@@ -1050,7 +1050,11 @@ build_buffer_to_image_fs(const struct vk_meta_device *meta,
    nir_def *img_offs = nir_vec3(b,
       load_info(b, struct vk_meta_copy_buffer_image_info, img.offset.x),
       load_info(b, struct vk_meta_copy_buffer_image_info, img.offset.y),
-      load_info(b, struct vk_meta_copy_buffer_image_info, img.offset.z));
+      /* The z offset compared to array_layer is always effectively zero,
+       * since the z coordinate is applied with subresourceRange.baseArrayLayer
+       * rather than increasing the layer id
+       */
+      nir_imm_zero(b, 1, 32));
 
    /* Move the layer ID to the second coordinate if we're dealing with a 1D
     * array, as this is where the texture instruction expects it. */
@@ -1236,7 +1240,8 @@ copy_buffer_image_prepare_gfx_push_const(
       .img.offset = {
          .x = region->imageOffset.x,
          .y = region->imageOffset.y,
-         .z = region->imageOffset.z,
+         /* See the commnet in build_buffer_to_image_fs for why this is zero */
+         .z = 0,
       },
    };
 
