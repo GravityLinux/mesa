@@ -5968,6 +5968,38 @@ TEST(Apple9Compiler, VaryingPublicationCapacityIsCheckedBeforeAllocation)
    }
 }
 
+TEST(Apple9Compiler, MixLowersDynamicEndpointsAndFactors)
+{
+   for (bool exact : {false, true}) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "mix_dynamic");
+      nir_def *args[3];
+      for (unsigned i = 0; i < 3; ++i)
+         args[i] = nir_load_ubo(&b, 4, 32, nir_imm_int(&b, 0),
+                                nir_imm_int(&b, i * 16), .align_mul = 16,
+                                .range_base = i * 16, .range = 16);
+      nir_def *value = nir_flrp(&b, args[0], args[1], args[2]);
+      nir_def_as_alu(value)->fp_math_ctrl = exact ? nir_fp_exact : nir_fp_fast_math;
+      nir_store_output(&b, value, nir_imm_int(&b, 0), .write_mask = 15,
+                       .src_type = nir_type_float32,
+                       .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+      b.shader->info.io_lowered = true;
+      b.shader->info.num_ubos = 1;
+      agx_shader_part out = {};
+      const char *reason = nullptr;
+      EXPECT_TRUE(agx_compile_apple9_fragment(b.shader, &out, &reason)) << reason;
+      nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_alu) {
+               EXPECT_NE(nir_instr_as_alu(instr)->op, nir_op_flrp);
+            }
+         }
+      }
+      free(out.binary);
+      ralloc_free(b.shader);
+   }
+}
+
 TEST(Apple9Compiler, BooleanUniformCanSelectFragmentValues)
 {
    nir_builder b = nir_builder_init_simple_shader(

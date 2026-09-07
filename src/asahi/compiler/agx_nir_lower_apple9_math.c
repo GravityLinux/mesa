@@ -176,6 +176,9 @@ agx_nir_lower_apple9_math(nir_shader *shader)
 {
    bool progress =
       nir_shader_lower_instructions(shader, math_filter, lower_math, NULL);
+   /* Apple9 has ordinary multiply/add/FMA, but no modeled interpolation
+    * instruction. Use NIR's precision-aware lowering for FP32 mix. */
+   progress |= nir_lower_flrp(shader, 32, false);
    if (progress) {
       nir_opt_constant_folding(shader);
       nir_opt_copy_prop(shader);

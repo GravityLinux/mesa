@@ -8,6 +8,8 @@
  * command construction, and submission all come from Mesa.
  */
 
+#define _POSIX_C_SOURCE 200809L
+#include <time.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl3.h>
@@ -469,6 +471,10 @@ open_asahi_display(void)
    if (!query_devices || !query_device_string || !get_platform_display)
       fail("EGL_EXT_device_enumeration unavailable");
 
+   if (getenv("T8132_GLES_SOFTWARE_REFERENCE"))
+      return get_platform_display(EGL_PLATFORM_SURFACELESS_MESA,
+                                  EGL_DEFAULT_DISPLAY, NULL);
+
    EGLDeviceEXT devices[16];
    EGLint count = 0;
    if (!query_devices(16, devices, &count))
@@ -532,6 +538,7 @@ write_ppm(const char *path, const uint8_t *rgba,
 #include "scenes/mesh/mesh.h"
 #include "scenes/island/island.h"
 #include "scenes/sunset/sunset.h"
+#include "scenes/mix/mix.h"
 
 int
 main(int argc, char **argv)
@@ -597,8 +604,16 @@ main(int argc, char **argv)
       fail("eglMakeCurrent");
 
    const char *renderer = (const char *)glGetString(GL_RENDERER);
-   if (!renderer || !strstr(renderer, "Apple M4"))
+   printf("T8132_GLES_RENDERER %s\n", renderer ? renderer : "(null)");
+   const char *expected = getenv("T8132_GLES_SOFTWARE_REFERENCE") ? "llvmpipe" : "Apple M4";
+   if (!renderer || !strstr(renderer, expected))
       fail("unexpected GL renderer");
+
+
+   if (getenv("T8132_GLES_MIX"))
+      return run_mix(width, height);
+
+
 
    if (getenv("T8132_GLES_ISLAND"))
       return getenv("T8132_GLES_SUNSET") ? run_sunset(width, height) : run_island(width, height);
