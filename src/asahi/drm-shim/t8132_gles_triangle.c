@@ -536,6 +536,7 @@ write_ppm(const char *path, const uint8_t *rgba,
 }
 
 #include "scenes/mesh/mesh.h"
+#include "scenes/pipelines/pipelines.h"
 #include "scenes/blending/blending.h"
 #include "scenes/island/island.h"
 #include "scenes/sunset/sunset.h"
@@ -638,6 +639,8 @@ main(int argc, char **argv)
    if (getenv("T8132_GLES_BLEND"))
       return run_blending(width, height);
 
+   if (getenv("T8132_GLES_PIPELINES"))
+      return run_pipelines(width, height);
 
    if (getenv("T8132_GLES_ISLAND"))
       return getenv("T8132_GLES_SUNSET") ? run_sunset(width, height) : run_island(width, height);

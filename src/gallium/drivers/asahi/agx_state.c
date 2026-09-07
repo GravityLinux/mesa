@@ -5214,6 +5214,37 @@ agx_legalize_xfb(struct agx_context *ctx)
    }
 }
 
+/* Check the whole draw set before allocating descriptors or emitting this
+ * draw. Submission uses the same byte-identical stage interning policy. */
+static bool
+agx_apple9_draw_fits_archive(struct agx_batch *batch)
+{
+   struct agx_context *ctx = batch->ctx;
+   struct agx_screen *screen = agx_screen(ctx->base.screen);
+   struct agx_device *dev = &screen->dev;
+   struct agx_apple9_render_pipeline pipeline;
+   if (!agx_apple9_link_render_pipeline(
+          &pipeline, ctx->vs->apple9_render_stage, ctx->fs->apple9_render_stage) ||
+       batch->key.nr_cbufs != 1 || !batch->key.cbufs[0].texture)
+      return false;
+
+   const struct pipe_surface *surface = &batch->key.cbufs[0];
+   struct agx_resource *resource = agx_resource(surface->texture);
+   uint64_t target = agx_map_texture_gpu(resource, surface->first_layer) +
+                    ail_get_level_offset_B(&resource->layout, surface->level);
+   simple_mtx_lock(&screen->apple9_render_package_lock);
+   if (!screen->apple9_render_cache)
+      screen->apple9_render_cache = agx_apple9_render_cache_create(dev);
+   struct agx_apple9_render_package *package = agx_apple9_render_cache_get(
+      screen->apple9_render_cache, &pipeline, target, batch->key.width,
+      batch->key.height);
+   bool fits = agx_apple9_render_cache_can_add_draw(
+      screen->apple9_render_cache, batch->apple9_uniform_draws,
+      batch->apple9_uniform_draw_count, package);
+   simple_mtx_unlock(&screen->apple9_render_package_lock);
+   return fits;
+}
+
 static void
 agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
              unsigned drawid_offset,
@@ -5359,6 +5390,7 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       agx_dirty_all(ctx);
 #endif
 
+retry_apple9_batch:
    agx_batch_init_state(batch);
 
    /* Dirty track the reduced prim: lines vs points vs triangles. Happens before
@@ -5424,6 +5456,24 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
    /* This is subtle. But agx_update_fs will be true at least once per batch. */
    assert(!ctx->fs->bo || agx_batch_uses_bo(batch, ctx->fs->bo));
    assert(agx_batch_uses_bo(batch, ctx->linked.fs->bo));
+
+   if (agx_apple9_direct_render_enabled(dev) &&
+       !agx_apple9_draw_fits_archive(batch)) {
+      if (!batch->apple9_uniform_draw_count) {
+         fprintf(stderr, "Apple9 draw cannot fit an empty shader archive\n");
+         abort();
+      }
+      if (getenv("AGX_APPLE9_PACKAGE_TRACE"))
+         fprintf(stderr, "APPLE9_RENDER_ARCHIVE_SPLIT draws=%u\n",
+                 batch->apple9_uniform_draw_count);
+      agx_flush_batch(ctx, batch);
+      batch = agx_get_batch(ctx);
+      /* The index upload belonged to the retired batch. Shader/descriptor
+       * state must be re-established, while API statistics count only once. */
+      if (info->index_size)
+         ib = agx_index_buffer_ptr(batch, info, draws, &ib_extent);
+      goto retry_apple9_batch;
+   }
 
    if (ctx->linked.vs->uses_base_param || ctx->gs) {
       agx_upload_draw_params(batch, indirect, draws, info);
