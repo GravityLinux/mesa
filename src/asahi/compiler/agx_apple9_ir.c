@@ -2231,6 +2231,17 @@ apple9_materialize_pending_result_at(struct agx_apple9_vir_program *program,
    memcpy(&program->instructions[insertion], materialize_instructions,
           components * sizeof(*program->instructions));
 
+   /* Branch targets name VIR instruction boundaries. Inserting the return
+    * handoff must preserve both loop backedges and forward loop exits. */
+   for (unsigned i = 0; i < program->instruction_count; ++i) {
+      struct agx_apple9_vir_instr *jump = &program->instructions[i];
+      if ((jump->op == AGX_APPLE9_VIR_JMP_EXEC_ANY ||
+           jump->op == AGX_APPLE9_VIR_JMP_EXEC_NONE) &&
+          jump->branch_target != AGX_APPLE9_VREG_INVALID &&
+          jump->branch_target >= insertion)
+         jump->branch_target += components;
+   }
+
    for (unsigned i = insertion + components; i < program->instruction_count;
         ++i) {
       struct agx_apple9_vir_instr *instruction = &program->instructions[i];
@@ -2291,6 +2302,14 @@ apple9_materialize_unsupported_loads(struct agx_apple9_vir_program *program,
                  (program->instruction_count - i - 1) *
                     sizeof(*program->instructions));
          --program->instruction_count;
+         for (unsigned j = 0; j < program->instruction_count; ++j) {
+            struct agx_apple9_vir_instr *jump = &program->instructions[j];
+            if ((jump->op == AGX_APPLE9_VIR_JMP_EXEC_ANY ||
+                 jump->op == AGX_APPLE9_VIR_JMP_EXEC_NONE) &&
+                jump->branch_target != AGX_APPLE9_VREG_INVALID &&
+                jump->branch_target > i)
+               --jump->branch_target;
+         }
          --i;
          continue;
       }
@@ -3896,13 +3915,15 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
    case AGX_APPLE9_VIR_ITER: {
       if (instruction->encoding != AGX_APPLE9_ENC_ITER ||
           instruction->nr_srcs || phys[instruction->dest] >= 64 ||
-          (instruction->immediate & ~0x20fu) ||
+          (instruction->immediate & ~0xfu) ||
           (instruction->immediate & 15) > 12)
          return false;
-      /* EXP-M4-56: ordinary center coefficients, including coefficient 0
-       * for interpolated 1/W. Bit 9 marks the first iterator. */
+      /* Ordinary center coefficients, including coefficient 0 for 1/W.
+       * Keep byte1 bit3 clear: setting it on the first ITER makes implicit
+       * texture LOD fail in partially covered quads (mipmap edge probe).
+       * Its earlier interpretation as a first-iterator marker was wrong. */
       unsigned imm = instruction->immediate;
-      const uint8_t bytes[] = {0x2f, (imm & 0x200) ? 0x0d : 0x05,
+      const uint8_t bytes[] = {0x2f, 0x05,
                                0x54, phys[instruction->dest] << 1,
                                0x03, (imm & 0xff) << 1,
                                0,    2,

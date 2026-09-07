@@ -2672,6 +2672,20 @@ agx_screen_create(int fd, struct renderonly *ro,
          : &agx_nir_options;
    for (unsigned i = 0; i <= MESA_SHADER_COMPUTE; i++)
       screen->nir_options[i] = nir_options;
+   if (agx_apple9_direct_render_enabled(&agx_screen->dev)) {
+      /* The Apple9 backend supports structured loops. Expanding nested
+       * texture loops with Apple8's unroll policy can exhaust its bounded
+       * render archive. Preserve loops until we have a code-size cost model.
+       * Compute keeps its existing policy.
+       */
+      agx_screen->apple9_graphics_nir_options = *nir_options;
+      agx_screen->apple9_graphics_nir_options.max_unroll_iterations = 0;
+      screen->nir_options[MESA_SHADER_VERTEX] =
+         &agx_screen->apple9_graphics_nir_options;
+      screen->nir_options[MESA_SHADER_FRAGMENT] =
+         &agx_screen->apple9_graphics_nir_options;
+   }
+
 
    screen->resource_create = u_transfer_helper_resource_create;
    screen->resource_destroy = u_transfer_helper_resource_destroy;

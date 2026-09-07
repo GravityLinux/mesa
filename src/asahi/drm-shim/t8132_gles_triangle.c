@@ -538,6 +538,7 @@ write_ppm(const char *path, const uint8_t *rgba,
 #include "scenes/mesh/mesh.h"
 #include "scenes/island/island.h"
 #include "scenes/sunset/sunset.h"
+#include "scenes/control-flow/control-flow.h"
 #include "scenes/mix/mix.h"
 #include "scenes/trig/trig.h"
 
@@ -611,6 +612,8 @@ main(int argc, char **argv)
       fail("unexpected GL renderer");
 
 
+   if (getenv("T8132_GLES_CONTROL_FLOW"))
+      return run_control_flow(width, height);
    if (getenv("T8132_GLES_MIX"))
       return run_mix(width, height);
    if (getenv("T8132_GLES_TRIG"))

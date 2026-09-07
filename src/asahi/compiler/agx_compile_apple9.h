@@ -40,7 +40,7 @@ bool agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
                              const char **reason);
 
 /*
- * Compile straight-line FP32 graphics NIR through the common semantic VIR and
+ * Compile structured FP32 graphics NIR through the common semantic VIR and
  * register allocator. Fragment inputs support pixel-center smooth FP32 user
  * components; RT0 is a complete vec4 packed to RGBA8. Vertex inputs use vertex
  * ID and FP32 vertex elements; exports cover position plus up to twelve user

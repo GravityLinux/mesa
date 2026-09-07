@@ -1255,7 +1255,7 @@ apple9_lower_interpolated_input(struct apple9_dag_lower *lower,
    }
    if (!lower->perspective_ready) {
       uint32_t denominator = apple9_dag_emit(
-         lower, AGX_APPLE9_VIR_ITER, AGX_APPLE9_ENC_ITER, NULL, 0, 0x200);
+         lower, AGX_APPLE9_VIR_ITER, AGX_APPLE9_ENC_ITER, NULL, 0, 0);
       lower->perspective_reciprocal =
          apple9_dag_emit(lower, AGX_APPLE9_VIR_FRCP,
                          AGX_APPLE9_ENC_FLOAT_SPECIAL, &denominator, 1, 3);
@@ -4068,6 +4068,9 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
          return false;
       }
    }
+   /* Use the same structured mask/loop model as compute. Continuations become
+    * masked regions with one backedge before instruction selection. */
+   nir_lower_continue_constructs(nir);
    /* Frontends may supply vector NIR or pre-simplified scalar NIR. Expose
     * scalar constants to standard algebraic cleanup before expanding math
     * and output packing, rather than relying on a caller-specific pipeline.
@@ -4100,10 +4103,9 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
    nir_opt_constant_folding(nir);
    nir_opt_copy_prop(nir);
    nir_opt_dce(nir);
-   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
-   if (apple9_cf_list_has_control_flow(&impl->body) || nir->info.num_ssbos) {
+   if (nir->info.num_ssbos) {
       if (reason)
-         *reason = "Apple9 render requires straight-line shaders without SSBOs";
+         *reason = "Apple9 render does not yet support SSBOs";
       return false;
    }
    struct apple9_buffer_map buffers = {0};

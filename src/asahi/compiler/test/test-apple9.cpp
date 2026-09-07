@@ -5968,6 +5968,62 @@ TEST(Apple9Compiler, VaryingPublicationCapacityIsCheckedBeforeAllocation)
    }
 }
 
+TEST(Apple9Compiler, GraphicsLoopResultsReachMergedOutputs)
+{
+   for (bool fragment : {false, true}) {
+      for (bool continuation : {false, true}) {
+         nir_builder b = nir_builder_init_simple_shader(
+            fragment ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX,
+            &agx_nir_options, "graphics_loop_output");
+         b.shader->info.num_ubos = 1;
+         nir_def *limit = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0),
+            nir_imm_int(&b, 0), .align_mul = 4, .range = 4);
+         nir_def *initial = nir_imm_int(&b, 0);
+         nir_loop *loop = nir_push_loop(&b);
+         if (continuation)
+            nir_loop_add_continue_construct(loop);
+         nir_block *entry = nir_cf_node_as_block(nir_cf_node_prev(&loop->cf_node));
+         nir_block *header = nir_loop_first_block(loop);
+         nir_phi_instr *phi = nir_phi_instr_create(b.shader);
+         nir_def_init(&phi->instr, &phi->def, 1, 32);
+         nir_phi_instr_add_src(phi, entry, initial);
+         nir_break_if(&b, nir_uge(&b, &phi->def, limit));
+         if (continuation) {
+            nir_if *skip = nir_push_if(&b, nir_ieq_imm(&b, &phi->def, 1));
+            nir_jump(&b, nir_jump_continue);
+            nir_pop_if(&b, skip);
+            nir_push_continue(&b, loop);
+         }
+         nir_def *next = nir_iadd_imm(&b, &phi->def, 1);
+         nir_phi_instr_add_src(phi, nir_cursor_current_block(b.cursor), next);
+         nir_pop_loop(&b, loop);
+         b.cursor = nir_after_phis(header);
+         nir_builder_instr_insert(&b, &phi->instr);
+         b.cursor = nir_after_cf_node(&loop->cf_node);
+         nir_if *choose = nir_push_if(&b, nir_ult_imm(&b, &phi->def, 2));
+         nir_def *yes = nir_fmul_imm(&b, nir_u2f32(&b, &phi->def), .125);
+         nir_push_else(&b, choose);
+         nir_def *no = nir_fmul_imm(&b, nir_u2f32(&b, &phi->def), .25);
+         nir_pop_if(&b, choose);
+         nir_def *value = nir_if_phi(&b, yes, no);
+         nir_store_output(&b, nir_vec4(&b, value, value, value, nir_imm_float(&b, 1)),
+            nir_imm_int(&b, 0), .write_mask = 15,
+            .src_type = nir_type_float32,
+            .io_semantics = {.location = unsigned(fragment ? FRAG_RESULT_DATA0 : VARYING_SLOT_POS)});
+         b.shader->info.io_lowered = true;
+         agx_shader_part compiled = {};
+         const char *reason = nullptr;
+         bool ok = fragment ? agx_compile_apple9_fragment(b.shader, &compiled, &reason)
+                            : agx_compile_apple9_vertex(b.shader, &compiled, &reason);
+         ASSERT_TRUE(ok) << (reason ?: "") << " fragment=" << fragment
+                        << " continue=" << continuation;
+         EXPECT_GT(compiled.info.binary_size, 4u);
+         free(compiled.binary);
+         ralloc_free(b.shader);
+      }
+   }
+}
+
 TEST(Apple9Compiler, MixLowersDynamicEndpointsAndFactors)
 {
    for (bool exact : {false, true}) {

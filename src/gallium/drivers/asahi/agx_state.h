@@ -918,6 +918,7 @@ struct agx_screen {
     * arithmetic in its source stage until both stage compilers accept the
     * same general instruction set. */
    nir_shader_compiler_options apple9_nir_options;
+   nir_shader_compiler_options apple9_graphics_nir_options;
 
    /* Fixed-base Apple9 render generations, owned by Gallium. */
    struct agx_apple9_render_cache *apple9_render_cache;
