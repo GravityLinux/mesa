@@ -1727,6 +1727,7 @@ TEST(Apple9Vir, MaskedPhiEdgesShareOneAllocatedMergeDestination)
       EXPECT_EQ(program.phys[program.instructions[i].target],
                 program.phys[merge]);
    }
+   EXPECT_GE(program.phys[merge], 16); /* Leave constrained coordinate tuples available. */
    EXPECT_NE(program.phys[merge], program.phys[then_value]);
    EXPECT_NE(program.phys[merge], program.phys[else_value]);
    agx_apple9_vir_finish(&program);
@@ -6288,6 +6289,83 @@ TEST(Apple9Compiler, GraphicsTrigUsesOneFactorPerOperation)
       free(out.binary);
       ralloc_free(b.shader);
    }
+}
+
+TEST(Apple9Compiler, TextureCoordinatesAndResultUseAllocatedRegisters)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "apple9_texture");
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 1);
+   tex->op = nir_texop_tex;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 2;
+   tex->texture_index = 3;
+   tex->sampler_index = 5;
+   tex->src[0].src_type = nir_tex_src_coord;
+   tex->src[0].src = nir_src_for_ssa(nir_vec2(
+      &b, nir_imm_float(&b, .375), nir_imm_float(&b, .875)));
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+   nir_store_output(&b, &tex->def, nir_imm_int(&b, 0),
+                    .write_mask = 15, .src_type = nir_type_float32,
+                    .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+   b.shader->info.io_lowered = true;
+   agx_shader_part compiled = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason)) << (reason ?: "");
+   EXPECT_TRUE(compiled.info.apple9_has_texture);
+   EXPECT_EQ(compiled.info.apple9_texture_binding, 3);
+   EXPECT_EQ(compiled.info.apple9_sampler_binding, 5);
+   unsigned samples = 0;
+   const auto *code = static_cast<const uint8_t *>(compiled.binary);
+   for (unsigned i = 0; i + 14 <= compiled.info.binary_size; ++i) {
+      if ((code[i] & 7) == 5 && code[i+2] == 0x0c && code[i+3] == 0xb8 &&
+          code[i+4] == 0xb0 && code[i+12] == 1) {
+         EXPECT_LE(code[i] >> 3, 12);
+         EXPECT_EQ(code[i+1] & 1, 0);
+         EXPECT_LE(code[i+1] & 0x7f, 6);
+         ++samples;
+      }
+   }
+   EXPECT_EQ(samples, 1u);
+   free(compiled.binary);
+   ralloc_free(b.shader);
+}
+
+TEST(Apple9Vir, SampleMaterializationRelocatesBothBranchDirections)
+{
+   agx_apple9_vir_program p;
+   agx_apple9_vir_init(&p);
+   uint32_t coords[] = {agx_apple9_vir_input(&p, 2), agx_apple9_vir_input(&p, 3)};
+   uint32_t one = agx_apple9_vir_input(&p, 4);
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_JMP_EXEC_NONE,
+      AGX_APPLE9_ENC_JMP_EXEC_NONE, nullptr, 0, 0));
+   uint32_t sample = agx_apple9_vir_emit_texture_sample(&p, coords, one);
+   ASSERT_NE(sample, AGX_APPLE9_VREG_INVALID);
+   unsigned marker = p.instruction_count;
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_LOOP_MASK_UPDATE,
+      AGX_APPLE9_ENC_LOOP_MASK_UPDATE, nullptr, 0, 0x22));
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_JMP_EXEC_ANY,
+      AGX_APPLE9_ENC_JMP_EXEC_ANY, nullptr, 0, 0));
+   p.instructions[0].branch_target = marker;
+   p.instructions[p.instruction_count - 1].branch_target = marker;
+   p.output = sample;
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&p, &reason)) << (reason ?: "");
+   unsigned copies = 0, jumps = 0;
+   for (unsigned i = 0; i < p.instruction_count; ++i) {
+      auto &ins = p.instructions[i];
+      copies += ins.op == AGX_APPLE9_VIR_IOR;
+      if (ins.op == AGX_APPLE9_VIR_JMP_EXEC_ANY || ins.op == AGX_APPLE9_VIR_JMP_EXEC_NONE) {
+         ASSERT_LT(ins.branch_target, p.instruction_count);
+         EXPECT_EQ(p.instructions[ins.branch_target].op, AGX_APPLE9_VIR_LOOP_MASK_UPDATE);
+         ++jumps;
+      }
+   }
+   EXPECT_EQ(copies, 4u);
+   EXPECT_EQ(jumps, 2u);
+   agx_apple9_vir_finish(&p);
 }
 
 TEST(Apple9Compiler, BooleanUniformCanSelectFragmentValues)

@@ -32,6 +32,8 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_GET_GLOBAL_ID,
    AGX_APPLE9_VIR_GET_SR,
    AGX_APPLE9_VIR_DEVICE_LOAD,
+   AGX_APPLE9_VIR_TEXTURE_COORDS,
+   AGX_APPLE9_VIR_TEXTURE_SAMPLE,
    AGX_APPLE9_VIR_U2F32,
    AGX_APPLE9_VIR_I2F32,
    AGX_APPLE9_VIR_F2I32,
@@ -365,6 +367,12 @@ uint32_t agx_apple9_vir_emit_device_load(
 uint32_t agx_apple9_vir_emit_device_load_vector(
    struct agx_apple9_vir_program *program, unsigned binding, uint32_t index,
    unsigned components, const struct agx_apple9_device_load_contract *contract);
+/* Publish an allocated FP32 coordinate pair and sample one bound 2D texture.
+ * The current graphics package supplies eight coordinate publications. */
+uint32_t agx_apple9_vir_emit_texture_sample(
+   struct agx_apple9_vir_program *program, const uint32_t coords[2],
+   uint32_t one);
+
 /* Form an adjacent register tuple from independent scalar SSA values before
  * register allocation. The pseudo is coalesced when possible and otherwise
  * lowered to copies after allocation, following the Apple8 AGX IR model. */

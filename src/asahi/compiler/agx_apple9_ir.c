@@ -391,6 +391,45 @@ agx_apple9_vir_emit_device_load_vector(
 }
 
 uint32_t
+agx_apple9_vir_emit_texture_sample(struct agx_apple9_vir_program *program,
+                                  const uint32_t coords[2], uint32_t one)
+{
+   if (!program || !coords || coords[0] >= program->value_count ||
+       coords[1] >= program->value_count || one >= program->value_count)
+      return AGX_APPLE9_VREG_INVALID;
+
+   uint32_t published = program->value_count;
+   if (!apple9_vir_append_values(program, 2))
+      return AGX_APPLE9_VREG_INVALID;
+   struct agx_apple9_vir_instr *instruction = apple9_vir_append_instruction(program);
+   if (!instruction)
+      return AGX_APPLE9_VREG_INVALID;
+   *instruction = (struct agx_apple9_vir_instr){
+      .op = AGX_APPLE9_VIR_TEXTURE_COORDS,
+      .encoding = AGX_APPLE9_ENC_TEXTURE_COORDS,
+      .dest = published, .dest_components = 2,
+      .nr_srcs = 3, .src = {coords[0], coords[1], one},
+   };
+
+   uint32_t result = program->value_count;
+   if (!apple9_vir_append_values(program, 4))
+      return AGX_APPLE9_VREG_INVALID;
+   instruction = apple9_vir_append_instruction(program);
+   if (!instruction)
+      return AGX_APPLE9_VREG_INVALID;
+   *instruction = (struct agx_apple9_vir_instr){
+      .op = AGX_APPLE9_VIR_TEXTURE_SAMPLE,
+      .encoding = AGX_APPLE9_ENC_TEXTURE_SAMPLE,
+      .dest = result, .dest_components = 4,
+      .nr_srcs = 2, .src = {published, published + 1},
+      /* The serial sampling path uses handoff slot 1. Materialize each
+       * result before issuing another sample or changing the lane mask. */
+      .producer_scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_1,
+   };
+   return result;
+}
+
+uint32_t
 agx_apple9_vir_emit_collect(struct agx_apple9_vir_program *program,
                             const uint32_t *src, unsigned components)
 {
@@ -1212,7 +1251,9 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
       if (components > 4 || components > program->value_count ||
           instruction->dest > program->value_count - components ||
           (components > 1 && instruction->op != AGX_APPLE9_VIR_DEVICE_LOAD &&
-           instruction->op != AGX_APPLE9_VIR_COLLECT)) {
+           instruction->op != AGX_APPLE9_VIR_COLLECT &&
+           instruction->op != AGX_APPLE9_VIR_TEXTURE_COORDS &&
+           instruction->op != AGX_APPLE9_VIR_TEXTURE_SAMPLE)) {
          if (reason != NULL)
             *reason = "Apple9 instruction has an invalid destination tuple";
          return false;
@@ -1895,17 +1936,20 @@ agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
       unsigned range_count = 1;
       if (has_fixed || coalesced_collect) {
          range_first[0] = range_last[0] = selected;
-      } else if (dest_constraint != NULL &&
-                 dest_constraint->max_index >= APPLE9_FIRST_GENERAL_GPR) {
+      } else if ((is_pseudo_definition && dest_constraint == NULL) ||
+                 (dest_constraint != NULL &&
+                  dest_constraint->max_index >= APPLE9_FIRST_GENERAL_GPR)) {
          /* Keep the compact bank available for instructions whose result has
           * a genuine r0-r15 encoding limit.  General values start in r16 and
-          * fall back to the low bank only after r16-r63 is occupied. */
+          * fall back to the low bank only after r16-r63 is occupied. This
+          * includes MERGE/COLLECT pseudo-definitions: loop phis must not
+          * occupy the entire constrained coordinate/result bank. */
+         const unsigned maximum = dest_constraint ? dest_constraint->max_index
+                                                   : APPLE9_LAST_ALLOCATABLE_GPR;
          range_first[0] = APPLE9_FIRST_GENERAL_GPR;
-         range_last[0] = MIN2((unsigned)dest_constraint->max_index,
-                              APPLE9_LAST_ALLOCATABLE_GPR);
+         range_last[0] = MIN2(maximum, APPLE9_LAST_ALLOCATABLE_GPR);
          range_first[1] = APPLE9_FIRST_ALLOCATABLE_GPR;
-         range_last[1] = MIN2((unsigned)dest_constraint->max_index,
-                              APPLE9_FIRST_GENERAL_GPR - 1);
+         range_last[1] = MIN2(maximum, APPLE9_FIRST_GENERAL_GPR - 1);
          range_count = 2;
       } else if (dest_constraint != NULL) {
          range_last[0] = MIN2((unsigned)dest_constraint->max_index,
@@ -2126,7 +2170,8 @@ apple9_vir_producer_instruction(const struct agx_apple9_vir_program *program,
 static bool
 apple9_vir_is_pending_load(enum agx_apple9_vir_opcode op)
 {
-   return op == AGX_APPLE9_VIR_DEVICE_LOAD || op == AGX_APPLE9_VIR_TILE_LOAD;
+   return op == AGX_APPLE9_VIR_DEVICE_LOAD || op == AGX_APPLE9_VIR_TILE_LOAD ||
+          op == AGX_APPLE9_VIR_TEXTURE_SAMPLE;
 }
 
 static bool
@@ -2288,6 +2333,14 @@ apple9_materialize_unsupported_loads(struct agx_apple9_vir_program *program,
 {
    for (unsigned i = 0; i < program->instruction_count; ++i) {
       struct agx_apple9_vir_instr *producer = &program->instructions[i];
+      if (producer->op == AGX_APPLE9_VIR_TEXTURE_SAMPLE) {
+         /* Separate the sample's fixed first-result handoff from subsequent
+          * arithmetic and memory traffic, using ordinary SSA bit copies. */
+         if (!apple9_materialize_load(program, i, reason))
+            return false;
+         i += 4;
+         continue;
+      }
       if (!apple9_vir_is_pending_load(producer->op) ||
           producer->producer_scoreboard_slot != AGX_APPLE9_SCOREBOARD_SLOT_AUTO)
          continue;
@@ -3974,6 +4027,48 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
          instruction->immediate & 0xff,
          (instruction->immediate >> 8) & 0xff,
          0};
+      packed_init(packed, bytes, sizeof(bytes));
+      return true;
+   }
+   case AGX_APPLE9_VIR_TEXTURE_COORDS: {
+      if (instruction->encoding != AGX_APPLE9_ENC_TEXTURE_COORDS ||
+          instruction->nr_srcs != 3 || instruction->dest_components != 2 ||
+          phys[instruction->dest] > 6 || (phys[instruction->dest] & 1))
+         return false;
+      uint8_t bytes[16];
+      for (unsigned c = 0; c < 2; ++c) {
+         uint8_t registers[] = {phys[instruction->dest] + c,
+                               phys[instruction->src[c]],
+                               phys[instruction->src[2]]};
+         struct agx_apple9_vir_instr publish = {
+            .op = AGX_APPLE9_VIR_FMUL, .encoding = AGX_APPLE9_ENC_FLOAT2_EXPORT,
+            .dest = 0, .nr_srcs = 2, .src = {1, 2},
+            .live_after_mask = ((instruction->live_after_mask >> c) & 1) |
+                               ((c == 0 || (instruction->live_after_mask & 4)) ? 2 : 0),
+         };
+         struct agx_apple9_packed_instruction part;
+         if (!pack_float2(&publish, registers, &part))
+            return false;
+         memcpy(bytes + c * 8, part.bytes, 8);
+      }
+      packed_init(packed, bytes, sizeof(bytes));
+      return true;
+   }
+   case AGX_APPLE9_VIR_TEXTURE_SAMPLE: {
+      if (instruction->encoding != AGX_APPLE9_ENC_TEXTURE_SAMPLE ||
+          instruction->nr_srcs != 2 || instruction->dest_components != 4 ||
+          instruction->immediate ||
+          instruction->producer_scoreboard_slot != AGX_APPLE9_SCOREBOARD_SLOT_1)
+         return false;
+      unsigned dst = phys[instruction->dest], coord = phys[instruction->src[0]];
+      if (dst > 12 || coord > 6 || (coord & 1) ||
+          phys[instruction->src[1]] != coord + 1)
+         return false;
+      /* The four-byte prefix names the result tuple and coordinate
+       * publication. The legacy database's sampler-byte 'coord' label is
+       * not this operand. First bound texture/sampler, FP32 2D implicit LOD. */
+      const uint8_t bytes[] = {5 | (dst << 3), 0x80 | coord, 0x0c, 0xb8,
+                              0xb0, 0, 0, 0, 1, 0, 0x10, 0, 1, 0};
       packed_init(packed, bytes, sizeof(bytes));
       return true;
    }

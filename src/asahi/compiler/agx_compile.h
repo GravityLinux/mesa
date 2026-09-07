@@ -98,6 +98,8 @@ struct agx_shader_info {
    /* Ordered launcher arguments: API UBOs 0..31, vertex elements 32..47. */
    uint8_t apple9_resource_count;
    uint8_t apple9_resource_binding[4];
+   bool apple9_has_texture;
+   uint8_t apple9_texture_binding, apple9_sampler_binding;
 
    union agx_varyings varyings;
 

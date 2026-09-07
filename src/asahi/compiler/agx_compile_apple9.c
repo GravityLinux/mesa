@@ -378,9 +378,23 @@ apple9_cf_list_last_block(struct exec_list *list)
 }
 
 static bool
+apple9_texture_supported(const nir_tex_instr *tex)
+{
+   return tex->op == nir_texop_tex && tex->sampler_dim == GLSL_SAMPLER_DIM_2D &&
+          !tex->is_array && !tex->is_shadow && tex->coord_components == 2 &&
+          tex->def.bit_size == 32 && tex->def.num_components == 4 &&
+          tex->dest_type == nir_type_float32 && tex->num_srcs == 1 &&
+          tex->src[0].src_type == nir_tex_src_coord &&
+          tex->src[0].src.ssa->bit_size == 32 &&
+          tex->texture_index < 32 && tex->sampler_index < 32;
+}
+
+static bool
 apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
 {
    switch (instr->type) {
+   case nir_instr_type_tex:
+      return graphics && apple9_texture_supported(nir_instr_as_tex(instr));
    case nir_instr_type_load_const:
       return true;
    case nir_instr_type_alu: {
@@ -1314,6 +1328,30 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
       if (scalar.def->bit_size < 32)
          constant &= BITFIELD_MASK(scalar.def->bit_size);
       value = apple9_dag_imm(lower, constant);
+   } else if (nir_def_instr_type(scalar.def) == nir_instr_type_tex) {
+      nir_tex_instr *tex = nir_instr_as_tex(nir_def_instr(scalar.def));
+      if (!apple9_texture_supported(tex)) {
+         lower->reason = "Apple9 requires a non-shadow FP32 2D implicit-LOD sample";
+         return AGX_APPLE9_VREG_INVALID;
+      }
+      uint32_t coords[2];
+      for (unsigned c = 0; c < 2; ++c)
+         coords[c] = apple9_lower_dag_scalar(
+            lower, nir_get_scalar(tex->src[0].src.ssa, c));
+      uint32_t one = apple9_dag_imm(lower, 0x3f800000);
+      if (!lower->tile_access && !lower->tile_read &&
+          !agx_apple9_vir_emit_side_effect(&lower->program,
+             AGX_APPLE9_VIR_TILE_ACCESS, AGX_APPLE9_ENC_TILE_ACCESS, NULL, 0, 0x600))
+         return AGX_APPLE9_VREG_INVALID;
+      lower->tile_access = true;
+      uint32_t result = agx_apple9_vir_emit_texture_sample(&lower->program, coords, one);
+      if (result == AGX_APPLE9_VREG_INVALID) {
+         lower->reason = "could not emit Apple9 texture sample";
+         return result;
+      }
+      for (unsigned c = 0; c < 4; ++c)
+         lower->ssa_to_vreg[scalar.def->index * 4 + c] = result + c;
+      value = result + scalar.comp;
    } else {
       struct apple9_system_source system;
       const bool subgroup_size =
@@ -1907,7 +1945,9 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
       nir_foreach_instr(instr, block) {
          if (!apple9_instruction_is_in_subset(
                 instr, nir->info.stage != MESA_SHADER_COMPUTE)) {
-            *reason = "Apple9 buffer compiler encountered unsupported NIR";
+            *reason = instr->type == nir_instr_type_tex
+                         ? "Apple9 texture sampling is not implemented"
+                         : "Apple9 buffer compiler encountered unsupported NIR";
             return false;
          }
          if (instr->type != nir_instr_type_intrinsic)
@@ -3563,6 +3603,11 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
 
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
    nir_index_ssa_defs(impl);
+   bool has_texture = false;
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block)
+         has_texture |= instr->type == nir_instr_type_tex;
+   }
    struct apple9_dag_lower lower = {
       .nir = nir,
       .varyings = varyings,
@@ -3575,7 +3620,7 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
          util_dynarray_num_elements(&atomics, struct apple9_buffer_atomic),
       .argument_base = nir->info.stage == MESA_SHADER_COMPUTE && atomics.size == 0
                           ? AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE
-                          : 0,
+                          : has_texture ? 2 : 0,
       .structured_cf = apple9_cf_list_has_control_flow(&impl->body),
    };
    for (unsigned i = 0; i < ARRAY_SIZE(lower.system_vreg); ++i)
@@ -3595,6 +3640,18 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    }
    for (unsigned i = 0; i < lower.ssa_map_count; ++i)
       lower.ssa_to_vreg[i] = AGX_APPLE9_VREG_INVALID;
+
+   /* Open tile access before divergent control flow. A first sample in one
+    * branch must not be the only lane population that executes this setup. */
+   if (has_texture) {
+      if (!agx_apple9_vir_emit_side_effect(&lower.program,
+             AGX_APPLE9_VIR_TILE_ACCESS, AGX_APPLE9_ENC_TILE_ACCESS,
+             NULL, 0, 0x600)) {
+         *reason = "could not open Apple9 fragment tile access";
+         goto fail;
+      }
+      lower.tile_access = true;
+   }
 
    if (!apple9_emit_cf_list(&lower, &stores, &impl->body)) {
       *reason = lower.reason != NULL
@@ -3799,6 +3856,16 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
 
    out->binary = emitter.bytes.data;
    out->info.stage = nir->info.stage;
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_tex) {
+            nir_tex_instr *tex = nir_instr_as_tex(instr);
+            out->info.apple9_has_texture = true;
+            out->info.apple9_texture_binding = tex->texture_index;
+            out->info.apple9_sampler_binding = tex->sampler_index;
+         }
+      }
+   }
    if (nir->info.stage != MESA_SHADER_COMPUTE) {
       out->info.apple9_resource_count = resource_map.count;
       for (unsigned i = 0; i < resource_map.count; ++i) {
@@ -4314,6 +4381,7 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
          return false;
       }
    }
+   nir_lower_samplers(nir);
    nir_shader_intrinsics_pass(nir, apple9_scalarize_graphics_ubo,
                               nir_metadata_control_flow, NULL);
    agx_nir_lower_apple9_math(nir);
@@ -4337,6 +4405,24 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
       if (reason)
          *reason = "Apple9 render does not yet support SSBOs";
       return false;
+   }
+   int texture_binding = -1, sampler_binding = -1;
+   nir_foreach_block(block, nir_shader_get_entrypoint(nir)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_tex)
+            continue;
+         nir_tex_instr *tex = nir_instr_as_tex(instr);
+         if (nir->info.stage != MESA_SHADER_FRAGMENT ||
+             !apple9_texture_supported(tex) ||
+             (texture_binding >= 0 &&
+              (texture_binding != tex->texture_index ||
+               sampler_binding != tex->sampler_index))) {
+            *reason = "Apple9 requires FP32 2D samples from one texture/sampler";
+            return false;
+         }
+         texture_binding = tex->texture_index;
+         sampler_binding = tex->sampler_index;
+      }
    }
    struct apple9_buffer_map buffers = {0};
    if (!apple9_collect_buffer_map(nir, &buffers, reason))

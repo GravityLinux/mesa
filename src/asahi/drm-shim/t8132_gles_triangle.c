@@ -544,6 +544,7 @@ write_ppm(const char *path, const uint8_t *rgba,
 #include "scenes/mix/mix.h"
 #include "scenes/trig/trig.h"
 #include "scenes/scissor/scissor.h"
+#include "scenes/textures/textures.h"
 #include "scenes/vertex-inputs/vertex-inputs.h"
 #include "scenes/canvases/canvases.h"
 
@@ -629,6 +630,8 @@ main(int argc, char **argv)
       return run_trig(width, height);
    if (getenv("T8132_GLES_VERTEX_INPUTS"))
       return run_vertex_inputs(width, height);
+   if (getenv("T8132_GLES_TEXTURES"))
+      return run_textures(width, height);
    if (getenv("T8132_GLES_SCISSOR"))
       return run_scissor(width, height);
 

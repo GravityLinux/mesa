@@ -2120,13 +2120,19 @@ agx_init_shader_caps(struct pipe_screen *pscreen)
       caps->indirect_const_addr = true;
       caps->integers = true;
 
-      caps->fp16 = caps->glsl_16bit_consts = caps->fp16_derivatives = !is_no16;
+      /* The Apple9 graphics compiler currently consumes FP32 shader I/O
+       * and texture results. Keep lowp/mediump GLSL at FP32 instead of
+       * advertising a half-precision lowering path it cannot compile. */
+      bool apple9_graphics = agx_apple9_direct_render_enabled(agx_device(pscreen)) &&
+                             (i == MESA_SHADER_VERTEX || i == MESA_SHADER_FRAGMENT);
+      caps->fp16 = caps->glsl_16bit_consts = caps->fp16_derivatives =
+         !is_no16 && !apple9_graphics;
       /* GLSL compiler is broken. Flip this on when Panfrost does. */
       caps->int16 = false;
       /* This cap is broken, see 9a38dab2d18 ("zink: disable
        * pipe_shader_caps.fp16_const_buffers") */
       caps->fp16_const_buffers = false;
-      caps->glsl_16bit_load_dst = true;
+      caps->glsl_16bit_load_dst = !apple9_graphics;
 
       /* TODO: Enable when fully baked */
       if (strcmp(util_get_process_name(), "blender") == 0)
@@ -2322,7 +2328,11 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
 
    caps->max_vertex_element_src_offset = 0xffff;
 
-   caps->texture_transfer_modes = PIPE_TEXTURE_TRANSFER_BLIT;
+   /* Apple9 has CPU texture transfers, but its compute image blitter is not
+    * implemented yet. Use Mesa's existing CPU format-conversion fallback. */
+   caps->texture_transfer_modes = agx_apple9_direct_render_enabled(agx_device(pscreen))
+                                    ? PIPE_TEXTURE_TRANSFER_DEFAULT
+                                    : PIPE_TEXTURE_TRANSFER_BLIT;
 
    caps->device_type = PIPE_DEVICE_TYPE_INTEGRATED_GPU;
    caps->endianness = PIPE_ENDIAN_LITTLE;
@@ -2437,6 +2447,16 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
    /* For framebuffer_no_attachments, fake support for "none" images */
    if (format == PIPE_FORMAT_NONE)
       return true;
+
+   /* The Apple9 compatibility attachment path stores BGRA8. Advertising
+    * RGBA8 rendering makes render-to-texture swap red/blue. Let the state
+    * tracker choose its normal BGRA8 backing/conversion for GL_RGBA8 until
+    * attachment format programming is generalized. Sampling RGBA8 is valid. */
+   if (agx_apple9_direct_render_enabled(agx_device(pscreen)) &&
+       (usage & PIPE_BIND_RENDER_TARGET) &&
+       (format == PIPE_FORMAT_R8G8B8A8_UNORM ||
+        format == PIPE_FORMAT_R8G8B8X8_UNORM))
+      return false;
 
    if (usage & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW |
                 PIPE_BIND_SHADER_IMAGE)) {

@@ -1852,6 +1852,9 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
             .varying_components = apple9_stage.info.apple9_varyings.count,
             .varyings = apple9_stage.info.apple9_varyings,
             .render_targets = 1,
+            .has_texture = apple9_stage.info.apple9_has_texture,
+            .texture_binding = apple9_stage.info.apple9_texture_binding,
+            .sampler_binding = apple9_stage.info.apple9_sampler_binding,
          };
       } else {
          compiled->apple9_render_stage = (struct agx_apple9_render_stage){
@@ -5708,6 +5711,65 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
             else
                record->vertex[slot] = address;
          }
+      }
+      if (pipeline.fragment.has_texture) {
+         struct agx_stage *fs = &ctx->stage[MESA_SHADER_FRAGMENT];
+         struct agx_sampler_view *view = fs->textures[pipeline.fragment.texture_binding];
+         struct agx_sampler_state *sampler = fs->samplers[pipeline.fragment.sampler_binding];
+         if (!view || !sampler) {
+            fprintf(stderr, "Apple9 texture or sampler is unbound\n");
+            abort();
+         }
+         struct agx_resource *resource = view->rsrc;
+         const struct pipe_sampler_state *state = &sampler->base;
+         if (view->base.target != PIPE_TEXTURE_2D ||
+             !agx_apple9_texture_format_supported(view->format) ||
+             resource->layout.compressed ||
+             resource->base.nr_samples > 1 || view->base.u.tex.first_level ||
+             view->base.u.tex.first_layer ||
+             resource->layout.tiling != AIL_TILING_GPU ||
+             state->min_img_filter > PIPE_TEX_FILTER_LINEAR ||
+             state->mag_img_filter > PIPE_TEX_FILTER_LINEAR ||
+             state->wrap_s != PIPE_TEX_WRAP_CLAMP_TO_EDGE ||
+             state->wrap_t != PIPE_TEX_WRAP_CLAMP_TO_EDGE ||
+             state->compare_mode != PIPE_TEX_COMPARE_NONE ||
+             state->unnormalized_coords) {
+            fprintf(stderr, "Apple9 texture path requires uncompressed UNORM8 clamp 2D "
+                    "(target=%u format=%s compressed=%u levels=%u samples=%u "
+                    "level=%u layer=%u tiling=%u filters=%u/%u/%u wraps=%u/%u "
+                    "compare=%u unnormalized=%u)\n",
+                    view->base.target, util_format_name(view->format),
+                    resource->layout.compressed, resource->base.last_level,
+                    resource->base.nr_samples, view->base.u.tex.first_level,
+                    view->base.u.tex.first_layer, resource->layout.tiling,
+                    state->min_img_filter, state->mag_img_filter, state->min_mip_filter,
+                    state->wrap_s, state->wrap_t, state->compare_mode, state->unnormalized_coords);
+            abort();
+         }
+         agx_batch_reads(batch, resource);
+         record->has_texture = true;
+         /* Format, swizzle, dimensions and layout share the first 64 bits
+          * with Apple8. M4's address starts at bit 64, unlike Apple8's 66. */
+         memcpy(record->texture_descriptor, &view->desc, 8);
+         /* First/last-level nibbles in the Apple8 header become Apple9
+          * sample/mipmap flags. Apple9's mip count lives separately at +22. */
+         uint32_t dimensions;
+         memcpy(&dimensions, record->texture_descriptor + 4, 4);
+         dimensions &= 0x00ffffff;
+         if (resource->base.last_level)
+            dimensions |= 1u << 26;
+         memcpy(record->texture_descriptor + 4, &dimensions, 4);
+         uint64_t address = agx_map_texture_gpu(resource, 0) >> 4;
+         if (resource->base.last_level)
+            address |= UINT64_C(1) << 63;
+         memcpy(record->texture_descriptor + 8, &address, sizeof(address));
+         record->texture_descriptor[22] = view->base.u.tex.last_level;
+         agx_apple9_pack_sampler(record->sampler_descriptor,
+            state->min_img_filter == PIPE_TEX_FILTER_LINEAR,
+            state->mag_img_filter == PIPE_TEX_FILTER_LINEAR,
+            state->min_mip_filter == PIPE_TEX_MIPFILTER_NONE ? 0 :
+               state->min_mip_filter == PIPE_TEX_MIPFILTER_NEAREST ? 1 : 2,
+            state->min_lod, state->max_lod);
       }
       pipeline.uniform_draw = ++batch->apple9_uniform_draw_count;
       pipeline.index_size = info->index_size;

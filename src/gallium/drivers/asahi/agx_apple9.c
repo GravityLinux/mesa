@@ -1202,14 +1202,41 @@ agx_apple9_pack_r32f_texture(void *out, uint64_t address, uint32_t width,
    memcpy(out, words, sizeof(words));
 }
 
+bool
+agx_apple9_texture_format_supported(enum pipe_format format)
+{
+   switch (format) {
+   case PIPE_FORMAT_R8_UNORM:
+   case PIPE_FORMAT_R8G8_UNORM:
+   case PIPE_FORMAT_R8G8B8A8_UNORM:
+   case PIPE_FORMAT_R8G8B8X8_UNORM:
+   case PIPE_FORMAT_B8G8R8A8_UNORM:
+   case PIPE_FORMAT_B8G8R8X8_UNORM:
+      return true;
+   default:
+      return false;
+   }
+}
+
+void
+agx_apple9_pack_sampler(void *out, bool min_linear, bool mag_linear,
+                         unsigned mip_filter, float min_lod, float max_lod)
+{
+   assert(mip_filter <= 2);
+   max_lod = CLAMP(max_lod, 0.0f, 14.0f);
+   min_lod = CLAMP(min_lod, 0.0f, max_lod);
+   const uint32_t words[2] = {
+      (uint32_t)roundf(min_lod * 64) | ((uint32_t)roundf(max_lod * 8) << 13) |
+      (mag_linear << 23) | (min_linear << 25) | (mip_filter << 27),
+      (1u << 7) | (7u << 8), /* normalized coordinates, clamp-to-edge, compare always */
+   };
+   memcpy(out, words, sizeof(words));
+}
+
 void
 agx_apple9_pack_nearest_sampler(void *out)
 {
-   const uint32_t words[2] = {
-      112u << 13,            /* lod_min=0.0, lod_max=14.0 */
-      (1u << 7) | (7u << 8), /* clamp-to-edge, nearest, compare always */
-   };
-   memcpy(out, words, sizeof(words));
+   agx_apple9_pack_sampler(out, false, false, 0, 0, 14);
 }
 
 /* Native Apple9 render-context aperture used by the source-built graph. */
@@ -2981,6 +3008,22 @@ static_assert(AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS * 0x100 <= 0x3f00,
               "draw pointer records must fit in the resource page");
 
 static struct apple9_external_blob apple9_uniform_launch;
+static struct apple9_external_blob apple9_texture_launch;
+static util_once_flag apple9_texture_once = UTIL_ONCE_FLAG_INIT;
+static bool apple9_texture_loaded;
+
+static void
+apple9_load_texture_launch(void)
+{
+   /* Complete opaque FS setup from our four-coordinate, four-buffer probe.
+    * It supplies eight coordinate publications. The complete record occupies
+    * 0x100 bytes: truncating it to the buffer launcher's 0xc0 bytes stalls FS.
+    * No helper instructions are reconstructed here or in the compiler. */
+   apple9_texture_loaded = apple9_load_external_blob(
+      "render_texture_coords8_launch.bin", &apple9_texture_launch) &&
+      apple9_texture_launch.size == 0x100;
+}
+
 static util_once_flag apple9_uniform_once = UTIL_ONCE_FLAG_INIT;
 static bool apple9_uniform_loaded;
 
@@ -3015,14 +3058,28 @@ agx_apple9_render_cache_upload_uniforms(
       if (!package || !package->fragment_call || !package->vertex_prolog_call)
          return false;
       unsigned record = APPLE9_UNIFORM_RECORDS + i * 0x100;
-      unsigned cf_offset = 0x40;
+      if (draws[i].has_texture) {
+         util_call_once(&apple9_texture_once, apple9_load_texture_launch);
+         if (!apple9_texture_loaded)
+            return false;
+      }
+      unsigned cf_offset = draws[i].has_texture ? 0x60 : 0x40;
       for (unsigned v = 0; v < ARRAY_SIZE(views); ++v) {
          uint8_t *view = views[v];
          memset(view + record, 0, 0x100);
          for (unsigned slot = 0; slot < 4; ++slot) {
             apple9_put_u64(view + record + slot * 8, draws[i].vertex[slot]);
-            apple9_put_u64(view + record + 0x20 + slot * 8,
+            apple9_put_u64(view + record + 0x20 +
+                              (draws[i].has_texture ? 0x10 : 0) + slot * 8,
                            draws[i].fragment[slot]);
+         }
+         if (draws[i].has_texture) {
+            apple9_put_u64(view + record + 0x20,
+                           cache->dev->shader_base + record + 0xa0);
+            apple9_put_u64(view + record + 0x28,
+                           cache->dev->shader_base + record + 0xc0);
+            memcpy(view + record + 0xa0, draws[i].texture_descriptor, 32);
+            memcpy(view + record + 0xc0, draws[i].sampler_descriptor, 8);
          }
          apple9_build_cf_bindings(view + record + cf_offset,
                                   package->varying_components);
@@ -3031,12 +3088,18 @@ agx_apple9_render_cache_upload_uniforms(
                (stage ? APPLE9_UNIFORM_FS_LAUNCH : APPLE9_UNIFORM_VS_LAUNCH) +
                i * APPLE9_UNIFORM_STRIDE;
             uint8_t *launch = view + location;
-            memcpy(launch, apple9_uniform_launch.data + stage * 0xc0, 0xc0);
+            bool textured = stage && draws[i].has_texture;
+            memcpy(launch, textured ? apple9_texture_launch.data :
+                                      apple9_uniform_launch.data + stage * 0xc0,
+                   textured ? 0x100 : 0xc0);
             if (!apple9_patch_compact_pointer(
                    launch, 1, 4, 5, 6, cache->dev->shader_base,
                    cache->dev->shader_base + record + stage * 0x20))
                return false;
-            apple9_put_u24(launch + 0x36,
+            /* The source-authored main is at archive +0x3c0 in both
+             * captures. Its established 0x07aa selector occurs at +0x44
+             * in the textured record and +0x36 in the buffer-only record. */
+            apple9_put_u24(launch + (textured ? 0x44 : 0x36),
                            stage ? package->fragment_call
                                  : package->vertex_prolog_call);
          }
@@ -3052,6 +3115,11 @@ agx_apple9_render_cache_upload_uniforms(
       memcpy(ppp + 0x40, state + AGX_APPLE9_BIND_GROUP_OFFSET, 0x80);
       uint8_t *group = ppp + 0x40;
       apple9_put_u32(group + 8, record + cf_offset);
+      /* Match the textured setup's native state, including with two user
+       * varyings. This field's full resource-count formula is unresolved;
+       * the varying-only estimate is insufficient to describe the captures. */
+      if (draws[i].has_texture)
+         apple9_put_u32(group + 0x18, MAX2(apple9_get_u32(group + 0x18), 1));
       apple9_put_u32(group + 0x14,
          (APPLE9_UNIFORM_FS_LAUNCH + i * APPLE9_UNIFORM_STRIDE) / 0x40);
       /* EXP-M4-09 authored blend/write-mask state: enable tile read/modify/write.

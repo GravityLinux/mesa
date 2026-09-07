@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "util/format/u_formats.h"
 
 #include "asahi/compiler/agx_apple9_profile.h"
 #include "asahi/compiler/agx_compile.h"
@@ -16,6 +17,8 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+bool agx_apple9_texture_format_supported(enum pipe_format format);
 
 struct agx_device;
 struct agx_bo;
@@ -28,6 +31,8 @@ struct agx_apple9_render_stage {
    uint32_t ubo_mask;
    uint8_t resource_count;
    uint8_t resource_binding[4];
+   bool has_texture;
+   uint8_t texture_binding, sampler_binding;
 
    /* Scalar interface counts used by the bounded Apple9 stage linker. */
    uint8_t position_components;
@@ -74,6 +79,8 @@ struct agx_apple9_uniform_draw {
    struct agx_apple9_render_package *package;
    uint64_t vertex[4];
    uint64_t fragment[4];
+   bool has_texture;
+   uint8_t texture_descriptor[32], sampler_descriptor[8];
    uint32_t depth_control, depth_face;
    float viewport_translate[3], viewport_scale[3];
    uint32_t scissor_index;
@@ -362,6 +369,8 @@ bool agx_apple9_emit_indirect_dispatch(
 void agx_apple9_pack_r32f_texture(void *out, uint64_t address, uint32_t width,
                                   uint32_t height, uint32_t stride_B);
 
+void agx_apple9_pack_sampler(void *out, bool min_linear, bool mag_linear,
+                              unsigned mip_filter, float min_lod, float max_lod);
 void agx_apple9_pack_nearest_sampler(void *out);
 
 const struct agx_apple9_render_region *
