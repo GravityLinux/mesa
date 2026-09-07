@@ -10,7 +10,9 @@ Mesa now compiles both compute and a bounded vertex/fragment subset through
 semantic Apple9 IR. The graphics path supports procedural vertex-ID geometry,
 FP32 vertex elements, position and up to twelve smooth user components across
 multiple locations, perspective interpolation, arithmetic, indexed triangles,
-and one packed RGBA8 color output. See [varying linkage](scenes/varyings/README.md). Unsupported graphics inputs fail compilation.
+2D fragment sampling with filtering/mipmaps and structured control flow,
+render-to-texture, and one packed RGBA8 color output.
+See [sampled textures](scenes/textures/README.md) and [varying linkage](scenes/varyings/README.md). Unsupported graphics inputs fail compilation.
 
 After the normal reset and m1n1 chainload, the hardware triangle gate is:
 
@@ -34,10 +36,9 @@ Four additional Metal-hosted tests cover changed geometry, nontrivial fragment
 arithmetic, and unequal vertex W, with both mains replaced in full.
 
 This remains a graphics bring-up gate. Other interpolation modes, arbitrary
-raster/attachment state, and graphics control flow are not implemented in the
-semantic graphics path. The carrier still clears to its
-captured color instead of honoring `glClearColor`; `glReadPixels` is not part of
-this gate. Readback validation used the shim's synchronized attachment bytes.
+raster/attachment state remain limited. Structured graphics control flow and
+RGBA clears/reloads are now implemented; see the later milestones below.
+`glReadPixels` is not part of this gate. Readback validation used the shim's synchronized attachment bytes.
 
 The [Tidal prism scene](scenes/tidal-prism/README.md) exercises a much larger
 fragment program with sine, floor, smoothstep, procedural color, and unequal
@@ -46,6 +47,33 @@ within one channel byte. Shader files can be selected using
 `T8132_GLES_VERTEX_SOURCE` and `T8132_GLES_FRAGMENT_SOURCE`; the optional
 `G16G_RENDER_ATTACHMENT_DUMP` directory receives raw synchronized attachments
 from the shim without altering the submission.
+
+
+## G16G render synchronization
+
+Normal render submissions compare BO contents with the last synchronized host
+snapshot and send only changed bytes. Uploads larger than 64 KiB use m1n1's
+compressed transfer helper. Unchanged atlases and GPU-written surfaces stay on
+the target. Partial uploads invalidate CPU cache lines before writing, preserving
+adjacent GPU results. Readbacks update the host snapshot so those GPU results
+are not mistaken for CPU edits on the next draw.
+
+Render readback defaults off, matching the original m1n1 shim. Set
+`ASAHI_SHIM_PULL=1` to download the listed fragment attachments after completion;
+`G16G_RENDER_ATTACHMENT_DUMP=DIR` also requests this attachment readback.
+`ASAHI_SHIM_PULL=all` retains the slower diagnostic synchronization of every
+writable binding. Timestamps and fences are synchronized independently. Compute
+keeps its existing writable-buffer readback for CPU result consumers.
+
+`G16G_SYNC_TRACE=1` logs upload bytes, write calls, compressed calls, upload time,
+and the readback policy/byte count. Normal HDMI presentation no longer needs
+`G16G_RENDER_PRESENT_ONLY=1` to avoid redundant transfers.
+
+Content comparison is not mmap write-fault tracking: an unchanged host value
+written over an unread GPU result cannot be detected. CPU consumers of render
+results must request the appropriate readback (`all` when attachments do not
+cover those results). This remains an experimental shim, not general shared
+CPU/GPU memory coherence.
 
 ## Current compute model
 
@@ -167,7 +195,7 @@ zero. NaN results are checked by classification; payload propagation is not
 promised. The source stays live across the factor until the multiply, using
 the allocator's ordinary liveness handling.
 
-`sin` and `cos` use the `0x2f` class-3 factor, represented by the FP32 NIR
+Compute `sin` and `cos` use the `0x2f` class-3 factor, represented by the FP32 NIR
 operation `fsin_factor_agx`: `sin(pi*x/2)/x` on [-1,1], with the pi/2 limit at
 zero and NaN outside that interval. An independently constructed 256-bit
 fixed-point expansion of 2/pi preserves quadrant information across the
@@ -449,10 +477,15 @@ It contains no Metal-generated API shader main.
 `scenes/mesh/` now exercises real FP32 vertex elements, u16/u32 index buffers,
 VS transforms and FS tint uniforms, and Depth32Float testing/writes. Vertex
 loads are normal compiler-generated device loads inside the API VS main;
-there is no fixed-format Metal vertex-fetch main. Stride and FP32 channel
-count are shader-key state; buffer bindings and offsets are retained per draw.
+there is no fixed-format Metal vertex-fetch main. Format, stride, and relative
+attribute offsets are shader-key state; buffer addresses are retained per draw.
 The compiler uses Gallium's compacted vertex-element indices independently of
-GL attribute locations.
+GL attribute locations. `scenes/vertex-inputs/` additionally checks interleaved
+FP32 positions, UNORM16 UVs, UNORM8 colors, constant attributes, and changing
+VBOs. Multiple GL bindings of one resource share a hardware argument. Other
+supported direct formats include signed normalized and signed/unsigned scaled
+8/16-bit channels; unsupported formats use Mesa's vertex translation path.
+Unused point-size writes are removed for this triangle-only path.
 
 The graphics preload now publishes four pointers per stage. It lives outside
 Mesa as `render_buffers_launch.bin` (SHA-256
@@ -479,3 +512,83 @@ preload is now `render_buffers_varyings12_launch.bin`; its complete vertex
 launcher handles sixteen retained publications. The prior four-buffer blob
 remains available as the historical EXP-M4-58 artifact. Linkage, shader keys,
 and coefficient/state tables are generated from the current shader interface.
+
+### Multiple graphics pipelines in one batch
+
+Shader binding no longer flushes an Apple9 render batch. Each draw retains
+its source package and has independent launchers, buffer bindings, coefficient
+layout and fixed-function state. Submission installs the complete shader set
+before publishing those records; archive rollover cannot invalidate an earlier
+draw in the same batch. The existing arena now holds up to 32 graphics draws,
+including draws without uniforms.
+
+`scenes/pipelines/run.sh OUTPUT_DIRECTORY` checks an A/B/A sequence extended
+with another pipeline, changing both stages and varying counts while preserving
+color and depth. Its `arena`, `rollover`, and `pin` modes test all 32 draw slots,
+a constrained archive rebuild, and 20 simultaneously retained pipelines.
+See [the fixture documentation](scenes/pipelines/README.md) for validation and
+remaining limits.
+
+### RGBA8 blending and write masks
+
+The Apple9 fragment compiler now lowers ADD blending with ZERO, ONE, SRC_ALPHA
+and ONE_MINUS_SRC_ALPHA factors, including separate RGB/alpha factors and channel
+write masks. Destination reads use allocated scoreboard slots and the draw's
+PPP tile read/modify/write state. Unsupported blend equations/factors fail
+compilation. See [the blending fixture](scenes/blending/README.md) for pixel/depth
+validation.
+
+### Graphics control flow and 2D canvas groundwork
+
+Both graphics stages now use the common branch/loop execution-mask compiler.
+See [control-flow tests](scenes/control-flow/README.md) for divergent/nested loops,
+zero iterations, break/continue and blending. ESSL gl_FragColor is accepted as RT0.
+
+RGBA clear colors and attachment reloads now work. Clears without application
+draws use the ordinary Mesa clear rectangle, with triangle fans/strips converted
+to indexed lists. See [canvas tests](scenes/canvases/README.md) for clear-only,
+color-only, two-target switching, 1024×1024 and batch-boundary coverage.
+
+Fragment screen XY now uses native integer pixel system registers and Mesa's
+API coordinate conversion. Per-draw viewport transforms follow Gallium, so raw
+FBO readbacks now have bottom-left rows. See the [screen-coordinate tests](scenes/fragcoord/README.md).
+Single-viewport scissoring now uses per-draw pixel rectangles, intersected
+with the framebuffer and viewport; see [scissor tests](scenes/scissor/README.md).
+FP32 `mix` lowers through NIR to supported arithmetic. Window Z/W remains
+unsupported. Sampling/render-then-sample and expanded argument bindings are now
+implemented.
+
+Apple9 graphics frontends preserve structured loops instead of inheriting
+Apple8's 32-iteration unroll threshold. This avoids expanding nested sampling
+loops into large static instruction sequences. Standard scalar/algebraic NIR
+cleanup before graphics-specific expansion also removes avoidable vector math.
+Compute's frontend unroll policy is unchanged.
+
+The compatibility render archive now uses the zero-filled reservation through
+`+0x18000`, immediately before compiler state, instead of stopping at `+0x10000`.
+The opaque helper closure stays at its original offsets. This increases dynamic
+stage capacity from 14,016 to 46,784 bytes (including per-stage block overhead).
+Compact calls preserve the validated next address bit; the `wide` pipeline test
+checks shaders with entry points above 64 KiB against an independent pixel/depth
+oracle. Batch planning checks both storage and call encodability before any
+per-draw calls are published. Draw admission uses that same plan: when adding
+another pipeline would exceed capacity, Mesa submits the existing draws and
+retries the new draw in a fresh batch with attachment reloads. Shared stage
+blocks count once; API draw statistics are not repeated on retry. The `split`
+pipeline test covers indexed draws across this boundary. A single pipeline
+must still fit in the bounded compatibility archive.
+
+Graphics sine/cosine now uses compact FP32 phase reduction rather than the
+full-range multiword reducer. See [graphics trig tests](scenes/trig/README.md)
+for measured error versus input magnitude. Compute retains the full-range path
+as a compatibility choice; it is not a general compute-stage requirement.
+
+### Application-controlled HDMI presentation
+
+The optional `G16G_RENDER_PRESENT_ON_SWAP=1` mode presents the actual surfaceless or
+device-platform EGL pbuffer at an application swap, rather than attachment 0 after every GPU
+submission. It uses the live Gallium resource and its current DRM-file-scoped
+binding; offscreen rendering and archive splits do not produce display updates.
+The [presentation fixture](scenes/present/README.md) documents the SDL/LÖVE
+adapter, limits, and HDMI checks for resource identity, lifetime and resize.
+Buffer upload behavior is unchanged by this presentation feature.

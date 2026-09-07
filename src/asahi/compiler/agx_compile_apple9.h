@@ -54,9 +54,13 @@ bool agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
  * arguments per stage use common buffer lowering.
  * Distinct vertex buffers and UBOs share that budget. The resource-binding array
  * records hardware argument order; apple9_ubo_mask records API UBO bindings.
- * SSBOs, other interpolation modes, MRT, and structured graphics control flow fail
- * closed. The caller supplies hardware clip coordinates and compatible stage
- * and render-target state.
+ * Branches and loops use the common execution-mask model, including lowered
+ * continuation constructs. Fragment window XY uses upper-left integer pixel
+ * coordinates, matching Gallium's advertised convention; API center/origin
+ * transforms belong to the caller. Fragment sampling supports one 2D texture
+ * and sampler pair. Window Z/W, SSBOs, other interpolation modes, and MRT
+ * fail closed. The caller supplies hardware clip
+ * coordinates and compatible stage and render-target state.
  */
 bool agx_compile_apple9_fragment(nir_shader *nir,
                                  struct agx_shader_part *out,
