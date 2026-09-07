@@ -5604,6 +5604,43 @@ apple9_render_test_shader(bool fragment, bool flat = false)
    return b.shader;
 }
 
+TEST(Apple9Compiler, GraphicsVectorConstantsMatchSimplifiedScalarInputs)
+{
+   for (bool fragment : {false, true}) {
+      unsigned sizes[2] = {};
+      for (unsigned simplified = 0; simplified < 2; ++simplified) {
+         nir_builder b = nir_builder_init_simple_shader(
+            fragment ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX,
+            &agx_nir_options, "graphics_vector_constants");
+         b.shader->info.num_ubos = 1;
+         nir_def *value = nir_load_ubo(&b, 4, 32, nir_imm_int(&b, 0),
+            nir_imm_int(&b, 0), .align_mul = 16, .range = 16);
+         if (simplified) {
+            value = nir_vec4(&b, nir_channel(&b, value, 0),
+               nir_imm_float(&b, .5), nir_imm_float(&b, .25),
+               nir_channel(&b, value, 3));
+         } else {
+            value = nir_fadd(&b,
+               nir_fmul(&b, value, nir_imm_vec4(&b, 1, 0, 0, 1)),
+               nir_imm_vec4(&b, 0, .5, .25, 0));
+         }
+         nir_store_output(&b, value, nir_imm_int(&b, 0), .write_mask = 15,
+            .src_type = nir_type_float32,
+            .io_semantics = {.location = fragment ? unsigned(FRAG_RESULT_DATA0) : unsigned(VARYING_SLOT_POS)});
+         b.shader->info.io_lowered = true;
+         agx_shader_part compiled = {};
+         const char *reason = nullptr;
+         bool ok = fragment ? agx_compile_apple9_fragment(b.shader, &compiled, &reason)
+                            : agx_compile_apple9_vertex(b.shader, &compiled, &reason);
+         ASSERT_TRUE(ok) << (reason ?: "");
+         sizes[simplified] = compiled.info.binary_size;
+         free(compiled.binary);
+         ralloc_free(b.shader);
+      }
+      EXPECT_EQ(sizes[0], sizes[1]) << "fragment=" << fragment;
+   }
+}
+
 TEST(Apple9Compiler, VertexExportsStayDistinctThroughCompletion)
 {
    nir_shader *nir = apple9_render_test_shader(false);
@@ -5929,4 +5966,28 @@ TEST(Apple9Compiler, VaryingPublicationCapacityIsCheckedBeforeAllocation)
       }
       ralloc_free(b.shader);
    }
+}
+
+TEST(Apple9Compiler, BooleanUniformCanSelectFragmentValues)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "boolean_uniform");
+   b.shader->info.num_ubos = 1;
+   nir_def *storage = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0),
+      nir_imm_int(&b, 0), .align_mul = 4, .range = 4);
+   nir_def *x = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0),
+      nir_imm_int(&b, 4), .align_mul = 4, .range = 4);
+   nir_def *condition = nir_ieq(&b, nir_b2b1(&b, storage),
+                                nir_flt(&b, x, nir_imm_float(&b, .5)));
+   nir_def *value = nir_bcsel(&b, condition,
+                             nir_imm_float(&b, .25), nir_imm_float(&b, .75));
+   nir_store_output(&b, nir_vec4(&b, value, value, value, nir_imm_float(&b, 1)),
+      nir_imm_int(&b, 0), .write_mask = 15, .src_type = nir_type_float32,
+      .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+   b.shader->info.io_lowered = true;
+   agx_shader_part compiled = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason)) << (reason ?: "");
+   free(compiled.binary);
+   ralloc_free(b.shader);
 }

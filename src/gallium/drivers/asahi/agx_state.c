@@ -1762,19 +1762,20 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
                   &key_->fs.apple9_varyings, &apple9_stage, &reason)
             : agx_compile_apple9_vertex_inputs(apple9_nir, &key_->vs.apple9_inputs,
                                                &apple9_stage, &reason);
-      ralloc_free(apple9_nir);
       if (!compiled_stage) {
          fprintf(stderr,
                  "Apple9 %s shader is outside the bounded render compiler: "
                  "%s\n",
                  _mesa_shader_stage_to_abbrev(so->type),
                  reason ?: "unknown reason");
-         nir_print_shader(nir, stderr);
+         nir_print_shader(apple9_nir, stderr);
+         ralloc_free(apple9_nir);
          ralloc_free(nir);
          ralloc_free(pre_gs);
          ralloc_free(gs_count);
          return NULL;
       }
+      ralloc_free(apple9_nir);
    }
 
    struct agx_compiled_shader *compiled = agx_compile_nir(

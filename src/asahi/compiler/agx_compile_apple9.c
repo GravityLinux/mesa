@@ -380,6 +380,7 @@ apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
       case nir_op_vec2:
       case nir_op_vec3:
       case nir_op_vec4:
+      case nir_op_b2b1:
       case nir_op_b2i32:
       case nir_op_b2f32:
       case nir_op_bcsel:
@@ -1059,6 +1060,17 @@ apple9_lower_bool_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
             value = apple9_emit_dag_select(lower, scalar, one, zero);
       } else {
          switch (op) {
+         case nir_op_b2b1: {
+            /* Uniform Boolean storage is 32 bits; Boolean SSA uses 0/1. */
+            uint32_t source = apple9_lower_dag_source(lower, scalar, 0);
+            uint32_t one = apple9_dag_imm(lower, 1);
+            uint32_t zero = apple9_dag_zero(lower);
+            if (source != AGX_APPLE9_VREG_INVALID &&
+                one != AGX_APPLE9_VREG_INVALID && zero != AGX_APPLE9_VREG_INVALID)
+               value = apple9_emit_dag_select_raw(lower, zero, source, one, zero,
+                                                   AGX_APPLE9_SELECT_ULT);
+            break;
+         }
          case nir_op_iand:
          case nir_op_ior:
          case nir_op_ixor: {
@@ -1263,6 +1275,8 @@ static uint32_t
 apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
 {
    scalar = apple9_chase_trivial(scalar);
+   if (scalar.def->bit_size == 1)
+      return apple9_lower_bool_scalar(lower, scalar);
    if ((scalar.def->bit_size != 8 && scalar.def->bit_size != 16 &&
         scalar.def->bit_size != 32) ||
        scalar.comp >= 4) {
@@ -3473,6 +3487,29 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
                    const struct agx_apple9_varying_layout *varyings,
                    const char **reason)
 {
+   /* Undefined lanes can remain in vectors with partial output write masks.
+    * Materialize them consistently before instruction selection. */
+   nir_lower_undef_to_zero(nir, NULL);
+   /* Format and shader-math lowering can create identical expressions. */
+   bool progress;
+   do {
+      progress = nir_opt_constant_folding(nir);
+      progress |= nir_opt_copy_prop(nir);
+      progress |= nir_opt_cse(nir);
+      progress |= nir_opt_dce(nir);
+   } while (progress);
+
+   /* Selection follows NIR order, so shorten live ranges after lowering and
+    * before collecting loads or assigning virtual registers. Use the same
+    * movement options as the Apple8 backend; NIR checks load reorderability.
+    */
+   nir_move_options move = nir_move_const_undef | nir_move_load_ubo |
+                           nir_move_load_input | nir_move_load_frag_coord |
+                           nir_move_comparisons | nir_move_copies |
+                           nir_move_load_ssbo | nir_move_alu;
+   nir_opt_sink(nir, move);
+   nir_opt_move(nir, move);
+
    struct util_dynarray loads = UTIL_DYNARRAY_INIT;
    struct util_dynarray stores = UTIL_DYNARRAY_INIT;
    struct util_dynarray atomics = UTIL_DYNARRAY_INIT;
@@ -3566,6 +3603,8 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
       goto fail;
 
    if (getenv("AGX_APPLE9_TRACE") != NULL) {
+      fprintf(stderr, "APPLE9_ALLOC_STATS stage=%u peak_live_gprs=%u\n",
+              nir->info.stage, lower.program.peak_live_gprs);
       for (unsigned i = 0; i < lower.program.instruction_count; ++i) {
          const struct agx_apple9_vir_instr *instruction =
             &lower.program.instructions[i];
@@ -4029,6 +4068,21 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
          return false;
       }
    }
+   /* Frontends may supply vector NIR or pre-simplified scalar NIR. Expose
+    * scalar constants to standard algebraic cleanup before expanding math
+    * and output packing, rather than relying on a caller-specific pipeline.
+    */
+   nir_lower_vars_to_ssa(nir);
+   nir_lower_alu_to_scalar(nir, NULL, NULL);
+   bool progress;
+   do {
+      progress = nir_opt_algebraic(nir);
+      progress |= nir_opt_constant_folding(nir);
+      progress |= nir_opt_copy_prop(nir);
+      progress |= nir_opt_dce(nir);
+      progress |= nir_opt_cse(nir);
+   } while (progress);
+
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       bool valid = true;
       nir_shader_intrinsics_pass(nir, apple9_lower_color,
