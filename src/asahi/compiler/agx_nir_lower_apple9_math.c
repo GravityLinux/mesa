@@ -141,6 +141,27 @@ lower_sincos(nir_builder *b, nir_def *x, bool cosine)
                     nir_imm_int(b, 0x7fc00000), result);
 }
 
+/* Graphics uses bounded-accuracy floating-point reduction, like the existing
+ * AGX graphics backend. The Apple9 factor consumes quarter-turn units, so
+ * fold four quadrants into [-1, 1] before evaluating sin(pi*p/2)/p.
+ * Work on the magnitude to avoid cancellation for small negative sine inputs.
+ * Unlike the compute reducer, phase accuracy degrades as |x| grows. */
+static nir_def *
+lower_graphics_sincos(nir_builder *b, nir_def *x, bool cosine)
+{
+   nir_def *turns = nir_fmul_imm(b, nir_fabs(b, x), 0x1.45f306p-3f);
+   nir_def *q = nir_fmul_imm(b, nir_fsub(b, turns, nir_ffloor(b, turns)), 4.0f);
+   if (cosine) {
+      q = nir_fadd_imm(b, q, 1.0f);
+      q = nir_bcsel(b, nir_fge_imm(b, q, 4.0f), nir_fadd_imm(b, q, -4.0f), q);
+   }
+   nir_def *p = nir_bcsel(b, nir_flt_imm(b, q, 1.0f), q,
+      nir_bcsel(b, nir_flt_imm(b, q, 3.0f),
+                 nir_fsub(b, nir_imm_float(b, 2.0f), q), nir_fadd_imm(b, q, -4.0f)));
+   nir_def *result = nir_fmul(b, p, nir_fsin_factor_agx(b, p));
+   return cosine ? result : nir_ixor(b, result, nir_iand_imm(b, x, 0x80000000));
+}
+
 static bool
 math_filter(const nir_instr *instr, UNUSED const void *data)
 {
@@ -163,10 +184,15 @@ lower_math(nir_builder *b, nir_instr *instr, UNUSED void *data)
       /* GLSL clamp/smoothstep may arrive as fsat even though Apple9 does
        * not yet model an ALU saturation modifier. Use its ordinary FP32
        * min/max operations, preserving the NIR clamp ordering. */
-      components[i] = alu->op == nir_op_fsat
-                         ? nir_fmin(b, nir_fmax(b, x, nir_imm_float(b, 0)),
-                                    nir_imm_float(b, 1))
-                         : lower_sincos(b, x, alu->op == nir_op_fcos);
+      if (alu->op == nir_op_fsat) {
+         components[i] = nir_fmin(b, nir_fmax(b, x, nir_imm_float(b, 0)),
+                                  nir_imm_float(b, 1));
+      } else if (b->shader->info.stage == MESA_SHADER_VERTEX ||
+                 b->shader->info.stage == MESA_SHADER_FRAGMENT) {
+         components[i] = lower_graphics_sincos(b, x, alu->op == nir_op_fcos);
+      } else {
+         components[i] = lower_sincos(b, x, alu->op == nir_op_fcos);
+      }
    }
    return nir_vec(b, components, alu->def.num_components);
 }

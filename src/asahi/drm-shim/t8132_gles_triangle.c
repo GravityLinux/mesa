@@ -539,6 +539,7 @@ write_ppm(const char *path, const uint8_t *rgba,
 #include "scenes/island/island.h"
 #include "scenes/sunset/sunset.h"
 #include "scenes/mix/mix.h"
+#include "scenes/trig/trig.h"
 
 int
 main(int argc, char **argv)
@@ -612,6 +613,8 @@ main(int argc, char **argv)
 
    if (getenv("T8132_GLES_MIX"))
       return run_mix(width, height);
+   if (getenv("T8132_GLES_TRIG"))
+      return run_trig(width, height);
 
 
 

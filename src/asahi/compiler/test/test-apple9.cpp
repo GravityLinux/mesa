@@ -6000,6 +6000,39 @@ TEST(Apple9Compiler, MixLowersDynamicEndpointsAndFactors)
    }
 }
 
+TEST(Apple9Compiler, GraphicsTrigUsesOneFactorPerOperation)
+{
+   for (bool fragment : {false, true}) {
+      nir_builder b = nir_builder_init_simple_shader(
+         fragment ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX,
+         &agx_nir_options, "compact_graphics_trig");
+      nir_def *x = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
+                               .align_mul = 4, .range = 4);
+      nir_store_output(&b, nir_vec4(&b, nir_fsin(&b, x), nir_fcos(&b, x),
+                                    nir_imm_float(&b, 0), nir_imm_float(&b, 1)),
+                       nir_imm_int(&b, 0), .write_mask = 15,
+                       .src_type = nir_type_float32,
+                       .io_semantics = {.location = fragment ? unsigned(FRAG_RESULT_DATA0) : unsigned(VARYING_SLOT_POS), .num_slots = 1});
+      b.shader->info.io_lowered = true;
+      b.shader->info.num_ubos = 1;
+      agx_shader_part out = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(fragment ? agx_compile_apple9_fragment(b.shader, &out, &reason)
+                           : agx_compile_apple9_vertex(b.shader, &out, &reason)) << reason;
+      unsigned factors = 0;
+      nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_alu)
+               factors += nir_instr_as_alu(instr)->op == nir_op_fsin_factor_agx;
+         }
+      }
+      EXPECT_EQ(factors, 2u);
+      EXPECT_LT(out.info.binary_size, 2048u);
+      free(out.binary);
+      ralloc_free(b.shader);
+   }
+}
+
 TEST(Apple9Compiler, BooleanUniformCanSelectFragmentValues)
 {
    nir_builder b = nir_builder_init_simple_shader(
