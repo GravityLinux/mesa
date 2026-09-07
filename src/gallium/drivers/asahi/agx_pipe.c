@@ -1941,6 +1941,68 @@ asahi_clear_buffer(struct pipe_context *pipe, struct pipe_resource *resource,
                           clear_value_size);
 }
 
+/* Until the Apple9 compute image blitter is implemented, generate ordinary
+ * UNORM8 mipmaps through Gallium's synchronized CPU texture-map interface.
+ * This matches the bilinear downsampling used by util_gen_mipmap and keeps
+ * image uploads/generation independent of captured shaders. */
+static bool
+agx_apple9_generate_mipmap(struct pipe_context *pipe, struct pipe_resource *image,
+                           enum pipe_format format, unsigned base_level,
+                           unsigned last_level, unsigned first_layer,
+                           unsigned last_layer)
+{
+   if (image->target != PIPE_TEXTURE_2D || image->nr_samples > 1 ||
+       first_layer || last_layer ||
+       !agx_apple9_texture_format_supported(format) ||
+       agx_resource(image)->layout.compressed)
+      return false;
+
+   unsigned channels = util_format_get_blocksize(format);
+   for (unsigned level = base_level + 1; level <= last_level; ++level) {
+      unsigned sw = u_minify(image->width0, level - 1);
+      unsigned sh = u_minify(image->height0, level - 1);
+      unsigned dw = u_minify(image->width0, level);
+      unsigned dh = u_minify(image->height0, level);
+      struct pipe_box src_box = {.width = sw, .height = sh, .depth = 1};
+      struct pipe_box dst_box = {.width = dw, .height = dh, .depth = 1};
+      struct pipe_transfer *src_transfer = NULL, *dst_transfer = NULL;
+      uint8_t *src = pipe->texture_map(pipe, image, level - 1, PIPE_MAP_READ,
+                                      &src_box, &src_transfer);
+      if (!src)
+         return false;
+      uint8_t *dst = pipe->texture_map(pipe, image, level,
+                                      PIPE_MAP_WRITE | PIPE_MAP_DISCARD_RANGE,
+                                      &dst_box, &dst_transfer);
+      if (!dst) {
+         pipe_texture_unmap(pipe, src_transfer);
+         return false;
+      }
+      for (unsigned y = 0; y < dh; ++y) {
+         float fy = (y + 0.5f) * sh / dh - 0.5f;
+         unsigned y0 = MAX2((int)floorf(fy), 0), y1 = MIN2(y0 + 1, sh - 1);
+         float wy = fy - floorf(fy);
+         for (unsigned x = 0; x < dw; ++x) {
+            float fx = (x + 0.5f) * sw / dw - 0.5f;
+            unsigned x0 = MAX2((int)floorf(fx), 0), x1 = MIN2(x0 + 1, sw - 1);
+            float wx = fx - floorf(fx);
+            for (unsigned c = 0; c < channels; ++c) {
+               float a = src[y0 * src_transfer->stride + x0 * channels + c];
+               float b = src[y0 * src_transfer->stride + x1 * channels + c];
+               float d = src[y1 * src_transfer->stride + x0 * channels + c];
+               float e = src[y1 * src_transfer->stride + x1 * channels + c];
+               float top = a * (1 - wx) + b * wx;
+               float bottom = d * (1 - wx) + e * wx;
+               dst[y * dst_transfer->stride + x * channels + c] =
+                  (uint8_t)lrintf(top * (1 - wy) + bottom * wy);
+            }
+         }
+      }
+      pipe_texture_unmap(pipe, dst_transfer);
+      pipe_texture_unmap(pipe, src_transfer);
+   }
+   return true;
+}
+
 static struct pipe_context *
 agx_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
 {
@@ -1983,6 +2045,8 @@ agx_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    pctx->clear = agx_clear;
    pctx->resource_copy_region = agx_resource_copy_region;
    pctx->blit = agx_blit;
+   if (agx_apple9_direct_render_enabled(agx_device(screen)))
+      pctx->generate_mipmap = agx_apple9_generate_mipmap;
    pctx->flush_resource = agx_flush_resource;
 
    pctx->buffer_map = u_transfer_helper_transfer_map;
@@ -2330,6 +2394,7 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
 
    /* Apple9 has CPU texture transfers, but its compute image blitter is not
     * implemented yet. Use Mesa's existing CPU format-conversion fallback. */
+   caps->generate_mipmap = agx_apple9_direct_render_enabled(agx_device(pscreen));
    caps->texture_transfer_modes = agx_apple9_direct_render_enabled(agx_device(pscreen))
                                     ? PIPE_TEXTURE_TRANSFER_DEFAULT
                                     : PIPE_TEXTURE_TRANSFER_BLIT;

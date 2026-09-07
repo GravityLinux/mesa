@@ -143,3 +143,73 @@ TEST(Miptree, SmallPartialMiptree3D)
    EXPECT_EQ(layout.sparse_folios_per_layer, 1);
    EXPECT_EQ(layout.sparse_table_size_B, 0x20000);
 }
+
+/* Native EXP-M4-07 byte offsets, reproduced by the shared AGX layout. */
+TEST(Apple9Miptree, CapturedSquareOffsets)
+{
+   ail_layout layout = {
+      .width_px = 384, .height_px = 384, .depth_px = 1,
+      .sample_count_sa = 1, .levels = 9,
+      .tiling = AIL_TILING_GPU, .format = PIPE_FORMAT_R8G8B8A8_UNORM,
+   };
+   ail_make_miptree(&layout);
+   const unsigned offsets[] = {0, 0x90000, 0xb4000, 0xc8000, 0xcc000,
+                              0xcd000, 0xcd400, 0xcd500, 0xcd580, 0xcd600};
+   for (unsigned l = 0; l < ARRAY_SIZE(offsets); ++l)
+      EXPECT_EQ(layout.level_offsets_B[l], offsets[l]) << l;
+   EXPECT_EQ(layout.mip_tail_first_lod, 3);
+   EXPECT_EQ(layout.size_B, 0xcd600);
+}
+
+TEST(Apple9Miptree, TinyLevelsKeepMinimumSlots)
+{
+   ail_layout layout = {
+      .width_px = 128, .height_px = 128, .depth_px = 1,
+      .sample_count_sa = 1, .levels = 8,
+      .tiling = AIL_TILING_GPU, .format = PIPE_FORMAT_R8G8B8A8_UNORM,
+   };
+   ail_make_miptree(&layout);
+   const unsigned offsets[] = {0, 0x10000, 0x14000, 0x15000, 0x15400,
+                              0x15500, 0x15580, 0x15600, 0x15680};
+   for (unsigned l = 0; l < ARRAY_SIZE(offsets); ++l)
+      EXPECT_EQ(layout.level_offsets_B[l], offsets[l]) << l;
+}
+
+/* Hardware sampling of every level in the rectangular atlas regression
+ * verifies the padding that square-only tests did not distinguish. */
+TEST(Apple9Miptree, RectangularAtlasLargeLevelPadding)
+{
+   ail_layout layout = {
+      .width_px = 994, .height_px = 950, .depth_px = 1,
+      .sample_count_sa = 1, .levels = 10,
+      .tiling = AIL_TILING_GPU, .format = PIPE_FORMAT_R8G8B8A8_UNORM,
+   };
+   ail_make_miptree(&layout);
+   const unsigned offsets[] = {0, 0x3c0000, 0x4d0000, 0x51c000, 0x530000,
+                              0x534000, 0x535000, 0x535400, 0x535500,
+                              0x535580, 0x535600};
+   for (unsigned l = 0; l < ARRAY_SIZE(offsets); ++l)
+      EXPECT_EQ(layout.level_offsets_B[l], offsets[l]) << l;
+   EXPECT_EQ(layout.mip_tail_first_lod, 4);
+   EXPECT_EQ(layout.size_B, 0x535600);
+}
+
+TEST(Apple9Miptree, WideAtlasDoesNotAddTailGap)
+{
+   ail_layout layout = {
+      .width_px = 1846, .height_px = 760, .depth_px = 1,
+      .sample_count_sa = 1, .levels = 11,
+      .tiling = AIL_TILING_GPU, .format = PIPE_FORMAT_R8G8B8A8_UNORM,
+   };
+   ail_make_miptree(&layout);
+   const unsigned offsets[] = {0, 0x570000, 0x6e4000, 0x744000, 0x76c000,
+                              0x774000, 0x776000, 0x776800, 0x776a00,
+                              0x776a80, 0x776b00, 0x776b80};
+   for (unsigned l = 0; l < ARRAY_SIZE(offsets); ++l)
+      EXPECT_EQ(layout.level_offsets_B[l], offsets[l]) << l;
+   EXPECT_EQ(layout.mip_tail_first_lod, 4);
+   EXPECT_EQ(layout.size_B, 0x776b80);
+   // Sub-tile addressing uses square tiles, including elongated tiny levels.
+   EXPECT_EQ(layout.tilesize_el[8].width_el, 2);
+   EXPECT_EQ(layout.tilesize_el[8].height_el, 2);
+}
