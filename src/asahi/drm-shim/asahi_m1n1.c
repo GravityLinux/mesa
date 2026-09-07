@@ -227,6 +227,24 @@ out:
    return ret;
 }
 
+/* Private EGL/DRM-shim bridge, not a kernel ioctl or an application GPU VA. */
+__attribute__((visibility("default"))) int
+asahi_m1n1_present_surface(int fd, uint32_t handle, uint32_t width,
+                           uint32_t height, uint32_t stride, uint32_t offset);
+
+int
+asahi_m1n1_present_surface(int fd, uint32_t handle, uint32_t width,
+                           uint32_t height, uint32_t stride, uint32_t offset)
+{
+   uint64_t client_id;
+   int ret = asahi_client_id(fd, &client_id);
+   if (ret)
+      return ret;
+   return python_status("modern_present_surface", 6, client_id,
+                        (uint64_t)handle, (uint64_t)width, (uint64_t)height,
+                        (uint64_t)stride, (uint64_t)offset);
+}
+
 static bool
 python_backend_init(void)
 {

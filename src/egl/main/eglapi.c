@@ -1432,6 +1432,19 @@ eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
       RETURN_EGL_ERROR(disp, EGL_BAD_SURFACE, EGL_FALSE);
 #endif
 
+   /* Opt-in m1n1 bring-up presentation for SDL's offscreen pbuffer.
+    * Ordinary EGL pbuffer swaps retain their specified no-op behavior. */
+   const char *shim_present = getenv("G16G_RENDER_PRESENT_ON_SWAP");
+   if ((disp->Platform == _EGL_PLATFORM_SURFACELESS ||
+        disp->Platform == _EGL_PLATFORM_DEVICE) &&
+       surf->Type == EGL_PBUFFER_BIT && shim_present &&
+       strcmp(shim_present, "1") == 0) {
+      egl_relax (disp, &surf->Resource) {
+         ret = disp->Driver->SwapBuffers(disp, surf);
+      }
+      RETURN_EGL_EVAL(disp, ret);
+   }
+
    if (surf->Type != EGL_WINDOW_BIT)
       RETURN_EGL_EVAL(disp, EGL_TRUE);
 

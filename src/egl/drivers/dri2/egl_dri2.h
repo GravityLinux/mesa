@@ -584,6 +584,9 @@ void
 dri2_flush_drawable_for_swapbuffers_flags(
    _EGLDisplay *disp, _EGLSurface *draw,
    enum __DRI2throttleReason throttle_reason);
+EGLBoolean
+dri2_m1n1_swap_pbuffer(_EGLDisplay *disp, _EGLSurface *surf);
+
 void
 dri2_flush_drawable_for_swapbuffers(_EGLDisplay *disp, _EGLSurface *draw);
 

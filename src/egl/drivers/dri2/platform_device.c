@@ -172,6 +172,7 @@ dri2_device_create_pbuffer_surface(_EGLDisplay *disp, _EGLConfig *conf,
 }
 
 static const struct dri2_egl_display_vtbl dri2_device_display_vtbl = {
+   .swap_buffers = dri2_m1n1_swap_pbuffer,
    .create_pbuffer_surface = dri2_device_create_pbuffer_surface,
    .destroy_surface = device_destroy_surface,
    .create_image = dri2_create_image_khr,

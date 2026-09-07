@@ -1460,6 +1460,38 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
    }
 }
 
+/* Explicit pbuffer presentation for the optional m1n1 shim. No resource is
+ * exported, and the caller retains the surface for this synchronous call. */
+static void
+agx_m1n1_flush_frontbuffer(struct pipe_screen *screen, struct pipe_context *ctx,
+                           struct pipe_resource *resource, unsigned level,
+                           unsigned layer, void *drawable, unsigned nboxes,
+                           struct pipe_box *boxes)
+{
+   if (!drawable)
+      return;
+   int *status = drawable;
+   *status = -EINVAL;
+   struct agx_resource *rsrc = agx_resource(resource);
+   if (level || layer ||
+       (resource->format != PIPE_FORMAT_B8G8R8A8_UNORM &&
+        resource->format != PIPE_FORMAT_B8G8R8X8_UNORM) ||
+       rsrc->modifier != DRM_FORMAT_MOD_APPLE_GPU_TILED)
+      return;
+
+   typedef int (*present_fn)(int, uint32_t, uint32_t, uint32_t,
+                             uint32_t, uint32_t);
+   present_fn present = (present_fn)dlsym(RTLD_DEFAULT, "asahi_m1n1_present_surface");
+   if (!present) {
+      *status = -ENOSYS;
+      return;
+   }
+   *status = present(agx_device(screen)->fd, rsrc->bo->handle,
+                     resource->width0, resource->height0,
+                     ail_get_wsi_stride_B(&rsrc->layout, level),
+                     rsrc->layout.level_offsets_B[level]);
+}
+
 /*
  * context
  */
@@ -2813,6 +2845,10 @@ agx_screen_create(int fd, struct renderonly *ro,
          &agx_screen->apple9_graphics_nir_options;
    }
 
+   const char *shim_present = getenv("G16G_RENDER_PRESENT_ON_SWAP");
+   if (agx_apple9_direct_render_enabled(&agx_screen->dev) && shim_present &&
+       strcmp(shim_present, "1") == 0)
+      screen->flush_frontbuffer = agx_m1n1_flush_frontbuffer;
 
    screen->resource_create = u_transfer_helper_resource_create;
    screen->resource_destroy = u_transfer_helper_resource_destroy;

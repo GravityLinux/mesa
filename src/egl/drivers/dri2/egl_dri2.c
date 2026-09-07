@@ -1675,6 +1675,38 @@ dri2_flush_drawable_for_swapbuffers(_EGLDisplay *disp, _EGLSurface *draw)
                                              __DRI2_THROTTLE_SWAPBUFFER);
 }
 
+/* The opt-in shim path presents the actual surface resource. Pbuffers use
+ * the loader's front image; it need not be exportable or last rendered. */
+EGLBoolean
+dri2_m1n1_swap_pbuffer(_EGLDisplay *disp, _EGLSurface *surf)
+{
+   const char *enabled = getenv("G16G_RENDER_PRESENT_ON_SWAP");
+   if (!enabled || strcmp(enabled, "1") != 0)
+      return EGL_TRUE;
+
+   struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
+   struct dri2_egl_surface *dri2_surf = dri2_egl_surface(surf);
+   struct pipe_screen *screen = dri2_dpy->dri_screen_render_gpu->base.screen;
+   if (!dri2_dpy->driver_name || strcmp(dri2_dpy->driver_name, "asahi") ||
+       !screen->flush_frontbuffer)
+      return _eglError(EGL_BAD_MATCH, "m1n1 surface presentation unavailable");
+
+   /* The m1n1 transport completes each GPU submission synchronously. */
+   dri2_flush_drawable_for_swapbuffers(disp, surf);
+   if (!dri2_surf->front)
+      return EGL_TRUE; /* Never-rendered surface: no defined pixels to show. */
+
+   struct dri_image *image = dri2_surf->front;
+   int status = -1;
+   /* The opt-in Asahi callback uses its out-of-band drawable handle as a
+    * synchronous status result. The surface owns the image for this call. */
+   screen->flush_frontbuffer(screen, NULL, image->texture, image->level,
+                             image->layer, &status, 0, NULL);
+   if (status)
+      return _eglError(EGL_BAD_ACCESS, "m1n1 surface presentation failed");
+   return EGL_TRUE;
+}
+
 static EGLBoolean
 dri2_swap_buffers(_EGLDisplay *disp, _EGLSurface *surf)
 {
