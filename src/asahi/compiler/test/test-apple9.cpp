@@ -5809,9 +5809,10 @@ TEST(Apple9Compiler, VertexInputsKeepAttributeAndUniformBindingsDistinct)
    b.shader->info.io_lowered = true;
    agx_apple9_vertex_layout layout = {};
    layout.stride[0] = 20;
-   layout.components[0] = 3; /* A vec4 shader input defaults W to one. */
+   layout.format[0] = PIPE_FORMAT_R32G32B32_FLOAT; /* A vec4 shader input defaults W to one. */
    layout.stride[1] = 32;
-   layout.components[1] = 4;
+   layout.format[1] = PIPE_FORMAT_R32G32B32A32_FLOAT;
+   layout.buffer[1] = 1;
    layout.clip_halfz = true;
    agx_shader_part compiled = {};
    const char *reason = nullptr;
@@ -5822,6 +5823,66 @@ TEST(Apple9Compiler, VertexInputsKeepAttributeAndUniformBindingsDistinct)
    EXPECT_EQ(compiled.info.apple9_resource_binding[0], 33);
    EXPECT_EQ(compiled.info.apple9_resource_binding[1], 32);
    EXPECT_EQ(compiled.info.apple9_resource_binding[2], 7);
+   EXPECT_EQ(compiled.info.apple9_ubo_mask, 1u << 7);
+   nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_intrinsic) {
+            EXPECT_NE(nir_instr_as_intrinsic(instr)->intrinsic,
+                      nir_intrinsic_load_input);
+         }
+      }
+   }
+   free(compiled.binary);
+   ralloc_free(b.shader);
+}
+
+TEST(Apple9Compiler, PackedVertexInputsShareSparseBufferBinding)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_VERTEX, &agx_nir_options, "vertex_buffers_and_uniforms");
+   nir_def *position = nir_load_input(
+      &b, 4, 32, nir_imm_int(&b, 0), .dest_type = nir_type_float32,
+      .io_semantics = {.location = VERT_ATTRIB_GENERIC3, .num_slots = 1});
+   nir_def *color = nir_load_input(
+      &b, 3, 32, nir_imm_int(&b, 0), .base = 1, .dest_type = nir_type_float32,
+      .io_semantics = {.location = VERT_ATTRIB_GENERIC9, .num_slots = 1});
+   nir_def *scale =
+      nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 7), nir_imm_int(&b, 16),
+                   .align_mul = 4, .range = 4);
+   nir_store_output(
+      &b, position, nir_imm_int(&b, 0), .write_mask = 15,
+      .src_type = nir_type_float32,
+      .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+   nir_def *scaled = nir_fmul(&b, color, scale);
+   nir_store_output(
+      &b, nir_vec4(&b, nir_channel(&b, scaled, 0), nir_channel(&b, scaled, 1),
+                   nir_channel(&b, scaled, 2), nir_undef(&b, 1, 32)),
+      nir_imm_int(&b, 0), .write_mask = 7,
+      .src_type = nir_type_float32,
+      .io_semantics = {.location = VARYING_SLOT_VAR0, .num_slots = 1});
+   nir_store_output(&b, nir_imm_float(&b, 4), nir_imm_int(&b, 0),
+                    .write_mask = 1, .src_type = nir_type_float32,
+                    .io_semantics = {.location = VARYING_SLOT_PSIZ, .num_slots = 1});
+   b.shader->info.io_lowered = true;
+   agx_apple9_vertex_layout layout = {};
+   layout.stride[0] = 24;
+   layout.offset[0] = 8;
+   layout.buffer[0] = 7;
+   layout.format[0] = PIPE_FORMAT_R16G16_UNORM; /* Missing Z/W default to zero/one. */
+   layout.stride[1] = 24;
+   layout.offset[1] = 12;
+   layout.format[1] = PIPE_FORMAT_R8G8B8A8_SNORM;
+   layout.buffer[1] = 7;
+   layout.clip_halfz = true;
+   layout.ignore_point_size = true;
+   agx_shader_part compiled = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(
+      agx_compile_apple9_vertex_inputs(b.shader, &layout, &compiled, &reason))
+      << (reason ?: "");
+   EXPECT_EQ(compiled.info.apple9_resource_count, 2);
+   EXPECT_EQ(compiled.info.apple9_resource_binding[0], 39);
+   EXPECT_EQ(compiled.info.apple9_resource_binding[1], 7);
    EXPECT_EQ(compiled.info.apple9_ubo_mask, 1u << 7);
    nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
       nir_foreach_instr(instr, block) {

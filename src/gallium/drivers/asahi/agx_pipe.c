@@ -2406,8 +2406,13 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
    if (MAX2(sample_count, 1) != MAX2(storage_sample_count, 1))
       return false;
 
-   if ((usage & PIPE_BIND_VERTEX_BUFFER) && !agx_vbo_supports_format(format))
-      return false;
+   if (usage & PIPE_BIND_VERTEX_BUFFER) {
+      bool supported = agx_apple9_direct_render_enabled(agx_device(pscreen))
+                          ? agx_apple9_vertex_format_supported(format)
+                          : agx_vbo_supports_format(format);
+      if (!supported)
+         return false;
+   }
 
    /* For framebuffer_no_attachments, fake support for "none" images */
    if (format == PIPE_FORMAT_NONE)

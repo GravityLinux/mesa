@@ -1512,7 +1512,8 @@ agx_apple9_bounded_render_signature(const nir_shader *nir)
       uint64_t supported_inputs = BITFIELD64_MASK(16) << VERT_ATTRIB_GENERIC0;
       return !(nir->info.inputs_read & ~supported_inputs) &&
              (nir->info.outputs_written & position) &&
-             !(nir->info.outputs_written & ~(position | user));
+             !(nir->info.outputs_written &
+               ~(position | user | BITFIELD64_BIT(VARYING_SLOT_PSIZ)));
    }
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       return !(nir->info.inputs_read & ~user) &&
@@ -2388,18 +2389,61 @@ agx_update_vs(struct agx_batch *batch, unsigned index_size_B)
 
    if (agx_apple9_direct_render_enabled(agx_device(ctx->base.screen))) {
       key.apple9_inputs.clip_halfz = !ctx->rast->base.clip_halfz;
+      /* The direct path currently accepts triangles only. LÖVE's shared
+       * vertex shader also writes point size, which triangles do not use. */
+      key.apple9_inputs.ignore_point_size = true;
+      bool compact_resources = false;
+retry_apple9_inputs:
       for (unsigned i = 0; i < MIN2(ctx->attributes->num_attribs, 16); ++i) {
          const struct agx_velem_key *a = &ctx->attributes->key[i];
-         const struct util_format_description *desc = util_format_description(a->format);
-         bool fp32 = desc->layout == UTIL_FORMAT_LAYOUT_PLAIN &&
-                     desc->colorspace == UTIL_FORMAT_COLORSPACE_RGB;
-         for (unsigned c = 0; c < desc->nr_channels; ++c)
-            fp32 &= desc->channel[c].type == UTIL_FORMAT_TYPE_FLOAT &&
-                    desc->channel[c].size == 32 && desc->swizzle[c] == c;
-         if (fp32 && !a->instanced) {
+         if (!a->instanced && agx_apple9_vertex_format_supported(a->format)) {
             key.apple9_inputs.stride[i] = a->stride;
-            key.apple9_inputs.components[i] = desc->nr_channels;
+            key.apple9_inputs.format[i] = a->format;
+            unsigned binding = ctx->attributes->buffers[i];
+            const struct pipe_vertex_buffer *vb = &ctx->vertex_buffers[binding];
+
+            /* Legacy GL attribute pointers can create separate bindings for
+             * each attribute in the same stream. Share a resource pointer and
+             * express the differences as attribute offsets. Use the lowest
+             * base so all offsets remain unsigned, and align that base to
+             * the largest supported channel. Keep resource identities and
+             * absolute streaming offsets out of the shader key. Different
+             * strides describe independent streams, even when an uploader
+             * places them in the same BO. In particular, never anchor moving
+             * vertex arrays to a zero-stride constant attribute allocation.
+             */
+            for (unsigned j = 0; j < MIN2(ctx->attributes->num_attribs, 16); ++j) {
+               unsigned candidate = ctx->attributes->buffers[j];
+               const struct pipe_vertex_buffer *other =
+                  &ctx->vertex_buffers[candidate];
+               const struct pipe_vertex_buffer *base =
+                  &ctx->vertex_buffers[binding];
+               if ((compact_resources || ctx->attributes->key[j].stride == a->stride) &&
+                   vb->buffer.resource &&
+                   other->buffer.resource == vb->buffer.resource &&
+                   (other->buffer_offset < base->buffer_offset ||
+                    (other->buffer_offset == base->buffer_offset &&
+                     candidate < binding)))
+                  binding = candidate;
+            }
+            key.apple9_inputs.offset[i] = ctx->attributes->src_offsets[i] +
+               vb->buffer_offset -
+               (ctx->vertex_buffers[binding].buffer_offset & ~3u);
+            key.apple9_inputs.buffer[i] = binding;
          }
+      }
+      /* Preserve the bounded ABI when extra independent streams would use
+       * more arguments than the launch can preload. Bound constant buffers
+       * share this budget. Coalescing is always address-equivalent, although
+       * it can specialize offsets again for these less common layouts. */
+      uint32_t input_bindings = 0;
+      for (unsigned i = 0; i < MIN2(ctx->attributes->num_attribs, 16); ++i)
+         if (key.apple9_inputs.format[i] != PIPE_FORMAT_NONE)
+            input_bindings |= 1u << key.apple9_inputs.buffer[i];
+      if (!compact_resources && util_bitcount(input_bindings) +
+          util_bitcount(ctx->stage[MESA_SHADER_VERTEX].cb_mask) > 4) {
+         compact_resources = true;
+         goto retry_apple9_inputs;
       }
    }
    agx_update_shader(ctx, &ctx->vs, MESA_SHADER_VERTEX,
@@ -5606,14 +5650,12 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
             unsigned binding = rs->resource_binding[slot];
             uint64_t address;
             if (binding >= 32) {
-               unsigned attribute = binding - 32;
-               const struct agx_vertex_elements *a = ctx->attributes;
                const struct pipe_vertex_buffer *vb =
-                  &ctx->vertex_buffers[a->buffers[attribute]];
+                  &ctx->vertex_buffers[binding - 32];
                struct agx_resource *vbo = agx_resource(vb->buffer.resource);
                agx_batch_reads(batch, vbo);
-               address = agx_map_gpu(vbo) + vb->buffer_offset +
-                         a->src_offsets[attribute];
+               /* Match the aligned base used by vertex-input lowering. */
+               address = agx_map_gpu(vbo) + (vb->buffer_offset & ~3u);
             } else {
                struct pipe_constant_buffer *cb = &ctx->stage[shader].cb[binding];
                if (!cb->buffer || !cb->buffer_size) {

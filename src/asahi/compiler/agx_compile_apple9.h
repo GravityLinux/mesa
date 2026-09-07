@@ -10,6 +10,7 @@
 #include <stdint.h>
 
 #include "agx_compile.h"
+#include "util/format/u_formats.h"
 #include "agx_apple9_profile.h"
 
 #ifdef __cplusplus
@@ -43,7 +44,7 @@ bool agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
  * Compile structured FP32 graphics NIR through the common semantic VIR and
  * register allocator. Fragment inputs support pixel-center smooth FP32 user
  * components; RT0 is a complete vec4 packed to RGBA8. Vertex inputs use vertex
- * ID and FP32 vertex elements; exports cover position plus up to twelve user
+ * ID and formatted vertex elements; exports cover position plus up to twelve user
  * scalars across VAR0..VAR31, compacted by semantic location and component.
  * Fragment variants use the producer's layout, including unused outputs.
  * User UVS values stay unprojected for clipping and require perspective CF
@@ -51,7 +52,7 @@ bool agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
  * handles both ordinary and primitive-constant coefficient representations.
  * Constant array offsets and component holes are supported. Up to four buffer
  * arguments per stage use common buffer lowering.
- * Vertex elements and UBOs share that budget. The resource-binding array
+ * Distinct vertex buffers and UBOs share that budget. The resource-binding array
  * records hardware argument order; apple9_ubo_mask records API UBO bindings.
  * SSBOs, other interpolation modes, MRT, and structured graphics control flow fail
  * closed. The caller supplies hardware clip coordinates and compatible stage
@@ -66,12 +67,18 @@ bool agx_compile_apple9_fragment_inputs(
    nir_shader *nir, const struct agx_apple9_varying_layout *varyings,
    struct agx_shader_part *out, const char **reason);
 
-/* Vertex pulling uses ordinary buffer loads in the API main. Addresses and
- * source offsets remain draw state; stride and format determine the code. */
+bool agx_apple9_vertex_format_supported(enum pipe_format format);
+
+/* Vertex pulling uses ordinary typed buffer loads in the API main. Buffer
+ * addresses remain draw state; format, stride and attribute offset specialize
+ * the fetch. Multiple attributes sharing a binding use one resource argument. */
 struct agx_apple9_vertex_layout {
    uint32_t stride[16];
-   bool clip_halfz; /* Convert GL [-w,w] depth to hardware [0,w]. */
-   uint8_t components[16]; /* FP32 channel count; zero means unsupported. */
+   bool clip_halfz;
+   bool ignore_point_size; /* Valid only when rasterizing non-point primitives. */ /* Convert GL [-w,w] depth to hardware [0,w]. */
+   enum pipe_format format[16];
+   uint32_t offset[16]; /* Attribute byte offset within its vertex buffer. */
+   uint8_t buffer[16]; /* Gallium vertex-buffer binding, independent of location. */
 };
 
 bool agx_compile_apple9_vertex_inputs(

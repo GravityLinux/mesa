@@ -8,6 +8,7 @@
 
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
+#include "util/format/u_format.h"
 #include "util/u_dynarray.h"
 
 #include <stdio.h>
@@ -3932,6 +3933,34 @@ apple9_scalarize_graphics_ubo(nir_builder *b, nir_intrinsic_instr *intr,
    return true;
 }
 
+/* Naturally aligned homogeneous channels. Packed bitfields and integer
+ * shader inputs can use the ordinary Mesa vertex-format fallback for now. */
+bool
+agx_apple9_vertex_format_supported(enum pipe_format format)
+{
+   if (format == PIPE_FORMAT_NONE)
+      return false;
+   const struct util_format_description *desc = util_format_description(format);
+   if (desc->layout != UTIL_FORMAT_LAYOUT_PLAIN ||
+       desc->colorspace != UTIL_FORMAT_COLORSPACE_RGB ||
+       desc->nr_channels < 1 || desc->nr_channels > 4)
+      return false;
+   for (unsigned c = 0; c < desc->nr_channels; ++c) {
+      const struct util_format_channel_description *ch = &desc->channel[c];
+      if (ch->type == UTIL_FORMAT_TYPE_VOID)
+         continue;
+      if (!ch->size || ch->pure_integer || (ch->shift % ch->size))
+         return false;
+      if (ch->type == UTIL_FORMAT_TYPE_FLOAT && ch->size == 32)
+         continue;
+      if ((ch->type == UTIL_FORMAT_TYPE_UNSIGNED || ch->type == UTIL_FORMAT_TYPE_SIGNED) &&
+          (ch->size == 8 || ch->size == 16))
+         continue;
+      return false;
+   }
+   return true;
+}
+
 struct apple9_vertex_lower {
    const struct agx_apple9_vertex_layout *layout;
    bool valid;
@@ -3957,29 +3986,59 @@ apple9_lower_vertex_input(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    }
    if (intr->intrinsic != nir_intrinsic_load_input)
       return false;
-   /* Gallium compacts vertex elements independently of API locations. */
+   /* Gallium compacts elements independently of API attribute locations. */
    unsigned attribute = nir_intrinsic_base(intr);
    if (!lower->layout || attribute >= 16 || intr->def.bit_size != 32 ||
        intr->num_components < 1 || intr->num_components > 4 ||
        nir_intrinsic_component(intr) + intr->num_components > 4 ||
        !nir_src_is_const(intr->src[0]) || nir_src_as_uint(intr->src[0]) ||
-       !lower->layout->components[attribute] ||
-       lower->layout->components[attribute] > 4 ||
-       (lower->layout->stride[attribute] & 3)) {
+       lower->layout->buffer[attribute] >= 32 ||
+       !agx_apple9_vertex_format_supported(lower->layout->format[attribute])) {
       lower->valid = false;
       return false;
    }
+   const struct util_format_description *desc =
+      util_format_description(lower->layout->format[attribute]);
    b->cursor = nir_before_instr(&intr->instr);
    nir_def *index = nir_load_vertex_id(b);
-   nir_def *offset = nir_imul_imm(b, index, lower->layout->stride[attribute]);
+   nir_def *offset = nir_iadd_imm(b,
+      nir_imul_imm(b, index, lower->layout->stride[attribute]),
+      lower->layout->offset[attribute]);
    nir_def *components[4];
    for (unsigned c = 0; c < intr->num_components; ++c) {
       unsigned component = nir_intrinsic_component(intr) + c;
-      components[c] = component < lower->layout->components[attribute]
-         ? nir_load_ubo(b, 1, 32, nir_imm_int(b, 32 + attribute),
-                        nir_iadd_imm(b, offset, component * 4),
-                        .align_mul = 4, .range = ~0u)
-         : nir_imm_float(b, component == 3 ? 1.0f : 0.0f);
+      unsigned swizzle = desc->swizzle[component];
+      if (swizzle >= PIPE_SWIZZLE_0) {
+         components[c] = nir_imm_float(b, swizzle == PIPE_SWIZZLE_1 ? 1 : 0);
+         continue;
+      }
+      const struct util_format_channel_description *ch = &desc->channel[swizzle];
+      unsigned bytes = ch->size / 8;
+      unsigned add = lower->layout->offset[attribute] + ch->shift / 8;
+      if (!bytes || (lower->layout->stride[attribute] % bytes) || (add % bytes)) {
+         lower->valid = false;
+         return false;
+      }
+      nir_def *value = nir_load_ubo(b, 1, ch->size,
+         nir_imm_int(b, 32 + lower->layout->buffer[attribute]),
+         nir_iadd_imm(b, offset, ch->shift / 8),
+         .align_mul = bytes, .range = ~0u);
+      if (ch->type != UTIL_FORMAT_TYPE_FLOAT) {
+         unsigned bits = ch->size;
+         if (ch->type == UTIL_FORMAT_TYPE_SIGNED) {
+            value = nir_i2i32(b, value);
+            value = nir_i2f32(b, value);
+            if (ch->normalized)
+               value = nir_fmax(b, nir_fmul_imm(b, value,
+                  1.0 / ((1u << (bits - 1)) - 1)), nir_imm_float(b, -1));
+         } else {
+            value = nir_u2u32(b, value);
+            value = nir_u2f32(b, value);
+            if (ch->normalized)
+               value = nir_fmul_imm(b, value, 1.0 / ((1u << bits) - 1));
+         }
+      }
+      components[c] = value;
    }
    nir_def_rewrite_uses(&intr->def, nir_vec(b, components, intr->num_components));
    nir_instr_remove(&intr->instr);
@@ -4060,11 +4119,14 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
    nir_lower_io(nir, nir_var_shader_in | nir_var_shader_out, apple9_io_size,
                 nir_lower_io_use_interpolated_input_intrinsics);
    if (nir->info.stage == MESA_SHADER_VERTEX) {
+      if (layout && layout->ignore_point_size)
+         nir_remove_outputs(nir, MESA_SHADER_FRAGMENT, 0,
+                            BITFIELD64_BIT(VARYING_SLOT_PSIZ));
       struct apple9_vertex_lower lower = {.layout = layout, .valid = true};
       nir_shader_intrinsics_pass(nir, apple9_lower_vertex_input,
                                  nir_metadata_control_flow, &lower);
       if (!lower.valid) {
-         *reason = "Apple9 vertex inputs require aligned FP32 attributes";
+         *reason = "Apple9 vertex inputs require supported naturally aligned formats";
          return false;
       }
    }
@@ -4113,7 +4175,7 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
       return false;
    bool valid_buffers = buffers.count <= 4;
    for (unsigned i = 0; i < buffers.count; ++i)
-      valid_buffers &= buffers.resource[i].binding < (layout ? 48 : 32) &&
+      valid_buffers &= buffers.resource[i].binding < (layout ? 64 : 32) &&
          buffers.resource[i].kind == AGX_APPLE9_COMPUTE_RESOURCE_UBO;
    if (!valid_buffers) {
       if (reason)
