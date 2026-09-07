@@ -541,6 +541,7 @@ write_ppm(const char *path, const uint8_t *rgba,
 #include "scenes/control-flow/control-flow.h"
 #include "scenes/mix/mix.h"
 #include "scenes/trig/trig.h"
+#include "scenes/scissor/scissor.h"
 
 int
 main(int argc, char **argv)
@@ -618,6 +619,8 @@ main(int argc, char **argv)
       return run_mix(width, height);
    if (getenv("T8132_GLES_TRIG"))
       return run_trig(width, height);
+   if (getenv("T8132_GLES_SCISSOR"))
+      return run_scissor(width, height);
 
 
 

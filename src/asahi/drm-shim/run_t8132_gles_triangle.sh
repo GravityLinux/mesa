@@ -40,7 +40,7 @@ if [ -n "${T8132_GLES_FRAGMENT_MATRIX_INTERLEAVED:-}" ]; then
     export G16G_MESA_FRAGMENT_MATRIX_INTERLEAVED=1
 fi
 
-uv run --python 3.14 --with-requirements "$m1n1_root/requirements.txt" sh -c '
+uv run --python 3.14 --with-requirements "$m1n1_root/requirements-agx.txt" sh -c '
     python_site=$(find "$VIRTUAL_ENV/lib" -maxdepth 2 -type d \
         -name site-packages -print -quit)
     export PYTHONPATH="$M1N1_SHIM_ROOT/proxyclient:$python_site"

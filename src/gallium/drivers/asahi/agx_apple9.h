@@ -67,13 +67,23 @@ struct agx_apple9_render_pipeline {
 
 };
 
-/* Bounded per-draw buffer/depth arena, independent of vertex/primitive count. */
-#define AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS 32
+/* Bounded per-draw shader, buffer and depth snapshots, independent of
+ * vertex/primitive count. Each snapshot retains its source package. */
+#define AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS 56
 struct agx_apple9_uniform_draw {
+   struct agx_apple9_render_package *package;
    uint64_t vertex[4];
    uint64_t fragment[4];
    uint32_t depth_control, depth_face;
+   float viewport_translate[3], viewport_scale[3];
+   uint32_t scissor_index;
+   uint16_t scissor_min[2], scissor_max[2];
+   bool reads_tile;
 };
+
+bool agx_apple9_render_cache_bind_draws(
+   struct agx_apple9_render_cache *cache,
+   const struct agx_apple9_uniform_draw *draws, unsigned count);
 
 bool agx_apple9_render_cache_upload_uniforms(
    struct agx_apple9_render_cache *cache,
@@ -412,6 +422,13 @@ agx_apple9_render_cache_get(struct agx_apple9_render_cache *cache,
                             const struct agx_apple9_render_pipeline *pipeline,
                             uint64_t color_target, unsigned width,
                             unsigned height);
+
+/* Read-only admission check using the same stage interning as submission.
+ * Caller holds the screen fixed-USC generation lock. */
+bool agx_apple9_render_cache_can_add_draw(
+   const struct agx_apple9_render_cache *cache,
+   const struct agx_apple9_uniform_draw *draws, unsigned count,
+   const struct agx_apple9_render_package *package);
 
 bool agx_apple9_render_cache_bind(struct agx_apple9_render_cache *cache,
                                   struct agx_apple9_render_package *package);

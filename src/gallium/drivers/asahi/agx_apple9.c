@@ -1403,6 +1403,7 @@ struct agx_apple9_render_cache {
     * not change the package archive, but it invalidates every fixed-USC view
     * published from the current render package. */
    bool fixed_usc_dirty;
+   bool installing_draws;
 };
 
 #define AGX_APPLE9_RENDER_CACHE_MAX_PACKAGES 16
@@ -2398,6 +2399,7 @@ agx_apple9_render_cache_bind(struct agx_apple9_render_cache *cache,
    uint8_t *fixed_usc = agx_bo_map(cache->dev->apple9_render_fixed_usc);
    const uint8_t *source = agx_bo_map(package->bo);
    const bool force_authored_generation =
+      !cache->installing_draws &&
       getenv("AGX_APPLE9_RENDER_FORCE_AUTHORED_GENERATION") != NULL;
 
    /*
@@ -2507,6 +2509,9 @@ agx_apple9_render_cache_bind(struct agx_apple9_render_cache *cache,
       }
 
       if (!appended) {
+         /* A batch must never evict programs named by its earlier draws. */
+         if (cache->installing_draws)
+            return false;
          /* Compact archive generation rollover.  The previous user has
           * already retired before cache_bind, so retain the physical BO while
           * rebuilding its contents around the selected pipeline. */
@@ -2758,6 +2763,161 @@ agx_apple9_render_cache_bind(struct agx_apple9_render_cache *cache,
    return true;
 }
 
+struct apple9_render_archive_plan {
+   bool append_fits;
+   bool fresh_fits;
+   uint64_t end;
+};
+
+static bool
+apple9_plan_render_archive(const struct agx_apple9_render_cache *cache,
+                          const struct agx_apple9_uniform_draw *draws,
+                          unsigned count,
+                          const struct agx_apple9_render_package *extra,
+                          struct apple9_render_archive_plan *plan)
+{
+   if (!cache || (count && !draws) ||
+       count + (extra != NULL) > AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS)
+      return false;
+
+   /* Plan the same stage interning performed by cache_bind. Count shared
+    * shaders once, including a program used by several linked pipelines. */
+   struct {
+      const uint8_t *data;
+      uint32_t size;
+      unsigned stage;
+      bool resident, in_first;
+   } programs[AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS * 3];
+   unsigned program_count = 0;
+   const struct agx_apple9_render_package *first = count ? draws[0].package : extra;
+   if (!first)
+      return false;
+   for (unsigned i = 0; i < count + (extra != NULL); ++i) {
+      const struct agx_apple9_render_package *p =
+         i < count ? draws[i].package : extra;
+      if (!p || !p->sealed || p->color_target != first->color_target ||
+          p->width != first->width || p->height != first->height)
+         return false;
+      const uint8_t *source = agx_bo_map(p->bo);
+      const uint32_t blocks[] = {
+         p->archive.fragment_block, p->archive.vertex_prolog_block,
+         p->archive.vertex_main_block};
+      const uint32_t sizes[] = {
+         p->archive.fragment_block_size, p->archive.vertex_prolog_block_size,
+         p->archive.vertex_main_block_size};
+      const uint32_t calls[] = {
+         p->fragment_call, p->vertex_prolog_call, p->vertex_call};
+      for (unsigned stage = 0; stage < 3; ++stage) {
+         unsigned j;
+         for (j = 0; j < program_count; ++j) {
+            if (programs[j].stage == stage && programs[j].size == sizes[stage] &&
+                !memcmp(programs[j].data, source + blocks[stage], sizes[stage]))
+               break;
+         }
+         if (j == program_count) {
+            programs[j].data = source + blocks[stage];
+            programs[j].size = sizes[stage];
+            programs[j].stage = stage;
+            programs[j].resident = false;
+            programs[j].in_first = i == 0;
+            program_count++;
+         }
+         programs[j].resident |= calls[stage] != 0;
+      }
+   }
+   uint64_t append_end = cache->resident_archive_next;
+   uint64_t end = first->archive.end;
+   bool append_fits = cache->current != NULL;
+   bool fresh_fits = end <= cache->resident_archive_limit;
+   const uint32_t prefix = AGX_APPLE9_RENDER_BLOCK_HEADER_SIZE +
+                           AGX_APPLE9_RENDER_CONSTANT_SIZE;
+   for (unsigned i = 0; i < program_count; ++i) {
+      uint32_t call;
+      if (!programs[i].resident) {
+         append_fits &= append_end + prefix <= UINT32_MAX &&
+                        apple9_archive_call(append_end + prefix, &call);
+         append_end += programs[i].size;
+      }
+      if (!programs[i].in_first) {
+         fresh_fits &= end + prefix <= UINT32_MAX &&
+                       apple9_archive_call(end + prefix, &call);
+         end += programs[i].size;
+      }
+   }
+   plan->append_fits = append_fits && append_end <= cache->resident_archive_limit;
+   plan->fresh_fits = fresh_fits && end <= cache->resident_archive_limit;
+   plan->end = end;
+   return true;
+}
+
+bool
+agx_apple9_render_cache_can_add_draw(
+   const struct agx_apple9_render_cache *cache,
+   const struct agx_apple9_uniform_draw *draws, unsigned count,
+   const struct agx_apple9_render_package *package)
+{
+   struct apple9_render_archive_plan plan;
+   return package && apple9_plan_render_archive(cache, draws, count, package,
+                                                &plan) && plan.fresh_fits;
+}
+
+/* Install the complete draw set before publishing any per-draw calls. The
+ * submission lock and previous-owner wait also protect archive rollover. */
+bool
+agx_apple9_render_cache_bind_draws(
+   struct agx_apple9_render_cache *cache,
+   const struct agx_apple9_uniform_draw *draws, unsigned count)
+{
+   if (!cache || !draws || !count || count > AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS)
+      return false;
+
+   bool single_package = true;
+   for (unsigned i = 1; i < count; ++i)
+      single_package &= draws[i].package == draws[0].package;
+   if (single_package)
+      return agx_apple9_render_cache_bind(cache, draws[0].package);
+
+   struct apple9_render_archive_plan plan;
+   if (!apple9_plan_render_archive(cache, draws, count, NULL, &plan))
+      return false;
+   uint64_t end = plan.end;
+
+   /* Check storage and entry encoding before installing any draw's programs. */
+   if (!plan.append_fits) {
+      if (!plan.fresh_fits) {
+         fprintf(stderr,
+                 "Apple9 batch shader archive exceeds storage or entry range: "
+                 "end=%#llx storage=%#x\n",
+                 (unsigned long long)end, cache->resident_archive_limit);
+         return false;
+      }
+      if (getenv("AGX_APPLE9_PACKAGE_TRACE"))
+         fprintf(stderr, "APPLE9_RENDER_BATCH_ROLLOVER end=%#llx limit=%#x\n",
+                 (unsigned long long)end, cache->resident_archive_limit);
+      list_for_each_entry(struct agx_apple9_render_package, p,
+                          &cache->packages, link) {
+         p->fragment_call = p->vertex_prolog_call = p->vertex_call = 0;
+      }
+      cache->current = NULL;
+   }
+
+   cache->installing_draws = true;
+   bool ok = true;
+   for (unsigned i = 0; ok && i < count; ++i) {
+      bool seen = false;
+      for (unsigned j = 0; j < i; ++j)
+         seen |= draws[j].package == draws[i].package;
+      if (!seen)
+         ok = agx_apple9_render_cache_bind(cache, draws[i].package);
+   }
+   /* Attachment helpers and viewport are shared; retain the first package
+    * as the batch's attachment owner. Shader-dependent PPP follows below. */
+   if (ok)
+      ok = agx_apple9_render_cache_bind(cache, draws[0].package);
+   cache->installing_draws = false;
+   return ok;
+}
+
 void
 agx_apple9_render_cache_invalidate_fixed_usc(
    struct agx_apple9_render_cache *cache)
@@ -2801,16 +2961,19 @@ agx_apple9_render_cache_upload_vertex_buffer(
    return true;
 }
 
-/* EXP-M4-57/58: per-draw 0xc0-byte launch records keep shared shader calls.
+/* EXP-M4-57/58: per-draw opaque launch records keep shared shader calls.
  * The four-buffer preload has its archive selector at +0x36 and needs no
  * separate constant-state reference. These externally captured preloads stay
  * opaque; only known table references and archive selectors are patched. */
 #define APPLE9_UNIFORM_VS_LAUNCH 0x220400u
 #define APPLE9_UNIFORM_FS_LAUNCH 0x230800u
 #define APPLE9_UNIFORM_RECORDS   0x200100u
-#define APPLE9_UNIFORM_PPP       0x58080u
-#define APPLE9_DRAW_DEPTH_PPP    0x59000u
-#define APPLE9_UNIFORM_STRIDE    0xc0u
+#define APPLE9_DRAW_PIPELINE_PPP 0x5a000u
+#define APPLE9_DRAW_PIPELINE_STRIDE 0x100u
+#define APPLE9_UNIFORM_STRIDE    0x100u
+static_assert(APPLE9_DRAW_PIPELINE_PPP + AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS *
+                 APPLE9_DRAW_PIPELINE_STRIDE <= 0x64000,
+              "draw state must end before the viewport page");
 static_assert(AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS * APPLE9_UNIFORM_STRIDE <=
                  0x3800,
               "uniform launches must fit in their reserved pages");
@@ -2848,7 +3011,11 @@ agx_apple9_render_cache_upload_uniforms(
                        agx_bo_map(cache->dev->apple9_render_fixed_usc)};
    uint8_t *context = agx_bo_map(cache->resident_state_bo);
    for (unsigned i = 0; i < count; ++i) {
+      const struct agx_apple9_render_package *package = draws[i].package;
+      if (!package || !package->fragment_call || !package->vertex_prolog_call)
+         return false;
       unsigned record = APPLE9_UNIFORM_RECORDS + i * 0x100;
+      unsigned cf_offset = 0x40;
       for (unsigned v = 0; v < ARRAY_SIZE(views); ++v) {
          uint8_t *view = views[v];
          memset(view + record, 0, 0x100);
@@ -2857,6 +3024,8 @@ agx_apple9_render_cache_upload_uniforms(
             apple9_put_u64(view + record + 0x20 + slot * 8,
                            draws[i].fragment[slot]);
          }
+         apple9_build_cf_bindings(view + record + cf_offset,
+                                  package->varying_components);
          for (unsigned stage = 0; stage < 2; ++stage) {
             unsigned location =
                (stage ? APPLE9_UNIFORM_FS_LAUNCH : APPLE9_UNIFORM_VS_LAUNCH) +
@@ -2868,20 +3037,43 @@ agx_apple9_render_cache_upload_uniforms(
                    cache->dev->shader_base + record + stage * 0x20))
                return false;
             apple9_put_u24(launch + 0x36,
-                           stage ? cache->current->fragment_call
-                                 : cache->current->vertex_prolog_call);
+                           stage ? package->fragment_call
+                                 : package->vertex_prolog_call);
          }
       }
-      uint8_t *ppp = context + APPLE9_UNIFORM_PPP + i * 0x20;
-      memcpy(ppp, context + 0x58000, 0x1c);
-      apple9_put_u32(
-         ppp + 0x14,
+      /* Retain the complete shader-dependent PPP records, including the
+       * UVS scalar count and coefficient count. Viewport state is also a
+       * per-draw snapshot: utility clears and API draws can use different
+       * transforms within the same submission. */
+      const uint8_t *state = agx_bo_map(package->state_bo);
+      uint8_t *ppp = context + APPLE9_DRAW_PIPELINE_PPP +
+                     i * APPLE9_DRAW_PIPELINE_STRIDE;
+      memcpy(ppp, state + 0x40, 0x40);
+      memcpy(ppp + 0x40, state + AGX_APPLE9_BIND_GROUP_OFFSET, 0x80);
+      uint8_t *group = ppp + 0x40;
+      apple9_put_u32(group + 8, record + cf_offset);
+      apple9_put_u32(group + 0x14,
          (APPLE9_UNIFORM_FS_LAUNCH + i * APPLE9_UNIFORM_STRIDE) / 0x40);
-      uint8_t *depth = context + APPLE9_DRAW_DEPTH_PPP + i * 0x20;
-      memcpy(depth, context + 0x58030, 0x1c);
-      apple9_put_u32(depth + 4, draws[i].depth_control);
-      apple9_put_u32(depth + 8, draws[i].depth_face);
-      apple9_put_u32(depth + 16, draws[i].depth_face);
+      apple9_put_u32(group + 0x34, draws[i].depth_control);
+      apple9_put_u32(group + 0x38, draws[i].depth_face);
+      apple9_put_u32(group + 0x40, draws[i].depth_face);
+      memcpy(ppp + 0xc0, state + AGX_APPLE9_VIEWPORT_OFFSET + 0x900, 0x30);
+      /* Region clip is tile-granular. The scissor array supplies exact pixel
+       * bounds, including empty rectangles and partial edge tiles. */
+      for (unsigned axis = 0; axis < 2; ++axis) {
+         uint32_t lo = draws[i].scissor_min[axis] / 32;
+         uint32_t hi = DIV_ROUND_UP(MAX2(draws[i].scissor_max[axis], 1), 32) - 1;
+         apple9_put_u32(ppp + 0xc4 + axis * 4,
+                        (axis ? 0 : 0x80000000u) | (lo << 16) | hi);
+      }
+      for (unsigned axis = 0; axis < 3; ++axis) {
+         apple9_put_f32(ppp + 0xd0 + axis * 8, draws[i].viewport_translate[axis]);
+         apple9_put_f32(ppp + 0xd4 + axis * 8, draws[i].viewport_scale[axis]);
+      }
+      /* PPP depth-bias/scissor record: header followed by two 16-bit indices.
+       * Depth bias remains disabled; its index is zero. */
+      apple9_put_u32(ppp + 0xf0, 0x100);
+      apple9_put_u32(ppp + 0xf4, draws[i].scissor_index);
    }
    return true;
 }
@@ -3069,6 +3261,7 @@ agx_apple9_emit_direct_draw(uint8_t *out,
 {
    assert(pipeline && pipeline->vertex.binary && pipeline->fragment.binary);
    assert(vertex_count > 0 && instance_count > 0);
+   assert(pipeline->uniform_draw <= AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS);
    assert(!pipeline->package ||
           agx_apple9_render_package_matches(pipeline->package, pipeline));
 
@@ -3082,8 +3275,7 @@ agx_apple9_emit_direct_draw(uint8_t *out,
       0x00000000,
       0x00000500,
    };
-   if (pipeline->uniform_draw && (pipeline->vertex.resource_count ||
-                                  pipeline->vertex.varying_components > 4))
+   if (pipeline->uniform_draw)
       header[3] = (APPLE9_UNIFORM_VS_LAUNCH +
                    (pipeline->uniform_draw - 1) * APPLE9_UNIFORM_STRIDE) / 0x40;
    memcpy(out, header, sizeof(header));
@@ -3102,18 +3294,25 @@ agx_apple9_emit_direct_draw(uint8_t *out,
    if (pipeline->vertex_prolog.binary)
       ppp[0].relative = 0x0040;
 
-   if (pipeline->uniform_draw && pipeline->fragment.resource_count) {
-      ppp[1].relative = APPLE9_UNIFORM_PPP + (pipeline->uniform_draw - 1) * 0x20;
-      /* This encoder republishes complete state using its 0x500 packet;
-       * native's incremental second-draw record uses a different 0x700 form. */
-      ppp[1].control = 0x500;
+   if (pipeline->uniform_draw) {
+      uint32_t state = APPLE9_DRAW_PIPELINE_PPP +
+                       (pipeline->uniform_draw - 1) * APPLE9_DRAW_PIPELINE_STRIDE;
+      ppp[0].relative = state;
+      ppp[1].relative = state + 0x40;
+      ppp[2].relative = state + 0x5c;
+      ppp[3].relative = state + 0x70;
+      ppp[4].relative = state + 0x8c;
+      ppp[5].relative = state + 0xc0;
+      ppp[6].relative = state + 0xa0;
+      ppp[7].relative = state + 0xac;
    }
-   if (pipeline->uniform_draw)
-      ppp[3].relative = APPLE9_DRAW_DEPTH_PPP + (pipeline->uniform_draw - 1) * 0x20;
    memcpy(out, ppp, sizeof(ppp));
    out += sizeof(ppp);
 
-   apple9_put_u32(out, AGX_APPLE9_DRAW_STATE - AGX_APPLE9_RENDER_CONTEXT_BASE);
+   apple9_put_u32(out, pipeline->uniform_draw
+      ? APPLE9_DRAW_PIPELINE_PPP +
+           (pipeline->uniform_draw - 1) * APPLE9_DRAW_PIPELINE_STRIDE + 0xf0
+      : AGX_APPLE9_DRAW_STATE - AGX_APPLE9_RENDER_CONTEXT_BASE);
    out += 4;
    if (pipeline->index_size) {
       assert(pipeline->index_size == 2 || pipeline->index_size == 4);

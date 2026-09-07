@@ -470,7 +470,7 @@ struct agx_batch {
    struct agx_encoder vdm;
    struct agx_encoder cdm;
 
-   /* Immutable source package selected into the resident archive on submit. */
+   /* First draw owns attachment state; each draw retains its shader package. */
    struct agx_apple9_render_package *apple9_render_package;
    unsigned apple9_uniform_draw_count;
    struct agx_apple9_uniform_draw
@@ -1140,8 +1140,6 @@ void agx_flush_batch(struct agx_context *ctx, struct agx_batch *batch);
 void agx_flush_batch_for_reason(struct agx_context *ctx,
                                 struct agx_batch *batch, const char *reason);
 void agx_flush_all(struct agx_context *ctx, const char *reason);
-void agx_flush_apple9_render_batches(struct agx_context *ctx,
-                                     const char *reason);
 void agx_flush_readers(struct agx_context *ctx, struct agx_resource *rsrc,
                        const char *reason);
 void agx_flush_writer(struct agx_context *ctx, struct agx_resource *rsrc,

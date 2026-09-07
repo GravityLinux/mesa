@@ -2648,17 +2648,6 @@ agx_bind_shader_state(struct pipe_context *pctx, void *cso,
 {
    struct agx_context *ctx = agx_context(pctx);
 
-   /*
-    * The bounded Apple9 VDM stream has one fixed logical launch slot per
-    * render batch.  Submit an existing batch before changing either linked
-    * stage.  Its immutable package generation is rebound just before submit,
-    * while the next batch may select another generation at the same slot.
-    */
-   if ((stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_FRAGMENT) &&
-       agx_apple9_direct_render_enabled(agx_device(pctx->screen)) &&
-       ctx->stage[stage].shader != cso)
-      agx_flush_apple9_render_batches(ctx, "Apple9 render pipeline change");
-
    if (stage == MESA_SHADER_VERTEX)
       ctx->dirty |= AGX_DIRTY_VS_PROG;
    else if (stage == MESA_SHADER_FRAGMENT)
@@ -5224,6 +5213,13 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
    agx_legalize_xfb(ctx);
 
    struct agx_batch *batch = agx_get_batch(ctx);
+   if (agx_apple9_direct_render_enabled(dev) &&
+       batch->apple9_uniform_draw_count == AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS) {
+      /* Split before allocating any draw-local state. The new batch reloads
+       * valid attachments; clear state belongs only to the completed batch. */
+      agx_flush_batch(ctx, batch);
+      batch = agx_get_batch(ctx);
+   }
    uint64_t ib = 0;
    size_t ib_extent = 0;
 
@@ -5546,69 +5542,95 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       if (!render_package) {
          fprintf(stderr, "failed to install Apple9 render generation\n");
          simple_mtx_unlock(&screen->apple9_render_package_lock);
-         return;
+         /* A missing package cannot produce a valid command buffer. */
+         abort();
       }
-      if (batch->apple9_render_package &&
-          batch->apple9_render_package != render_package) {
-         fprintf(stderr, "Apple9 render pipeline changed inside one batch\n");
-         simple_mtx_unlock(&screen->apple9_render_package_lock);
-         return;
-      }
-
-      if (!batch->apple9_render_package) {
-         agx_apple9_render_package_acquire(render_package);
+      if (!batch->apple9_render_package)
          batch->apple9_render_package = render_package;
-      }
       bool depth_enabled = ctx->zs->base.depth_enabled && batch->key.zsbuf.texture;
-      if (pipeline.vertex.resource_count || pipeline.fragment.resource_count ||
-          pipeline.vertex.varying_components > 4 || depth_enabled) {
-         unsigned index = batch->apple9_uniform_draw_count;
-         if (index >= AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS) {
-            fprintf(stderr, "Apple9 buffer/depth draw arena exhausted\n");
-            abort();
-         }
-         struct agx_apple9_uniform_draw *record =
-            &batch->apple9_uniform_draws[index];
-         memset(record, 0, sizeof(*record));
-         record->depth_control = depth_enabled ? 0x200 : 0x40200;
-         record->depth_face = 0xf00 |
-            ((depth_enabled ? ctx->zs->base.depth_func : PIPE_FUNC_ALWAYS) << 24) |
-            ((depth_enabled && ctx->zs->base.depth_writemask) ? 0 : (1 << 21));
-         for (unsigned stage = 0; stage < 2; ++stage) {
-            const struct agx_apple9_render_stage *rs =
-               stage ? &pipeline.fragment : &pipeline.vertex;
-            mesa_shader_stage shader =
-               stage ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX;
-            for (unsigned slot = 0; slot < rs->resource_count; ++slot) {
-               unsigned binding = rs->resource_binding[slot];
-               uint64_t address;
-               if (binding >= 32) {
-                  unsigned attribute = binding - 32;
-                  const struct agx_vertex_elements *a = ctx->attributes;
-                  const struct pipe_vertex_buffer *vb =
-                     &ctx->vertex_buffers[a->buffers[attribute]];
-                  struct agx_resource *vbo = agx_resource(vb->buffer.resource);
-                  agx_batch_reads(batch, vbo);
-                  address = agx_map_gpu(vbo) + vb->buffer_offset +
-                            a->src_offsets[attribute];
-               } else {
-                  struct pipe_constant_buffer *cb = &ctx->stage[shader].cb[binding];
-                  if (!cb->buffer || !cb->buffer_size) {
-                     fprintf(stderr, "Apple9 graphics UBO is unbound\n");
-                     abort();
-                  }
-                  struct agx_resource *ubo = agx_resource(cb->buffer);
-                  agx_batch_reads(batch, ubo);
-                  address = agx_map_gpu(ubo) + cb->buffer_offset;
-               }
-               if (stage)
-                  record->fragment[slot] = address;
-               else
-                  record->vertex[slot] = address;
-            }
-         }
-         pipeline.uniform_draw = ++batch->apple9_uniform_draw_count;
+      unsigned index = batch->apple9_uniform_draw_count;
+      if (index >= AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS) {
+         fprintf(stderr, "Apple9 graphics draw arena exhausted\n");
+         abort();
       }
+      struct agx_apple9_uniform_draw *record =
+         &batch->apple9_uniform_draws[index];
+      memset(record, 0, sizeof(*record));
+      agx_apple9_render_package_acquire(render_package);
+      record->package = render_package;
+      memcpy(record->viewport_translate, ctx->viewport[0].translate,
+             sizeof(record->viewport_translate));
+      memcpy(record->viewport_scale, ctx->viewport[0].scale,
+             sizeof(record->viewport_scale));
+      /* The Apple9 vertex path already lowers clip Z to [0, W]. */
+      if (!ctx->rast->base.clip_halfz) {
+         record->viewport_translate[2] -= record->viewport_scale[2];
+         record->viewport_scale[2] *= 2.0f;
+      }
+      unsigned minx, miny, maxx, maxy;
+      agx_get_scissor_extents(&ctx->viewport[0],
+                              ctx->rast->base.scissor ? &ctx->scissor[0] : NULL,
+                              &batch->key, &minx, &miny, &maxx, &maxy);
+      /* Canonicalize empty intersections before unsigned region packing. */
+      if (minx >= maxx || miny >= maxy)
+         minx = miny = maxx = maxy = 0;
+      record->scissor_min[0] = minx;
+      record->scissor_min[1] = miny;
+      record->scissor_max[0] = maxx;
+      record->scissor_max[1] = maxy;
+      record->scissor_index = batch->scissor.size / AGX_SCISSOR_LENGTH;
+      struct agx_scissor_packed *scissor =
+         util_dynarray_grow_bytes(&batch->scissor, 1, AGX_SCISSOR_LENGTH);
+      float minz, maxz;
+      util_viewport_zmin_zmax(&ctx->viewport[0], ctx->rast->base.clip_halfz,
+                             &minz, &maxz);
+      agx_pack(scissor, SCISSOR, cfg) {
+         cfg.min_x = minx;
+         cfg.min_y = miny;
+         cfg.max_x = maxx;
+         cfg.max_y = maxy;
+         cfg.min_z = minz;
+         cfg.max_z = maxz;
+      }
+      /* Scissor enable is independent of depth testing. */
+      record->depth_control = (depth_enabled ? 0x200 : 0x40200) | (1u << 16);
+      record->depth_face = 0xf00 |
+         ((depth_enabled ? ctx->zs->base.depth_func : PIPE_FUNC_ALWAYS) << 24) |
+         ((depth_enabled && ctx->zs->base.depth_writemask) ? 0 : (1 << 21));
+      for (unsigned stage = 0; stage < 2; ++stage) {
+         const struct agx_apple9_render_stage *rs =
+            stage ? &pipeline.fragment : &pipeline.vertex;
+         mesa_shader_stage shader =
+            stage ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX;
+         for (unsigned slot = 0; slot < rs->resource_count; ++slot) {
+            unsigned binding = rs->resource_binding[slot];
+            uint64_t address;
+            if (binding >= 32) {
+               unsigned attribute = binding - 32;
+               const struct agx_vertex_elements *a = ctx->attributes;
+               const struct pipe_vertex_buffer *vb =
+                  &ctx->vertex_buffers[a->buffers[attribute]];
+               struct agx_resource *vbo = agx_resource(vb->buffer.resource);
+               agx_batch_reads(batch, vbo);
+               address = agx_map_gpu(vbo) + vb->buffer_offset +
+                         a->src_offsets[attribute];
+            } else {
+               struct pipe_constant_buffer *cb = &ctx->stage[shader].cb[binding];
+               if (!cb->buffer || !cb->buffer_size) {
+                  fprintf(stderr, "Apple9 graphics UBO is unbound\n");
+                  abort();
+               }
+               struct agx_resource *ubo = agx_resource(cb->buffer);
+               agx_batch_reads(batch, ubo);
+               address = agx_map_gpu(ubo) + cb->buffer_offset;
+            }
+            if (stage)
+               record->fragment[slot] = address;
+            else
+               record->vertex[slot] = address;
+         }
+      }
+      pipeline.uniform_draw = ++batch->apple9_uniform_draw_count;
       pipeline.index_size = info->index_size;
       pipeline.index_buffer = ib;
       pipeline.index_extent = MIN2(ib_extent, (uint64_t)draws->count * info->index_size);

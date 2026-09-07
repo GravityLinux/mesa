@@ -7,7 +7,7 @@ p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('attachment',type=Path);p.add_argument('--mode',choices=['quad','depth','cube'],required=True)
 p.add_argument('--depth-states',action='store_true');p.add_argument('--depth-attachment',type=Path);p.add_argument('--four-buffers',action='store_true');p.add_argument('--frame',type=int,default=0);p.add_argument('--output',type=Path,required=True)
 p.add_argument('--varyings',type=int,choices=[0,7,8,9,12]);p.add_argument('--perspective-varyings',action='store_true');p.add_argument('--clipped-varyings',action='store_true');p.add_argument('--depth-clipped-varyings',action='store_true')
-a=p.parse_args();size=512;clear=(4,5,15,255)
+a=p.parse_args();size=512;clear=(0,0,0,0)
 if a.mode=='quad':
  vertices=[(-.75,-.5,0),(.75,-.5,0),(.75,.5,0),(-.75,.5,0)]
  indices=[2,0,1,0,2,3]
@@ -60,7 +60,9 @@ if a.frame%2:
 greater=a.depth_states and a.frame//2==1
 write_depth=not a.depth_states or a.frame//2<2
 test_depth=a.mode!='quad' and (not a.depth_states or a.frame//2!=3)
-points=[(f32(f32(x+1)*256),f32(f32(1-y)*256),f32(f32(z+1)*.5)) for x,y,z in vertices]
+# Raw attachment rows follow the GL viewport's positive Y scale. The mesh
+# fixture uses glClear without glClearColor, hence default transparent black.
+points=[(f32(f32(x+1)*256),f32(f32(y+1)*256),f32(f32(z+1)*.5)) for x,y,z in vertices]
 # Rasterization snaps projected XY to 1/256 pixel before forming planes.
 # Keep Z unquantized; snapping Z would hide depth interpolation errors.
 # Positive halfway screen coordinates round upward, not ties-to-even.

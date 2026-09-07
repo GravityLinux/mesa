@@ -1717,8 +1717,9 @@ agx_flush_batch(struct agx_context *ctx, struct agx_batch *batch)
 
    if (apple9_render) {
       bool bound = screen->apple9_render_cache &&
-         agx_apple9_render_cache_bind(
-            screen->apple9_render_cache, batch->apple9_render_package);
+         agx_apple9_render_cache_bind_draws(
+            screen->apple9_render_cache, batch->apple9_uniform_draws,
+            batch->apple9_uniform_draw_count);
       if (!bound) {
          fprintf(stderr, "failed to bind Apple9 render generation\n");
          agx_apple9_render_cache_invalidate_fixed_usc(

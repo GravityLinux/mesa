@@ -320,8 +320,8 @@ agx_batch_cleanup(struct agx_context *ctx, struct agx_batch *batch, bool reset)
    agx_bo_unreference(dev, batch->cdm.bo);
    agx_bo_unreference(dev, batch->apple9_package);
    batch->apple9_package = NULL;
-   if (batch->apple9_render_package)
-      agx_apple9_render_package_release(batch->apple9_render_package);
+   for (unsigned i = 0; i < batch->apple9_uniform_draw_count; ++i)
+      agx_apple9_render_package_release(batch->apple9_uniform_draws[i].package);
    batch->apple9_render_package = NULL;
    batch->apple9_uniform_draw_count = 0;
    agx_pool_cleanup(&batch->pool);
@@ -461,19 +461,6 @@ agx_flush_all(struct agx_context *ctx, const char *reason)
          perf_debug_ctx(ctx, "Flushing due to: %s\n", reason);
 
       agx_flush_batch(ctx, &ctx->batches.slots[idx]);
-   }
-}
-
-void
-agx_flush_apple9_render_batches(struct agx_context *ctx, const char *reason)
-{
-   unsigned idx;
-   foreach_active(ctx, idx) {
-      struct agx_batch *batch = &ctx->batches.slots[idx];
-
-      /* Clear-only batches have no selected fixed-slot generation yet. */
-      if (batch->apple9_render_package)
-         agx_flush_batch_for_reason(ctx, batch, reason);
    }
 }
 
