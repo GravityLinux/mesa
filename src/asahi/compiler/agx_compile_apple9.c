@@ -4247,8 +4247,33 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
    memset(out, 0, sizeof(*out));
    if (reason)
       *reason = NULL;
+   /* ESSL 1.00 and Gallium utility shaders may use gl_FragColor. This
+    * single-render-target path maps that broadcast output to RT0. */
+   if (nir->info.stage == MESA_SHADER_FRAGMENT)
+      nir_lower_fragcolor(nir, 1);
    nir_lower_io(nir, nir_var_shader_in | nir_var_shader_out, apple9_io_size,
                 nir_lower_io_use_interpolated_input_intrinsics);
+   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+      nir_foreach_block(block, nir_shader_get_entrypoint(nir)) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_store_output)
+               continue;
+            nir_io_semantics semantics = nir_intrinsic_io_semantics(intr);
+            if (semantics.location == FRAG_RESULT_COLOR) {
+               semantics.location = FRAG_RESULT_DATA0;
+               nir_intrinsic_set_io_semantics(intr, semantics);
+            }
+         }
+      }
+      if (nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_COLOR)) {
+         nir->info.outputs_written &= ~BITFIELD64_BIT(FRAG_RESULT_COLOR);
+         nir->info.outputs_written |= BITFIELD64_BIT(FRAG_RESULT_DATA0);
+      }
+   }
+
    if (nir->info.stage == MESA_SHADER_VERTEX) {
       if (layout && layout->ignore_point_size)
          nir_remove_outputs(nir, MESA_SHADER_FRAGMENT, 0,

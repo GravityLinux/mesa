@@ -3352,3 +3352,22 @@ agx_apple9_emit_direct_draw(uint8_t *out,
    }
    return out;
 }
+
+/* The authored EXP-M4-09 MRT captures identify float4 clear colors in the
+ * attachment state graph. The compatibility image retains the same data
+ * records at +0x170 and +0x470. Update both published views per submission;
+ * neither program code nor the immutable source package is modified. */
+void
+agx_apple9_render_cache_set_clear_color(struct agx_apple9_render_cache *cache,
+                                       const float color[4])
+{
+   uint8_t *resident = agx_bo_map(cache->resident_bo);
+   uint8_t *fixed = agx_bo_map(cache->dev->apple9_render_fixed_usc);
+   for (unsigned i = 0; i < 2; ++i) {
+      unsigned offset = 0x170 + i * 0x300;
+      memcpy(resident + AGX_APPLE9_RENDER_TARGET_GRAPH_SOURCE_OFFSET + offset,
+             color, 16);
+      memcpy(fixed + AGX_APPLE9_RENDER_FIXED_TARGET_GRAPH_OFFSET + offset,
+             color, 16);
+   }
+}

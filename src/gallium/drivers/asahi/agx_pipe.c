@@ -45,6 +45,7 @@
 #include "util/xmlconfig.h"
 #include "agx_bg_eot.h"
 #include "agx_apple9.h"
+#include "indices/u_primconvert.h"
 #include "agx_bo.h"
 #include "agx_device.h"
 #include "agx_disk_cache.h"
@@ -1090,6 +1091,13 @@ agx_clear(struct pipe_context *pctx, unsigned buffers,
 
    unsigned fastclear = buffers & ~(batch->draw | batch->load);
    unsigned slowclear = buffers & ~fastclear;
+   /* A clear submitted without an API draw needs a complete graphics package.
+    * Mesa's ordinary clear rectangle handles this without depending on the
+    * native compiler's independent zero-draw helper setup. */
+   if (agx_apple9_direct_render_enabled(agx_device(pctx->screen)) &&
+       !batch->apple9_render_package) {
+      slowclear |= fastclear;
+   }
 
    assert(scissor_state == NULL &&
           "we don't support pipe_caps.clear_scissored");
@@ -1104,6 +1112,9 @@ agx_clear(struct pipe_context *pctx, unsigned buffers,
       /* Clear colour must be clamped to properly handle signed ints. */
       union pipe_color_union clamped =
          util_clamp_color(batch->key.cbufs[rt].format, color);
+
+      if (rt == 0)
+         memcpy(batch->apple9_clear_color, clamped.f, sizeof(clamped.f));
 
       batch->uploaded_clear_color[rt] = agx_pool_upload_aligned(
          &batch->pool, clamped.f, sizeof(clamped.f), 16);
@@ -1638,7 +1649,9 @@ agx_flush_render(struct agx_context *ctx, struct agx_batch *batch,
          batch->apple9_render_package;
       bool package_ready = render_package != NULL;
       uint32_t load_usc = agx_apple9_render_package_program_word(
-         dev, render_package, AGX_APPLE9_RENDER_LOAD_OFFSET);
+         dev, render_package, (batch->clear & PIPE_CLEAR_COLOR0)
+                                 ? AGX_APPLE9_RENDER_LOAD_OFFSET
+                                 : AGX_APPLE9_RENDER_RELOAD_OFFSET);
       uint32_t store_usc = agx_apple9_render_package_program_word(
          dev, render_package, AGX_APPLE9_RENDER_STORE_OFFSET);
       if (!package_ready || !load_usc || !store_usc) {
@@ -1653,7 +1666,8 @@ agx_flush_render(struct agx_context *ctx, struct agx_batch *batch,
       cmdbuf->bg.rsrc_spec = AGX_APPLE9_RENDER_LOAD_RSRC;
       cmdbuf->eot.usc = store_usc;
       cmdbuf->eot.rsrc_spec = 0;
-      cmdbuf->partial_bg.usc = load_usc;
+      cmdbuf->partial_bg.usc = agx_apple9_render_package_program_word(
+         dev, render_package, AGX_APPLE9_RENDER_RELOAD_OFFSET);
       cmdbuf->partial_bg.rsrc_spec = AGX_APPLE9_RENDER_LOAD_RSRC;
       cmdbuf->partial_eot.usc = store_usc;
       cmdbuf->partial_eot.rsrc_spec = 0;
@@ -1727,6 +1741,10 @@ agx_flush_batch(struct agx_context *ctx, struct agx_batch *batch)
          simple_mtx_unlock(&screen->apple9_render_package_lock);
          abort();
       }
+      if (batch->clear & PIPE_CLEAR_COLOR0)
+         agx_apple9_render_cache_set_clear_color(screen->apple9_render_cache,
+                                                batch->apple9_clear_color);
+
       if (batch->apple9_uniform_draw_count &&
           !agx_apple9_render_cache_upload_uniforms(
              screen->apple9_render_cache, batch->apple9_uniform_draws,
@@ -1817,6 +1835,8 @@ agx_destroy_context(struct pipe_context *pctx)
 
    if (ctx->blitter)
       util_blitter_destroy(ctx->blitter);
+   if (ctx->apple9_primconvert)
+      util_primconvert_destroy(ctx->apple9_primconvert);
 
    util_unreference_framebuffer_state(&ctx->framebuffer);
 

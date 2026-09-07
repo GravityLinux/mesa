@@ -6157,6 +6157,31 @@ TEST(Apple9Compiler, GraphicsLoopResultsReachMergedOutputs)
    }
 }
 
+TEST(Apple9Compiler, LegacyFragColorUsesTheSingleRenderTarget)
+{
+   nir_shader *direct = apple9_render_test_shader(true);
+   nir_shader *legacy = nir_shader_clone(NULL, direct);
+   nir_foreach_block(block, nir_shader_get_entrypoint(legacy)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic) continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic != nir_intrinsic_store_output) continue;
+         nir_io_semantics semantics = nir_intrinsic_io_semantics(intr);
+         semantics.location = FRAG_RESULT_COLOR;
+         nir_intrinsic_set_io_semantics(intr, semantics);
+      }
+   }
+   legacy->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_COLOR);
+   agx_shader_part a = {}, b = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_fragment(direct, &a, &reason)) << reason;
+   ASSERT_TRUE(agx_compile_apple9_fragment(legacy, &b, &reason)) << reason;
+   ASSERT_EQ(a.info.binary_size, b.info.binary_size);
+   EXPECT_EQ(memcmp(a.binary, b.binary, a.info.binary_size), 0);
+   free(a.binary); free(b.binary);
+   ralloc_free(direct); ralloc_free(legacy);
+}
+
 TEST(Apple9Compiler, FragmentPositionFormsAndUnsupportedDepth)
 {
    /* Exercise live component tracking: a vec4 load with only XY live is legal,

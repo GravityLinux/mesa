@@ -545,6 +545,7 @@ write_ppm(const char *path, const uint8_t *rgba,
 #include "scenes/trig/trig.h"
 #include "scenes/scissor/scissor.h"
 #include "scenes/vertex-inputs/vertex-inputs.h"
+#include "scenes/canvases/canvases.h"
 
 int
 main(int argc, char **argv)
@@ -615,6 +616,8 @@ main(int argc, char **argv)
    if (!renderer || !strstr(renderer, expected))
       fail("unexpected GL renderer");
 
+   if (getenv("T8132_GLES_CANVASES"))
+      return run_canvases(width, height);
 
    if (getenv("T8132_GLES_CONTROL_FLOW"))
       return run_control_flow(width, height);

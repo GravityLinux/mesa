@@ -54,6 +54,7 @@
 #include "util/u_transfer.h"
 #include "util/u_upload_mgr.h"
 #include "agx_apple9.h"
+#include "indices/u_primconvert.h"
 #include "agx_bg_eot.h"
 #include "agx_bo.h"
 #include "agx_device.h"
@@ -1509,7 +1510,10 @@ agx_apple9_bounded_render_signature(const nir_shader *nir)
    uint64_t user = BITFIELD64_MASK(32) << VARYING_SLOT_VAR0;
    if (nir->info.stage == MESA_SHADER_VERTEX) {
       uint64_t position = BITFIELD64_BIT(VARYING_SLOT_POS);
-      uint64_t supported_inputs = BITFIELD64_MASK(16) << VERT_ATTRIB_GENERIC0;
+      /* mesa/st clear rectangles can use the legacy position semantic;
+       * vertex fetch still uses the ordinary compacted element index. */
+      uint64_t supported_inputs = (BITFIELD64_MASK(16) << VERT_ATTRIB_GENERIC0) |
+                                  BITFIELD64_BIT(VERT_ATTRIB_POS);
       return !(nir->info.inputs_read & ~supported_inputs) &&
              (nir->info.outputs_written & position) &&
              !(nir->info.outputs_written &
@@ -1517,7 +1521,8 @@ agx_apple9_bounded_render_signature(const nir_shader *nir)
    }
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       return !(nir->info.inputs_read & ~(user | BITFIELD64_BIT(VARYING_SLOT_POS))) &&
-             nir->info.outputs_written == BITFIELD64_BIT(FRAG_RESULT_DATA0) &&
+             (nir->info.outputs_written == BITFIELD64_BIT(FRAG_RESULT_DATA0) ||
+              nir->info.outputs_written == BITFIELD64_BIT(FRAG_RESULT_COLOR)) &&
              !nir->info.fs.uses_discard;
    }
 
@@ -5213,6 +5218,21 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
              const struct pipe_draw_start_count_bias *draws, unsigned num_draws)
 {
    struct agx_context *ctx = agx_context(pctx);
+   if (agx_apple9_direct_render_enabled(agx_device(pctx->screen)) &&
+       (info->mode == MESA_PRIM_TRIANGLE_FAN ||
+        info->mode == MESA_PRIM_TRIANGLE_STRIP)) {
+      if (!ctx->apple9_primconvert)
+         ctx->apple9_primconvert =
+            util_primconvert_create(pctx, BITFIELD_BIT(MESA_PRIM_TRIANGLES));
+      if (!ctx->apple9_primconvert)
+         abort();
+      util_primconvert_save_flatshade_first(
+         ctx->apple9_primconvert, ctx->rast->base.flatshade_first);
+      util_primconvert_draw_vbo(ctx->apple9_primconvert, info, drawid_offset,
+                                indirect, draws, num_draws);
+      return;
+   }
+
    struct agx_device *dev = agx_device(pctx->screen);
    struct agx_screen *screen = agx_screen(pctx->screen);
 

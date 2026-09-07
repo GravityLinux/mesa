@@ -420,6 +420,7 @@ struct agx_batch {
    bool initialized;
 
    uint64_t uploaded_clear_color[PIPE_MAX_COLOR_BUFS];
+   float apple9_clear_color[4];
    double clear_depth;
    unsigned clear_stencil;
 
@@ -720,6 +721,7 @@ struct agx_context {
    bool in_tess;
 
    struct blitter_context *blitter;
+   struct primconvert_context *apple9_primconvert;
    struct asahi_blitter compute_blitter;
 
    /* Map of GEM handle to (batch index + 1) that (conservatively) writes that

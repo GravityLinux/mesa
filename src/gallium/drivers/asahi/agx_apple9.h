@@ -154,6 +154,7 @@ bool agx_apple9_render_cache_upload_uniforms(
 #define AGX_APPLE9_RENDER_ENCODER_BASE              UINT64_C(0x1003000000)
 #define AGX_APPLE9_RENDER_ENCODER_STRIDE            0x00100000u
 #define AGX_APPLE9_RENDER_ENCODER_SLOTS             128u
+#define AGX_APPLE9_RENDER_RELOAD_OFFSET             0x00230000u
 #define AGX_APPLE9_RENDER_LOAD_OFFSET               0x00230240u
 #define AGX_APPLE9_RENDER_STORE_OFFSET              0x00230480u
 #define AGX_APPLE9_RENDER_LOAD_RSRC                 0x00000040u
@@ -503,6 +504,9 @@ agx_apple9_direct_draw_size(const struct agx_apple9_render_pipeline *pipeline);
 uint8_t *agx_apple9_emit_direct_draw(
    uint8_t *out, const struct agx_apple9_render_pipeline *pipeline,
    unsigned vertex_count, unsigned instance_count, unsigned vertex_start);
+
+void agx_apple9_render_cache_set_clear_color(struct agx_apple9_render_cache *cache,
+                                             const float color[4]);
 
 #ifdef __cplusplus
 }
