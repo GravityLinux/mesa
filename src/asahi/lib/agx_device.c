@@ -507,7 +507,9 @@ agx_bo_import(struct agx_device *dev, int fd)
       /* If this bo came back to us via import, it had better
        * been marked shared to begin with.
        */
-      assert(bo->flags & AGX_BO_SHAREABLE);
+      if (bo->shim_cpu_epoch)
+      *bo->shim_cpu_epoch = 0;
+   assert(bo->flags & AGX_BO_SHAREABLE);
       assert(bo->flags & AGX_BO_SHARED);
       assert(bo->prime_fd != -1);
    }

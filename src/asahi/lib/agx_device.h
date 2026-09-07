@@ -276,9 +276,14 @@ agx_rw_addr_to_ro(struct agx_device *dev, uint64_t addr)
    return addr + dev->sparse_ro_offset;
 }
 
+void agx_bo_note_cpu_write(struct agx_bo *bo, uint64_t offset, uint64_t size);
+
 static inline void *
 agx_bo_map_placed(struct agx_bo *bo, void *fixed_addr)
 {
+   /* An ordinary map can escape and be written after any submission. */
+   if (bo->shim_cpu_epoch)
+      *bo->shim_cpu_epoch = 0;
    if (!bo->_map)
       bo->dev->ops.bo_mmap(bo->dev, bo, fixed_addr);
 

@@ -2581,6 +2581,8 @@ agx_apple9_render_cache_bind(struct agx_apple9_render_cache *cache,
             resident + AGX_APPLE9_RENDER_ARCHIVE_SIZE,
             source + AGX_APPLE9_RENDER_ARCHIVE_SIZE,
             AGX_APPLE9_RENDER_PACKAGE_SIZE - AGX_APPLE9_RENDER_ARCHIVE_SIZE);
+         agx_bo_note_cpu_write(cache->resident_bo, AGX_APPLE9_RENDER_ARCHIVE_SIZE,
+            AGX_APPLE9_RENDER_PACKAGE_SIZE - AGX_APPLE9_RENDER_ARCHIVE_SIZE);
          apple9_put_u24(resident + AGX_APPLE9_RENDER_FRAGMENT_CALL_OFFSET,
                         package->fragment_call);
          apple9_put_u24(resident + package->vertex_prolog_call_offset,
@@ -2598,6 +2600,9 @@ agx_apple9_render_cache_bind(struct agx_apple9_render_cache *cache,
    memcpy(resident_state +
              (AGX_APPLE9_RENDER_STATE_ADDRESS - AGX_APPLE9_RENDER_CONTEXT_BASE),
           package_state, AGX_APPLE9_RENDER_STATE_SIZE);
+   agx_bo_note_cpu_write(cache->resident_state_bo,
+      AGX_APPLE9_RENDER_STATE_ADDRESS - AGX_APPLE9_RENDER_CONTEXT_BASE,
+      AGX_APPLE9_RENDER_STATE_SIZE);
    if (package->vertex_buffer_size) {
       /* VBO VDM selects +0x0040 instead of the inline path's +0x4040.
        * Publish the first-page bind record at the context base, clear its
@@ -2630,6 +2635,8 @@ agx_apple9_render_cache_bind(struct agx_apple9_render_cache *cache,
    assert(cache->dev->apple9_render_fixed_usc->size ==
           AGX_APPLE9_RENDER_PACKAGE_SIZE);
    memcpy(fixed_usc, resident, AGX_APPLE9_RENDER_PACKAGE_SIZE);
+   agx_bo_note_cpu_write(cache->dev->apple9_render_fixed_usc, 0,
+                         AGX_APPLE9_RENDER_PACKAGE_SIZE);
 
    /* The queue USC base is fixed. Install the selected compiler resource
     * graph into the base archive rather than changing usc_exec_base or

@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include <errno.h>
+#include <dlfcn.h>
 #include <stdio.h>
 #include <xf86drm.h>
 #include "asahi/compiler/agx_compile.h"
@@ -135,7 +136,7 @@ agx_resource_debug(struct agx_resource *res, const char *msg)
 }
 
 static void
-agx_resource_setup(struct agx_device *dev, struct agx_resource *nresource)
+agx_resource_setup(struct agx_resource *nresource)
 {
    struct pipe_resource *templ = &nresource->base;
 
@@ -209,7 +210,7 @@ agx_resource_from_handle(struct pipe_screen *pscreen,
       return NULL;
    }
 
-   agx_resource_setup(dev, rsc);
+   agx_resource_setup(rsc);
 
    if (rsc->layout.tiling == AIL_TILING_LINEAR) {
       rsc->layout.linear_stride_B = whandle->stride;
@@ -526,7 +527,7 @@ agx_resource_create_with_modifiers(struct pipe_screen *screen,
           templ->format != PIPE_FORMAT_Z24_UNORM_S8_UINT &&
           "u_transfer_helper should have lowered");
 
-   agx_resource_setup(dev, nresource);
+   agx_resource_setup(nresource);
 
    pipe_reference_init(&nresource->base.reference, 1);
 
@@ -590,6 +591,21 @@ agx_resource_create_with_modifiers(struct pipe_screen *screen,
    if (!nresource->bo) {
       FREE(nresource);
       return NULL;
+   }
+
+   /* Tiled transfers expose staging memory, never the BO pointer. Other maps
+    * revoke this optional shim optimization. Imported/shared and already mapped
+    * BOs stay on content comparison, including persistent linear mappings. */
+   if (nresource->modifier != DRM_FORMAT_MOD_LINEAR &&
+       !(create_flags & AGX_BO_SHAREABLE) && !nresource->bo->_map) {
+      typedef uint64_t *(*epoch_fn)(int, uint32_t);
+      epoch_fn get_epoch = (epoch_fn)dlsym(RTLD_DEFAULT, "asahi_m1n1_cpu_epoch");
+      if (get_epoch) {
+         nresource->bo->shim_cpu_epoch =
+            get_epoch(dev->fd, nresource->bo->uapi_handle);
+         if (nresource->bo->shim_cpu_epoch)
+            *nresource->bo->shim_cpu_epoch = 1;
+      }
    }
 
    agx_resource_debug(nresource, "New: ");

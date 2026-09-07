@@ -1021,7 +1021,14 @@ agx_resource_valid(struct agx_resource *rsrc, int level)
 static inline void *
 agx_map_texture_cpu(struct agx_resource *rsrc, unsigned level, unsigned z)
 {
-   return ((uint8_t *)agx_bo_map(rsrc->bo)) +
+   /* Only for synchronous tile/detile copies; this pointer must not escape.
+    * Mark even reads conservatively. A revoked epoch must stay revoked. */
+   struct agx_bo *bo = rsrc->bo;
+   if (bo->shim_cpu_epoch && *bo->shim_cpu_epoch)
+      ++*bo->shim_cpu_epoch;
+   if (!bo->_map)
+      bo->dev->ops.bo_mmap(bo->dev, bo, NULL);
+   return ((uint8_t *)bo->_map) +
           ail_get_layer_level_B(&rsrc->layout, z, level);
 }
 

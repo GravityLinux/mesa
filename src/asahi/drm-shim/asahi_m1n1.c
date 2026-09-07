@@ -7,6 +7,7 @@
 /* Modern Asahi DRM-shim transport backed by m1n1's embedded Python driver. */
 
 #include <Python.h>
+#include "delta.h"
 
 #include <errno.h>
 #include <inttypes.h>
@@ -24,6 +25,8 @@ struct asahi_bo {
    uint64_t client_id;
    uint32_t handle;
    bool python_registered;
+   struct asahi_cpu_spans cpu_writes;
+   uint64_t cpu_epoch; /* Zero means untracked CPU access. */
 };
 
 static PyObject *python_shim;
@@ -47,6 +50,58 @@ static struct asahi_bo *
 asahi_bo(struct shim_bo *bo)
 {
    return (struct asahi_bo *)bo;
+}
+
+/* Borrowed for the GEM lifetime; Mesa drops the pointer with its BO. */
+__attribute__((visibility("default"))) uint64_t *
+asahi_m1n1_cpu_epoch(int fd, uint32_t handle);
+
+uint64_t *
+asahi_m1n1_cpu_epoch(int fd, uint32_t handle)
+{
+   struct shim_fd *file = drm_shim_fd_lookup(fd);
+   if (!file)
+      return NULL;
+   struct shim_bo *base = drm_shim_bo_lookup(file, handle);
+   if (!base)
+      return NULL;
+   uint64_t *epoch = &asahi_bo(base)->cpu_epoch;
+   drm_shim_bo_put(base);
+   return epoch;
+}
+
+/* Permission to resend gaps comes from completed, explicit CPU writes. It
+ * lasts only until the next successful upload, including all aliases. */
+__attribute__((visibility("default"))) void
+asahi_m1n1_cpu_written(int fd, uint32_t handle, uint64_t start, uint64_t size);
+
+void asahi_m1n1_cpu_written(int fd, uint32_t handle, uint64_t start, uint64_t size)
+{
+   struct shim_fd *file = drm_shim_fd_lookup(fd);
+   struct shim_bo *base = file ? drm_shim_bo_lookup(file, handle) : NULL;
+   if (!base)
+      return;
+   struct asahi_cpu_spans *spans = &asahi_bo(base)->cpu_writes;
+   if (!size || start > base->size || size > base->size - start)
+      goto out;
+   uint64_t end = start + size;
+   /* Union only overlapping/touching writes; never authorize an unwritten gap. */
+   for (uint64_t i = 0; i < spans->count;) {
+      struct asahi_cpu_span r = spans->spans[i];
+      if (r.start <= end && start <= r.end) {
+         if (r.start < start) start = r.start;
+         if (r.end > end) end = r.end;
+         spans->spans[i] = spans->spans[--spans->count];
+         i = 0;
+      } else {
+         ++i;
+      }
+   }
+   /* Full table simply loses this optimization, never broadens permission. */
+   if (spans->count < ASAHI_CPU_SPANS)
+      spans->spans[spans->count++] = (struct asahi_cpu_span){start, end};
+out:
+   drm_shim_bo_put(base);
 }
 
 static int
@@ -305,10 +360,12 @@ asahi_ioctl_gem_create(int fd, unsigned long request, void *arg)
    bo->handle = drm_shim_bo_get_handle(shim_fd, &bo->base);
    create->handle = bo->handle;
 
-   ret = python_status("modern_gem_created", 6,
+   ret = python_status("modern_gem_created", 8,
                        bo->client_id, (uint64_t)bo->handle,
                        bo->base.mem_addr, create->size,
-                       (uint64_t)create->flags, (uint64_t)create->vm_id);
+                       (uint64_t)create->flags, (uint64_t)create->vm_id,
+                       (uint64_t)(uintptr_t)&bo->cpu_epoch,
+                       (uint64_t)(uintptr_t)&bo->cpu_writes);
    if (!ret)
       bo->python_registered = true;
 

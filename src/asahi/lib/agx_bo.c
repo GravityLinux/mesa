@@ -6,6 +6,7 @@
 
 #include "agx_bo.h"
 #include <inttypes.h>
+#include <dlfcn.h>
 #include <stdlib.h>
 #include "util/hash_table.h"
 #include "util/ralloc.h"
@@ -389,7 +390,12 @@ agx_bo_create(struct agx_device *dev, size_t size, unsigned align,
       return NULL;
    }
 
+   if (bo->shim_cpu_epoch)
+      *bo->shim_cpu_epoch = 0; /* Cache reuse must opt in again. */
    bo->label = label;
+   if (getenv("AGX_BO_TRACE_LABELS"))
+      fprintf(stderr, "AGX_BO_LABEL fd=%d handle=%u flags=%u size=%zu label=%s\n",
+              dev->fd, bo->uapi_handle, bo->flags, bo->size, label);
    p_atomic_set(&bo->refcnt, 1);
 
    if (dev->debug & AGX_DBG_TRACE) {
@@ -399,4 +405,14 @@ agx_bo_create(struct agx_device *dev, size_t size, unsigned align,
 
    agx_bo_dump_all_periodic(dev);
    return bo;
+}
+
+/* Optional shim instrumentation; no claim is made by an ordinary BO map. */
+void
+agx_bo_note_cpu_write(struct agx_bo *bo, uint64_t offset, uint64_t size)
+{
+   typedef void (*note_fn)(int, uint32_t, uint64_t, uint64_t);
+   note_fn note = (note_fn)dlsym(RTLD_DEFAULT, "asahi_m1n1_cpu_written");
+   if (note)
+      note(bo->dev->fd, bo->uapi_handle, offset, size);
 }
