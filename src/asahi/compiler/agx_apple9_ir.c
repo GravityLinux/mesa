@@ -2124,6 +2124,12 @@ apple9_vir_producer_instruction(const struct agx_apple9_vir_program *program,
 }
 
 static bool
+apple9_vir_is_pending_load(enum agx_apple9_vir_opcode op)
+{
+   return op == AGX_APPLE9_VIR_DEVICE_LOAD || op == AGX_APPLE9_VIR_TILE_LOAD;
+}
+
+static bool
 apple9_vir_is_load_token(const struct agx_apple9_vir_program *program,
                          uint32_t value, uint16_t raw_token)
 {
@@ -2173,7 +2179,7 @@ apple9_materialize_pending_result_at(struct agx_apple9_vir_program *program,
    const struct agx_apple9_vir_instr *producer =
       &program->instructions[producer_index];
    const bool atomic = producer->op == AGX_APPLE9_VIR_DEVICE_ATOMIC;
-   if (producer->op != AGX_APPLE9_VIR_DEVICE_LOAD &&
+   if (!apple9_vir_is_pending_load(producer->op) &&
        !(atomic && !producer->atomic_discard)) {
       if (reason != NULL)
          *reason =
@@ -2282,7 +2288,7 @@ apple9_materialize_unsupported_loads(struct agx_apple9_vir_program *program,
 {
    for (unsigned i = 0; i < program->instruction_count; ++i) {
       struct agx_apple9_vir_instr *producer = &program->instructions[i];
-      if (producer->op != AGX_APPLE9_VIR_DEVICE_LOAD ||
+      if (!apple9_vir_is_pending_load(producer->op) ||
           producer->producer_scoreboard_slot != AGX_APPLE9_SCOREBOARD_SLOT_AUTO)
          continue;
 
@@ -2409,7 +2415,7 @@ apple9_materialize_scoreboard_pressure(struct agx_apple9_vir_program *program,
       for (unsigned i = 0; i < program->instruction_count; ++i) {
          const struct agx_apple9_vir_instr *current = &program->instructions[i];
          const bool current_pending =
-            (current->op == AGX_APPLE9_VIR_DEVICE_LOAD ||
+            (apple9_vir_is_pending_load(current->op) ||
              (current->op == AGX_APPLE9_VIR_DEVICE_ATOMIC &&
               !current->atomic_discard)) &&
             current->producer_scoreboard_slot ==
@@ -2424,7 +2430,7 @@ apple9_materialize_scoreboard_pressure(struct agx_apple9_vir_program *program,
             const struct agx_apple9_vir_instr *producer =
                &program->instructions[p];
             const bool pending =
-               (producer->op == AGX_APPLE9_VIR_DEVICE_LOAD ||
+               (apple9_vir_is_pending_load(producer->op) ||
                 (producer->op == AGX_APPLE9_VIR_DEVICE_ATOMIC &&
                  !producer->atomic_discard)) &&
                producer->producer_scoreboard_slot ==
@@ -2459,7 +2465,7 @@ apple9_materialize_scoreboard_pressure(struct agx_apple9_vir_program *program,
             const struct agx_apple9_vir_instr *producer =
                &program->instructions[p];
             const bool pending =
-               (producer->op == AGX_APPLE9_VIR_DEVICE_LOAD ||
+               (apple9_vir_is_pending_load(producer->op) ||
                 (producer->op == AGX_APPLE9_VIR_DEVICE_ATOMIC &&
                  !producer->atomic_discard)) &&
                producer->producer_scoreboard_slot ==
@@ -2475,13 +2481,13 @@ apple9_materialize_scoreboard_pressure(struct agx_apple9_vir_program *program,
             for (unsigned p = 0; p < program->instruction_count; ++p) {
                const struct agx_apple9_vir_instr *candidate =
                   &program->instructions[p];
-               if ((candidate->op == AGX_APPLE9_VIR_DEVICE_LOAD ||
+               if ((apple9_vir_is_pending_load(candidate->op) ||
                     (candidate->op == AGX_APPLE9_VIR_DEVICE_ATOMIC &&
                      !candidate->atomic_discard)) &&
                    program->instructions[p].dest == *value) {
                   producer = p;
                }
-               if ((candidate->op == AGX_APPLE9_VIR_DEVICE_LOAD ||
+               if ((apple9_vir_is_pending_load(candidate->op) ||
                     (candidate->op == AGX_APPLE9_VIR_DEVICE_ATOMIC &&
                      !candidate->atomic_discard)) &&
                    candidate->dest == pressure_value)
@@ -2513,7 +2519,7 @@ apple9_is_logic_handoff_source(const struct agx_apple9_vir_program *program,
    const struct agx_apple9_vir_instr *producer =
       apple9_vir_producer_instruction(program, source);
    return producer != NULL &&
-          (producer->op == AGX_APPLE9_VIR_DEVICE_LOAD ||
+          (apple9_vir_is_pending_load(producer->op) ||
            (producer->op == AGX_APPLE9_VIR_DEVICE_ATOMIC &&
             !producer->atomic_discard)) &&
           apple9_first_consumer(program,
@@ -2599,7 +2605,7 @@ agx_apple9_assign_vir_scoreboard_slots(struct agx_apple9_vir_program *program,
          occupied[slot] = false;
       }
 
-      const bool is_load = producer->op == AGX_APPLE9_VIR_DEVICE_LOAD;
+      const bool is_load = apple9_vir_is_pending_load(producer->op);
       const bool is_returning_atomic =
          producer->op == AGX_APPLE9_VIR_DEVICE_ATOMIC &&
          !producer->atomic_discard;
@@ -2660,7 +2666,9 @@ agx_apple9_assign_vir_scoreboard_slots(struct agx_apple9_vir_program *program,
                goto fail;
             }
 
-            if (automatic && is_load) {
+            if (automatic && producer->op == AGX_APPLE9_VIR_TILE_LOAD) {
+               producer->producer_scoreboard_slot = slot;
+            } else if (automatic && is_load) {
                uint16_t token;
                if (!apple9_scalar_load_token_for_slot(slot, &token)) {
                   if (reason != NULL)
@@ -3955,7 +3963,8 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
           instruction->encoding != (access ? AGX_APPLE9_ENC_TILE_ACCESS
                                            : AGX_APPLE9_ENC_TILE_FENCE) ||
           (access ? instruction->immediate != 0x600 &&
-                       instruction->immediate != 0x80c
+                       instruction->immediate != 0x80c &&
+                       instruction->immediate != 0x808
                   : instruction->immediate != 0x20c))
          return false;
       const uint8_t bytes[] = {
@@ -3965,6 +3974,22 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
          instruction->immediate & 0xff,
          (instruction->immediate >> 8) & 0xff,
          0};
+      packed_init(packed, bytes, sizeof(bytes));
+      return true;
+   }
+   case AGX_APPLE9_VIR_TILE_LOAD: {
+      if (instruction->encoding != AGX_APPLE9_ENC_TILE_LOAD ||
+          instruction->nr_srcs || instruction->immediate ||
+          phys[instruction->dest] >= 64 ||
+          instruction->producer_scoreboard_slot < AGX_APPLE9_SCOREBOARD_SLOT_1 ||
+          instruction->producer_scoreboard_slot > AGX_APPLE9_SCOREBOARD_SLOT_6)
+         return false;
+      /* Explicit framebuffer input in our M4 f_blend shader, EXP-M4-01.
+       * Native tag 0x2ce publishes slot 6; Mesa-produced reads and matching
+       * consumers have been hardware-validated for all six slots. */
+      const unsigned tag = 0x4e | ((instruction->producer_scoreboard_slot - 1) << 7);
+      const uint8_t bytes[] = {0x67, 0x0e, 0x54, phys[instruction->dest] << 1,
+                              0, 0, 1, tag & 0xff, tag >> 8, 0, 0, 0};
       packed_init(packed, bytes, sizeof(bytes));
       return true;
    }

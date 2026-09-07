@@ -536,6 +536,7 @@ write_ppm(const char *path, const uint8_t *rgba,
 }
 
 #include "scenes/mesh/mesh.h"
+#include "scenes/blending/blending.h"
 #include "scenes/island/island.h"
 #include "scenes/sunset/sunset.h"
 #include "scenes/control-flow/control-flow.h"
@@ -625,6 +626,8 @@ main(int argc, char **argv)
    if (getenv("T8132_GLES_SCISSOR"))
       return run_scissor(width, height);
 
+   if (getenv("T8132_GLES_BLEND"))
+      return run_blending(width, height);
 
 
    if (getenv("T8132_GLES_ISLAND"))

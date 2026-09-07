@@ -3054,6 +3054,10 @@ agx_apple9_render_cache_upload_uniforms(
       apple9_put_u32(group + 8, record + cf_offset);
       apple9_put_u32(group + 0x14,
          (APPLE9_UNIFORM_FS_LAUNCH + i * APPLE9_UNIFORM_STRIDE) / 0x40);
+      /* EXP-M4-09 authored blend/write-mask state: enable tile read/modify/write.
+       * The shader also waits for its allocated tile-load result slot. */
+      if (draws[i].reads_tile)
+         apple9_put_u32(group + 0x50, apple9_get_u32(group + 0x50) | (1u << 29));
       apple9_put_u32(group + 0x34, draws[i].depth_control);
       apple9_put_u32(group + 0x38, draws[i].depth_face);
       apple9_put_u32(group + 0x40, draws[i].depth_face);

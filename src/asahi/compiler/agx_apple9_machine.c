@@ -700,6 +700,17 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .allocator_safe = true,
          .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
       },
+   [AGX_APPLE9_ENC_TILE_LOAD] =
+      {
+         .name = "tile_load",
+         .length = 12,
+         .operand_count = 1,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .operands = {GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 63,
+                          2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                          AGX_APPLE9_EVIDENCE_HARDWARE)},
+      },
    [AGX_APPLE9_ENC_TILE_STORE] =
       {
          .name = "tile_store",

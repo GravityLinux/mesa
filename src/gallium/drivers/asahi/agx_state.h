@@ -548,8 +548,9 @@ struct asahi_fs_shader_key {
    uint8_t nr_samples;
    bool padding[7];
    struct agx_apple9_varying_layout apple9_varyings;
+   struct agx_apple9_blend apple9_blend;
 };
-static_assert(sizeof(struct asahi_fs_shader_key) == 76, "no holes");
+static_assert(sizeof(struct asahi_fs_shader_key) == 84, "no holes");
 
 union asahi_shader_key {
    struct asahi_vs_shader_key vs;

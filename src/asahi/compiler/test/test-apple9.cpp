@@ -6029,6 +6029,78 @@ TEST(Apple9Compiler, VaryingPublicationCapacityIsCheckedBeforeAllocation)
    }
 }
 
+TEST(Apple9Encoding, TileReadHasAnExplicitResultSlot)
+{
+   agx_apple9_vir_instr load = {};
+   load.op = AGX_APPLE9_VIR_TILE_LOAD;
+   load.encoding = AGX_APPLE9_ENC_TILE_LOAD;
+   load.dest = 0;
+   load.producer_scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_6;
+   uint8_t phys[] = {0};
+   agx_apple9_packed_instruction packed = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_pack_vir_instruction(&load, phys, &packed, &reason));
+   const uint8_t native[] = {0x67,0x0e,0x54,0,0,0,1,0xce,2,0,0,0};
+   ASSERT_EQ(packed.length, sizeof(native));
+   EXPECT_EQ(memcmp(packed.bytes, native, sizeof(native)), 0);
+   load.producer_scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_NONE;
+   EXPECT_FALSE(agx_apple9_pack_vir_instruction(&load, phys, &packed, &reason));
+   load.producer_scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_1;
+   phys[0] = 25;
+   ASSERT_TRUE(agx_apple9_pack_vir_instruction(&load, phys, &packed, &reason));
+   EXPECT_EQ(packed.bytes[3], 50);
+   EXPECT_EQ(packed.bytes[7], 0x4e);
+   EXPECT_EQ(packed.bytes[8], 0);
+   phys[0] = 64;
+   EXPECT_FALSE(agx_apple9_pack_vir_instruction(&load, phys, &packed, &reason));
+}
+
+TEST(Apple9Allocator, TileReadNormalizesAndRetainsTheFirstLogicConsumer)
+{
+   agx_apple9_vir_program program;
+   agx_apple9_vir_init(&program);
+   uint32_t mask = agx_apple9_vir_input(&program, 16);
+   uint32_t tile = agx_apple9_vir_emit(&program, AGX_APPLE9_VIR_TILE_LOAD,
+      AGX_APPLE9_ENC_TILE_LOAD, nullptr, 0, 0);
+   program.instructions[0].producer_scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_AUTO;
+   uint32_t src[] = {mask, tile};
+   uint32_t red = agx_apple9_vir_emit(&program, AGX_APPLE9_VIR_IAND,
+      AGX_APPLE9_ENC_LOGIC_EXTENDED, src, 2, 0);
+   uint32_t later[] = {tile, red};
+   program.output = agx_apple9_vir_emit(&program, AGX_APPLE9_VIR_IOR,
+      AGX_APPLE9_ENC_LOGIC_EXTENDED, later, 2, 0);
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason)) << reason;
+   EXPECT_EQ(program.instructions[1].src[0], tile);
+   EXPECT_EQ(program.instructions[1].scoreboard_slot,
+             program.instructions[0].producer_scoreboard_slot);
+   EXPECT_EQ(program.instructions[2].scoreboard_slot, AGX_APPLE9_SCOREBOARD_SLOT_NONE);
+   ASSERT_TRUE(agx_apple9_allocate_vir(&program, &reason)) << reason;
+   EXPECT_NE(program.instructions[1].live_after_mask & 1u, 0u);
+   EXPECT_TRUE(agx_apple9_validate_vir_allocation(&program, &reason)) << reason;
+   agx_apple9_vir_finish(&program);
+}
+
+TEST(Apple9Allocator, TileReadMaterializesBeforeAStoreWithoutAWaitField)
+{
+   agx_apple9_vir_program program;
+   agx_apple9_vir_init(&program);
+   uint32_t tile = agx_apple9_vir_emit(&program, AGX_APPLE9_VIR_TILE_LOAD,
+      AGX_APPLE9_ENC_TILE_LOAD, nullptr, 0, 0);
+   program.instructions[0].producer_scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_AUTO;
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&program, AGX_APPLE9_VIR_TILE_STORE,
+      AGX_APPLE9_ENC_TILE_STORE, &tile, 1, 0));
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason)) << reason;
+   ASSERT_EQ(program.instruction_count, 3u);
+   EXPECT_TRUE(program.instructions[1].scoreboard_materialize);
+   EXPECT_EQ(program.instructions[1].scoreboard_slot,
+             program.instructions[0].producer_scoreboard_slot);
+   ASSERT_TRUE(agx_apple9_allocate_vir(&program, &reason)) << reason;
+   EXPECT_TRUE(agx_apple9_validate_vir_allocation(&program, &reason)) << reason;
+   agx_apple9_vir_finish(&program);
+}
+
 TEST(Apple9Compiler, GraphicsLoopResultsReachMergedOutputs)
 {
    for (bool fragment : {false, true}) {

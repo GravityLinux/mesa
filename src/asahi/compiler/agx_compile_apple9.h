@@ -62,6 +62,18 @@ bool agx_compile_apple9_fragment(nir_shader *nir,
                                  struct agx_shader_part *out,
                                  const char **reason);
 
+/* Independent RGB/alpha ADD equations with ONE, ZERO, SRC_ALPHA and
+ * INV_SRC_ALPHA factors, plus the RGBA write mask. */
+struct agx_apple9_blend {
+   uint8_t rgb_src, rgb_dst, alpha_src, alpha_dst;
+   uint8_t rgb_func, alpha_func, colormask, unsupported;
+};
+
+bool agx_compile_apple9_fragment_blend(
+   nir_shader *nir, const struct agx_apple9_varying_layout *varyings,
+   const struct agx_apple9_blend *blend,
+   struct agx_shader_part *out, const char **reason);
+
 /* Specialize fragment coefficient reads to the producing vertex layout. */
 bool agx_compile_apple9_fragment_inputs(
    nir_shader *nir, const struct agx_apple9_varying_layout *varyings,

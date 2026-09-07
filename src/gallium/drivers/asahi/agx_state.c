@@ -1759,8 +1759,9 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
          nir_deserialize(NULL, &agx_nir_options, &apple9_reader);
       bool compiled_stage =
          so->type == MESA_SHADER_FRAGMENT
-            ? agx_compile_apple9_fragment_inputs(apple9_nir,
-                  &key_->fs.apple9_varyings, &apple9_stage, &reason)
+            ? agx_compile_apple9_fragment_blend(apple9_nir,
+                  &key_->fs.apple9_varyings, &key_->fs.apple9_blend,
+                  &apple9_stage, &reason)
             : agx_compile_apple9_vertex_inputs(apple9_nir, &key_->vs.apple9_inputs,
                                                &apple9_stage, &reason);
       if (!compiled_stage) {
@@ -2584,8 +2585,19 @@ agx_update_fs(struct agx_batch *batch)
 
    /* Get main shader */
    struct asahi_fs_shader_key key = {0};
-   if (agx_apple9_direct_render_enabled(dev))
+   if (agx_apple9_direct_render_enabled(dev)) {
       key.apple9_varyings = ctx->vs->apple9_render_stage.varyings;
+      struct agx_blend_standard blend =
+         agx_unpack_blend_standard(ctx->blend->key.rt[0].mode);
+      key.apple9_blend = (struct agx_apple9_blend) {
+         .rgb_src = blend.rgb_src_factor, .rgb_dst = blend.rgb_dst_factor,
+         .alpha_src = blend.alpha_src_factor, .alpha_dst = blend.alpha_dst_factor,
+         .rgb_func = blend.rgb_func, .alpha_func = blend.alpha_func,
+         .colormask = ctx->blend->key.rt[0].colormask,
+         .unsupported = ctx->blend->key.logicop_enable ||
+                        ctx->blend->key.alpha_to_coverage || ctx->blend->key.alpha_to_one,
+      };
+   }
 
    if (ctx->stage[MESA_SHADER_FRAGMENT].shader->info.uses_fbfetch) {
       key.nr_samples = nr_samples;
@@ -5636,6 +5648,11 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
          cfg.min_z = minz;
          cfg.max_z = maxz;
       }
+      struct agx_blend_standard blend =
+         agx_unpack_blend_standard(ctx->blend->key.rt[0].mode);
+      record->reads_tile = blend.rgb_dst_factor != PIPE_BLENDFACTOR_ZERO ||
+                           blend.alpha_dst_factor != PIPE_BLENDFACTOR_ZERO ||
+                           ctx->blend->key.rt[0].colormask != 15;
       /* Scissor enable is independent of depth testing. */
       record->depth_control = (depth_enabled ? 0x200 : 0x40200) | (1u << 16);
       record->depth_face = 0xf00 |
