@@ -18,6 +18,10 @@
 #include "util/u_math.h"
 #include "agx_device.h"
 
+static_assert(AGX_APPLE9_RENDER_ARCHIVE_SIZE <=
+                 AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET,
+              "Render code must not overlap compiler state");
+
 static_assert(AGX_APPLE9_COMPUTE_STATE_LITERAL_STORAGE_CAPACITY *
                     sizeof(uint32_t) <=
                  0x20,
@@ -647,7 +651,10 @@ apple9_archive_call(uint32_t main_offset, uint32_t *call)
 
    uint64_t value = UINT64_C(0x07aa) +
                     2 * (main_offset - AGX_APPLE9_RENDER_FIRST_MAIN_OFFSET);
-   if (value > 0x1ffff)
+   /* The third byte carries address bits beyond the original 64 KiB arena.
+    * Graphics pipeline tests validate bit 17 with mains above +0x10000.
+    * Keep higher, untested bits out of the encoding. */
+   if (value > 0x3ffff)
       return false;
 
    *call = value;
@@ -1729,8 +1736,14 @@ agx_apple9_layout_render_archive(
                      AGX_APPLE9_RENDER_TEMPLATE_TAIL_C_SIZE;
    uint64_t fs_size = ALIGN_POT(pipeline->fragment.binary_size, 0x40) + prefix;
    uint64_t vs_size = ALIGN_POT(pipeline->vertex.binary_size, 0x40) + prefix;
-   if (fs_size + vs_size > AGX_APPLE9_RENDER_ARCHIVE_SIZE - cursor - 0x80)
+   if (fs_size + vs_size > AGX_APPLE9_RENDER_ARCHIVE_SIZE - cursor - 0x80) {
+      fprintf(stderr, "Apple9 render archive capacity exceeded: FS=%zu VS=%zu "
+              "bytes, blocks=%llu available=%llu bytes\n",
+              pipeline->fragment.binary_size, pipeline->vertex.binary_size,
+              (unsigned long long)(fs_size + vs_size),
+              (unsigned long long)(AGX_APPLE9_RENDER_ARCHIVE_SIZE - cursor - 0x80));
       return false;
+   }
    memset(layout, 0, sizeof(*layout));
    layout->fragment_block = cursor;
    layout->fragment_main = cursor + prefix;
@@ -1867,8 +1880,8 @@ apple9_build_render_archive(uint8_t *package,
                   layout->vertex_call);
 
    /* Metal represents the remaining archive capacity as one empty program
-    * block ending at the fixed zero header at +0xffc0.  Its size therefore
-    * changes whenever dynamic stage or vertex-fetch blocks change.  A fixed
+    * block ending at the final zero header of the reservation. Its size changes
+    * whenever dynamic stage or vertex-fetch blocks change.  A fixed
     * 0x80 record happened to be tolerated by the inline-vertex path but is
     * not the compiler archive grammar consumed by vertex fetch. */
    const uint32_t zero_header = AGX_APPLE9_RENDER_ARCHIVE_SIZE - 0x40;
@@ -2432,7 +2445,7 @@ agx_apple9_render_cache_bind(struct agx_apple9_render_cache *cache,
    /*
     * Metal keeps one physical archive at the queue's fixed USC base and
     * interns stage programs into it.  The compatibility package has the same
-    * split: the first 64 KiB is executable archive, while caller launch/state
+    * split: the first 96 KiB is executable archive, while caller launch/state
     * in the remaining range selects three archive entries.  Preserve the
     * resident archive and install only the selected command state.
     */

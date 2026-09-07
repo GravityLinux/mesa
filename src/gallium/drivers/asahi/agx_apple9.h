@@ -120,7 +120,9 @@ bool agx_apple9_render_cache_upload_uniforms(
 
 #define AGX_APPLE9_RENDER_PACKAGE_OFFSET        0x01000000u
 #define AGX_APPLE9_RENDER_PACKAGE_SIZE          0x00400000u
-#define AGX_APPLE9_RENDER_ARCHIVE_SIZE          0x00010000u
+/* The package reserves zeroed space through the compiler-state boundary.
+ * Compact entry calls are checked separately against their measured range. */
+#define AGX_APPLE9_RENDER_ARCHIVE_SIZE          0x00018000u
 #define AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET 0x00018000u
 #define AGX_APPLE9_RENDER_COMPILER_STATE_SIZE   0x00020000u
 #define AGX_APPLE9_RENDER_RESOURCE_OFFSET       0x00200000u
@@ -187,8 +189,8 @@ struct agx_apple9_render_region {
  * Apple9 graphics code uses the same self-describing archive grammar as
  * compute: a 0x340-byte helper directory followed by 0x40-byte block headers,
  * a 0x40-byte constant program, and a 0x40-aligned machine-code main.  The
- * stage launch programs carry 17-bit archive calls, so neither stage has a
- * fixed-size slot.
+ * stage launch programs carry compact archive calls (18 bits validated), so
+ * neither stage has a fixed-size slot.
  */
 struct agx_apple9_render_archive_layout {
    uint32_t fragment_block;
