@@ -6157,6 +6157,49 @@ TEST(Apple9Compiler, GraphicsLoopResultsReachMergedOutputs)
    }
 }
 
+TEST(Apple9Compiler, FragmentPositionFormsAndUnsupportedDepth)
+{
+   /* Exercise live component tracking: a vec4 load with only XY live is legal,
+    * while consuming Z or W must fail rather than return invented values. */
+   for (unsigned form = 0; form < 3; ++form) {
+      for (unsigned component = 0; component < 4; ++component) {
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_FRAGMENT, &agx_nir_options, "fragment_position");
+         nir_def *position;
+         if (form == 0) {
+            position = nir_load_frag_coord(&b);
+         } else if (form == 1) {
+            position = nir_load_interpolated_input(
+               &b, 4, 32,
+               nir_load_barycentric_pixel(&b, 32, .interp_mode = INTERP_MODE_SMOOTH),
+               nir_imm_int(&b, 0), .dest_type = nir_type_float32,
+               .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+         } else {
+            position = nir_load_input(
+               &b, 4, 32, nir_imm_int(&b, 0), .dest_type = nir_type_float32,
+               .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+         }
+         nir_def *value = nir_channel(&b, position, component);
+         nir_store_output(&b, nir_vec4(&b, value, value, value, nir_imm_float(&b, 1)),
+                          nir_imm_int(&b, 0), .write_mask = 15,
+                          .src_type = nir_type_float32,
+                          .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+         b.shader->info.io_lowered = true;
+         agx_shader_part out = {};
+         const char *reason = nullptr;
+         bool ok = agx_compile_apple9_fragment(b.shader, &out, &reason);
+         EXPECT_EQ(ok, component < 2) << "form=" << form << " component=" << component
+                                      << " reason=" << (reason ? reason : "none");
+         if (ok)
+            EXPECT_EQ(out.info.apple9_varyings.count, 0u);
+         else
+            EXPECT_STREQ(reason, "Apple9 fragment window position currently supports XY only");
+         free(out.binary);
+         ralloc_free(b.shader);
+      }
+   }
+}
+
 TEST(Apple9Compiler, MixLowersDynamicEndpointsAndFactors)
 {
    for (bool exact : {false, true}) {

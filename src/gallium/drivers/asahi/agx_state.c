@@ -1516,7 +1516,7 @@ agx_apple9_bounded_render_signature(const nir_shader *nir)
                ~(position | user | BITFIELD64_BIT(VARYING_SLOT_PSIZ)));
    }
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      return !(nir->info.inputs_read & ~user) &&
+      return !(nir->info.inputs_read & ~(user | BITFIELD64_BIT(VARYING_SLOT_POS))) &&
              nir->info.outputs_written == BITFIELD64_BIT(FRAG_RESULT_DATA0) &&
              !nir->info.fs.uses_discard;
    }

@@ -104,17 +104,25 @@ static bool
 apple9_system_source(nir_scalar scalar, struct apple9_system_source *source)
 {
    scalar = apple9_chase_trivial(scalar);
-   if (scalar.def->bit_size != 32 ||
-       nir_def_instr_type(scalar.def) != nir_instr_type_intrinsic)
+   if (nir_def_instr_type(scalar.def) != nir_instr_type_intrinsic)
       return false;
 
    nir_intrinsic_op op = nir_def_as_intrinsic(scalar.def)->intrinsic;
+   /* NIR pixel coordinates are 16-bit. The fragment SR reads a full word;
+    * framebuffer coordinates fit in 16 bits (maximum dimension 16384). */
+   if (scalar.def->bit_size != 32 &&
+       !(op == nir_intrinsic_load_pixel_coord && scalar.def->bit_size == 16))
+      return false;
    unsigned components = scalar.def->num_components;
    uint8_t base;
    bool zext16 = false;
    bool global_id = false;
 
    switch (op) {
+   case nir_intrinsic_load_pixel_coord:
+      base = 0xa0;
+      components = 2;
+      break;
    case nir_intrinsic_load_global_invocation_id:
       base = 0xa0;
       global_id = true;
@@ -450,6 +458,7 @@ apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
       nir_intrinsic_op op = nir_instr_as_intrinsic(instr)->intrinsic;
       if (graphics && (op == nir_intrinsic_load_vertex_id ||
                        op == nir_intrinsic_load_vertex_id_zero_base ||
+                       op == nir_intrinsic_load_pixel_coord ||
                        op == nir_intrinsic_load_barycentric_pixel ||
                        op == nir_intrinsic_load_interpolated_input ||
                        op == nir_intrinsic_load_output ||
@@ -4116,6 +4125,52 @@ apple9_lower_vertex_input(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    return true;
 }
 
+/* EXP-0111 FS-01: fragment SR 0xa0/0xa1 are integer pixel coordinates.
+ * Gallium advertises upper-left, integer centers; mesa/st performs the API
+ * center/origin adjustment. Keep this separate from user interpolation slots.
+ * Z/W need their own interpolation model and must not be fabricated. */
+static bool
+apple9_lower_window_position(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   unsigned component = 0;
+   switch (intr->intrinsic) {
+   case nir_intrinsic_load_frag_coord:
+   case nir_intrinsic_load_frag_coord_xy:
+      break;
+   case nir_intrinsic_load_input:
+   case nir_intrinsic_load_interpolated_input: {
+      if (nir_intrinsic_io_semantics(intr).location != VARYING_SLOT_POS)
+         return false;
+      unsigned offset = intr->intrinsic == nir_intrinsic_load_input ? 0 : 1;
+      if (!nir_src_is_const(intr->src[offset]) ||
+          nir_src_as_uint(intr->src[offset]) != 0) {
+         *(bool *)data = false;
+         return false;
+      }
+      component = nir_intrinsic_component(intr);
+      break;
+   }
+   default:
+      return false;
+   }
+   unsigned read = nir_def_components_read(&intr->def);
+   if (intr->def.bit_size != 32 || component >= 4 ||
+       ((read << component) & ~0x3u)) {
+      *(bool *)data = false;
+      return false;
+   }
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *xy = nir_u2f32(b, nir_load_pixel_coord(b));
+   nir_def *values[4];
+   for (unsigned i = 0; i < intr->def.num_components; ++i)
+      values[i] = (read & BITFIELD_BIT(i))
+                     ? nir_channel(b, xy, component + i)
+                     : nir_undef(b, 1, 32);
+   nir_def_rewrite_uses(&intr->def, nir_vec(b, values, intr->def.num_components));
+   nir_instr_remove(&intr->instr);
+   return true;
+}
+
 static bool
 apple9_collect_varyings(nir_shader *nir,
                         const struct agx_apple9_varying_layout *producer,
@@ -4134,6 +4189,10 @@ apple9_collect_varyings(nir_shader *nir,
          unsigned location = nir_intrinsic_io_semantics(intr).location;
          if (!fragment && location == VARYING_SLOT_POS)
             continue;
+         if (fragment && location == VARYING_SLOT_POS) {
+            *reason = "Apple9 fragment window-position input is not implemented";
+            return false;
+         }
          if (!nir_src_is_const(intr->src[1]) ||
              nir_src_as_uint(intr->src[1]) >= 32)
             goto unsupported;
@@ -4237,6 +4296,18 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
    nir_opt_constant_folding(nir);
    nir_opt_copy_prop(nir);
    nir_opt_dce(nir);
+   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+      bool valid = true;
+      nir_shader_intrinsics_pass(nir, apple9_lower_window_position,
+                                 nir_metadata_control_flow, &valid);
+      if (!valid) {
+         *reason = "Apple9 fragment window position currently supports XY only";
+         return false;
+      }
+      nir_lower_alu_to_scalar(nir, NULL, NULL);
+      nir_opt_copy_prop(nir);
+      nir_opt_dce(nir);
+   }
    if (nir->info.num_ssbos) {
       if (reason)
          *reason = "Apple9 render does not yet support SSBOs";

@@ -540,6 +540,7 @@ write_ppm(const char *path, const uint8_t *rgba,
 #include "scenes/island/island.h"
 #include "scenes/sunset/sunset.h"
 #include "scenes/control-flow/control-flow.h"
+#include "scenes/fragcoord/fragcoord.h"
 #include "scenes/mix/mix.h"
 #include "scenes/trig/trig.h"
 #include "scenes/scissor/scissor.h"
@@ -617,6 +618,8 @@ main(int argc, char **argv)
 
    if (getenv("T8132_GLES_CONTROL_FLOW"))
       return run_control_flow(width, height);
+   if (getenv("T8132_GLES_FRAGCOORD"))
+      return run_fragcoord(width, height);
    if (getenv("T8132_GLES_MIX"))
       return run_mix(width, height);
    if (getenv("T8132_GLES_TRIG"))
