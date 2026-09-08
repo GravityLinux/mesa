@@ -1,0 +1,25 @@
+[require]
+GLSL >= 1.10
+
+[vertex shader]
+attribute vec4 vertex;
+void main() { gl_Position = vertex;  }
+
+[fragment shader]
+void main() { gl_FragColor = vec4(gl_FragCoord.w * 0.25, 0.0, 0.0, 1.0); }
+
+[vertex data]
+vertex/float/4
+-1 -1 0 1
+6 -2 0 2
+-4 12 0 4
+
+[test]
+clear color 0.0 0.0 0.0 0.0
+clear
+draw arrays GL_TRIANGLES 0 3
+probe rgba 25 25 0.23406250 0 0 1
+probe rgba 125 125 0.17156250 0 0 1
+probe rgba 200 200 0.12468750 0 0 1
+probe rgba 240 10 0.18593750 0 0 1
+probe rgba 10 240 0.15718750 0 0 1

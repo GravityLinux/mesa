@@ -6,7 +6,7 @@ from pathlib import Path
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('attachment',type=Path);p.add_argument('--mode',choices=['quad','depth','cube'],required=True)
 p.add_argument('--depth-states',action='store_true');p.add_argument('--depth-attachment',type=Path);p.add_argument('--four-buffers',action='store_true');p.add_argument('--frame',type=int,default=0);p.add_argument('--output',type=Path,required=True)
-p.add_argument('--varyings',type=int,choices=[0,7,8,9,12]);p.add_argument('--perspective-varyings',action='store_true');p.add_argument('--clipped-varyings',action='store_true');p.add_argument('--depth-clipped-varyings',action='store_true')
+p.add_argument('--interpolation', choices=['linear','flat','mixed','integer']);p.add_argument('--varyings',type=int,choices=[0,7,8,9,12,16,24,32]);p.add_argument('--perspective-varyings',action='store_true');p.add_argument('--clipped-varyings',action='store_true');p.add_argument('--depth-clipped-varyings',action='store_true')
 a=p.parse_args();size=512;clear=(0,0,0,0)
 if a.mode=='quad':
  vertices=[(-.75,-.5,0),(.75,-.5,0),(.75,.5,0),(-.75,.5,0)]
@@ -37,12 +37,26 @@ if a.varyings is not None:
   colors.append(tuple((.1*(k+1) if a.varyings==0 else
      first[k]*.2+second[k]*.3+third[k]*.4+(extra[k]*.1 if a.varyings==12 else 0))
      * [1,.875,.75][k] for k in range(3)))
-clip_w=[1+x*.5 if a.perspective_varyings else 1. for x,y,z in vertices]
+if a.varyings in (16,24,32):
+ colors=[]
+ for x,y,z in vertices:
+  c=[0.,0.,0.]
+  for j in range(a.varyings//4):
+   v=[q*(j+1)/32+b for q,b in zip((x,y,x*y,x*x+y*y+.3*x+.2*y),(.3,.4,.5,.6))]
+   for k in range(3): c[k]+=(v[k]*.75+v[3]*.25)/(a.varyings//4)
+  colors.append(tuple(c[k]*[1,.875,.75][k] for k in range(3)))
+if a.interpolation:
+ colors=[(x*.6+.5,(y*.6+.5)*.875,(x*y*.25+.4)*.75) for x,y,z in vertices]
+if a.interpolation == 'integer':
+ # Full-width comparisons in the FS catch corruption of every payload bit.
+ colors=[(.95 if x>0 else .05, (.8 if y>0 else .2)*.875,
+          (.7 if x*y>0 else .1)*.75) for x,y,z in vertices]
+clip_w=[1+x*.5 if a.perspective_varyings or a.interpolation else 1. for x,y,z in vertices]
 if a.clipped_varyings:
- assert a.varyings == 9 and a.perspective_varyings and a.mode == 'quad'
+ assert a.mode == 'quad' and (a.interpolation or (a.varyings == 9 and a.perspective_varyings))
  vertices=[(x*2,y,z) for x,y,z in vertices]
 if a.depth_clipped_varyings:
- assert a.varyings == 9 and a.perspective_varyings and a.mode == 'quad'
+ assert a.mode == 'quad' and (a.interpolation or (a.varyings == 9 and a.perspective_varyings))
  vertices=[(x,y,4*x/w) for (x,y,z),w in zip(vertices,clip_w)]
 if a.four_buffers:
  colors=[tuple(x*(1-i*.0625) for x in c) for i,c in enumerate(colors)]
@@ -100,6 +114,12 @@ for t in range(0,len(indices),3):
    if a.perspective_varyings:
     weighted=[q/clip_w[i] for q,i in zip(weights,ids)]
     color_weights=[q/sum(weighted) for q in weighted]
+   if a.interpolation:
+    smooth=[q/clip_w[i] for q,i in zip(weights,ids)]
+    smooth=[q/sum(smooth) for q in smooth]
+    channel_weights = [weights]*3 if a.interpolation=='linear' else [(0,0,1)]*3 if a.interpolation in ('flat','integer') else [smooth,weights,(0,0,1)]
+    expected[index]=tuple(round(255*max(0,min(1,sum(q*cc[k] for q,cc in zip(channel_weights[k],c))))) for k in range(3))+(255,)
+    continue
    expected[index]=tuple(round(255*max(0,min(1,sum(q*cc[k] for q,cc in zip(color_weights,c))))) for k in range(3))+(255,)
 raw=a.attachment.read_bytes();assert len(raw)==size*size*4
 depth_raw=a.depth_attachment.read_bytes() if a.depth_attachment else None

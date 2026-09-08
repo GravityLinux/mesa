@@ -1,9 +1,10 @@
 # Linked vertex/fragment varyings
 
-Apple9 supports up to **12 smooth FP32 user components**, in addition to the
-four position components. Three vec4s, four vec3s, or mixtures of scalars and
-vectors fit the same budget. This is the current compiler publication limit,
-not a claimed hardware maximum.
+Apple9 supports up to **32 user components** (eight vec4s), in addition to the
+four position components. FP32 inputs support smooth perspective, center
+noperspective, and flat interpolation, including mixed modes in one interface.
+Flat signed/unsigned 32-bit integers use bit-preserving publications. This is
+the current compiler capacity, not a claimed hardware maximum.
 
 The compiler records a component mask for each user location VAR0..VAR31 and
 compacts the written components into scalar export slots. The FS is compiled
@@ -81,9 +82,9 @@ from the trusted `twelve.pkl.gz` capture and the retained
 Only pixel-center smooth FP32 interpolation is supported here. Flat/integer,
 centroid/sample, and noperspective shader inputs remain unsupported. Graphics
 control flow, textures, multiple render targets, and arbitrary raster state
-are separate work. The four-buffer budget per stage and 32 draw-record limit
-still apply; interfaces larger than four components also use that draw arena
-when they have no buffers.
+are separate work. The former four-buffer budget is superseded by the shader-loaded address tables
+documented in `../buffers/README.md`. Interfaces larger than four components
+also use the draw arena when they have no buffers.
 
 Validation on T8132, 2026-09-05: all eight cases pass both hardware frames with
 no coverage or color failures (at most one channel byte of rounding error).
@@ -97,3 +98,68 @@ water triangles crossing the view volume. Source-correlated encoding evidence
 and the before/after results are recorded in `tmp/apple9-render-bugs/RESULTS.md`.
 The suite has 191 passing compiler tests after adding the projective-multiply
 operand/encoding check.
+
+
+## Larger interfaces and interpolation (2026-09-07)
+
+New `run.sh` modes: `16`, `24`, `32`, `linear`, `flat`, `mixed-clipped`, and
+`integer`. Each runs two frames with reversed primitive submission order and
+checks the raw hardware attachment against the independent CPU rasterizer.
+Larger interfaces use unequal W; the mixed case clips geometry while combining
+all three interpolation modes. Integer shaders compare the complete 32-bit
+payload against distinct expected values, including values with the sign bit
+set and overflowing unsigned additions.
+
+The center-linear GLSL fixtures explicitly enable the noperspective extension
+for the development test; this does not advertise untested centroid/sample
+interpolation. The compiler also accepts NIR-generated noperspective inputs.
+
+Flat coefficient reads return an asynchronous three-word tuple. Its third word
+is the unmodified provoking-vertex value. The compiler allocates a scoreboard
+slot and consumes it through the common handoff path, keeping unused tuple lanes
+live until completion. A synchronous interpretation produced intermittent
+missing channels and failed integer values; merely changing the slot byte was
+not a valid fix.
+
+The runtime requires `render_buffers_varyings32_launch.bin` in the external
+Apple9 blob directory (448 bytes, SHA256
+`2cdfb0e078dfab8eb011ed0af9aff5ecdf81ead6db082dce40b81a57a79099cb`). It retains
+an entire opaque 256-byte VS setup from our authored 32-scalar Metal probe and
+the existing entire 192-byte FS setup. No helper code is reconstructed in Mesa.
+The authored-main call moves to +0x54 in the VS setup; FS offsets are unchanged.
+
+Export results still remain live until completion. Reusable publication
+registers, more than 32 user scalars, and centroid/sample interpolation remain
+future work. Detailed artifacts: `tmp/apple9-exports/RESULTS.md` in the Asahi
+workspace.
+
+Final validation: 18 hardware frames pass across the seven new varying modes
+and the existing sampled-texture and buffer-table regressions. No coverage or
+color errors; maximum interpolation rounding difference is one channel byte.
+All 211 compiler tests pass. Raw reports are in
+`tmp/apple9-exports/VALIDATION.json`.
+
+## Export lifetime investigation (2026-09-07)
+
+Later Metal and hardware tests distinguish publication contents from ordinary
+GPR contents. Overwriting the same-number ordinary GPR **before** VARY_STORE
+preserves the exact image; overwriting the publication destroys it. Metal also
+writes ordinary GPRs while same-number publications remain live. Consequently,
+the previous shared allocation/live-out model was unnecessarily conservative.
+The allocator now assigns publication indices independently of ordinary GPRs.
+FLOAT2_EXPORT and LOGIC_EXPORT define publication values; VARY_STORE consumes
+those values. Namespace mismatches are rejected. Every publication retains a
+unique index through completion, without occupying the same-number GPR.
+Trace output distinguishes `pN` from `rN` and reports publication count.
+
+The 32-component VS now peaks at 17 allocator-counted live GPRs, down from 42.
+This is a compiler liveness improvement, not a measurement of physical hardware
+occupancy. The existing 32-user-component interface limit is unchanged.
+Allocator regression tests cover 64 simultaneous publications with one ordinary
+GPR, publication exhaustion, overlapping publication slots, and namespace
+mismatches. Validation results: `tmp/apple9-publication-allocator/RESULTS.md`.
+
+Reusing publication storage immediately after VARY_STORE still fails. A delayed
+overwrite can pass, which demonstrates asynchronous consumption rather than a
+safe release rule. Fixed delays are not a valid workaround. Full evidence and
+negative controls: `tmp/apple9-export-lifetime/RESULTS.md` in the Asahi workspace.

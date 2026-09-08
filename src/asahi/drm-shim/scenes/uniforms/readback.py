@@ -20,7 +20,7 @@ COLORS = (
     ((1, 0, 0), (0, .5, 0), (0, 0, .25)),
     ((.25, 0, 0), (0, .75, 0), (0, 0, 1)),
 )
-CLEAR = bytes((4, 5, 15, 255))  # Current carrier's fixed clear, in RGBA order.
+CLEAR = bytes((191, 186, 255, 255))  # glClearColor(0.75, 0.73, 1, 1).
 
 
 def barycentric(x, y, vertices):

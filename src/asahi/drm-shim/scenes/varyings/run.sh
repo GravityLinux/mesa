@@ -3,7 +3,7 @@
 # Reset and chainload m1n1 before invoking.
 set -eu
 if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
-    echo "usage: $0 NEW_OUTPUT_DIRECTORY [seven|eight|nine|twelve|perspective|clipped|depth-clipped|procedural|zero]" >&2
+    echo "usage: $0 NEW_OUTPUT_DIRECTORY [seven|eight|nine|twelve|16|24|32|linear|flat|mixed|mixed-clipped|integer|perspective|clipped|depth-clipped|procedural|zero]" >&2
     exit 2
 fi
 scene_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -13,7 +13,11 @@ fragment=fragment.glsl
 components=9
 perspective=
 clipped=
+interpolation=
 case "$mode" in
+    16|24|32) vertex=vertex-$mode.glsl; fragment=fragment-$mode.glsl; components=$mode; perspective=--perspective-varyings ;;
+    linear|flat|mixed|integer) vertex=vertex-$mode.glsl; fragment=fragment-$mode.glsl; interpolation="--interpolation $mode" ;;
+    mixed-clipped) vertex=vertex-mixed-clipped.glsl; fragment=fragment-mixed.glsl; interpolation="--interpolation mixed"; clipped=--clipped-varyings ;;
     nine) ;;
     seven) fragment=fragment-seven.glsl; components=7 ;;
     eight) fragment=fragment-eight.glsl; components=8 ;;
@@ -31,6 +35,9 @@ if [ -e "$output_dir/render-0000-attachment-0.bin" ]; then
     echo "output directory already contains a render capture" >&2
     exit 2
 fi
+if [ -n "$interpolation" ]; then
+    export MESA_EXTENSION_OVERRIDE=GL_NV_shader_noperspective_interpolation
+fi
 export T8132_GLES_VERTEX_SOURCE=$scene_dir/$vertex
 export T8132_GLES_FRAGMENT_SOURCE=$scene_dir/$fragment
 export T8132_GLES_FRAMES=2
@@ -46,7 +53,7 @@ export G16G_RENDER_ATTACHMENT_DUMP=$output_dir
 for frame in 0 1; do
     capture=$(printf 'render-%04d-attachment-0.bin' "$frame")
     python3 "$scene_dir/../mesh/readback.py" "$output_dir/$capture" \
-        --mode quad --varyings "$components" $perspective $clipped --frame "$frame" \
+        --mode quad --varyings "$components" $perspective $clipped $interpolation --frame "$frame" \
         --output "$output_dir/frame-$frame"
 done
 cmp "$output_dir/render-0000-attachment-0.bin" "$output_dir/render-0001-attachment-0.bin"

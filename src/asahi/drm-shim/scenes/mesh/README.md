@@ -61,7 +61,7 @@ Validated on T8132 M4 with standalone m1n1 on 2026-09-04:
   hashes, as does the 100-triangle procedural scene. All 188 compiler tests pass.
 
 Current limits: FP32 vertex formats with one to four channels, aligned offsets
-and strides; up to four buffer arguments per stage (vertex elements and UBOs
+and strides; up to 32 buffer table entries per stage (vertex buffers and UBOs
 share the VS budget); 32 buffer/depth-state draws per batch. Index buffers use
 the fixed USC aperture and support u16/u32 triangle lists. Primitive restart,
 indirect draws, instanced attributes, other vertex formats, general graphics

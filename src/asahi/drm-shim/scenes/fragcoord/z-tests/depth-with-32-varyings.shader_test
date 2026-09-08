@@ -1,0 +1,50 @@
+[require]
+GLSL >= 1.10
+
+[vertex shader]
+attribute vec4 vertex; attribute float value;
+varying vec4 v0;
+varying vec4 v1;
+varying vec4 v2;
+varying vec4 v3;
+varying vec4 v4;
+varying vec4 v5;
+varying vec4 v6;
+varying vec4 v7;
+void main() { gl_Position=vertex;
+v0=vec4(1.0,2.0,3.0,4.0)*value;
+v1=vec4(5.0,6.0,7.0,8.0)*value;
+v2=vec4(9.0,10.0,11.0,12.0)*value;
+v3=vec4(13.0,14.0,15.0,16.0)*value;
+v4=vec4(17.0,18.0,19.0,20.0)*value;
+v5=vec4(21.0,22.0,23.0,24.0)*value;
+v6=vec4(25.0,26.0,27.0,28.0)*value;
+v7=vec4(29.0,30.0,31.0,32.0)*value;
+}
+
+[fragment shader]
+varying vec4 v0;
+varying vec4 v1;
+varying vec4 v2;
+varying vec4 v3;
+varying vec4 v4;
+varying vec4 v5;
+varying vec4 v6;
+varying vec4 v7;
+void main() { float a=dot(v0,vec4(1.0))+dot(v1,vec4(1.0))+dot(v2,vec4(1.0))+dot(v3,vec4(1.0))+dot(v4,vec4(1.0))+dot(v5,vec4(1.0))+dot(v6,vec4(1.0))+dot(v7,vec4(1.0)); gl_FragColor=vec4(gl_FragCoord.z,a/528.0,gl_FragCoord.w*0.25,1); }
+
+[vertex data]
+vertex/float/4 value/float/1
+-1 -1 -.8 1 .2
+6 -2 1.2 2 .6
+-4 12 .8 4 .9
+
+[test]
+clear color 0 0 0 0
+clear
+draw arrays GL_TRIANGLES 0 3
+probe rgba 25 25 0.1612 0.2204272363150868 0.23406249999999998 1
+probe rgba 125 125 0.4012 0.33715846994535525 0.17156249999999998 1
+probe rgba 200 200 0.5812 0.5015037593984962 0.12468749999999999 1
+probe rgba 240 10 0.4472 0.33428571428571435 0.18593749999999998 1
+probe rgba 10 240 0.35519999999999996 0.3405566600397615 0.15718749999999998 1
