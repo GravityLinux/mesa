@@ -26,6 +26,7 @@
 #include "util/u_sampler.h"
 #include "util/u_surface.h"
 #include "agx_state.h"
+#include "agx_apple9.h"
 #include "glsl_types.h"
 #include "nir.h"
 #include "nir_builder_opcodes.h"
@@ -534,7 +535,11 @@ agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
    agx_legalize_compression(ctx, agx_resource(info->src.resource),
                             info->src.format);
 
-   if (asahi_compute_blit_supported(info)) {
+   bool apple9 = agx_apple9_direct_render_enabled(agx_device(pipe->screen));
+   if (apple9 && util_try_blit_via_copy_region(pipe, info, false))
+      return;
+
+   if (!apple9 && asahi_compute_blit_supported(info)) {
       asahi_compute_blit(pipe, info, &ctx->compute_blitter);
       return;
    }
@@ -620,6 +625,15 @@ agx_resource_copy_region(struct pipe_context *pctx, struct pipe_resource *dst,
                          unsigned dstz, struct pipe_resource *src,
                          unsigned src_level, const struct pipe_box *src_box)
 {
+   /* The Apple8 precompiled copy kernels and compute image blitter do not
+    * implement the Apple9 execution ABI. Gallium's mapped copy preserves the
+    * normal synchronization, tiling and dirty-tracking contracts. */
+   if (agx_apple9_direct_render_enabled(agx_device(pctx->screen))) {
+      util_resource_copy_region(pctx, dst, dst_level, dstx, dsty, dstz, src,
+                                 src_level, src_box);
+      return;
+   }
+
    if (dst->target == PIPE_BUFFER && src->target == PIPE_BUFFER) {
       struct agx_batch *batch = agx_get_compute_batch(agx_context(pctx));
       agx_batch_init_state(batch);
