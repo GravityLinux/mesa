@@ -8,8 +8,9 @@ firmware backend.
 
 Mesa now compiles both compute and a bounded vertex/fragment subset through
 semantic Apple9 IR. The graphics path supports procedural vertex-ID geometry,
-FP32 vertex elements, position and up to twelve smooth user components across
-multiple locations, perspective interpolation, arithmetic, indexed triangles,
+FP32 vertex elements, position and up to 32 user components across
+multiple locations, smooth/linear/flat interpolation, integer flat inputs,
+arithmetic, indexed triangles,
 2D fragment sampling with filtering/mipmaps and structured control flow,
 render-to-texture, and one packed RGBA8 color output.
 See [sampled textures](scenes/textures/README.md) and [varying linkage](scenes/varyings/README.md). Unsupported graphics inputs fail compilation.
@@ -504,14 +505,29 @@ See `scenes/mesh/README.md` for reproduction and limits. The four-buffer u32
 quad, depth-state controls and rotating shared-vertex cube pass pixel checks.
 The earlier uniform and 100-triangle scenes retain their original hashes.
 
+### Shader-loaded buffer address tables
+
+The four-direct-buffer graphics limit is superseded by
+[shader-loaded address tables](scenes/buffers/README.md). Each stage receives one
+root pointer and supports up to 32 live table entries. Hardware tests exercise
+32 VS resources and 16 FS resources together, including per-draw rebinding.
+The existing opaque launchers are unchanged; generated mains perform the pointer
+loads and indirect data accesses. API uniform-block limits remain separate.
+
 ### Generalized VS/FS linkage (EXP-M4-59)
 
 See [the varying tests](scenes/varyings/README.md) for the scalar/component map,
-coefficient-aware perspective interpolation contract, and reproduction. The runtime
-preload is now `render_buffers_varyings12_launch.bin`; its complete vertex
-launcher handles sixteen retained publications. The prior four-buffer blob
-remains available as the historical EXP-M4-58 artifact. Linkage, shader keys,
-and coefficient/state tables are generated from the current shader interface.
+coefficient-aware perspective interpolation contract, and reproduction. The
+September 7 expansion supports 32 user scalars and mixed smooth, center-linear,
+and flat inputs. Integer flat values use bit-preserving exports and asynchronous
+coefficient reads integrated with the shared scoreboard allocator.
+
+The runtime preload is `render_buffers_varyings32_launch.bin`: a complete opaque
+256-byte VS launcher from the authored larger-interface probe, followed by the
+existing 192-byte FS launcher. Earlier launchers remain historical artifacts.
+Linkage, shader keys, and per-draw coefficient/state tables are generated from
+the shader interface. See `tmp/apple9-exports/RESULTS.md` in the Asahi workspace
+for clean-room provenance, before/after failures, and hardware reports.
 
 ### Multiple graphics pipelines in one batch
 
