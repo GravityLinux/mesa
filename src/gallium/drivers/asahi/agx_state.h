@@ -980,6 +980,13 @@ struct agx_resource {
 
    struct renderonly_scanout *scanout;
 
+   /* Linear external storage for a tiled render target. The direct Apple9
+    * store path writes tiled images; sharing resolves into this resource. */
+   struct pipe_resource *linear_export;
+   /* Cleared by CPU/GPU writes; repeated sharing of unchanged contents can
+    * reuse the previous tiled-to-linear resolve. */
+   bool linear_export_valid;
+
    BITSET_DECLARE(data_valid, PIPE_MAX_TEXTURE_LEVELS);
 
    struct ail_layout layout;

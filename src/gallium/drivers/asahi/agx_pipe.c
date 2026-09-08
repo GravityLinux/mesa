@@ -252,6 +252,8 @@ agx_resource_get_handle(struct pipe_screen *pscreen, struct pipe_context *ctx,
    }
 
    struct agx_resource *rsrc = agx_resource(cur);
+   if (rsrc->linear_export)
+      rsrc = agx_resource(rsrc->linear_export);
 
    if (handle->type == WINSYS_HANDLE_TYPE_KMS && dev->ro) {
       rsrc_debug(rsrc, "Get handle: %p (KMS RO)\n", rsrc);
@@ -307,6 +309,8 @@ agx_resource_get_param(struct pipe_screen *pscreen, struct pipe_context *pctx,
 {
    struct agx_resource *rsrc =
       (struct agx_resource *)util_resource_at_index(prsc, plane);
+   if (rsrc->linear_export)
+      rsrc = agx_resource(rsrc->linear_export);
 
    switch (param) {
    case PIPE_RESOURCE_PARAM_STRIDE:
@@ -511,6 +515,15 @@ agx_resource_create_with_modifiers(struct pipe_screen *screen,
       return NULL;
    }
 
+   /* The direct Apple9 attachment descriptor currently describes tiled
+    * storage. Render to a properly sized tiled BO and resolve to the requested
+    * linear layout when handing the image to another device or compositor. */
+   bool linear_export = agx_apple9_direct_render_enabled(dev) &&
+                        nresource->modifier == DRM_FORMAT_MOD_LINEAR &&
+                        (templ->bind & PIPE_BIND_RENDER_TARGET);
+   if (linear_export)
+      nresource->modifier = DRM_FORMAT_MOD_APPLE_GPU_TILED;
+
    /* If there's only 1 layer and there's no compression, there's no harm in
     * inferring the shader image flag. Do so to avoid reallocation in case the
     * resource is later used as an image.
@@ -608,6 +621,19 @@ agx_resource_create_with_modifiers(struct pipe_screen *screen,
       }
    }
 
+   if (linear_export) {
+      struct pipe_resource external = *templ;
+      external.bind &= ~PIPE_BIND_RENDER_TARGET;
+      const uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
+      nresource->linear_export = agx_resource_create_with_modifiers(
+         screen, &external, &modifier, 1);
+      if (!nresource->linear_export) {
+         agx_bo_unreference(dev, nresource->bo);
+         FREE(nresource);
+         return NULL;
+      }
+   }
+
    agx_resource_debug(nresource, "New: ");
    return &nresource->base;
 }
@@ -633,6 +659,7 @@ agx_resource_destroy(struct pipe_screen *screen, struct pipe_resource *prsrc)
    if (rsrc->scanout)
       renderonly_scanout_destroy(rsrc->scanout, agx_screen->dev.ro);
 
+   pipe_resource_reference(&rsrc->linear_export, NULL);
    agx_bo_unreference(&agx_screen->dev, rsrc->bo);
    FREE(rsrc);
 }
@@ -1086,8 +1113,10 @@ agx_transfer_unmap(struct pipe_context *pctx, struct pipe_transfer *transfer)
    /* The level we wrote is now initialized. We do this at the end so
     * blit_from_staging can avoid reloading existing contents.
     */
-   if (transfer->usage & PIPE_MAP_WRITE)
+   if (transfer->usage & PIPE_MAP_WRITE) {
       BITSET_SET(rsrc->data_valid, transfer->level);
+      rsrc->linear_export_valid = false;
+   }
 
    /* Free the transfer */
    free(trans->map);
@@ -1197,6 +1226,7 @@ transition_resource(struct pipe_context *pctx, struct agx_resource *rsrc,
    rsrc->layout = new_res->layout;
    rsrc->modifier = new_res->modifier;
    rsrc->bo = new_res->bo;
+   rsrc->linear_export_valid = false;
    new_res->bo = old;
 
    /* Free the new resource, which now owns the old BO */
@@ -1223,6 +1253,19 @@ static void
 agx_flush_resource(struct pipe_context *pctx, struct pipe_resource *pres)
 {
    struct agx_resource *rsrc = agx_resource(pres);
+
+   if (rsrc->linear_export) {
+      if (rsrc->linear_export_valid)
+         return;
+
+      struct pipe_box box;
+      u_box_3d(0, 0, 0, pres->width0, pres->height0,
+               util_num_layers(pres, 0), &box);
+      agx_resource_copy_region(pctx, rsrc->linear_export, 0, 0, 0, 0,
+                               pres, 0, &box);
+      rsrc->linear_export_valid = true;
+      return;
+   }
 
    /* flush_resource is used to prepare resources for sharing, so if this is not
     * already a shareabe resource, make it so

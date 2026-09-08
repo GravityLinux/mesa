@@ -610,6 +610,7 @@ agx_batch_writes_internal(struct agx_batch *batch, struct agx_resource *rsrc,
    agx_flush_readers_except(ctx, rsrc, batch, "Write from other batch", false);
 
    BITSET_SET(rsrc->data_valid, level);
+   rsrc->linear_export_valid = false;
 
    /* Nothing to do if we're already writing */
    if (writer == batch)
