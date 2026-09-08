@@ -2882,6 +2882,8 @@ agx_init_meta_shaders(struct agx_context *ctx)
 static void
 agx_destroy_compute_blitter(struct pipe_context *ctx, struct asahi_blitter *bl)
 {
+   if (bl->detile_cs)
+      ctx->delete_compute_state(ctx, bl->detile_cs);
    hash_table_foreach(bl->blit_cs, ent) {
       ctx->delete_compute_state(ctx, ent->data);
    }

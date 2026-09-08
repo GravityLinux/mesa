@@ -615,6 +615,7 @@ DERIVE_HASH_TABLE(asahi_blit_key);
 struct asahi_blitter {
    bool active;
    struct hash_table *blit_cs;
+   void *detile_cs;
 
    /* [filter] */
    void *sampler[2];
