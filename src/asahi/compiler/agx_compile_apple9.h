@@ -74,8 +74,7 @@ bool agx_compile_apple9_fragment(nir_shader *nir,
 #define AGX_APPLE9_SAMPLER_BIAS_COUNT 32
 #define AGX_APPLE9_GRAPHICS_SYSVAL_SIZE (16 + AGX_APPLE9_SAMPLER_BIAS_COUNT * sizeof(float))
 
-/* Independent RGB/alpha ADD equations with ONE, ZERO, SRC_ALPHA and
- * INV_SRC_ALPHA factors, plus the RGBA write mask. */
+/* Standard independent RGB/alpha blending, plus the RGBA write mask. */
 struct agx_apple9_blend {
    uint8_t rgb_src, rgb_dst, alpha_src, alpha_dst;
    uint8_t rgb_func, alpha_func, colormask, unsupported;

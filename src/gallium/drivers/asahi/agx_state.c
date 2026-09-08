@@ -5735,7 +5735,11 @@ retry_apple9_batch:
       struct agx_blend_standard blend =
          agx_unpack_blend_standard(ctx->blend->key.rt[0].mode);
       record->uses_discard = pipeline.fragment.uses_discard;
-      record->reads_tile = blend.rgb_dst_factor != PIPE_BLENDFACTOR_ZERO ||
+      record->reads_tile = blend.rgb_func != PIPE_BLEND_ADD ||
+                           blend.alpha_func != PIPE_BLEND_ADD ||
+                           blend.rgb_src_factor != PIPE_BLENDFACTOR_ONE ||
+                           blend.alpha_src_factor != PIPE_BLENDFACTOR_ONE ||
+                           blend.rgb_dst_factor != PIPE_BLENDFACTOR_ZERO ||
                            blend.alpha_dst_factor != PIPE_BLENDFACTOR_ZERO ||
                            ctx->blend->key.rt[0].colormask != 15;
       /* Scissor enable is independent of depth testing. */

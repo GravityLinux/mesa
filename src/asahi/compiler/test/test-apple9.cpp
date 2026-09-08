@@ -6965,6 +6965,43 @@ TEST(Apple9Allocator, RejectsCrossNamespaceOperands)
    }
 }
 
+TEST(Apple9Compiler, StandardBlendEquationsAndFactors)
+{
+   const unsigned factors[] = {
+      PIPE_BLENDFACTOR_ZERO, PIPE_BLENDFACTOR_ONE,
+      PIPE_BLENDFACTOR_SRC_COLOR, PIPE_BLENDFACTOR_INV_SRC_COLOR,
+      PIPE_BLENDFACTOR_DST_COLOR, PIPE_BLENDFACTOR_INV_DST_COLOR,
+      PIPE_BLENDFACTOR_SRC_ALPHA, PIPE_BLENDFACTOR_INV_SRC_ALPHA,
+      PIPE_BLENDFACTOR_DST_ALPHA, PIPE_BLENDFACTOR_INV_DST_ALPHA,
+      PIPE_BLENDFACTOR_CONST_COLOR, PIPE_BLENDFACTOR_INV_CONST_COLOR,
+      PIPE_BLENDFACTOR_CONST_ALPHA, PIPE_BLENDFACTOR_INV_CONST_ALPHA,
+      PIPE_BLENDFACTOR_SRC_ALPHA_SATURATE,
+   };
+   for (unsigned factor : factors) {
+      for (unsigned equation = PIPE_BLEND_ADD; equation <= PIPE_BLEND_MAX; ++equation) {
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_FRAGMENT, &agx_nir_options, "standard_blend");
+         nir_store_output(&b, nir_imm_vec4(&b, .2, .4, .6, .8), nir_imm_int(&b, 0),
+            .write_mask = 15, .src_type = nir_type_float32,
+            .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+         b.shader->info.io_lowered = true;
+         agx_apple9_blend blend = {};
+         blend.rgb_src = blend.alpha_src = factor;
+         blend.rgb_dst = blend.alpha_dst = PIPE_BLENDFACTOR_ONE;
+         blend.rgb_func = blend.alpha_func = equation;
+         blend.colormask = 15;
+         agx_apple9_varying_layout varyings = {};
+         agx_shader_part out = {};
+         const char *reason = nullptr;
+         ASSERT_TRUE(agx_compile_apple9_fragment_blend(
+            b.shader, &varyings, &blend, &out, &reason))
+            << "factor=" << factor << " equation=" << equation << " " << reason;
+         free(out.binary);
+         ralloc_free(b.shader);
+      }
+   }
+}
+
 TEST(Apple9Allocator, TexturePublicationsHaveIndependentStorageAndPendingLifetime)
 {
    for (unsigned placement : {0u, 1u, 2u}) {

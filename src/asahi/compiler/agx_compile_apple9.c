@@ -8,6 +8,7 @@
 
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
+#include "compiler/nir/nir_lower_blend.h"
 #include "util/format/u_format.h"
 #include "util/u_dynarray.h"
 #include "gallium/include/pipe/p_defines.h"
@@ -4153,6 +4154,19 @@ struct apple9_color_lower {
    bool valid;
 };
 
+static bool
+apple9_lower_blend_constant(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_blend_const_color_rgba)
+      return false;
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *value = nir_load_ubo(b, 4, 32,
+      nir_imm_int(b, AGX_APPLE9_GRAPHICS_SYSVAL_BINDING), nir_imm_int(b, 0),
+      .align_mul = 16, .range = 16);
+   nir_def_rewrite_uses(&intr->def, value);
+   nir_instr_remove(&intr->instr);
+   return true;
+}
 
 /* Sampler bias is per-draw state, independent of a shader's explicit bias.
  * Keep this in FP32, matching the rest of the Apple9 texture operands. */
@@ -4193,15 +4207,28 @@ apple9_lower_sampler_bias(nir_builder *b, nir_instr *instr, void *data)
    return true;
 }
 
-static nir_def *
-apple9_blend_factor(nir_builder *b, unsigned factor, nir_def *alpha)
+static bool
+apple9_blend_factor_supported(unsigned factor)
 {
    switch (factor) {
-   case PIPE_BLENDFACTOR_ZERO: return nir_imm_float(b, 0);
-   case PIPE_BLENDFACTOR_ONE: return nir_imm_float(b, 1);
-   case PIPE_BLENDFACTOR_SRC_ALPHA: return alpha;
-   case PIPE_BLENDFACTOR_INV_SRC_ALPHA: return nir_fsub(b, nir_imm_float(b, 1), alpha);
-   default: return NULL;
+   case PIPE_BLENDFACTOR_ZERO:
+   case PIPE_BLENDFACTOR_ONE:
+   case PIPE_BLENDFACTOR_SRC_COLOR:
+   case PIPE_BLENDFACTOR_INV_SRC_COLOR:
+   case PIPE_BLENDFACTOR_DST_COLOR:
+   case PIPE_BLENDFACTOR_INV_DST_COLOR:
+   case PIPE_BLENDFACTOR_SRC_ALPHA:
+   case PIPE_BLENDFACTOR_INV_SRC_ALPHA:
+   case PIPE_BLENDFACTOR_DST_ALPHA:
+   case PIPE_BLENDFACTOR_INV_DST_ALPHA:
+   case PIPE_BLENDFACTOR_CONST_COLOR:
+   case PIPE_BLENDFACTOR_INV_CONST_COLOR:
+   case PIPE_BLENDFACTOR_CONST_ALPHA:
+   case PIPE_BLENDFACTOR_INV_CONST_ALPHA:
+   case PIPE_BLENDFACTOR_SRC_ALPHA_SATURATE:
+      return true;
+   default:
+      return false;
    }
 }
 
@@ -4222,37 +4249,37 @@ apple9_lower_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    }
    b->cursor = nir_before_instr(&intr->instr);
    const struct agx_apple9_blend *blend = lower->blend;
-   nir_def *dst = NULL, *factors[4] = {0};
+   nir_def *color = intr->src[0].ssa;
    if (blend) {
-      if (blend->unsupported || blend->rgb_func != PIPE_BLEND_ADD ||
-          blend->alpha_func != PIPE_BLEND_ADD) {
+      if (blend->unsupported || blend->rgb_func > PIPE_BLEND_MAX ||
+          blend->alpha_func > PIPE_BLEND_MAX ||
+          !apple9_blend_factor_supported(blend->rgb_src) ||
+          !apple9_blend_factor_supported(blend->rgb_dst) ||
+          !apple9_blend_factor_supported(blend->alpha_src) ||
+          !apple9_blend_factor_supported(blend->alpha_dst)) {
          lower->valid = false;
          return false;
       }
-      nir_def *alpha = nir_fsat(b, nir_channel(b, intr->src[0].ssa, 3));
-      unsigned requested[] = {blend->rgb_src, blend->rgb_dst,
-                              blend->alpha_src, blend->alpha_dst};
-      for (unsigned i = 0; i < 4; ++i) {
-         factors[i] = apple9_blend_factor(b, requested[i], alpha);
-         if (!factors[i]) { lower->valid = false; return false; }
-      }
-      if (blend->rgb_dst != PIPE_BLENDFACTOR_ZERO ||
-          blend->alpha_dst != PIPE_BLENDFACTOR_ZERO || blend->colormask != 15)
-         dst = nir_load_output(b, 1, 32, nir_imm_int(b, 0),
-            .dest_type = nir_type_uint32,
-            .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+      nir_def *packed_dst = nir_load_output(b, 1, 32, nir_imm_int(b, 0),
+         .dest_type = nir_type_uint32,
+         .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+      nir_def *channels[4];
+      for (unsigned c = 0; c < 4; ++c)
+         channels[c] = nir_fmul_imm(b, nir_u2f32(b,
+            nir_iand_imm(b, nir_ushr_imm(b, packed_dst, 8*c), 255)), 1.0/255.0);
+      nir_def *dst = nir_vec(b, channels, 4);
+      const nir_lower_blend_rt rt = {
+         .format = PIPE_FORMAT_R8G8B8A8_UNORM,
+         .rgb = {blend->rgb_func, blend->rgb_src, blend->rgb_dst},
+         .alpha = {blend->alpha_func, blend->alpha_src, blend->alpha_dst},
+         .colormask = blend->colormask,
+      };
+      color = nir_color_blend(b, color, NULL, dst, &rt, false);
+      color = nir_color_mask(b, color, dst, blend->colormask);
    }
    nir_def *packed = nir_imm_int(b, 0);
    for (unsigned c = 0; c < 4; ++c) {
-      nir_def *v = nir_channel(b, intr->src[0].ssa, c);
-      if (blend) {
-         nir_def *d = dst ? nir_fmul_imm(b, nir_u2f32(b,
-            nir_iand_imm(b, nir_ushr_imm(b, dst, 8*c), 255)), 1.0/255.0)
-            : nir_imm_float(b, 0);
-         v = (blend->colormask & (1 << c))
-            ? nir_fadd(b, nir_fmul(b, nir_fsat(b, v), factors[c == 3 ? 2 : 0]),
-                          nir_fmul(b, d, factors[c == 3 ? 3 : 1])) : d;
-      }
+      nir_def *v = nir_channel(b, color, c);
       v = nir_fmin(b, nir_fmax(b, v, nir_imm_float(b, 0)), nir_imm_float(b, 1));
       v = nir_f2u32(b, nir_fround_even(b, nir_fmul_imm(b, v, 255)));
       packed = nir_ior(b, packed, nir_ishl_imm(b, v, 8 * c));
@@ -4573,10 +4600,12 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
                                  nir_metadata_control_flow, &color);
       if (!color.valid) {
          if (reason)
-            *reason = "Apple9 render requires FP32 vec4 RT0 and supported ADD blending";
+            *reason = "Apple9 render requires FP32 vec4 RT0 and standard single-source blending";
          return false;
       }
    }
+   nir_shader_intrinsics_pass(nir, apple9_lower_blend_constant,
+                              nir_metadata_control_flow, NULL);
    nir_opt_dce(nir);
    nir_lower_samplers(nir);
    /* Compatibility GL supplies projective texture coordinates. Reuse the
