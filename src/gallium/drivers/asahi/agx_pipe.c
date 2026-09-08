@@ -2553,6 +2553,11 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
       /* Do not inherit capabilities whose Apple8 shader/attachment paths are
        * unavailable to this backend. Version overrides belong in development
        * harnesses, not in capabilities presented to applications. */
+      /* Public contexts expose the current graphics frontend contract.
+       * Internal NIR compute remains available for resource copies. */
+      caps->glsl_feature_level = caps->glsl_feature_level_compatibility = 110;
+      caps->essl_feature_level = 100;
+      caps->robust_buffer_access_behavior = false;
       caps->max_render_targets = caps->fbfetch = 1;
       caps->max_dual_source_render_targets = 0;
       caps->shader_stencil_export = false;
