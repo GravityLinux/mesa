@@ -5742,11 +5742,24 @@ retry_apple9_batch:
                            blend.rgb_dst_factor != PIPE_BLENDFACTOR_ZERO ||
                            blend.alpha_dst_factor != PIPE_BLENDFACTOR_ZERO ||
                            ctx->blend->key.rt[0].colormask != 15;
-      /* Scissor enable is independent of depth testing. */
-      record->depth_control = (depth_enabled ? 0x200 : 0x40200) | (1u << 16);
-      record->depth_face = 0xf00 |
+      /* Fragment control bits18/19 enable stencil/two-sided stencil, not
+       * depth. Depth disable is ALWAYS plus disabled writes in each face.
+       * Authored Metal captures match the shared fragment stencil encoding. */
+      bool stencil_enabled = ctx->zs->base.stencil[0].enabled &&
+                             batch->key.zsbuf.texture;
+      record->depth_control = 0x200 | (1u << 16) |
+                              (stencil_enabled ? (3u << 18) : 0);
+      record->raster_control = ctx->rast->base.cull_face |
+                               (ctx->rast->base.front_ccw ? 1u << 16 : 0);
+      uint32_t depth_face = 0xf00 |
          ((depth_enabled ? ctx->zs->base.depth_func : PIPE_FUNC_ALWAYS) << 24) |
          ((depth_enabled && ctx->zs->base.depth_writemask) ? 0 : (1 << 21));
+      bool two_sided = ctx->zs->base.stencil[1].enabled;
+      for (unsigned face = 0; face < 2; ++face)
+         record->depth_face[face] = depth_face |
+            (ctx->stencil_ref.ref_value[two_sided ? face : 0] & 0xff);
+      memcpy(&record->stencil[0], &ctx->zs->front_stencil, 4);
+      memcpy(&record->stencil[1], &ctx->zs->back_stencil, 4);
       for (unsigned stage = 0; stage < 2; ++stage) {
          const struct agx_apple9_render_stage *rs =
             stage ? &pipeline.fragment : &pipeline.vertex;

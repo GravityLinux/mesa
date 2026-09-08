@@ -3243,9 +3243,15 @@ agx_apple9_render_cache_upload_uniforms(
        * triangle merging so shader coverage controls late tests. */
       if (draws[i].uses_discard)
          apple9_put_u32(group + 0x50, apple9_get_u32(group + 0x50) | 0x44000000u);
+      /* Native raster packet: cull front/back bits0/1, front winding bit16.
+       * Preserve the independently configured clipping/provoking fields. */
+      apple9_put_u32(group + 0x70,
+         (apple9_get_u32(group + 0x70) & ~0x10003u) | draws[i].raster_control);
       apple9_put_u32(group + 0x34, draws[i].depth_control);
-      apple9_put_u32(group + 0x38, draws[i].depth_face);
-      apple9_put_u32(group + 0x40, draws[i].depth_face);
+      apple9_put_u32(group + 0x38, draws[i].depth_face[0]);
+      apple9_put_u32(group + 0x3c, draws[i].stencil[0]);
+      apple9_put_u32(group + 0x40, draws[i].depth_face[1]);
+      apple9_put_u32(group + 0x44, draws[i].stencil[1]);
       memcpy(ppp + 0xc0, state + AGX_APPLE9_VIEWPORT_OFFSET + 0x900, 0x30);
       /* Region clip is tile-granular. The scissor array supplies exact pixel
        * bounds, including empty rectangles and partial edge tiles. */

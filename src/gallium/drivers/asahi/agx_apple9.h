@@ -87,7 +87,8 @@ struct agx_apple9_uniform_draw {
    uint64_t vertex_table;
    uint64_t fragment_table;
    uint64_t texture_table, sampler_table;
-   uint32_t depth_control, depth_face;
+   uint32_t depth_control, depth_face[2], stencil[2];
+   uint32_t raster_control;
    float viewport_translate[3], viewport_scale[3];
    uint32_t scissor_index;
    uint16_t scissor_min[2], scissor_max[2];
