@@ -2275,6 +2275,13 @@ agx_init_shader_caps(struct pipe_screen *pscreen)
       caps->max_shader_buffers = PIPE_MAX_SHADER_BUFFERS;
 
       caps->max_shader_images = PIPE_MAX_SHADER_IMAGES;
+      if (apple9_graphics) {
+         caps->max_outputs = i == MESA_SHADER_FRAGMENT ? 1 : 8;
+         caps->max_inputs = i == MESA_SHADER_FRAGMENT ? 8 : 16;
+         caps->max_shader_buffers = caps->max_shader_images = 0;
+         caps->max_texture_samplers = caps->max_sampler_views =
+            i == MESA_SHADER_FRAGMENT ? 16 : 0;
+      }
    }
 }
 
@@ -2318,6 +2325,7 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
    struct pipe_caps *caps = (struct pipe_caps *)&pscreen->caps;
    struct agx_screen *screen = agx_screen(pscreen);
    const bool apple9_compute = agx_apple9_compute_enabled(&screen->dev);
+   const bool apple9_render = agx_apple9_direct_render_enabled(&screen->dev);
 
    u_init_pipe_screen_caps(pscreen, 1);
 
@@ -2383,12 +2391,12 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
    caps->seamless_cube_map_per_texture = true;
    caps->texture_buffer_objects = true;
    caps->null_textures = true;
-   caps->texture_multisample = true;
+   caps->texture_multisample = !apple9_render;
    caps->image_load_formatted = true;
    caps->image_store_formatted = true;
    caps->compute = true;
    caps->int64 = true;
-   caps->sample_shading = true;
+   caps->sample_shading = !apple9_render;
    caps->start_instance = true;
    caps->draw_parameters = true;
    caps->multi_draw_indirect = true;
@@ -2469,7 +2477,7 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
    caps->min_texture_gather_offset = -8;
    caps->max_texture_gather_offset = 7;
    caps->draw_indirect = true;
-   caps->texture_query_samples = true;
+   caps->texture_query_samples = !apple9_render;
    caps->texture_query_lod = true;
    caps->texture_shadow_lod = true;
 
@@ -2533,12 +2541,37 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
 
    caps->max_point_size = caps->max_point_size_aa = 511.95f;
 
+   /* Native sampler descriptors support logarithmic anisotropy up to 16x. */
    caps->max_texture_anisotropy = 16.0;
 
    caps->max_texture_lod_bias = 16.0; /* arbitrary */
 
    /* Up to 16 bytes are accelerated */
-   caps->hw_clear_buffer_sizes = 1 | 2 | 4 | 8 | 16;
+   caps->hw_clear_buffer_sizes = apple9_render ? 0 : (1 | 2 | 4 | 8 | 16);
+
+   if (apple9_render) {
+      /* Do not inherit capabilities whose Apple8 shader/attachment paths are
+       * unavailable to this backend. Version overrides belong in development
+       * harnesses, not in capabilities presented to applications. */
+      caps->max_render_targets = caps->fbfetch = 1;
+      caps->max_dual_source_render_targets = 0;
+      caps->shader_stencil_export = false;
+      caps->framebuffer_no_attachment = false;
+      caps->texture_mirror_clamp_to_edge = false;
+      caps->texture_buffer_objects = false;
+      caps->max_texel_buffer_elements = 0;
+      caps->max_texture_array_layers = 0;
+      caps->max_texture_cube_levels = 0;
+      caps->max_texture_3d_levels = 0;
+      caps->cube_map_array = false;
+      caps->seamless_cube_map = false;
+      caps->seamless_cube_map_per_texture = false;
+      caps->image_load_formatted = false;
+      caps->image_store_formatted = false;
+      caps->max_texture_gather_components = 0;
+      caps->max_varyings = 8;
+      caps->doubles = false;
+   }
 }
 
 static bool
@@ -2551,6 +2584,13 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
           target == PIPE_TEXTURE_2D_ARRAY || target == PIPE_TEXTURE_RECT ||
           target == PIPE_TEXTURE_3D || target == PIPE_TEXTURE_CUBE ||
           target == PIPE_TEXTURE_CUBE_ARRAY);
+
+   /* The compatibility attachment and sampling paths are single-sample.
+    * Reject MSAA configurations before applications allocate surfaces or
+    * the state tracker creates resolve shaders that this backend cannot run. */
+   if (agx_apple9_direct_render_enabled(agx_device(pscreen)) &&
+       (sample_count > 1 || storage_sample_count > 1))
+      return false;
 
    if (sample_count > 1 && sample_count != 4 && sample_count != 2)
       return false;
@@ -2573,15 +2613,19 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
    if (format == PIPE_FORMAT_NONE)
       return true;
 
-   /* The Apple9 compatibility attachment path stores BGRA8. Advertising
-    * RGBA8 rendering makes render-to-texture swap red/blue. Let the state
-    * tracker choose its normal BGRA8 backing/conversion for GL_RGBA8 until
-    * attachment format programming is generalized. Sampling RGBA8 is valid. */
-   if (agx_apple9_direct_render_enabled(agx_device(pscreen)) &&
-       (usage & PIPE_BIND_RENDER_TARGET) &&
-       (format == PIPE_FORMAT_R8G8B8A8_UNORM ||
-        format == PIPE_FORMAT_R8G8B8X8_UNORM))
-      return false;
+   if (agx_apple9_direct_render_enabled(agx_device(pscreen))) {
+      if (usage & PIPE_BIND_SHADER_IMAGE)
+         return false;
+      if ((usage & PIPE_BIND_RENDER_TARGET) &&
+          (target != PIPE_TEXTURE_2D ||
+           (format != PIPE_FORMAT_B8G8R8A8_UNORM &&
+            format != PIPE_FORMAT_B8G8R8X8_UNORM)))
+         return false;
+      if ((usage & PIPE_BIND_SAMPLER_VIEW) &&
+          (target != PIPE_TEXTURE_2D ||
+           !agx_apple9_texture_format_supported(format)))
+         return false;
+   }
 
    if (usage & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW |
                 PIPE_BIND_SHADER_IMAGE)) {

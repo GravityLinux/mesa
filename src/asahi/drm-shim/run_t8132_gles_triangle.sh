@@ -54,6 +54,12 @@ uv run --python 3.14 --with-requirements "$m1n1_root/requirements-agx.txt" sh -c
     # The bounded G16G backend executes render commands today, not the Mesa
     # compute conversion/decompression command used by glReadPixels.
     export ASAHI_MESA_DEBUG=${ASAHI_MESA_DEBUG:-nocompress}
+    # This development fixture exercises a selected GLES3 subset. The Apple9
+    # backend does not yet meet every requirement for a conformant ES3 context.
+    export MESA_GLES_VERSION_OVERRIDE=${MESA_GLES_VERSION_OVERRIDE:-3.0}
+    if [ -n "${T8132_DESKTOP_GL:-}" ]; then
+        export MESA_GL_VERSION_OVERRIDE=${MESA_GL_VERSION_OVERRIDE:-3.3COMPAT}
+    fi
     if [ "${T8132_GLES_READBACK:-0}" = 1 ]; then
         exec "$M1N1_SHIM_BINARY" "$M1N1_SHIM_OUTPUT"
     fi

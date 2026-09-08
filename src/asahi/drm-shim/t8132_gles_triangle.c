@@ -13,6 +13,7 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl3.h>
+#include <GLES2/gl2ext.h>
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -563,14 +564,15 @@ main(int argc, char **argv)
    EGLint major = 0, minor = 0;
    if (!eglInitialize(display, &major, &minor))
       fail("eglInitialize");
-   if (!eglBindAPI(EGL_OPENGL_ES_API))
+   bool desktop = getenv("T8132_DESKTOP_GL") != NULL;
+   if (!eglBindAPI(desktop ? EGL_OPENGL_API : EGL_OPENGL_ES_API))
       fail("eglBindAPI");
 
    const EGLint config_attributes[] = {
       EGL_SURFACE_TYPE,
       EGL_PBUFFER_BIT,
       EGL_RENDERABLE_TYPE,
-      EGL_OPENGL_ES3_BIT_KHR,
+      desktop ? EGL_OPENGL_BIT : EGL_OPENGL_ES3_BIT_KHR,
       EGL_RED_SIZE,
       8,
       EGL_GREEN_SIZE,
@@ -631,6 +633,7 @@ main(int argc, char **argv)
       return run_trig(width, height);
    if (getenv("T8132_GLES_VERTEX_INPUTS"))
       return run_vertex_inputs(width, height);
+
    if (getenv("T8132_GLES_TEXTURES"))
       return run_textures(width, height);
    if (getenv("T8132_GLES_SCISSOR"))
