@@ -277,6 +277,7 @@ agx_rw_addr_to_ro(struct agx_device *dev, uint64_t addr)
 }
 
 void agx_bo_note_cpu_write(struct agx_bo *bo, uint64_t offset, uint64_t size);
+bool agx_bo_sync_cpu_read(struct agx_bo *bo);
 
 static inline void *
 agx_bo_map_placed(struct agx_bo *bo, void *fixed_addr)

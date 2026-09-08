@@ -955,6 +955,12 @@ agx_transfer_map(struct pipe_context *pctx, struct pipe_resource *resource,
 
    agx_prepare_for_map(ctx, rsrc, level, usage, box, staging_blit);
 
+   /* The remote shim keeps a separate device copy. Synchronizing its fence
+    * alone does not make GPU writes visible in the host mmap. */
+   if (!staging_blit && (usage & PIPE_MAP_READ) &&
+       !agx_bo_sync_cpu_read(rsrc->bo))
+      return NULL;
+
    /* Track the written buffer range */
    if (resource->target == PIPE_BUFFER) {
       /* Note the ordering: DISCARD|WRITE is valid, so clear before adding. */

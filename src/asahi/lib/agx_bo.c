@@ -408,6 +408,14 @@ agx_bo_create(struct agx_device *dev, size_t size, unsigned align,
 }
 
 /* Optional shim instrumentation; no claim is made by an ordinary BO map. */
+bool
+agx_bo_sync_cpu_read(struct agx_bo *bo)
+{
+   typedef int (*read_fn)(int, uint32_t);
+   read_fn read = (read_fn)dlsym(RTLD_DEFAULT, "asahi_m1n1_cpu_read");
+   return !read || read(bo->dev->fd, bo->uapi_handle) == 0;
+}
+
 void
 agx_bo_note_cpu_write(struct agx_bo *bo, uint64_t offset, uint64_t size)
 {

@@ -522,6 +522,19 @@ asahi_file_close(uint64_t client_id)
 
 /* Experiment-only diagnostic ABI used by the hardware resource stress gate. */
 __attribute__((visibility("default"))) int
+asahi_m1n1_cpu_read(int fd, uint32_t handle);
+
+int
+asahi_m1n1_cpu_read(int fd, uint32_t handle)
+{
+   uint64_t client_id;
+   int ret = asahi_client_id(fd, &client_id);
+   if (ret)
+      return ret;
+   return python_status("modern_cpu_read", 2, client_id, (uint64_t)handle);
+}
+
+__attribute__((visibility("default"))) int
 asahi_m1n1_debug_stat(uint32_t key, uint64_t *value)
 {
    int64_t result;
