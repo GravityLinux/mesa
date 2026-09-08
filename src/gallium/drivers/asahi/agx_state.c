@@ -2467,6 +2467,12 @@ retry_apple9_inputs:
    }
    agx_update_shader(ctx, &ctx->vs, MESA_SHADER_VERTEX,
                      (union asahi_shader_key *)&key);
+   if (!ctx->vs) {
+      /* An unsupported prototype shader must not reach the linker, nor use a
+       * previously linked variant for a different shader. */
+      ctx->linked.vs = NULL;
+      return false;
+   }
 
    struct agx_device *dev = agx_device(ctx->base.screen);
    struct agx_fast_link_key link_key = {
@@ -2627,6 +2633,12 @@ agx_update_fs(struct agx_batch *batch)
 
    agx_update_shader(ctx, &ctx->fs, MESA_SHADER_FRAGMENT,
                      (union asahi_shader_key *)&key);
+   if (!ctx->fs) {
+      /* An unsupported prototype shader must not reach the linker, nor use a
+       * previously linked variant for a different shader. */
+      ctx->linked.fs = NULL;
+      return false;
+   }
 
    /* Fast link with prolog/epilog */
    bool msaa = ctx->rast->base.multisample;
@@ -5419,6 +5431,9 @@ retry_apple9_batch:
               (ctx->dirty & AGX_DIRTY_VERTEX))
       ctx->dirty |= AGX_DIRTY_VS;
 
+   if (!ctx->vs)
+      return;
+
    /* This is subtle. But agx_update_vs will be true at least once per batch. */
    assert(agx_batch_uses_bo(batch, ctx->vs->bo));
    assert(!ctx->linked.vs || agx_batch_uses_bo(batch, ctx->linked.vs->bo));
@@ -5462,6 +5477,9 @@ retry_apple9_batch:
               (ctx->dirty & (AGX_DIRTY_BLEND_COLOR | AGX_DIRTY_SAMPLE_MASK))) {
       ctx->dirty |= AGX_DIRTY_FS;
    }
+
+   if (!ctx->fs)
+      return;
 
    /* This is subtle. But agx_update_fs will be true at least once per batch. */
    assert(!ctx->fs->bo || agx_batch_uses_bo(batch, ctx->fs->bo));
