@@ -9,6 +9,7 @@
 
 #include "compiler/nir/nir_builder.h"
 #include <gtest/gtest.h>
+#include "gallium/include/pipe/p_defines.h"
 
 TEST(Apple9Machine, PhysicalModel)
 {
@@ -143,12 +144,12 @@ TEST(Apple9Packer, PerspectiveMultiplyNamesCoefficientAndBoundsRegisters)
    const uint8_t own_msl[] = {0xf9, 0x15, 0x2f, 0x8d, 0x00, 0x02, 0x00, 0x00};
    ASSERT_EQ(packed.length, sizeof(own_msl));
    EXPECT_EQ(memcmp(packed.bytes, own_msl, sizeof(own_msl)), 0);
-   for (unsigned cf = 0; cf <= 12; ++cf) {
+   for (unsigned cf = 0; cf <= 32; ++cf) {
       project.immediate = cf;
       ASSERT_TRUE(agx_apple9_pack_vir_instruction(&project, phys, &packed, &reason));
-      EXPECT_EQ(packed.bytes[5] & 15, cf);
+      EXPECT_EQ(packed.bytes[5], cf);
    }
-   project.immediate = 13;
+   project.immediate = 33;
    EXPECT_FALSE(agx_apple9_pack_vir_instruction(&project, phys, &packed, &reason));
    project.immediate = 2;
    phys[1] = 64;
@@ -259,10 +260,10 @@ TEST(Apple9Vir, DeviceLoadDirectIndexIsAnSsaSource)
       agx_apple9_vir_emit_device_load(&program, 0, index, &contract);
    ASSERT_NE(load, AGX_APPLE9_VREG_INVALID);
    ASSERT_EQ(program.instruction_count, 1u);
-   EXPECT_EQ(program.instructions[0].encoding, AGX_APPLE9_ENC_DEVICE_LOAD);
-   ASSERT_EQ(program.instructions[0].nr_srcs, 1u);
-   EXPECT_EQ(program.instructions[0].src[0], index);
-   EXPECT_EQ(program.instructions[0].device_load_raw_token,
+   EXPECT_EQ(program.instructions[0]->encoding, AGX_APPLE9_ENC_DEVICE_LOAD);
+   ASSERT_EQ(program.instructions[0]->nr_srcs, 1u);
+   EXPECT_EQ(program.instructions[0]->src[0], index);
+   EXPECT_EQ(program.instructions[0]->device_load_raw_token,
              AGX_APPLE9_DEVICE_LOAD_TOKEN_5101);
 
    ASSERT_TRUE(agx_apple9_vir_set_fixed_phys(&program, index, 1));
@@ -273,7 +274,7 @@ TEST(Apple9Vir, DeviceLoadDirectIndexIsAnSsaSource)
    ASSERT_TRUE(agx_apple9_allocate_vir(&program, &reason))
       << (reason ? reason : "");
    agx_apple9_packed_instruction packed = {};
-   ASSERT_TRUE(agx_apple9_pack_vir_instruction(&program.instructions[0],
+   ASSERT_TRUE(agx_apple9_pack_vir_instruction(program.instructions[0],
                                                program.phys, &packed, &reason))
       << (reason ? reason : "");
    static const uint8_t expected[] = {
@@ -306,7 +307,7 @@ TEST(Apple9Vir, DeviceLoadComputedIndexIsIndependentOfDestination)
    uint8_t phys[] = {2, 4};
    agx_apple9_packed_instruction packed = {};
    const char *reason = nullptr;
-   ASSERT_TRUE(agx_apple9_pack_vir_instruction(&program.instructions[0], phys,
+   ASSERT_TRUE(agx_apple9_pack_vir_instruction(program.instructions[0], phys,
                                                &packed, &reason))
       << (reason ? reason : "");
    static const uint8_t expected[] = {
@@ -323,7 +324,7 @@ TEST(Apple9Vir, DeviceLoadComputedIndexIsIndependentOfDestination)
    agx_apple9_vir_finish(&program);
 }
 
-TEST(Apple9Vir, DeviceLoadIndexLifetimeAssertionsFollowLiveness)
+TEST(Apple9Vir, DeviceLoadIndexLifetimeIsFinalizedFromLiveness)
 {
    for (bool asserted_last_use : {false, true}) {
       SCOPED_TRACE(asserted_last_use);
@@ -348,7 +349,13 @@ TEST(Apple9Vir, DeviceLoadIndexLifetimeAssertionsFollowLiveness)
       }
       program.output = load;
       const char *reason = nullptr;
-      EXPECT_FALSE(agx_apple9_allocate_vir(&program, &reason));
+      ASSERT_TRUE(agx_apple9_allocate_vir(&program, &reason)) << (reason ?: "");
+      EXPECT_EQ(program.instructions[0]->device_load_index_kind,
+         asserted_last_use ? AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR
+                           : AGX_APPLE9_DEVICE_LOAD_INDEX_LAST_USE_GPR);
+      /* A stale contract introduced after finalization is still rejected. */
+      program.instructions[0]->device_load_index_kind = contract.index_kind;
+      EXPECT_FALSE(agx_apple9_validate_vir_allocation(&program, &reason));
       ASSERT_NE(reason, nullptr);
       EXPECT_NE(strstr(reason, "lifetime"), nullptr) << reason;
       agx_apple9_vir_finish(&program);
@@ -1352,11 +1359,11 @@ TEST(Apple9Vir, ScalarLoadAutoStartsAtSlot6)
    const char *reason = nullptr;
    ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason))
       << (reason ? reason : "");
-   EXPECT_EQ(program.instructions[0].producer_scoreboard_slot,
+   EXPECT_EQ(program.instructions[0]->producer_scoreboard_slot,
              AGX_APPLE9_SCOREBOARD_SLOT_6);
-   EXPECT_EQ(program.instructions[0].device_load_raw_token,
+   EXPECT_EQ(program.instructions[0]->device_load_raw_token,
              AGX_APPLE9_DEVICE_LOAD_TOKEN_5101);
-   EXPECT_EQ(program.instructions[1].scoreboard_slot,
+   EXPECT_EQ(program.instructions[1]->scoreboard_slot,
              AGX_APPLE9_SCOREBOARD_SLOT_6);
    agx_apple9_vir_finish(&program);
 }
@@ -1394,8 +1401,8 @@ TEST(Apple9Vir, IndependentPendingGroupsAdvanceAndReuseSlots)
    const uint8_t expected[] = {6, 1, 2, 6};
    unsigned seen = 0;
    for (unsigned i = 0; i < program.instruction_count; ++i) {
-      if (program.instructions[i].op == AGX_APPLE9_VIR_DEVICE_LOAD) {
-         EXPECT_EQ(program.instructions[i].producer_scoreboard_slot,
+      if (program.instructions[i]->op == AGX_APPLE9_VIR_DEVICE_LOAD) {
+         EXPECT_EQ(program.instructions[i]->producer_scoreboard_slot,
                    expected[seen++]);
       }
    }
@@ -1440,8 +1447,8 @@ TEST(Apple9Vir, ScalarLoadPreferenceUsesFirstFreeSlotAcrossGaps)
    const uint8_t expected[] = {6, 1, 2, 3, 4, 5, 2};
    unsigned seen = 0;
    for (unsigned i = 0; i < program.instruction_count; ++i) {
-      if (program.instructions[i].op == AGX_APPLE9_VIR_DEVICE_LOAD) {
-         EXPECT_EQ(program.instructions[i].producer_scoreboard_slot,
+      if (program.instructions[i]->op == AGX_APPLE9_VIR_DEVICE_LOAD) {
+         EXPECT_EQ(program.instructions[i]->producer_scoreboard_slot,
                    expected[seen++]);
       }
    }
@@ -1463,7 +1470,7 @@ TEST(Apple9Vir, SevenIndependentPendingGroupsMaterializeOldestHandoff)
       ASSERT_TRUE(agx_apple9_vir_set_device_load_contract(
          &program, loads[i], 0, AGX_APPLE9_SCOREBOARD_SLOT_AUTO));
    }
-   program.instructions[6].device_load_index_kind =
+   program.instructions[6]->device_load_index_kind =
       AGX_APPLE9_DEVICE_LOAD_INDEX_LAST_USE_GPR;
    uint32_t last_result = AGX_APPLE9_VREG_INVALID;
    for (unsigned i = 0; i < 7; ++i) {
@@ -1480,11 +1487,11 @@ TEST(Apple9Vir, SevenIndependentPendingGroupsMaterializeOldestHandoff)
    const uint8_t expected[] = {6, 1, 2, 3, 4, 5, 6};
    unsigned seen = 0, materialized = 0;
    for (unsigned i = 0; i < program.instruction_count; ++i) {
-      if (program.instructions[i].op == AGX_APPLE9_VIR_DEVICE_LOAD) {
-         EXPECT_EQ(program.instructions[i].producer_scoreboard_slot,
+      if (program.instructions[i]->op == AGX_APPLE9_VIR_DEVICE_LOAD) {
+         EXPECT_EQ(program.instructions[i]->producer_scoreboard_slot,
                    expected[seen++]);
       }
-      materialized += program.instructions[i].scoreboard_materialize;
+      materialized += program.instructions[i]->scoreboard_materialize;
    }
    EXPECT_EQ(seen, 7u);
    EXPECT_EQ(materialized, 1u);
@@ -1492,11 +1499,11 @@ TEST(Apple9Vir, SevenIndependentPendingGroupsMaterializeOldestHandoff)
       << (reason ? reason : "");
    bool general_materialization = false;
    for (unsigned i = 0; i < program.instruction_count; ++i) {
-      if (program.instructions[i].scoreboard_materialize) {
-         EXPECT_EQ(program.instructions[i].encoding,
+      if (program.instructions[i]->scoreboard_materialize) {
+         EXPECT_EQ(program.instructions[i]->encoding,
                    AGX_APPLE9_ENC_LOGIC_EXTENDED);
          general_materialization |=
-            program.phys[program.instructions[i].dest] >= 16;
+            program.phys[program.instructions[i]->dest] >= 16;
       }
    }
    EXPECT_TRUE(general_materialization);
@@ -1535,7 +1542,7 @@ TEST(Apple9Vir, ReciprocalUsesSharedOneHotDependencySlots)
    unsigned seen_loads = 0, materializations = 0, reciprocals = 0;
    const uint8_t expected_slots[] = {6, 1, 2, 3, 4};
    for (unsigned i = 0; i < program.instruction_count; ++i) {
-      const auto &instruction = program.instructions[i];
+      const auto &instruction = *program.instructions[i];
       if (instruction.op == AGX_APPLE9_VIR_DEVICE_LOAD) {
          EXPECT_EQ(instruction.producer_scoreboard_slot,
                    expected_slots[seen_loads++]);
@@ -1570,13 +1577,13 @@ TEST(Apple9Vir, MultiSourcePendingLoadsShareOneSlot)
    const char *reason = nullptr;
    ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason))
       << (reason ? reason : "");
-   EXPECT_EQ(program.instructions[0].producer_scoreboard_slot, 6u);
-   EXPECT_EQ(program.instructions[1].producer_scoreboard_slot, 6u);
-   EXPECT_EQ(program.instructions[0].device_load_raw_token,
+   EXPECT_EQ(program.instructions[0]->producer_scoreboard_slot, 6u);
+   EXPECT_EQ(program.instructions[1]->producer_scoreboard_slot, 6u);
+   EXPECT_EQ(program.instructions[0]->device_load_raw_token,
              AGX_APPLE9_DEVICE_LOAD_TOKEN_5101);
-   EXPECT_EQ(program.instructions[1].device_load_raw_token,
+   EXPECT_EQ(program.instructions[1]->device_load_raw_token,
              AGX_APPLE9_DEVICE_LOAD_TOKEN_5101);
-   EXPECT_EQ(program.instructions[2].scoreboard_slot, 6u);
+   EXPECT_EQ(program.instructions[2]->scoreboard_slot, 6u);
    agx_apple9_vir_finish(&program);
 }
 
@@ -1605,9 +1612,9 @@ TEST(Apple9Vir, FirstHandoffRetainsGprForLaterReads)
       << (reason ? reason : "");
    ASSERT_TRUE(agx_apple9_allocate_vir(&program, &reason))
       << (reason ? reason : "");
-   EXPECT_EQ(program.instructions[1].scoreboard_slot, 6u);
-   EXPECT_EQ(program.instructions[2].scoreboard_slot, 0u);
-   EXPECT_NE(program.instructions[1].live_after_mask & 1u, 0u);
+   EXPECT_EQ(program.instructions[1]->scoreboard_slot, 6u);
+   EXPECT_EQ(program.instructions[2]->scoreboard_slot, 0u);
+   EXPECT_NE(program.instructions[1]->live_after_mask & 1u, 0u);
    agx_apple9_vir_finish(&program);
 }
 
@@ -1632,11 +1639,11 @@ TEST(Apple9Vir, RawLoadTokenDefinesProducerScoreboardSlot)
    const char *reason = nullptr;
    ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason))
       << (reason ? reason : "");
-   EXPECT_EQ(program.instructions[0].device_load_raw_token,
+   EXPECT_EQ(program.instructions[0]->device_load_raw_token,
              AGX_APPLE9_DEVICE_LOAD_TOKEN_9100);
-   EXPECT_EQ(program.instructions[0].producer_scoreboard_slot,
+   EXPECT_EQ(program.instructions[0]->producer_scoreboard_slot,
              AGX_APPLE9_SCOREBOARD_SLOT_3);
-   EXPECT_EQ(program.instructions[1].scoreboard_slot,
+   EXPECT_EQ(program.instructions[1]->scoreboard_slot,
              AGX_APPLE9_SCOREBOARD_SLOT_3);
    agx_apple9_vir_finish(&program);
 }
@@ -1664,10 +1671,10 @@ TEST(Apple9Vir, IntegerAddDirectlyConsumesSlot6)
    ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason))
       << (reason ? reason : "");
    ASSERT_EQ(program.instruction_count, 2u);
-   EXPECT_EQ(program.instructions[0].producer_scoreboard_slot, 6u);
-   EXPECT_EQ(program.instructions[1].scoreboard_slot, 6u);
-   EXPECT_EQ(program.instructions[1].op, AGX_APPLE9_VIR_IADD);
-   EXPECT_EQ(program.instructions[1].src[0], load);
+   EXPECT_EQ(program.instructions[0]->producer_scoreboard_slot, 6u);
+   EXPECT_EQ(program.instructions[1]->scoreboard_slot, 6u);
+   EXPECT_EQ(program.instructions[1]->op, AGX_APPLE9_VIR_IADD);
+   EXPECT_EQ(program.instructions[1]->src[0], load);
    agx_apple9_vir_finish(&program);
 }
 
@@ -1693,10 +1700,10 @@ TEST(Apple9Vir, AllLogicDirectlyConsumePendingLoadGroups)
       ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason))
          << (reason ? reason : "") << " op=" << unsigned(op);
       ASSERT_EQ(program.instruction_count, 3u);
-      EXPECT_EQ(program.instructions[0].producer_scoreboard_slot, 6u);
-      EXPECT_EQ(program.instructions[1].producer_scoreboard_slot, 6u);
-      EXPECT_EQ(program.instructions[2].scoreboard_slot, 6u);
-      EXPECT_FALSE(program.instructions[2].scoreboard_materialize);
+      EXPECT_EQ(program.instructions[0]->producer_scoreboard_slot, 6u);
+      EXPECT_EQ(program.instructions[1]->producer_scoreboard_slot, 6u);
+      EXPECT_EQ(program.instructions[2]->scoreboard_slot, 6u);
+      EXPECT_FALSE(program.instructions[2]->scoreboard_materialize);
       agx_apple9_vir_finish(&program);
    }
 }
@@ -1707,10 +1714,10 @@ TEST(Apple9Vir, MaskedPhiEdgesShareOneAllocatedMergeDestination)
    agx_apple9_vir_init(&program);
    uint32_t then_value = agx_apple9_vir_input(&program, 2);
    uint32_t else_value = agx_apple9_vir_input(&program, 3);
-   uint32_t merge = agx_apple9_vir_emit_merge(&program);
+   uint32_t merge = agx_apple9_vir_emit_phi(&program, nullptr);
    ASSERT_NE(merge, AGX_APPLE9_VREG_INVALID);
-   ASSERT_TRUE(agx_apple9_vir_emit_masked_copy(&program, merge, then_value));
-   ASSERT_TRUE(agx_apple9_vir_emit_masked_copy(&program, merge, else_value));
+   ASSERT_TRUE(agx_apple9_vir_emit_phi_source(&program, merge, then_value));
+   ASSERT_TRUE(agx_apple9_vir_emit_phi_source(&program, merge, else_value));
    program.output = merge;
 
    const char *reason = nullptr;
@@ -1720,17 +1727,84 @@ TEST(Apple9Vir, MaskedPhiEdgesShareOneAllocatedMergeDestination)
       << (reason ? reason : "");
 
    ASSERT_EQ(program.instruction_count, 3u);
-   EXPECT_EQ(program.instructions[0].op, AGX_APPLE9_VIR_MERGE);
+   EXPECT_EQ(program.instructions[0]->op, AGX_APPLE9_VIR_PHI);
    for (unsigned i = 1; i < 3; ++i) {
-      EXPECT_EQ(program.instructions[i].op, AGX_APPLE9_VIR_MASKED_COPY);
-      EXPECT_EQ(program.instructions[i].target, merge);
-      EXPECT_EQ(program.phys[program.instructions[i].target],
+      EXPECT_EQ(program.instructions[i]->op, AGX_APPLE9_VIR_PHI_SRC);
+      EXPECT_EQ(program.instructions[i]->target, merge);
+      EXPECT_EQ(program.phys[program.instructions[i]->target],
                 program.phys[merge]);
    }
    EXPECT_GE(program.phys[merge], 16); /* Leave constrained coordinate tuples available. */
    EXPECT_NE(program.phys[merge], program.phys[then_value]);
    EXPECT_NE(program.phys[merge], program.phys[else_value]);
    agx_apple9_vir_finish(&program);
+}
+
+TEST(Apple9Vir, ParallelPhiAssignmentsPreserveAllSourcesAfterAllocation)
+{
+   /* Every four-source assignment: chains, fanout, self copies, swaps,
+    * disjoint cycles, and three/four-way rotations. Check allocated register
+    * execution against simultaneous assignment, including arbitrary bit patterns. */
+   const uint32_t initial[] = {0xdeadbeef, 0xbf800000, 0x7fc12345, 0x80000000};
+   for (unsigned pattern = 0; pattern < 256; ++pattern) {
+      SCOPED_TRACE(pattern);
+      agx_apple9_vir_program program;
+      agx_apple9_vir_init(&program);
+      uint32_t values[4];
+      for (unsigned i = 0; i < 4; ++i)
+         values[i] = agx_apple9_vir_emit_phi(&program, nullptr);
+      agx_apple9_vir_copy copies[4];
+      for (unsigned i = 0; i < 4; ++i)
+         copies[i] = {values[i], values[(pattern >> (2 * i)) & 3]};
+      ASSERT_TRUE(agx_apple9_vir_emit_phi_edge(&program, copies, 4));
+      program.output = agx_apple9_vir_emit_collect(&program, values, 4);
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason))
+         << (reason ? reason : "");
+      ASSERT_TRUE(agx_apple9_allocate_vir(&program, &reason))
+         << (reason ? reason : "");
+
+      uint32_t registers[64] = {};
+      for (unsigned i = 0; i < 4; ++i)
+         registers[program.phys[values[i]]] = initial[i];
+      bool checked = false;
+      for (unsigned i = 0; i < program.instruction_count; ++i) {
+         const auto &ins = *program.instructions[i];
+         switch (ins.op) {
+         case AGX_APPLE9_VIR_PHI:
+            break;
+         case AGX_APPLE9_VIR_IOR:
+            registers[program.phys[ins.dest]] =
+               registers[program.phys[ins.src[0]]] |
+               registers[program.phys[ins.src[1]]];
+            break;
+         case AGX_APPLE9_VIR_PHI_SRC:
+            ASSERT_TRUE(agx_apple9_resolve_phi_edge(&program, &ins,
+               [](void *data, bool swap, unsigned dest, unsigned source) {
+                  auto *registers = static_cast<uint32_t *>(data);
+                  if (swap) {
+                     uint32_t old = registers[dest];
+                     registers[dest] = registers[source];
+                     registers[source] = old;
+                  } else {
+                     registers[dest] = registers[source];
+                  }
+                  return true;
+               }, registers));
+            break;
+         case AGX_APPLE9_VIR_COLLECT:
+            for (unsigned c = 0; c < 4; ++c)
+               EXPECT_EQ(registers[program.phys[values[c]]],
+                         initial[(pattern >> (2 * c)) & 3]);
+            checked = true;
+            break;
+         default:
+            FAIL() << "Unexpected opcode " << unsigned(ins.op);
+         }
+      }
+      EXPECT_TRUE(checked);
+      agx_apple9_vir_finish(&program);
+   }
 }
 
 TEST(Apple9Vir, LogicNormalizesSinglePendingSourceIntoSourceA)
@@ -1756,10 +1830,10 @@ TEST(Apple9Vir, LogicNormalizesSinglePendingSourceIntoSourceA)
       ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason))
          << (reason ? reason : "") << " op=" << unsigned(op);
       ASSERT_EQ(program.instruction_count, 2u);
-      EXPECT_EQ(program.instructions[0].producer_scoreboard_slot, 6u);
-      EXPECT_EQ(program.instructions[1].scoreboard_slot, 6u);
-      EXPECT_EQ(program.instructions[1].src[0], load);
-      EXPECT_EQ(program.instructions[1].src[1], ordinary);
+      EXPECT_EQ(program.instructions[0]->producer_scoreboard_slot, 6u);
+      EXPECT_EQ(program.instructions[1]->scoreboard_slot, 6u);
+      EXPECT_EQ(program.instructions[1]->src[0], load);
+      EXPECT_EQ(program.instructions[1]->src[1], ordinary);
       agx_apple9_vir_finish(&program);
    }
 }
@@ -1831,19 +1905,19 @@ TEST(Apple9Vir, VectorStoreDirectlyConsumesItsLoadTuple)
    unsigned collect_index = UINT_MAX;
    unsigned store_index = UINT_MAX;
    for (unsigned i = 0; i < program.instruction_count; ++i) {
-      collect_index = program.instructions[i].op == AGX_APPLE9_VIR_COLLECT
+      collect_index = program.instructions[i]->op == AGX_APPLE9_VIR_COLLECT
                          ? i
                          : collect_index;
-      store_index = program.instructions[i].op == AGX_APPLE9_VIR_DEVICE_STORE
+      store_index = program.instructions[i]->op == AGX_APPLE9_VIR_DEVICE_STORE
                        ? i
                        : store_index;
    }
    ASSERT_EQ(collect_index, UINT_MAX);
    ASSERT_NE(store_index, UINT_MAX);
-   EXPECT_EQ(program.instructions[store_index].scoreboard_slot,
+   EXPECT_EQ(program.instructions[store_index]->scoreboard_slot,
              AGX_APPLE9_SCOREBOARD_SLOT_1);
    for (unsigned c = 0; c < 4; ++c)
-      EXPECT_EQ(program.instructions[store_index].src[c], vector + c);
+      EXPECT_EQ(program.instructions[store_index]->src[c], vector + c);
 
    ASSERT_TRUE(agx_apple9_allocate_vir(&program, &reason))
       << (reason ? reason : "");
@@ -1873,13 +1947,13 @@ TEST(Apple9Vir, ReturningAtomicUsesAdjacentNativeResultMaterializer)
    ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason))
       << (reason ? reason : "");
    ASSERT_EQ(program.instruction_count, 3u);
-   EXPECT_EQ(program.instructions[0].producer_scoreboard_slot,
+   EXPECT_EQ(program.instructions[0]->producer_scoreboard_slot,
              AGX_APPLE9_SCOREBOARD_SLOT_6);
-   EXPECT_EQ(program.instructions[1].op,
+   EXPECT_EQ(program.instructions[1]->op,
              AGX_APPLE9_VIR_DEVICE_ATOMIC_RESULT);
-   EXPECT_EQ(program.instructions[1].scoreboard_slot,
+   EXPECT_EQ(program.instructions[1]->scoreboard_slot,
              AGX_APPLE9_SCOREBOARD_SLOT_NONE);
-   EXPECT_EQ(program.instructions[2].scoreboard_slot,
+   EXPECT_EQ(program.instructions[2]->scoreboard_slot,
              AGX_APPLE9_SCOREBOARD_SLOT_6);
 
    ASSERT_TRUE(agx_apple9_allocate_vir(&program, &reason))
@@ -1888,11 +1962,11 @@ TEST(Apple9Vir, ReturningAtomicUsesAdjacentNativeResultMaterializer)
    agx_apple9_packed_instruction materialize = {};
    agx_apple9_packed_instruction copy = {};
    ASSERT_TRUE(agx_apple9_pack_vir_instruction(
-      &program.instructions[0], program.phys, &atomic, &reason));
+      program.instructions[0], program.phys, &atomic, &reason));
    ASSERT_TRUE(agx_apple9_pack_vir_instruction(
-      &program.instructions[1], program.phys, &materialize, &reason));
+      program.instructions[1], program.phys, &materialize, &reason));
    ASSERT_TRUE(agx_apple9_pack_vir_instruction(
-      &program.instructions[2], program.phys, &copy, &reason));
+      program.instructions[2], program.phys, &copy, &reason));
    EXPECT_EQ(atomic.bytes[0], 0x67);
    EXPECT_EQ(atomic.bytes[1], 0x01);
    EXPECT_EQ(atomic.bytes[2], 0x54);
@@ -1900,7 +1974,7 @@ TEST(Apple9Vir, ReturningAtomicUsesAdjacentNativeResultMaterializer)
    ASSERT_EQ(materialize.length, 8u);
    EXPECT_EQ(materialize.bytes[0] & 0x0f, 0x0c);
    EXPECT_EQ(materialize.bytes[0] >> 4,
-             program.phys[program.instructions[0].dest]);
+             program.phys[program.instructions[0]->dest]);
    EXPECT_EQ(materialize.bytes[1], 0x80);
    EXPECT_EQ(materialize.bytes[2], 0x09);
    EXPECT_EQ(copy.bytes[5] & 0xe0, 0u);
@@ -1936,22 +2010,22 @@ TEST(Apple9Vir, ReturningAtomicReusesConsumedPendingInputSlot)
    ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason))
       << (reason ? reason : "");
    ASSERT_EQ(program.instruction_count, 4u);
-   EXPECT_EQ(program.instructions[0].producer_scoreboard_slot,
+   EXPECT_EQ(program.instructions[0]->producer_scoreboard_slot,
              AGX_APPLE9_SCOREBOARD_SLOT_6);
-   EXPECT_EQ(program.instructions[1].scoreboard_slot,
+   EXPECT_EQ(program.instructions[1]->scoreboard_slot,
              AGX_APPLE9_SCOREBOARD_SLOT_6);
-   EXPECT_EQ(program.instructions[1].producer_scoreboard_slot,
+   EXPECT_EQ(program.instructions[1]->producer_scoreboard_slot,
              AGX_APPLE9_SCOREBOARD_SLOT_6);
-   EXPECT_EQ(program.instructions[2].producer_scoreboard_slot,
+   EXPECT_EQ(program.instructions[2]->producer_scoreboard_slot,
              AGX_APPLE9_SCOREBOARD_SLOT_6);
-   EXPECT_EQ(program.instructions[3].scoreboard_slot,
+   EXPECT_EQ(program.instructions[3]->scoreboard_slot,
              AGX_APPLE9_SCOREBOARD_SLOT_6);
 
    ASSERT_TRUE(agx_apple9_allocate_vir(&program, &reason))
       << (reason ? reason : "");
    agx_apple9_packed_instruction packed = {};
    ASSERT_TRUE(agx_apple9_pack_vir_instruction(
-      &program.instructions[1], program.phys, &packed, &reason));
+      program.instructions[1], program.phys, &packed, &reason));
    EXPECT_EQ(((packed.bytes[1] >> 4) & 0x0f) |
                 ((packed.bytes[2] & 0x03) << 4),
              1u << (AGX_APPLE9_SCOREBOARD_SLOT_6 - 1));
@@ -2006,18 +2080,15 @@ TEST(Apple9Vir, SixPendingLoadsFeedReturningAtomicsAtFullSlotPressure)
    ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason))
       << (reason ? reason : "");
    for (unsigned i = 0; i < ARRAY_SIZE(expected_slots); ++i) {
-      EXPECT_EQ(program.instructions[load_instruction[i]]
-                   .producer_scoreboard_slot,
+      EXPECT_EQ(program.instructions[load_instruction[i]]->producer_scoreboard_slot,
                 expected_slots[i]);
-      EXPECT_EQ(program.instructions[atomic_instruction[i]].scoreboard_slot,
+      EXPECT_EQ(program.instructions[atomic_instruction[i]]->scoreboard_slot,
                 expected_slots[i]);
-      EXPECT_EQ(program.instructions[atomic_instruction[i]]
-                   .producer_scoreboard_slot,
+      EXPECT_EQ(program.instructions[atomic_instruction[i]]->producer_scoreboard_slot,
                 expected_slots[i]);
-      EXPECT_EQ(program.instructions[publication_instruction[i]]
-                   .producer_scoreboard_slot,
+      EXPECT_EQ(program.instructions[publication_instruction[i]]->producer_scoreboard_slot,
                 expected_slots[i]);
-      EXPECT_EQ(program.instructions[consumer_instruction[i]].scoreboard_slot,
+      EXPECT_EQ(program.instructions[consumer_instruction[i]]->scoreboard_slot,
                 expected_slots[i]);
    }
    agx_apple9_vir_finish(&program);
@@ -2035,9 +2106,9 @@ TEST(Apple9Vir, DiscardedAtomicIsDestinationlessSideEffect)
       &program, 8, index, &data, 1, AGX_APPLE9_ATOMIC_XOR, true, nullptr));
    ASSERT_EQ(program.instruction_count, 1u);
    EXPECT_EQ(program.value_count, value_count);
-   EXPECT_EQ(program.instructions[0].op, AGX_APPLE9_VIR_DEVICE_ATOMIC);
-   EXPECT_EQ(program.instructions[0].dest, AGX_APPLE9_VREG_INVALID);
-   EXPECT_TRUE(program.instructions[0].atomic_discard);
+   EXPECT_EQ(program.instructions[0]->op, AGX_APPLE9_VIR_DEVICE_ATOMIC);
+   EXPECT_EQ(program.instructions[0]->dest, AGX_APPLE9_VREG_INVALID);
+   EXPECT_TRUE(program.instructions[0]->atomic_discard);
 
    const char *reason = nullptr;
    ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason))
@@ -2046,7 +2117,7 @@ TEST(Apple9Vir, DiscardedAtomicIsDestinationlessSideEffect)
       << (reason ? reason : "");
    agx_apple9_packed_instruction packed = {};
    ASSERT_TRUE(agx_apple9_pack_vir_instruction(
-      &program.instructions[0], program.phys, &packed, &reason))
+      program.instructions[0], program.phys, &packed, &reason))
       << (reason ? reason : "");
    EXPECT_EQ(packed.bytes[1], 0x01);
    EXPECT_EQ(packed.bytes[9], 0x40);
@@ -2084,7 +2155,7 @@ TEST(Apple9Vir, ReturningAtomicsUseTheCommonSixSlotAllocator)
    static const unsigned expected_slots[] = {6, 1, 2, 3, 4, 5};
    unsigned atomic_index = 0;
    for (unsigned i = 0; i < program.instruction_count; ++i) {
-      const agx_apple9_vir_instr &instruction = program.instructions[i];
+      const agx_apple9_vir_instr &instruction = *program.instructions[i];
       if (instruction.op != AGX_APPLE9_VIR_DEVICE_ATOMIC)
          continue;
 
@@ -2094,9 +2165,9 @@ TEST(Apple9Vir, ReturningAtomicsUseTheCommonSixSlotAllocator)
       EXPECT_EQ(instruction.producer_scoreboard_slot,
                 expected_slots[atomic_index]);
       ASSERT_LT(i + 1, program.instruction_count);
-      EXPECT_EQ(program.instructions[i + 1].op,
+      EXPECT_EQ(program.instructions[i + 1]->op,
                 AGX_APPLE9_VIR_DEVICE_ATOMIC_RESULT);
-      EXPECT_EQ(program.instructions[i + 1].producer_scoreboard_slot,
+      EXPECT_EQ(program.instructions[i + 1]->producer_scoreboard_slot,
                 expected_slots[atomic_index]);
       ++atomic_index;
    }
@@ -2141,7 +2212,7 @@ TEST(Apple9Vir, SeventhReturningAtomicMaterializesOldestPendingGroup)
       << (reason ? reason : "");
    unsigned materializations = 0;
    for (unsigned i = 0; i < program.instruction_count; ++i)
-      materializations += program.instructions[i].scoreboard_materialize;
+      materializations += program.instructions[i]->scoreboard_materialize;
    EXPECT_EQ(materializations, 1u);
    agx_apple9_vir_finish(&program);
 }
@@ -2160,7 +2231,7 @@ TEST(Apple9Allocator, CompareExchangeCollectsDesiredCompareTuple)
       &program, 8, index, data, 2, AGX_APPLE9_ATOMIC_CMPXCHG, false,
       &result));
    ASSERT_NE(result, AGX_APPLE9_VREG_INVALID);
-   ASSERT_EQ(program.instructions[0].op, AGX_APPLE9_VIR_COLLECT);
+   ASSERT_EQ(program.instructions[0]->op, AGX_APPLE9_VIR_COLLECT);
    const uint32_t copy_sources[] = {result, result};
    uint32_t durable = agx_apple9_vir_emit(
       &program, AGX_APPLE9_VIR_IOR, AGX_APPLE9_ENC_LOGIC_EXTENDED,
@@ -2174,10 +2245,10 @@ TEST(Apple9Allocator, CompareExchangeCollectsDesiredCompareTuple)
       << (reason ? reason : "");
    ASSERT_TRUE(agx_apple9_allocate_vir(&program, &reason))
       << (reason ? reason : "");
-   const agx_apple9_vir_instr &atomic = program.instructions[1];
+   const agx_apple9_vir_instr &atomic = *program.instructions[1];
    EXPECT_EQ(program.phys[atomic.src[1]], program.phys[atomic.src[0]] + 1);
    EXPECT_NE(program.phys[atomic.dest], program.phys[atomic.src[0]]);
-   EXPECT_EQ(program.instructions[2].op,
+   EXPECT_EQ(program.instructions[2]->op,
              AGX_APPLE9_VIR_DEVICE_ATOMIC_RESULT);
    agx_apple9_vir_finish(&program);
 }
@@ -2676,9 +2747,9 @@ TEST(Apple9Allocator, NativeVectorLoadUsesOneAdjacentTupleAndOneSlot)
    const char *reason = nullptr;
    ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason))
       << reason;
-   EXPECT_EQ(program.instructions[0].producer_scoreboard_slot,
+   EXPECT_EQ(program.instructions[0]->producer_scoreboard_slot,
              AGX_APPLE9_SCOREBOARD_SLOT_6);
-   EXPECT_EQ(program.instructions[1].scoreboard_slot,
+   EXPECT_EQ(program.instructions[1]->scoreboard_slot,
              AGX_APPLE9_SCOREBOARD_SLOT_6);
    ASSERT_TRUE(agx_apple9_allocate_vir(&program, &reason)) << reason;
    EXPECT_GE(program.phys[vector], 16u);
@@ -2740,6 +2811,53 @@ TEST(Apple9Allocator, PendingVectorTupleCannotOverlapLaterAsyncDestination)
    agx_apple9_vir_finish(&program);
 }
 
+TEST(Apple9Vir, MemoryTupleLegalizationPreservesControlFlowTargets)
+{
+   /* COLLECT belongs to its memory consumer: a branch to that consumer must
+    * execute the new COLLECT, while targets past it move forward. Exercise
+    * both branch directions, repeated insertions, and the end boundary. */
+
+   for (unsigned target = 0; target < 5; ++target) {
+      SCOPED_TRACE(target);
+      agx_apple9_vir_program program;
+      agx_apple9_vir_init(&program);
+      agx_apple9_block *blocks[5];
+      for (auto &block : blocks)
+         block = agx_apple9_block_create(&program);
+      agx_apple9_block_begin(&program, blocks[0]);
+      uint32_t sources[] = {agx_apple9_vir_input(&program, 2),
+                            agx_apple9_vir_input(&program, 4),
+                            agx_apple9_vir_input(&program, 6)};
+      ASSERT_TRUE(agx_apple9_vir_emit_branch(
+         &program, AGX_APPLE9_VIR_JMP_EXEC_NONE,
+         AGX_APPLE9_ENC_JMP_EXEC_NONE, blocks[target]));
+      for (unsigned i = 0; i < 2; ++i) {
+         agx_apple9_block_begin(&program, blocks[i + 1]);
+         /* Mimic scalarized sources after scoreboard legalization. */
+         ASSERT_TRUE(agx_apple9_vir_emit_side_effect(
+            &program, AGX_APPLE9_VIR_DEVICE_STORE,
+            AGX_APPLE9_ENC_DEVICE_STORE, sources, 3, 0));
+         auto &store = *program.instructions[program.instruction_count - 1];
+         store.memory_bits = 32;
+         store.memory_components = 2;
+      }
+      agx_apple9_block_begin(&program, blocks[3]);
+      ASSERT_TRUE(agx_apple9_vir_emit_branch(
+         &program, AGX_APPLE9_VIR_JMP_EXEC_ANY,
+         AGX_APPLE9_ENC_JMP_EXEC_ANY, blocks[target]));
+      agx_apple9_block_begin(&program, blocks[4]);
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason))
+         << (reason ? reason : "");
+      ASSERT_EQ(program.instruction_count, 6u);
+      EXPECT_EQ(program.instructions[0]->branch_target, blocks[target]);
+      EXPECT_EQ(program.instructions[5]->branch_target, blocks[target]);
+      EXPECT_EQ(program.instructions[1]->op, AGX_APPLE9_VIR_COLLECT);
+      EXPECT_EQ(program.instructions[3]->op, AGX_APPLE9_VIR_COLLECT);
+      agx_apple9_vir_finish(&program);
+   }
+}
+
 TEST(Apple9Allocator, VectorStoreCollectsScalarSourcesBeforeAllocation)
 {
    agx_apple9_vir_program program;
@@ -2754,12 +2872,12 @@ TEST(Apple9Allocator, VectorStoreCollectsScalarSourcesBeforeAllocation)
    ASSERT_TRUE(
       agx_apple9_vir_emit_device_store(&program, 0, index, data, 4, 32));
    ASSERT_EQ(program.instruction_count, 2u);
-   const uint32_t tuple = program.instructions[0].dest;
-   EXPECT_EQ(program.instructions[0].op, AGX_APPLE9_VIR_COLLECT);
-   EXPECT_EQ(program.instructions[0].dest_components, 4u);
-   EXPECT_EQ(program.instructions[1].op, AGX_APPLE9_VIR_DEVICE_STORE);
+   const uint32_t tuple = program.instructions[0]->dest;
+   EXPECT_EQ(program.instructions[0]->op, AGX_APPLE9_VIR_COLLECT);
+   EXPECT_EQ(program.instructions[0]->dest_components, 4u);
+   EXPECT_EQ(program.instructions[1]->op, AGX_APPLE9_VIR_DEVICE_STORE);
    for (unsigned c = 0; c < 4; ++c)
-      EXPECT_EQ(program.instructions[1].src[c], tuple + c);
+      EXPECT_EQ(program.instructions[1]->src[c], tuple + c);
 
    const char *reason = nullptr;
    ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason))
@@ -2796,8 +2914,8 @@ TEST(Apple9Allocator, StoreIndexLifetimeUsesAccessDescriptorWithoutCopy)
    ASSERT_TRUE(agx_apple9_allocate_vir(&program, &reason))
       << (reason ? reason : "");
 
-   const auto &first_store = program.instructions[0];
-   const auto &last_store = program.instructions[2];
+   const auto &first_store = *program.instructions[0];
+   const auto &last_store = *program.instructions[2];
    EXPECT_NE(first_store.live_after_mask & (1u << 1), 0u);
    EXPECT_EQ(last_store.live_after_mask & (1u << 1), 0u);
    EXPECT_EQ(program.phys[first_store.src[1]], program.phys[last_store.src[1]]);
@@ -2827,7 +2945,7 @@ TEST(Apple9Allocator, CollectCoalescesAnAlreadyAdjacentKilledTuple)
    }
    ASSERT_TRUE(
       agx_apple9_vir_emit_device_store(&program, 0, index, data, 4, 32));
-   const uint32_t tuple = program.instructions[4].dest;
+   const uint32_t tuple = program.instructions[4]->dest;
 
    const char *reason = nullptr;
    ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason))
@@ -2854,7 +2972,7 @@ TEST(Apple9Allocator, CollectRespectsValuesLiveAcrossVectorStore)
    ASSERT_TRUE(
       agx_apple9_vir_emit_device_store(&program, 0, index, data, 4, 32));
    ASSERT_TRUE(agx_apple9_vir_add_live_out(&program, live));
-   const uint32_t tuple = program.instructions[0].dest;
+   const uint32_t tuple = program.instructions[0]->dest;
 
    const char *reason = nullptr;
    ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason))
@@ -4802,12 +4920,11 @@ TEST(Apple9Compiler, ConditionalLoadsAreCompletedInsideTheirMaskRegions)
          EXPECT_GT(loads[3], pop_offset);
       }
 
-      /* The entry load consumes get_sr directly. Arm/merge indices pass
-       * through ALU and use the ordinary address form. HAS_NEXT follows the
-       * complete linear load sequence across PUSH/ELSE/POP. */
+      /* Byte-offset conversion uses ordinary computed indices, including
+       * the entry load. HAS_NEXT follows issue order across PUSH/ELSE/POP. */
       const uint8_t *binary = (const uint8_t *)compiled.binary;
       for (unsigned i = 0; i < test.load_count; ++i) {
-         EXPECT_EQ(binary[loads[i] + 1] & 0x10, i == 0 ? 0x10 : 0x00);
+         EXPECT_EQ(binary[loads[i] + 1] & 0x10, 0);
          EXPECT_EQ(binary[loads[i] + 2] & 0x10,
                    i + 1 < test.load_count ? 0x10 : 0x00);
       }
@@ -5217,7 +5334,8 @@ TEST(Apple9Compiler, MultipleWritableBindingsUseSemanticResourceMasks)
                                        (alias_input ? 1u : 2u));
       EXPECT_EQ(store_arguments[1], AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE +
                                        (alias_input ? 0u : 1u));
-      EXPECT_EQ(access_desc[0], 0x20);
+      /* Each independently computed byte offset has its own last use. */
+      EXPECT_EQ(access_desc[0], 0x21);
       EXPECT_EQ(access_desc[1], 0x21);
       free(compiled.binary);
       ralloc_free(nir);
@@ -5555,7 +5673,7 @@ TEST(Apple9Machine, RenderPublicationOperands)
    const uint8_t expected[] = {0x79, 0x21, 0x3d, 0x23, 0x41, 0, 0, 0};
    ASSERT_EQ(packed.length, sizeof(expected));
    EXPECT_EQ(memcmp(packed.bytes, expected, sizeof(expected)), 0);
-   const uint8_t bad_dest[] = {16, 16, 17};
+   const uint8_t bad_dest[] = {64, 16, 17};
    EXPECT_FALSE(
       agx_apple9_pack_vir_instruction(&mul, bad_dest, &packed, &reason));
    const uint8_t bad_source[] = {7, 64, 17};
@@ -5650,7 +5768,8 @@ TEST(Apple9Compiler, VertexExportsStayDistinctThroughCompletion)
    ASSERT_TRUE(agx_compile_apple9_vertex(nir, &compiled, &reason))
       << (reason ?: "");
    const uint8_t *code = static_cast<const uint8_t *>(compiled.binary);
-   unsigned registers = 0, slots = 0, count = 0;
+   uint64_t registers = 0;
+   unsigned slots = 0, count = 0;
    bool vertex_handoff = false;
    for (unsigned i = 0; i + 14 <= compiled.info.binary_size; ++i) {
       if ((code[i] & 15) == 12 && code[i + 1] == 0xdd && code[i + 2] == 0x10) {
@@ -5662,9 +5781,9 @@ TEST(Apple9Compiler, VertexExportsStayDistinctThroughCompletion)
          continue;
       unsigned reg = code[i + 3] >> 1;
       unsigned slot = code[i + 4] >> 5;
-      ASSERT_LT(reg, 16u);
-      EXPECT_EQ(registers & (1u << reg), 0u);
-      registers |= 1u << reg;
+      ASSERT_LT(reg, 64u);
+      EXPECT_EQ(registers & (UINT64_C(1) << reg), 0u);
+      registers |= UINT64_C(1) << reg;
       slots |= 1u << slot;
       ++count;
    }
@@ -5763,12 +5882,70 @@ TEST(Apple9Compiler, GraphicsUboBindingAndConstantVectorOffsets)
    }
 }
 
-TEST(Apple9Compiler, GraphicsRejectsTooManyBuffersWithoutDiagnosticPointer)
+TEST(Apple9Compiler, GraphicsBufferAddressTables)
+{
+   for (bool fragment : {false, true}) {
+      for (unsigned count : {5u, 16u, 32u}) {
+         nir_shader *nir = apple9_render_test_shader(fragment);
+         nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+         nir_builder b = nir_builder_create(impl);
+         nir_intrinsic_instr *output = nullptr;
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type == nir_instr_type_intrinsic &&
+                   nir_instr_as_intrinsic(instr)->intrinsic ==
+                      nir_intrinsic_store_output) {
+                  output = nir_instr_as_intrinsic(instr);
+                  break;
+               }
+            }
+            if (output)
+               break;
+         }
+         ASSERT_NE(output, nullptr);
+         b.cursor = nir_before_instr(&output->instr);
+         nir_def *sum = nir_imm_float(&b, 0);
+         for (unsigned i = 0; i < count; ++i) {
+            /* Include the highest API binding even for the sparse cases. */
+            unsigned binding = i == count - 1 ? 31 : i;
+            nir_def *value = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, binding),
+                                          nir_imm_int(&b, i * 4),
+                                          .align_mul = 4, .range = 128);
+            sum = nir_fadd(&b, sum, value);
+         }
+         nir_src_rewrite(&output->src[0],
+                         nir_fmul(&b, output->src[0].ssa, sum));
+         nir->info.num_ubos = 32;
+         agx_shader_part compiled = {};
+         const char *reason = nullptr;
+         ASSERT_TRUE(fragment
+                        ? agx_compile_apple9_fragment(nir, &compiled, &reason)
+                        : agx_compile_apple9_vertex(nir, &compiled, &reason))
+            << count << " " << (reason ?: "");
+         EXPECT_EQ(compiled.info.apple9_resource_count, count);
+         EXPECT_EQ(compiled.info.apple9_resource_binding[0], 31);
+         EXPECT_EQ(compiled.info.apple9_ubo_mask,
+                   (count == 32 ? UINT32_MAX
+                                : ((1u << (count - 1)) - 1) | (1u << 31)));
+         unsigned indirect = 0;
+         const uint8_t *code = (const uint8_t *)compiled.binary;
+         for (unsigned i = 0; i + 14 <= compiled.info.binary_size; ++i)
+            indirect += code[i] == 0x67 && (code[i + 2] & 0xec) == 0x44 &&
+                        code[i + 11] == 0x40 && (code[i + 12] & 0x20);
+         EXPECT_GE(indirect, count);
+         free(compiled.binary);
+         ralloc_free(nir);
+      }
+   }
+}
+
+TEST(Apple9Compiler,
+     GraphicsRejectsInvalidBufferBindingWithoutDiagnosticPointer)
 {
    nir_builder b = nir_builder_init_simple_shader(
-      MESA_SHADER_FRAGMENT, &agx_nir_options, "two_graphics_ubos");
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "invalid_graphics_ubo");
    nir_def *sum = nir_imm_float(&b, 0);
-   for (unsigned binding = 0; binding < 5; ++binding) {
+   for (unsigned binding = 0; binding < 33; ++binding) {
       nir_def *value =
          nir_load_ubo(&b, 1, 32, nir_imm_int(&b, binding), nir_imm_int(&b, 0),
                       .align_mul = 4, .range = 4);
@@ -5778,7 +5955,7 @@ TEST(Apple9Compiler, GraphicsRejectsTooManyBuffersWithoutDiagnosticPointer)
       &b, nir_vec4(&b, sum, sum, sum, nir_imm_float(&b, 1)), nir_imm_int(&b, 0),
       .write_mask = 15, .src_type = nir_type_float32,
       .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
-   b.shader->info.num_ubos = 5;
+   b.shader->info.num_ubos = 33;
    b.shader->info.io_lowered = true;
    agx_shader_part compiled = {};
    EXPECT_FALSE(agx_compile_apple9_fragment(b.shader, &compiled, nullptr));
@@ -5925,9 +6102,9 @@ TEST(Apple9Compiler, SparseVaryingsLinkBySemanticComponent)
    const char *reason = nullptr;
    ASSERT_TRUE(agx_compile_apple9_vertex(vs.shader, &vertex, &reason)) << reason;
    EXPECT_EQ(vertex.info.apple9_varyings.count, 6u);
-   EXPECT_EQ(vertex.info.apple9_varyings.mask[3], 10u);
-   EXPECT_EQ(vertex.info.apple9_varyings.mask[9], 7u);
-   EXPECT_EQ(vertex.info.apple9_varyings.mask[31], 8u);
+   EXPECT_EQ(vertex.info.apple9_varyings.mask[VARYING_SLOT_VAR3], 10u);
+   EXPECT_EQ(vertex.info.apple9_varyings.mask[VARYING_SLOT_VAR9], 7u);
+   EXPECT_EQ(vertex.info.apple9_varyings.mask[VARYING_SLOT_VAR31], 8u);
    const uint8_t *code = static_cast<const uint8_t *>(vertex.binary);
    unsigned slots = 0;
    for (unsigned i = 0; i + 8 <= vertex.info.binary_size; ++i) {
@@ -5973,7 +6150,7 @@ TEST(Apple9Compiler, SparseVaryingsLinkBySemanticComponent)
    /* The same FS has different coefficient indices with another producer,
     * including an output which this FS does not consume. */
    auto shifted = vertex.info.apple9_varyings;
-   shifted.mask[0] = 1;
+   shifted.mask[VARYING_SLOT_VAR0] = 1;
    shifted.count++;
    ASSERT_TRUE(agx_compile_apple9_fragment_inputs(relocated, &shifted,
                                                   &fragment, &reason)) << reason;
@@ -5987,7 +6164,109 @@ TEST(Apple9Compiler, SparseVaryingsLinkBySemanticComponent)
    EXPECT_EQ(coefficients, (1u << 0) | (1u << 3) | (1u << 6) | (1u << 7));
    free(fragment.binary);
    auto invalid = vertex.info.apple9_varyings;
-   invalid.mask[31] = 0;
+   invalid.mask[VARYING_SLOT_VAR31] = 0;
+   invalid.count--;
+   EXPECT_FALSE(agx_compile_apple9_fragment_inputs(missing, &invalid, &fragment, &reason));
+   EXPECT_EQ(fragment.binary, nullptr);
+   EXPECT_NE(strstr(reason, "not written"), nullptr);
+   free(vertex.binary);
+   ralloc_free(vs.shader);
+   ralloc_free(fs.shader);
+   ralloc_free(missing);
+   ralloc_free(relocated);
+}
+
+TEST(Apple9Compiler, LegacyAndGenericVaryingsLinkBySemanticComponent)
+{
+   nir_builder vs = nir_builder_init_simple_shader(
+      MESA_SHADER_VERTEX, &agx_nir_options, "sparse_vertex_outputs");
+   nir_store_output(&vs, nir_vec4(&vs, nir_imm_float(&vs, 0), nir_imm_float(&vs, 0),
+                                nir_imm_float(&vs, .5), nir_imm_float(&vs, 1)),
+                    nir_imm_int(&vs, 0), .write_mask = 15,
+                    .src_type = nir_type_float32,
+                    .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+   /* Write out of semantic order, with holes and a constant array offset. */
+   nir_store_output(&vs, nir_vec3(&vs, nir_imm_float(&vs, .1),
+                                nir_imm_float(&vs, .2), nir_imm_float(&vs, .3)),
+                    nir_imm_int(&vs, 2), .write_mask = 7,
+                    .src_type = nir_type_float32,
+                    .io_semantics = {.location = VARYING_SLOT_TEX0, .num_slots = 3});
+   nir_store_output(&vs, nir_vec4(&vs, nir_imm_float(&vs, 0), nir_imm_float(&vs, .4),
+                                nir_imm_float(&vs, 0), nir_imm_float(&vs, .5)),
+                    nir_imm_int(&vs, 0), .write_mask = 10,
+                    .src_type = nir_type_float32,
+                    .io_semantics = {.location = VARYING_SLOT_COL0, .num_slots = 1});
+   nir_store_output(&vs, nir_imm_float(&vs, .6), nir_imm_int(&vs, 0),
+                    .write_mask = 1, .component = 3, .src_type = nir_type_float32,
+                    .io_semantics = {.location = VARYING_SLOT_VAR31, .num_slots = 1});
+   vs.shader->info.io_lowered = true;
+   agx_shader_part vertex = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_vertex(vs.shader, &vertex, &reason)) << reason;
+   EXPECT_EQ(vertex.info.apple9_varyings.count, 6u);
+   EXPECT_EQ(vertex.info.apple9_varyings.mask[VARYING_SLOT_COL0], 10u);
+   EXPECT_EQ(vertex.info.apple9_varyings.mask[VARYING_SLOT_TEX2], 7u);
+   EXPECT_EQ(vertex.info.apple9_varyings.mask[VARYING_SLOT_VAR31], 8u);
+   const uint8_t *code = static_cast<const uint8_t *>(vertex.binary);
+   unsigned slots = 0;
+   for (unsigned i = 0; i + 8 <= vertex.info.binary_size; ++i) {
+      if (code[i] == 0x57 && code[i+1] == 6 && code[i+2] == 0x54)
+         slots |= 1u << ((code[i+4] >> 5) | ((code[i+5] & 1) << 3));
+   }
+   EXPECT_EQ(slots, 0x3ffu);
+
+   nir_builder fs = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "sparse_fragment_inputs");
+   nir_def *bary = nir_load_barycentric_pixel(&fs, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *a = nir_load_interpolated_input(
+      &fs, 1, 32, bary, nir_imm_int(&fs, 0), .component = 3,
+      .dest_type = nir_type_float32,
+      .io_semantics = {.location = VARYING_SLOT_COL0, .num_slots = 1});
+   nir_def *b = nir_load_interpolated_input(
+      &fs, 1, 32, bary, nir_imm_int(&fs, 2), .component = 2,
+      .dest_type = nir_type_float32,
+      .io_semantics = {.location = VARYING_SLOT_TEX0, .num_slots = 3});
+   nir_def *c = nir_load_interpolated_input(
+      &fs, 1, 32, bary, nir_imm_int(&fs, 0), .component = 3,
+      .dest_type = nir_type_float32,
+      .io_semantics = {.location = VARYING_SLOT_VAR31, .num_slots = 1});
+   nir_store_output(&fs, nir_vec4(&fs, a, b, c, nir_imm_float(&fs, 1)),
+                    nir_imm_int(&fs, 0), .write_mask = 15,
+                    .src_type = nir_type_float32,
+                    .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+   fs.shader->info.io_lowered = true;
+   nir_shader *missing = nir_shader_clone(NULL, fs.shader);
+   nir_shader *relocated = nir_shader_clone(NULL, fs.shader);
+   agx_shader_part fragment = {};
+   ASSERT_TRUE(agx_compile_apple9_fragment_inputs(fs.shader,
+      &vertex.info.apple9_varyings, &fragment, &reason)) << reason;
+   EXPECT_EQ(fragment.info.varyings.fs.nr_cf, 7u);
+   code = static_cast<const uint8_t *>(fragment.binary);
+   unsigned coefficients = 0;
+   for (unsigned i = 0; i + 10 <= fragment.info.binary_size; ++i) {
+      if (code[i] == 0x2f && (code[i+1] == 5 || code[i+1] == 13))
+         coefficients |= 1u << (code[i+5] >> 1);
+   }
+   EXPECT_EQ(coefficients, (1u << 0) | (1u << 2) | (1u << 5) | (1u << 6));
+   free(fragment.binary);
+   /* The same FS has different coefficient indices with another producer,
+    * including an output which this FS does not consume. */
+   auto shifted = vertex.info.apple9_varyings;
+   shifted.mask[VARYING_SLOT_COL0] |= 1;
+   shifted.count++;
+   ASSERT_TRUE(agx_compile_apple9_fragment_inputs(relocated, &shifted,
+                                                  &fragment, &reason)) << reason;
+   EXPECT_EQ(fragment.info.varyings.fs.nr_cf, 8u);
+   code = static_cast<const uint8_t *>(fragment.binary);
+   coefficients = 0;
+   for (unsigned i = 0; i + 10 <= fragment.info.binary_size; ++i) {
+      if (code[i] == 0x2f && (code[i+1] == 5 || code[i+1] == 13))
+         coefficients |= 1u << (code[i+5] >> 1);
+   }
+   EXPECT_EQ(coefficients, (1u << 0) | (1u << 3) | (1u << 6) | (1u << 7));
+   free(fragment.binary);
+   auto invalid = vertex.info.apple9_varyings;
+   invalid.mask[VARYING_SLOT_VAR31] = 0;
    invalid.count--;
    EXPECT_FALSE(agx_compile_apple9_fragment_inputs(missing, &invalid, &fragment, &reason));
    EXPECT_EQ(fragment.binary, nullptr);
@@ -6001,7 +6280,7 @@ TEST(Apple9Compiler, SparseVaryingsLinkBySemanticComponent)
 
 TEST(Apple9Compiler, VaryingPublicationCapacityIsCheckedBeforeAllocation)
 {
-   for (unsigned count : {0u, 12u, 13u}) {
+   for (unsigned count : {0u, 12u, 16u, 24u, 32u, 33u}) {
       nir_builder b = nir_builder_init_simple_shader(
          MESA_SHADER_VERTEX, &agx_nir_options, "varying_capacity");
       nir_store_output(&b, nir_imm_vec4(&b, 0, 0, .5, 1), nir_imm_int(&b, 0),
@@ -6017,14 +6296,14 @@ TEST(Apple9Compiler, VaryingPublicationCapacityIsCheckedBeforeAllocation)
       agx_shader_part compiled = {};
       const char *reason = nullptr;
       bool ok = agx_compile_apple9_vertex(b.shader, &compiled, &reason);
-      if (count <= 12) {
+      if (count <= 32) {
          ASSERT_TRUE(ok) << reason;
          EXPECT_EQ(compiled.info.apple9_varyings.count, count);
          free(compiled.binary);
       } else {
          EXPECT_FALSE(ok);
          EXPECT_EQ(compiled.binary, nullptr);
-         EXPECT_NE(strstr(reason, "twelve"), nullptr);
+         EXPECT_NE(strstr(reason, "32 user"), nullptr);
       }
       ralloc_free(b.shader);
    }
@@ -6063,7 +6342,7 @@ TEST(Apple9Allocator, TileReadNormalizesAndRetainsTheFirstLogicConsumer)
    uint32_t mask = agx_apple9_vir_input(&program, 16);
    uint32_t tile = agx_apple9_vir_emit(&program, AGX_APPLE9_VIR_TILE_LOAD,
       AGX_APPLE9_ENC_TILE_LOAD, nullptr, 0, 0);
-   program.instructions[0].producer_scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_AUTO;
+   program.instructions[0]->producer_scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_AUTO;
    uint32_t src[] = {mask, tile};
    uint32_t red = agx_apple9_vir_emit(&program, AGX_APPLE9_VIR_IAND,
       AGX_APPLE9_ENC_LOGIC_EXTENDED, src, 2, 0);
@@ -6072,12 +6351,12 @@ TEST(Apple9Allocator, TileReadNormalizesAndRetainsTheFirstLogicConsumer)
       AGX_APPLE9_ENC_LOGIC_EXTENDED, later, 2, 0);
    const char *reason = nullptr;
    ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason)) << reason;
-   EXPECT_EQ(program.instructions[1].src[0], tile);
-   EXPECT_EQ(program.instructions[1].scoreboard_slot,
-             program.instructions[0].producer_scoreboard_slot);
-   EXPECT_EQ(program.instructions[2].scoreboard_slot, AGX_APPLE9_SCOREBOARD_SLOT_NONE);
+   EXPECT_EQ(program.instructions[1]->src[0], tile);
+   EXPECT_EQ(program.instructions[1]->scoreboard_slot,
+             program.instructions[0]->producer_scoreboard_slot);
+   EXPECT_EQ(program.instructions[2]->scoreboard_slot, AGX_APPLE9_SCOREBOARD_SLOT_NONE);
    ASSERT_TRUE(agx_apple9_allocate_vir(&program, &reason)) << reason;
-   EXPECT_NE(program.instructions[1].live_after_mask & 1u, 0u);
+   EXPECT_NE(program.instructions[1]->live_after_mask & 1u, 0u);
    EXPECT_TRUE(agx_apple9_validate_vir_allocation(&program, &reason)) << reason;
    agx_apple9_vir_finish(&program);
 }
@@ -6088,15 +6367,15 @@ TEST(Apple9Allocator, TileReadMaterializesBeforeAStoreWithoutAWaitField)
    agx_apple9_vir_init(&program);
    uint32_t tile = agx_apple9_vir_emit(&program, AGX_APPLE9_VIR_TILE_LOAD,
       AGX_APPLE9_ENC_TILE_LOAD, nullptr, 0, 0);
-   program.instructions[0].producer_scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_AUTO;
+   program.instructions[0]->producer_scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_AUTO;
    ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&program, AGX_APPLE9_VIR_TILE_STORE,
       AGX_APPLE9_ENC_TILE_STORE, &tile, 1, 0));
    const char *reason = nullptr;
    ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason)) << reason;
    ASSERT_EQ(program.instruction_count, 3u);
-   EXPECT_TRUE(program.instructions[1].scoreboard_materialize);
-   EXPECT_EQ(program.instructions[1].scoreboard_slot,
-             program.instructions[0].producer_scoreboard_slot);
+   EXPECT_TRUE(program.instructions[1]->scoreboard_materialize);
+   EXPECT_EQ(program.instructions[1]->scoreboard_slot,
+             program.instructions[0]->producer_scoreboard_slot);
    ASSERT_TRUE(agx_apple9_allocate_vir(&program, &reason)) << reason;
    EXPECT_TRUE(agx_apple9_validate_vir_allocation(&program, &reason)) << reason;
    agx_apple9_vir_finish(&program);
@@ -6183,10 +6462,10 @@ TEST(Apple9Compiler, LegacyFragColorUsesTheSingleRenderTarget)
    ralloc_free(direct); ralloc_free(legacy);
 }
 
-TEST(Apple9Compiler, FragmentPositionFormsAndUnsupportedDepth)
+TEST(Apple9Compiler, FragmentPositionForms)
 {
    /* Exercise live component tracking: a vec4 load with only XY live is legal,
-    * while consuming Z or W must fail rather than return invented values. */
+    * and consuming Z/W uses dedicated rasterizer coefficients. */
    for (unsigned form = 0; form < 3; ++form) {
       for (unsigned component = 0; component < 4; ++component) {
          nir_builder b = nir_builder_init_simple_shader(
@@ -6214,12 +6493,13 @@ TEST(Apple9Compiler, FragmentPositionFormsAndUnsupportedDepth)
          agx_shader_part out = {};
          const char *reason = nullptr;
          bool ok = agx_compile_apple9_fragment(b.shader, &out, &reason);
-         EXPECT_EQ(ok, component < 2) << "form=" << form << " component=" << component
+         EXPECT_TRUE(ok) << "form=" << form << " component=" << component
                                       << " reason=" << (reason ? reason : "none");
-         if (ok)
+         if (ok) {
             EXPECT_EQ(out.info.apple9_varyings.count, 0u);
-         else
-            EXPECT_STREQ(reason, "Apple9 fragment window position currently supports XY only");
+            EXPECT_EQ(out.info.apple9_reads_z, component == 2);
+            EXPECT_EQ(out.info.varyings.fs.nr_cf, component == 2 ? 2u : 1u);
+         }
          free(out.binary);
          ralloc_free(b.shader);
       }
@@ -6314,9 +6594,8 @@ TEST(Apple9Compiler, TextureCoordinatesAndResultUseAllocatedRegisters)
    agx_shader_part compiled = {};
    const char *reason = nullptr;
    ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason)) << (reason ?: "");
-   EXPECT_TRUE(compiled.info.apple9_has_texture);
-   EXPECT_EQ(compiled.info.apple9_texture_binding, 3);
-   EXPECT_EQ(compiled.info.apple9_sampler_binding, 5);
+   EXPECT_EQ(compiled.info.apple9_texture_mask, 1u << 3);
+   EXPECT_EQ(compiled.info.apple9_sampler_mask, 1u << 5);
    unsigned samples = 0;
    const auto *code = static_cast<const uint8_t *>(compiled.binary);
    for (unsigned i = 0; i + 14 <= compiled.info.binary_size; ++i) {
@@ -6333,7 +6612,7 @@ TEST(Apple9Compiler, TextureCoordinatesAndResultUseAllocatedRegisters)
    ralloc_free(b.shader);
 }
 
-TEST(Apple9Vir, SampleMaterializationRelocatesBothBranchDirections)
+TEST(Apple9Vir, SampleMaterializationPreservesProducerBlockAndBranchTargets)
 {
    agx_apple9_vir_program p;
    agx_apple9_vir_init(&p);
@@ -6341,25 +6620,26 @@ TEST(Apple9Vir, SampleMaterializationRelocatesBothBranchDirections)
    uint32_t one = agx_apple9_vir_input(&p, 4);
    ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_JMP_EXEC_NONE,
       AGX_APPLE9_ENC_JMP_EXEC_NONE, nullptr, 0, 0));
-   uint32_t sample = agx_apple9_vir_emit_texture_sample(&p, coords, one);
+   uint32_t sample = agx_apple9_vir_emit_texture_sample(&p, coords, one, 0, 0);
    ASSERT_NE(sample, AGX_APPLE9_VREG_INVALID);
-   unsigned marker = p.instruction_count;
+   auto *marker = agx_apple9_block_create(&p);
+   agx_apple9_block_begin(&p, marker);
    ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_LOOP_MASK_UPDATE,
       AGX_APPLE9_ENC_LOOP_MASK_UPDATE, nullptr, 0, 0x22));
    ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_JMP_EXEC_ANY,
       AGX_APPLE9_ENC_JMP_EXEC_ANY, nullptr, 0, 0));
-   p.instructions[0].branch_target = marker;
-   p.instructions[p.instruction_count - 1].branch_target = marker;
+   p.instructions[0]->branch_target = marker;
+   p.instructions[p.instruction_count - 1]->branch_target = marker;
    p.output = sample;
    const char *reason = nullptr;
    ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&p, &reason)) << (reason ?: "");
    unsigned copies = 0, jumps = 0;
    for (unsigned i = 0; i < p.instruction_count; ++i) {
-      auto &ins = p.instructions[i];
+      auto &ins = *p.instructions[i];
       copies += ins.op == AGX_APPLE9_VIR_IOR;
       if (ins.op == AGX_APPLE9_VIR_JMP_EXEC_ANY || ins.op == AGX_APPLE9_VIR_JMP_EXEC_NONE) {
-         ASSERT_LT(ins.branch_target, p.instruction_count);
-         EXPECT_EQ(p.instructions[ins.branch_target].op, AGX_APPLE9_VIR_LOOP_MASK_UPDATE);
+         ASSERT_EQ(ins.branch_target, marker);
+         EXPECT_EQ(p.instructions[marker->start_index]->op, AGX_APPLE9_VIR_LOOP_MASK_UPDATE);
          ++jumps;
       }
    }
@@ -6390,4 +6670,794 @@ TEST(Apple9Compiler, BooleanUniformCanSelectFragmentValues)
    ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason)) << (reason ?: "");
    free(compiled.binary);
    ralloc_free(b.shader);
+}
+
+TEST(Apple9Compiler, SixteenIndependentTextureAndSamplerBindings)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "apple9_texture_bindings");
+   nir_def *sum = nir_imm_vec4(&b, 0, 0, 0, 0);
+   for (unsigned i = 0; i < 16; ++i) {
+      nir_tex_instr *tex = nir_tex_instr_create(b.shader, 1);
+      tex->op = nir_texop_tex;
+      tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+      tex->dest_type = nir_type_float32;
+      tex->coord_components = 2;
+      tex->texture_index = 2*i+1;
+      tex->sampler_index = 2*(15-i);
+      tex->src[0].src_type = nir_tex_src_coord;
+      tex->src[0].src = nir_src_for_ssa(nir_vec2(
+         &b, nir_imm_float(&b, .375), nir_imm_float(&b, .875)));
+      nir_def_init(&tex->instr, &tex->def, 4, 32);
+      nir_builder_instr_insert(&b, &tex->instr);
+      sum = nir_fadd(&b, sum, &tex->def);
+   }
+   nir_store_output(&b, nir_fmul_imm(&b, sum, 1.0/16.0), nir_imm_int(&b, 0),
+                    .write_mask = 15, .src_type = nir_type_float32,
+                    .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+   b.shader->info.io_lowered = true;
+   agx_shader_part compiled = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason)) << (reason ?: "");
+   EXPECT_EQ(compiled.info.apple9_texture_mask, 0xaaaaaaaau);
+   EXPECT_EQ(compiled.info.apple9_sampler_mask, 0x55555555u);
+   const auto *code = static_cast<const uint8_t *>(compiled.binary);
+   unsigned seen = 0;
+   for (unsigned i = 0; i + 14 <= compiled.info.binary_size; ++i) {
+      if ((code[i] & 7) != 5 || code[i+2] != 0x0c || code[i+3] != 0xb8 ||
+          (code[i+4] & 0xf8) != 0xb0 || code[i+12] != 1)
+         continue;
+      unsigned texture = ((code[i+1] >> 3) & 7)*2 + (code[i+8] >> 7);
+      unsigned sampler = (code[i+4] & 7)*2 + (code[i+9] & 1);
+      EXPECT_EQ(sampler, 15-texture);
+      EXPECT_EQ(seen & (1u << texture), 0u);
+      seen |= 1u << texture;
+   }
+   EXPECT_EQ(seen, 0xffffu);
+   free(compiled.binary);
+   ralloc_free(b.shader);
+}
+
+TEST(Apple9Compiler, RejectsDescriptorCapacityBeforeEmission)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "apple9_too_many_textures");
+   nir_def *sum = nir_imm_vec4(&b, 0, 0, 0, 0);
+   for (unsigned i = 0; i < 17; ++i) {
+      nir_tex_instr *tex = nir_tex_instr_create(b.shader, 1);
+      tex->op = nir_texop_tex;
+      tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+      tex->dest_type = nir_type_float32;
+      tex->coord_components = 2;
+      tex->texture_index = i;
+      tex->sampler_index = 0;
+      tex->src[0].src_type = nir_tex_src_coord;
+      tex->src[0].src = nir_src_for_ssa(nir_vec2(
+         &b, nir_imm_float(&b, .375), nir_imm_float(&b, .875)));
+      nir_def_init(&tex->instr, &tex->def, 4, 32);
+      nir_builder_instr_insert(&b, &tex->instr);
+      sum = nir_fadd(&b, sum, &tex->def);
+   }
+   nir_store_output(&b, sum, nir_imm_int(&b, 0),
+                    .write_mask = 15, .src_type = nir_type_float32,
+                    .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+   b.shader->info.io_lowered = true;
+   agx_shader_part compiled = {};
+   const char *reason = nullptr;
+   EXPECT_FALSE(agx_compile_apple9_fragment(b.shader, &compiled, &reason));
+   ASSERT_NE(reason, nullptr);
+   EXPECT_NE(strstr(reason, "sixteen textures"), nullptr);
+   EXPECT_EQ(compiled.binary, nullptr);
+   ralloc_free(b.shader);
+}
+
+TEST(Apple9Compiler, FragmentInterpolationModesUseDistinctCoefficientContracts)
+{
+   for (unsigned mode :
+        {INTERP_MODE_NONE, INTERP_MODE_SMOOTH, INTERP_MODE_NOPERSPECTIVE,
+         INTERP_MODE_FLAT}) {
+      for (bool integer : {false, true}) {
+         if (integer && mode != INTERP_MODE_FLAT)
+            continue;
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_FRAGMENT, &agx_nir_options, "interpolation_modes");
+         nir_def *input;
+         if (mode == INTERP_MODE_FLAT) {
+            input = nir_load_input(
+               &b, 1, 32, nir_imm_int(&b, 0), .component = 3,
+               .dest_type = integer ? nir_type_uint32 : nir_type_float32,
+               .io_semantics = {.location = VARYING_SLOT_VAR7, .num_slots = 1});
+         } else {
+            nir_def *bary =
+               nir_load_barycentric_pixel(&b, 32, .interp_mode = mode);
+            input = nir_load_interpolated_input(
+               &b, 1, 32, bary, nir_imm_int(&b, 0), .component = 3,
+               .dest_type = nir_type_float32,
+               .io_semantics = {.location = VARYING_SLOT_VAR7, .num_slots = 1});
+         }
+         if (integer)
+            input = nir_u2f32(&b, nir_iand_imm(&b, input, 255));
+         nir_store_output(
+            &b, nir_vec4(&b, input, input, input, nir_imm_float(&b, 1)),
+            nir_imm_int(&b, 0), .write_mask = 15, .src_type = nir_type_float32,
+            .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+         b.shader->info.io_lowered = true;
+         agx_apple9_varying_layout producer = {};
+         for (unsigned i = 0; i < 8; ++i)
+            producer.mask[VARYING_SLOT_VAR0 + i] = 15;
+         producer.count = 32;
+         agx_shader_part out = {};
+         const char *reason = nullptr;
+         ASSERT_TRUE(agx_compile_apple9_fragment_inputs(b.shader, &producer,
+                                                        &out, &reason))
+            << reason;
+         EXPECT_EQ(out.info.apple9_linear_mask,
+                   mode == INTERP_MODE_NOPERSPECTIVE ? 0x80000000u : 0u);
+         EXPECT_EQ(out.info.apple9_flat_mask,
+                   mode == INTERP_MODE_FLAT ? 0x80000000u : 0u);
+         EXPECT_EQ(out.info.varyings.fs.nr_cf, 33u);
+         free(out.binary);
+         ralloc_free(b.shader);
+      }
+   }
+}
+
+TEST(Apple9Compiler, IntegerVertexExportsPreserveBitPatterns)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_VERTEX, &agx_nir_options, "integer_exports");
+   nir_store_output(
+      &b, nir_imm_vec4(&b, 0, 0, .5, 1), nir_imm_int(&b, 0), .write_mask = 15,
+      .src_type = nir_type_float32,
+      .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+   nir_store_output(
+      &b, nir_ixor(&b, nir_load_vertex_id(&b), nir_imm_int(&b, 0xffabcdefu)),
+      nir_imm_int(&b, 0), .write_mask = 1, .src_type = nir_type_uint32,
+      .io_semantics = {.location = VARYING_SLOT_VAR0, .num_slots = 1});
+   b.shader->info.io_lowered = true;
+   agx_shader_part out = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_vertex(b.shader, &out, &reason)) << reason;
+   EXPECT_EQ(out.info.apple9_varyings.count, 1u);
+   free(out.binary);
+   ralloc_free(b.shader);
+}
+
+TEST(Apple9Allocator, FlatCoefficientTuplesUseScoreboardAndKeepUnusedLanesLive)
+{
+   agx_apple9_vir_program program;
+   agx_apple9_vir_init(&program);
+   uint32_t a = agx_apple9_vir_emit_iter_flat(&program, 1);
+   uint32_t b = agx_apple9_vir_emit_iter_flat(&program, 32);
+   uint32_t aa[] = {a, a}, bb[] = {b, b};
+   uint32_t x = agx_apple9_vir_emit(&program, AGX_APPLE9_VIR_IOR,
+                                    AGX_APPLE9_ENC_LOGIC_EXTENDED, aa, 2, 0);
+   uint32_t y = agx_apple9_vir_emit(&program, AGX_APPLE9_VIR_IOR,
+                                    AGX_APPLE9_ENC_LOGIC_EXTENDED, bb, 2, 0);
+   uint32_t xy[] = {x, y};
+   program.output = agx_apple9_vir_emit(
+      &program, AGX_APPLE9_VIR_IXOR, AGX_APPLE9_ENC_LOGIC_EXTENDED, xy, 2, 0);
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason))
+      << reason;
+   ASSERT_TRUE(agx_apple9_allocate_vir(&program, &reason)) << reason;
+   ASSERT_TRUE(agx_apple9_validate_vir_allocation(&program, &reason)) << reason;
+   EXPECT_NE(program.instructions[0]->producer_scoreboard_slot,
+             program.instructions[1]->producer_scoreboard_slot);
+   EXPECT_EQ(program.instructions[0]->producer_scoreboard_slot,
+             program.instructions[2]->scoreboard_slot);
+   EXPECT_EQ(program.instructions[1]->producer_scoreboard_slot,
+             program.instructions[3]->scoreboard_slot);
+   for (unsigned i = 0; i < 3; ++i)
+      for (unsigned j = 0; j < 3; ++j)
+         EXPECT_NE(program.phys[a - 2 + i], program.phys[b - 2 + j]);
+   agx_apple9_packed_instruction packed = {};
+   ASSERT_TRUE(agx_apple9_pack_vir_instruction(program.instructions[1],
+                                               program.phys, &packed, &reason))
+      << reason;
+   EXPECT_EQ(packed.bytes[4], 16);
+   EXPECT_EQ(packed.bytes[5],
+             program.instructions[1]->producer_scoreboard_slot - 1);
+   agx_apple9_vir_finish(&program);
+}
+
+TEST(Apple9Packer, IntegerPublicationBoundsAllRegisterOperands)
+{
+   agx_apple9_vir_instr instruction = {};
+   instruction.op = AGX_APPLE9_VIR_IXOR;
+   instruction.encoding = AGX_APPLE9_ENC_LOGIC_EXPORT;
+   instruction.dest = 0;
+   instruction.src[0] = 1;
+   instruction.src[1] = 2;
+   instruction.nr_srcs = 2;
+   agx_apple9_packed_instruction packed = {};
+   const char *reason = nullptr;
+   for (unsigned operand = 0; operand < 3; ++operand) {
+      uint8_t phys[] = {16, 20, 21};
+      phys[operand] = 63;
+      ASSERT_TRUE(agx_apple9_pack_vir_instruction(&instruction, phys, &packed, &reason));
+      EXPECT_EQ(packed.bytes[4] & 0x40, 0x40);
+      phys[operand] = 64;
+      EXPECT_FALSE(agx_apple9_pack_vir_instruction(&instruction, phys, &packed, &reason));
+   }
+}
+
+TEST(Apple9Allocator, PublicationsDoNotOccupyGprs)
+{
+   for (unsigned count : {1u, 36u, 64u, 65u}) {
+      agx_apple9_vir_program program;
+      agx_apple9_vir_init(&program);
+      uint32_t publications[65];
+      uint32_t ordinary[65];
+      for (unsigned i = 0; i < count; ++i) {
+         ordinary[i] = agx_apple9_vir_emit(
+            &program, AGX_APPLE9_VIR_IMM, AGX_APPLE9_ENC_MOV_IMM32,
+            nullptr, 0, 0x3f800000 + i);
+         uint32_t sources[] = {ordinary[i], ordinary[i]};
+         publications[i] = agx_apple9_vir_emit(
+            &program, i % 2 ? AGX_APPLE9_VIR_IXOR : AGX_APPLE9_VIR_FMUL,
+            i % 2 ? AGX_APPLE9_ENC_LOGIC_EXPORT : AGX_APPLE9_ENC_FLOAT2_EXPORT,
+            sources, 2, 0);
+      }
+      /* Keep every publication pending while reusing ordinary storage. */
+      for (unsigned i = 0; i < count; ++i)
+         ASSERT_TRUE(agx_apple9_vir_emit_side_effect(
+            &program, AGX_APPLE9_VIR_VARY_STORE, AGX_APPLE9_ENC_VARY_STORE,
+            &publications[i], 1, 0));
+      const char *reason = nullptr;
+      if (count > 64) {
+         EXPECT_FALSE(agx_apple9_allocate_vir(&program, &reason));
+         ASSERT_NE(reason, nullptr);
+         EXPECT_NE(strstr(reason, "publication slots"), nullptr);
+      } else {
+         ASSERT_TRUE(agx_apple9_allocate_vir(&program, &reason)) << reason;
+         EXPECT_EQ(program.publication_count, count);
+         EXPECT_EQ(program.peak_live_gprs, 1u);
+         EXPECT_EQ(program.max_phys_gpr, program.phys[ordinary[0]]);
+         uint64_t seen = 0;
+         for (unsigned i = 0; i < count; ++i) {
+            EXPECT_TRUE(program.publication[publications[i]]);
+            EXPECT_FALSE(program.publication[ordinary[i]]);
+            EXPECT_EQ(program.phys[ordinary[i]], program.phys[ordinary[0]]);
+            ASSERT_LT(program.phys[publications[i]], 64);
+            uint64_t bit = UINT64_C(1) << program.phys[publications[i]];
+            EXPECT_EQ(seen & bit, 0u);
+            seen |= bit;
+         }
+         if (count == 64) {
+            EXPECT_NE(seen & (UINT64_C(1) << program.phys[ordinary[0]]), 0u);
+            program.phys[publications[1]] = program.phys[publications[0]];
+            EXPECT_FALSE(agx_apple9_validate_vir_allocation(&program, &reason));
+            EXPECT_NE(strstr(reason, "overlap"), nullptr);
+         }
+      }
+      agx_apple9_vir_finish(&program);
+   }
+}
+
+TEST(Apple9Allocator, RejectsCrossNamespaceOperands)
+{
+   for (bool publication_as_gpr : {false, true}) {
+      agx_apple9_vir_program program;
+      agx_apple9_vir_init(&program);
+      uint32_t value = agx_apple9_vir_emit(
+         &program, AGX_APPLE9_VIR_IMM, AGX_APPLE9_ENC_MOV_IMM32,
+         nullptr, 0, 0x3f800000);
+      uint32_t sources[] = {value, value};
+      uint32_t publication = agx_apple9_vir_emit(
+         &program, AGX_APPLE9_VIR_FMUL, AGX_APPLE9_ENC_FLOAT2_EXPORT,
+         sources, 2, 0);
+      uint32_t stored = publication_as_gpr ? publication : value;
+      ASSERT_TRUE(agx_apple9_vir_emit_side_effect(
+         &program, AGX_APPLE9_VIR_VARY_STORE, AGX_APPLE9_ENC_VARY_STORE,
+         &stored, 1, 0));
+      if (publication_as_gpr) {
+         uint32_t invalid[] = {publication, value};
+         program.output = agx_apple9_vir_emit(
+            &program, AGX_APPLE9_VIR_FMUL, AGX_APPLE9_ENC_FLOAT2_MODIFIER_EXTENDED,
+            invalid, 2, 0);
+      }
+      const char *reason = nullptr;
+      EXPECT_FALSE(agx_apple9_allocate_vir(&program, &reason));
+      ASSERT_NE(reason, nullptr);
+      EXPECT_NE(strstr(reason, "namespace"), nullptr);
+      agx_apple9_vir_finish(&program);
+   }
+}
+
+TEST(Apple9Allocator, TexturePublicationsHaveIndependentStorageAndPendingLifetime)
+{
+   for (unsigned placement : {0u, 1u, 2u}) {
+      bool overlap = placement != 0;
+      agx_apple9_vir_program p;
+      agx_apple9_vir_init(&p);
+      uint32_t inputs[8];
+      for (unsigned i = 0; i < 8; ++i) {
+         inputs[i] = agx_apple9_vir_input(&p, i);
+         ASSERT_TRUE(agx_apple9_vir_add_live_out(&p, inputs[i]));
+      }
+      uint32_t coords[] = {inputs[0], inputs[1]};
+      ASSERT_NE(agx_apple9_vir_emit_texture_sample(&p, coords, inputs[2], 0, 0),
+                AGX_APPLE9_VREG_INVALID);
+      p.output = agx_apple9_vir_emit_texture_sample(&p, coords, inputs[2], 1, 0);
+      ASSERT_NE(p.output, AGX_APPLE9_VREG_INVALID);
+      /* Move the second parameter definition ahead of the first sample.
+       * Both publications must coexist until the first result handoff. */
+      if (placement == 1) {
+         agx_apple9_vir_move_before(&p, p.instructions[2], p.instructions[1]);
+      }
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&p, &reason)) << (reason ?: "");
+      if (placement == 2) {
+         /* More subtly, issuing the first sample does not end its parameter
+          * lifetime. Put another publication before its result handoff. */
+         unsigned second_params = 0;
+         for (unsigned i = 1; i < p.instruction_count; ++i) {
+            if (p.instructions[i]->op == AGX_APPLE9_VIR_TEXTURE_COORDS) {
+               second_params = i;
+               break;
+            }
+         }
+         ASSERT_GT(second_params, 2u);
+         agx_apple9_vir_move_before(&p, p.instructions[second_params], p.instructions[2]);
+      }
+      ASSERT_TRUE(agx_apple9_allocate_vir(&p, &reason)) << (reason ?: "");
+      ASSERT_TRUE(agx_apple9_validate_vir_allocation(&p, &reason)) << (reason ?: "");
+      EXPECT_EQ(p.publication_count, overlap ? 4u : 2u);
+      uint32_t pubs[2];
+      unsigned count = 0;
+      for (unsigned i = 0; i < p.instruction_count; ++i) {
+         auto &ins = *p.instructions[i];
+         if (ins.op != AGX_APPLE9_VIR_TEXTURE_COORDS)
+            continue;
+         ASSERT_LT(count, 2u);
+         pubs[count++] = ins.dest;
+         EXPECT_TRUE(p.publication[ins.dest]);
+         EXPECT_TRUE(p.publication[ins.dest + 1]);
+         EXPECT_EQ(p.phys[ins.dest] & 1, 0);
+      }
+      ASSERT_EQ(count, 2u);
+      for (unsigned i = 0; i < 8; ++i) {
+         EXPECT_FALSE(p.publication[inputs[i]]);
+         EXPECT_EQ(p.phys[inputs[i]], i);
+      }
+      if (overlap) {
+         p.phys[pubs[1]] = p.phys[pubs[0]];
+         p.phys[pubs[1] + 1] = p.phys[pubs[0] + 1];
+         EXPECT_FALSE(agx_apple9_validate_vir_allocation(&p, &reason));
+         ASSERT_NE(reason, nullptr);
+         EXPECT_NE(strstr(reason, "overlap"), nullptr);
+      }
+      agx_apple9_vir_finish(&p);
+   }
+}
+
+TEST(Apple9Compiler, TexelFetchUsesDynamicLodWithoutSamplerBinding)
+{
+   for (bool reverse_sources : {false, true}) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "apple9_texel_fetch");
+      b.shader->info.num_ubos = 1;
+      nir_def *lod = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0),
+         nir_imm_int(&b, 0), .align_mul = 4, .range = 4);
+      nir_def *coord = nir_vec2(&b, nir_imm_int(&b, 3), nir_imm_int(&b, 5));
+      nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
+      tex->op = nir_texop_txf;
+      tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+      tex->dest_type = nir_type_float32;
+      tex->coord_components = 2;
+      tex->texture_index = 7;
+      tex->sampler_index = 31; /* Has no meaning for an integer fetch. */
+      unsigned c = reverse_sources ? 1 : 0;
+      tex->src[c].src_type = nir_tex_src_coord;
+      tex->src[c].src = nir_src_for_ssa(coord);
+      tex->src[1-c].src_type = nir_tex_src_lod;
+      tex->src[1-c].src = nir_src_for_ssa(lod);
+      nir_def_init(&tex->instr, &tex->def, 4, 32);
+      nir_builder_instr_insert(&b, &tex->instr);
+      nir_store_output(&b, &tex->def, nir_imm_int(&b, 0),
+                       .write_mask = 15, .src_type = nir_type_float32,
+                       .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+      b.shader->info.io_lowered = true;
+      agx_shader_part compiled = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason))
+         << (reason ?: "");
+      EXPECT_EQ(compiled.info.apple9_texture_mask, 1u << 7);
+      EXPECT_EQ(compiled.info.apple9_sampler_mask, 0u);
+      EXPECT_TRUE(compiled.info.apple9_uses_texel_fetch);
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
+}
+
+TEST(Apple9Compiler, FilteredLodAndBiasUseSamplerBindings)
+{
+   for (auto op : {nir_texop_txl, nir_texop_txb})
+   for (bool reverse_sources : {false, true})
+   for (unsigned sampler : {5u, 29u}) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "apple9_texel_fetch");
+      b.shader->info.num_ubos = 1;
+      nir_def *lod = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0),
+         nir_imm_int(&b, 0), .align_mul = 4, .range = 4);
+      nir_def *coord = nir_vec2(&b, nir_imm_float(&b, .375), nir_imm_float(&b, .625));
+      nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
+      tex->op = op;
+      tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+      tex->dest_type = nir_type_float32;
+      tex->coord_components = 2;
+      tex->texture_index = 7;
+      tex->sampler_index = sampler;
+      unsigned c = reverse_sources ? 1 : 0;
+      tex->src[c].src_type = nir_tex_src_coord;
+      tex->src[c].src = nir_src_for_ssa(coord);
+      tex->src[1-c].src_type = op == nir_texop_txb ? nir_tex_src_bias : nir_tex_src_lod;
+      tex->src[1-c].src = nir_src_for_ssa(lod);
+      nir_def_init(&tex->instr, &tex->def, 4, 32);
+      nir_builder_instr_insert(&b, &tex->instr);
+      nir_store_output(&b, &tex->def, nir_imm_int(&b, 0),
+                       .write_mask = 15, .src_type = nir_type_float32,
+                       .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+      b.shader->info.io_lowered = true;
+      agx_shader_part compiled = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason))
+         << (reason ?: "");
+      EXPECT_EQ(compiled.info.apple9_texture_mask, 1u << 7);
+      EXPECT_EQ(compiled.info.apple9_sampler_mask, 1u << sampler);
+      EXPECT_FALSE(compiled.info.apple9_uses_texel_fetch);
+      ASSERT_EQ(compiled.info.apple9_resource_count, 2u);
+      EXPECT_TRUE(compiled.info.apple9_resource_binding[0] == AGX_APPLE9_GRAPHICS_SYSVAL_BINDING ||
+                  compiled.info.apple9_resource_binding[1] == AGX_APPLE9_GRAPHICS_SYSVAL_BINDING);
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
+}
+
+TEST(Apple9Compiler, ExplicitGradientsUseEightWordPublications)
+{
+   for (bool reverse_sources : {false, true}) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "apple9_texel_fetch");
+      b.shader->info.num_ubos = 1;
+      nir_def *lod = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0),
+         nir_imm_int(&b, 0), .align_mul = 4, .range = 4);
+      nir_def *coord = nir_vec2(&b, nir_imm_float(&b, .375), nir_imm_float(&b, .625));
+      nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
+      tex->op = nir_texop_txd;
+      tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+      tex->dest_type = nir_type_float32;
+      tex->coord_components = 2;
+      tex->texture_index = 7;
+      tex->sampler_index = 5;
+      unsigned c = reverse_sources ? 1 : 0;
+      tex->src[c].src_type = nir_tex_src_coord;
+      tex->src[c].src = nir_src_for_ssa(coord);
+      tex->src[1-c].src_type = nir_tex_src_ddx;
+      tex->src[1-c].src = nir_src_for_ssa(nir_vec2(&b, lod, nir_imm_float(&b, 0)));
+      tex->src[2].src_type = nir_tex_src_ddy;
+      tex->src[2].src = nir_src_for_ssa(nir_vec2(&b, nir_imm_float(&b, 0), lod));
+      nir_def_init(&tex->instr, &tex->def, 4, 32);
+      nir_builder_instr_insert(&b, &tex->instr);
+      nir_store_output(&b, &tex->def, nir_imm_int(&b, 0),
+                       .write_mask = 15, .src_type = nir_type_float32,
+                       .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+      b.shader->info.io_lowered = true;
+      agx_shader_part compiled = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason))
+         << (reason ?: "");
+      EXPECT_EQ(compiled.info.apple9_texture_mask, 1u << 7);
+      EXPECT_EQ(compiled.info.apple9_sampler_mask, 1u << 5);
+      EXPECT_FALSE(compiled.info.apple9_uses_texel_fetch);
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
+}
+
+TEST(Apple9Encoding, FetchPublicationsDoNotIntroduceUnrequestedWaits)
+{
+   uint8_t phys[] = {4, 16, 20, 21};
+   agx_apple9_vir_instr ins = {};
+   ins.op = AGX_APPLE9_VIR_TEXTURE_COORDS;
+   ins.encoding = AGX_APPLE9_ENC_TEXTURE_FETCH_PARAMS;
+   ins.dest = 0;
+   ins.dest_components = 4;
+   ins.nr_srcs = 3;
+   ins.src[0] = 1;
+   ins.src[1] = 2;
+   ins.src[2] = 3;
+   for (unsigned live = 0; live < 8; ++live) {
+      ins.live_after_mask = live;
+      agx_apple9_packed_instruction packed;
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_pack_vir_instruction(&ins, phys, &packed, &reason));
+      ASSERT_EQ(packed.length, 32u);
+      for (unsigned offset : {0u, 10u}) {
+         EXPECT_EQ(packed.bytes[offset + 5] & 0xe0, 0);
+         EXPECT_EQ(packed.bytes[offset + 7] & 0xe0, 0);
+         EXPECT_NE(packed.bytes[offset + 2] & 0x20, 0);
+      }
+      EXPECT_EQ((packed.bytes[28] >> 7) & 1, !(live & 4));
+   }
+}
+
+TEST(Apple9Encoding, FloatToIntegerPreservesLiveSources)
+{
+   uint8_t phys[] = {16, 18};
+   for (bool is_signed : {false, true}) {
+      for (bool keep : {false, true}) {
+         agx_apple9_vir_instr ins = {};
+         ins.op = is_signed ? AGX_APPLE9_VIR_F2I32 : AGX_APPLE9_VIR_F2U32;
+         ins.encoding = is_signed ? AGX_APPLE9_ENC_FLOAT_TO_SINT : AGX_APPLE9_ENC_FLOAT_TO_UINT;
+         ins.dest = 0;
+         ins.nr_srcs = 1;
+         ins.src[0] = 1;
+         ins.live_after_mask = keep;
+         agx_apple9_packed_instruction packed;
+         const char *reason = nullptr;
+         ASSERT_TRUE(agx_apple9_pack_vir_instruction(&ins, phys, &packed, &reason));
+         EXPECT_EQ(packed.bytes[6], keep ? 0x96 : 0xb4);
+      }
+   }
+}
+
+TEST(Apple9Compiler, RepeatedDemotionReusesCoveragePublication)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "repeated_demotion");
+   nir_def *bary = nir_load_barycentric_pixel(&b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *x = nir_load_interpolated_input(&b, 1, 32, bary, nir_imm_int(&b, 0),
+      .dest_type = nir_type_float32,
+      .io_semantics = {.location = VARYING_SLOT_VAR0, .num_slots = 1});
+   for (unsigned i = 0; i < 20; ++i)
+      nir_demote_if(&b, nir_flt(&b, x, nir_imm_float(&b, i / 40.0)));
+   nir_store_output(&b, nir_vec4(&b, x, x, x, nir_imm_float(&b, 1)),
+      nir_imm_int(&b, 0), .write_mask = 15, .src_type = nir_type_float32,
+      .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+   b.shader->info.io_lowered = true;
+   /* The compiler gathers discard use from the intrinsics. */
+   agx_shader_part part = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_fragment_inputs(b.shader, nullptr, &part, &reason)) << reason;
+   const uint8_t *code = static_cast<const uint8_t *>(part.binary);
+   unsigned coverage = 0;
+   for (unsigned i = 0; i + 6 <= part.info.binary_size; ++i) {
+      if (code[i] == 0x57 && code[i+1] == 0x14 && code[i+2] == 0x54) {
+         EXPECT_EQ(code[i+3], 0u);
+         ++coverage;
+      }
+   }
+   EXPECT_EQ(coverage, 21u);
+   free(part.binary);
+   ralloc_free(b.shader);
+}
+
+TEST(Apple9Compiler, DepthStencilOnlyFragmentHasNoColorStore)
+{
+   for (bool discard : {false, true}) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "depth_stencil_only");
+      if (discard) {
+         b.shader->info.num_ubos = 1;
+         nir_def *x = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0),
+            nir_imm_int(&b, 0), .align_mul = 4, .range = 4);
+         nir_demote_if(&b, nir_flt(&b, x, nir_imm_float(&b, .5)));
+      }
+      b.shader->info.io_lowered = true;
+      agx_shader_part compiled = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason))
+         << (reason ?: "");
+      EXPECT_EQ(compiled.info.apple9_uses_discard, discard);
+      ASSERT_NE(compiled.binary, nullptr);
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
+}
+
+TEST(Apple9Vir, PhiDefinitionStaysInSuccessorAndLivenessReachesFixedPoint)
+{
+   agx_apple9_vir_program p;
+   agx_apple9_vir_init(&p);
+   auto *entry = agx_apple9_block_create(&p);
+   auto *header = agx_apple9_block_create(&p);
+   auto *exit = agx_apple9_block_create(&p);
+   agx_apple9_block_begin(&p, entry);
+   uint32_t invariant = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IMM,
+      AGX_APPLE9_ENC_MOV_IMM32, nullptr, 0, 17);
+   uint32_t phi = agx_apple9_vir_emit_phi(&p, header);
+   auto *definition = p.instructions[p.instruction_count - 1];
+   agx_apple9_vir_copy initial[] = {{phi, invariant}};
+   ASSERT_TRUE(agx_apple9_vir_emit_phi_edge(&p, initial, 1));
+   agx_apple9_block_begin(&p, header);
+   uint32_t sources[] = {phi, invariant};
+   uint32_t sum = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IADD,
+      AGX_APPLE9_ENC_INT_ADD_EXTENDED, sources, 2, 0);
+   ASSERT_TRUE(agx_apple9_vir_emit_branch(&p, AGX_APPLE9_VIR_JMP_EXEC_NONE,
+      AGX_APPLE9_ENC_JMP_EXEC_NONE, exit));
+   /* Forces CFG construction to split the header at its early exit. */
+   agx_apple9_vir_copy backedge[] = {{phi, sum}};
+   ASSERT_TRUE(agx_apple9_vir_emit_phi_edge(&p, backedge, 1));
+   ASSERT_TRUE(agx_apple9_vir_emit_branch(&p, AGX_APPLE9_VIR_JMP_EXEC_ANY,
+      AGX_APPLE9_ENC_JMP_EXEC_ANY, header));
+   agx_apple9_block_begin(&p, exit);
+   p.output = phi;
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_allocate_vir(&p, &reason)) << (reason ?: "");
+   EXPECT_EQ(agx_apple9_instr_block(definition), header);
+   EXPECT_EQ(p.instructions[header->start_index], definition);
+   ASSERT_NE(header->next, exit);
+   auto *latch = header->next;
+   EXPECT_EQ(header->successors[0], latch);
+   EXPECT_EQ(header->successors[1], exit);
+   EXPECT_EQ(latch->successors[1], header);
+   EXPECT_EQ(header->predecessor_count, 2u);
+   EXPECT_TRUE(BITSET_TEST(header->live_in, invariant));
+   EXPECT_TRUE(BITSET_TEST(latch->live_out, invariant));
+   EXPECT_FALSE(BITSET_TEST(header->live_in, phi));
+   EXPECT_NE(p.phys[invariant], p.phys[sum]);
+   EXPECT_NE(p.phys[phi], p.phys[sum]);
+   agx_apple9_vir_finish(&p);
+}
+
+TEST(Apple9Vir, RemovingLastInstructionKeepsEmptyTargetBlockAlive)
+{
+   agx_apple9_vir_program p;
+   agx_apple9_vir_init(&p);
+   auto *entry = agx_apple9_block_create(&p);
+   auto *target = agx_apple9_block_create(&p);
+   agx_apple9_block_begin(&p, entry);
+   ASSERT_TRUE(agx_apple9_vir_emit_branch(&p, AGX_APPLE9_VIR_JMP_EXEC_NONE,
+      AGX_APPLE9_ENC_JMP_EXEC_NONE, target));
+   auto *branch = p.instructions[0];
+   /* Growing the indexed view must not move instruction or block objects. */
+   for (unsigned i = 0; i < 128; ++i)
+      ASSERT_NE(agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IMM,
+         AGX_APPLE9_ENC_MOV_IMM32, nullptr, 0, i), AGX_APPLE9_VREG_INVALID);
+   agx_apple9_block_begin(&p, target);
+   uint32_t index = agx_apple9_vir_input(&p, 2);
+   uint32_t load = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_DEVICE_LOAD,
+      AGX_APPLE9_ENC_DEVICE_LOAD, &index, 1, 0);
+   ASSERT_TRUE(agx_apple9_vir_set_device_load_contract(&p, load, 0,
+      AGX_APPLE9_SCOREBOARD_SLOT_AUTO));
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&p, &reason)) << (reason ?: "");
+   EXPECT_EQ(p.instructions[0], branch);
+   EXPECT_EQ(branch->branch_target, target);
+   EXPECT_TRUE(list_is_empty(&target->instructions));
+   EXPECT_EQ(target->start_index, p.instruction_count);
+   agx_apple9_vir_finish(&p);
+}
+
+TEST(Apple9Compiler, ComputedByteOffsetsDoNotRequireAnAffineShell)
+{
+   for (unsigned form = 0; form < 6; ++form) {
+      SCOPED_TRACE(form);
+      nir_builder b = apple9_compute_builder("computed_byte_offset");
+      b.shader->info.num_ssbos = 2;
+      nir_def *gid = apple9_global_id_x(&b);
+      nir_def *offset;
+      switch (form) {
+      case 0: offset = nir_ineg(&b, nir_ishl_imm(&b, gid, 2)); break;
+      case 1: offset = nir_inot(&b, nir_ior_imm(&b, gid, 3)); break;
+      case 2: offset = nir_iand_imm(&b, nir_imul(&b, gid, gid), ~3u); break;
+      case 3: offset = nir_bcsel(&b, nir_ult_imm(&b, gid, 8),
+                      nir_ishl_imm(&b, gid, 2), nir_ishl_imm(&b, gid, 4)); break;
+      case 4: offset = nir_ishl(&b, nir_ishl_imm(&b, gid, 2),
+                               nir_iand_imm(&b, gid, 3)); break;
+      default: offset = nir_iadd_imm(&b, nir_ishl_imm(&b, gid, 4), 0xfffffff0u); break;
+      }
+      nir_def *value = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 0), offset,
+                                     .align_mul = 4);
+      nir_store_ssbo(&b, value, nir_imm_int(&b, 1), offset, .align_mul = 4);
+      nir_validate_shader(b.shader, "computed byte offsets");
+      agx_shader_part compiled = {};
+      const char *reason = nullptr;
+      agx_apple9_compute_profile profile = {};
+      ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason))
+         << (reason ?: "");
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
+}
+
+TEST(Apple9Vir, SharedUseAnalysisTracksOperandAndLayoutEdits)
+{
+   agx_apple9_vir_program p;
+   agx_apple9_vir_init(&p);
+   uint32_t a = agx_apple9_vir_input(&p, 2), b = agx_apple9_vir_input(&p, 3);
+   uint32_t src[] = {a, a};
+   uint32_t x = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IOR,
+      AGX_APPLE9_ENC_LOGIC_EXTENDED, src, 2, 0);
+   auto *first = p.instructions[0];
+   ASSERT_EQ(agx_apple9_definition(&p, x), first);
+   ASSERT_EQ(agx_apple9_uses(&p, a)->instruction, first);
+   ASSERT_EQ(agx_apple9_uses(&p, a)->next->source, 1u);
+   EXPECT_EQ(agx_apple9_uses(&p, b), nullptr);
+   agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IOR, AGX_APPLE9_ENC_LOGIC_EXTENDED, src, 2, 0);
+   auto *second = p.instructions[1];
+   agx_apple9_vir_move_before(&p, second, first);
+   ASSERT_EQ(agx_apple9_uses(&p, a)->instruction, second);
+   second->src[0] = second->src[1] = b;
+   agx_apple9_invalidate_uses(&p);
+   ASSERT_EQ(agx_apple9_uses(&p, a)->instruction, first);
+   ASSERT_EQ(agx_apple9_uses(&p, b)->instruction, second);
+   ASSERT_EQ(agx_apple9_definition(&p, x), first);
+   agx_apple9_vir_finish(&p);
+}
+
+TEST(Apple9Vir, LoopIndexReleaseUsesCfgRatherThanLastTextualRead)
+{
+   agx_apple9_vir_program p;
+   agx_apple9_vir_init(&p);
+   uint32_t index = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IMM,
+      AGX_APPLE9_ENC_MOV_IMM32, nullptr, 0, 3);
+   auto *header = agx_apple9_block_create(&p);
+   auto *exit = agx_apple9_block_create(&p);
+   agx_apple9_block_begin(&p, header);
+   uint32_t load = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_DEVICE_LOAD,
+      AGX_APPLE9_ENC_DEVICE_LOAD, &index, 1, 0);
+   ASSERT_TRUE(agx_apple9_vir_set_device_load_contract(&p, load, 0,
+      AGX_APPLE9_SCOREBOARD_SLOT_AUTO));
+   auto *memory = p.instructions[p.instruction_count - 1];
+   uint32_t src[] = {load, load};
+   p.output = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IOR,
+      AGX_APPLE9_ENC_LOGIC_EXTENDED, src, 2, 0);
+   ASSERT_TRUE(agx_apple9_vir_emit_branch(&p, AGX_APPLE9_VIR_JMP_EXEC_ANY,
+      AGX_APPLE9_ENC_JMP_EXEC_ANY, header));
+   agx_apple9_block_begin(&p, exit);
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&p, &reason)) << (reason ?: "");
+   ASSERT_TRUE(agx_apple9_allocate_vir(&p, &reason)) << (reason ?: "");
+   EXPECT_TRUE(memory->live_after_mask & 1);
+   EXPECT_EQ(memory->device_load_index_kind, AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR);
+   agx_apple9_vir_finish(&p);
+}
+
+TEST(Apple9Compiler, MemoryLegalizationHandlesUnalignedAndPartialVectors)
+{
+   for (unsigned alignment : {1u, 2u, 4u, 8u, 16u}) {
+      SCOPED_TRACE(alignment);
+      nir_builder b = apple9_compute_builder("general_memory_alignment");
+      b.shader->info.num_ssbos = 2;
+      nir_def *offset = nir_iadd_imm(&b,
+         nir_ishl_imm(&b, apple9_global_id_x(&b), 4), alignment == 16 ? 0 : alignment);
+      unsigned components = 4;
+      nir_def *value = nir_load_ssbo(&b, components, 32, nir_imm_int(&b, 0), offset,
+         .align_mul = alignment);
+      nir_store_ssbo(&b, value, nir_imm_int(&b, 1), offset,
+         .write_mask = 5, .align_mul = alignment);
+      agx_shader_part compiled = {};
+      agx_apple9_compute_profile profile = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason))
+         << (reason ?: "");
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
+}
+
+TEST(Apple9Vir, EditingAllocatedIrInvalidatesDependencyFinalization)
+{
+   agx_apple9_vir_program p;
+   agx_apple9_vir_init(&p);
+   p.output = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IMM,
+      AGX_APPLE9_ENC_MOV_IMM32, nullptr, 0, 3);
+   auto *first = p.instructions[0];
+   agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IMM,
+      AGX_APPLE9_ENC_MOV_IMM32, nullptr, 0, 4);
+   auto *second = p.instructions[1];
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_allocate_vir(&p, &reason)) << (reason ?: "");
+   EXPECT_TRUE(p.dependencies_finalized);
+   agx_apple9_vir_move_before(&p, second, first);
+   EXPECT_FALSE(p.dependencies_finalized);
+   ASSERT_FALSE(agx_apple9_validate_vir_allocation(&p, &reason));
+   ASSERT_NE(reason, nullptr);
+   EXPECT_NE(strstr(reason, "stale"), nullptr);
+   ASSERT_TRUE(agx_apple9_allocate_vir(&p, &reason)) << (reason ?: "");
+   EXPECT_TRUE(p.dependencies_finalized);
+   agx_apple9_vir_finish(&p);
 }

@@ -44,27 +44,35 @@ bool agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
  * Compile structured FP32 graphics NIR through the common semantic VIR and
  * register allocator. Fragment inputs support pixel-center smooth FP32 user
  * components; RT0 is a complete vec4 packed to RGBA8. Vertex inputs use vertex
- * ID and formatted vertex elements; exports cover position plus up to twelve user
- * scalars across VAR0..VAR31, compacted by semantic location and component.
- * Fragment variants use the producer's layout, including unused outputs.
- * User UVS values stay unprojected for clipping and require perspective CF
- * bindings. The FS uses coefficient-aware projective multiplication, which
- * handles both ordinary and primitive-constant coefficient representations.
- * Constant array offsets and component holes are supported. Up to four buffer
- * arguments per stage use common buffer lowering.
- * Distinct vertex buffers and UBOs share that budget. The resource-binding array
- * records hardware argument order; apple9_ubo_mask records API UBO bindings.
- * Branches and loops use the common execution-mask model, including lowered
- * continuation constructs. Fragment window XY uses upper-left integer pixel
- * coordinates, matching Gallium's advertised convention; API center/origin
- * transforms belong to the caller. Fragment sampling supports one 2D texture
- * and sampler pair. Window Z/W, SSBOs, other interpolation modes, and MRT
- * fail closed. The caller supplies hardware clip
+ * ID and formatted vertex elements; exports cover position plus up to twelve
+ * user scalars across VAR0..VAR31, compacted by semantic location and
+ * component. Fragment variants use the producer's layout, including unused
+ * outputs. User UVS values stay unprojected for clipping and require
+ * perspective CF bindings. The FS uses coefficient-aware projective
+ * multiplication, which handles both ordinary and primitive-constant
+ * coefficient representations. Constant array offsets and component holes are
+ * supported. Up to 32 buffer resources per stage use a shader-loaded address
+ * table and common memory lowering. Distinct vertex buffers and UBOs share that
+ * budget. The resource-binding array records address-table order;
+ * apple9_ubo_mask records API UBO bindings. Branches and loops use the common
+ * execution-mask model, including lowered continuation constructs. Fragment
+ * window XY uses upper-left integer pixel coordinates, matching Gallium's
+ * advertised convention; API center/origin transforms belong to the caller.
+ * Fragment sampling supports up to sixteen 2D textures and sixteen samplers,
+ * independently compacted from live API bindings. Window Z/W, SSBOs, other
+ * interpolation modes, and MRT fail closed. The caller supplies hardware clip
  * coordinates and compatible stage and render-target state.
  */
 bool agx_compile_apple9_fragment(nir_shader *nir,
                                  struct agx_shader_part *out,
                                  const char **reason);
+
+/* Internal per-draw system values share the ordinary buffer-address table.
+ * API UBOs use 0..31; vertex bindings use 32..63. */
+#define AGX_APPLE9_GRAPHICS_SYSVAL_BINDING 64
+#define AGX_APPLE9_SAMPLER_BIAS_OFFSET 16
+#define AGX_APPLE9_SAMPLER_BIAS_COUNT 32
+#define AGX_APPLE9_GRAPHICS_SYSVAL_SIZE (16 + AGX_APPLE9_SAMPLER_BIAS_COUNT * sizeof(float))
 
 /* Independent RGB/alpha ADD equations with ONE, ZERO, SRC_ALPHA and
  * INV_SRC_ALPHA factors, plus the RGBA write mask. */

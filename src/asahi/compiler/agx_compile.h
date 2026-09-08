@@ -77,16 +77,30 @@ struct agx_rodata {
    uint16_t size_16;
 };
 
-/* The current export publication bank retains position plus at most twelve
- * user scalars through completion. This is a compiler limit, not an API or
+/* The current export publication bank retains position plus user scalars
+ * through completion. This is a validated compiler capacity, not an API or
  * hardware varying limit. Semantic locations are compacted independently of
  * declaration order and never encoded directly as hardware slot numbers. */
-#define AGX_APPLE9_MAX_VARYING_COMPONENTS 12
+#define AGX_APPLE9_MAX_VARYING_COMPONENTS 32
+/* Ordinary interpolants from both compatibility GL and programmable shaders.
+ * Rasterizer-generated system values require their own lowering. */
+static inline bool
+agx_apple9_varying_supported(unsigned location)
+{
+   return (location >= VARYING_SLOT_COL0 && location <= VARYING_SLOT_TEX7) ||
+          location == VARYING_SLOT_BFC0 || location == VARYING_SLOT_BFC1 ||
+          (location >= VARYING_SLOT_VAR0 && location <= VARYING_SLOT_VAR31);
+}
+
 struct agx_apple9_varying_layout {
-   uint8_t mask[32]; /* Per-component masks for VAR0..VAR31. */
+   uint8_t mask[64]; /* Per-component masks indexed by gl_varying_slot. */
    uint8_t count;
    uint8_t reserved[3];
 };
+
+/* Software capacity of the graphics address table, separate from launcher
+ * slots. */
+#define AGX_APPLE9_MAX_GRAPHICS_BUFFERS 32
 
 struct agx_shader_info {
    mesa_shader_stage stage;
@@ -95,11 +109,15 @@ struct agx_shader_info {
    /* Apple9 graphics API UBO binding mask (distinct from hardware slots). */
    uint32_t apple9_ubo_mask;
    struct agx_apple9_varying_layout apple9_varyings;
-   /* Ordered launcher arguments: API UBOs 0..31, vertex elements 32..47. */
+   uint32_t apple9_linear_mask, apple9_flat_mask;
+   bool apple9_reads_z;
+   /* Ordered graphics table entries: API UBOs 0..31, vertex bindings 32..63. */
    uint8_t apple9_resource_count;
-   uint8_t apple9_resource_binding[4];
-   bool apple9_has_texture;
-   uint8_t apple9_texture_binding, apple9_sampler_binding;
+   uint8_t apple9_resource_binding[AGX_APPLE9_MAX_GRAPHICS_BUFFERS];
+   /* Live API bindings; descriptor tables compact each mask independently. */
+   uint32_t apple9_texture_mask, apple9_sampler_mask;
+   bool apple9_uses_texel_fetch;
+   bool apple9_uses_discard;
 
    union agx_varyings varyings;
 

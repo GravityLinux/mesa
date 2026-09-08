@@ -3254,6 +3254,79 @@ run_loop_device_loads(void)
 }
 
 static void
+run_computed_addresses(void)
+{
+   const char *source =
+      "#version 310 es\n"
+      "layout(local_size_x=256) in;\n"
+      "layout(std430,binding=0) readonly buffer Control { ivec4 v[]; } ctl;\n"
+      "layout(std430,binding=1) readonly buffer Data { uvec4 v[]; } data0;\n"
+      "layout(std140,binding=2) uniform Palette { uvec4 v[16]; } palette;\n"
+      "layout(std430,binding=3) buffer Output { uvec4 v[]; } output0;\n"
+      "void main(){uint gid=gl_GlobalInvocationID.x;"
+      "uint idx=uint(-ctl.v[gid].x);"
+      "uint alt=(idx*idx+gid)&15u;"
+      "uint pick=(gid&1u)==0u?idx:alt;"
+      "uvec4 a=data0.v[pick],b=palette.v[idx];"
+      "output0.v[gid]=a^b;"
+      "output0.v[gid].xz=uvec2(a.y+b.z,a.w+b.x);}";
+   int32_t *control = calloc(VALUE_COUNT * 4, sizeof(*control));
+   uint32_t *initial = calloc(VALUE_COUNT * 4, sizeof(*initial));
+   if (!control || !initial)
+      fail("allocate computed-address inputs");
+   uint32_t data[16][4], palette[16][4];
+   for (unsigned i = 0; i < VALUE_COUNT; ++i)
+      control[4 * i] = -(int32_t)((i * 7 + 3) & 15);
+   for (unsigned i = 0; i < 16; ++i) {
+      for (unsigned c = 0; c < 4; ++c) {
+         data[i][c] = 0xdeadbeefu ^ (i * 0x10203u + c * 0x1234567u);
+         palette[i][c] = 0x80000000u + i * 0x789abu + c * 0x314159u;
+      }
+   }
+   GLuint buffers[4], program = build_compute_source(source);
+   glGenBuffers(4, buffers);
+   const void *contents[] = {control, data, palette, initial};
+   const size_t sizes[] = {VALUE_COUNT * 16, sizeof(data), sizeof(palette), VALUE_COUNT * 16};
+   for (unsigned i = 0; i < 4; ++i) {
+      GLenum target = i == 2 ? GL_UNIFORM_BUFFER : GL_SHADER_STORAGE_BUFFER;
+      glBindBuffer(target, buffers[i]);
+      glBufferData(target, sizes[i], contents[i], GL_DYNAMIC_COPY);
+      glBindBufferBase(target, i, buffers[i]);
+   }
+   glUseProgram(program);
+   glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffers[3]);
+   const uint32_t *out = glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, sizes[3], GL_MAP_READ_BIT);
+   if (!out)
+      fail("map computed-address result");
+   unsigned mismatches = 0;
+   for (unsigned gid = 0; gid < VALUE_COUNT; ++gid) {
+      unsigned idx = (gid * 7 + 3) & 15;
+      unsigned pick = gid & 1 ? (idx * idx + gid) & 15 : idx;
+      uint32_t expected[] = {data[pick][1] + palette[idx][2],
+                            data[pick][1] ^ palette[idx][1],
+                            data[pick][3] + palette[idx][0],
+                            data[pick][3] ^ palette[idx][3]};
+      for (unsigned c = 0; c < 4; ++c) {
+         if (out[gid * 4 + c] != expected[c]) {
+            if (mismatches++ < 8)
+               fprintf(stderr, "computed-address gid=%u channel=%u got=%#x expected=%#x\n",
+                       gid, c, out[gid * 4 + c], expected[c]);
+         }
+      }
+   }
+   if (mismatches)
+      fail("computed-address output mismatch");
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   glDeleteBuffers(4, buffers);
+   glDeleteProgram(program);
+   free(control);
+   free(initial);
+}
+
+static void
 run_loop_conditions_and_general_break(void)
 {
    static const char *source =
@@ -4204,11 +4277,16 @@ static const char *const lifecycle_case_names[] = {
    "device-atomic-native-shape",
    "device-atomic-pending-load-forwarding",
    "mid-body-break-loop",
+   "computed-addresses",
 };
 
 static int
 run_named_case(const char *name)
 {
+   if (!strcmp(name, "computed-addresses")) {
+      run_computed_addresses();
+      return 1;
+   }
    for (unsigned i = 0; i < WORKLOAD_ARCHIVE_CROSS_0; ++i) {
       if (!strcmp(name, workload_names[i])) {
          return run_formula_case((enum workload)i) ? 1 : -1;

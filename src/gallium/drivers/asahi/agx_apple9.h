@@ -18,6 +18,10 @@
 extern "C" {
 #endif
 
+/* Direct resource table slot size; sampler payloads occupy only eight bytes. */
+#define AGX_APPLE9_TEXTURE_TABLE_STRIDE 32
+#define AGX_APPLE9_SAMPLER_TABLE_STRIDE 32
+
 bool agx_apple9_texture_format_supported(enum pipe_format format);
 
 struct agx_device;
@@ -30,14 +34,17 @@ struct agx_apple9_render_stage {
    size_t binary_size;
    uint32_t ubo_mask;
    uint8_t resource_count;
-   uint8_t resource_binding[4];
-   bool has_texture;
-   uint8_t texture_binding, sampler_binding;
+   uint8_t resource_binding[AGX_APPLE9_MAX_GRAPHICS_BUFFERS];
+   uint32_t texture_mask, sampler_mask;
+   bool uses_texel_fetch;
+   bool uses_discard;
 
    /* Scalar interface counts used by the bounded Apple9 stage linker. */
    uint8_t position_components;
    uint8_t varying_components;
    struct agx_apple9_varying_layout varyings;
+   uint32_t apple9_linear_mask, apple9_flat_mask;
+   bool apple9_reads_z;
    uint8_t render_targets;
 };
 
@@ -77,15 +84,16 @@ struct agx_apple9_render_pipeline {
 #define AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS 56
 struct agx_apple9_uniform_draw {
    struct agx_apple9_render_package *package;
-   uint64_t vertex[4];
-   uint64_t fragment[4];
-   bool has_texture;
-   uint8_t texture_descriptor[32], sampler_descriptor[8];
+   uint64_t vertex_table;
+   uint64_t fragment_table;
+   uint64_t texture_table, sampler_table;
    uint32_t depth_control, depth_face;
    float viewport_translate[3], viewport_scale[3];
    uint32_t scissor_index;
    uint16_t scissor_min[2], scissor_max[2];
    bool reads_tile;
+   bool uses_discard;
+   bool flatshade_first;
 };
 
 bool agx_apple9_render_cache_bind_draws(
@@ -371,8 +379,10 @@ bool agx_apple9_emit_indirect_dispatch(
 void agx_apple9_pack_r32f_texture(void *out, uint64_t address, uint32_t width,
                                   uint32_t height, uint32_t stride_B);
 
+bool agx_apple9_sampler_wrap_supported(unsigned wrap);
 void agx_apple9_pack_sampler(void *out, bool min_linear, bool mag_linear,
-                              unsigned mip_filter, float min_lod, float max_lod);
+                              unsigned mip_filter, float min_lod, float max_lod,
+                         unsigned wrap_s, unsigned wrap_t, unsigned max_anisotropy);
 void agx_apple9_pack_nearest_sampler(void *out);
 
 const struct agx_apple9_render_region *

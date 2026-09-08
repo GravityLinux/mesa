@@ -8,6 +8,8 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "util/bitset.h"
+#include "util/list.h"
 
 #include "agx_apple9_machine.h"
 
@@ -17,7 +19,7 @@ extern "C" {
 
 #define AGX_APPLE9_VREG_INVALID UINT32_MAX
 #define AGX_APPLE9_PHYS_INVALID UINT8_MAX
-#define AGX_APPLE9_MAX_VIR_SRCS 5
+#define AGX_APPLE9_MAX_VIR_SRCS 6
 /*
  * A deliberately small semantic IR for the first real Apple9 compiler.
  *
@@ -73,8 +75,8 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_FROUND_EVEN,
    AGX_APPLE9_VIR_SELECT,
    AGX_APPLE9_VIR_COLLECT,
-   AGX_APPLE9_VIR_MERGE,
-   AGX_APPLE9_VIR_MASKED_COPY,
+   AGX_APPLE9_VIR_PHI,
+   AGX_APPLE9_VIR_PHI_SRC,
    AGX_APPLE9_VIR_PREDICATE_COMPARE,
    AGX_APPLE9_VIR_EXEC_MASK_PUSH,
    AGX_APPLE9_VIR_EXEC_MASK_ELSE,
@@ -86,7 +88,9 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_JMP_EXEC_NONE,
    AGX_APPLE9_VIR_BREAK_MASK_UNWIND,
    AGX_APPLE9_VIR_ITER,
+   AGX_APPLE9_VIR_ITER_FLAT,
    AGX_APPLE9_VIR_VARY_STORE,
+   AGX_APPLE9_VIR_COVERAGE,
    AGX_APPLE9_VIR_TILE_ACCESS,
    AGX_APPLE9_VIR_TILE_LOAD,
    AGX_APPLE9_VIR_TILE_STORE,
@@ -241,6 +245,8 @@ struct agx_apple9_device_load_contract {
    bool index_first_load_consumer;
 };
 
+struct agx_apple9_block;
+
 struct agx_apple9_vir_instr {
    enum agx_apple9_vir_opcode op;
    enum agx_apple9_encoding encoding;
@@ -259,16 +265,17 @@ struct agx_apple9_vir_instr {
    uint8_t memory_components;
    enum agx_apple9_atomic_op atomic_op;
    bool atomic_discard;
+   uint8_t texture_index, sampler_index;
    uint32_t src[AGX_APPLE9_MAX_VIR_SRCS];
-   /* MASKED_COPY is a predecessor-edge assignment into storage defined by a
-    * MERGE pseudo.  Keeping this distinct from dest preserves SSA: MERGE has
-    * the single virtual definition, while each masked arm conditionally writes
-    * its allocated physical register. */
+   /* An incoming phi use names its successor's SSA definition. This is
+    * edge metadata, not a mutable register assignment before allocation. */
    uint32_t target;
    uint32_t immediate;
-   /* Branches name a VIR instruction boundary.  Final signed byte
-    * displacements are patched after variable-size pseudos are emitted. */
-   uint32_t branch_target;
+   /* Stable destination identity; byte displacement is computed at packing. */
+   struct agx_apple9_block *branch_target;
+   /* Phi declaration and incoming edge uses remain SSA until packing. */
+   struct agx_apple9_block *phi_block;
+   struct agx_apple9_vir_instr *phi_edge;
    uint8_t nr_srcs;
 
    /* Scoreboard slot published by an asynchronous producer.  Ordinary ALU
@@ -312,12 +319,43 @@ struct agx_apple9_vir_instr {
     */
 };
 
+/* Instruction storage and block identity survive every insertion/removal.
+ * Layout links are independent of ownership, allowing forward branch targets. */
+struct agx_apple9_block {
+   struct agx_apple9_block *next, *prev, *allocated_next;
+   struct agx_apple9_vir_program *program;
+   struct agx_apple9_block **predecessors;
+   unsigned predecessor_count;
+   struct list_head instructions;
+   bool placed;
+   unsigned index;
+   struct agx_apple9_block *successors[2];
+   BITSET_WORD *live_in, *live_out;
+   unsigned start_index; /* Derived analysis position, never a branch identity. */
+   unsigned offset;
+};
+
+/* Uses are ordered by machine layout. Rebuild after operand edits; pointers
+ * remain valid only until the next analysis rebuild. */
+struct agx_apple9_use {
+   struct agx_apple9_vir_instr *instruction;
+   unsigned source;
+   struct agx_apple9_use *next;
+};
+
 struct agx_apple9_vir_program {
-   struct agx_apple9_vir_instr *instructions;
+   /* Indexed analysis view of stable, block-owned instructions. */
+   struct agx_apple9_vir_instr **instructions;
+   struct agx_apple9_block *blocks, *last_block, *current_block;
+   struct agx_apple9_block *allocated_blocks;
+   struct agx_apple9_use_analysis *use_analysis;
+   bool dependencies_finalized;
    unsigned instruction_count;
    unsigned instruction_capacity;
    unsigned value_count;
    uint32_t output;
+   /* Fragment execution can update depth/stencil without explicit stores. */
+   bool fragment_shader;
 
    /*
     * Values may enter or leave the bounded program in fixed physical GPRs.
@@ -335,12 +373,32 @@ struct agx_apple9_vir_program {
 
    /* Filled by agx_apple9_allocate_vir(). */
    uint8_t *phys;
+   /* Export publications have their own index namespace. Slots remain distinct
+    * through completion; ordinary GPRs with the same index are independent. */
+   bool *publication;
+   unsigned publication_count;
    unsigned peak_live_gprs;
    unsigned max_phys_gpr;
 };
 
+void agx_apple9_invalidate_uses(struct agx_apple9_vir_program *program);
+bool agx_apple9_analyze_uses(struct agx_apple9_vir_program *program);
+const struct agx_apple9_vir_instr *agx_apple9_definition(
+   const struct agx_apple9_vir_program *program, uint32_t value);
+const struct agx_apple9_use *agx_apple9_uses(
+   const struct agx_apple9_vir_program *program, uint32_t value);
+
 void agx_apple9_vir_init(struct agx_apple9_vir_program *program);
 void agx_apple9_vir_finish(struct agx_apple9_vir_program *program);
+
+struct agx_apple9_block *agx_apple9_block_create(struct agx_apple9_vir_program *program);
+void agx_apple9_block_begin(struct agx_apple9_vir_program *program,
+                          struct agx_apple9_block *block);
+struct agx_apple9_block *agx_apple9_instr_block(const struct agx_apple9_vir_instr *instr);
+void agx_apple9_vir_move_before(struct agx_apple9_vir_program *program,
+                              struct agx_apple9_vir_instr *instr,
+                              struct agx_apple9_vir_instr *before);
+void agx_apple9_vir_reindex(struct agx_apple9_vir_program *program);
 
 uint32_t agx_apple9_vir_emit(struct agx_apple9_vir_program *program,
                              enum agx_apple9_vir_opcode op,
@@ -357,10 +415,15 @@ bool agx_apple9_vir_emit_side_effect(struct agx_apple9_vir_program *program,
 bool agx_apple9_vir_emit_branch(struct agx_apple9_vir_program *program,
                                 enum agx_apple9_vir_opcode op,
                                 enum agx_apple9_encoding encoding,
-                                uint32_t target_instruction);
+                                struct agx_apple9_block *target);
 
 uint32_t agx_apple9_vir_input(struct agx_apple9_vir_program *program,
                               unsigned phys);
+bool agx_apple9_vir_set_load_address(struct agx_apple9_vir_program *program,
+                                     uint32_t value, uint32_t address);
+uint32_t agx_apple9_vir_emit_iter_flat(struct agx_apple9_vir_program *program,
+                                       unsigned coefficient);
+
 uint32_t agx_apple9_vir_emit_device_load(
    struct agx_apple9_vir_program *program, unsigned binding, uint32_t index,
    const struct agx_apple9_device_load_contract *contract);
@@ -371,16 +434,46 @@ uint32_t agx_apple9_vir_emit_device_load_vector(
  * The current graphics package supplies eight coordinate publications. */
 uint32_t agx_apple9_vir_emit_texture_sample(
    struct agx_apple9_vir_program *program, const uint32_t coords[2],
-   uint32_t one);
+   uint32_t one, unsigned texture, unsigned sampler);
 
 /* Form an adjacent register tuple from independent scalar SSA values before
  * register allocation. The pseudo is coalesced when possible and otherwise
  * lowered to copies after allocation, following the Apple8 AGX IR model. */
+/* Integer 2D coordinates and a signed16 LOD in the low source halfword.
+ * The lowering must saturate wider LOD inputs before this conversion. */
+uint32_t agx_apple9_vir_emit_texture_fetch(
+   struct agx_apple9_vir_program *program, const uint32_t coords[2],
+   uint32_t lod, unsigned texture, unsigned sampler);
+
+/* FP32 coordinates and signed Q6 LOD packed in bits16..27. */
+uint32_t agx_apple9_vir_emit_texture_lod(
+   struct agx_apple9_vir_program *program, const uint32_t coords[2],
+   uint32_t packed_lod, unsigned texture, unsigned sampler, bool bias);
+
+/* Coordinates followed by ddx.xy and ddy.xy, all FP32. */
+uint32_t agx_apple9_vir_emit_texture_grad(
+   struct agx_apple9_vir_program *program, const uint32_t src[6],
+   unsigned texture, unsigned sampler);
+
 uint32_t agx_apple9_vir_emit_collect(struct agx_apple9_vir_program *program,
                                      const uint32_t *src, unsigned components);
-uint32_t agx_apple9_vir_emit_merge(struct agx_apple9_vir_program *program);
-bool agx_apple9_vir_emit_masked_copy(struct agx_apple9_vir_program *program,
+void agx_apple9_place_phis(struct agx_apple9_vir_program *program);
+/* Reuse the Apple8 physical parallel-copy scheduler. Indices are 32-bit GPRs. */
+bool agx_apple9_resolve_phi_edge(const struct agx_apple9_vir_program *program,
+   const struct agx_apple9_vir_instr *edge,
+   bool (*emit)(void *data, bool swap, unsigned dest, unsigned source), void *data);
+
+uint32_t agx_apple9_vir_emit_phi(struct agx_apple9_vir_program *program,
+                                  struct agx_apple9_block *block);
+bool agx_apple9_vir_emit_phi_source(struct agx_apple9_vir_program *program,
                                      uint32_t target, uint32_t source);
+struct agx_apple9_vir_copy {
+   uint32_t target, source;
+};
+bool agx_apple9_vir_emit_phi_edge(
+   struct agx_apple9_vir_program *program,
+   const struct agx_apple9_vir_copy *copies, unsigned count);
+
 bool agx_apple9_vir_emit_device_store(struct agx_apple9_vir_program *program,
                                       unsigned binding, uint32_t index,
                                       const uint32_t *data, unsigned components,
@@ -403,7 +496,8 @@ bool agx_apple9_vir_set_fixed_phys(struct agx_apple9_vir_program *program,
 bool agx_apple9_vir_add_live_out(struct agx_apple9_vir_program *program,
                                  uint32_t value);
 /*
- * Scalar/adjacent-tuple linear-scan allocator. General encodings prefer
+ * CFG liveness with conservative enclosing-interval allocation for scalar
+ * and adjacent-tuple values. General encodings prefer
  * r16-r63 so the r0-r15 compact-result bank stays available to hard-low
  * instructions, then fall back to that low bank. Destinations remain distinct
  * from their inputs; killed sources become available to following
@@ -425,7 +519,8 @@ agx_apple9_assign_vir_scoreboard_slots(struct agx_apple9_vir_program *program,
 
 /* One physical Apple9 instruction, used by the compiler and packer tests. */
 struct agx_apple9_packed_instruction {
-   uint8_t bytes[16];
+   /* Includes bounded multi-instruction parameter-publication pseudos. */
+   uint8_t bytes[64];
    uint8_t length;
 };
 

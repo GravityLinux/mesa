@@ -20,6 +20,10 @@ enum agx_apple9_compute_abi {
    AGX_APPLE9_COMPUTE_ABI_SSBO8_ATOMIC,
 };
 
+/* Validated direct descriptor selection capacity, independent of API slots. */
+#define AGX_APPLE9_GRAPHICS_MAX_TEXTURES 16
+#define AGX_APPLE9_GRAPHICS_MAX_SAMPLERS 16
+
 #define AGX_APPLE9_COMPUTE_MAX_RESOURCES 8
 #define AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE 3
 

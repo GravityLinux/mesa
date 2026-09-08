@@ -1,0 +1,27 @@
+[require]
+GLSL >= 1.10
+
+[vertex shader]
+varying vec4 seed;
+void main() { gl_Position = gl_Vertex; seed = vec4(.125, .375, .625, .875); }
+
+[fragment shader]
+varying vec4 seed;
+uniform int count;
+void main() {
+  vec4 v = seed;
+  int i = 0;
+  while (i < count) { v = v.yzwx; i++; }
+  gl_FragColor = v;
+}
+
+[test]
+uniform int count 0
+draw rect -1 -1 2 2
+probe rgba 125 125 .125 .375 .625 .875
+uniform int count 1
+draw rect -1 -1 2 2
+probe rgba 125 125 .375 .625 .875 .125
+uniform int count 3
+draw rect -1 -1 2 2
+probe rgba 125 125 .875 .125 .375 .625
