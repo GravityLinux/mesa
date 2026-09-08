@@ -220,7 +220,9 @@ agx_batch_print_stats(struct agx_device *dev, struct agx_batch *batch)
    unsigned batch_idx = agx_batch_idx(batch);
 
    if (u_printf_check_abort(stdout, &dev->printf)) {
-      fprintf(stderr, "GPU abort");
+      fprintf(stderr, "GPU abort: batch %u printf header %#x %#x at %#llx\n",
+              batch_idx, dev->printf.map[0], dev->printf.map[1],
+              (unsigned long long)((struct agx_bo *)dev->printf.bo)->va->addr);
       abort();
    }
 
