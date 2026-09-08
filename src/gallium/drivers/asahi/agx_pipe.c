@@ -1995,8 +1995,8 @@ asahi_clear_buffer(struct pipe_context *pipe, struct pipe_resource *resource,
                           clear_value_size);
 }
 
-/* Until the Apple9 compute image blitter is implemented, generate ordinary
- * UNORM8 mipmaps through Gallium's synchronized CPU texture-map interface.
+/* Until the Apple9 compute image blitter is implemented, generate supported
+ * color mipmaps through Gallium's synchronized CPU texture-map interface.
  * This matches the bilinear downsampling used by util_gen_mipmap and keeps
  * image uploads/generation independent of captured shaders. */
 static bool
@@ -2011,7 +2011,7 @@ agx_apple9_generate_mipmap(struct pipe_context *pipe, struct pipe_resource *imag
        agx_resource(image)->layout.compressed)
       return false;
 
-   unsigned channels = util_format_get_blocksize(format);
+   unsigned pixel_size = util_format_get_blocksize(format);
    for (unsigned level = base_level + 1; level <= last_level; ++level) {
       unsigned sw = u_minify(image->width0, level - 1);
       unsigned sh = u_minify(image->height0, level - 1);
@@ -2039,16 +2039,22 @@ agx_apple9_generate_mipmap(struct pipe_context *pipe, struct pipe_resource *imag
             float fx = (x + 0.5f) * sw / dw - 0.5f;
             unsigned x0 = MAX2((int)floorf(fx), 0), x1 = MIN2(x0 + 1, sw - 1);
             float wx = fx - floorf(fx);
-            for (unsigned c = 0; c < channels; ++c) {
-               float a = src[y0 * src_transfer->stride + x0 * channels + c];
-               float b = src[y0 * src_transfer->stride + x1 * channels + c];
-               float d = src[y1 * src_transfer->stride + x0 * channels + c];
-               float e = src[y1 * src_transfer->stride + x1 * channels + c];
-               float top = a * (1 - wx) + b * wx;
-               float bottom = d * (1 - wx) + e * wx;
-               dst[y * dst_transfer->stride + x * channels + c] =
-                  (uint8_t)lrintf(top * (1 - wy) + bottom * wy);
+            float samples[4][4], result[4];
+            util_format_unpack_rgba(format, samples[0],
+               src + y0 * src_transfer->stride + x0 * pixel_size, 1);
+            util_format_unpack_rgba(format, samples[1],
+               src + y0 * src_transfer->stride + x1 * pixel_size, 1);
+            util_format_unpack_rgba(format, samples[2],
+               src + y1 * src_transfer->stride + x0 * pixel_size, 1);
+            util_format_unpack_rgba(format, samples[3],
+               src + y1 * src_transfer->stride + x1 * pixel_size, 1);
+            for (unsigned c = 0; c < 4; ++c) {
+               float top = samples[0][c] * (1 - wx) + samples[1][c] * wx;
+               float bottom = samples[2][c] * (1 - wx) + samples[3][c] * wx;
+               result[c] = top * (1 - wy) + bottom * wy;
             }
+            util_format_pack_rgba(format,
+               dst + y * dst_transfer->stride + x * pixel_size, result, 1);
          }
       }
       pipe_texture_unmap(pipe, dst_transfer);
