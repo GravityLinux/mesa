@@ -810,7 +810,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
     * carveout after the small fixed client graph and before the ordinary Mesa
     * heap, with exactly the advertised minimum capacity. */
    uint64_t kernel_size = MAX2(dev->params.vm_kernel_min_size, 32ull << 30);
-   struct drm_asahi_vm_create vm_create;
+   struct drm_asahi_vm_create vm_create = {0};
    if (dev->params.gpu_generation == 16 &&
        dev->params.gpu_variant == 'G') {
       kernel_size = dev->params.vm_kernel_min_size;
