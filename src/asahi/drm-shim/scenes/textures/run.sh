@@ -8,7 +8,7 @@ mkdir -p -- "$1"
 output_dir=$(CDPATH= cd -- "$1" && pwd)
 [ ! -e "$output_dir/render-0000-attachment-0.bin" ] || exit 2
 export T8132_GLES_TEXTURES=1
-export T8132_GLES_VERTEX_SOURCE=$scene_dir/vertex.glsl
+export T8132_GLES_VERTEX_SOURCE=${T8132_TEXTURE_VERTEX_SOURCE:-$scene_dir/vertex.glsl}
 export T8132_GLES_FRAGMENT_SOURCE=${T8132_TEXTURE_FRAGMENT_SOURCE:-$scene_dir/fragment.glsl}
 export T8132_GLES_WIDTH=256 T8132_GLES_HEIGHT=256
 export G16G_RENDER_ATTACHMENT_DUMP=$output_dir
