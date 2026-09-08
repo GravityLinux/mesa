@@ -8,6 +8,9 @@
 #include "agx_state.h"
 #include <errno.h>
 #include <stdio.h>
+#include <stdatomic.h>
+
+static _Atomic uint64_t apple9_program_serial;
 #include "asahi/compiler/agx_compile.h"
 #include "asahi/compiler/agx_compile_apple9.h"
 #include "asahi/compiler/agx_nir.h"
@@ -1878,6 +1881,10 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
          };
       }
    }
+
+   if (apple9_render)
+      compiled->apple9_render_stage.program_id =
+         atomic_fetch_add_explicit(&apple9_program_serial, 1, memory_order_relaxed) + 1;
 
    if (apple9_render)
       memcpy(compiled->apple9_render_stage.resource_binding,

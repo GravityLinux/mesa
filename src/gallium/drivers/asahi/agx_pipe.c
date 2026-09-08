@@ -1822,8 +1822,7 @@ agx_flush_batch(struct agx_context *ctx, struct agx_batch *batch)
          simple_mtx_unlock(&screen->apple9_render_package_lock);
          abort();
       }
-      agx_apple9_render_cache_invalidate_fixed_usc(
-         screen->apple9_render_cache);
+      /* Switching the USC mapping preserves the separate render backing. */
    }
 
    if (apple9_render) {

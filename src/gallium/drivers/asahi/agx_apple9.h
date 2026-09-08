@@ -30,6 +30,8 @@ struct agx_apple9_render_package;
 struct agx_apple9_render_cache;
 
 struct agx_apple9_render_stage {
+   /* Stable compiled-object identity; zero for externally supplied stages. */
+   uint64_t program_id;
    const uint8_t *binary;
    size_t binary_size;
    uint32_t ubo_mask;

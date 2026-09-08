@@ -4,6 +4,7 @@
  */
 
 #include "agx_apple9.h"
+#include "agx_immutable_state.h"
 #include "pipe/p_defines.h"
 
 #include <assert.h>
@@ -1459,6 +1460,22 @@ static const struct agx_apple9_render_region apple9_render_regions[] = {
    {AGX_APPLE9_RENDER_REGION_COLOR_BUFFER, 0x210620, 0x20},
 };
 
+/* Immutable stage programs are interned once when a package is created.
+ * Draw planning compares object identities, never executable byte arrays. */
+struct apple9_render_program {
+   struct list_head link;
+   unsigned references;
+   unsigned stage;
+   uint32_t size;
+   uint8_t data[];
+};
+
+struct apple9_state_transition {
+   struct list_head link;
+   uint64_t previous_id;
+   struct agx_immutable_state images[3];
+};
+
 struct agx_apple9_render_package {
    struct list_head link;
    struct agx_bo *bo;
@@ -1470,6 +1487,14 @@ struct agx_apple9_render_package {
    unsigned active_batches;
    uint64_t last_used;
    struct agx_apple9_render_archive_layout archive;
+   struct apple9_render_program *programs[3];
+   uint64_t shader_ids[3];
+   struct agx_immutable_state images[3];
+   uint8_t *fixed_image;
+   uint8_t *context_image;
+   uint64_t cache_id;
+   struct list_head transitions;
+   unsigned transition_count;
    uint32_t fragment_call;
    uint32_t vertex_prolog_call;
    uint32_t vertex_prolog_call_offset;
@@ -1484,18 +1509,20 @@ struct agx_apple9_render_package {
 struct agx_apple9_render_cache {
    struct agx_device *dev;
    struct list_head packages;
+   struct list_head programs;
    struct agx_va *logical_va;
    struct agx_bo *resident_bo;
    struct agx_bo *resident_state_bo;
    struct agx_apple9_render_package *current;
+   uint64_t package_serial;
+   bool state_initialized;
    uint64_t generation;
    uint64_t use_serial;
    unsigned package_count;
    uint32_t resident_archive_next;
    uint32_t resident_archive_limit;
-   /* Compute and VBO render share fixed-USC +0.  A compute installation does
-    * not change the package archive, but it invalidates every fixed-USC view
-    * published from the current render package. */
+   /* A failed publication invalidates the selected state. Compute switches
+    * the USC mapping to separate storage, preserving these render objects. */
    bool fixed_usc_dirty;
    bool installing_draws;
 };
@@ -2057,6 +2084,9 @@ agx_apple9_render_package_create(
    struct agx_apple9_render_package *result = calloc(1, sizeof(*result));
    if (!result)
       return NULL;
+   result->shader_ids[0] = pipeline->fragment.program_id;
+   result->shader_ids[1] = pipeline->vertex_prolog.program_id;
+   result->shader_ids[2] = pipeline->vertex.program_id;
    result->varying_components = pipeline->vertex.varying_components;
    result->linear_mask = pipeline->fragment.apple9_linear_mask;
    result->reads_z = pipeline->fragment.apple9_reads_z;
@@ -2130,6 +2160,7 @@ agx_apple9_render_package_create(
       agx_apple9_layout_render_archive(pipeline, &result->archive);
    assert(layout_ok);
    list_inithead(&result->link);
+   list_inithead(&result->transitions);
    return result;
 }
 
@@ -2141,6 +2172,24 @@ agx_apple9_render_package_destroy(struct agx_device *dev,
       return;
 
    assert(!package->active_batches);
+   for (unsigned i = 0; i < ARRAY_SIZE(package->programs); i++) {
+      struct apple9_render_program *program = package->programs[i];
+      if (program && --program->references == 0) {
+         list_del(&program->link);
+         free(program);
+      }
+   }
+   for (unsigned i = 0; i < ARRAY_SIZE(package->images); i++)
+      free(package->images[i].ranges);
+   list_for_each_entry_safe(struct apple9_state_transition, transition,
+                            &package->transitions, link) {
+      for (unsigned i = 0; i < ARRAY_SIZE(transition->images); i++)
+         free(transition->images[i].ranges);
+      list_del(&transition->link);
+      free(transition);
+   }
+   free(package->fixed_image);
+   free(package->context_image);
    agx_bo_unreference(dev, package->bo);
    agx_bo_unreference(dev, package->state_bo);
    free(package);
@@ -2178,6 +2227,16 @@ agx_apple9_render_package_matches(
       return false;
    if (package->vertex_buffer_size != pipeline->vertex_buffer_size)
       return false;
+
+   /* Normal Gallium stages own immutable compiled binaries. Their identities
+    * remain unique after deletion, so pointer reuse cannot alias an old entry.
+    * Source-supplied test stages retain the byte-exact validation below. */
+   if (pipeline->fragment.program_id && pipeline->vertex.program_id &&
+       (!pipeline->vertex_prolog.binary || pipeline->vertex_prolog.program_id)) {
+      return package->shader_ids[0] == pipeline->fragment.program_id &&
+             package->shader_ids[1] == pipeline->vertex_prolog.program_id &&
+             package->shader_ids[2] == pipeline->vertex.program_id;
+   }
 
    struct agx_apple9_render_archive_layout layout;
    if (!agx_apple9_layout_render_archive(pipeline, &layout))
@@ -2415,6 +2474,7 @@ agx_apple9_render_cache_create(struct agx_device *dev)
          cache->resident_archive_limit = parsed;
    }
    list_inithead(&cache->packages);
+   list_inithead(&cache->programs);
    return cache;
 }
 
@@ -2440,271 +2500,55 @@ agx_apple9_render_cache_destroy(struct agx_device *dev,
    free(cache);
 }
 
-struct agx_apple9_render_package *
-agx_apple9_render_cache_get(struct agx_apple9_render_cache *cache,
-                            const struct agx_apple9_render_pipeline *pipeline,
-                            uint64_t color_target, unsigned width,
-                            unsigned height)
+static bool
+apple9_intern_package_programs(struct agx_apple9_render_cache *cache,
+                               struct agx_apple9_render_package *package)
 {
-   if (!cache || !pipeline)
-      return NULL;
-
-   list_for_each_entry(struct agx_apple9_render_package, package,
-                       &cache->packages, link) {
-      if (package->sealed && package->color_target == color_target &&
-          package->width == width && package->height == height &&
-          agx_apple9_render_package_matches(package, pipeline)) {
-         package->last_used = ++cache->use_serial;
-         return package;
-      }
-   }
-
-   while (cache->package_count >= AGX_APPLE9_RENDER_CACHE_MAX_PACKAGES) {
-      struct agx_apple9_render_package *victim = NULL;
-      list_for_each_entry(struct agx_apple9_render_package, candidate,
-                          &cache->packages, link) {
-         if (candidate != cache->current && !candidate->active_batches &&
-             (!victim || candidate->last_used < victim->last_used))
-            victim = candidate;
-      }
-
-      /* This is a soft memory bound, never a correctness bound. Active
-       * batches pin their source packages and may temporarily exceed it. */
-      if (!victim)
-         break;
-      list_del(&victim->link);
-      cache->package_count--;
-      agx_apple9_render_package_destroy(cache->dev, victim);
-   }
-
-   struct agx_apple9_render_package *package =
-      agx_apple9_render_package_create(cache->dev, pipeline);
-   if (!package || !agx_apple9_render_package_prepare(package, color_target,
-                                                      width, height)) {
-      agx_apple9_render_package_destroy(cache->dev, package);
-      return NULL;
-   }
-
-   package->last_used = ++cache->use_serial;
-   list_addtail(&package->link, &cache->packages);
-   cache->package_count++;
-   return package;
-}
-
-bool
-agx_apple9_render_cache_bind(struct agx_apple9_render_cache *cache,
-                             struct agx_apple9_render_package *package)
-{
-   if (!cache || !package || !package->bo || !package->state_bo ||
-       !package->sealed || !cache->dev->apple9_render_fixed_usc)
-      return false;
-
-   if (cache->current == package && !cache->fixed_usc_dirty)
-      return true;
-
-   uint8_t *resident = agx_bo_map(cache->resident_bo);
-   uint8_t *fixed_usc = agx_bo_map(cache->dev->apple9_render_fixed_usc);
    const uint8_t *source = agx_bo_map(package->bo);
-   const bool force_authored_generation =
-      !cache->installing_draws &&
-      getenv("AGX_APPLE9_RENDER_FORCE_AUTHORED_GENERATION") != NULL;
-
-   /*
-    * Metal keeps one physical archive at the queue's fixed USC base and
-    * interns stage programs into it.  The compatibility package has the same
-    * split: the first 96 KiB is executable archive, while caller launch/state
-    * in the remaining range selects three archive entries.  Preserve the
-    * resident archive and install only the selected command state.
-    */
-   if (!cache->current || force_authored_generation) {
-      if (force_authored_generation && cache->current) {
-         /* Diagnostic isolation for compact archive calls and Dynamic
-          * Caching program identity.  Metal-authored standalone pipelines
-          * place their fragment main at the first archive slot.  Reinstall
-          * the selected immutable source generation verbatim so a test can
-          * distinguish that contract from Mesa's ordinary cross-pipeline
-          * block interning without changing any shader, Work, or fixed state
-          * bytes. */
-         list_for_each_entry(struct agx_apple9_render_package, candidate,
-                             &cache->packages, link) {
-            candidate->fragment_call = 0;
-            candidate->vertex_prolog_call = 0;
-            candidate->vertex_call = 0;
-         }
-      }
-      memcpy(resident, source, AGX_APPLE9_RENDER_PACKAGE_SIZE);
-      cache->resident_archive_next = package->archive.end;
-      package->fragment_call = package->archive.fragment_call;
-      package->vertex_prolog_call = package->archive.vertex_prolog_call;
-      package->vertex_call = package->archive.vertex_call;
-   } else {
-      if (!package->fragment_call) {
-         list_for_each_entry(struct agx_apple9_render_package, candidate,
-                             &cache->packages, link) {
-            if (candidate->fragment_call &&
-                candidate->archive.fragment_block_size ==
-                   package->archive.fragment_block_size &&
-                !memcmp((const uint8_t *)agx_bo_map(candidate->bo) +
-                           candidate->archive.fragment_block,
-                        source + package->archive.fragment_block,
-                        package->archive.fragment_block_size)) {
-               package->fragment_call = candidate->fragment_call;
-               break;
-            }
-         }
-      }
-      if (!package->vertex_call) {
-         list_for_each_entry(struct agx_apple9_render_package, candidate,
-                             &cache->packages, link) {
-            if (candidate->vertex_call &&
-                candidate->archive.vertex_main_block_size ==
-                   package->archive.vertex_main_block_size &&
-                !memcmp((const uint8_t *)agx_bo_map(candidate->bo) +
-                           candidate->archive.vertex_main_block,
-                        source + package->archive.vertex_main_block,
-                        package->archive.vertex_main_block_size)) {
-               package->vertex_call = candidate->vertex_call;
-               break;
-            }
-         }
-      }
-      if (!package->vertex_prolog_call) {
-         list_for_each_entry(struct agx_apple9_render_package, candidate,
-                             &cache->packages, link) {
-            if (candidate->vertex_prolog_call &&
-                candidate->archive.vertex_prolog_block_size ==
-                   package->archive.vertex_prolog_block_size &&
-                !memcmp((const uint8_t *)agx_bo_map(candidate->bo) +
-                           candidate->archive.vertex_prolog_block,
-                        source + package->archive.vertex_prolog_block,
-                        package->archive.vertex_prolog_block_size)) {
-               package->vertex_prolog_call = candidate->vertex_prolog_call;
-               break;
-            }
-         }
-      }
-
-      const struct {
-         uint32_t source_block;
-         uint32_t block_size;
-         uint32_t *call;
-      } stages[] = {
-         {package->archive.fragment_block, package->archive.fragment_block_size,
-          &package->fragment_call},
-         {package->archive.vertex_prolog_block,
-          package->archive.vertex_prolog_block_size,
-          &package->vertex_prolog_call},
-         {package->archive.vertex_main_block,
-          package->archive.vertex_main_block_size, &package->vertex_call},
-      };
-      bool appended = true;
-      for (unsigned i = 0; i < ARRAY_SIZE(stages); ++i) {
-         if (*stages[i].call)
-            continue;
-         uint32_t block = cache->resident_archive_next;
-         uint32_t main = block + AGX_APPLE9_RENDER_BLOCK_HEADER_SIZE +
-                         AGX_APPLE9_RENDER_CONSTANT_SIZE;
-         if (block > cache->resident_archive_limit ||
-             stages[i].block_size > cache->resident_archive_limit - block ||
-             !apple9_archive_call(main, stages[i].call)) {
-            appended = false;
+   const uint32_t offsets[] = {package->archive.fragment_block,
+      package->archive.vertex_prolog_block, package->archive.vertex_main_block};
+   const uint32_t sizes[] = {package->archive.fragment_block_size,
+      package->archive.vertex_prolog_block_size, package->archive.vertex_main_block_size};
+   for (unsigned i = 0; i < ARRAY_SIZE(offsets); i++) {
+      if (package->programs[i])
+         continue;
+      struct apple9_render_program *found = NULL;
+      list_for_each_entry(struct apple9_render_program, program, &cache->programs, link) {
+         if (program->stage == i && program->size == sizes[i] &&
+             !memcmp(program->data, source + offsets[i], sizes[i])) {
+            found = program;
             break;
          }
-         memcpy(resident + block, source + stages[i].source_block,
-                stages[i].block_size);
-         cache->resident_archive_next = block + stages[i].block_size;
       }
-
-      if (!appended) {
-         /* A batch must never evict programs named by its earlier draws. */
-         if (cache->installing_draws)
+      if (!found) {
+         found = malloc(sizeof(*found) + sizes[i]);
+         if (!found)
             return false;
-         /* Compact archive generation rollover.  The previous user has
-          * already retired before cache_bind, so retain the physical BO while
-          * rebuilding its contents around the selected pipeline. */
-         if (getenv("AGX_APPLE9_PACKAGE_TRACE")) {
-            fprintf(stderr,
-                    "APPLE9_RENDER_CACHE_ROLLOVER next=%#x need=%#x "
-                    "limit=%#x\n",
-                    cache->resident_archive_next,
-                    package->archive.fragment_block_size +
-                       package->archive.vertex_prolog_block_size +
-                       package->archive.vertex_main_block_size,
-                    cache->resident_archive_limit);
-         }
-         list_for_each_entry(struct agx_apple9_render_package, candidate,
-                             &cache->packages, link) {
-            candidate->fragment_call = 0;
-            candidate->vertex_prolog_call = 0;
-            candidate->vertex_call = 0;
-         }
-         memcpy(resident, source, AGX_APPLE9_RENDER_PACKAGE_SIZE);
-         cache->resident_archive_next = package->archive.end;
-         package->fragment_call = package->archive.fragment_call;
-         package->vertex_prolog_call = package->archive.vertex_prolog_call;
-         package->vertex_call = package->archive.vertex_call;
-      } else {
-         memcpy(
-            resident + AGX_APPLE9_RENDER_ARCHIVE_SIZE,
-            source + AGX_APPLE9_RENDER_ARCHIVE_SIZE,
-            AGX_APPLE9_RENDER_PACKAGE_SIZE - AGX_APPLE9_RENDER_ARCHIVE_SIZE);
-         agx_bo_note_cpu_write(cache->resident_bo, AGX_APPLE9_RENDER_ARCHIVE_SIZE,
-            AGX_APPLE9_RENDER_PACKAGE_SIZE - AGX_APPLE9_RENDER_ARCHIVE_SIZE);
-         apple9_put_u24(resident + AGX_APPLE9_RENDER_FRAGMENT_CALL_OFFSET,
-                        package->fragment_call);
-         apple9_put_u24(resident + package->vertex_prolog_call_offset,
-                        package->vertex_prolog_call);
-         apple9_put_u24(resident + AGX_APPLE9_RENDER_VERTEX_CALL_OFFSET,
-                        package->vertex_call);
+         found->references = 0;
+         found->stage = i;
+         found->size = sizes[i];
+         memcpy(found->data, source + offsets[i], sizes[i]);
+         list_addtail(&found->link, &cache->programs);
       }
+      found->references++;
+      package->programs[i] = found;
    }
-   uint8_t *resident_state = agx_bo_map(cache->resident_state_bo);
-   const uint8_t *package_state = agx_bo_map(package->state_bo);
-   /* The former template-overlay shim supplied this context page. The
-    * caller now owns it, including the null link at the end of bind0. */
-   apple9_build_direct_bind0(resident_state, package->varying_components);
-   memset(resident_state + 0x340, 0, 8);
-   memcpy(resident_state +
-             (AGX_APPLE9_RENDER_STATE_ADDRESS - AGX_APPLE9_RENDER_CONTEXT_BASE),
-          package_state, AGX_APPLE9_RENDER_STATE_SIZE);
-   agx_bo_note_cpu_write(cache->resident_state_bo,
-      AGX_APPLE9_RENDER_STATE_ADDRESS - AGX_APPLE9_RENDER_CONTEXT_BASE,
-      AGX_APPLE9_RENDER_STATE_SIZE);
-   if (package->vertex_buffer_size) {
-      /* VBO VDM selects +0x0040 instead of the inline path's +0x4040.
-       * Publish the first-page bind record at the context base, clear its
-       * inline-path link at +0x340, and leave the original +0x4000 slot
-       * empty.  Native keeps the remainder of the fixed-function image at
-       * the ordinary addresses starting at +0x8000.  Duplicating the generic
-       * first page at +0x4000 made the stale 0x1004 link live and selected a
-       * non-VBO state path before TA could retire. */
-      memcpy(resident_state, package_state, 0x4000);
-      memset(resident_state + 0x340, 0, sizeof(uint64_t));
-      memset(resident_state + 0x4000, 0, 0x4000);
-   }
+   return true;
+}
 
-   /* The VBO launch wrapper is entered through the fixed USC arena and its
-    * compact archive call is relative to that arena, not to the compatibility
-    * VDM pipeline offset.  Native T8132 therefore carries the same selected
-    * archive at USC_EXEC_BASE+0 as well as in the independently owned package
-    * generation.  Install the complete executable archive atomically with
-    * the command state; leaving these four pages zero makes TA/3D stall before
-    * either queue retires even though the package-offset archive is valid. */
-   if (package->vertex_buffer_size) {
-      assert(cache->dev->apple9_render_fixed_usc->size >=
-             AGX_APPLE9_RENDER_ARCHIVE_SIZE);
-      memcpy(fixed_usc, resident, AGX_APPLE9_RENDER_ARCHIVE_SIZE);
-   }
-
-   /* Opaque helper/resource references still reach the complete fixed USC
-    * window even when VDM selects the separately owned package. Publish the
-    * entire selected view; the first 2 MiB alone leaves live callees absent. */
-   assert(cache->dev->apple9_render_fixed_usc->size ==
-          AGX_APPLE9_RENDER_PACKAGE_SIZE);
-   memcpy(fixed_usc, resident, AGX_APPLE9_RENDER_PACKAGE_SIZE);
-   agx_bo_note_cpu_write(cache->dev->apple9_render_fixed_usc, 0,
-                         AGX_APPLE9_RENDER_PACKAGE_SIZE);
-
+static bool
+apple9_build_package_state(struct agx_apple9_render_cache *cache,
+                           struct agx_apple9_render_package *package)
+{
+   const uint8_t *source = agx_bo_map(package->bo);
+   const uint32_t context_size = AGX_APPLE9_RENDER_STATE_SIZE +
+      (AGX_APPLE9_RENDER_STATE_ADDRESS - AGX_APPLE9_RENDER_CONTEXT_BASE);
+   package->fixed_image = malloc(AGX_APPLE9_RENDER_PACKAGE_SIZE);
+   package->context_image = calloc(1, context_size);
+   if (!package->fixed_image || !package->context_image)
+      return false;
+   uint8_t *fixed_usc = package->fixed_image;
+   memcpy(fixed_usc, source, AGX_APPLE9_RENDER_PACKAGE_SIZE);
    /* The queue USC base is fixed. Install the selected compiler resource
     * graph into the base archive rather than changing usc_exec_base or
     * falling back to the shim's immutable client template. */
@@ -2716,7 +2560,7 @@ agx_apple9_render_cache_bind(struct agx_apple9_render_cache *cache,
     * fixed selector 0x00a8.  Keep the independently owned package as the
     * immutable source generation, but publish the selected record into the
     * queue's fixed USC arena at the synchronized cache-bind boundary. */
-   assert(cache->dev->apple9_render_fixed_usc->size >=
+   assert(AGX_APPLE9_RENDER_PACKAGE_SIZE >=
           AGX_APPLE9_RENDER_FIXED_RESOURCE_OFFSET +
              AGX_APPLE9_RENDER_FIXED_RESOURCE_SIZE);
    memcpy(fixed_usc + AGX_APPLE9_RENDER_FIXED_RESOURCE_OFFSET,
@@ -2730,7 +2574,7 @@ agx_apple9_render_cache_bind(struct agx_apple9_render_cache *cache,
     * immutable object; copying only the launch/resource leaves its callees
     * unmapped/zero and TA cannot retire. */
    if (package->vertex_buffer_size) {
-      assert(cache->dev->apple9_render_fixed_usc->size >=
+      assert(AGX_APPLE9_RENDER_PACKAGE_SIZE >=
              AGX_APPLE9_RENDER_FIXED_RUNTIME_OFFSET +
                 AGX_APPLE9_RENDER_FIXED_RUNTIME_SIZE);
       memcpy(fixed_usc + AGX_APPLE9_RENDER_FIXED_RUNTIME_OFFSET,
@@ -2763,7 +2607,7 @@ agx_apple9_render_cache_bind(struct agx_apple9_render_cache *cache,
     * sufficient until the first real vertex fetch.  Publish the complete
     * page at the same generation boundary as its resource record. */
    if (package->vertex_buffer_size) {
-      assert(cache->dev->apple9_render_fixed_usc->size >=
+      assert(AGX_APPLE9_RENDER_PACKAGE_SIZE >=
              AGX_APPLE9_RENDER_FIXED_VERTEX_LAUNCH_OFFSET +
                 AGX_APPLE9_RENDER_FIXED_VERTEX_LAUNCH_SIZE);
       memcpy(fixed_usc + AGX_APPLE9_RENDER_FIXED_VERTEX_LAUNCH_OFFSET,
@@ -2844,12 +2688,336 @@ agx_apple9_render_cache_bind(struct agx_apple9_render_cache *cache,
       assert(fixed_fragment_call_offset + 3 <=
              AGX_APPLE9_RENDER_FIXED_PIPELINE_OFFSET + 0x8000);
       apple9_put_u24(fixed_usc + fixed_fragment_call_offset,
-                     package->fragment_call);
+                     package->archive.fragment_call);
 
       apple9_put_u32(fixed_usc + AGX_APPLE9_RENDER_FIXED_DIMENSIONS_OFFSET,
                      package->width);
       apple9_put_u32(fixed_usc + AGX_APPLE9_RENDER_FIXED_DIMENSIONS_OFFSET + 4,
                      package->height);
+   }
+
+   uint8_t *resident_state = package->context_image;
+   const uint8_t *package_state = agx_bo_map(package->state_bo);
+   /* The former template-overlay shim supplied this context page. The
+    * caller now owns it, including the null link at the end of bind0. */
+   apple9_build_direct_bind0(resident_state, package->varying_components);
+   memset(resident_state + 0x340, 0, 8);
+   memcpy(resident_state +
+             (AGX_APPLE9_RENDER_STATE_ADDRESS - AGX_APPLE9_RENDER_CONTEXT_BASE),
+          package_state, AGX_APPLE9_RENDER_STATE_SIZE);
+
+   if (package->vertex_buffer_size) {
+      /* VBO VDM selects +0x0040 instead of the inline path's +0x4040.
+       * Publish the first-page bind record at the context base, clear its
+       * inline-path link at +0x340, and leave the original +0x4000 slot
+       * empty.  Native keeps the remainder of the fixed-function image at
+       * the ordinary addresses starting at +0x8000.  Duplicating the generic
+       * first page at +0x4000 made the stale 0x1004 link live and selected a
+       * non-VBO state path before TA could retire. */
+      memcpy(resident_state, package_state, 0x4000);
+      memset(resident_state + 0x340, 0, sizeof(uint64_t));
+      memset(resident_state + 0x4000, 0, 0x4000);
+   }
+
+   const uint8_t *data[] = {source + AGX_APPLE9_RENDER_ARCHIVE_SIZE,
+      fixed_usc + AGX_APPLE9_RENDER_ARCHIVE_SIZE, package->context_image};
+   const uint32_t sizes[] = {
+      AGX_APPLE9_RENDER_PACKAGE_SIZE - AGX_APPLE9_RENDER_ARCHIVE_SIZE,
+      AGX_APPLE9_RENDER_PACKAGE_SIZE - AGX_APPLE9_RENDER_ARCHIVE_SIZE,
+      context_size};
+   for (unsigned i = 0; i < ARRAY_SIZE(data); i++)
+      package->images[i] = (struct agx_immutable_state){.data = data[i], .size = sizes[i]};
+   package->cache_id = ++cache->package_serial;
+   return true;
+}
+
+static struct apple9_state_transition *
+apple9_package_transition(struct agx_apple9_render_package *previous,
+                          struct agx_apple9_render_package *next)
+{
+   list_for_each_entry(struct apple9_state_transition, t, &next->transitions, link) {
+      if (t->previous_id == previous->cache_id)
+         return t;
+   }
+   struct apple9_state_transition *t = calloc(1, sizeof(*t));
+   if (!t)
+      return NULL;
+   for (unsigned i = 0; i < ARRAY_SIZE(t->images); i++) {
+      if (!agx_immutable_state_init(&t->images[i], next->images[i].data,
+                                    previous->images[i].data, next->images[i].size)) {
+         for (unsigned j = 0; j < i; j++) free(t->images[j].ranges);
+         free(t);
+         return NULL;
+      }
+   }
+   t->previous_id = previous->cache_id;
+   if (next->transition_count == AGX_APPLE9_RENDER_CACHE_MAX_PACKAGES) {
+      struct apple9_state_transition *old = list_first_entry(
+         &next->transitions, struct apple9_state_transition, link);
+      list_del(&old->link);
+      for (unsigned i = 0; i < ARRAY_SIZE(old->images); i++) free(old->images[i].ranges);
+      free(old);
+      next->transition_count--;
+   }
+   list_addtail(&t->link, &next->transitions);
+   next->transition_count++;
+   return t;
+}
+
+static void
+apple9_publish_package_state(struct agx_apple9_render_cache *cache,
+                             struct agx_apple9_render_package *package)
+{
+   struct agx_bo *bos[] = {cache->resident_bo,
+      cache->dev->apple9_render_fixed_usc, cache->resident_state_bo};
+   const uint32_t offsets[] = {AGX_APPLE9_RENDER_ARCHIVE_SIZE,
+      AGX_APPLE9_RENDER_ARCHIVE_SIZE, 0};
+   /* Cache the exact transition: two states can share fields that both
+    * differ from an earlier baseline. Those shared fields need no upload. */
+   struct apple9_state_transition *transition = cache->state_initialized &&
+      !cache->fixed_usc_dirty ? apple9_package_transition(cache->current, package) : NULL;
+   const struct agx_immutable_state empty = {0};
+   for (unsigned i = 0; i < ARRAY_SIZE(bos); i++) {
+      const struct agx_immutable_state *old = transition ? &empty : NULL;
+      const struct agx_immutable_state *next = transition ? &transition->images[i] : &package->images[i];
+      uint8_t *dst = (uint8_t *)agx_bo_map(bos[i]) + offsets[i];
+      uint32_t oi = 0, ni = 0;
+      struct agx_state_range range;
+      while ((range = agx_immutable_state_next(old, next, &oi, &ni)).size) {
+         memcpy(dst + range.offset, next->data + range.offset, range.size);
+         agx_bo_note_cpu_write(bos[i], offsets[i] + range.offset, range.size);
+      }
+   }
+   cache->state_initialized = true;
+}
+
+struct agx_apple9_render_package *
+agx_apple9_render_cache_get(struct agx_apple9_render_cache *cache,
+                            const struct agx_apple9_render_pipeline *pipeline,
+                            uint64_t color_target, unsigned width,
+                            unsigned height)
+{
+   if (!cache || !pipeline)
+      return NULL;
+
+   list_for_each_entry(struct agx_apple9_render_package, package,
+                       &cache->packages, link) {
+      if (package->sealed && package->color_target == color_target &&
+          package->width == width && package->height == height &&
+          agx_apple9_render_package_matches(package, pipeline)) {
+         package->last_used = ++cache->use_serial;
+         return package;
+      }
+   }
+
+   while (cache->package_count >= AGX_APPLE9_RENDER_CACHE_MAX_PACKAGES) {
+      struct agx_apple9_render_package *victim = NULL;
+      list_for_each_entry(struct agx_apple9_render_package, candidate,
+                          &cache->packages, link) {
+         if (candidate != cache->current && !candidate->active_batches &&
+             (!victim || candidate->last_used < victim->last_used))
+            victim = candidate;
+      }
+
+      /* This is a soft memory bound, never a correctness bound. Active
+       * batches pin their source packages and may temporarily exceed it. */
+      if (!victim)
+         break;
+      list_del(&victim->link);
+      cache->package_count--;
+      agx_apple9_render_package_destroy(cache->dev, victim);
+   }
+
+   struct agx_apple9_render_package *package =
+      agx_apple9_render_package_create(cache->dev, pipeline);
+   if (!package || !agx_apple9_render_package_prepare(package, color_target,
+                                                      width, height) ||
+       !apple9_intern_package_programs(cache, package) ||
+       !apple9_build_package_state(cache, package)) {
+      agx_apple9_render_package_destroy(cache->dev, package);
+      return NULL;
+   }
+
+   package->last_used = ++cache->use_serial;
+   list_addtail(&package->link, &cache->packages);
+   cache->package_count++;
+   return package;
+}
+
+/* Add code to the persistent archive without selecting attachment or draw
+ * state. Every draw carries its own small state records and archive calls. */
+static bool
+apple9_render_cache_install_programs(struct agx_apple9_render_cache *cache,
+                                     struct agx_apple9_render_package *package)
+{
+   uint8_t *resident = agx_bo_map(cache->resident_bo);
+   uint8_t *fixed_usc = agx_bo_map(cache->dev->apple9_render_fixed_usc);
+   const uint8_t *source = agx_bo_map(package->bo);
+   if (!package->fragment_call) {
+      list_for_each_entry(struct agx_apple9_render_package, candidate,
+                          &cache->packages, link) {
+         if (candidate->fragment_call &&
+             candidate->programs[0] == package->programs[0]) {
+            package->fragment_call = candidate->fragment_call;
+            break;
+         }
+      }
+   }
+   if (!package->vertex_call) {
+      list_for_each_entry(struct agx_apple9_render_package, candidate,
+                          &cache->packages, link) {
+         if (candidate->vertex_call &&
+             candidate->programs[2] == package->programs[2]) {
+            package->vertex_call = candidate->vertex_call;
+            break;
+         }
+      }
+   }
+   if (!package->vertex_prolog_call) {
+      list_for_each_entry(struct agx_apple9_render_package, candidate,
+                          &cache->packages, link) {
+         if (candidate->vertex_prolog_call &&
+             candidate->programs[1] == package->programs[1]) {
+            package->vertex_prolog_call = candidate->vertex_prolog_call;
+            break;
+         }
+      }
+   }
+
+   const struct {
+      uint32_t source_block;
+      uint32_t block_size;
+      uint32_t *call;
+   } stages[] = {
+      {package->archive.fragment_block, package->archive.fragment_block_size,
+       &package->fragment_call},
+      {package->archive.vertex_prolog_block,
+       package->archive.vertex_prolog_block_size,
+       &package->vertex_prolog_call},
+      {package->archive.vertex_main_block,
+       package->archive.vertex_main_block_size, &package->vertex_call},
+   };
+   bool appended = true;
+   for (unsigned i = 0; i < ARRAY_SIZE(stages); ++i) {
+      if (*stages[i].call)
+         continue;
+      uint32_t block = cache->resident_archive_next;
+      uint32_t main = block + AGX_APPLE9_RENDER_BLOCK_HEADER_SIZE +
+                      AGX_APPLE9_RENDER_CONSTANT_SIZE;
+      if (block > cache->resident_archive_limit ||
+          stages[i].block_size > cache->resident_archive_limit - block ||
+          !apple9_archive_call(main, stages[i].call)) {
+         appended = false;
+         break;
+      }
+      memcpy(resident + block, source + stages[i].source_block,
+             stages[i].block_size);
+      memcpy(fixed_usc + block, source + stages[i].source_block,
+             stages[i].block_size);
+      agx_bo_note_cpu_write(cache->resident_bo, block, stages[i].block_size);
+      agx_bo_note_cpu_write(cache->dev->apple9_render_fixed_usc, block,
+                            stages[i].block_size);
+      cache->resident_archive_next = block + stages[i].block_size;
+   }
+   return appended;
+}
+
+bool
+agx_apple9_render_cache_bind(struct agx_apple9_render_cache *cache,
+                             struct agx_apple9_render_package *package)
+{
+   if (!cache || !package || !package->bo || !package->state_bo ||
+       !package->sealed || !cache->dev->apple9_render_fixed_usc)
+      return false;
+
+   if (!package->images[0].data &&
+       (!apple9_intern_package_programs(cache, package) ||
+        !apple9_build_package_state(cache, package)))
+      return false;
+
+   if (cache->current == package && !cache->fixed_usc_dirty)
+      return agx_apple9_install_render_archive(cache->dev);
+
+   uint8_t *resident = agx_bo_map(cache->resident_bo);
+   uint8_t *fixed_usc = agx_bo_map(cache->dev->apple9_render_fixed_usc);
+   const uint8_t *source = agx_bo_map(package->bo);
+   const bool force_authored_generation =
+      !cache->installing_draws &&
+      getenv("AGX_APPLE9_RENDER_FORCE_AUTHORED_GENERATION") != NULL;
+
+   /*
+    * Metal keeps one physical archive at the queue's fixed USC base and
+    * interns stage programs into it.  The compatibility package has the same
+    * split: the first 96 KiB is executable archive, while caller launch/state
+    * in the remaining range selects three archive entries.  Preserve the
+    * resident archive and install only the selected command state.
+    */
+   if (!cache->current || force_authored_generation) {
+      if (force_authored_generation && cache->current) {
+         /* Diagnostic isolation for compact archive calls and Dynamic
+          * Caching program identity.  Metal-authored standalone pipelines
+          * place their fragment main at the first archive slot.  Reinstall
+          * the selected immutable source generation verbatim so a test can
+          * distinguish that contract from Mesa's ordinary cross-pipeline
+          * block interning without changing any shader, Work, or fixed state
+          * bytes. */
+         list_for_each_entry(struct agx_apple9_render_package, candidate,
+                             &cache->packages, link) {
+            candidate->fragment_call = 0;
+            candidate->vertex_prolog_call = 0;
+            candidate->vertex_call = 0;
+         }
+      }
+      memcpy(resident, source, AGX_APPLE9_RENDER_ARCHIVE_SIZE);
+      memcpy(fixed_usc, source, AGX_APPLE9_RENDER_ARCHIVE_SIZE);
+      cache->resident_archive_next = package->archive.end;
+      package->fragment_call = package->archive.fragment_call;
+      package->vertex_prolog_call = package->archive.vertex_prolog_call;
+      package->vertex_call = package->archive.vertex_call;
+   } else {
+      bool appended = apple9_render_cache_install_programs(cache, package);
+      if (!appended) {
+         /* A batch must never evict programs named by its earlier draws. */
+         if (cache->installing_draws)
+            return false;
+         /* Compact archive generation rollover.  The previous user has
+          * already retired before cache_bind, so retain the physical BO while
+          * rebuilding its contents around the selected pipeline. */
+         if (getenv("AGX_APPLE9_PACKAGE_TRACE")) {
+            fprintf(stderr,
+                    "APPLE9_RENDER_CACHE_ROLLOVER next=%#x need=%#x "
+                    "limit=%#x\n",
+                    cache->resident_archive_next,
+                    package->archive.fragment_block_size +
+                       package->archive.vertex_prolog_block_size +
+                       package->archive.vertex_main_block_size,
+                    cache->resident_archive_limit);
+         }
+         list_for_each_entry(struct agx_apple9_render_package, candidate,
+                             &cache->packages, link) {
+            candidate->fragment_call = 0;
+            candidate->vertex_prolog_call = 0;
+            candidate->vertex_call = 0;
+         }
+         memcpy(resident, source, AGX_APPLE9_RENDER_ARCHIVE_SIZE);
+         memcpy(fixed_usc, source, AGX_APPLE9_RENDER_ARCHIVE_SIZE);
+         cache->resident_archive_next = package->archive.end;
+         package->fragment_call = package->archive.fragment_call;
+         package->vertex_prolog_call = package->archive.vertex_prolog_call;
+         package->vertex_call = package->archive.vertex_call;
+      }
+   }
+   apple9_publish_package_state(cache, package);
+   for (unsigned view = 0; view < 2; view++) {
+      uint8_t *dst = view ? fixed_usc : resident;
+      apple9_put_u24(dst + AGX_APPLE9_RENDER_FRAGMENT_CALL_OFFSET, package->fragment_call);
+      apple9_put_u24(dst + package->vertex_prolog_call_offset, package->vertex_prolog_call);
+      apple9_put_u24(dst + AGX_APPLE9_RENDER_VERTEX_CALL_OFFSET, package->vertex_call);
+   }
+   if (package->vertex_buffer_size) {
+      const uint32_t fixed_fragment = AGX_APPLE9_RENDER_FIXED_PIPELINE_OFFSET +
+         AGX_APPLE9_RENDER_FRAGMENT_CALL_OFFSET - AGX_APPLE9_RENDER_PIPELINE_SOURCE_OFFSET;
+      apple9_put_u24(fixed_usc + fixed_fragment, package->fragment_call);
    }
 
    if (!agx_apple9_install_render_archive(cache->dev))
@@ -2897,7 +3065,7 @@ apple9_plan_render_archive(const struct agx_apple9_render_cache *cache,
    /* Plan the same stage interning performed by cache_bind. Count shared
     * shaders once, including a program used by several linked pipelines. */
    struct {
-      const uint8_t *data;
+      const struct apple9_render_program *program;
       uint32_t size;
       unsigned stage;
       bool resident, in_first;
@@ -2912,10 +3080,6 @@ apple9_plan_render_archive(const struct agx_apple9_render_cache *cache,
       if (!p || !p->sealed || p->color_target != first->color_target ||
           p->width != first->width || p->height != first->height)
          return false;
-      const uint8_t *source = agx_bo_map(p->bo);
-      const uint32_t blocks[] = {
-         p->archive.fragment_block, p->archive.vertex_prolog_block,
-         p->archive.vertex_main_block};
       const uint32_t sizes[] = {
          p->archive.fragment_block_size, p->archive.vertex_prolog_block_size,
          p->archive.vertex_main_block_size};
@@ -2925,11 +3089,11 @@ apple9_plan_render_archive(const struct agx_apple9_render_cache *cache,
          unsigned j;
          for (j = 0; j < program_count; ++j) {
             if (programs[j].stage == stage && programs[j].size == sizes[stage] &&
-                !memcmp(programs[j].data, source + blocks[stage], sizes[stage]))
+                programs[j].program == p->programs[stage])
                break;
          }
          if (j == program_count) {
-            programs[j].data = source + blocks[stage];
+            programs[j].program = p->programs[stage];
             programs[j].size = sizes[stage];
             programs[j].stage = stage;
             programs[j].resident = false;
@@ -3013,21 +3177,21 @@ agx_apple9_render_cache_bind_draws(
          p->fragment_call = p->vertex_prolog_call = p->vertex_call = 0;
       }
       cache->current = NULL;
+      cache->state_initialized = false;
    }
 
    cache->installing_draws = true;
-   bool ok = true;
-   for (unsigned i = 0; ok && i < count; ++i) {
+   /* Select shared attachments once. The per-draw uploader supplies each
+    * draw's shader-dependent state; interning later programs must not copy
+    * their whole state images over that attachment owner. */
+   bool ok = agx_apple9_render_cache_bind(cache, draws[0].package);
+   for (unsigned i = 1; ok && i < count; ++i) {
       bool seen = false;
       for (unsigned j = 0; j < i; ++j)
          seen |= draws[j].package == draws[i].package;
       if (!seen)
-         ok = agx_apple9_render_cache_bind(cache, draws[i].package);
+         ok = apple9_render_cache_install_programs(cache, draws[i].package);
    }
-   /* Attachment helpers and viewport are shared; retain the first package
-    * as the batch's attachment owner. Shader-dependent PPP follows below. */
-   if (ok)
-      ok = agx_apple9_render_cache_bind(cache, draws[0].package);
    cache->installing_draws = false;
    return ok;
 }
