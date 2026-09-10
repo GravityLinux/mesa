@@ -418,6 +418,7 @@ struct agx_batch {
    /* PIPE_CLEAR_* bitmask */
    uint32_t clear, draw, load, resolve, feedback;
    bool initialized;
+   bool apple9_msaa_reloaded;
 
    uint64_t uploaded_clear_color[PIPE_MAX_COLOR_BUFS];
    float apple9_clear_color[8][4];
@@ -619,6 +620,7 @@ struct asahi_blitter {
    bool active;
    struct hash_table *blit_cs;
    void *detile_cs;
+   void *resolve_cs[2][4];
 
    /* [filter] */
    void *sampler[2];
@@ -725,6 +727,7 @@ struct agx_context {
    bool in_tess;
 
    struct blitter_context *blitter;
+   struct agx_msaa_reload *msaa_reload;
    struct primconvert_context *apple9_primconvert;
    struct asahi_blitter compute_blitter;
 
@@ -1234,6 +1237,8 @@ void agx_blitter_save(struct agx_context *ctx, struct blitter_context *blitter,
                       enum asahi_blitter_op op);
 
 void agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info);
+bool agx_apple9_reload_msaa(struct agx_batch *batch);
+void agx_destroy_msaa_reload(struct agx_context *ctx);
 
 void agx_resource_copy_region(struct pipe_context *pctx,
                               struct pipe_resource *dst, unsigned dst_level,

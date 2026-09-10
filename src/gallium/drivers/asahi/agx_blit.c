@@ -518,6 +518,8 @@ agx_blitter_save(struct agx_context *ctx, struct blitter_context *blitter,
    }
 }
 
+static bool asahi_raw_resolve(struct pipe_context *, const struct pipe_blit_info *);
+
 void
 agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
 {
@@ -536,6 +538,8 @@ agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
                             info->src.format);
 
    bool apple9 = agx_apple9_direct_render_enabled(agx_device(pipe->screen));
+   if (apple9 && asahi_raw_resolve(pipe, info))
+      return;
    if (apple9 && util_try_blit_via_copy_region(pipe, info, false))
       return;
 
@@ -628,6 +632,447 @@ asahi_spread_bits(nir_builder *b, nir_def *v)
    v = nir_iand_imm(b, nir_ior(b, v, nir_ishl_imm(b, v, 4)), 0x0f0f0f0f);
    v = nir_iand_imm(b, nir_ior(b, v, nir_ishl_imm(b, v, 2)), 0x33333333);
    return nir_iand_imm(b, nir_ior(b, v, nir_ishl_imm(b, v, 1)), 0x55555555);
+}
+
+/* Sample-minor tiled storage is shared by rendering and resolves. Keeping the
+ * addressing in NIR lets ordinary compute lowering handle both byte layouts. */
+static nir_def *
+asahi_tiled_pixel(nir_builder *b, nir_def *x, nir_def *y,
+                  nir_def *tw_log2, nir_def *th_log2, nir_def *columns)
+{
+   nir_def *common = nir_umin(b, tw_log2, th_log2);
+   nir_def *mask = nir_iadd_imm(b, nir_ishl(b, nir_imm_int(b, 1), common), -1);
+   nir_def *ix = asahi_spread_bits(b, nir_iand(b, x, mask));
+   nir_def *iy = asahi_spread_bits(b, nir_iand(b, y, mask));
+   nir_def *major = nir_bcsel(b, nir_ult(b, th_log2, tw_log2), x, y);
+   nir_def *tail = nir_ishl(b, nir_iand(b, nir_ushr(b, major, common),
+      nir_iadd_imm(b, nir_ishl(b, nir_imm_int(b, 1),
+         nir_isub(b, nir_umax(b, tw_log2, th_log2), common)), -1)),
+      nir_imul_imm(b, common, 2));
+   nir_def *tile = nir_iadd(b, nir_ushr(b, x, tw_log2),
+      nir_imul(b, nir_ushr(b, y, th_log2), columns));
+   return nir_iadd(b, nir_ishl(b, tile, nir_iadd(b, tw_log2, th_log2)),
+      nir_ior(b, tail, nir_ior(b, ix, nir_ishl_imm(b, iy, 1))));
+}
+
+/* Uncompressed multisample reloads use the same sample-minor layout as the
+ * compute resolve. The shader restores raw tile words without quantization. */
+struct agx_msaa_reload_key {
+   enum pipe_format formats[8];
+   unsigned samples, mask, count;
+   unsigned tile_w_log2[8], tile_h_log2[8];
+};
+
+struct agx_msaa_reload {
+   struct blitter_context *blitter;
+   struct hash_table *shaders;
+   void *vs, *rast, *velem;
+};
+
+static uint32_t
+asahi_reload_hash(const void *key)
+{
+   return _mesa_hash_data(key, sizeof(struct agx_msaa_reload_key));
+}
+
+static bool
+asahi_reload_equal(const void *a, const void *b)
+{
+   return !memcmp(a, b, sizeof(struct agx_msaa_reload_key));
+}
+
+static void *
+asahi_reload_vs(struct pipe_context *pctx)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_VERTEX,
+      pctx->screen->nir_options[MESA_SHADER_VERTEX], "color reload triangle");
+   nir_def *id = nir_load_vertex_id(&b);
+   nir_def *x = nir_bcsel(&b, nir_ieq_imm(&b, id, 1),
+                         nir_imm_float(&b, 3), nir_imm_float(&b, -1));
+   nir_def *y = nir_bcsel(&b, nir_ieq_imm(&b, id, 2),
+                         nir_imm_float(&b, 3), nir_imm_float(&b, -1));
+   nir_store_output(&b, nir_vec4(&b, x, y, nir_imm_float(&b, 0),
+                                nir_imm_float(&b, 1)), nir_imm_int(&b, 0),
+      .io_semantics = {.location = VARYING_SLOT_POS}, .write_mask = 15);
+   nir_shader_gather_info(b.shader, nir_shader_get_entrypoint(b.shader));
+   return pipe_shader_from_nir(pctx, b.shader);
+}
+
+static void *
+asahi_reload_fs(struct pipe_context *pctx, const struct agx_msaa_reload_key *key)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT,
+      pctx->screen->nir_options[MESA_SHADER_FRAGMENT], "multisample color reload");
+   b.shader->info.num_ubos = key->count + 1;
+   nir_def *xy = nir_u2u32(&b, nir_load_pixel_coord(&b));
+   unsigned offset = 0;
+   for (unsigned rt = 0; rt < key->count; ++rt) {
+      unsigned words = agx_apple9_color_words(key->formats[rt]);
+      if (key->mask & BITFIELD_BIT(rt)) {
+         nir_def *p[4];
+         p[0] = nir_imm_int(&b, key->tile_w_log2[rt]);
+         p[1] = nir_imm_int(&b, key->tile_h_log2[rt]);
+         for (unsigned i = 2; i < 4; ++i)
+            p[i] = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0),
+               nir_imm_int(&b, 16 * rt + 4 * i), .align_mul = 4, .range = 128);
+         nir_def *pixel = asahi_tiled_pixel(&b, nir_channel(&b, xy, 0),
+            nir_channel(&b, xy, 1), p[0], p[1], p[2]);
+         unsigned bytes = util_format_get_blocksize(key->formats[rt]);
+         nir_def *base = nir_iadd(&b, p[3],
+            nir_imul_imm(&b, pixel, key->samples * bytes));
+         nir_variable *sample_index = nir_local_variable_create(b.impl, glsl_uint_type(), "reload sample");
+         nir_store_var(&b, sample_index, nir_imm_int(&b, 0), 1);
+         nir_push_loop(&b)->control = nir_loop_control_dont_unroll;
+         nir_def *sample = nir_load_var(&b, sample_index);
+         nir_push_if(&b, nir_uge_imm(&b, sample, key->samples));
+         nir_jump(&b, nir_jump_break);
+         nir_pop_if(&b, NULL);
+         {
+            nir_def *v[2];
+            for (unsigned w = 0; w < words; ++w) {
+               /* R16F occupies a padded word in the tilebuffer. Reading its
+                * containing memory word also works for odd halfword offsets. */
+               nir_def *address = nir_iadd_imm(&b, nir_iadd(&b, base,
+                  nir_imul_imm(&b, sample, bytes)), 4 * w);
+               v[w] = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, rt + 1),
+                  bytes == 2 ? nir_iand_imm(&b, address, ~3u) : address,
+                  .align_mul = 4, .range = ~0u);
+               if (bytes == 2)
+                  v[w] = nir_iand_imm(&b, nir_ushr(&b, v[w],
+                     nir_imul_imm(&b, nir_iand_imm(&b, address, 2), 8)), 0xffff);
+            }
+            if (key->formats[rt] == PIPE_FORMAT_B8G8R8A8_UNORM ||
+                key->formats[rt] == PIPE_FORMAT_B8G8R8X8_UNORM) {
+               /* PBE memory is BGRA; raw tile words use RGBA. */
+               v[0] = nir_ior(&b, nir_iand_imm(&b, v[0], 0xff00ff00),
+                  nir_ior(&b, nir_ishl_imm(&b, nir_iand_imm(&b, v[0], 255), 16),
+                     nir_iand_imm(&b, nir_ushr_imm(&b, v[0], 16), 255)));
+               if (key->formats[rt] == PIPE_FORMAT_B8G8R8X8_UNORM)
+                  v[0] = nir_ior_imm(&b, v[0], 0xff000000);
+            }
+            nir_store_local_pixel_agx(&b, nir_vec(&b, v, words),
+               nir_u2u16(&b, nir_ishl(&b, nir_imm_int(&b, 1), sample)),
+               nir_undef(&b, 2, 16),
+               .base = offset, .format = words == 2 ? PIPE_FORMAT_R32G32_UINT
+                                                  : PIPE_FORMAT_R32_UINT,
+               .write_mask = BITFIELD_MASK(words));
+         }
+         nir_store_var(&b, sample_index, nir_iadd_imm(&b, sample, 1), 1);
+         nir_pop_loop(&b, NULL);
+      }
+      offset += 4 * words;
+   }
+   nir_shader_gather_info(b.shader, nir_shader_get_entrypoint(b.shader));
+   return pipe_shader_from_nir(pctx, b.shader);
+}
+
+void
+agx_destroy_msaa_reload(struct agx_context *ctx)
+{
+   struct agx_msaa_reload *reload = ctx->msaa_reload;
+   if (!reload)
+      return;
+   struct pipe_context *pctx = &ctx->base;
+   if (reload->shaders) {
+      hash_table_foreach(reload->shaders, entry) {
+         pctx->delete_fs_state(pctx, entry->data);
+         free((void *)entry->key);
+      }
+      _mesa_hash_table_destroy(reload->shaders, NULL);
+   }
+   if (reload->vs) pctx->delete_vs_state(pctx, reload->vs);
+   if (reload->rast) pctx->delete_rasterizer_state(pctx, reload->rast);
+   if (reload->velem) pctx->delete_vertex_elements_state(pctx, reload->velem);
+   if (reload->blitter) util_blitter_destroy(reload->blitter);
+   free(reload);
+   ctx->msaa_reload = NULL;
+}
+
+bool
+agx_apple9_reload_msaa(struct agx_batch *batch)
+{
+   struct agx_context *ctx = batch->ctx;
+   struct pipe_context *pctx = &ctx->base;
+   if (batch->apple9_msaa_reloaded || batch->tilebuffer_layout.nr_samples == 1)
+      return true;
+   batch->apple9_msaa_reloaded = true;
+   unsigned mask = ((batch->load & ~batch->clear) / PIPE_CLEAR_COLOR0) & 0xff;
+   if (!mask)
+      return true;
+   struct agx_msaa_reload_key key = {
+      .samples = batch->tilebuffer_layout.nr_samples,
+      .mask = mask, .count = batch->key.nr_cbufs,
+   };
+   uint32_t params[8][4] = {0};
+   for (unsigned rt = 0; rt < key.count; ++rt) {
+      const struct pipe_surface *surf = &batch->key.cbufs[rt];
+      key.formats[rt] = surf->format == PIPE_FORMAT_NONE
+                          ? PIPE_FORMAT_R8G8B8A8_UNORM : surf->format;
+      if (!(mask & BITFIELD_BIT(rt)))
+         continue;
+      struct agx_resource *rsrc = agx_resource(surf->texture);
+      const struct ail_layout *layout = &rsrc->layout;
+      if (ail_is_level_logically_compressed(layout, surf->level) ||
+          surf->first_layer != surf->last_layer)
+         return false;
+      struct ail_tile tile = layout->tilesize_el[surf->level];
+      params[rt][0] = util_logbase2(tile.width_el);
+      params[rt][1] = util_logbase2(tile.height_el);
+      key.tile_w_log2[rt] = params[rt][0];
+      key.tile_h_log2[rt] = params[rt][1];
+      params[rt][2] = DIV_ROUND_UP(u_minify(surf->texture->width0, surf->level), tile.width_el);
+      params[rt][3] = layout->level_offsets_B[surf->level] +
+                     surf->first_layer * layout->layer_stride_B;
+   }
+   if (!ctx->msaa_reload) {
+      ctx->msaa_reload = calloc(1, sizeof(*ctx->msaa_reload));
+      if (!ctx->msaa_reload)
+         return false;
+      struct agx_msaa_reload *r = ctx->msaa_reload;
+      r->blitter = util_blitter_create(pctx);
+      r->shaders = _mesa_hash_table_create(NULL, asahi_reload_hash, asahi_reload_equal);
+      r->vs = asahi_reload_vs(pctx);
+      struct pipe_rasterizer_state rast = {
+         .flatshade = true, .cull_face = PIPE_FACE_NONE,
+         .fill_front = PIPE_POLYGON_MODE_FILL, .fill_back = PIPE_POLYGON_MODE_FILL,
+         .depth_clip_near = true, .depth_clip_far = true,
+         .half_pixel_center = true, .bottom_edge_rule = true, .multisample = true,
+      };
+      r->rast = pctx->create_rasterizer_state(pctx, &rast);
+      r->velem = pctx->create_vertex_elements_state(pctx, 0, NULL);
+      if (!r->blitter || !r->shaders || !r->vs || !r->rast || !r->velem) {
+         agx_destroy_msaa_reload(ctx);
+         return false;
+      }
+   }
+   struct agx_msaa_reload *r = ctx->msaa_reload;
+   struct hash_entry *entry = _mesa_hash_table_search(r->shaders, &key);
+   if (!entry) {
+      struct agx_msaa_reload_key *saved_key = malloc(sizeof(key));
+      void *fs = asahi_reload_fs(pctx, &key);
+      if (!saved_key || !fs) {
+         free(saved_key);
+         if (fs) pctx->delete_fs_state(pctx, fs);
+         return false;
+      }
+      *saved_key = key;
+      entry = _mesa_hash_table_insert(r->shaders, saved_key, fs);
+   }
+   struct pipe_constant_buffer saved[9] = {0};
+   for (unsigned i = 0; i <= key.count; ++i)
+      util_copy_constant_buffer(&saved[i], &ctx->stage[MESA_SHADER_FRAGMENT].cb[i]);
+   bool queries = ctx->active_queries;
+   agx_blitter_save(ctx, r->blitter, ASAHI_SAVE_FRAGMENT_STATE);
+   util_blitter_common_clear_setup(r->blitter, batch->key.width,
+      batch->key.height, mask * PIPE_CLEAR_COLOR0, NULL, NULL);
+   pctx->set_active_query_state(pctx, false);
+   pctx->bind_vs_state(pctx, r->vs);
+   pctx->bind_fs_state(pctx, entry->data);
+   pctx->bind_rasterizer_state(pctx, r->rast);
+   pctx->bind_vertex_elements_state(pctx, r->velem);
+   pctx->bind_tcs_state(pctx, NULL);
+   pctx->bind_tes_state(pctx, NULL);
+   pctx->bind_gs_state(pctx, NULL);
+   pctx->set_stream_output_targets(pctx, 0, NULL, NULL, MESA_PRIM_UNKNOWN);
+   struct pipe_viewport_state vp = {
+      .scale = {batch->key.width * 0.5f, batch->key.height * 0.5f, 1},
+      .translate = {batch->key.width * 0.5f, batch->key.height * 0.5f, 0},
+   };
+   pctx->set_viewport_states(pctx, 0, 1, &vp);
+   struct pipe_constant_buffer cb = {.user_buffer = params, .buffer_size = sizeof(params)};
+   pctx->set_constant_buffer(pctx, MESA_SHADER_FRAGMENT, 0, &cb);
+   for (unsigned rt = 0; rt < key.count; ++rt) {
+      if (!(mask & BITFIELD_BIT(rt)))
+         continue;
+      struct pipe_resource *resource = batch->key.cbufs[rt].texture;
+      struct pipe_constant_buffer backing = {
+         .buffer = resource, .buffer_size = agx_resource(resource)->layout.size_B,
+      };
+      pctx->set_constant_buffer(pctx, MESA_SHADER_FRAGMENT, rt + 1, &backing);
+   }
+   batch->clear |= mask * PIPE_CLEAR_COLOR0;
+   struct pipe_draw_info info = {.mode = MESA_PRIM_TRIANGLES, .instance_count = 1};
+   struct pipe_draw_start_count_bias draw = {.count = 3};
+   pctx->draw_vbo(pctx, &info, 0, NULL, &draw, 1);
+   for (unsigned i = 0; i <= key.count; ++i) {
+      pctx->set_constant_buffer(pctx, MESA_SHADER_FRAGMENT, i, &saved[i]);
+      pipe_resource_reference(&saved[i].buffer, NULL);
+   }
+   util_blitter_restore_vertex_states(r->blitter);
+   util_blitter_restore_fragment_states(r->blitter);
+   util_blitter_restore_render_cond(r->blitter);
+   util_blitter_unset_running_flag(r->blitter);
+   pctx->set_active_query_state(pctx, queries);
+   return true;
+}
+
+static void *
+asahi_raw_resolve_shader(struct pipe_context *pctx, unsigned samples,
+                         unsigned components, bool fp16)
+{
+   const nir_shader_compiler_options *options = pctx->screen->nir_options[MESA_SHADER_COMPUTE];
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, options,
+                                                  "tiled color resolve");
+   b.shader->info.workgroup_size[0] = 32;
+   b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
+   b.shader->info.num_ssbos = 2;
+   b.shader->info.num_ubos = 1;
+   nir_def *p[20];
+   for (unsigned i = 0; i < ARRAY_SIZE(p); ++i)
+      p[i] = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0), nir_imm_int(&b, i * 4),
+                          .align_mul = 4, .range = sizeof(uint32_t) * ARRAY_SIZE(p));
+   nir_def *id = nir_load_global_invocation_id(&b, 32);
+   nir_def *x = nir_channel(&b, id, 0), *y = nir_channel(&b, id, 1);
+   nir_push_if(&b, nir_iand(&b, nir_ult(&b, x, p[0]), nir_ult(&b, y, p[1])));
+   nir_def *sx = nir_iadd(&b, p[2], nir_imul(&b, x, p[4]));
+   nir_def *sy = nir_iadd(&b, p[3], nir_imul(&b, y, p[5]));
+   nir_def *dx = nir_iadd(&b, p[6], nir_imul(&b, x, p[8]));
+   nir_def *dy = nir_iadd(&b, p[7], nir_imul(&b, y, p[9]));
+   nir_def *src = asahi_tiled_pixel(&b, sx, sy, p[10], p[11], p[12]);
+   nir_def *dst = asahi_tiled_pixel(&b, dx, dy, p[14], p[15], p[16]);
+   unsigned bytes = fp16 ? components * 2 : 4;
+   src = nir_iadd(&b, p[13], nir_imul_imm(&b, src, samples * bytes));
+   dst = nir_iadd(&b, p[17], nir_imul_imm(&b, dst, bytes));
+   nir_def *sum[4];
+   for (unsigned c = 0; c < components; ++c)
+      sum[c] = nir_imm_float(&b, 0);
+   for (unsigned sample = 0; sample < samples; ++sample) {
+      nir_def *words[2];
+      unsigned bits = bytes == 2 ? 16 : 32;
+      for (unsigned w = 0; w < DIV_ROUND_UP(bytes, 4); ++w)
+         words[w] = nir_u2u32(&b, nir_load_ssbo(&b, 1, bits, nir_imm_int(&b, 0),
+            nir_iadd_imm(&b, src, sample * bytes + w * 4),
+            .align_mul = bits / 8, .access = ACCESS_NON_WRITEABLE));
+      for (unsigned c = 0; c < components; ++c) {
+         nir_def *value = fp16
+            ? nir_channel(&b, nir_unpack_half_2x16(&b, words[c / 2]), c & 1)
+            : nir_u2f32(&b, nir_iand_imm(&b, nir_ushr_imm(&b, words[0], c * 8), 255));
+         sum[c] = nir_fadd(&b, sum[c], value);
+      }
+   }
+   for (unsigned c = 0; c < components; ++c)
+      sum[c] = nir_fmul_imm(&b, sum[c], 1.0f / samples);
+   nir_def *out[2] = {nir_imm_int(&b, 0), nir_imm_int(&b, 0)};
+   if (fp16) {
+      for (unsigned c = 0; c < components; c += 2)
+         out[c / 2] = nir_pack_half_2x16(&b, nir_vec2(&b, sum[c],
+            c + 1 < components ? sum[c + 1] : nir_imm_float(&b, 0)));
+   } else {
+      for (unsigned c = 0; c < components; ++c)
+         out[0] = nir_ior(&b, out[0], nir_ishl_imm(&b,
+            nir_f2u32(&b, nir_fround_even(&b, sum[c])), 8 * c));
+   }
+   for (unsigned w = 0; w < DIV_ROUND_UP(bytes, 4); ++w)
+      nir_store_ssbo(&b, bytes == 2 ? nir_u2u16(&b, out[w]) : out[w],
+         nir_imm_int(&b, 1), nir_iadd_imm(&b, dst, 4 * w),
+         .align_mul = MIN2(bytes, 4), .write_mask = 1, .access = ACCESS_NON_READABLE);
+   nir_pop_if(&b, NULL);
+   return pipe_shader_from_nir(pctx, b.shader);
+}
+
+static bool
+asahi_raw_resolve(struct pipe_context *pctx, const struct pipe_blit_info *info)
+{
+   struct agx_context *ctx = agx_context(pctx);
+   struct pipe_resource *src = info->src.resource, *dst = info->dst.resource;
+   struct agx_resource *s = agx_resource(src), *d = agx_resource(dst);
+   bool fp16 = agx_apple9_color_is_half(info->src.format);
+   if ((src->nr_samples != 2 && src->nr_samples != 4) || dst->nr_samples > 1 ||
+       info->src.format != info->dst.format ||
+       (!fp16 && info->src.format != PIPE_FORMAT_B8G8R8A8_UNORM &&
+        info->src.format != PIPE_FORMAT_B8G8R8X8_UNORM) ||
+       info->mask != util_format_get_mask(info->src.format) ||
+       info->swizzle_enable || info->alpha_blend || info->num_window_rectangles ||
+       info->window_rectangle_include || info->sample0_only ||
+       abs(info->src.box.width) != abs(info->dst.box.width) ||
+       abs(info->src.box.height) != abs(info->dst.box.height) ||
+       info->src.box.depth != 1 || info->dst.box.depth != 1 ||
+       !info->src.box.width || !info->src.box.height ||
+       s->layout.compressed || d->layout.compressed ||
+       s->layout.tiling != AIL_TILING_GPU || d->layout.tiling != AIL_TILING_GPU ||
+       s->bo == d->bo || s->layout.size_B > UINT32_MAX || d->layout.size_B > UINT32_MAX)
+      return false;
+   unsigned levels[] = {info->src.level, info->dst.level};
+   const struct pipe_box *boxes[] = {&info->src.box, &info->dst.box};
+   struct agx_resource *resources[] = {s, d};
+   uint32_t params[20] = {abs(info->src.box.width), abs(info->src.box.height)};
+   for (unsigned i = 0; i < 2; ++i) {
+      const struct pipe_box *box = boxes[i];
+      struct agx_resource *r = resources[i];
+      if (box->z < 0 || levels[i] > r->base.last_level ||
+          box->z >= r->base.array_size)
+         return false;
+      struct ail_tile tile = r->layout.tilesize_el[levels[i]];
+      if (!util_is_power_of_two_nonzero(tile.width_el) ||
+          !util_is_power_of_two_nonzero(tile.height_el))
+         return false;
+      params[2 + 4 * i] = box->x - (box->width < 0);
+      params[3 + 4 * i] = box->y - (box->height < 0);
+      params[4 + 4 * i] = box->width < 0 ? -1 : 1;
+      params[5 + 4 * i] = box->height < 0 ? -1 : 1;
+      params[10 + 4 * i] = util_logbase2(tile.width_el);
+      params[11 + 4 * i] = util_logbase2(tile.height_el);
+      params[12 + 4 * i] = DIV_ROUND_UP(r->layout.stride_el[levels[i]], tile.width_el);
+      params[13 + 4 * i] = ail_get_level_offset_B(&r->layout, levels[i]) +
+                           r->layout.layer_stride_B * box->z;
+   }
+   /* Clip in copy coordinates so mirrored boxes and destination scissoring
+    * preserve the one-to-one sample mapping. */
+   for (unsigned axis = 0; axis < 2; ++axis) {
+      int lo = 0, hi = params[axis];
+      for (unsigned i = 0; i < 2; ++i) {
+         struct pipe_resource *r = &resources[i]->base;
+         int start = params[2 + 4 * i + axis];
+         int step = (int32_t)params[4 + 4 * i + axis];
+         int min = 0, max = u_minify(axis ? r->height0 : r->width0, levels[i]);
+         if (i == 1 && info->scissor_enable) {
+            min = axis ? info->scissor.miny : info->scissor.minx;
+            max = MIN2(max, axis ? info->scissor.maxy : info->scissor.maxx);
+         }
+         lo = MAX2(lo, step > 0 ? min - start : start - max + 1);
+         hi = MIN2(hi, step > 0 ? max - start : start - min + 1);
+      }
+      if (lo >= hi)
+         return true;
+      params[axis] = hi - lo;
+      for (unsigned i = 0; i < 2; ++i)
+         params[2 + 4 * i + axis] += lo * (int32_t)params[4 + 4 * i + axis];
+   }
+   unsigned components = agx_apple9_color_components(info->src.format);
+   unsigned kind = fp16 ? (components == 1 ? 1 : components == 2 ? 2 : 3) : 0;
+   void **shader = &ctx->compute_blitter.resolve_cs[src->nr_samples == 4][kind];
+   if (!*shader)
+      *shader = asahi_raw_resolve_shader(pctx, src->nr_samples, components, fp16);
+   if (!*shader)
+      return false;
+   agx_flush_writer(ctx, s, "multisample resolve");
+   agx_flush_writer(ctx, d, "multisample resolve destination");
+   struct agx_stage *stage = &ctx->stage[MESA_SHADER_COMPUTE];
+   struct pipe_shader_buffer saved[2] = {stage->ssbo[0], stage->ssbo[1]};
+   for (unsigned i = 0; i < 2; ++i) {
+      saved[i].buffer = NULL;
+      pipe_resource_reference(&saved[i].buffer, stage->ssbo[i].buffer);
+   }
+   unsigned writable = stage->ssbo_writable_mask & 3;
+   asahi_compute_save(ctx);
+   struct pipe_constant_buffer cb = {.user_buffer = params, .buffer_size = sizeof(params)};
+   pctx->set_constant_buffer(pctx, MESA_SHADER_COMPUTE, 0, &cb);
+   struct pipe_shader_buffer buffers[] = {
+      {.buffer = src, .buffer_size = s->layout.size_B},
+      {.buffer = dst, .buffer_size = d->layout.size_B},
+   };
+   pctx->set_shader_buffers(pctx, MESA_SHADER_COMPUTE, 0, 2, buffers, 2);
+   pctx->bind_compute_state(pctx, *shader);
+   struct pipe_grid_info grid = {.block = {32, 1, 1},
+      .grid = {DIV_ROUND_UP(params[0], 32), params[1], 1}};
+   pctx->launch_grid(pctx, &grid);
+   pctx->set_shader_buffers(pctx, MESA_SHADER_COMPUTE, 0, 2, saved, writable);
+   for (unsigned i = 0; i < 2; ++i)
+      pipe_resource_reference(&saved[i].buffer, NULL);
+   asahi_compute_restore(ctx);
+   BITSET_SET(d->data_valid, info->dst.level);
+   d->linear_export_valid = false;
+   return true;
 }
 
 static void *

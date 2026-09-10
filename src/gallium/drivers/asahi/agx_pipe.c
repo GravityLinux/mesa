@@ -1966,6 +1966,7 @@ agx_destroy_context(struct pipe_context *pctx)
 
    agx_bg_eot_cleanup(&ctx->bg_eot);
    agx_destroy_meta_shaders(ctx);
+   agx_destroy_msaa_reload(ctx);
 
    /* Lock around the syncobj destruction, to avoid racing
     * command submission in another context.
@@ -2659,13 +2660,6 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
           target == PIPE_TEXTURE_2D_ARRAY || target == PIPE_TEXTURE_RECT ||
           target == PIPE_TEXTURE_3D || target == PIPE_TEXTURE_CUBE ||
           target == PIPE_TEXTURE_CUBE_ARRAY);
-
-   /* The compatibility attachment and sampling paths are single-sample.
-    * Reject MSAA configurations before applications allocate surfaces or
-    * the state tracker creates resolve shaders that this backend cannot run. */
-   if (agx_apple9_direct_render_enabled(agx_device(pscreen)) &&
-       (sample_count > 1 || storage_sample_count > 1))
-      return false;
 
    if (sample_count > 1 && sample_count != 4 && sample_count != 2)
       return false;

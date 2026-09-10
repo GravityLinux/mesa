@@ -2973,6 +2973,10 @@ agx_destroy_compute_blitter(struct pipe_context *ctx, struct asahi_blitter *bl)
 {
    if (bl->detile_cs)
       ctx->delete_compute_state(ctx, bl->detile_cs);
+   for (unsigned n = 0; n < 2; ++n)
+      for (unsigned f = 0; f < 4; ++f)
+         if (bl->resolve_cs[n][f])
+            ctx->delete_compute_state(ctx, bl->resolve_cs[n][f]);
    hash_table_foreach(bl->blit_cs, ent) {
       ctx->delete_compute_state(ctx, ent->data);
    }
@@ -5643,6 +5647,8 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
    bool retried_apple9_batch = false;
 retry_apple9_batch:
    agx_batch_init_state(batch);
+   if (agx_apple9_direct_render_enabled(dev) && !agx_apple9_reload_msaa(batch))
+      return;
 
    /* Dirty track the reduced prim: lines vs points vs triangles. Happens before
     * agx_update_vs/agx_update_fs, which specialize based on primitive.

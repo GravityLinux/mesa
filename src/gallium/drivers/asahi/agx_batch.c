@@ -169,6 +169,7 @@ agx_batch_init(struct agx_context *ctx,
    util_dynarray_init(&batch->apple9_attachments, ctx);
 
    batch->clear = 0;
+   batch->apple9_msaa_reloaded = false;
    batch->draw = 0;
    batch->load = 0;
    batch->resolve = 0;
