@@ -2350,11 +2350,12 @@ agx_init_shader_caps(struct pipe_screen *pscreen)
 
       caps->max_shader_images = PIPE_MAX_SHADER_IMAGES;
       if (apple9_graphics) {
-         caps->max_outputs = i == MESA_SHADER_FRAGMENT ? 1 : 8;
-         caps->max_inputs = i == MESA_SHADER_FRAGMENT ? 8 : 16;
+         caps->max_outputs = i == MESA_SHADER_FRAGMENT
+                                ? 1 : AGX_APPLE9_MAX_VARYING_COMPONENTS / 4;
+         caps->max_inputs = i == MESA_SHADER_FRAGMENT
+                               ? AGX_APPLE9_MAX_VARYING_COMPONENTS / 4 : 16;
          caps->max_shader_buffers = caps->max_shader_images = 0;
-         caps->max_texture_samplers = caps->max_sampler_views =
-            i == MESA_SHADER_FRAGMENT ? 16 : 0;
+         caps->max_texture_samplers = caps->max_sampler_views = 16;
       }
    }
 }
@@ -2632,7 +2633,9 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
       caps->glsl_feature_level = caps->glsl_feature_level_compatibility = 110;
       caps->essl_feature_level = 100;
       caps->robust_buffer_access_behavior = false;
-      caps->max_render_targets = caps->fbfetch = 1;
+      /* One RGBA8 tile-output slot per active color attachment. */
+      caps->max_render_targets = 8;
+      caps->fbfetch = 1;
       caps->max_dual_source_render_targets = 0;
       caps->shader_stencil_export = false;
       caps->framebuffer_no_attachment = false;
@@ -2640,15 +2643,15 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
       caps->texture_buffer_objects = false;
       caps->max_texel_buffer_elements = 0;
       caps->max_texture_array_layers = 0;
-      caps->max_texture_cube_levels = 0;
-      caps->max_texture_3d_levels = 0;
+      caps->max_texture_cube_levels = 15;
+      caps->max_texture_3d_levels = 12;
       caps->cube_map_array = false;
       caps->seamless_cube_map = false;
       caps->seamless_cube_map_per_texture = false;
       caps->image_load_formatted = false;
       caps->image_store_formatted = false;
       caps->max_texture_gather_components = 0;
-      caps->max_varyings = 8;
+      caps->max_varyings = AGX_APPLE9_MAX_VARYING_COMPONENTS / 4;
       caps->doubles = false;
    }
 }
@@ -2686,15 +2689,23 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
       return true;
 
    if (agx_apple9_direct_render_enabled(agx_device(pscreen))) {
+      /* The direct VDM encoder accepts u16/u32 indices. Let u_vbuf widen
+       * byte indices instead of advertising an unencodable draw format. */
+      if ((usage & PIPE_BIND_INDEX_BUFFER) && format == PIPE_FORMAT_R8_UINT)
+         return false;
       if (usage & PIPE_BIND_SHADER_IMAGE)
          return false;
       if ((usage & PIPE_BIND_RENDER_TARGET) &&
-          (target != PIPE_TEXTURE_2D ||
+          ((target != PIPE_TEXTURE_2D && target != PIPE_TEXTURE_CUBE) ||
            (format != PIPE_FORMAT_B8G8R8A8_UNORM &&
-            format != PIPE_FORMAT_B8G8R8X8_UNORM)))
+            format != PIPE_FORMAT_B8G8R8X8_UNORM &&
+            format != PIPE_FORMAT_R16_FLOAT &&
+            format != PIPE_FORMAT_R16G16_FLOAT &&
+            format != PIPE_FORMAT_R16G16B16A16_FLOAT)))
          return false;
       if ((usage & PIPE_BIND_SAMPLER_VIEW) &&
-          (target != PIPE_TEXTURE_2D ||
+          ((target != PIPE_TEXTURE_2D && target != PIPE_TEXTURE_1D &&
+            target != PIPE_TEXTURE_3D && target != PIPE_TEXTURE_CUBE) ||
            !agx_apple9_texture_format_supported(format)))
          return false;
    }
