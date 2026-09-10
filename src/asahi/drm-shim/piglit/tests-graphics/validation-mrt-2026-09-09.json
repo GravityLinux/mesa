@@ -1,0 +1,931 @@
+{
+  "date": "2026-09-09",
+  "hardware": "M4 Mac mini / Mac16,10 / J773g / T8132 / G16G A0",
+  "transport": "standalone m1n1 DRM shim",
+  "mrt": {
+    "status": "implemented and hardware validated",
+    "max_render_targets": 8,
+    "format_scope": "RGBA8 tile outputs",
+    "tile_dimensions": [
+      32,
+      32
+    ],
+    "features": [
+      "independent color outputs",
+      "per-target blending and color masks",
+      "legacy gl_FragColor broadcast",
+      "sparse GL_NONE draw-buffer slots",
+      "attachment remapping",
+      "textured output",
+      "discard",
+      "masked and per-target clears"
+    ]
+  },
+  "graphics": {
+    "process_status": 0,
+    "expected_tests": 158,
+    "counts": {
+      "pass": 158
+    },
+    "tests": [
+      {
+        "test": "border-clamp-linear",
+        "result": "pass"
+      },
+      {
+        "test": "border-clamp-nearest",
+        "result": "pass"
+      },
+      {
+        "test": "border-clamp_to_border-linear",
+        "result": "pass"
+      },
+      {
+        "test": "border-clamp_to_border-nearest",
+        "result": "pass"
+      },
+      {
+        "test": "cube-bias",
+        "result": "pass"
+      },
+      {
+        "test": "cube-faces",
+        "result": "pass"
+      },
+      {
+        "test": "cube-lod",
+        "result": "pass"
+      },
+      {
+        "test": "shadow-linear",
+        "result": "pass"
+      },
+      {
+        "test": "shadow-nearest",
+        "result": "pass"
+      },
+      {
+        "test": "volume-bias",
+        "result": "pass"
+      },
+      {
+        "test": "volume-implicit",
+        "result": "pass"
+      },
+      {
+        "test": "volume-lod",
+        "result": "pass"
+      },
+      {
+        "test": "constant-half",
+        "result": "pass"
+      },
+      {
+        "test": "constant-two",
+        "result": "pass"
+      },
+      {
+        "test": "near-clipped",
+        "result": "pass"
+      },
+      {
+        "test": "varying",
+        "result": "pass"
+      },
+      {
+        "test": "with-varying",
+        "result": "pass"
+      },
+      {
+        "test": "depth-with-32-varyings",
+        "result": "pass"
+      },
+      {
+        "test": "rotate-divergent",
+        "result": "pass"
+      },
+      {
+        "test": "rotate-four",
+        "result": "pass"
+      },
+      {
+        "test": "swap-vertex",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-abs-01",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-ceil",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-clamp-1",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-cross",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-dot-vec2",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-exp",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-floor",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-log",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-log2",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-max",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-min",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-mix",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-mod",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-sign",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-copy-propagation-loop-1",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-vs-copy-propagation-1",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-derivs-abs-sign",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-derivs-abs",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-derivs-sign",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-derivs-swizzle",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-derivs-varyings",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-discard-01",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-discard-03",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-if-texture2d-discard",
+        "result": "pass"
+      },
+      {
+        "test": "fragcoord_w",
+        "result": "pass"
+      },
+      {
+        "test": "fs-dfdx-accuracy",
+        "result": "pass"
+      },
+      {
+        "test": "fs-dfdy-accuracy",
+        "result": "pass"
+      },
+      {
+        "test": "fs-frontfacing-ternary-0.0-neg-1.0",
+        "result": "pass"
+      },
+      {
+        "test": "fs-frontfacing-ternary-1-neg-1",
+        "result": "pass"
+      },
+      {
+        "test": "fs-frontfacing-ternary-1.0-neg-1.0",
+        "result": "pass"
+      },
+      {
+        "test": "fs-frontfacing-ternary-neg-1.0-1.0-alt",
+        "result": "pass"
+      },
+      {
+        "test": "fs-frontfacing-ternary-neg-1.0-1.0",
+        "result": "pass"
+      },
+      {
+        "test": "fs-frontfacing-ternary-vec4-neg-1.0-1.0",
+        "result": "pass"
+      },
+      {
+        "test": "fs-texture-select",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-if-less",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-if-nested-loop",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-integer-multiplication",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-post-increment-01",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-uniform-array-2",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-vs-uniform-array-2",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-vs-uniform-array-4",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-loop-break",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-loop-const-decr",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-loop-const-incr",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-loop-shadow-variables",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-unroll-out-param",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-vs-loop-break",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-vs-loop-redundant-condition",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-lots-of-tex",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-sampler-numbering-2",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-sampler-numbering-3",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow1D-01",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow1D-02",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow1D-03",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow1D-04",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow1D-05",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow1D-06",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow1D-07",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow1D-08",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow1D-09",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow1D-bias",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow1D",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow1DProj-bias",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow1DProj",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow2D-01",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow2D-02",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow2D-03",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow2D-04",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow2D-05",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow2D-06",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow2D-07",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow2D-08",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow2D-09",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow2D-bias",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow2D-clamp-z",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow2D-consecutive-draws",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow2D",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow2DProj-bias",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-shadow2DProj",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-texture2d-bias",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-texture2d-branching",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-texture2d-dependent-1",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-texture2d",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-texture2dproj",
+        "result": "pass"
+      },
+      {
+        "test": "in-parameter-array",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-vec4-indexing-temp-dst",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-vec4-indexing-temp-src-in-loop",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-vec4-indexing-temp-src-in-nested-loop-combined",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-vec4-indexing-temp-src-in-nested-loop-inner",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-vec4-indexing-temp-src-in-nested-loop-outer",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-vec4-indexing-temp-src",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-vs-vec4-indexing-temp-dst",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-vs-vec4-indexing-temp-src-in-loop",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-vs-vec4-indexing-temp-src-in-nested-loop-combined",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-vs-vec4-indexing-temp-src-in-nested-loop-inner",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-vs-vec4-indexing-temp-src-in-nested-loop-outer",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-vs-vec4-indexing-temp-src",
+        "result": "pass"
+      },
+      {
+        "test": "fs-input-array-float-index-rd",
+        "result": "pass"
+      },
+      {
+        "test": "fs-input-array-vec2-index-rd",
+        "result": "pass"
+      },
+      {
+        "test": "fs-input-array-vec3-index-rd",
+        "result": "pass"
+      },
+      {
+        "test": "fs-input-array-vec4-index-rd",
+        "result": "pass"
+      },
+      {
+        "test": "vs-output-array-float-index-wr",
+        "result": "pass"
+      },
+      {
+        "test": "vs-output-array-vec2-index-wr-no-unroll",
+        "result": "pass"
+      },
+      {
+        "test": "vs-output-array-vec2-index-wr",
+        "result": "pass"
+      },
+      {
+        "test": "vs-output-array-vec3-index-wr",
+        "result": "pass"
+      },
+      {
+        "test": "vs-loop-complex-no-unroll",
+        "result": "pass"
+      },
+      {
+        "test": "vs-loop-complex-unroll-cf-before-terminators",
+        "result": "pass"
+      },
+      {
+        "test": "vs-loop-complex-unroll-cf-inside-terminator",
+        "result": "pass"
+      },
+      {
+        "test": "vs-loop-complex-unroll-nested-break",
+        "result": "pass"
+      },
+      {
+        "test": "vs-loop-complex-unroll-with-else-break",
+        "result": "pass"
+      },
+      {
+        "test": "vs-loop-complex-unroll",
+        "result": "pass"
+      },
+      {
+        "test": "vs-loop-complex-with-else-break",
+        "result": "pass"
+      },
+      {
+        "test": "vs-loop-simple-unroll-cf-inside-terminator",
+        "result": "pass"
+      },
+      {
+        "test": "vs-loop-simple-unroll-induction-variable-inside-if-branch",
+        "result": "pass"
+      },
+      {
+        "test": "vs-saturate-sqrt",
+        "result": "pass"
+      },
+      {
+        "test": "fragment-direct",
+        "result": "pass"
+      },
+      {
+        "test": "fragment-else-value-before-break",
+        "result": "pass"
+      },
+      {
+        "test": "fragment-nested-value-before-break",
+        "result": "pass"
+      },
+      {
+        "test": "fragment-value-before-break",
+        "result": "pass"
+      },
+      {
+        "test": "vertex-direct",
+        "result": "pass"
+      },
+      {
+        "test": "vertex-else-value-before-break",
+        "result": "pass"
+      },
+      {
+        "test": "vertex-nested-value-before-break",
+        "result": "pass"
+      },
+      {
+        "test": "vertex-value-before-break",
+        "result": "pass"
+      },
+      {
+        "test": "colors2",
+        "result": "pass"
+      },
+      {
+        "test": "colors3",
+        "result": "pass"
+      },
+      {
+        "test": "colors4",
+        "result": "pass"
+      },
+      {
+        "test": "colors5",
+        "result": "pass"
+      },
+      {
+        "test": "colors6",
+        "result": "pass"
+      },
+      {
+        "test": "colors7",
+        "result": "pass"
+      },
+      {
+        "test": "colors8",
+        "result": "pass"
+      },
+      {
+        "test": "large2",
+        "result": "pass"
+      },
+      {
+        "test": "large3",
+        "result": "pass"
+      },
+      {
+        "test": "large4",
+        "result": "pass"
+      },
+      {
+        "test": "large5",
+        "result": "pass"
+      },
+      {
+        "test": "large6",
+        "result": "pass"
+      },
+      {
+        "test": "large7",
+        "result": "pass"
+      },
+      {
+        "test": "large8",
+        "result": "pass"
+      }
+    ]
+  },
+  "mrt_api": {
+    "process_status": 0,
+    "expected_tests": 7,
+    "counts": {
+      "pass": 7
+    },
+    "tests": [
+      {
+        "test": "large-eight",
+        "result": "pass"
+      },
+      {
+        "test": "legacy-broadcast-eight",
+        "result": "pass"
+      },
+      {
+        "test": "textured-eight",
+        "result": "pass"
+      },
+      {
+        "test": "discard-eight",
+        "result": "pass"
+      },
+      {
+        "test": "sparse-eight",
+        "result": "pass"
+      },
+      {
+        "test": "remapped-eight",
+        "result": "pass"
+      },
+      {
+        "test": "indexed-blend-and-masks-eight",
+        "result": "pass"
+      }
+    ]
+  },
+  "upstream_mrt": {
+    "expected_tests": 10,
+    "counts": {
+      "pass": 10
+    },
+    "tests": [
+      {
+        "name": "fbo-drawbuffers",
+        "status": 0,
+        "pass": true,
+        "results": [
+          {
+            "result": "pass"
+          }
+        ]
+      },
+      {
+        "name": "fbo-drawbuffers masked-clear",
+        "status": 0,
+        "pass": true,
+        "results": [
+          {
+            "result": "pass"
+          }
+        ]
+      },
+      {
+        "name": "fbo-drawbuffers-fragcolor",
+        "status": 0,
+        "pass": true,
+        "results": [
+          {
+            "result": "pass"
+          }
+        ]
+      },
+      {
+        "name": "fbo-drawbuffers2-colormask",
+        "status": 0,
+        "pass": true,
+        "results": [
+          {
+            "result": "pass"
+          }
+        ]
+      },
+      {
+        "name": "fbo-drawbuffers2-colormask clear",
+        "status": 0,
+        "pass": true,
+        "results": [
+          {
+            "result": "pass"
+          }
+        ]
+      },
+      {
+        "name": "fbo-drawbuffers2-blend",
+        "status": 0,
+        "pass": true,
+        "results": [
+          {
+            "result": "pass"
+          }
+        ]
+      },
+      {
+        "name": "fbo-draw-buffers-blend",
+        "status": 0,
+        "pass": true,
+        "results": [
+          {
+            "result": "pass"
+          }
+        ]
+      },
+      {
+        "name": "arb_draw_buffers-state_change",
+        "status": 0,
+        "pass": true,
+        "results": [
+          {
+            "result": "pass"
+          }
+        ]
+      },
+      {
+        "name": "fbo-drawbuffers-blend-add",
+        "status": 0,
+        "pass": true,
+        "results": [
+          {
+            "result": "pass"
+          }
+        ]
+      },
+      {
+        "name": "fbo-drawbuffers-maxtargets",
+        "status": 0,
+        "pass": true,
+        "results": [
+          {
+            "result": "pass"
+          }
+        ]
+      }
+    ]
+  },
+  "compiler": {
+    "expected_tests": 238,
+    "counts": {
+      "pass": 238
+    }
+  },
+  "compute": {
+    "expected_tests": 22,
+    "counts": {
+      "pass": 22
+    },
+    "tests": [
+      {
+        "test": "computed-addresses",
+        "result": "pass"
+      },
+      {
+        "test": "aos-load",
+        "result": "pass"
+      },
+      {
+        "test": "aos-store",
+        "result": "pass"
+      },
+      {
+        "test": "vector-swizzle",
+        "result": "pass"
+      },
+      {
+        "test": "vector-fanout",
+        "result": "pass"
+      },
+      {
+        "test": "vector2-copy",
+        "result": "pass"
+      },
+      {
+        "test": "vector3-copy",
+        "result": "pass"
+      },
+      {
+        "test": "vector4-copy",
+        "result": "pass"
+      },
+      {
+        "test": "vector4-alu-store",
+        "result": "pass"
+      },
+      {
+        "test": "seven-pending",
+        "result": "pass"
+      },
+      {
+        "test": "two-load-and",
+        "result": "pass"
+      },
+      {
+        "test": "dependent-index",
+        "result": "pass"
+      },
+      {
+        "test": "nested-dependent",
+        "result": "pass"
+      },
+      {
+        "test": "reciprocal-retain",
+        "result": "pass"
+      },
+      {
+        "test": "branch-local-device-loads",
+        "result": "pass"
+      },
+      {
+        "test": "nested-branch-local-loads",
+        "result": "pass"
+      },
+      {
+        "test": "multiple-phi-vectors",
+        "result": "pass"
+      },
+      {
+        "test": "loop-device-loads",
+        "result": "pass"
+      },
+      {
+        "test": "loop-unwind-continue",
+        "result": "pass"
+      },
+      {
+        "test": "device-atomics",
+        "result": "pass"
+      },
+      {
+        "test": "device-atomic-pending-load-forwarding",
+        "result": "pass"
+      },
+      {
+        "test": "loop-conditions-general-break",
+        "result": "pass"
+      }
+    ]
+  },
+  "mrt_api_reference": {
+    "renderer": "llvmpipe (LLVM 22.1.8, 256 bits)",
+    "expected_tests": 7,
+    "counts": {
+      "pass": 7
+    }
+  },
+  "logs": {
+    "graphics": "tmp/apple9-mrt-final-graphics3/run.log",
+    "mrt_api": "tmp/apple9-mrt-final-api3/run.log",
+    "upstream_mrt": "tmp/apple9-mrt-resume-originals/test-{1..10}.log",
+    "compiler": "tmp/apple9-mrt-final-unit2.log",
+    "compute": "tmp/apple9-mrt-final-compute2.log"
+  },
+  "notes": [
+    "Shader and API tests use a development context override; this is not an OpenGL conformance claim.",
+    "Register spilling and scratch remain deferred.",
+    "The final cleanup removed an allocation-dependent vertex-address adjustment; the full 158-case graphics and seven-case API suites passed again afterward."
+  ]
+}

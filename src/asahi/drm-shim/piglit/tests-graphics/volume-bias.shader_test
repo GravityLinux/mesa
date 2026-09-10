@@ -1,0 +1,23 @@
+[require]
+GLSL >= 1.20
+
+[fragment shader]
+uniform sampler3D tex;
+uniform float level;
+void main() {
+    float lod_color = texture3D(tex, vec3(gl_FragCoord.xy * 0.25, 0.25), level).r;
+    gl_FragColor = vec4(lod_color, lod_color, lod_color, 1.0);
+}
+
+[test]
+texture volume-mip-colors 0
+uniform int tex 0
+uniform float level 0
+draw rect -1 -1 2 2
+probe all rgba 0 0 0 1
+uniform float level 1
+draw rect -1 -1 2 2
+probe all rgba 0.5 0.5 0.5 1
+uniform float level 2
+draw rect -1 -1 2 2
+probe all rgba 1 1 1 1

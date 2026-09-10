@@ -1,0 +1,98 @@
+[require]
+GLSL >= 1.20
+GL_ARB_shader_texture_lod
+
+[fragment shader]
+#extension GL_ARB_shader_texture_lod : require
+uniform sampler3D tex;
+uniform vec3 coord;
+uniform float level;
+void main() { gl_FragColor = texture3DLod(tex, coord, level); }
+
+[test]
+texture volume-mip-colors 0
+uniform int tex 0
+uniform float level 0
+uniform vec3 coord 0.125 0.5 0.125
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1
+uniform float level 0
+uniform vec3 coord 0.375 0.5 0.125
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.3333333333333333 1
+uniform float level 0
+uniform vec3 coord 0.625 0.5 0.125
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.6666666666666666 1
+uniform float level 0
+uniform vec3 coord 0.875 0.5 0.125
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 1.0 1
+uniform float level 0
+uniform vec3 coord 0.125 0.5 0.375
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.3333333333333333 0.0 1
+uniform float level 0
+uniform vec3 coord 0.375 0.5 0.375
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.3333333333333333 0.3333333333333333 1
+uniform float level 0
+uniform vec3 coord 0.625 0.5 0.375
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.3333333333333333 0.6666666666666666 1
+uniform float level 0
+uniform vec3 coord 0.875 0.5 0.375
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.3333333333333333 1.0 1
+uniform float level 0
+uniform vec3 coord 0.125 0.5 0.625
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.6666666666666666 0.0 1
+uniform float level 0
+uniform vec3 coord 0.375 0.5 0.625
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.6666666666666666 0.3333333333333333 1
+uniform float level 0
+uniform vec3 coord 0.625 0.5 0.625
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.6666666666666666 0.6666666666666666 1
+uniform float level 0
+uniform vec3 coord 0.875 0.5 0.625
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.6666666666666666 1.0 1
+uniform float level 0
+uniform vec3 coord 0.125 0.5 0.875
+draw rect -1 -1 2 2
+probe all rgba 0.0 1.0 0.0 1
+uniform float level 0
+uniform vec3 coord 0.375 0.5 0.875
+draw rect -1 -1 2 2
+probe all rgba 0.0 1.0 0.3333333333333333 1
+uniform float level 0
+uniform vec3 coord 0.625 0.5 0.875
+draw rect -1 -1 2 2
+probe all rgba 0.0 1.0 0.6666666666666666 1
+uniform float level 0
+uniform vec3 coord 0.875 0.5 0.875
+draw rect -1 -1 2 2
+probe all rgba 0.0 1.0 1.0 1
+uniform float level 1
+uniform vec3 coord 0.25 0.5 0.25
+draw rect -1 -1 2 2
+probe all rgba 0.5 0.0 0.0 1
+uniform float level 1
+uniform vec3 coord 0.75 0.5 0.25
+draw rect -1 -1 2 2
+probe all rgba 0.5 0.0 1.0 1
+uniform float level 1
+uniform vec3 coord 0.25 0.5 0.75
+draw rect -1 -1 2 2
+probe all rgba 0.5 1.0 0.0 1
+uniform float level 1
+uniform vec3 coord 0.75 0.5 0.75
+draw rect -1 -1 2 2
+probe all rgba 0.5 1.0 1.0 1
+uniform float level 2
+uniform vec3 coord 0.5 0.5 0.5
+draw rect -1 -1 2 2
+probe all rgba 1.0 0 0 1

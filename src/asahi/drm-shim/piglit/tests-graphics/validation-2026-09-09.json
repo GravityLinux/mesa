@@ -1,0 +1,735 @@
+{
+  "process_status": 0,
+  "expected_tests": 144,
+  "counts": {
+    "pass": 144
+  },
+  "tests": [
+    {
+      "test": "border-clamp-linear",
+      "result": "pass"
+    },
+    {
+      "test": "border-clamp-nearest",
+      "result": "pass"
+    },
+    {
+      "test": "border-clamp_to_border-linear",
+      "result": "pass"
+    },
+    {
+      "test": "border-clamp_to_border-nearest",
+      "result": "pass"
+    },
+    {
+      "test": "cube-bias",
+      "result": "pass"
+    },
+    {
+      "test": "cube-faces",
+      "result": "pass"
+    },
+    {
+      "test": "cube-lod",
+      "result": "pass"
+    },
+    {
+      "test": "shadow-linear",
+      "result": "pass"
+    },
+    {
+      "test": "shadow-nearest",
+      "result": "pass"
+    },
+    {
+      "test": "volume-bias",
+      "result": "pass"
+    },
+    {
+      "test": "volume-implicit",
+      "result": "pass"
+    },
+    {
+      "test": "volume-lod",
+      "result": "pass"
+    },
+    {
+      "test": "constant-half",
+      "result": "pass"
+    },
+    {
+      "test": "constant-two",
+      "result": "pass"
+    },
+    {
+      "test": "near-clipped",
+      "result": "pass"
+    },
+    {
+      "test": "varying",
+      "result": "pass"
+    },
+    {
+      "test": "with-varying",
+      "result": "pass"
+    },
+    {
+      "test": "depth-with-32-varyings",
+      "result": "pass"
+    },
+    {
+      "test": "rotate-divergent",
+      "result": "pass"
+    },
+    {
+      "test": "rotate-four",
+      "result": "pass"
+    },
+    {
+      "test": "swap-vertex",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-abs-01",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-ceil",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-clamp-1",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-cross",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-dot-vec2",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-exp",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-floor",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-log",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-log2",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-max",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-min",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-mix",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-mod",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-sign",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-copy-propagation-loop-1",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-vs-copy-propagation-1",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-derivs-abs-sign",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-derivs-abs",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-derivs-sign",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-derivs-swizzle",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-derivs-varyings",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-discard-01",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-discard-03",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-if-texture2d-discard",
+      "result": "pass"
+    },
+    {
+      "test": "fragcoord_w",
+      "result": "pass"
+    },
+    {
+      "test": "fs-dfdx-accuracy",
+      "result": "pass"
+    },
+    {
+      "test": "fs-dfdy-accuracy",
+      "result": "pass"
+    },
+    {
+      "test": "fs-frontfacing-ternary-0.0-neg-1.0",
+      "result": "pass"
+    },
+    {
+      "test": "fs-frontfacing-ternary-1-neg-1",
+      "result": "pass"
+    },
+    {
+      "test": "fs-frontfacing-ternary-1.0-neg-1.0",
+      "result": "pass"
+    },
+    {
+      "test": "fs-frontfacing-ternary-neg-1.0-1.0-alt",
+      "result": "pass"
+    },
+    {
+      "test": "fs-frontfacing-ternary-neg-1.0-1.0",
+      "result": "pass"
+    },
+    {
+      "test": "fs-frontfacing-ternary-vec4-neg-1.0-1.0",
+      "result": "pass"
+    },
+    {
+      "test": "fs-texture-select",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-if-less",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-if-nested-loop",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-integer-multiplication",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-post-increment-01",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-uniform-array-2",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-vs-uniform-array-2",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-vs-uniform-array-4",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-loop-break",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-loop-const-decr",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-loop-const-incr",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-loop-shadow-variables",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-unroll-out-param",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-vs-loop-break",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-vs-loop-redundant-condition",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-lots-of-tex",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-sampler-numbering-2",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-sampler-numbering-3",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow1D-01",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow1D-02",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow1D-03",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow1D-04",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow1D-05",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow1D-06",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow1D-07",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow1D-08",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow1D-09",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow1D-bias",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow1D",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow1DProj-bias",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow1DProj",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow2D-01",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow2D-02",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow2D-03",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow2D-04",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow2D-05",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow2D-06",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow2D-07",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow2D-08",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow2D-09",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow2D-bias",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow2D-clamp-z",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow2D-consecutive-draws",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow2D",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow2DProj-bias",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-shadow2DProj",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-texture2d-bias",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-texture2d-branching",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-texture2d-dependent-1",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-texture2d",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-texture2dproj",
+      "result": "pass"
+    },
+    {
+      "test": "in-parameter-array",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-vec4-indexing-temp-dst",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-vec4-indexing-temp-src-in-loop",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-vec4-indexing-temp-src-in-nested-loop-combined",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-vec4-indexing-temp-src-in-nested-loop-inner",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-vec4-indexing-temp-src-in-nested-loop-outer",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-fs-vec4-indexing-temp-src",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-vs-vec4-indexing-temp-dst",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-vs-vec4-indexing-temp-src-in-loop",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-vs-vec4-indexing-temp-src-in-nested-loop-combined",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-vs-vec4-indexing-temp-src-in-nested-loop-inner",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-vs-vec4-indexing-temp-src-in-nested-loop-outer",
+      "result": "pass"
+    },
+    {
+      "test": "glsl-vs-vec4-indexing-temp-src",
+      "result": "pass"
+    },
+    {
+      "test": "fs-input-array-float-index-rd",
+      "result": "pass"
+    },
+    {
+      "test": "fs-input-array-vec2-index-rd",
+      "result": "pass"
+    },
+    {
+      "test": "fs-input-array-vec3-index-rd",
+      "result": "pass"
+    },
+    {
+      "test": "fs-input-array-vec4-index-rd",
+      "result": "pass"
+    },
+    {
+      "test": "vs-output-array-float-index-wr",
+      "result": "pass"
+    },
+    {
+      "test": "vs-output-array-vec2-index-wr-no-unroll",
+      "result": "pass"
+    },
+    {
+      "test": "vs-output-array-vec2-index-wr",
+      "result": "pass"
+    },
+    {
+      "test": "vs-output-array-vec3-index-wr",
+      "result": "pass"
+    },
+    {
+      "test": "vs-loop-complex-no-unroll",
+      "result": "pass"
+    },
+    {
+      "test": "vs-loop-complex-unroll-cf-before-terminators",
+      "result": "pass"
+    },
+    {
+      "test": "vs-loop-complex-unroll-cf-inside-terminator",
+      "result": "pass"
+    },
+    {
+      "test": "vs-loop-complex-unroll-nested-break",
+      "result": "pass"
+    },
+    {
+      "test": "vs-loop-complex-unroll-with-else-break",
+      "result": "pass"
+    },
+    {
+      "test": "vs-loop-complex-unroll",
+      "result": "pass"
+    },
+    {
+      "test": "vs-loop-complex-with-else-break",
+      "result": "pass"
+    },
+    {
+      "test": "vs-loop-simple-unroll-cf-inside-terminator",
+      "result": "pass"
+    },
+    {
+      "test": "vs-loop-simple-unroll-induction-variable-inside-if-branch",
+      "result": "pass"
+    },
+    {
+      "test": "vs-saturate-sqrt",
+      "result": "pass"
+    },
+    {
+      "test": "fragment-direct",
+      "result": "pass"
+    },
+    {
+      "test": "fragment-else-value-before-break",
+      "result": "pass"
+    },
+    {
+      "test": "fragment-nested-value-before-break",
+      "result": "pass"
+    },
+    {
+      "test": "fragment-value-before-break",
+      "result": "pass"
+    },
+    {
+      "test": "vertex-direct",
+      "result": "pass"
+    },
+    {
+      "test": "vertex-else-value-before-break",
+      "result": "pass"
+    },
+    {
+      "test": "vertex-nested-value-before-break",
+      "result": "pass"
+    },
+    {
+      "test": "vertex-value-before-break",
+      "result": "pass"
+    }
+  ],
+  "date": "2026-09-09",
+  "hardware": "M4 Mac mini J773g / Mac16,10 / T8132",
+  "compiler_tests": {
+    "pass": 236,
+    "fail": 0
+  },
+  "compute_tests": [
+    {
+      "test": "computed-addresses",
+      "result": "pass"
+    },
+    {
+      "test": "aos-load",
+      "result": "pass"
+    },
+    {
+      "test": "aos-store",
+      "result": "pass"
+    },
+    {
+      "test": "vector-swizzle",
+      "result": "pass"
+    },
+    {
+      "test": "vector-fanout",
+      "result": "pass"
+    },
+    {
+      "test": "vector2-copy",
+      "result": "pass"
+    },
+    {
+      "test": "vector3-copy",
+      "result": "pass"
+    },
+    {
+      "test": "vector4-copy",
+      "result": "pass"
+    },
+    {
+      "test": "vector4-alu-store",
+      "result": "pass"
+    },
+    {
+      "test": "seven-pending",
+      "result": "pass"
+    },
+    {
+      "test": "two-load-and",
+      "result": "pass"
+    },
+    {
+      "test": "dependent-index",
+      "result": "pass"
+    },
+    {
+      "test": "nested-dependent",
+      "result": "pass"
+    },
+    {
+      "test": "reciprocal-retain",
+      "result": "pass"
+    },
+    {
+      "test": "branch-local-device-loads",
+      "result": "pass"
+    },
+    {
+      "test": "nested-branch-local-loads",
+      "result": "pass"
+    },
+    {
+      "test": "multiple-phi-vectors",
+      "result": "pass"
+    },
+    {
+      "test": "loop-device-loads",
+      "result": "pass"
+    },
+    {
+      "test": "loop-unwind-continue",
+      "result": "pass"
+    },
+    {
+      "test": "device-atomics",
+      "result": "pass"
+    },
+    {
+      "test": "device-atomic-pending-load-forwarding",
+      "result": "pass"
+    },
+    {
+      "test": "loop-conditions-general-break",
+      "result": "pass"
+    }
+  ],
+  "resource_rejection_checks": {
+    "process_status": 0,
+    "description": "Five register-limited shaders were rejected; a supported case passed immediately after each rejection. These are not graphics conformance passes.",
+    "tests": [
+      {
+        "test": "vs-output-array-vec4-index-wr",
+        "result": "fail"
+      },
+      {
+        "test": "vs-output-array-vec2-index-wr",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-vec4-indexing-temp-dst-in-loop",
+        "result": "fail"
+      },
+      {
+        "test": "fs-input-array-float-index-rd",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-vs-vec4-indexing-temp-dst-in-loop",
+        "result": "fail"
+      },
+      {
+        "test": "vs-output-array-vec3-index-wr",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-fs-vec4-indexing-temp-dst-in-nested-loop-combined",
+        "result": "fail"
+      },
+      {
+        "test": "glsl-fs-vec4-indexing-temp-src",
+        "result": "pass"
+      },
+      {
+        "test": "glsl-vs-vec4-indexing-temp-dst-in-nested-loop-combined",
+        "result": "fail"
+      },
+      {
+        "test": "glsl-vs-vec4-indexing-temp-src",
+        "result": "pass"
+      }
+    ]
+  },
+  "mrt_status": "Incomplete; max_render_targets remains 1. RT1 tile copy probe passes; later RT export and larger tile probes do not.",
+  "restored_desktop": {
+    "root": "NVMe ext4 /dev/nvme0n1p4",
+    "weston": "running with DRM/GL renderer",
+    "native_input": "READY 0.0.0.0:5566; TCP listener verified"
+  },
+  "phase": "Initial feature validation, before MRT completion",
+  "superseded_by": "validation-mrt-2026-09-09.json"
+}

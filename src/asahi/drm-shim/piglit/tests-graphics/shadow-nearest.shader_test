@@ -1,0 +1,165 @@
+[require]
+GLSL >= 1.10
+
+[fragment shader]
+uniform sampler2DShadow tex;
+uniform vec3 coord;
+void main() { gl_FragColor = vec4(vec3(shadow2D(tex, coord).r), 1.0); }
+
+[test]
+texture shadow2D 0 (2, 2)
+uniform int tex 0
+texparameter 2D min nearest
+texparameter 2D mag nearest
+texparameter 2D compare_func never
+uniform vec3 coord 0.25 0.5 0
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1
+uniform vec3 coord 0.75 0.5 0
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1
+uniform vec3 coord 0.25 0.5 0.5
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1
+uniform vec3 coord 0.75 0.5 0.5
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1
+uniform vec3 coord 0.25 0.5 1
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1
+uniform vec3 coord 0.75 0.5 1
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1
+texparameter 2D compare_func always
+uniform vec3 coord 0.25 0.5 0
+draw rect -1 -1 2 2
+probe all rgba 1.0 1.0 1.0 1
+uniform vec3 coord 0.75 0.5 0
+draw rect -1 -1 2 2
+probe all rgba 1.0 1.0 1.0 1
+uniform vec3 coord 0.25 0.5 0.5
+draw rect -1 -1 2 2
+probe all rgba 1.0 1.0 1.0 1
+uniform vec3 coord 0.75 0.5 0.5
+draw rect -1 -1 2 2
+probe all rgba 1.0 1.0 1.0 1
+uniform vec3 coord 0.25 0.5 1
+draw rect -1 -1 2 2
+probe all rgba 1.0 1.0 1.0 1
+uniform vec3 coord 0.75 0.5 1
+draw rect -1 -1 2 2
+probe all rgba 1.0 1.0 1.0 1
+texparameter 2D compare_func less
+uniform vec3 coord 0.25 0.5 0
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1
+uniform vec3 coord 0.75 0.5 0
+draw rect -1 -1 2 2
+probe all rgba 1.0 1.0 1.0 1
+uniform vec3 coord 0.25 0.5 0.5
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1
+uniform vec3 coord 0.75 0.5 0.5
+draw rect -1 -1 2 2
+probe all rgba 1.0 1.0 1.0 1
+uniform vec3 coord 0.25 0.5 1
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1
+uniform vec3 coord 0.75 0.5 1
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1
+texparameter 2D compare_func lequal
+uniform vec3 coord 0.25 0.5 0
+draw rect -1 -1 2 2
+probe all rgba 1.0 1.0 1.0 1
+uniform vec3 coord 0.75 0.5 0
+draw rect -1 -1 2 2
+probe all rgba 1.0 1.0 1.0 1
+uniform vec3 coord 0.25 0.5 0.5
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1
+uniform vec3 coord 0.75 0.5 0.5
+draw rect -1 -1 2 2
+probe all rgba 1.0 1.0 1.0 1
+uniform vec3 coord 0.25 0.5 1
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1
+uniform vec3 coord 0.75 0.5 1
+draw rect -1 -1 2 2
+probe all rgba 1.0 1.0 1.0 1
+texparameter 2D compare_func greater
+uniform vec3 coord 0.25 0.5 0
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1
+uniform vec3 coord 0.75 0.5 0
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1
+uniform vec3 coord 0.25 0.5 0.5
+draw rect -1 -1 2 2
+probe all rgba 1.0 1.0 1.0 1
+uniform vec3 coord 0.75 0.5 0.5
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1
+uniform vec3 coord 0.25 0.5 1
+draw rect -1 -1 2 2
+probe all rgba 1.0 1.0 1.0 1
+uniform vec3 coord 0.75 0.5 1
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1
+texparameter 2D compare_func gequal
+uniform vec3 coord 0.25 0.5 0
+draw rect -1 -1 2 2
+probe all rgba 1.0 1.0 1.0 1
+uniform vec3 coord 0.75 0.5 0
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1
+uniform vec3 coord 0.25 0.5 0.5
+draw rect -1 -1 2 2
+probe all rgba 1.0 1.0 1.0 1
+uniform vec3 coord 0.75 0.5 0.5
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1
+uniform vec3 coord 0.25 0.5 1
+draw rect -1 -1 2 2
+probe all rgba 1.0 1.0 1.0 1
+uniform vec3 coord 0.75 0.5 1
+draw rect -1 -1 2 2
+probe all rgba 1.0 1.0 1.0 1
+texparameter 2D compare_func equal
+uniform vec3 coord 0.25 0.5 0
+draw rect -1 -1 2 2
+probe all rgba 1.0 1.0 1.0 1
+uniform vec3 coord 0.75 0.5 0
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1
+uniform vec3 coord 0.25 0.5 0.5
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1
+uniform vec3 coord 0.75 0.5 0.5
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1
+uniform vec3 coord 0.25 0.5 1
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1
+uniform vec3 coord 0.75 0.5 1
+draw rect -1 -1 2 2
+probe all rgba 1.0 1.0 1.0 1
+texparameter 2D compare_func notequal
+uniform vec3 coord 0.25 0.5 0
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1
+uniform vec3 coord 0.75 0.5 0
+draw rect -1 -1 2 2
+probe all rgba 1.0 1.0 1.0 1
+uniform vec3 coord 0.25 0.5 0.5
+draw rect -1 -1 2 2
+probe all rgba 1.0 1.0 1.0 1
+uniform vec3 coord 0.75 0.5 0.5
+draw rect -1 -1 2 2
+probe all rgba 1.0 1.0 1.0 1
+uniform vec3 coord 0.25 0.5 1
+draw rect -1 -1 2 2
+probe all rgba 1.0 1.0 1.0 1
+uniform vec3 coord 0.75 0.5 1
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 0.0 1

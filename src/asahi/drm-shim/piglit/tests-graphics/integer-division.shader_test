@@ -1,0 +1,88 @@
+[require]
+GLSL >= 1.20
+
+[fragment shader]
+uniform int numerator;
+uniform int denominator;
+uniform int expected;
+void main() {
+    int quotient = numerator / denominator;
+    gl_FragColor = vec4(quotient == expected ? 1.0 : 0.0, 0.0, 0.0, 1.0);
+}
+
+[test]
+uniform int numerator 50
+uniform int denominator 3
+uniform int expected 16
+draw rect -1 -1 2 2
+probe all rgba 1 0 0 1
+uniform int numerator 65536
+uniform int denominator 1
+uniform int expected 65536
+draw rect -1 -1 2 2
+probe all rgba 1 0 0 1
+uniform int numerator 65537
+uniform int denominator 2
+uniform int expected 32768
+draw rect -1 -1 2 2
+probe all rgba 1 0 0 1
+uniform int numerator 65535
+uniform int denominator 7
+uniform int expected 9362
+draw rect -1 -1 2 2
+probe all rgba 1 0 0 1
+uniform int numerator 1000000
+uniform int denominator 13
+uniform int expected 76923
+draw rect -1 -1 2 2
+probe all rgba 1 0 0 1
+uniform int numerator 1073741824
+uniform int denominator 3
+uniform int expected 357913941
+draw rect -1 -1 2 2
+probe all rgba 1 0 0 1
+uniform int numerator 2147483647
+uniform int denominator 7
+uniform int expected 306783378
+draw rect -1 -1 2 2
+probe all rgba 1 0 0 1
+uniform int numerator -2147483648
+uniform int denominator 3
+uniform int expected -715827882
+draw rect -1 -1 2 2
+probe all rgba 1 0 0 1
+uniform int numerator -2147483648
+uniform int denominator 1
+uniform int expected -2147483648
+draw rect -1 -1 2 2
+probe all rgba 1 0 0 1
+uniform int numerator -2147483647
+uniform int denominator -7
+uniform int expected 306783378
+draw rect -1 -1 2 2
+probe all rgba 1 0 0 1
+uniform int numerator 123456789
+uniform int denominator -97
+uniform int expected -1272750
+draw rect -1 -1 2 2
+probe all rgba 1 0 0 1
+uniform int numerator -123456789
+uniform int denominator 97
+uniform int expected -1272750
+draw rect -1 -1 2 2
+probe all rgba 1 0 0 1
+uniform int numerator 0
+uniform int denominator 1
+uniform int expected 0
+draw rect -1 -1 2 2
+probe all rgba 1 0 0 1
+uniform int numerator 1
+uniform int denominator 2147483647
+uniform int expected 0
+draw rect -1 -1 2 2
+probe all rgba 1 0 0 1
+uniform int numerator 2147483647
+uniform int denominator 2147483647
+uniform int expected 1
+draw rect -1 -1 2 2
+probe all rgba 1 0 0 1

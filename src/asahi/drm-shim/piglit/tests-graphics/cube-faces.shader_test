@@ -1,0 +1,85 @@
+[require]
+GLSL >= 1.10
+
+[vertex shader passthrough]
+
+[fragment shader]
+uniform samplerCube tex;
+uniform vec3 direction;
+void main() { gl_FragColor = textureCube(tex, direction); }
+
+[test]
+texture cube-face-colors 0
+uniform int tex 0
+uniform vec3 direction 1 0.5 0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.0, 0, 0, 1)
+uniform vec3 direction 1 -0.5 0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.0, 0, 1, 1)
+uniform vec3 direction 1 0.5 -0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.0, 1, 0, 1)
+uniform vec3 direction 1 -0.5 -0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.0, 1, 1, 1)
+uniform vec3 direction -1 0.5 -0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.2, 0, 0, 1)
+uniform vec3 direction -1 -0.5 -0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.2, 0, 1, 1)
+uniform vec3 direction -1 0.5 0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.2, 1, 0, 1)
+uniform vec3 direction -1 -0.5 0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.2, 1, 1, 1)
+uniform vec3 direction -0.5 1 -0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.4, 0, 0, 1)
+uniform vec3 direction -0.5 1 0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.4, 0, 1, 1)
+uniform vec3 direction 0.5 1 -0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.4, 1, 0, 1)
+uniform vec3 direction 0.5 1 0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.4, 1, 1, 1)
+uniform vec3 direction -0.5 -1 0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.6, 0, 0, 1)
+uniform vec3 direction -0.5 -1 -0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.6, 0, 1, 1)
+uniform vec3 direction 0.5 -1 0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.6, 1, 0, 1)
+uniform vec3 direction 0.5 -1 -0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.6, 1, 1, 1)
+uniform vec3 direction -0.5 0.5 1
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.8, 0, 0, 1)
+uniform vec3 direction -0.5 -0.5 1
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.8, 0, 1, 1)
+uniform vec3 direction 0.5 0.5 1
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.8, 1, 0, 1)
+uniform vec3 direction 0.5 -0.5 1
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.8, 1, 1, 1)
+uniform vec3 direction 0.5 0.5 -1
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (1.0, 0, 0, 1)
+uniform vec3 direction 0.5 -0.5 -1
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (1.0, 0, 1, 1)
+uniform vec3 direction -0.5 0.5 -1
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (1.0, 1, 0, 1)
+uniform vec3 direction -0.5 -0.5 -1
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (1.0, 1, 1, 1)

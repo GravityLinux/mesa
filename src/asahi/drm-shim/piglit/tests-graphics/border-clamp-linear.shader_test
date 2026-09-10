@@ -1,0 +1,93 @@
+[require]
+GLSL >= 1.10
+
+[vertex shader passthrough]
+
+[fragment shader]
+uniform sampler2D tex;
+uniform vec2 uv;
+void main() { gl_FragColor = texture2D(tex, uv); }
+
+[test]
+uniform int tex 0
+texture checkerboard 0 0 (4, 4) (0.2, 0.4, 0.6, 0.8) (0.2, 0.4, 0.6, 0.8)
+texparameter 2D wrap_s clamp
+texparameter 2D wrap_t clamp
+texparameter 2D min linear
+texparameter 2D mag linear
+texparameter 2D border_color 0 0 0 0
+uniform vec2 uv 0.5 0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.2, 0.4, 0.6, 0.8)
+uniform vec2 uv -0.25 0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.1, 0.2, 0.3, 0.4)
+uniform vec2 uv 0 0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.1, 0.2, 0.3, 0.4)
+uniform vec2 uv 0 0
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.05, 0.1, 0.15, 0.2)
+uniform vec2 uv 1 0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.1, 0.2, 0.3, 0.4)
+uniform vec2 uv 1.25 1.25
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.05, 0.1, 0.15, 0.2)
+texparameter 2D border_color 0 0 0 1
+uniform vec2 uv 0.5 0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.2, 0.4, 0.6, 0.8)
+uniform vec2 uv -0.25 0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.1, 0.2, 0.3, 0.9)
+uniform vec2 uv 0 0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.1, 0.2, 0.3, 0.9)
+uniform vec2 uv 0 0
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.05, 0.1, 0.15, 0.95)
+uniform vec2 uv 1 0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.1, 0.2, 0.3, 0.9)
+uniform vec2 uv 1.25 1.25
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.05, 0.1, 0.15, 0.95)
+texparameter 2D border_color 1 1 1 1
+uniform vec2 uv 0.5 0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.2, 0.4, 0.6, 0.8)
+uniform vec2 uv -0.25 0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.6, 0.7, 0.8, 0.9)
+uniform vec2 uv 0 0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.6, 0.7, 0.8, 0.9)
+uniform vec2 uv 0 0
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.8, 0.85, 0.9, 0.95)
+uniform vec2 uv 1 0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.6, 0.7, 0.8, 0.9)
+uniform vec2 uv 1.25 1.25
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.8, 0.85, 0.9, 0.95)
+texparameter 2D border_color 0.8 0.2 0.4 0.6
+uniform vec2 uv 0.5 0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.2, 0.4, 0.6, 0.8)
+uniform vec2 uv -0.25 0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.5, 0.30000000000000004, 0.5, 0.7)
+uniform vec2 uv 0 0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.5, 0.30000000000000004, 0.5, 0.7)
+uniform vec2 uv 0 0
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.6500000000000001, 0.25, 0.45000000000000007, 0.6499999999999999)
+uniform vec2 uv 1 0.5
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.5, 0.30000000000000004, 0.5, 0.7)
+uniform vec2 uv 1.25 1.25
+draw rect -1 -1 2 2
+relative probe rgba (0.5, 0.5) (0.6500000000000001, 0.25, 0.45000000000000007, 0.6499999999999999)

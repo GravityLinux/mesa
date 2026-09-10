@@ -1,0 +1,42 @@
+[require]
+GLSL >= 1.10
+INT GL_MAX_DRAW_BUFFERS >= 7
+
+[vertex shader passthrough]
+
+[fragment shader]
+#version 110
+void main() {
+ gl_FragData[0] = vec4(0.0,0.0,0.0,1.0);
+ gl_FragData[1] = vec4(1.0,0.0,0.0,1.0);
+ gl_FragData[2] = vec4(0.0,1.0,0.0,1.0);
+ gl_FragData[3] = vec4(1.0,1.0,0.0,1.0);
+ gl_FragData[4] = vec4(0.0,0.0,1.0,1.0);
+ gl_FragData[5] = vec4(1.0,0.0,1.0,1.0);
+ gl_FragData[6] = vec4(0.0,1.0,1.0,1.0);
+}
+
+[test]
+texture rgbw 0 (16, 16) GL_RGBA8
+texture rgbw 1 (16, 16) GL_RGBA8
+texture rgbw 2 (16, 16) GL_RGBA8
+texture rgbw 3 (16, 16) GL_RGBA8
+texture rgbw 4 (16, 16) GL_RGBA8
+texture rgbw 5 (16, 16) GL_RGBA8
+texture rgbw 6 (16, 16) GL_RGBA8
+fb tex 2d 0 1 2 3 4 5 6
+draw rect -1 -1 2 2
+fb tex 2d 0
+probe all rgba 0.0 0.0 0.0 1.0
+fb tex 2d 1
+probe all rgba 1.0 0.0 0.0 1.0
+fb tex 2d 2
+probe all rgba 0.0 1.0 0.0 1.0
+fb tex 2d 3
+probe all rgba 1.0 1.0 0.0 1.0
+fb tex 2d 4
+probe all rgba 0.0 0.0 1.0 1.0
+fb tex 2d 5
+probe all rgba 1.0 0.0 1.0 1.0
+fb tex 2d 6
+probe all rgba 0.0 1.0 1.0 1.0

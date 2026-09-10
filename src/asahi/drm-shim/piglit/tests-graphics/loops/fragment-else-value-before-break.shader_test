@@ -1,0 +1,23 @@
+[require]
+GLSL >= 1.10
+[vertex shader passthrough]
+[fragment shader]
+uniform int limit;
+uniform int stop_at;
+void main() { float visits=0.0; float marker=0.0; int i;
+for(i=0;i<limit;++i) {if(i != stop_at) { visits += 1.0; } else { marker = 1.0; break; }}
+gl_FragColor=vec4(float(i)/8.0, visits/8.0, marker, 1.0); }
+[test]
+uniform int limit 6
+uniform int stop_at 0
+draw rect -1 -1 2 2
+probe all rgba 0.0 0.0 1 1
+uniform int stop_at 2
+draw rect -1 -1 2 2
+probe all rgba 0.25 0.25 1 1
+uniform int stop_at 5
+draw rect -1 -1 2 2
+probe all rgba 0.625 0.625 1 1
+uniform int stop_at 7
+draw rect -1 -1 2 2
+probe all rgba 0.75 0.75 0 1

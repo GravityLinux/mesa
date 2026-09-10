@@ -1,5 +1,8 @@
 # T8132 Apple9 Piglit harness
 
+The graphics suite and its feature limits are documented in [GRAPHICS.md](GRAPHICS.md).
+Run it with `run-graphics.sh NEW_RESULTS_DIRECTORY` after a cold chainload.
+
 This directory contains compute profiles for the m1n1-backed DRM shim. The
 GLES profile drives `t8132_apple9_compute_runner`, a native test binary whose
 named cases use ordinary GLES 3.1 shaders and compare complete guarded buffers
