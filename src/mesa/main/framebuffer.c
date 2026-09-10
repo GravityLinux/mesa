@@ -970,7 +970,12 @@ _mesa_get_color_read_type(struct gl_context *ctx,
    }
    else {
       const mesa_format format = fb->_ColorReadBuffer->Format;
-      return _mesa_uncompressed_format_to_type(format);
+      GLenum type = _mesa_uncompressed_format_to_type(format);
+      /* ES 2 exposes the OES token, not the distinct ES 3/desktop token.
+       * The implementation-selected read pair must itself be accepted. */
+      if (_mesa_is_gles2(ctx) && ctx->Version < 30 && type == GL_HALF_FLOAT)
+         type = GL_HALF_FLOAT_OES;
+      return type;
    }
 }
 /**

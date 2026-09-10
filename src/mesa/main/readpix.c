@@ -1080,6 +1080,13 @@ read_pixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format,
          return;
       }
 
+      /* EXT_color_buffer_half_float adds RGBA/FLOAT readback from floating
+       * surfaces to ES 2, independently of OES_texture_float. */
+      bool half_float_read = _mesa_is_gles2(ctx) && ctx->Version < 30 &&
+         ctx->Extensions.EXT_color_buffer_half_float &&
+         format == GL_RGBA && type == GL_FLOAT &&
+         _mesa_get_format_datatype(rb->Format) == GL_FLOAT;
+
       /* OpenGL ES 1.x and OpenGL ES 2.0 impose additional restrictions on the
        * combinations of format and type that can be used.
        *
@@ -1089,7 +1096,9 @@ read_pixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format,
        * combination is, and Mesa can handle anything valid.  Just work instead.
        */
       if (_mesa_is_gles(ctx)) {
-         if (_mesa_is_gles2(ctx) &&
+         if (half_float_read) {
+            err = GL_NO_ERROR;
+         } else if (_mesa_is_gles2(ctx) &&
              _mesa_is_color_format(format) &&
              _mesa_get_color_read_format(ctx, NULL, "glReadPixels") == format &&
              _mesa_get_color_read_type(ctx, NULL, "glReadPixels") == type) {
@@ -1113,7 +1122,8 @@ read_pixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format,
          }
       }
 
-      err = _mesa_error_check_format_and_type(ctx, format, type);
+      err = half_float_read ? GL_NO_ERROR :
+         _mesa_error_check_format_and_type(ctx, format, type);
       if (err != GL_NO_ERROR) {
          _mesa_error(ctx, err, "glReadPixels(invalid format %s and/or type %s)",
                      _mesa_enum_to_string(format),
@@ -1207,6 +1217,11 @@ read_pixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format,
 
    if (ctx->Pack.BufferObj)
       ctx->Pack.BufferObj->UsageHistory |= USAGE_PIXEL_PACK_BUFFER;
+
+   /* Validation uses the ES token, while the packing paths use the core
+    * half-float token when deciding whether to clamp floating-point values. */
+   if (type == GL_HALF_FLOAT_OES)
+      type = GL_HALF_FLOAT;
 
    st_ReadPixels(ctx, x, y, width, height,
                  format, type, &clippedPacking, pixels);
