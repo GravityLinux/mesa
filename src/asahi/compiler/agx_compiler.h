@@ -342,6 +342,15 @@ enum agx_lod_mode {
 /* Forward declare for branch target */
 struct agx_block;
 
+/* Instruction-local register constraints, in 16-bit units. Bounds apply to
+ * the first register of an operand; vectors must also fit in the register
+ * file. A fixed source inside the reserved region is a short pre-instruction
+ * copy, not a restriction on the source's whole live range. */
+struct agx_reg_constraint {
+   uint16_t min, max, align;
+   bool clobber;
+};
+
 /* Keep synced with hash_instr */
 typedef struct {
    /* Must be first */
@@ -352,6 +361,9 @@ typedef struct {
 
    /* Data flow */
    agx_index *dest;
+
+   /* Optional constraints for destinations followed by sources. */
+   struct agx_reg_constraint *reg_constraints;
 
    enum agx_opcode op;
 
@@ -385,6 +397,9 @@ typedef struct {
        * if nr_srcs == 0 and the opcode is PHI, points to the NIR phi.
        */
       nir_phi_instr *phi;
+
+      /* Target-selected instruction carried through shared allocation. */
+      struct agx_apple9_vir_instr *apple9;
    };
 
    /* For local access */
@@ -481,7 +496,22 @@ typedef struct agx_block {
    uint8_t pass_flags;
 } agx_block;
 
+/* Target allocation limits, in the IR's 16-bit register units. Zero selects
+ * the established Apple7/8 defaults. Instruction selection and spill lowering
+ * remain target-specific; SSA spilling and register assignment are shared. */
+struct agx_ra_target {
+   unsigned max_registers;
+   unsigned reserved_registers;
+   unsigned spill_reserved_registers;
+   unsigned spill_copy_register;
+   unsigned spill_swap_registers[2];
+   bool late_kill_sources;
+   bool preserve_source_kills;
+   bool defer_spill_lowering;
+};
+
 typedef struct {
+   struct agx_ra_target ra_target;
    nir_shader *nir;
    mesa_shader_stage stage;
    bool is_preamble;
@@ -920,6 +950,7 @@ static inline bool
 instr_after_logical_end(const agx_instr *I)
 {
    switch (I->op) {
+   case AGX_OPCODE_APPLE9_CF:
    case AGX_OPCODE_JMP_EXEC_ANY:
    case AGX_OPCODE_JMP_EXEC_NONE:
    case AGX_OPCODE_POP_EXEC:

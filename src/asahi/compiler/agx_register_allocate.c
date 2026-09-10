@@ -112,6 +112,9 @@ struct ra_ctx {
 
    /* Maximum number of registers that RA is allowed to use */
    unsigned bound[RA_CLASSES];
+
+   /* Operand placements committed for the current constrained instruction. */
+   BITSET_WORD *pinned;
 };
 
 /*
@@ -123,6 +126,9 @@ struct ra_ctx {
 static unsigned
 reserved_size(agx_context *ctx)
 {
+   if (ctx->ra_target.reserved_registers)
+      return MAX2(ctx->ra_target.reserved_registers,
+                  ctx->has_spill_pcopy_reserved ? ctx->ra_target.spill_reserved_registers : 0);
    if (ctx->has_spill_pcopy_reserved)
       return 8;
    else if (ctx->any_quad_divergent_shuffle)
@@ -383,6 +389,9 @@ find_best_region_to_evict(struct ra_ctx *rctx, unsigned size,
        * region" unevictability.
        */
       if (base < reserved_size(rctx->shader))
+         continue;
+
+      if (rctx->pinned && BITSET_TEST_COUNT(rctx->pinned, base, size))
          continue;
 
       /* Do not evict the same register multiple times. It's not necessary since
@@ -769,6 +778,190 @@ assign_regs(struct ra_ctx *rctx, agx_index v, unsigned reg)
 }
 
 static void
+relocate_unconstrained(struct ra_ctx *rctx, unsigned ssa)
+{
+   unsigned reg, count = rctx->ncomps[ssa];
+   if (find_regs_simple(rctx, RA_GPR, count, count, &reg)) {
+      BITSET_SET_COUNT(rctx->used_regs[RA_GPR], reg, count);
+      set_ssa_to_reg(rctx, ssa, reg);
+   } else {
+      /* This transaction emits one parallel copy from its original mapping
+       * after all relocations, including recursive live-range splits. */
+      struct util_dynarray ignored = UTIL_DYNARRAY_INIT;
+      agx_index value = agx_get_vec_index(
+         ssa, rctx->sizes[ssa],
+         rctx->ncomps_unrounded[ssa] / agx_size_align_16(rctx->sizes[ssa]));
+      assign_regs_by_copying(rctx, value, rctx->instr, &ignored);
+      util_dynarray_fini(&ignored);
+   }
+}
+
+static unsigned
+place_constrained_value(struct ra_ctx *rctx, agx_index value,
+                        struct agx_reg_constraint c, bool defined)
+{
+   unsigned ssa = value.value, count = rctx->ncomps[ssa];
+   unsigned align = MAX2(count, c.align);
+   unsigned first = ALIGN_POT(MAX2(c.min, reserved_size(rctx->shader)), align);
+   unsigned last = MIN2(c.max, rctx->bound[RA_GPR] - count);
+
+   if (defined) {
+      unsigned reg = rctx->ssa_to_reg[ssa];
+      if (reg >= first && reg <= last && !(reg % align)) {
+         BITSET_SET_COUNT(rctx->pinned, reg, count);
+         return reg;
+      }
+   }
+
+   /* Unlike unconstrained splitting, the legal bank may be completely full.
+    * Choose a legal region, then move its occupants to the rest of the file.
+    * Only this instruction's already-placed operands are pinned. */
+   unsigned chosen = ~0, best = ~0;
+   for (unsigned reg = first; reg <= last; reg += align) {
+      if (BITSET_TEST_COUNT(rctx->pinned, reg, count))
+         continue;
+      unsigned cost = 0;
+      for (unsigned h = reg; h < reg + count; ++h)
+         cost += BITSET_TEST(rctx->used_regs[RA_GPR], h);
+      if (cost < best) {
+         best = cost;
+         chosen = reg;
+      }
+   }
+   assert(chosen != ~0 && "instruction operand constraints are unsatisfiable");
+
+   unsigned victims[16], nr_victims = 0;
+   for (unsigned reg = reserved_size(rctx->shader);
+        reg < rctx->bound[RA_GPR];) {
+      if (!BITSET_TEST(rctx->used_regs[RA_GPR], reg)) {
+         ++reg;
+         continue;
+      }
+      unsigned owner = rctx->reg_to_ssa[reg];
+      unsigned width = rctx->ncomps[owner];
+      assert(rctx->ssa_to_reg[owner] == reg && width);
+      if (reg < chosen + count && chosen < reg + width) {
+         assert(nr_victims < ARRAY_SIZE(victims));
+         victims[nr_victims++] = owner;
+      }
+      reg += width;
+   }
+   for (unsigned i = 0; i < nr_victims; ++i) {
+      unsigned owner = victims[i];
+      BITSET_CLEAR_COUNT(rctx->used_regs[RA_GPR], rctx->ssa_to_reg[owner],
+                         rctx->ncomps[owner]);
+   }
+   if (defined)
+      BITSET_CLEAR_COUNT(rctx->used_regs[RA_GPR], rctx->ssa_to_reg[ssa], count);
+
+   BITSET_SET_COUNT(rctx->pinned, chosen, count);
+   if (defined) {
+      BITSET_SET_COUNT(rctx->used_regs[RA_GPR], chosen, count);
+      set_ssa_to_reg(rctx, ssa, chosen);
+   } else {
+      assign_regs(rctx, value, chosen);
+   }
+
+   /* Largest first, matching the power-of-two live-range splitter. */
+   while (nr_victims) {
+      unsigned largest = 0;
+      for (unsigned i = 1; i < nr_victims; ++i) {
+         if (rctx->ncomps[victims[i]] > rctx->ncomps[victims[largest]])
+            largest = i;
+      }
+      unsigned victim = victims[largest];
+      victims[largest] = victims[--nr_victims];
+      relocate_unconstrained(rctx, victim);
+   }
+   return chosen;
+}
+
+static void
+assign_constrained_operands(struct ra_ctx *rctx, agx_instr *I)
+{
+   BITSET_DECLARE(pinned, AGX_NUM_REGS) = {0};
+   rctx->pinned = pinned;
+   unsigned old_owner[AGX_NUM_REGS];
+   for (unsigned reg = 0; reg < ARRAY_SIZE(old_owner); ++reg)
+      old_owner[reg] = ~0;
+   for (unsigned reg = reserved_size(rctx->shader);
+        reg < rctx->bound[RA_GPR];) {
+      if (!BITSET_TEST(rctx->used_regs[RA_GPR], reg)) {
+         ++reg;
+         continue;
+      }
+      unsigned ssa = rctx->reg_to_ssa[reg];
+      old_owner[reg] = ssa;
+      reg += rctx->ncomps[ssa];
+   }
+
+   agx_foreach_ssa_src(I, s) {
+      struct agx_reg_constraint c = I->reg_constraints[I->nr_dests + s];
+      if (c.min == c.max && c.max < reserved_size(rctx->shader))
+         continue;
+
+      /* Repeated uses of one SSA value must satisfy all their constraints. */
+      bool seen = false;
+      agx_foreach_ssa_src(I, t) {
+         if (!agx_is_equiv(I->src[s], I->src[t]))
+            continue;
+         struct agx_reg_constraint other = I->reg_constraints[I->nr_dests + t];
+         if (other.min == other.max && other.max < reserved_size(rctx->shader))
+            continue;
+         seen |= t < s;
+         c.min = MAX2(c.min, other.min);
+         c.max = MIN2(c.max, other.max);
+         c.align = MAX2(c.align, other.align);
+      }
+      if (seen)
+         continue;
+      /* Unrestricted sources may move while placing other operands. */
+      if (c.min <= reserved_size(rctx->shader) &&
+          c.max >= rctx->bound[RA_GPR] - rctx->ncomps[I->src[s].value] &&
+          c.align <= rctx->ncomps[I->src[s].value])
+         continue;
+      place_constrained_value(rctx, I->src[s], c, true);
+   }
+   agx_foreach_ssa_dest(I, d) {
+      place_constrained_value(rctx, I->dest[d], I->reg_constraints[d], false);
+   }
+
+   struct util_dynarray copies = UTIL_DYNARRAY_INIT;
+   for (unsigned reg = 0; reg < rctx->bound[RA_GPR]; ++reg) {
+      unsigned ssa = old_owner[reg];
+      if (ssa == ~0 || rctx->ssa_to_reg[ssa] == reg)
+         continue;
+      unsigned width = agx_size_align_16(rctx->sizes[ssa]);
+      for (unsigned c = 0; c < rctx->ncomps_unrounded[ssa]; c += width) {
+         struct agx_copy copy = {
+            .dest = rctx->ssa_to_reg[ssa] + c,
+            .src = agx_register(reg + c, rctx->sizes[ssa]),
+         };
+         util_dynarray_append(&copies, copy);
+      }
+   }
+   agx_foreach_ssa_src(I, s) {
+      struct agx_reg_constraint c = I->reg_constraints[I->nr_dests + s];
+      if (c.min != c.max || c.max >= reserved_size(rctx->shader))
+         continue;
+      unsigned old = 0;
+      while (old < rctx->bound[RA_GPR] && old_owner[old] != I->src[s].value)
+         ++old;
+      assert(old < rctx->bound[RA_GPR]);
+      struct agx_copy copy = {
+         .dest = c.min,
+         .src = agx_register(old, I->src[s].size),
+      };
+      util_dynarray_append(&copies, copy);
+   }
+   agx_builder b = agx_init_builder(rctx->shader, agx_before_instr(I));
+   agx_emit_parallel_copies(&b, copies.data,
+                            util_dynarray_num_elements(&copies, struct agx_copy));
+   util_dynarray_fini(&copies);
+   rctx->pinned = NULL;
+}
+
+static void
 agx_set_sources(struct ra_ctx *rctx, agx_instr *I)
 {
    assert(I->op != AGX_OPCODE_PHI);
@@ -777,6 +970,11 @@ agx_set_sources(struct ra_ctx *rctx, agx_instr *I)
       assert(BITSET_TEST(rctx->visited, I->src[s].value) && "no phis");
 
       I->src[s].reg = rctx->ssa_to_reg[I->src[s].value];
+      if (I->reg_constraints) {
+         struct agx_reg_constraint c = I->reg_constraints[I->nr_dests + s];
+         if (c.min == c.max && c.max < reserved_size(rctx->shader))
+            I->src[s].reg = c.min;
+      }
       I->src[s].has_reg = true;
    }
 }
@@ -1058,6 +1256,9 @@ agx_ra_assign_local(struct ra_ctx *rctx)
 
    reserve_live_in(rctx);
 
+   if (rctx->shader->ra_target.reserved_registers)
+      BITSET_SET_COUNT(used_regs_gpr, 0, reserved_size(rctx->shader));
+
    /* Force the nesting counter r0l live throughout shaders using control flow.
     * This could be optimized (sync with agx_calc_register_demand).
     */
@@ -1126,7 +1327,9 @@ agx_ra_assign_local(struct ra_ctx *rctx)
       /* Search for regions of contiguous killed sources to early-kill. */
       rctx->early_killed = false;
 
-      if (I->nr_dests == 1) {
+      if (I->nr_dests == 1 && !I->reg_constraints &&
+          (!rctx->shader->ra_target.late_kill_sources ||
+           I->op == AGX_OPCODE_MOV || I->op == AGX_OPCODE_COLLECT)) {
          unsigned first_src = 0;
          unsigned end = 0;
          unsigned start = 0;
@@ -1151,11 +1354,15 @@ agx_ra_assign_local(struct ra_ctx *rctx)
       /* Next, assign destinations one at a time. This is always legal
        * because of the SSA form.
        */
-      agx_foreach_ssa_dest(I, d) {
-         if (I->op == AGX_OPCODE_PHI && I->dest[d].has_reg)
-            continue;
+      if (I->reg_constraints) {
+         assign_constrained_operands(rctx, I);
+      } else {
+         agx_foreach_ssa_dest(I, d) {
+            if (I->op == AGX_OPCODE_PHI && I->dest[d].has_reg)
+               continue;
 
-         assign_regs(rctx, I->dest[d], pick_regs(rctx, I, d));
+            assign_regs(rctx, I->dest[d], pick_regs(rctx, I, d));
+         }
       }
 
       /* Free late-killed sources */
@@ -1321,16 +1528,31 @@ lower_exports(agx_context *ctx)
 void
 agx_ra(agx_context *ctx)
 {
+   /* Destructive input operands get a private SSA lifetime. Ordinary move
+    * coalescing removes the copy when the original value dies here. */
+   agx_foreach_instr_global_safe(ctx, I) {
+      if (!I->reg_constraints)
+         continue;
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      agx_foreach_ssa_src(I, s) {
+         if (!I->reg_constraints[I->nr_dests + s].clobber)
+            continue;
+         agx_index copy = agx_vec_temp(ctx, I->src[s].size, agx_channels(I->src[s]));
+         agx_mov_to(&b, copy, I->src[s]);
+         I->src[s] = copy;
+      }
+   }
    bool force_spilling =
       (agx_compiler_debug & AGX_DBG_SPILL) && ctx->key->has_scratch;
 
    /* Determine maximum possible registers. We won't exceed this! */
-   unsigned max_possible_regs = AGX_NUM_REGS;
+   unsigned max_possible_regs = ctx->ra_target.max_registers ?: AGX_NUM_REGS;
 
    /* Compute shaders need to have their entire workgroup together, so our
     * register usage is bounded by the workgroup size.
     */
-   if (mesa_shader_stage_is_compute(ctx->stage)) {
+   if (mesa_shader_stage_is_compute(ctx->stage) &&
+       !ctx->ra_target.max_registers) {
       unsigned threads_per_workgroup;
 
       /* If we don't know the workgroup size, worst case it. TODO: Optimize
@@ -1344,8 +1566,8 @@ agx_ra(agx_context *ctx)
                                  ctx->nir->info.workgroup_size[2];
       }
 
-      max_possible_regs =
-         agx_max_registers_for_occupancy(threads_per_workgroup);
+      max_possible_regs = MIN2(max_possible_regs,
+         agx_max_registers_for_occupancy(threads_per_workgroup));
    }
 
    if (force_spilling) {
@@ -1492,7 +1714,7 @@ agx_ra(agx_context *ctx)
     * affecting occupancy. This reduces live range splitting.
     */
    unsigned max_regs = agx_occupancy_for_register_count(demand).max_registers;
-   if (ctx->key->is_helper || force_spilling)
+   if (ctx->key->is_helper || force_spilling || ctx->ra_target.max_registers)
       max_regs = max_possible_regs;
 
    max_regs = ROUND_DOWN_TO(max_regs, reg_file_alignment);
@@ -1553,8 +1775,23 @@ agx_ra(agx_context *ctx)
             agx_replace_index(ins->dest[d], agx_as_register(ins->dest[d]));
       }
 
+      /* Apple9 consumes the shared liveness result when selecting physical
+       * operand release bits. Duplicate operands have one SSA kill marker. */
+      unsigned source_kills = 0;
+      if (ctx->ra_target.preserve_source_kills) {
+         agx_foreach_ssa_src(ins, s) {
+            agx_foreach_ssa_src(ins, t) {
+               if (ins->src[t].kill &&
+                   ins->src[s].value == ins->src[t].value &&
+                   ins->src[s].memory == ins->src[t].memory)
+                  source_kills |= BITFIELD_BIT(s);
+            }
+         }
+      }
       agx_foreach_ssa_src(ins, s) {
          agx_replace_src(ins, s, agx_as_register(ins->src[s]));
+         if (ctx->ra_target.preserve_source_kills)
+            ins->src[s].kill = (source_kills & BITFIELD_BIT(s)) != 0;
       }
 
       /* Lower away RA pseudo-instructions */
@@ -1655,7 +1892,7 @@ agx_ra(agx_context *ctx)
       }
    }
 
-   if (spilling)
+   if (spilling && !ctx->ra_target.defer_spill_lowering)
       agx_lower_spill(ctx);
 
    agx_foreach_block(ctx, block) {

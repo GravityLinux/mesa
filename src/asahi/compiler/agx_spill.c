@@ -1168,7 +1168,10 @@ agx_spill(agx_context *ctx, unsigned k, bool remat_only)
    void *memctx = ralloc_context(NULL);
 
    /* We need extra registers for memory-memory swaps */
-   k -= remat_only ? 2 : 8;
+   k -= ctx->ra_target.reserved_registers
+           ? MAX2(ctx->ra_target.reserved_registers,
+                  remat_only ? 0 : ctx->ra_target.spill_reserved_registers)
+           : (remat_only ? 2 : 8);
 
    uint8_t *channels = rzalloc_array(memctx, uint8_t, ctx->alloc);
    dist_t *next_uses = rzalloc_array(memctx, dist_t, ctx->alloc);

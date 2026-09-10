@@ -484,3 +484,9 @@ for (name, is_float) in [("break_if_icmp", False), ("break_if_fcmp", True)]:
     op(name, _, dests = 0, srcs = 2,
        imms = [NEST, INVERT_COND, FCOND if is_float else ICOND, TARGET],
        can_eliminate = False, schedule_class = "invalid")
+
+# Allocation IR for target-selected Apple9 instructions. Encoding remains in
+# the Apple9 backend; common SSA and allocation passes see explicit dataflow.
+op("apple9", _, dests = VARIABLE, srcs = VARIABLE, can_eliminate = False, can_reorder = False)
+op("apple9_pure", _, dests = VARIABLE, srcs = VARIABLE, can_eliminate = True, can_reorder = False)
+op("apple9_cf", _, dests = 0, srcs = VARIABLE, can_eliminate = False, can_reorder = False)

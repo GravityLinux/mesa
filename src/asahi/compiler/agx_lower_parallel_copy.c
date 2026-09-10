@@ -55,7 +55,8 @@ do_copy(agx_builder *b, const struct agx_copy *copy)
       /* Memory-memory copies need to be lowered to memory-register and
        * register-memory, using a reserved scratch register.
        */
-      agx_index scratch_reg = agx_register(2, copy->src.size);
+      agx_index scratch_reg = agx_register(b->shader->ra_target.spill_copy_register ?: 2,
+                                           copy->src.size);
       agx_mov_to(b, scratch_reg, copy->src);
       agx_mov_to(b, dst, scratch_reg);
    } else if (copy->src.type == AGX_INDEX_IMMEDIATE) {
@@ -81,8 +82,10 @@ do_swap(agx_builder *b, const struct agx_copy *copy)
 
    /* Memory-memory swaps lowered here, GPR swaps lowered later */
    if (x.memory) {
-      agx_index temp1 = agx_register(4, copy->src.size);
-      agx_index temp2 = agx_register(6, copy->src.size);
+      agx_index temp1 = agx_register(b->shader->ra_target.spill_swap_registers[0] ?: 4,
+                                     copy->src.size);
+      agx_index temp2 = agx_register(b->shader->ra_target.spill_swap_registers[1] ?: 6,
+                                     copy->src.size);
 
       agx_mov_to(b, temp1, x);
       agx_mov_to(b, temp2, y);

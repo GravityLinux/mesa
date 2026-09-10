@@ -123,6 +123,7 @@ if with_tests
       files(
          'test/test-compact-constants.cpp',
          'test/test-apple9.cpp',
+         'test/test-apple9-shared-ra.cpp',
          'test/test-minifloat.cpp',
          'test/test-optimizer.cpp',
          'test/test-lower-pseudo.cpp',

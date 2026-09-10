@@ -155,6 +155,8 @@ agx_write_registers(const agx_instr *I, unsigned d)
    switch (I->op) {
    case AGX_OPCODE_MOV:
    case AGX_OPCODE_PHI:
+   case AGX_OPCODE_APPLE9:
+   case AGX_OPCODE_APPLE9_PURE:
       /* Tautological */
       return agx_index_size_16(I->dest[d]);
 
@@ -242,6 +244,10 @@ agx_read_registers(const agx_instr *I, unsigned s)
    unsigned size = agx_size_align_16(I->src[s].size);
 
    switch (I->op) {
+   case AGX_OPCODE_APPLE9:
+   case AGX_OPCODE_APPLE9_PURE:
+   case AGX_OPCODE_APPLE9_CF:
+      return agx_index_size_16(I->src[s]);
    case AGX_OPCODE_MOV:
    case AGX_OPCODE_EXPORT:
       /* Tautological */
