@@ -738,6 +738,15 @@ agx_shadow(struct agx_context *ctx, struct agx_resource *rsrc, bool needs_copy)
       return false;
 
    if (needs_copy) {
+      /* A completed GPU writer may still own the authoritative contents on
+       * transports with separate CPU and GPU memory. Fetch them before copying
+       * untouched pixels into the replacement allocation.
+       */
+      if (!agx_bo_sync_cpu_read(old)) {
+         agx_bo_unreference(dev, new_);
+         return false;
+      }
+
       perf_debug_ctx(ctx, "Shadowing %zu bytes on the CPU (%s)", size,
                      (old->flags & AGX_BO_WRITEBACK) ? "cached" : "uncached");
       agx_resource_debug(rsrc, "Shadowed: ");
@@ -983,8 +992,11 @@ agx_transfer_map(struct pipe_context *pctx, struct pipe_resource *resource,
    agx_prepare_for_map(ctx, rsrc, level, usage, box, staging_blit);
 
    /* The remote shim keeps a separate device copy. Synchronizing its fence
-    * alone does not make GPU writes visible in the host mmap. */
-   if (!staging_blit && (usage & PIPE_MAP_READ) &&
+    * alone does not make GPU writes visible in the host mmap. Writes also
+    * need a current baseline: rewriting old host bytes over unread GPU data
+    * must not disappear from the shim's differential upload, including when
+    * a BO is recycled for a new resource. */
+   if (!staging_blit && (usage & (PIPE_MAP_READ | PIPE_MAP_WRITE)) &&
        !agx_bo_sync_cpu_read(rsrc->bo))
       return NULL;
 

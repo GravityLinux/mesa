@@ -75,6 +75,19 @@ agx_bo_cache_fetch(struct agx_device *dev, size_t size, size_t align,
    }
    simple_mtx_unlock(&dev->bo_cache.lock);
 
+   if (bo) {
+      /* A cached allocation has a new owner. The remote copy may contain
+       * writes by the previous GPU user even where the host bytes did not
+       * change. Start a new upload baseline before exposing it for CPU use. */
+      typedef int (*reused_fn)(int, uint32_t);
+      reused_fn reused =
+         (reused_fn)dlsym(RTLD_DEFAULT, "asahi_m1n1_bo_reused");
+      if (reused && reused(dev->fd, bo->uapi_handle)) {
+         agx_bo_free(dev, bo);
+         bo = NULL;
+      }
+   }
+
    return bo;
 }
 
@@ -407,7 +420,7 @@ agx_bo_create(struct agx_device *dev, size_t size, unsigned align,
    return bo;
 }
 
-/* Optional shim instrumentation; no claim is made by an ordinary BO map. */
+/* Native DRM mappings are coherent; the remote shim needs an explicit pull. */
 bool
 agx_bo_sync_cpu_read(struct agx_bo *bo)
 {
