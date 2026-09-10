@@ -6681,7 +6681,14 @@ ast_function_definition::hir(ir_exec_list *instructions,
    }
 
    /* Convert the body of the function to HIR. */
+   /* ESSL 1.00 section 4.2.2 gives the body a scope nested inside the
+    * parameter scope. Later ESSL versions and desktop GLSL combine them. */
+   const bool separate_body_scope = state->es_shader && state->language_version == 100;
+   if (separate_body_scope)
+      state->symbols->push_scope();
    this->body->hir(&signature->body, state);
+   if (separate_body_scope)
+      state->symbols->pop_scope();
    signature->is_defined = true;
 
    state->symbols->pop_scope();

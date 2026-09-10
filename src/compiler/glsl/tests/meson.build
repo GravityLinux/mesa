@@ -59,6 +59,12 @@ test(
 # Meson can't auto-skip these on cross builds because of the python wrapper
 if meson.can_run_host_binaries()
   test(
+    'glsl function scopes',
+    prog_python,
+    args : [files('function_scope_test.py'), glsl_compiler],
+    suite : ['compiler', 'glsl'],
+  )
+  test(
     'glsl compiler warnings',
     prog_python,
     args : [
