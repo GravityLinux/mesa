@@ -3583,6 +3583,13 @@ agx_nir_lower_fdiv(nir_builder *b, nir_alu_instr *alu, void *_)
    return true;
 }
 
+bool
+agx_nir_lower_accurate_frcp(nir_shader *nir)
+{
+   return nir_shader_alu_pass(nir, agx_nir_lower_fdiv,
+                              nir_metadata_control_flow, NULL);
+}
+
 /* Preprocess NIR independent of shader state */
 void
 agx_preprocess_nir(nir_shader *nir)
@@ -3638,8 +3645,7 @@ agx_preprocess_nir(nir_shader *nir)
    NIR_PASS(_, nir, nir_lower_idiv, &idiv_options);
 
    /* Has to run after nir_lower_idiv */
-   NIR_PASS(_, nir, nir_shader_alu_pass, agx_nir_lower_fdiv,
-            nir_metadata_control_flow, NULL);
+   NIR_PASS(_, nir, agx_nir_lower_accurate_frcp);
 
    NIR_PASS(_, nir, nir_opt_deref);
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
