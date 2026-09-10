@@ -1162,6 +1162,14 @@ agx_clear(struct pipe_context *pctx, unsigned buffers,
       slowclear |= fastclear;
    }
 
+   /* Different attachments may be cleared or loaded independently. Use the
+    * ordinary clear shader so the compatibility load selection stays uniform. */
+   if (agx_apple9_direct_render_enabled(agx_device(pctx->screen)) &&
+       batch->key.nr_cbufs > 1) {
+      slowclear |= fastclear;
+      fastclear = 0;
+   }
+
    assert(scissor_state == NULL &&
           "we don't support pipe_caps.clear_scissored");
 
@@ -1176,8 +1184,7 @@ agx_clear(struct pipe_context *pctx, unsigned buffers,
       union pipe_color_union clamped =
          util_clamp_color(batch->key.cbufs[rt].format, color);
 
-      if (rt == 0)
-         memcpy(batch->apple9_clear_color, clamped.f, sizeof(clamped.f));
+      memcpy(batch->apple9_clear_color[rt], clamped.f, sizeof(clamped.f));
 
       batch->uploaded_clear_color[rt] = agx_pool_upload_aligned(
          &batch->pool, clamped.f, sizeof(clamped.f), 16);
@@ -1671,7 +1678,7 @@ agx_flush_compute(struct agx_context *ctx, struct agx_batch *batch,
    }
 }
 
-static void
+static bool
 agx_flush_render(struct agx_context *ctx, struct agx_batch *batch,
                  struct drm_asahi_cmd_render *cmdbuf)
 {
@@ -1748,10 +1755,10 @@ agx_flush_render(struct agx_context *ctx, struct agx_batch *batch,
       batch->clear_depth, batch->clear_stencil, &batch->tilebuffer_layout);
 
    if (agx_apple9_direct_render_enabled(dev)) {
-      if (batch->key.nr_cbufs != 1 || !batch->key.cbufs[0].texture) {
+      if (!batch->key.nr_cbufs || batch->key.nr_cbufs > 8) {
          fprintf(stderr,
-                 "Apple9 direct render currently needs one color target\n");
-         return;
+                 "Apple9 direct render requires one to eight color targets\n");
+         return false;
       }
 
       struct agx_apple9_render_package *render_package =
@@ -1765,22 +1772,29 @@ agx_flush_render(struct agx_context *ctx, struct agx_batch *batch,
          dev, render_package, AGX_APPLE9_RENDER_STORE_OFFSET);
       if (!package_ready || !load_usc || !store_usc) {
          fprintf(stderr, "failed to prepare Apple9 color target\n");
-         return;
+         return false;
       }
 
       /* These are offsets into the caller's USC package.  m1n1 combines
        * them with the admitted Apple9 render aperture; no PBE target alias or
        * source-fixture attachment remains necessary. */
       cmdbuf->bg.usc = load_usc;
-      cmdbuf->bg.rsrc_spec = AGX_APPLE9_RENDER_LOAD_RSRC;
+      /* T8132's native clear/load pair differs in this resource bit even
+       * when both select the same partial-reload program. */
+      cmdbuf->bg.rsrc_spec = (batch->clear & PIPE_CLEAR_COLOR0)
+                               ? AGX_APPLE9_RENDER_LOAD_RSRC : 0;
+      if (getenv("AGX_APPLE9_TRACE"))
+         fprintf(stderr, "APPLE9_TILE_STATE targets=%u sample_bytes=%u\n",
+                 batch->key.nr_cbufs, cmdbuf->sample_size_B);
       cmdbuf->eot.usc = store_usc;
       cmdbuf->eot.rsrc_spec = 0;
       cmdbuf->partial_bg.usc = agx_apple9_render_package_program_word(
          dev, render_package, AGX_APPLE9_RENDER_RELOAD_OFFSET);
-      cmdbuf->partial_bg.rsrc_spec = AGX_APPLE9_RENDER_LOAD_RSRC;
+      cmdbuf->partial_bg.rsrc_spec = cmdbuf->bg.rsrc_spec;
       cmdbuf->partial_eot.usc = store_usc;
       cmdbuf->partial_eot.rsrc_spec = 0;
    }
+   return true;
 }
 
 void
@@ -1891,8 +1905,8 @@ agx_flush_batch(struct agx_context *ctx, struct agx_batch *batch)
    }
 
    if (batch->vdm.bo && (batch->clear || batch->initialized)) {
-      agx_flush_render(ctx, batch, &render);
-      if (apple9_render) {
+      has_vdm = agx_flush_render(ctx, batch, &render);
+      if (has_vdm && apple9_render) {
          const uint8_t *encoder = agx_bo_map(batch->vdm.bo);
          size_t encoder_size = batch->vdm.current - encoder;
          bool uploaded = agx_apple9_render_cache_upload_encoder(
@@ -1906,11 +1920,13 @@ agx_flush_batch(struct agx_context *ctx, struct agx_batch *batch)
             abort();
          }
       }
-      has_vdm = true;
    }
 
    if (!has_cdm && !has_vdm) {
-      agx_batch_reset(ctx, batch);
+      if (batch->initialized)
+         agx_batch_discard(ctx, batch);
+      else
+         agx_batch_reset(ctx, batch);
       if (apple9_fixed_usc)
          simple_mtx_unlock(&screen->apple9_render_package_lock);
       return;

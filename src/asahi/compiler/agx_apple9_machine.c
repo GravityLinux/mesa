@@ -73,7 +73,7 @@ const struct agx_apple9_machine agx_apple9_machine = {
    .half_register_count = AGX_APPLE9_HALF_REGISTER_COUNT,
    .hardware_register_interlocks = true,
    .software_waits = false,
-   .spilling_supported = false,
+   .spilling_supported = true,
    .occupancy_model = AGX_APPLE9_OCCUPANCY_PRESSURE_TIER,
 };
 
@@ -85,6 +85,24 @@ const struct agx_apple9_machine agx_apple9_machine = {
  * cache, liveness, or source-file state.
  */
 static const struct agx_apple9_encoding_info encodings[] = {
+   /* EXP-M4-60: ordinary 32-bit GPRs and a separate word-indexed scratch file.
+    * SAVE/FILL each produce a completion tag and accept an incoming wait. */
+   [AGX_APPLE9_ENC_SPILL_STORE] = {
+      .name = "spill_store", .length = 10, .operand_count = 1,
+      .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      .dependency_layout = AGX_APPLE9_DEPENDENCY_MASK_45_47_61_63,
+      .operands = { GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 95, 2,
+         AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED,
+         AGX_APPLE9_EVIDENCE_HARDWARE) },
+   },
+   [AGX_APPLE9_ENC_SPILL_LOAD] = {
+      .name = "spill_load", .length = 8, .operand_count = 1,
+      .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      .dependency_layout = AGX_APPLE9_DEPENDENCY_MASK_45_47_61_63,
+      .operands = { GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 95, 2,
+         AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED,
+         AGX_APPLE9_EVIDENCE_HARDWARE) },
+   },
    [AGX_APPLE9_ENC_MOV_IMM_COMPACT] =
       {
          .name = "mov_imm_compact",
@@ -339,6 +357,21 @@ static const struct agx_apple9_encoding_info encodings[] = {
                   AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },
+   [AGX_APPLE9_ENC_DERIVATIVE] =
+      {
+         .name = "derivative",
+         .length = 10,
+         .operand_count = 2,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .dependency_layout = AGX_APPLE9_DEPENDENCY_MASK_12_17,
+         .operands = {
+            GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 63, 2,
+                AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
+            GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63, 2,
+                AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
+         },
+      },
    [AGX_APPLE9_ENC_FLOAT_SPECIAL] =
       {
          .name = "float_special",
@@ -505,8 +538,9 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .operands =
             {
                GPR(
-                  AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 63,
-                  2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED,
+                  AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32,
+                  AGX_APPLE9_PUBLICATION_COUNT - 1,
+                  2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_PUBLICATION | AGX_APPLE9_OPERAND_SCATTERED,
                   AGX_APPLE9_EVIDENCE_HARDWARE),
                GPR(
                   AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63,
@@ -518,6 +552,8 @@ static const struct agx_apple9_encoding_info encodings[] = {
                   AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },
+   /* The currently encoded shift form releases its source. Allocation must
+    * preserve a surviving value; a retain encoding has not been established. */
    [AGX_APPLE9_ENC_SHIFT_EXTENDED] =
       {
          .name = "shift_extended",
@@ -532,7 +568,8 @@ static const struct agx_apple9_encoding_info encodings[] = {
                    15, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
                GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
-                   15, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                   15, 2, AGX_APPLE9_OPERAND_ALLOCATABLE |
+                          AGX_APPLE9_OPERAND_CLOBBER,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },
@@ -786,6 +823,29 @@ static const struct agx_apple9_encoding_info encodings[] = {
                           63, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                           AGX_APPLE9_EVIDENCE_HARDWARE)},
       },
+   [AGX_APPLE9_ENC_TEXTURE_VOLUME_PARAMS] =
+      {
+         .name = "texture_volume_params",
+         .length = 40,
+         .operand_count = 5,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .operands = {GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32,
+                          7, 8, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                          AGX_APPLE9_EVIDENCE_HARDWARE),
+                      GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
+                          63, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                          AGX_APPLE9_EVIDENCE_HARDWARE),
+                      GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32,
+                          63, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                          AGX_APPLE9_EVIDENCE_HARDWARE),
+                      GPR(AGX_APPLE9_OPERAND_SRC2, AGX_APPLE9_WIDTH_32,
+                          63, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                          AGX_APPLE9_EVIDENCE_HARDWARE),
+                      GPR(AGX_APPLE9_OPERAND_SRC3, AGX_APPLE9_WIDTH_32,
+                          63, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                          AGX_APPLE9_EVIDENCE_HARDWARE)},
+      },
    [AGX_APPLE9_ENC_TEXTURE_LOD] =
       {
          .name = "texture_lod",
@@ -857,7 +917,7 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
          .operands =
             {GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32,
-                 63, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                 AGX_APPLE9_PUBLICATION_COUNT - 1, 2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_PUBLICATION,
                  AGX_APPLE9_EVIDENCE_HARDWARE),
              GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
                  63, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
@@ -895,8 +955,9 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .operand_count = 1,
          .allocator_safe = true,
          .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
-         .operands = {GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63,
-                          2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+         .operands = {GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
+                  AGX_APPLE9_PUBLICATION_COUNT - 1,
+                          2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_PUBLICATION,
                           AGX_APPLE9_EVIDENCE_HARDWARE)},
       },
    [AGX_APPLE9_ENC_COVERAGE] =
@@ -939,6 +1000,34 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .operands = {GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63,
                           2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                           AGX_APPLE9_EVIDENCE_HARDWARE)},
+      },
+   [AGX_APPLE9_ENC_TILE_LOAD_MASK] =
+      {
+         .name = "tile_load_mask",
+         .length = 12,
+         .operand_count = 2,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_BYTE_DIFF,
+         .operands = {GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 63,
+                          2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                          AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+                      GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63,
+                          2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                          AGX_APPLE9_EVIDENCE_BYTE_DIFF)},
+      },
+   [AGX_APPLE9_ENC_TILE_STORE_MASK] =
+      {
+         .name = "tile_store_mask",
+         .length = 12,
+         .operand_count = 2,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_BYTE_DIFF,
+         .operands = {GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63,
+                          2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                          AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+                      GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32, 63,
+                          2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                          AGX_APPLE9_EVIDENCE_BYTE_DIFF)},
       },
    [AGX_APPLE9_ENC_TILE_FENCE] =
       {
@@ -1028,11 +1117,13 @@ static const struct agx_apple9_encoding_info encodings[] = {
                 * until a dedicated high-index splice establishes otherwise. */
                GPR(
                   AGX_APPLE9_OPERAND_INDEX, AGX_APPLE9_WIDTH_32, 15,
-                  2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED,
+                  2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED |
+                     AGX_APPLE9_OPERAND_CLOBBER,
                   AGX_APPLE9_EVIDENCE_HARDWARE),
                GPR(
                   AGX_APPLE9_OPERAND_ATOMIC_DATA, AGX_APPLE9_WIDTH_32, 15,
-                  2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED,
+                  2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED |
+                     AGX_APPLE9_OPERAND_CLOBBER,
                   AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },
@@ -1086,7 +1177,9 @@ agx_apple9_encoding_accepts_gpr(enum agx_apple9_encoding encoding,
 
    if (operand == NULL || !(operand->files & AGX_APPLE9_FILE_GPR) ||
        !(operand->flags & AGX_APPLE9_OPERAND_ALLOCATABLE) ||
-       gpr >= AGX_APPLE9_GPR_COUNT || gpr < operand->min_index ||
+       gpr >= ((operand->flags & AGX_APPLE9_OPERAND_PUBLICATION)
+                  ? AGX_APPLE9_PUBLICATION_COUNT : AGX_APPLE9_GPR_COUNT) ||
+       gpr < operand->min_index ||
        gpr > operand->max_index)
       return false;
 

@@ -81,7 +81,37 @@ struct agx_rodata {
  * through completion. This is a validated compiler capacity, not an API or
  * hardware varying limit. Semantic locations are compacted independently of
  * declaration order and never encoded directly as hardware slot numbers. */
-#define AGX_APPLE9_MAX_VARYING_COMPONENTS 32
+#define AGX_APPLE9_MAX_VARYING_COMPONENTS 96
+/* Interpolation modes are indexed by compacted scalar, independent of API
+ * locations. Two words cover the complete publication-addressing namespace. */
+struct agx_apple9_interp_mask {
+   uint64_t lo, hi;
+};
+
+static inline void
+agx_apple9_interp_mask_set(struct agx_apple9_interp_mask *mask, unsigned index)
+{
+   assert(index < 128);
+   if (index < 64)
+      mask->lo |= UINT64_C(1) << index;
+   else
+      mask->hi |= UINT64_C(1) << (index - 64);
+}
+
+static inline bool
+agx_apple9_interp_mask_test(struct agx_apple9_interp_mask mask, unsigned index)
+{
+   assert(index < 128);
+   return ((index < 64 ? mask.lo : mask.hi) >> (index & 63)) & 1;
+}
+
+static inline bool
+agx_apple9_interp_mask_equal(struct agx_apple9_interp_mask a,
+                            struct agx_apple9_interp_mask b)
+{
+   return a.lo == b.lo && a.hi == b.hi;
+}
+
 /* Ordinary interpolants from both compatibility GL and programmable shaders.
  * Rasterizer-generated system values require their own lowering. */
 static inline bool
@@ -109,8 +139,11 @@ struct agx_shader_info {
    /* Apple9 graphics API UBO binding mask (distinct from hardware slots). */
    uint32_t apple9_ubo_mask;
    struct agx_apple9_varying_layout apple9_varyings;
-   uint32_t apple9_linear_mask, apple9_flat_mask;
+   struct agx_apple9_interp_mask apple9_linear_mask, apple9_flat_mask;
+   uint16_t apple9_publication_count;
    bool apple9_reads_z;
+   bool apple9_writes_point_size;
+   bool apple9_reads_point_coord;
    /* Ordered graphics table entries: API UBOs 0..31, vertex bindings 32..63. */
    uint8_t apple9_resource_count;
    uint8_t apple9_resource_binding[AGX_APPLE9_MAX_GRAPHICS_BUFFERS];

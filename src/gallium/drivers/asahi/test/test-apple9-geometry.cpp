@@ -26,7 +26,7 @@ get_u64(const uint8_t *bytes, size_t offset)
 
 TEST(Apple9ComputeGeometry, DirectPublishesThreadsAndIdentityScale)
 {
-   uint8_t record[0x80] = {};
+   uint8_t record[0x100] = {};
    const uint64_t address = 0x1000200000ull;
    const agx_apple9_compute_geometry geometry = {
       .mode = AGX_APPLE9_COMPUTE_GEOMETRY_DIRECT,
@@ -35,17 +35,17 @@ TEST(Apple9ComputeGeometry, DirectPublishesThreadsAndIdentityScale)
    };
    ASSERT_TRUE(agx_apple9_build_compute_geometry_fields(
       record, sizeof(record), address, &geometry));
-   EXPECT_EQ(get_u64(record, 0x00), address + 0x60);
-   EXPECT_EQ(get_u64(record, 0x08), address + 0x6c);
+   EXPECT_EQ(get_u64(record, 0x00), address + 0xc0);
+   EXPECT_EQ(get_u64(record, 0x08), address + 0xcc);
    for (unsigned d = 0; d < 3; ++d) {
-      EXPECT_EQ(get_u32(record, 0x60 + d * 4), geometry.threads[d]);
-      EXPECT_EQ(get_u32(record, 0x6c + d * 4), 1u);
+      EXPECT_EQ(get_u32(record, 0xc0 + d * 4), geometry.threads[d]);
+      EXPECT_EQ(get_u32(record, 0xcc + d * 4), 1u);
    }
 }
 
 TEST(Apple9ComputeGeometry, IndirectPublishesCallerRecordAndLocalScale)
 {
-   uint8_t record[0x80];
+   uint8_t record[0x100];
    memset(record, 0xa5, sizeof(record));
    const uint64_t address = 0x1000200000ull;
    const agx_apple9_compute_geometry geometry = {
@@ -55,17 +55,22 @@ TEST(Apple9ComputeGeometry, IndirectPublishesCallerRecordAndLocalScale)
    };
    ASSERT_TRUE(agx_apple9_build_compute_geometry_fields(
       record, sizeof(record), address, &geometry));
+   /* Every visible pointer remains intact even at the expanded capacity. */
+   for (unsigned i = 0x10; i < 0xc0; ++i)
+      EXPECT_EQ(record[i], 0xa5);
+   for (unsigned i = 0xd8; i < sizeof(record); ++i)
+      EXPECT_EQ(record[i], 0xa5);
    EXPECT_EQ(get_u64(record, 0x00), geometry.group_counts);
-   EXPECT_EQ(get_u64(record, 0x08), address + 0x6c);
+   EXPECT_EQ(get_u64(record, 0x08), address + 0xcc);
    for (unsigned d = 0; d < 3; ++d) {
-      EXPECT_EQ(get_u32(record, 0x60 + d * 4), 0u);
-      EXPECT_EQ(get_u32(record, 0x6c + d * 4), geometry.local[d]);
+      EXPECT_EQ(get_u32(record, 0xc0 + d * 4), 0u);
+      EXPECT_EQ(get_u32(record, 0xcc + d * 4), geometry.local[d]);
    }
 }
 
 TEST(Apple9ComputeGeometry, RejectsMalformedIndirectGeometry)
 {
-   uint8_t record[0x80] = {};
+   uint8_t record[0x100] = {};
    agx_apple9_compute_geometry geometry = {
       .mode = AGX_APPLE9_COMPUTE_GEOMETRY_INDIRECT,
       .group_counts = 0x2fff123402ull,
@@ -79,12 +84,12 @@ TEST(Apple9ComputeGeometry, RejectsMalformedIndirectGeometry)
    EXPECT_FALSE(agx_apple9_build_compute_geometry_fields(
       record, sizeof(record), 0x1000200000ull, &geometry));
    EXPECT_FALSE(agx_apple9_build_compute_geometry_fields(
-      record, 0x77, 0x1000200000ull, &geometry));
+      record, 0xd7, 0x1000200000ull, &geometry));
 }
 
 TEST(Apple9ComputeGeometry, RejectsMalformedDirectGeometry)
 {
-   uint8_t record[0x80] = {};
+   uint8_t record[0x100] = {};
    agx_apple9_compute_geometry geometry = {
       .mode = AGX_APPLE9_COMPUTE_GEOMETRY_DIRECT,
       .threads = {12, 10, 0},

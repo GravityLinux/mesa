@@ -420,7 +420,7 @@ struct agx_batch {
    bool initialized;
 
    uint64_t uploaded_clear_color[PIPE_MAX_COLOR_BUFS];
-   float apple9_clear_color[4];
+   float apple9_clear_color[8][4];
    double clear_depth;
    unsigned clear_stencil;
 
@@ -533,6 +533,7 @@ struct asahi_vs_shader_key {
     */
    bool hw;
    struct agx_apple9_vertex_layout apple9_inputs;
+   struct agx_apple9_sampler_key apple9_samplers[32];
 };
 
 struct agx_vertex_elements {
@@ -547,11 +548,13 @@ struct agx_vertex_elements {
 struct asahi_fs_shader_key {
    enum pipe_format rt_formats[PIPE_MAX_COLOR_BUFS];
    uint8_t nr_samples;
-   bool padding[7];
+   uint8_t apple9_nr_targets;
+   bool padding[6];
    struct agx_apple9_varying_layout apple9_varyings;
-   struct agx_apple9_blend apple9_blend;
+   struct agx_apple9_blend apple9_blend[PIPE_MAX_COLOR_BUFS];
+   struct agx_apple9_sampler_key apple9_samplers[32];
 };
-static_assert(sizeof(struct asahi_fs_shader_key) == 116, "no holes");
+static_assert(sizeof(struct asahi_fs_shader_key) == 876, "no holes");
 
 union asahi_shader_key {
    struct asahi_vs_shader_key vs;
@@ -1201,6 +1204,7 @@ agx_batch_is_compute(struct agx_batch *batch)
 struct agx_batch *agx_get_batch(struct agx_context *ctx);
 struct agx_batch *agx_get_compute_batch(struct agx_context *ctx);
 void agx_batch_reset(struct agx_context *ctx, struct agx_batch *batch);
+void agx_batch_discard(struct agx_context *ctx, struct agx_batch *batch);
 int agx_cleanup_batches(struct agx_context *ctx);
 
 void agx_batch_add_timestamp_query(struct agx_batch *batch,

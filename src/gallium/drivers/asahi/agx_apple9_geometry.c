@@ -25,8 +25,8 @@ agx_apple9_build_compute_geometry_fields(
    void *record_, size_t record_size, uint64_t record_address,
    const struct agx_apple9_compute_geometry *geometry)
 {
-   if (!record_ || !geometry || record_size < 0x78 ||
-       record_address > UINT64_MAX - 0x6c)
+   if (!record_ || !geometry || record_size < (AGX_APPLE9_COMPUTE_GEOMETRY_LOCAL_OFFSET + 12) ||
+       record_address > UINT64_MAX - AGX_APPLE9_COMPUTE_GEOMETRY_LOCAL_OFFSET)
       return false;
 
    uint8_t *record = record_;
@@ -39,11 +39,11 @@ agx_apple9_build_compute_geometry_fields(
             return false;
          local_threads *= geometry->local[d];
       }
-      put_u64(record + 0x00, record_address + 0x60);
-      put_u64(record + 0x08, record_address + 0x6c);
+      put_u64(record + 0x00, record_address + AGX_APPLE9_COMPUTE_GEOMETRY_THREADS_OFFSET);
+      put_u64(record + 0x08, record_address + AGX_APPLE9_COMPUTE_GEOMETRY_LOCAL_OFFSET);
       for (unsigned d = 0; d < 3; ++d) {
-         put_u32(record + 0x60 + d * sizeof(uint32_t), geometry->threads[d]);
-         put_u32(record + 0x6c + d * sizeof(uint32_t), 1);
+         put_u32(record + AGX_APPLE9_COMPUTE_GEOMETRY_THREADS_OFFSET + d * sizeof(uint32_t), geometry->threads[d]);
+         put_u32(record + AGX_APPLE9_COMPUTE_GEOMETRY_LOCAL_OFFSET + d * sizeof(uint32_t), 1);
       }
       return true;
    }
@@ -58,10 +58,10 @@ agx_apple9_build_compute_geometry_fields(
          local_threads *= geometry->local[d];
       }
       put_u64(record + 0x00, geometry->group_counts);
-      put_u64(record + 0x08, record_address + 0x6c);
+      put_u64(record + 0x08, record_address + AGX_APPLE9_COMPUTE_GEOMETRY_LOCAL_OFFSET);
       for (unsigned d = 0; d < 3; ++d) {
-         put_u32(record + 0x60 + d * sizeof(uint32_t), 0);
-         put_u32(record + 0x6c + d * sizeof(uint32_t), geometry->local[d]);
+         put_u32(record + AGX_APPLE9_COMPUTE_GEOMETRY_THREADS_OFFSET + d * sizeof(uint32_t), 0);
+         put_u32(record + AGX_APPLE9_COMPUTE_GEOMETRY_LOCAL_OFFSET + d * sizeof(uint32_t), geometry->local[d]);
       }
       return true;
    }

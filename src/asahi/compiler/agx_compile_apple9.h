@@ -78,7 +78,63 @@ bool agx_compile_apple9_fragment(nir_shader *nir,
 struct agx_apple9_blend {
    uint8_t rgb_src, rgb_dst, alpha_src, alpha_dst;
    uint8_t rgb_func, alpha_func, colormask, unsupported;
+   /* NONE retains the RGBA8 layout used by standalone compiler callers. */
+   enum pipe_format format;
+   uint8_t samples; /* Zero retains single-sample compiler callers. */
+   uint8_t disabled_samples;
+   uint8_t alpha_to_coverage, alpha_to_one;
 };
+
+static inline unsigned
+agx_apple9_color_components(enum pipe_format format)
+{
+   switch (format) {
+   case PIPE_FORMAT_R16_FLOAT: return 1;
+   case PIPE_FORMAT_R16G16_FLOAT: return 2;
+   default: return 4;
+   }
+}
+
+static inline bool
+agx_apple9_color_is_half(enum pipe_format format)
+{
+   return format == PIPE_FORMAT_R16_FLOAT ||
+          format == PIPE_FORMAT_R16G16_FLOAT ||
+          format == PIPE_FORMAT_R16G16B16A16_FLOAT;
+}
+
+static inline unsigned
+agx_apple9_color_words(enum pipe_format format)
+{
+   return format == PIPE_FORMAT_R16G16B16A16_FLOAT ? 2 : 1;
+}
+
+enum agx_apple9_sampler_flags {
+   AGX_APPLE9_CLAMP_S = 1 << 0,
+   AGX_APPLE9_CLAMP_T = 1 << 1,
+   AGX_APPLE9_CLAMP_R = 1 << 2,
+   AGX_APPLE9_CUSTOM_BORDER = 1 << 3,
+};
+
+struct agx_apple9_sampler_key {
+   uint32_t flags;
+   float border[4];
+};
+
+struct agx_apple9_texture_mapping {
+   uint8_t samplers[32];
+   uint32_t white_samplers;
+};
+
+bool agx_nir_lower_apple9_sampler_state(
+   nir_shader *nir, const struct agx_apple9_sampler_key key[32],
+   struct agx_apple9_texture_mapping *mapping, const char **reason);
+
+/* Per-target blend array contains nr_targets entries, up to eight. */
+bool agx_compile_apple9_fragment_mrt(
+   nir_shader *nir, const struct agx_apple9_varying_layout *varyings,
+   const struct agx_apple9_blend *blend, unsigned nr_targets,
+   struct agx_shader_part *out, const char **reason);
 
 bool agx_compile_apple9_fragment_blend(
    nir_shader *nir, const struct agx_apple9_varying_layout *varyings,

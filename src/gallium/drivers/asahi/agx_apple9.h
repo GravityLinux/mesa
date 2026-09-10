@@ -13,6 +13,7 @@
 
 #include "asahi/compiler/agx_apple9_profile.h"
 #include "asahi/compiler/agx_compile.h"
+#include "asahi/compiler/agx_compile_apple9.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,24 +30,35 @@ struct agx_bo;
 struct agx_apple9_render_package;
 struct agx_apple9_render_cache;
 
+/* Patch only the validated per-invocation extent fields in a launch record. */
+bool agx_apple9_patch_scratch_frame(uint8_t *launch, size_t size,
+                                   unsigned call_offset, unsigned bytes);
+
 struct agx_apple9_render_stage {
    /* Stable compiled-object identity; zero for externally supplied stages. */
    uint64_t program_id;
    const uint8_t *binary;
    size_t binary_size;
    uint32_t ubo_mask;
+   uint32_t scratch_size;
+   uint16_t publication_count;
+   bool publication_count_valid;
    uint8_t resource_count;
    uint8_t resource_binding[AGX_APPLE9_MAX_GRAPHICS_BUFFERS];
    uint32_t texture_mask, sampler_mask;
+   struct agx_apple9_texture_mapping texture_mapping;
    bool uses_texel_fetch;
    bool uses_discard;
+   bool disable_tri_merging;
 
    /* Scalar interface counts used by the bounded Apple9 stage linker. */
    uint8_t position_components;
    uint8_t varying_components;
    struct agx_apple9_varying_layout varyings;
-   uint32_t apple9_linear_mask, apple9_flat_mask;
+   struct agx_apple9_interp_mask apple9_linear_mask, apple9_flat_mask;
    bool apple9_reads_z;
+   bool writes_point_size;
+   bool reads_point_coord;
    uint8_t render_targets;
 };
 
@@ -65,6 +77,12 @@ struct agx_apple9_render_pipeline {
    uint64_t vertex_buffer;
    uint32_t vertex_buffer_size;
 
+   /* Color surfaces in draw-buffer order; RT0 may be supplied by the
+    * single-target package API when this array is zero. */
+   uint64_t color_targets[8];
+   enum pipe_format color_formats[8];
+   uint8_t samples;
+
    /* Optional Mesa-owned backing used by the fixed-VA compatibility path. */
    const struct agx_apple9_render_package *package;
 
@@ -78,6 +96,7 @@ struct agx_apple9_render_pipeline {
    uint64_t index_buffer;
    uint32_t index_extent;
    uint8_t index_size;
+   uint8_t primitive;
 
 };
 
@@ -88,14 +107,18 @@ struct agx_apple9_uniform_draw {
    struct agx_apple9_render_package *package;
    uint64_t vertex_table;
    uint64_t fragment_table;
-   uint64_t texture_table, sampler_table;
+   /* Graphics stage indices: vertex = 0, fragment = 1. */
+   uint64_t texture_table[2], sampler_table[2];
    uint32_t depth_control, depth_face[2], stencil[2];
    uint32_t raster_control;
+   uint8_t object_type;
    float viewport_translate[3], viewport_scale[3];
    uint32_t scissor_index;
+   uint16_t depth_bias_index;
    uint16_t scissor_min[2], scissor_max[2];
    bool reads_tile;
    bool uses_discard;
+   bool disable_tri_merging;
    bool flatshade_first;
 };
 
@@ -124,7 +147,9 @@ bool agx_apple9_render_cache_upload_uniforms(
 #define AGX_APPLE9_COMPUTE_LAUNCH_ALIGN          0x40u
 #define AGX_APPLE9_COMPUTE_LAUNCH_REGION_END     0x98000u
 #define AGX_APPLE9_COMPUTE_RESOURCE_STRIDE       0x20u
-#define AGX_APPLE9_COMPUTE_SUPERSET_RESOURCE_STRIDE 0x80u
+#define AGX_APPLE9_COMPUTE_SUPERSET_RESOURCE_STRIDE 0x100u
+#define AGX_APPLE9_COMPUTE_GEOMETRY_THREADS_OFFSET 0xc0u
+#define AGX_APPLE9_COMPUTE_GEOMETRY_LOCAL_OFFSET 0xccu
 #define AGX_APPLE9_COMPUTE_STATE_STRIDE          0x40u
 #define AGX_APPLE9_COMPUTE_CDM_RECORD_SIZE       0x2cu
 #define AGX_APPLE9_COMPUTE_INDIRECT_CDM_RECORD_SIZE 0x28u
@@ -239,8 +264,8 @@ unsigned agx_apple9_compute_resource_count(
    const struct agx_apple9_compute_profile *profile);
 
 /* Exact per-dispatch resource-record footprint selected by the package ABI.
- * The superset carrier uses one 0x80-byte record containing its hidden prefix,
- * eight visible slots, sentinel, and inline geometry tuples. */
+ * The direct-buffer ABI uses one 0x100-byte record containing three hidden
+ * pointers, up to eighteen visible pointers, and inline geometry tuples. */
 size_t agx_apple9_compute_resource_record_size(
    const struct agx_apple9_compute_profile *profile);
 
@@ -337,7 +362,7 @@ struct agx_apple9_compute_geometry {
    uint32_t local[3];
 };
 
-/* Populate only the geometry-owned fields of a zeroed 0x80-byte superset
+/* Populate only the geometry-owned fields of a zeroed 0x100-byte superset
  * resource record.  This is intentionally independent of opaque carrier
  * data so the direct/indirect contract can be unit tested exactly. */
 bool agx_apple9_build_compute_geometry_fields(
@@ -530,7 +555,7 @@ uint8_t *agx_apple9_emit_direct_draw(
    unsigned vertex_count, unsigned instance_count, unsigned vertex_start);
 
 void agx_apple9_render_cache_set_clear_color(struct agx_apple9_render_cache *cache,
-                                             const float color[4]);
+                                             const float color[8][4]);
 
 #ifdef __cplusplus
 }

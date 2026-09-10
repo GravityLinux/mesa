@@ -6,6 +6,7 @@ libasahi_agx_files = files(
   'agx_compile.c',
   'agx_apple9_machine.c',
   'agx_apple9_ir.c',
+  'agx_apple9_ra.c',
   'agx_compile_apple9.c',
   'agx_nir_lower_apple9_math.c',
   'agx_dce.c',

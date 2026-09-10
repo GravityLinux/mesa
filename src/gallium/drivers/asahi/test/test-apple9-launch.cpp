@@ -311,7 +311,7 @@ TEST(Apple9Launcher, GeneratedResourcesMoveCallAndSelectStateLoading)
       params.main_call = 0x12abc;
       params.frame_extent_a = 4096;
       std::array<uint8_t, 1024> out;
-      for (unsigned count = 1; count <= 8; ++count) {
+      for (unsigned count = 1; count <= 18; ++count) {
          params.resource_count = count;
          ASSERT_TRUE(agx_apple9_launch_build(out.data(), out.size(), &recipe, &params));
          unsigned roots = count + 3;
@@ -342,7 +342,7 @@ TEST(Apple9Launcher, GeneratedResourcesMoveCallAndSelectStateLoading)
          EXPECT_FALSE(agx_apple9_launch_build(out.data(), out.size(), &recipe, &params));
          EXPECT_EQ(out, saved);
       }
-      params.resource_count = 8;
+      params.resource_count = 18;
       EXPECT_FALSE(agx_apple9_launch_build(out.data(), out.size() - 1, &recipe, &params));
       EXPECT_EQ(out, saved);
       recipe.prefix.size--;

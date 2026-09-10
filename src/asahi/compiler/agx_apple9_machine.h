@@ -14,6 +14,7 @@ extern "C" {
 #endif
 
 /* Apple9 uses two independently addressable 16-bit halves per 32-bit GPR. */
+#define AGX_APPLE9_PUBLICATION_COUNT 128
 #define AGX_APPLE9_GPR_COUNT           96
 #define AGX_APPLE9_HALF_REGISTER_COUNT (2 * AGX_APPLE9_GPR_COUNT)
 
@@ -68,6 +69,12 @@ enum agx_apple9_operand_flag {
 
    /* A separate encoding can select the uniform file in this operand slot. */
    AGX_APPLE9_OPERAND_UNIFORM_ALTERNATIVE = 1 << 5,
+
+   /* The instruction destroys this input even when its value has later uses. */
+   AGX_APPLE9_OPERAND_CLOBBER = 1 << 6,
+
+   /* Scalar index addresses export storage rather than the ordinary GPR bank. */
+   AGX_APPLE9_OPERAND_PUBLICATION = 1 << 7,
 };
 
 struct agx_apple9_operand_constraint {
@@ -106,6 +113,7 @@ enum agx_apple9_encoding {
    AGX_APPLE9_ENC_FLOAT2_MODIFIER_EXTENDED,
    AGX_APPLE9_ENC_FLOAT3_EXTENDED,
    AGX_APPLE9_ENC_FLOAT_SPECIAL,
+   AGX_APPLE9_ENC_DERIVATIVE,
    AGX_APPLE9_ENC_INT_ADD_EXTENDED,
    AGX_APPLE9_ENC_INT_MAD_EXTENDED,
    AGX_APPLE9_ENC_MINMAX_COMPACT,
@@ -132,6 +140,7 @@ enum agx_apple9_encoding {
    AGX_APPLE9_ENC_TEXTURE_FETCH_PARAMS,
    AGX_APPLE9_ENC_TEXTURE_FETCH,
    AGX_APPLE9_ENC_TEXTURE_LOD_PARAMS,
+   AGX_APPLE9_ENC_TEXTURE_VOLUME_PARAMS,
    AGX_APPLE9_ENC_TEXTURE_LOD,
    AGX_APPLE9_ENC_TEXTURE_GRAD_PARAMS,
    AGX_APPLE9_ENC_TEXTURE_GRAD,
@@ -143,12 +152,16 @@ enum agx_apple9_encoding {
    AGX_APPLE9_ENC_TILE_ACCESS,
    AGX_APPLE9_ENC_TILE_LOAD,
    AGX_APPLE9_ENC_TILE_STORE,
+   AGX_APPLE9_ENC_TILE_LOAD_MASK,
+   AGX_APPLE9_ENC_TILE_STORE_MASK,
    AGX_APPLE9_ENC_TILE_FENCE,
    AGX_APPLE9_ENC_DEVICE_LOAD,
    AGX_APPLE9_ENC_DEVICE_LOAD_INDIRECT,
    AGX_APPLE9_ENC_DEVICE_STORE,
    AGX_APPLE9_ENC_DEVICE_ATOMIC,
    AGX_APPLE9_ENC_DEVICE_ATOMIC_RESULT,
+   AGX_APPLE9_ENC_SPILL_STORE,
+   AGX_APPLE9_ENC_SPILL_LOAD,
    AGX_APPLE9_ENC_COUNT,
 
    /* Semantic IR pseudos have no machine encoding.  Keep them out of the

@@ -73,6 +73,7 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_FCEIL,
    AGX_APPLE9_VIR_FTRUNC,
    AGX_APPLE9_VIR_FROUND_EVEN,
+   AGX_APPLE9_VIR_DERIVATIVE,
    AGX_APPLE9_VIR_SELECT,
    AGX_APPLE9_VIR_COLLECT,
    AGX_APPLE9_VIR_PHI,
@@ -98,6 +99,8 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_DEVICE_STORE,
    AGX_APPLE9_VIR_DEVICE_ATOMIC,
    AGX_APPLE9_VIR_DEVICE_ATOMIC_RESULT,
+   AGX_APPLE9_VIR_SPILL_STORE,
+   AGX_APPLE9_VIR_SPILL_LOAD,
 };
 
 /* Shared native five-bit operation selector used by the device and
@@ -181,7 +184,7 @@ enum agx_apple9_select_condition {
 /*
  * Apple9 asynchronous producers publish through a six-entry scoreboard.
  * Slot 0 is the ordinary/materialized GPR path; slots 1--6 are transient
- * pending-result handoffs.  AUTO is compiler IR only and must be resolved
+ * completion groups for outstanding asynchronous work.  AUTO is compiler IR only and must be resolved
  * after final instruction scheduling, before packing.
  */
 enum agx_apple9_scoreboard_slot {
@@ -267,6 +270,8 @@ struct agx_apple9_vir_instr {
    bool atomic_discard;
    uint8_t texture_index, sampler_index;
    uint32_t src[AGX_APPLE9_MAX_VIR_SRCS];
+   uint8_t texture_dimension;
+   bool texture_shadow;
    /* An incoming phi use names its successor's SSA definition. This is
     * edge metadata, not a mutable register assignment before allocation. */
    uint32_t target;
@@ -282,6 +287,11 @@ struct agx_apple9_vir_instr {
     * instructions leave this at NONE.  AUTO is resolved by the scheduled
     * scoreboard pass and is never serialized. */
    uint8_t producer_scoreboard_slot;
+   bool producer_scoreboard_assigned, scoreboard_assigned;
+
+   /* A scratch store has no register result. Its completion is consumed by
+    * a scheduled instruction in the same block, independently of SSA uses. */
+   struct agx_apple9_vir_instr *completion_consumer;
 
    /* Device-load address/sequence fields, independent of the load/cache
     * token. */
@@ -309,6 +319,8 @@ struct agx_apple9_vir_instr {
     * user has no proven slot-bearing form.  It consumes the assigned slot
     * immediately and leaves an ordinary GPR value for the original users. */
    bool scoreboard_materialize;
+   /* Preserve a result handoff that releases scarce texture publications. */
+   bool publication_handoff;
 
    /*
     * Fragment iterator/perspective producers are addressed by compact ALU
@@ -324,6 +336,7 @@ struct agx_apple9_vir_instr {
 struct agx_apple9_block {
    struct agx_apple9_block *next, *prev, *allocated_next;
    struct agx_apple9_vir_program *program;
+   struct nir_block *nir; /* Logical CFG, distinct from execution-mask layout. */
    struct agx_apple9_block **predecessors;
    unsigned predecessor_count;
    struct list_head instructions;
@@ -356,6 +369,7 @@ struct agx_apple9_vir_program {
    uint32_t output;
    /* Fragment execution can update depth/stencil without explicit stores. */
    bool fragment_shader;
+   bool physical;
 
    /*
     * Values may enter or leave the bounded program in fixed physical GPRs.
@@ -379,6 +393,8 @@ struct agx_apple9_vir_program {
    unsigned publication_count;
    unsigned peak_live_gprs;
    unsigned max_phys_gpr;
+   unsigned scratch_size; /* Bytes per invocation, rounded to 16. */
+   unsigned spill_slots;
 };
 
 void agx_apple9_invalidate_uses(struct agx_apple9_vir_program *program);
@@ -398,6 +414,7 @@ struct agx_apple9_block *agx_apple9_instr_block(const struct agx_apple9_vir_inst
 void agx_apple9_vir_move_before(struct agx_apple9_vir_program *program,
                               struct agx_apple9_vir_instr *instr,
                               struct agx_apple9_vir_instr *before);
+void agx_apple9_schedule_vary_stores(struct agx_apple9_vir_program *program);
 void agx_apple9_vir_reindex(struct agx_apple9_vir_program *program);
 
 uint32_t agx_apple9_vir_emit(struct agx_apple9_vir_program *program,
@@ -450,6 +467,11 @@ uint32_t agx_apple9_vir_emit_texture_lod(
    struct agx_apple9_vir_program *program, const uint32_t coords[2],
    uint32_t packed_lod, unsigned texture, unsigned sampler, bool bias);
 
+uint32_t agx_apple9_vir_emit_texture_volume(
+   struct agx_apple9_vir_program *program, const uint32_t coords[3],
+   uint32_t packed_lod, unsigned texture, unsigned sampler, unsigned dimension,
+   bool bias, bool shadow);
+
 /* Coordinates followed by ddx.xy and ddy.xy, all FP32. */
 uint32_t agx_apple9_vir_emit_texture_grad(
    struct agx_apple9_vir_program *program, const uint32_t src[6],
@@ -501,8 +523,14 @@ bool agx_apple9_vir_add_live_out(struct agx_apple9_vir_program *program,
  * r16-r63 so the r0-r15 compact-result bank stays available to hard-low
  * instructions, then fall back to that low bank. Destinations remain distinct
  * from their inputs; killed sources become available to following
- * instructions. Spilling waits on the Dynamic-Caching scratch ABI.
+ * instructions. Spills use per-thread Dynamic-Caching scratch storage.
  */
+struct nir_shader;
+bool agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
+                                 struct nir_shader *nir, const char **reason);
+bool agx_apple9_allocate_publications(struct agx_apple9_vir_program *program,
+                                      const char **reason);
+
 bool agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
                              const char **reason);
 

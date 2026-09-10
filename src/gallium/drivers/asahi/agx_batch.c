@@ -1124,6 +1124,18 @@ agx_sync_all(struct agx_context *ctx, const char *reason)
 }
 
 void
+agx_batch_discard(struct agx_context *ctx, struct agx_batch *batch)
+{
+   /* A failed encoder may already own resource write dependencies. Retire
+    * those along with its allocations without publishing a GPU command. */
+   assert(agx_batch_is_active(batch));
+   agx_batch_mark_submitted(batch);
+   if (ctx->batch == batch)
+      ctx->batch = NULL;
+   agx_batch_cleanup(ctx, batch, false);
+}
+
+void
 agx_batch_reset(struct agx_context *ctx, struct agx_batch *batch)
 {
    batch_debug(batch, "RESET");
