@@ -730,9 +730,11 @@ agx_emit_local_load_pixel(agx_builder *b, agx_index dest,
    agx_wait_pixel_mask(b, 0x8);
 
    unsigned nr_comps = instr->def.num_components;
-   agx_ld_tile_to(b, dest, agx_src_index(&instr->src[0]), agx_null(),
+   bool coords = instr->intrinsic == nir_intrinsic_load_tile_pixel_agx;
+   agx_ld_tile_to(b, dest, agx_src_index(&instr->src[0]),
+                  coords ? agx_src_index(&instr->src[1]) : agx_null(),
                   agx_format_for_pipe(nir_intrinsic_format(instr)),
-                  BITFIELD_MASK(nr_comps), nir_intrinsic_base(instr), false);
+                  BITFIELD_MASK(nr_comps), nir_intrinsic_base(instr), coords);
    agx_emit_cached_split(b, dest, nr_comps);
 }
 
@@ -1379,6 +1381,7 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
    case nir_intrinsic_store_local_pixel_agx:
       return agx_emit_local_store_pixel(b, instr);
 
+   case nir_intrinsic_load_tile_pixel_agx:
    case nir_intrinsic_load_local_pixel_agx:
       assert(stage == MESA_SHADER_FRAGMENT);
       agx_emit_local_load_pixel(b, dst, instr);

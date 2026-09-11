@@ -2543,6 +2543,9 @@ intrinsic("load_uvs_index_agx", dest_comp = 1, bit_sizes=[16],
 # src[] = { sample mask }
 # base = offset
 load("local_pixel_agx", [1], [BASE, FORMAT], [CAN_REORDER, CAN_ELIMINATE])
+# Explicit tile coordinates: packed uint32 (x in low 16 bits, y in high 16).
+# Apple9 currently requires a nonzero constant sample mask in the low four bits.
+load("tile_pixel_agx", [1, 1], [BASE, FORMAT], [CAN_REORDER, CAN_ELIMINATE])
 # src[] = { value, sample mask, coordinates }
 # base = offset
 store("local_pixel_agx", [1, -1], [BASE, WRITE_MASK, FORMAT, EXPLICIT_COORD], [CAN_REORDER])
