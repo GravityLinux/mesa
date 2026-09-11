@@ -4797,11 +4797,6 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
       nir_opt_copy_prop(nir);
       nir_opt_dce(nir);
    }
-   if (nir->info.num_ssbos) {
-      if (reason)
-         *reason = "Apple9 render does not yet support SSBOs";
-      return false;
-   }
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
    nir_foreach_block(block, nir_shader_get_entrypoint(nir)) {
       nir_foreach_instr(instr, block) {
@@ -4838,9 +4833,13 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
       return false;
    bool valid_buffers = buffers.count <= AGX_APPLE9_MAX_GRAPHICS_BUFFERS;
    for (unsigned i = 0; i < buffers.count; ++i)
-      valid_buffers &= (buffers.resource[i].binding < (layout ? 64 : 32) ||
-         buffers.resource[i].binding == AGX_APPLE9_GRAPHICS_SYSVAL_BINDING) &&
-         buffers.resource[i].kind == AGX_APPLE9_COMPUTE_RESOURCE_UBO;
+      valid_buffers &=
+         buffers.resource[i].kind == AGX_APPLE9_COMPUTE_RESOURCE_SSBO
+            ? buffers.resource[i].binding < 32
+            : buffers.resource[i].kind == AGX_APPLE9_COMPUTE_RESOURCE_UBO &&
+                 (buffers.resource[i].binding < (layout ? 64 : 32) ||
+                  buffers.resource[i].binding ==
+                     AGX_APPLE9_GRAPHICS_SYSVAL_BINDING);
    if (!valid_buffers) {
       if (reason)
          *reason =

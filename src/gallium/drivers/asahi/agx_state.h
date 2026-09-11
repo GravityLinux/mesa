@@ -232,7 +232,6 @@ struct agx_compiled_shader {
     * static-plus-dynamic total to the exact capture-backed ABI size. */
    bool apple9_has_variable_shared_mem;
    struct agx_apple9_compute_profile apple9_compute_profile;
-   uint32_t apple9_main_offset;
    /* Immutable per-pipeline Dynamic Caching state.  The device quarantines a
     * second reference so this compact address is not recycled early. */
    struct agx_bo *apple9_state_bo;
@@ -418,7 +417,10 @@ struct agx_batch {
    /* PIPE_CLEAR_* bitmask */
    uint32_t clear, draw, load, resolve, feedback;
    bool initialized;
-   bool apple9_msaa_reloaded;
+   bool apple9_color_reloaded;
+   unsigned apple9_color_reload_draw;
+   unsigned apple9_color_store_draw;
+   bool apple9_preparing_tile_store;
 
    uint64_t uploaded_clear_color[PIPE_MAX_COLOR_BUFS];
    float apple9_clear_color[8][4];
@@ -477,9 +479,6 @@ struct agx_batch {
    unsigned apple9_uniform_draw_count;
    struct agx_apple9_uniform_draw
       apple9_uniform_draws[AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS];
-   struct agx_bo *apple9_vertex_bo;
-   uint32_t apple9_vertex_offset;
-   uint32_t apple9_vertex_size;
 
    /* Apple9 direct records appended to cdm for this command. */
    unsigned apple9_dispatch_count;
@@ -727,7 +726,7 @@ struct agx_context {
    bool in_tess;
 
    struct blitter_context *blitter;
-   struct agx_msaa_reload *msaa_reload;
+   struct agx_color_reload *color_reload;
    struct primconvert_context *apple9_primconvert;
    struct asahi_blitter compute_blitter;
 
@@ -1237,8 +1236,8 @@ void agx_blitter_save(struct agx_context *ctx, struct blitter_context *blitter,
                       enum asahi_blitter_op op);
 
 void agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info);
-bool agx_apple9_reload_msaa(struct agx_batch *batch);
-void agx_destroy_msaa_reload(struct agx_context *ctx);
+bool agx_apple9_reload_color(struct agx_batch *batch);
+void agx_destroy_color_reload(struct agx_context *ctx);
 
 void agx_resource_copy_region(struct pipe_context *pctx,
                               struct pipe_resource *dst, unsigned dst_level,

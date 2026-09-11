@@ -4,9 +4,10 @@
  */
 
 #include "agx_apple9.h"
+#include "asahi/compiler/agx_apple9_ir.h"
+#include "pipe/p_defines.h"
 #include "agx_apple9_launch.h"
 #include "agx_immutable_state.h"
-#include "pipe/p_defines.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -21,9 +22,12 @@
 #include "util/u_math.h"
 #include "agx_device.h"
 
-static_assert(AGX_APPLE9_RENDER_ARCHIVE_SIZE <=
+static_assert(AGX_APPLE9_RENDER_ENTRY_REGION_SIZE <=
                  AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET,
-              "Render code must not overlap compiler state");
+              "Render entries must not overlap compiler state");
+static_assert(AGX_APPLE9_RENDER_COLOR_BUFFER_OFFSET + 0x20 <=
+                 AGX_APPLE9_RENDER_COMPILER_STATE_END,
+              "Attachment descriptors must fit the relocated state region");
 
 static_assert(AGX_APPLE9_COMPUTE_STATE_LITERAL_STORAGE_CAPACITY *
                     sizeof(uint32_t) <=
@@ -32,8 +36,8 @@ static_assert(AGX_APPLE9_COMPUTE_STATE_LITERAL_STORAGE_CAPACITY *
 static_assert(AGX_APPLE9_COMPUTE_CODE_SIZE == AGX_APPLE9_COMPUTE_ARCHIVE_SIZE,
               "Gallium and libagx must agree on the compute archive size");
 
-/* External development inputs. Opaque launch fragments and render-state
- * templates deliberately live outside Mesa; see README.apple9-launchers.md. */
+/* External development launch fragments and compute division support.
+ * Render entries and state are generated without a seed image. */
 #define APPLE9_EXTERNAL_BLOB_DIR "/home/nsheth/Projects/asahi/tmp/agx-apple9"
 
 struct apple9_external_blob {
@@ -46,7 +50,6 @@ static void apple9_build_sentinel_constant_program(uint8_t *out, unsigned slots)
 static struct apple9_external_blob apple9_launcher_blob;
 static struct agx_apple9_launch_library apple9_launchers;
 static struct apple9_external_blob apple9_division_ssbo8_superset;
-static struct apple9_external_blob apple9_g16_render_package_zst;
 
 static util_once_flag apple9_superset_blobs_once = UTIL_ONCE_FLAG_INIT;
 static bool apple9_superset_blobs_loaded;
@@ -107,24 +110,6 @@ apple9_superset_blobs_available(void)
 {
    util_call_once(&apple9_superset_blobs_once, apple9_load_superset_blobs_once);
    return apple9_superset_blobs_loaded;
-}
-
-static util_once_flag apple9_render_blobs_once = UTIL_ONCE_FLAG_INIT;
-static bool apple9_render_blobs_loaded;
-
-static void
-apple9_load_render_blobs_once(void)
-{
-   apple9_render_blobs_loaded =
-      apple9_load_external_blob("g16_render_package.bin.zst",
-                                &apple9_g16_render_package_zst);
-}
-
-static bool
-apple9_render_blobs_available(void)
-{
-   util_call_once(&apple9_render_blobs_once, apple9_load_render_blobs_once);
-   return apple9_render_blobs_loaded;
 }
 
 struct apple9_compute_abi_desc {
@@ -557,7 +542,6 @@ agx_apple9_compute_has_dynamic_state(
    return abi && abi->has_dynamic_state;
 }
 
-
 unsigned
 agx_apple9_compute_state_uniform_base(
    const struct agx_apple9_compute_profile *profile)
@@ -645,187 +629,32 @@ apple9_archive_call(uint32_t main_offset, uint32_t *call)
    return true;
 }
 
-static bool
-apple9_compute_archive_block_layout(size_t main_size,
-                                    const struct apple9_compute_abi_desc *abi,
-                                    uint32_t *main_relative,
-                                    uint32_t *block_size)
-{
-   if (!abi || !main_relative || !block_size || main_size > UINT32_MAX)
-      return false;
-
-   const uint8_t *constant = apple9_compute_constant_program(abi);
-   size_t constant_size = apple9_compute_constant_size(abi);
-   if (!constant || !constant_size || (constant_size & 0x3f))
-      return false;
-
-   size_t main_at = AGX_APPLE9_COMPUTE_BLOCK_HEADER_SIZE + constant_size;
-   if (main_at > UINT32_MAX || main_size > SIZE_MAX - main_at ||
-       main_at + main_size > SIZE_MAX - 0x3f)
-      return false;
-
-   size_t total = ALIGN_POT(main_at + main_size, 0x40);
-   if (total > UINT32_MAX)
-      return false;
-
-   *main_relative = main_at;
-   *block_size = total;
-   return true;
-}
-
-static bool
-apple9_build_compute_archive_block(uint8_t *out, size_t out_size,
-                                   const void *main, size_t main_size,
-                                   const struct apple9_compute_abi_desc *abi,
-                                   uint32_t *main_relative,
-                                   uint32_t *block_size)
-{
-   static const uint8_t stop[] = {0x0e, 0x00, 0x00, 0x00};
-   uint32_t main_at, total;
-   if (!out || !main || main_size < sizeof(stop) ||
-       memcmp((const uint8_t *)main + main_size - sizeof(stop), stop,
-              sizeof(stop)) != 0 ||
-       !apple9_compute_archive_block_layout(main_size, abi, &main_at, &total) ||
-       total > out_size)
-      return false;
-
-   memset(out, 0, total);
-   apple9_put_u32(out, total);
-   memcpy(out + AGX_APPLE9_COMPUTE_BLOCK_HEADER_SIZE,
-          apple9_compute_constant_program(abi),
-          apple9_compute_constant_size(abi));
-   memcpy(out + main_at, main, main_size);
-   *main_relative = main_at;
-   *block_size = total;
-   return true;
-}
+static bool apple9_build_body_entry(uint8_t *out, uint64_t entry,
+                                    uint64_t body);
 
 bool
-agx_apple9_build_compute_archive_image(
-   void *mapping, size_t mapping_size, const void *main, size_t main_size,
-   const struct agx_apple9_compute_profile *profile, uint32_t *main_offset)
+agx_apple9_build_compute_entry(void *mapping, unsigned dispatch,
+                               uint64_t shader_base, uint64_t body,
+                               const struct agx_apple9_compute_profile *profile,
+                               uint32_t *entry_offset)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   if (!mapping || mapping_size < AGX_APPLE9_COMPUTE_CODE_SIZE || !abi ||
-       !main_offset || !apple9_compute_profile_valid(profile, abi))
+   if (!mapping || !entry_offset || !abi ||
+       dispatch >= AGX_APPLE9_COMPUTE_MAX_ENTRIES ||
+       apple9_compute_constant_size(abi) != 0x40)
       return false;
-
-   uint8_t *archive = malloc(AGX_APPLE9_COMPUTE_CODE_SIZE);
-   if (!archive)
+   uint8_t *image = mapping;
+   if (!dispatch)
+      apple9_init_compute_archive(image, abi->helper_slots);
+   uint32_t block = AGX_APPLE9_COMPUTE_ARCHIVE_HEADER_SIZE + dispatch * 0xc0;
+   uint32_t entry = block + 0x80;
+   memset(image + block, 0, 0xc0);
+   apple9_put_u32(image + block, 0xc0);
+   memcpy(image + block + 0x40, apple9_compute_constant_program(abi), 0x40);
+   if (!apple9_build_body_entry(image + entry, shader_base + entry, body))
       return false;
-   apple9_init_compute_archive(archive, abi->helper_slots);
-   uint32_t main_relative, block_size;
-   if (!apple9_build_compute_archive_block(
-          archive + AGX_APPLE9_COMPUTE_ARCHIVE_HEADER_SIZE,
-          AGX_APPLE9_COMPUTE_CODE_SIZE - AGX_APPLE9_COMPUTE_ARCHIVE_HEADER_SIZE,
-          main, main_size, abi, &main_relative, &block_size)) {
-      free(archive);
-      return false;
-   }
-
-   uint32_t absolute = AGX_APPLE9_COMPUTE_ARCHIVE_HEADER_SIZE + main_relative;
-   uint32_t call;
-   if (!apple9_archive_call(absolute, &call)) {
-      free(archive);
-      return false;
-   }
-
-   memcpy(mapping, archive, AGX_APPLE9_COMPUTE_CODE_SIZE);
-   free(archive);
-   *main_offset = absolute;
+   *entry_offset = entry;
    return true;
-}
-
-bool
-agx_apple9_upload_compute_shader(
-   struct agx_device *dev, const void *main, size_t main_size,
-   const struct agx_apple9_compute_profile *profile, uint32_t *main_offset)
-{
-   const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   if (!dev || !dev->apple9_compute_archive ||
-       !dev->apple9_compute_archive_shadow || !main || !main_size || !abi ||
-       !main_offset || !apple9_compute_profile_valid(profile, abi))
-      return false;
-
-   uint32_t main_relative, block_size;
-   if (!apple9_compute_archive_block_layout(main_size, abi, &main_relative,
-                                            &block_size))
-      return false;
-   uint8_t *candidate = malloc(block_size);
-   if (!candidate)
-      return false;
-   if (!apple9_build_compute_archive_block(candidate, block_size, main,
-                                           main_size, abi, &main_relative,
-                                           &block_size)) {
-      free(candidate);
-      return false;
-   }
-
-   simple_mtx_lock(&dev->apple9_archive_lock);
-   uint8_t *archive = dev->apple9_compute_archive_shadow;
-   if (dev->apple9_archive_next == 0) {
-      apple9_init_compute_archive(archive, abi->helper_slots);
-      dev->apple9_archive_next = AGX_APPLE9_COMPUTE_ARCHIVE_HEADER_SIZE;
-      dev->apple9_archive_helper_slots = abi->helper_slots;
-   } else if (dev->apple9_archive_helper_slots != abi->helper_slots) {
-      fprintf(stderr,
-              "Apple9 archive helper ABI mismatch: resident=%u requested=%u\n",
-              dev->apple9_archive_helper_slots, abi->helper_slots);
-      simple_mtx_unlock(&dev->apple9_archive_lock);
-      free(candidate);
-      return false;
-   }
-
-   /*
-    * The caller's native archive interns byte-identical executable blocks, so
-    * do not spend the compact call window on duplicate mains.
-    */
-   for (unsigned i = 0; i < dev->apple9_archive_entry_count; ++i) {
-      const struct agx_apple9_archive_entry *entry =
-         &dev->apple9_archive_entries[i];
-      if (entry->block_size == block_size &&
-          memcmp(archive + entry->block_offset, candidate, block_size) == 0) {
-         *main_offset = entry->main_offset;
-         simple_mtx_unlock(&dev->apple9_archive_lock);
-         free(candidate);
-         return true;
-      }
-   }
-
-   uint32_t block = dev->apple9_archive_next;
-   uint32_t main_at = block + main_relative;
-   uint32_t call;
-   bool fits =
-      !(block & 0x3f) && block <= AGX_APPLE9_COMPUTE_CODE_SIZE &&
-      block_size <= AGX_APPLE9_COMPUTE_CODE_SIZE - block &&
-      dev->apple9_archive_entry_count < AGX_APPLE9_ARCHIVE_MAX_ENTRIES &&
-      apple9_archive_call(main_at, &call);
-   if (fits) {
-      memcpy(archive + block, candidate, block_size);
-      dev->apple9_archive_next = block + block_size;
-      ++dev->apple9_compute_archive_generation;
-      *main_offset = main_at;
-      unsigned index = dev->apple9_archive_entry_count++;
-      dev->apple9_archive_entries[index] = (struct agx_apple9_archive_entry){
-         .block_offset = block,
-         .block_size = block_size,
-         .main_offset = main_at,
-      };
-      if (getenv("AGX_APPLE9_PACKAGE_TRACE") != NULL) {
-         fprintf(stderr,
-                 "APPLE9_ARCHIVE index=%u block=%#x main=%#x size=%#zx "
-                 "next=%#x\n",
-                 index, block, main_at, main_size, dev->apple9_archive_next);
-      }
-   } else {
-      fprintf(stderr,
-              "Apple9 archive allocation failed: next=%#x main=%#zx "
-              "limit=%#x\n",
-              block, main_size, AGX_APPLE9_COMPUTE_CODE_SIZE);
-   }
-   simple_mtx_unlock(&dev->apple9_archive_lock);
-   free(candidate);
-   return fits;
 }
 
 static bool
@@ -1062,44 +891,6 @@ agx_apple9_compute_enabled(const struct agx_device *dev)
     * CDM constants are all exact T8132 captures.  Apple9 ISA support may be
     * shared with G17P, but that does not prove its userspace package ABI. */
    return dev->chip == AGX_CHIP_G16G;
-}
-
-void
-agx_apple9_build_compute_package(
-   void *mapping, uint64_t base, const void *main, size_t main_size,
-   const uint64_t *resources, unsigned resource_count,
-   const struct agx_apple9_compute_profile *profile)
-{
-   /*
-    * The archive block is header(0x40) + the carrier constant program + main
-    * rounded to 0x40 bytes.  EXP-M4-39 proves that the first 0x40 bytes of the
-    * captured constant region are sufficient with the largest eight-resource
-    * main.  Smaller alignment remains invalid: a 0x10-byte-rounded block can
-    * retire while a terminal compare returns garbage.
-    */
-   uint8_t *package = mapping;
-   uint8_t *code = package + AGX_APPLE9_COMPUTE_CODE_OFFSET;
-   memset(package, 0, AGX_APPLE9_COMPUTE_PACKAGE_SIZE);
-   uint32_t main_offset;
-   bool archived = agx_apple9_build_compute_archive_image(
-      code, AGX_APPLE9_COMPUTE_CODE_SIZE, main, main_size, profile,
-      &main_offset);
-   assert(archived && main_offset == AGX_APPLE9_COMPUTE_MAIN_OFFSET);
-   bool built = agx_apple9_build_compute_dispatch(
-      package, AGX_APPLE9_COMPUTE_PACKAGE_SIZE, base, base, main_offset,
-      AGX_APPLE9_COMPUTE_LAUNCH_OFFSET,
-      agx_apple9_compute_has_dynamic_state(profile)
-         ? AGX_APPLE9_COMPUTE_STATE_OFFSET
-         : 0,
-      AGX_APPLE9_COMPUTE_RESOURCE_OFFSET +
-         AGX_APPLE9_COMPUTE_RESOURCE_TABLE_OFFSET,
-      profile, resources, resource_count,
-      &(const struct agx_apple9_compute_geometry){
-         .mode = AGX_APPLE9_COMPUTE_GEOMETRY_DIRECT,
-         .threads = {1, 1, 1},
-         .local = {1, 1, 1},
-      });
-   assert(built);
 }
 
 bool
@@ -1447,8 +1238,8 @@ agx_apple9_build_render_state_image_for_varyings(void *mapping,
 }
 
 static const struct agx_apple9_render_region apple9_render_regions[] = {
-   {AGX_APPLE9_RENDER_REGION_COLOR_TEXTURE, 0x018220, 0x20},
-   {AGX_APPLE9_RENDER_REGION_COLOR_BUFFER, 0x018420, 0x20},
+   {AGX_APPLE9_RENDER_REGION_COLOR_TEXTURE, AGX_APPLE9_RENDER_COLOR_TEXTURE_OFFSET, 0x20},
+   {AGX_APPLE9_RENDER_REGION_COLOR_BUFFER, AGX_APPLE9_RENDER_COLOR_BUFFER_OFFSET, 0x20},
    {AGX_APPLE9_RENDER_REGION_COLOR_TEXTURE, 0x210020, 0x20},
    {AGX_APPLE9_RENDER_REGION_COLOR_TEXTURE, 0x210320, 0x20},
    {AGX_APPLE9_RENDER_REGION_COLOR_BUFFER, 0x210620, 0x20},
@@ -1461,7 +1252,7 @@ struct apple9_render_program {
    unsigned references;
    unsigned stage;
    uint32_t size;
-   uint8_t data[];
+   struct agx_bo *bo;
 };
 
 struct apple9_state_transition {
@@ -1474,6 +1265,9 @@ struct agx_apple9_render_package {
    struct list_head link;
    struct agx_bo *bo;
    struct agx_bo *state_bo;
+   struct agx_bo
+      *code[2]; /* Vertex, fragment; owned through programs when interned. */
+   uint32_t code_size[2];
    bool sealed;
    uint64_t color_target;
    uint64_t color_targets[8];
@@ -1484,9 +1278,8 @@ struct agx_apple9_render_package {
    uint16_t height;
    unsigned active_batches;
    uint64_t last_used;
-   struct agx_apple9_render_archive_layout archive;
-   struct apple9_render_program *programs[3];
-   uint64_t shader_ids[3];
+   struct apple9_render_program *programs[2];
+   uint64_t shader_ids[2];
    struct agx_immutable_state images[3];
    uint8_t *fixed_image;
    uint8_t *context_image;
@@ -1496,12 +1289,6 @@ struct agx_apple9_render_package {
    uint32_t scratch_size[2]; /* Vertex, fragment, per invocation. */
    uint16_t publication_count[2];
    bool publication_count_valid[2];
-   uint32_t fragment_call;
-   uint32_t vertex_prolog_call;
-   uint32_t vertex_prolog_call_offset;
-   uint32_t vertex_call;
-   uint64_t vertex_buffer;
-   uint32_t vertex_buffer_size;
    unsigned varying_components;
    struct agx_apple9_interp_mask linear_mask, flat_mask;
    bool reads_z;
@@ -1522,87 +1309,16 @@ struct agx_apple9_render_cache {
    uint64_t generation;
    uint64_t use_serial;
    unsigned package_count;
-   uint32_t resident_archive_next;
-   uint32_t resident_archive_limit;
    /* A failed publication invalidates the selected state. Compute switches
     * the USC mapping to separate storage, preserving these render objects. */
    bool fixed_usc_dirty;
-   bool installing_draws;
 };
 
 #define AGX_APPLE9_RENDER_CACHE_MAX_PACKAGES 16
 
-/*
- * A render pipeline is an ordered compiler-package closure in the process
- * archive.  Three entries are selected by explicit archive calls (fragment,
- * vertex fetch/prolog, and API vertex main); the empty/metadata entry, stage
- * adapters,
- * runtime-library programs, and format-specific fragment color epilog are
- * nevertheless required by hardware.  Removing any nonzero suffix entry
- * made the G16 render queue stop after StartTA/Start3D, while dropping the
- * final all-zero reservation succeeds.
- *
- * Independent caller-owned Metal captures retain the vertex/adapter/library
- * suffix byte-for-byte even when the shader mains change.  The second program
- * changes with vertex-fetch/resource lowering while the third consumes its
- * exported attributes.  Keep both as separately owned archive programs.
- */
-#define AGX_APPLE9_RENDER_FRAGMENT_CALL_OFFSET      0x23064au
-#define AGX_APPLE9_RENDER_VERTEX_PROLOG_CALL_OFFSET 0x220036u
-#define AGX_APPLE9_RENDER_VBO_PROLOG_CALL_OFFSET    0x220046u
-#define AGX_APPLE9_RENDER_VERTEX_CALL_OFFSET        0x18ca37u
-#define AGX_APPLE9_RENDER_INTERLEAVED_VBO_LAUNCH_SIZE 0x000c0u
-
-#define AGX_APPLE9_RENDER_TEMPLATE_FRAGMENT_CALL      0x007aau
-#define AGX_APPLE9_RENDER_TEMPLATE_VERTEX_PROLOG_CALL 0x00aaau
-#define AGX_APPLE9_RENDER_TEMPLATE_VERTEX_CALL        0x00daau
-
-#define AGX_APPLE9_RENDER_TEMPLATE_VERTEX_PROLOG_BLOCK  0x004c0u
-#define AGX_APPLE9_RENDER_TEMPLATE_VERTEX_PROLOG_MAIN   0x00540u
-#define AGX_APPLE9_RENDER_TEMPLATE_VERTEX_PROLOG_SIZE   0x00180u
-#define AGX_APPLE9_RENDER_TEMPLATE_VERTEX_ADAPTER_BLOCK 0x00640u
-#define AGX_APPLE9_RENDER_TEMPLATE_VERTEX_ADAPTER_SIZE  0x00140u
-#define AGX_APPLE9_RENDER_TEMPLATE_EMPTY_BLOCK          0x00440u
-#define AGX_APPLE9_RENDER_TEMPLATE_EMPTY_SIZE           0x00080u
-#define AGX_APPLE9_RENDER_TEMPLATE_ADAPTER_A            0x00780u
-#define AGX_APPLE9_RENDER_TEMPLATE_ADAPTER_B            0x00840u
-#define AGX_APPLE9_RENDER_TEMPLATE_ADAPTER_SIZE         0x000c0u
-#define AGX_APPLE9_RENDER_TEMPLATE_LIBRARY_A            0x00900u
-#define AGX_APPLE9_RENDER_TEMPLATE_LIBRARY_A_SIZE       0x00840u
-#define AGX_APPLE9_RENDER_TEMPLATE_LIBRARY_B            0x01140u
-#define AGX_APPLE9_RENDER_TEMPLATE_LIBRARY_B_SIZE       0x01400u
-#define AGX_APPLE9_RENDER_TEMPLATE_COLOR_EPILOG         0x02540u
-#define AGX_APPLE9_RENDER_TEMPLATE_COLOR_EPILOG_SIZE    0x000c0u
-#define AGX_APPLE9_RENDER_VBO_RUNTIME_A_SIZE            0x00100u
-#define AGX_APPLE9_RENDER_VBO_RUNTIME_B_SIZE            0x000c0u
-#define AGX_APPLE9_RENDER_TEMPLATE_TAIL_A               0x02600u
-#define AGX_APPLE9_RENDER_TEMPLATE_TAIL_A_SIZE          0x08680u
-#define AGX_APPLE9_RENDER_TEMPLATE_TAIL_B               0x0ac80u
-#define AGX_APPLE9_RENDER_TEMPLATE_TAIL_B_SIZE          0x01ac0u
-#define AGX_APPLE9_RENDER_TEMPLATE_TAIL_C               0x0c740u
-#define AGX_APPLE9_RENDER_TEMPLATE_TAIL_C_SIZE          0x00180u
-
-/*
- * The caller-owned compatibility image contains five compact references back
- * into the same logical USC package. They occupy matching instruction fields
- * in the background, load, and store programs. The normal G16 path keeps
- * these values unchanged and aliases each selected storage BO at the native
- * logical package address because the VDM entry token itself is not freely
- * relocatable. This helper remains an offline/research primitive for testing
- * the independently relocatable child references.
- *
- * Keep this deliberately narrow and fail closed.  A broad integer scan is
- * unsafe because Apple9 instruction bytes frequently resemble addresses.
- */
 struct apple9_render_self_relocation {
    uint32_t offset;
    uint32_t relative;
-};
-
-static const struct apple9_render_self_relocation
-   apple9_render_self_relocations[] = {
-      {0x230004, 0x080000}, {0x230210, 0x230401}, {0x230244, 0x08000c},
-      {0x230450, 0x230401}, {0x230484, 0x080018},
 };
 
 /* Absolute self-pointers in the package-owned render-target state graph.
@@ -1617,376 +1333,55 @@ static const struct apple9_render_self_relocation
       {0x210600, 0x210620}, {0x210820, 0x210828},
 };
 
-/* Sparse compiler table consumed by the fixed VBO launch path.  This is
- * caller-owned output from the public interleaved-VBO Metal probe, expressed
- * as sized records rather than retaining a mutable submission page.  The
- * table is invariant across the independently captured VBO layouts. */
-struct apple9_render_sparse_qword {
-   uint16_t offset;
-   uint64_t value;
-};
-
-static const struct apple9_render_sparse_qword apple9_render_vbo_fixed_table[] =
-   {
-      {0x0000, UINT64_C(0x0000000000000040)},
-      {0x0020, UINT64_C(0x0000035b60000000)},
-      {0x0040, UINT64_C(0x0000000000000040)},
-      {0x0080, UINT64_C(0x0000000000000040)},
-      {0x00c0, UINT64_C(0x0000000000000040)},
-      {0x00e0, UINT64_C(0x0000035b60000000)},
-      {0x0100, UINT64_C(0x0000000000000040)},
-      {0x0140, UINT64_C(0x0000000000000040)},
-      {0x0160, UINT64_C(0x0000aaabfffeffff)},
-      {0x0180, UINT64_C(0x0000000000000040)},
-      {0x01a0, UINT64_C(0x4b00000050001c00)},
-      {0x01a8, UINT64_C(0x14000a0505030201)},
-      {0x01b0, UINT64_C(0xffff3fff4f800000)},
-      {0x01b8, UINT64_C(0xfe00fe0001ff0000)},
-      {0x01c0, UINT64_C(0x0000000000000080)},
-      {0x0200, UINT64_C(0x0000035b60000000)},
-      {0x0240, UINT64_C(0x0000000000000080)},
-      {0x0280, UINT64_C(0x0000035b60000000)},
-      {0x02c0, UINT64_C(0x0000000000000100)},
-      {0x02e0, UINT64_C(0x00007fff0000ffff)},
-      {0x02e8, UINT64_C(0xffffff80ffff8000)},
-      {0x02f0, UINT64_C(0x40000000040003ff)},
-      {0x02f8, UINT64_C(0x0000010200000400)},
-      {0x0300, UINT64_C(0x0000010600000104)},
-      {0x0308, UINT64_C(0x0000010c0000010a)},
-      {0x0310, UINT64_C(0x000001100000010e)},
-      {0x0318, UINT64_C(0x0000011400000112)},
-      {0x0320, UINT64_C(0x0000011a00000118)},
-      {0x0328, UINT64_C(0x0000011e0000011c)},
-      {0x0330, UINT64_C(0x0000012200000120)},
-      {0x0338, UINT64_C(0x0000012800000126)},
-      {0x0340, UINT64_C(0x0000012c0000012a)},
-      {0x0348, UINT64_C(0x000001300000012e)},
-      {0x0350, UINT64_C(0x0000013600000134)},
-      {0x0358, UINT64_C(0x0000013a00000138)},
-      {0x0380, UINT64_C(0x0000035b60000000)},
-      {0x03c0, UINT64_C(0x00000000000000c0)},
-      {0x03e0, UINT64_C(0x0110010c01080104)},
-      {0x03e8, UINT64_C(0x012401220120011c)},
-      {0x03f0, UINT64_C(0x01340130012c0128)},
-      {0x03f8, UINT64_C(0x01440140013c0138)},
-      {0x0400, UINT64_C(0x01540150014c0148)},
-      {0x0408, UINT64_C(0x01640160015c0158)},
-      {0x0410, UINT64_C(0x017c0178016c0168)},
-      {0x0418, UINT64_C(0x018801840180017e)},
-      {0x0420, UINT64_C(0x019801940190018c)},
-      {0x0428, UINT64_C(0x01a801a401a0019c)},
-      {0x0430, UINT64_C(0x01b801b401b001ac)},
-      {0x0438, UINT64_C(0x01c801c401c001bc)},
-      {0x0440, UINT64_C(0x01dc01da01d801d4)},
-      {0x0448, UINT64_C(0x01ec01e801e401e0)},
-      {0x0450, UINT64_C(0x01fc01f801f401f0)},
-      {0x0458, UINT64_C(0x020c020802040200)},
-      {0x0480, UINT64_C(0x0000000000000080)},
-      {0x04a0, UINT64_C(0x0001ffffffffffff)},
-      {0x04a8, UINT64_C(0xffff07ff04000000)},
-      {0x04b0, UINT64_C(0x0fffffff00010000)},
-      {0x04b8, UINT64_C(0xfffff0ffff3fffff)},
-      {0x04c0, UINT64_C(0x200000001bffffff)},
-      {0x04c8, UINT64_C(0x7000000028000000)},
-      {0x04d0, UINT64_C(0xfffe0000f0000000)},
-      {0x0500, UINT64_C(0x0000000000000040)},
-      {0x0520, UINT64_C(0x0000000080000000)},
-      {0x0540, UINT64_C(0x000000000000fac0)},
-};
-
-/* Fields in the fixed compiler-pipeline records that describe the
- * interleaved vertex-fetch envelope.  The compatibility image was authored
- * for inline vertices and retains the smaller 0x08/0x0c/0x4c forms at these
- * positions.  Two independent T8132 VBO captures show the corresponding
- * fetch records use 0x0a/0x0e/0x4f.  The repeated 0x1b selectors are the
- * fixed-runtime compact target: the package-local 0x31 value moves down by
- * 0xb0000 / 0x8000 = 0x16 chunks when the runtime is published at +0xd8000.
- */
-struct apple9_render_sparse_byte {
-   uint16_t offset;
-   uint8_t value;
-};
-
-static const struct apple9_render_sparse_byte
-   apple9_render_interleaved_vbo_fixed_pipeline[] = {
-      {0x0014, 0x0a}, {0x00c6, 0x1b}, {0x0254, 0x0a},
-      {0x0306, 0x1b}, {0x0494, 0x0e}, {0x0537, 0x4f},
-};
-
-static void
-apple9_build_render_vbo_fixed_table(uint8_t *page)
+/* Entry slots are per submission, not a cache of shader bodies. The caller
+ * waits for prior fixed-USC users before replacing them. Each stage has its
+ * own block header, reserved constant area and generated transfer. */
+#define APPLE9_ENTRY_BLOCK_SIZE 0xc0u
+#define APPLE9_ENTRY_PREFIX     0x80u
+static_assert(AGX_APPLE9_RENDER_ARCHIVE_HEADER_SIZE +
+                    2 * AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS *
+                       APPLE9_ENTRY_BLOCK_SIZE <=
+                 AGX_APPLE9_RENDER_ENTRY_REGION_SIZE,
+              "Per-draw entries must fit the fixed entry table");
+static uint32_t
+apple9_render_entry(unsigned draw, unsigned stage)
 {
-   memset(page, 0, 0x4000);
-   for (unsigned i = 0; i < ARRAY_SIZE(apple9_render_vbo_fixed_table); ++i)
-      apple9_put_u64(page + apple9_render_vbo_fixed_table[i].offset,
-                     apple9_render_vbo_fixed_table[i].value);
+   return AGX_APPLE9_RENDER_ARCHIVE_HEADER_SIZE +
+          (draw * 2 + stage) * APPLE9_ENTRY_BLOCK_SIZE + APPLE9_ENTRY_PREFIX;
 }
 
-/*
- * Apple9 keeps the compiler archive and its small resource-layout graph in
- * one fixed USC aperture. Metal does not select another usc_exec_base for a
- * vertex-fetch pipeline. Instead, adding a VBO inserts one resource slot,
- * shifts the two descriptor/top-record pairs by one 0x100-byte slot, and
- * retargets the package resource record to the shifted graph. The actual VBO
- * is named independently by the resource qword at +0xa0.
- *
- * Keep one graph in every immutable package generation. At the synchronized
- * submit boundary, render_cache_bind() installs the selected graph into the
- * fixed resident USC archive together with its package-local command state.
- */
 static void
-apple9_build_render_compiler_state(
-   uint8_t *package, const struct agx_apple9_render_pipeline *pipeline)
+apple9_init_render_entries(uint8_t *image)
 {
-   if (!pipeline->vertex_prolog.binary)
-      return;
-
-   uint8_t *state = package + AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET;
-   const uint32_t allocation_size =
-      ALIGN_POT(pipeline->vertex_buffer_size, 0x100);
-   assert(allocation_size && allocation_size <= 0x2000);
-
-   /* Metal suballocates caller vertex buffers beginning at +0x200.  This is
-    * one compiler-owned heap, not four independently movable records.  The
-    * dense lookup table at +0x2500 and every byte after it move by the same
-    * rounded allocation extent.  In particular, a one-slot allocation spills
-    * the last 0x100 bytes of the original first page into the next page; only
-    * copying 0x4000 bytes leaves the hardware with a truncated table. */
-   memmove(state + 0x2500 + allocation_size, state + 0x2500,
-           AGX_APPLE9_RENDER_COMPILER_STATE_SIZE - 0x2500 - allocation_size);
-   memset(state + 0x2500, 0, allocation_size);
-
-   /* The two top records are adjacent, while the two attachment records have
-    * an empty 0x100-byte slot between them.  Clear both vacated attachment
-    * slots after copying backwards; retaining the old second record is not a
-    * valid heap graph. */
-   memmove(state + 0x1a00 + allocation_size, state + 0x1a00, 0x100);
-   memmove(state + 0x1900 + allocation_size, state + 0x1900, 0x100);
-   memset(state + 0x1900, 0, allocation_size);
-
-   memmove(state + 0x0400 + allocation_size, state + 0x0400, 0x100);
-   memmove(state + 0x0200 + allocation_size, state + 0x0200, 0x100);
-   memset(state + 0x0200, 0, allocation_size);
-   memset(state + 0x0400, 0, allocation_size);
-
-   /* Enabling vertex fetch changes the two attachment layout records from
-    * ordinary-store descriptors to the compressed form consumed by Metal's
-    * vertex compiler envelope.  The target and metadata addresses remain the
-    * source-built G16 attachment graph.  These are complete record values;
-    * the mode is not a single flag that can be ORed into the inline records. */
-   const uint64_t attachment = UINT64_C(0x10000080000) >> 4;
-   const uint64_t metadata =
-      (UINT64_C(0x10000000000) + AGX_APPLE9_RENDER_FIXED_VBO_METADATA_OFFSET) >>
-      4;
-   const uint32_t descriptor_offsets[] = {
-      0x0200 + allocation_size,
-      0x0400 + allocation_size,
-   };
-   const uint64_t descriptors[] = {
-      UINT64_C(0x08030010060a0a22),
-      UINT64_C(0x0800300100c60a22),
-   };
-   for (unsigned i = 0; i < ARRAY_SIZE(descriptor_offsets); ++i) {
-      uint8_t *record = state + descriptor_offsets[i] + 0x20;
-      apple9_put_u64(record + 0x00, descriptors[i]);
-      apple9_put_u64(record + 0x08, attachment | (UINT64_C(1) << 63));
-      apple9_put_u64(record + 0x10, metadata);
+   apple9_put_u32(image, AGX_APPLE9_RENDER_ARCHIVE_HEADER_SIZE);
+   for (unsigned at = 0x40; at < AGX_APPLE9_RENDER_ARCHIVE_HEADER_SIZE; at += 2)
+      apple9_put_u16(image + at, 6);
+   apple9_fill_helper_table(image, 0x100, 10);
+   apple9_fill_helper_table(image, 0x200, 10);
+   for (unsigned draw = 0; draw < AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS; draw++) {
+      for (unsigned stage = 0; stage < 2; stage++) {
+         unsigned entry = apple9_render_entry(draw, stage);
+         apple9_put_u32(image + entry - APPLE9_ENTRY_PREFIX,
+                        APPLE9_ENTRY_BLOCK_SIZE);
+         apple9_put_u32(image + entry, 0x0e);
+      }
    }
-
-   const uint64_t usc_exec_base = UINT64_C(0x10000000000);
-   apple9_put_u64(package + AGX_APPLE9_RENDER_RESOURCE_OFFSET + 0x30,
-                  usc_exec_base + AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET +
-                     0x1a00 + allocation_size);
-   apple9_put_u64(package + AGX_APPLE9_RENDER_RESOURCE_OFFSET + 0x38,
-                  usc_exec_base + AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET +
-                     0x1900 + allocation_size);
-   apple9_put_u64(
-      package + AGX_APPLE9_RENDER_VERTEX_RESOURCE_OFFSET,
-      usc_exec_base + AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET + 0x200);
-}
-
-bool
-agx_apple9_layout_render_archive(
-   const struct agx_apple9_render_pipeline *pipeline,
-   struct agx_apple9_render_archive_layout *layout)
-{
-   if (!pipeline || !layout || !pipeline->fragment.binary ||
-       !pipeline->fragment.binary_size || !pipeline->vertex.binary ||
-       !pipeline->vertex.binary_size || pipeline->vertex_prolog.binary ||
-       pipeline->vertex.scratch_size > AGX_APPLE9_MAX_SCRATCH_BYTES ||
-       pipeline->fragment.scratch_size > AGX_APPLE9_MAX_SCRATCH_BYTES ||
-       pipeline->vertex.publication_count > 1022 ||
-       pipeline->fragment.publication_count > 1022 ||
-       ((pipeline->vertex.scratch_size | pipeline->fragment.scratch_size) & 15) ||
-       pipeline->fragment.binary_size > AGX_APPLE9_RENDER_ARCHIVE_SIZE ||
-       pipeline->vertex.binary_size > AGX_APPLE9_RENDER_ARCHIVE_SIZE)
-      return false;
-
-   /* Helper-internal references have no complete relocation model. Keep the
-    * opaque closure at its original offsets and place our mains in the empty
-    * archive reservation. Only the three measured entry calls are patched. */
-   const uint32_t prefix =
-      AGX_APPLE9_RENDER_BLOCK_HEADER_SIZE + AGX_APPLE9_RENDER_CONSTANT_SIZE;
-   uint64_t cursor = AGX_APPLE9_RENDER_TEMPLATE_TAIL_C +
-                     AGX_APPLE9_RENDER_TEMPLATE_TAIL_C_SIZE;
-   uint64_t fs_size = ALIGN_POT(pipeline->fragment.binary_size, 0x40) + prefix;
-   uint64_t vs_size = ALIGN_POT(pipeline->vertex.binary_size, 0x40) + prefix;
-   if (fs_size + vs_size > AGX_APPLE9_RENDER_ARCHIVE_SIZE - cursor - 0x80) {
-      fprintf(stderr, "Apple9 render archive capacity exceeded: FS=%zu VS=%zu "
-              "bytes, blocks=%llu available=%llu bytes\n",
-              pipeline->fragment.binary_size, pipeline->vertex.binary_size,
-              (unsigned long long)(fs_size + vs_size),
-              (unsigned long long)(AGX_APPLE9_RENDER_ARCHIVE_SIZE - cursor - 0x80));
-      return false;
-   }
-   memset(layout, 0, sizeof(*layout));
-   layout->fragment_block = cursor;
-   layout->fragment_main = cursor + prefix;
-   layout->fragment_block_size = fs_size;
-   cursor += fs_size;
-   layout->vertex_prolog_block = cursor;
-   layout->vertex_prolog_main = cursor + prefix;
-   layout->vertex_prolog_block_size = vs_size;
-   cursor += vs_size;
-   layout->vertex_main_block = AGX_APPLE9_RENDER_TEMPLATE_VERTEX_ADAPTER_BLOCK;
-   layout->vertex_main = layout->vertex_main_block + prefix;
-   layout->vertex_main_block_size =
-      AGX_APPLE9_RENDER_TEMPLATE_VERTEX_ADAPTER_SIZE;
-   if (!apple9_archive_call(layout->fragment_main, &layout->fragment_call) ||
-       !apple9_archive_call(layout->vertex_prolog_main,
-                            &layout->vertex_prolog_call) ||
-       !apple9_archive_call(layout->vertex_main, &layout->vertex_call))
-      return false;
-   layout->end = cursor;
-   if (getenv("AGX_APPLE9_PACKAGE_TRACE") != NULL) {
-      fprintf(stderr,
-              "APPLE9_RENDER_ARCHIVE fs_bytes=%#zx fs_block=%#x/%#x "
-              "fs_main=%#x fs_call=%#x prolog_bytes=%#zx "
-              "prolog=%#x/%#x call=%#x vs_bytes=%#zx "
-              "vs_block=%#x/%#x vs_main=%#x vs_call=%#x "
-              "end=%#x\n",
-              pipeline->fragment.binary_size, layout->fragment_block,
-              layout->fragment_block_size, layout->fragment_main,
-              layout->fragment_call, pipeline->vertex_prolog.binary_size,
-              layout->vertex_prolog_block, layout->vertex_prolog_block_size,
-              layout->vertex_prolog_call, pipeline->vertex.binary_size,
-              layout->vertex_main_block, layout->vertex_main_block_size,
-              layout->vertex_main, layout->vertex_call, layout->end);
-   }
-   return true;
-}
-
-static void
-apple9_build_render_vertex_constant_program(uint8_t *out, bool textured)
-{
-   static const uint8_t header[0x0e] = {
-      0x03, 0x00, 0x07, 0x00, 0x02, 0x00, 0x00,
-      0x00, 0x60, 0x00, 0x0e, 0x00, 0x00, 0x00,
-   };
-
-   memset(out, 0, AGX_APPLE9_RENDER_CONSTANT_SIZE);
-   memcpy(out, header, sizeof(header));
-   out[8] = textured ? 0x80 : 0x60;
-   for (unsigned offset = sizeof(header);
-        offset < AGX_APPLE9_RENDER_CONSTANT_SIZE; offset += 2)
-      apple9_put_u16(out + offset, 0x0006);
-}
-
-static void
-apple9_build_render_program_block(uint8_t *archive, uint32_t block,
-                                  uint32_t block_size,
-                                  const uint8_t *constant_program,
-                                  const void *main, size_t main_size)
-{
-   memset(archive + block, 0, block_size);
-   apple9_put_u32(archive + block, block_size);
-   memcpy(archive + block + AGX_APPLE9_RENDER_BLOCK_HEADER_SIZE,
-          constant_program, AGX_APPLE9_RENDER_CONSTANT_SIZE);
-   memcpy(archive + block + AGX_APPLE9_RENDER_BLOCK_HEADER_SIZE +
-             AGX_APPLE9_RENDER_CONSTANT_SIZE,
-          main, main_size);
 }
 
 static bool
-apple9_build_render_archive(uint8_t *package,
-                            const struct agx_apple9_render_pipeline *pipeline,
-                            struct agx_apple9_render_archive_layout *layout)
+apple9_build_body_entry(uint8_t *out, uint64_t entry, uint64_t body)
 {
-   if (!agx_apple9_layout_render_archive(pipeline, layout))
+   int64_t displacement = (int64_t)body - (int64_t)entry;
+   /* Both allocations live within the same 4-GiB USC heap. Wider virtual
+    * placement is outside the current entry ABI's validated domain. */
+   if ((entry | body) & 1 || displacement < -(int64_t)UINT32_MAX ||
+       displacement > UINT32_MAX)
       return false;
-
-   /* Fail closed if the embedded compatibility fixture changes format. */
-   if (apple9_get_u32(package) != AGX_APPLE9_RENDER_ARCHIVE_HEADER_SIZE ||
-       apple9_get_u32(package +
-                      AGX_APPLE9_RENDER_TEMPLATE_VERTEX_PROLOG_BLOCK) !=
-          AGX_APPLE9_RENDER_TEMPLATE_VERTEX_PROLOG_SIZE ||
-       apple9_get_u32(package +
-                      AGX_APPLE9_RENDER_TEMPLATE_VERTEX_ADAPTER_BLOCK) !=
-          AGX_APPLE9_RENDER_TEMPLATE_VERTEX_ADAPTER_SIZE ||
-       apple9_get_u32(package + AGX_APPLE9_RENDER_TEMPLATE_EMPTY_BLOCK) !=
-          AGX_APPLE9_RENDER_TEMPLATE_EMPTY_SIZE ||
-       apple9_get_u32(package + AGX_APPLE9_RENDER_TEMPLATE_ADAPTER_A) !=
-          AGX_APPLE9_RENDER_TEMPLATE_ADAPTER_SIZE ||
-       apple9_get_u32(package + AGX_APPLE9_RENDER_TEMPLATE_ADAPTER_B) !=
-          AGX_APPLE9_RENDER_TEMPLATE_ADAPTER_SIZE ||
-       apple9_get_u32(package + AGX_APPLE9_RENDER_TEMPLATE_LIBRARY_A) !=
-          AGX_APPLE9_RENDER_TEMPLATE_LIBRARY_A_SIZE ||
-       apple9_get_u32(package + AGX_APPLE9_RENDER_TEMPLATE_LIBRARY_B) !=
-          AGX_APPLE9_RENDER_TEMPLATE_LIBRARY_B_SIZE ||
-       apple9_get_u32(package + AGX_APPLE9_RENDER_TEMPLATE_COLOR_EPILOG) !=
-          AGX_APPLE9_RENDER_TEMPLATE_COLOR_EPILOG_SIZE ||
-       apple9_get_u32(package + AGX_APPLE9_RENDER_TEMPLATE_TAIL_A) !=
-          AGX_APPLE9_RENDER_TEMPLATE_TAIL_A_SIZE ||
-       apple9_get_u32(package + AGX_APPLE9_RENDER_TEMPLATE_TAIL_B) !=
-          AGX_APPLE9_RENDER_TEMPLATE_TAIL_B_SIZE ||
-       apple9_get_u32(package + AGX_APPLE9_RENDER_TEMPLATE_TAIL_C) !=
-          AGX_APPLE9_RENDER_TEMPLATE_TAIL_C_SIZE ||
-       apple9_get_u24(package + AGX_APPLE9_RENDER_FRAGMENT_CALL_OFFSET) !=
-          AGX_APPLE9_RENDER_TEMPLATE_FRAGMENT_CALL ||
-       apple9_get_u24(package + AGX_APPLE9_RENDER_VERTEX_PROLOG_CALL_OFFSET) !=
-          AGX_APPLE9_RENDER_TEMPLATE_VERTEX_PROLOG_CALL ||
-       apple9_get_u24(package + AGX_APPLE9_RENDER_VERTEX_CALL_OFFSET) !=
-          AGX_APPLE9_RENDER_TEMPLATE_VERTEX_CALL)
+   struct agx_apple9_packed_instruction packed;
+   if (!agx_apple9_pack_branch(true, displacement, &packed))
       return false;
-
-   uint8_t fragment_constant[AGX_APPLE9_RENDER_CONSTANT_SIZE];
-   uint8_t vertex_constant[AGX_APPLE9_RENDER_CONSTANT_SIZE];
-   apple9_build_sentinel_constant_program(fragment_constant, 30);
-   apple9_build_render_vertex_constant_program(vertex_constant,
-                                               pipeline->vertex.texture_mask != 0);
-   /* Retire both original API bodies. An accidentally stale call terminates
-    * instead of silently executing a Metal-produced shader main. */
-   memset(package + 0x3c0, 0, 0x80);
-   apple9_put_u32(package + 0x3c0, 0x0e);
-   memset(package + 0x540, 0, 0x100);
-   apple9_put_u32(package + 0x540, 0x0e);
-   memset(package + layout->fragment_block, 0,
-          AGX_APPLE9_RENDER_ARCHIVE_SIZE - layout->fragment_block);
-   apple9_build_render_program_block(
-      package, layout->fragment_block, layout->fragment_block_size,
-      fragment_constant, pipeline->fragment.binary,
-      pipeline->fragment.binary_size);
-   apple9_build_render_program_block(
-      package, layout->vertex_prolog_block, layout->vertex_prolog_block_size,
-      vertex_constant, pipeline->vertex.binary, pipeline->vertex.binary_size);
-   apple9_put_u24(package + AGX_APPLE9_RENDER_FRAGMENT_CALL_OFFSET,
-                  layout->fragment_call);
-   apple9_put_u24(package + AGX_APPLE9_RENDER_VERTEX_PROLOG_CALL_OFFSET,
-                  layout->vertex_prolog_call);
-   apple9_put_u24(package + AGX_APPLE9_RENDER_VERTEX_CALL_OFFSET,
-                  layout->vertex_call);
-
-   /* Metal represents the remaining archive capacity as one empty program
-    * block ending at the final zero header of the reservation. Its size changes
-    * whenever dynamic stage or vertex-fetch blocks change.  A fixed
-    * 0x80 record happened to be tolerated by the inline-vertex path but is
-    * not the compiler archive grammar consumed by vertex fetch. */
-   const uint32_t zero_header = AGX_APPLE9_RENDER_ARCHIVE_SIZE - 0x40;
-   if (layout->end > zero_header - 0x40) {
-      return false;
-   }
-   apple9_put_u32(package + layout->end, zero_header - layout->end);
-   apple9_build_render_compiler_state(package, pipeline);
+   memcpy(out, packed.bytes, packed.length);
+   apple9_put_u32(out + packed.length, 0x0e); /* No active lanes: terminate. */
    return true;
 }
 
@@ -2004,30 +1399,18 @@ agx_apple9_build_render_package_image(
    void *mapping, size_t mapping_size,
    const struct agx_apple9_render_pipeline *pipeline)
 {
-#ifndef HAVE_COMPRESSION
-   (void)mapping;
-   (void)mapping_size;
-   (void)pipeline;
-   return false;
-#else
    if (!mapping || mapping_size != AGX_APPLE9_RENDER_PACKAGE_SIZE ||
        !pipeline || !pipeline->vertex.binary || !pipeline->fragment.binary)
       return false;
-
-   if (!apple9_render_blobs_available())
-      return false;
-
-   struct agx_apple9_render_archive_layout layout;
-   if (!agx_apple9_layout_render_archive(pipeline, &layout))
-      return false;
-
-   if (!util_compress_inflate(apple9_g16_render_package_zst.data,
-                              apple9_g16_render_package_zst.size, mapping,
-                              mapping_size))
-      return false;
-
-   if (!apple9_build_render_archive(mapping, pipeline, &layout))
-      return false;
+   memset(mapping, 0, mapping_size);
+   for (unsigned i = 0; i < ARRAY_SIZE(apple9_render_absolute_self_relocations);
+        ++i) {
+      const struct apple9_render_self_relocation *reloc =
+         &apple9_render_absolute_self_relocations[i];
+      apple9_put_u64((uint8_t *)mapping + reloc->offset,
+                     UINT64_C(0x10000000000) + reloc->relative);
+   }
+   apple9_init_render_entries(mapping);
    apple9_build_cf_bindings((uint8_t *)mapping + APPLE9_CF_BINDINGS,
                             pipeline->vertex.varying_components,
                             (struct agx_apple9_interp_mask){0},
@@ -2035,7 +1418,6 @@ agx_apple9_build_render_package_image(
                             pipeline->fragment.apple9_reads_z,
                             pipeline->fragment.reads_point_coord);
    return true;
-#endif
 }
 
 bool
@@ -2047,18 +1429,6 @@ agx_apple9_relocate_render_package_base(void *mapping, size_t mapping_size,
       return false;
 
    uint8_t *package = mapping;
-   for (unsigned i = 0; i < ARRAY_SIZE(apple9_render_self_relocations); ++i) {
-      const struct apple9_render_self_relocation *reloc =
-         &apple9_render_self_relocations[i];
-      if (reloc->relative > UINT32_MAX - package_offset)
-         return false;
-
-      uint32_t original = AGX_APPLE9_RENDER_PACKAGE_OFFSET + reloc->relative;
-      uint32_t relocated = package_offset + reloc->relative;
-      uint32_t current = apple9_get_u32(package + reloc->offset);
-      if (current != original && current != relocated)
-         return false;
-   }
 
    const uint64_t usc_exec_base = UINT64_C(0x10000000000);
    for (unsigned i = 0; i < ARRAY_SIZE(apple9_render_absolute_self_relocations);
@@ -2072,11 +1442,6 @@ agx_apple9_relocate_render_package_base(void *mapping, size_t mapping_size,
          return false;
    }
 
-   for (unsigned i = 0; i < ARRAY_SIZE(apple9_render_self_relocations); ++i) {
-      const struct apple9_render_self_relocation *reloc =
-         &apple9_render_self_relocations[i];
-      apple9_put_u32(package + reloc->offset, package_offset + reloc->relative);
-   }
    for (unsigned i = 0; i < ARRAY_SIZE(apple9_render_absolute_self_relocations);
         ++i) {
       const struct apple9_render_self_relocation *reloc =
@@ -2101,16 +1466,15 @@ agx_apple9_render_package_create(
    result->scratch_size[1] = pipeline->fragment.scratch_size;
    result->publication_count[0] = pipeline->vertex.publication_count;
    result->publication_count[1] = pipeline->fragment.publication_count;
-   result->publication_count_valid[0] = pipeline->vertex.publication_count_valid &&
-                                        !pipeline->vertex_prolog.binary;
+   result->publication_count_valid[0] =
+      pipeline->vertex.publication_count_valid;
    result->publication_count_valid[1] = pipeline->fragment.publication_count_valid;
    result->nr_targets = MAX2(pipeline->fragment.render_targets, 1);
    result->samples = MAX2(pipeline->samples, 1);
    memcpy(result->color_targets, pipeline->color_targets, sizeof(result->color_targets));
    memcpy(result->color_formats, pipeline->color_formats, sizeof(result->color_formats));
    result->shader_ids[0] = pipeline->fragment.program_id;
-   result->shader_ids[1] = pipeline->vertex_prolog.program_id;
-   result->shader_ids[2] = pipeline->vertex.program_id;
+   result->shader_ids[1] = pipeline->vertex.program_id;
    result->varying_components = pipeline->vertex.varying_components;
    result->linear_mask = pipeline->fragment.apple9_linear_mask;
    result->reads_z = pipeline->fragment.apple9_reads_z;
@@ -2165,26 +1529,28 @@ agx_apple9_render_package_create(
       free(result);
       return NULL;
    }
-   if (pipeline->vertex_prolog.binary) {
-      /* The vertex-fetch compiler envelope selects the same bind-group
-       * record as the inline path but changes its stage routing byte.  This
-       * is the sole bind-group difference in the two independent T8132 VBO
-       * captures with the three-scalar interface. */
-      ((uint8_t *)agx_bo_map(state))[AGX_APPLE9_BIND_GROUP_OFFSET + 0x15] =
-         0x60;
-   }
 
    result->bo = package;
    result->state_bo = state;
-   result->vertex_buffer = pipeline->vertex_buffer;
-   result->vertex_buffer_size = pipeline->vertex_buffer_size;
-   result->vertex_prolog_call_offset =
-      pipeline->vertex_prolog.binary
-         ? AGX_APPLE9_RENDER_VBO_PROLOG_CALL_OFFSET
-         : AGX_APPLE9_RENDER_VERTEX_PROLOG_CALL_OFFSET;
-   bool layout_ok =
-      agx_apple9_layout_render_archive(pipeline, &result->archive);
-   assert(layout_ok);
+   const struct agx_apple9_render_stage *stages[] = {&pipeline->vertex,
+                                                     &pipeline->fragment};
+   for (unsigned i = 0; i < 2; i++) {
+      result->code_size[i] = stages[i]->binary_size;
+      result->code[i] = agx_bo_create(
+         dev, stages[i]->binary_size, 0,
+         AGX_BO_EXEC | AGX_BO_LOW_VA | AGX_BO_WRITEBACK, "Apple9 shader body");
+      if (!result->code[i]) {
+         for (unsigned j = 0; j < i; j++)
+            agx_bo_unreference(dev, result->code[j]);
+         agx_bo_unreference(dev, result->bo);
+         agx_bo_unreference(dev, result->state_bo);
+         free(result);
+         return NULL;
+      }
+      memcpy(agx_bo_map(result->code[i]), stages[i]->binary,
+             stages[i]->binary_size);
+      agx_bo_note_cpu_write(result->code[i], 0, stages[i]->binary_size);
+   }
    list_inithead(&result->link);
    list_inithead(&result->transitions);
    return result;
@@ -2200,8 +1566,11 @@ agx_apple9_render_package_destroy(struct agx_device *dev,
    assert(!package->active_batches);
    for (unsigned i = 0; i < ARRAY_SIZE(package->programs); i++) {
       struct apple9_render_program *program = package->programs[i];
+      if (!program)
+         agx_bo_unreference(dev, package->code[i]);
       if (program && --program->references == 0) {
          list_del(&program->link);
+         agx_bo_unreference(dev, program->bo);
          free(program);
       }
    }
@@ -2243,112 +1612,34 @@ agx_apple9_render_package_matches(
    if (!package || !package->bo || !pipeline || !pipeline->vertex.binary ||
        !pipeline->fragment.binary)
       return false;
-
    if (package->varying_components != pipeline->vertex.varying_components ||
        package->reads_z != pipeline->fragment.apple9_reads_z ||
        package->writes_point_size != pipeline->vertex.writes_point_size ||
        package->reads_point_coord != pipeline->fragment.reads_point_coord ||
        !agx_apple9_interp_mask_equal(package->linear_mask,
-                                       pipeline->fragment.apple9_linear_mask) ||
+                                     pipeline->fragment.apple9_linear_mask) ||
        !agx_apple9_interp_mask_equal(package->flat_mask,
-                                       pipeline->fragment.apple9_flat_mask))
-      return false;
-   if (package->vertex_buffer != pipeline->vertex_buffer)
-      return false;
-   if (package->vertex_buffer_size != pipeline->vertex_buffer_size)
-      return false;
-
-   /* Normal Gallium stages own immutable compiled binaries. Their identities
-    * remain unique after deletion, so pointer reuse cannot alias an old entry.
-    * Source-supplied test stages retain the byte-exact validation below. */
-   if (package->scratch_size[0] != pipeline->vertex.scratch_size ||
-       package->scratch_size[1] != pipeline->fragment.scratch_size)
-      return false;
-   if (package->publication_count[0] != pipeline->vertex.publication_count ||
+                                     pipeline->fragment.apple9_flat_mask) ||
+       package->scratch_size[0] != pipeline->vertex.scratch_size ||
+       package->scratch_size[1] != pipeline->fragment.scratch_size ||
+       package->publication_count[0] != pipeline->vertex.publication_count ||
        package->publication_count[1] != pipeline->fragment.publication_count ||
        package->publication_count_valid[0] !=
-          (pipeline->vertex.publication_count_valid && !pipeline->vertex_prolog.binary) ||
-       package->publication_count_valid[1] != pipeline->fragment.publication_count_valid)
+          pipeline->vertex.publication_count_valid ||
+       package->publication_count_valid[1] !=
+          pipeline->fragment.publication_count_valid)
       return false;
-   if (pipeline->fragment.program_id && pipeline->vertex.program_id &&
-       (!pipeline->vertex_prolog.binary || pipeline->vertex_prolog.program_id)) {
+   if (pipeline->fragment.program_id && pipeline->vertex.program_id)
       return package->shader_ids[0] == pipeline->fragment.program_id &&
-             package->shader_ids[1] == pipeline->vertex_prolog.program_id &&
-             package->shader_ids[2] == pipeline->vertex.program_id;
-   }
+             package->shader_ids[1] == pipeline->vertex.program_id;
 
-   struct agx_apple9_render_archive_layout layout;
-   if (!agx_apple9_layout_render_archive(pipeline, &layout))
-      return false;
-
-   const uint8_t *mapping = agx_bo_map(package->bo);
-   if (apple9_get_u32(mapping + layout.fragment_block) !=
-          layout.fragment_block_size ||
-       apple9_get_u32(mapping + layout.vertex_prolog_block) !=
-          layout.vertex_prolog_block_size ||
-       apple9_get_u32(mapping + layout.vertex_main_block) !=
-          layout.vertex_main_block_size ||
-       apple9_get_u24(mapping + AGX_APPLE9_RENDER_FRAGMENT_CALL_OFFSET) !=
-          layout.fragment_call ||
-       apple9_get_u24(mapping + package->vertex_prolog_call_offset) !=
-          layout.vertex_prolog_call ||
-       apple9_get_u24(mapping + AGX_APPLE9_RENDER_VERTEX_CALL_OFFSET) !=
-          layout.vertex_call ||
-       memcmp(mapping + layout.fragment_main, pipeline->fragment.binary,
-              pipeline->fragment.binary_size))
-      return false;
-
-   if (pipeline->vertex_prolog.binary) {
-      if (memcmp(mapping + layout.vertex_prolog_main,
-                 pipeline->vertex_prolog.binary,
-                 pipeline->vertex_prolog.binary_size) ||
-          memcmp(mapping + layout.vertex_main, pipeline->vertex.binary,
-                 pipeline->vertex.binary_size))
+   const struct agx_apple9_render_stage *stages[] = {&pipeline->vertex,
+                                                     &pipeline->fragment};
+   for (unsigned i = 0; i < 2; i++)
+      if (package->code_size[i] != stages[i]->binary_size ||
+          memcmp(agx_bo_map(package->code[i]), stages[i]->binary,
+                 stages[i]->binary_size))
          return false;
-   } else if (memcmp(mapping + layout.vertex_prolog_main,
-                     pipeline->vertex.binary, pipeline->vertex.binary_size)) {
-      return false;
-   }
-
-   if (pipeline->vertex_prolog.binary &&
-       apple9_get_u64(mapping + AGX_APPLE9_RENDER_VERTEX_RESOURCE_OFFSET) !=
-          UINT64_C(0x10000018200))
-      return false;
-
-   for (size_t i = pipeline->fragment.binary_size;
-        i < layout.fragment_block_size - AGX_APPLE9_RENDER_BLOCK_HEADER_SIZE -
-               AGX_APPLE9_RENDER_CONSTANT_SIZE;
-        ++i) {
-      if (mapping[layout.fragment_main + i] != 0)
-         return false;
-   }
-   if (pipeline->vertex_prolog.binary) {
-      for (size_t i = pipeline->vertex.binary_size;
-           i < layout.vertex_main_block_size -
-                  AGX_APPLE9_RENDER_BLOCK_HEADER_SIZE -
-                  AGX_APPLE9_RENDER_CONSTANT_SIZE;
-           ++i) {
-         if (mapping[layout.vertex_main + i] != 0)
-            return false;
-      }
-      for (size_t i = pipeline->vertex_prolog.binary_size;
-           i < layout.vertex_prolog_block_size -
-                  AGX_APPLE9_RENDER_BLOCK_HEADER_SIZE -
-                  AGX_APPLE9_RENDER_CONSTANT_SIZE;
-           ++i) {
-         if (mapping[layout.vertex_prolog_main + i] != 0)
-            return false;
-      }
-   } else {
-      for (size_t i = pipeline->vertex.binary_size;
-           i < layout.vertex_prolog_block_size -
-                  AGX_APPLE9_RENDER_BLOCK_HEADER_SIZE -
-                  AGX_APPLE9_RENDER_CONSTANT_SIZE;
-           ++i) {
-         if (mapping[layout.vertex_prolog_main + i] != 0)
-            return false;
-      }
-   }
    return true;
 }
 
@@ -2393,32 +1684,11 @@ agx_apple9_relocate_render_package_image(void *mapping, size_t mapping_size,
       return false;
 
    uint8_t *package = mapping;
-   bool vertex_fetch =
-      apple9_get_u64(package + AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET +
-                     0x0320) == UINT64_C(0x08030010060a0a22) &&
-      apple9_get_u64(package + AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET +
-                     0x0520) == UINT64_C(0x0800300100c60a22);
-
-   /* The two compiler-heap attachment records move when vertex storage is
-    * inserted.  They also use a distinct compressed descriptor grammar; the
-    * raw-twiddled field patcher below must not rewrite their format word.  We
-    * have a byte-exact 257x193 oracle today, so fail closed for other VBO
-    * dimensions until their compressed dimension fields are measured. */
-   if (vertex_fetch && (width != 257 || height != 193))
-      return false;
-
    for (unsigned i = 0; i < ARRAY_SIZE(apple9_render_regions); ++i) {
       const struct agx_apple9_render_region *region = &apple9_render_regions[i];
       if (region->kind != AGX_APPLE9_RENDER_REGION_COLOR_TEXTURE &&
           region->kind != AGX_APPLE9_RENDER_REGION_COLOR_BUFFER)
          continue;
-
-      if (vertex_fetch && i < 2) {
-         unsigned offset = region->offset + 0x100;
-         apple9_put_u64(package + offset + 0x08,
-                        (color_target >> 4) | (UINT64_C(1) << 63));
-         continue;
-      }
 
       apple9_patch_render_target(
          package, region->offset,
@@ -2426,35 +1696,6 @@ agx_apple9_relocate_render_package_image(void *mapping, size_t mapping_size,
          width, height);
    }
 
-   return true;
-}
-
-/* Our authored MRT sweep establishes an eight-byte sample-stride field in
- * each stage setup. Preserve the opaque setup and parameterize only this
- * field: strides 8, 16, 24 and 32 use 0x43, 0x45, 0x47 and 0x49. */
-static bool
-apple9_patch_tile_stride(uint8_t *setup, unsigned field, unsigned tile_bytes,
-                         unsigned samples)
-{
-   if (setup[field] != 0x43 || !tile_bytes || tile_bytes > 64)
-      return false;
-   /* Sample count changes the local-memory launch layout as well as the
-    * stride. These independent fields come from the authored M4 count sweep. */
-   switch (samples) {
-   case 1:
-      setup[field] = 0x41 + 2 * DIV_ROUND_UP(tile_bytes, 8);
-      break;
-   case 2:
-      setup[field] = 0x40 + 2 * DIV_ROUND_UP(tile_bytes, 8);
-      break;
-   case 4:
-      setup[field - 1] = 0xaa;
-      setup[field] = 2 * DIV_ROUND_UP(tile_bytes, 8);
-      setup[field + 1] = 0x43;
-      break;
-   default:
-      return false;
-   }
    return true;
 }
 
@@ -2528,12 +1769,6 @@ apple9_build_multiple_targets(struct agx_apple9_render_package *package,
                (package->samples == 4 ? 0x01000000u : 0));
          }
       }
-   }
-   /* Load, reload and store setup share the per-sample tile stride. */
-   const unsigned tile_stride_fields[] = {0x2300bd, 0x2302fd, 0x23052f};
-   for (unsigned i = 0; i < ARRAY_SIZE(tile_stride_fields); ++i) {
-      if (!apple9_patch_tile_stride(image, tile_stride_fields[i], tile_bytes, package->samples))
-         return false;
    }
    unsigned actions = 0;
    for (unsigned rt = 0; rt < count; ++rt) {
@@ -2637,7 +1872,7 @@ agx_apple9_render_cache_create(struct agx_device *dev)
 
    cache->resident_bo = agx_bo_create(
       dev, AGX_APPLE9_RENDER_PACKAGE_SIZE, AGX_APPLE9_RENDER_PACKAGE_SIZE,
-      AGX_BO_EXEC | AGX_BO_WRITEBACK, "Apple9 fixed render archive");
+      AGX_BO_EXEC | AGX_BO_WRITEBACK, "Apple9 fixed render entries");
    cache->resident_state_bo = dev->apple9_render_context;
    agx_bo_reference(cache->resident_state_bo);
    uint32_t bind = DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE;
@@ -2657,16 +1892,6 @@ agx_apple9_render_cache_create(struct agx_device *dev)
    }
 
    cache->dev = dev;
-   cache->resident_archive_limit = AGX_APPLE9_RENDER_ARCHIVE_SIZE;
-   const char *test_limit = getenv("AGX_APPLE9_RENDER_ARCHIVE_TEST_LIMIT");
-   if (test_limit && test_limit[0]) {
-      char *end = NULL;
-      unsigned long parsed = strtoul(test_limit, &end, 0);
-      if (end && !end[0] && !(parsed & 0x3f) &&
-          parsed >= AGX_APPLE9_RENDER_ARCHIVE_HEADER_SIZE &&
-          parsed <= AGX_APPLE9_RENDER_ARCHIVE_SIZE)
-         cache->resident_archive_limit = parsed;
-   }
    list_inithead(&cache->packages);
    list_inithead(&cache->programs);
    return cache;
@@ -2698,30 +1923,28 @@ static bool
 apple9_intern_package_programs(struct agx_apple9_render_cache *cache,
                                struct agx_apple9_render_package *package)
 {
-   const uint8_t *source = agx_bo_map(package->bo);
-   const uint32_t offsets[] = {package->archive.fragment_block,
-      package->archive.vertex_prolog_block, package->archive.vertex_main_block};
-   const uint32_t sizes[] = {package->archive.fragment_block_size,
-      package->archive.vertex_prolog_block_size, package->archive.vertex_main_block_size};
-   for (unsigned i = 0; i < ARRAY_SIZE(offsets); i++) {
+   for (unsigned i = 0; i < 2; i++) {
       if (package->programs[i])
          continue;
       struct apple9_render_program *found = NULL;
       list_for_each_entry(struct apple9_render_program, program, &cache->programs, link) {
-         if (program->stage == i && program->size == sizes[i] &&
-             !memcmp(program->data, source + offsets[i], sizes[i])) {
+         if (program->stage == i && program->size == package->code_size[i] &&
+             !memcmp(agx_bo_map(program->bo), agx_bo_map(package->code[i]),
+                     program->size)) {
             found = program;
             break;
          }
       }
-      if (!found) {
-         found = malloc(sizeof(*found) + sizes[i]);
+      if (found) {
+         agx_bo_unreference(cache->dev, package->code[i]);
+         package->code[i] = found->bo;
+      } else {
+         found = calloc(1, sizeof(*found));
          if (!found)
             return false;
-         found->references = 0;
          found->stage = i;
-         found->size = sizes[i];
-         memcpy(found->data, source + offsets[i], sizes[i]);
+         found->size = package->code_size[i];
+         found->bo = package->code[i];
          list_addtail(&found->link, &cache->programs);
       }
       found->references++;
@@ -2743,153 +1966,6 @@ apple9_build_package_state(struct agx_apple9_render_cache *cache,
       return false;
    uint8_t *fixed_usc = package->fixed_image;
    memcpy(fixed_usc, source, AGX_APPLE9_RENDER_PACKAGE_SIZE);
-   /* The queue USC base is fixed. Install the selected compiler resource
-    * graph into the base archive rather than changing usc_exec_base or
-    * falling back to the shim's immutable client template. */
-   memcpy(fixed_usc + AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET,
-          source + AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET,
-          AGX_APPLE9_RENDER_COMPILER_STATE_SIZE);
-
-   /* The vertex-fetch launch wrapper addresses this record with the compact
-    * fixed selector 0x00a8.  Keep the independently owned package as the
-    * immutable source generation, but publish the selected record into the
-    * queue's fixed USC arena at the synchronized cache-bind boundary. */
-   assert(AGX_APPLE9_RENDER_PACKAGE_SIZE >=
-          AGX_APPLE9_RENDER_FIXED_RESOURCE_OFFSET +
-             AGX_APPLE9_RENDER_FIXED_RESOURCE_SIZE);
-   memcpy(fixed_usc + AGX_APPLE9_RENDER_FIXED_RESOURCE_OFFSET,
-          source + AGX_APPLE9_RENDER_RESOURCE_OFFSET,
-          AGX_APPLE9_RENDER_FIXED_RESOURCE_SIZE);
-
-   /* Vertex fetch also enters a dense compiler-runtime image through compact
-    * fixed-USC references.  The compatibility package retains this image at
-    * +0x188000, displaced by the caller-owned attachment aperture, whereas
-    * the live T8132 context selects +0xd8000.  Publish it as one coherent
-    * immutable object; copying only the launch/resource leaves its callees
-    * unmapped/zero and TA cannot retire. */
-   if (package->vertex_buffer_size) {
-      assert(AGX_APPLE9_RENDER_PACKAGE_SIZE >=
-             AGX_APPLE9_RENDER_FIXED_RUNTIME_OFFSET +
-                AGX_APPLE9_RENDER_FIXED_RUNTIME_SIZE);
-      memcpy(fixed_usc + AGX_APPLE9_RENDER_FIXED_RUNTIME_OFFSET,
-             source + AGX_APPLE9_RENDER_RUNTIME_SOURCE_OFFSET,
-             AGX_APPLE9_RENDER_FIXED_RUNTIME_SIZE);
-
-      /* The source range overlaps the package-owned vertex-call selector at
-       * +0x18ca37.  That selector is patched to the selected archive main,
-       * but Metal's fixed runtime view at +0xdca37 is an independent,
-       * immutable compiler-library image and retains the template call
-       * 0x0daa.  Copying the patched source byte-for-byte changed its first
-       * opcode byte from 0xaa to 0x2a and produced a repeatable UL1C0 read
-       * fault at a poison-looking address.  Restore the fixed view's own
-       * selector after publishing the shared source range. */
-      const uint32_t fixed_vertex_call_offset =
-         AGX_APPLE9_RENDER_FIXED_RUNTIME_OFFSET +
-         (AGX_APPLE9_RENDER_VERTEX_CALL_OFFSET -
-          AGX_APPLE9_RENDER_RUNTIME_SOURCE_OFFSET);
-      assert(fixed_vertex_call_offset + 3 <=
-             AGX_APPLE9_RENDER_FIXED_RUNTIME_OFFSET +
-                AGX_APPLE9_RENDER_FIXED_RUNTIME_SIZE);
-      apple9_put_u24(fixed_usc + fixed_vertex_call_offset,
-                     AGX_APPLE9_RENDER_TEMPLATE_VERTEX_CALL);
-   }
-
-   /* The VBO path has a second fixed-USC dependency: Metal keeps the launch
-    * wrapper at +0x170000 even though our independently owned package stores
-    * its mutable source image at +0x220000.  Inline vertices never consume
-    * this location, which is why relocating the archive mains alone appeared
-    * sufficient until the first real vertex fetch.  Publish the complete
-    * page at the same generation boundary as its resource record. */
-   if (package->vertex_buffer_size) {
-      assert(AGX_APPLE9_RENDER_PACKAGE_SIZE >=
-             AGX_APPLE9_RENDER_FIXED_VERTEX_LAUNCH_OFFSET +
-                AGX_APPLE9_RENDER_FIXED_VERTEX_LAUNCH_SIZE);
-      memcpy(fixed_usc + AGX_APPLE9_RENDER_FIXED_VERTEX_LAUNCH_OFFSET,
-             source + AGX_APPLE9_RENDER_VERTEX_LAUNCH_OFFSET,
-             AGX_APPLE9_RENDER_FIXED_VERTEX_LAUNCH_SIZE);
-
-      /* The launch wrapper's resource, pipeline, and dimension records are
-       * independently owned in the compatibility package but consumed from
-       * Metal's fixed USC layout.  Publish all three views together. */
-      apple9_build_render_vbo_fixed_table(
-         fixed_usc + AGX_APPLE9_RENDER_FIXED_VBO_TABLE_OFFSET);
-      memset(fixed_usc + AGX_APPLE9_RENDER_FIXED_VBO_METADATA_OFFSET, 0,
-             0x4000);
-      memset(fixed_usc + AGX_APPLE9_RENDER_FIXED_VBO_METADATA_OFFSET, 0x7f,
-             0x1000);
-      memcpy(fixed_usc + AGX_APPLE9_RENDER_FIXED_TARGET_GRAPH_OFFSET,
-             source + AGX_APPLE9_RENDER_TARGET_GRAPH_SOURCE_OFFSET, 0x4000);
-      memcpy(fixed_usc + AGX_APPLE9_RENDER_FIXED_PIPELINE_OFFSET,
-             source + AGX_APPLE9_RENDER_PIPELINE_SOURCE_OFFSET, 0x8000);
-      memcpy(fixed_usc + AGX_APPLE9_RENDER_FIXED_DIMENSIONS_OFFSET,
-             source + AGX_APPLE9_RENDER_DIMENSIONS_SOURCE_OFFSET, 0x4000);
-
-      /* Moving the target graph down by 0xb0000 moves its eight absolute
-       * record pointers by the same amount. */
-      const uint32_t fixed_shift =
-         AGX_APPLE9_RENDER_TARGET_GRAPH_SOURCE_OFFSET -
-         AGX_APPLE9_RENDER_FIXED_TARGET_GRAPH_OFFSET;
-      for (unsigned i = 0;
-           i < ARRAY_SIZE(apple9_render_absolute_self_relocations); ++i) {
-         const struct apple9_render_self_relocation *reloc =
-            &apple9_render_absolute_self_relocations[i];
-         assert(reloc->offset >= fixed_shift);
-         apple9_put_u64(
-            fixed_usc + reloc->offset - fixed_shift,
-            UINT64_C(0x10000000000) + reloc->relative - fixed_shift);
-      }
-
-      /* Three compact references in the fixed pipeline page name the dense
-       * runtime copied from +0x188000 to +0xd8000.  This encoding advances by
-       * eight for each byte of USC displacement, so the 0xb0000 move is a
-       * 0x580000 subtraction.  The two +0x230401 fields are package-local and
-       * remain unchanged, exactly as in the native 257x193 capture. */
-      for (unsigned i = 0; i < ARRAY_SIZE(apple9_render_self_relocations);
-           ++i) {
-         const struct apple9_render_self_relocation *reloc =
-            &apple9_render_self_relocations[i];
-         if (reloc->relative >= 0x100000)
-            continue;
-         assert(reloc->offset >= fixed_shift);
-         uint32_t at = reloc->offset - fixed_shift;
-         apple9_put_u32(fixed_usc + at,
-                        apple9_get_u32(fixed_usc + at) - (fixed_shift << 3));
-      }
-
-      for (unsigned i = 0;
-           i < ARRAY_SIZE(apple9_render_interleaved_vbo_fixed_pipeline); ++i) {
-         const struct apple9_render_sparse_byte *field =
-            &apple9_render_interleaved_vbo_fixed_pipeline[i];
-         assert(field->offset < 0x4000);
-         fixed_usc[AGX_APPLE9_RENDER_FIXED_PIPELINE_OFFSET + field->offset] =
-            field->value;
-      }
-
-      /* The fixed VBO pipeline is copied from the package's immutable source
-       * image above, but the selected fragment archive call is installed in
-       * the resident command image at cache-bind time.  Native switches
-       * fragment pipelines by changing this call while retaining the same
-       * archive and compiler state.  Publish the selected call into the
-       * fixed-USC view as part of the same generation; otherwise VBO draws
-       * continue to execute the template fragment entry (which happened to
-       * make the pass-through shader work, while arbitrary fragment DAGs
-       * produced retired but corrupt output).
-       */
-      const uint32_t fixed_fragment_call_offset =
-         AGX_APPLE9_RENDER_FIXED_PIPELINE_OFFSET +
-         (AGX_APPLE9_RENDER_FRAGMENT_CALL_OFFSET -
-          AGX_APPLE9_RENDER_PIPELINE_SOURCE_OFFSET);
-      assert(fixed_fragment_call_offset + 3 <=
-             AGX_APPLE9_RENDER_FIXED_PIPELINE_OFFSET + 0x8000);
-      apple9_put_u24(fixed_usc + fixed_fragment_call_offset,
-                     package->archive.fragment_call);
-
-      apple9_put_u32(fixed_usc + AGX_APPLE9_RENDER_FIXED_DIMENSIONS_OFFSET,
-                     package->width);
-      apple9_put_u32(fixed_usc + AGX_APPLE9_RENDER_FIXED_DIMENSIONS_OFFSET + 4,
-                     package->height);
-   }
-
    uint8_t *resident_state = package->context_image;
    const uint8_t *package_state = agx_bo_map(package->state_bo);
    /* The former template-overlay shim supplied this context page. The
@@ -2900,24 +1976,12 @@ apple9_build_package_state(struct agx_apple9_render_cache *cache,
              (AGX_APPLE9_RENDER_STATE_ADDRESS - AGX_APPLE9_RENDER_CONTEXT_BASE),
           package_state, AGX_APPLE9_RENDER_STATE_SIZE);
 
-   if (package->vertex_buffer_size) {
-      /* VBO VDM selects +0x0040 instead of the inline path's +0x4040.
-       * Publish the first-page bind record at the context base, clear its
-       * inline-path link at +0x340, and leave the original +0x4000 slot
-       * empty.  Native keeps the remainder of the fixed-function image at
-       * the ordinary addresses starting at +0x8000.  Duplicating the generic
-       * first page at +0x4000 made the stale 0x1004 link live and selected a
-       * non-VBO state path before TA could retire. */
-      memcpy(resident_state, package_state, 0x4000);
-      memset(resident_state + 0x340, 0, sizeof(uint64_t));
-      memset(resident_state + 0x4000, 0, 0x4000);
-   }
-
-   const uint8_t *data[] = {source + AGX_APPLE9_RENDER_ARCHIVE_SIZE,
-      fixed_usc + AGX_APPLE9_RENDER_ARCHIVE_SIZE, package->context_image};
+   const uint8_t *data[] = {source + AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET,
+                            fixed_usc + AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET,
+                            package->context_image};
    const uint32_t sizes[] = {
-      AGX_APPLE9_RENDER_PACKAGE_SIZE - AGX_APPLE9_RENDER_ARCHIVE_SIZE,
-      AGX_APPLE9_RENDER_PACKAGE_SIZE - AGX_APPLE9_RENDER_ARCHIVE_SIZE,
+      AGX_APPLE9_RENDER_PACKAGE_SIZE - AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET,
+      AGX_APPLE9_RENDER_PACKAGE_SIZE - AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET,
       context_size};
    for (unsigned i = 0; i < ARRAY_SIZE(data); i++)
       package->images[i] = (struct agx_immutable_state){.data = data[i], .size = sizes[i]};
@@ -2964,8 +2028,8 @@ apple9_publish_package_state(struct agx_apple9_render_cache *cache,
 {
    struct agx_bo *bos[] = {cache->resident_bo,
       cache->dev->apple9_render_fixed_usc, cache->resident_state_bo};
-   const uint32_t offsets[] = {AGX_APPLE9_RENDER_ARCHIVE_SIZE,
-      AGX_APPLE9_RENDER_ARCHIVE_SIZE, 0};
+   const uint32_t offsets[] = {AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET,
+                               AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET, 0};
    /* Cache the exact transition: two states can share fields that both
     * differ from an earlier baseline. Those shared fields need no upload. */
    struct apple9_state_transition *transition = cache->state_initialized &&
@@ -3052,359 +2116,36 @@ agx_apple9_render_cache_get(struct agx_apple9_render_cache *cache,
    return package;
 }
 
-/* Add code to the persistent archive without selecting attachment or draw
- * state. Every draw carries its own small state records and archive calls. */
-static bool
-apple9_render_cache_install_programs(struct agx_apple9_render_cache *cache,
-                                     struct agx_apple9_render_package *package)
-{
-   uint8_t *resident = agx_bo_map(cache->resident_bo);
-   uint8_t *fixed_usc = agx_bo_map(cache->dev->apple9_render_fixed_usc);
-   const uint8_t *source = agx_bo_map(package->bo);
-   if (!package->fragment_call) {
-      list_for_each_entry(struct agx_apple9_render_package, candidate,
-                          &cache->packages, link) {
-         if (candidate->fragment_call &&
-             candidate->programs[0] == package->programs[0]) {
-            package->fragment_call = candidate->fragment_call;
-            break;
-         }
-      }
-   }
-   if (!package->vertex_call) {
-      list_for_each_entry(struct agx_apple9_render_package, candidate,
-                          &cache->packages, link) {
-         if (candidate->vertex_call &&
-             candidate->programs[2] == package->programs[2]) {
-            package->vertex_call = candidate->vertex_call;
-            break;
-         }
-      }
-   }
-   if (!package->vertex_prolog_call) {
-      list_for_each_entry(struct agx_apple9_render_package, candidate,
-                          &cache->packages, link) {
-         if (candidate->vertex_prolog_call &&
-             candidate->programs[1] == package->programs[1]) {
-            package->vertex_prolog_call = candidate->vertex_prolog_call;
-            break;
-         }
-      }
-   }
-
-   const struct {
-      uint32_t source_block;
-      uint32_t block_size;
-      uint32_t *call;
-   } stages[] = {
-      {package->archive.fragment_block, package->archive.fragment_block_size,
-       &package->fragment_call},
-      {package->archive.vertex_prolog_block,
-       package->archive.vertex_prolog_block_size,
-       &package->vertex_prolog_call},
-      {package->archive.vertex_main_block,
-       package->archive.vertex_main_block_size, &package->vertex_call},
-   };
-   bool appended = true;
-   for (unsigned i = 0; i < ARRAY_SIZE(stages); ++i) {
-      if (*stages[i].call)
-         continue;
-      uint32_t block = cache->resident_archive_next;
-      uint32_t main = block + AGX_APPLE9_RENDER_BLOCK_HEADER_SIZE +
-                      AGX_APPLE9_RENDER_CONSTANT_SIZE;
-      if (block > cache->resident_archive_limit ||
-          stages[i].block_size > cache->resident_archive_limit - block ||
-          !apple9_archive_call(main, stages[i].call)) {
-         appended = false;
-         break;
-      }
-      memcpy(resident + block, source + stages[i].source_block,
-             stages[i].block_size);
-      memcpy(fixed_usc + block, source + stages[i].source_block,
-             stages[i].block_size);
-      agx_bo_note_cpu_write(cache->resident_bo, block, stages[i].block_size);
-      agx_bo_note_cpu_write(cache->dev->apple9_render_fixed_usc, block,
-                            stages[i].block_size);
-      cache->resident_archive_next = block + stages[i].block_size;
-   }
-   return appended;
-}
-
+/* Publish only attachment/state data. Executable bodies are immutable
+ * allocations retained by packages and by every batch that references them. */
 bool
 agx_apple9_render_cache_bind(struct agx_apple9_render_cache *cache,
                              struct agx_apple9_render_package *package)
 {
-   if (!cache || !package || !package->bo || !package->state_bo ||
-       !package->sealed || !cache->dev->apple9_render_fixed_usc)
+   if (!cache || !package || !package->sealed)
       return false;
-
    if (!package->images[0].data &&
        (!apple9_intern_package_programs(cache, package) ||
         !apple9_build_package_state(cache, package)))
       return false;
-
-   if (cache->current == package && !cache->fixed_usc_dirty)
-      return agx_apple9_install_render_archive(cache->dev);
-
-   uint8_t *resident = agx_bo_map(cache->resident_bo);
-   uint8_t *fixed_usc = agx_bo_map(cache->dev->apple9_render_fixed_usc);
-   const uint8_t *source = agx_bo_map(package->bo);
-   const bool force_authored_generation =
-      !cache->installing_draws &&
-      getenv("AGX_APPLE9_RENDER_FORCE_AUTHORED_GENERATION") != NULL;
-
-   /*
-    * Metal keeps one physical archive at the queue's fixed USC base and
-    * interns stage programs into it.  The compatibility package has the same
-    * split: the first 96 KiB is executable archive, while caller launch/state
-    * in the remaining range selects three archive entries.  Preserve the
-    * resident archive and install only the selected command state.
-    */
-   if (!cache->current || force_authored_generation) {
-      if (force_authored_generation && cache->current) {
-         /* Diagnostic isolation for compact archive calls and Dynamic
-          * Caching program identity.  Metal-authored standalone pipelines
-          * place their fragment main at the first archive slot.  Reinstall
-          * the selected immutable source generation verbatim so a test can
-          * distinguish that contract from Mesa's ordinary cross-pipeline
-          * block interning without changing any shader, Work, or fixed state
-          * bytes. */
-         list_for_each_entry(struct agx_apple9_render_package, candidate,
-                             &cache->packages, link) {
-            candidate->fragment_call = 0;
-            candidate->vertex_prolog_call = 0;
-            candidate->vertex_call = 0;
-         }
-      }
-      memcpy(resident, source, AGX_APPLE9_RENDER_ARCHIVE_SIZE);
-      memcpy(fixed_usc, source, AGX_APPLE9_RENDER_ARCHIVE_SIZE);
-      cache->resident_archive_next = package->archive.end;
-      package->fragment_call = package->archive.fragment_call;
-      package->vertex_prolog_call = package->archive.vertex_prolog_call;
-      package->vertex_call = package->archive.vertex_call;
-   } else {
-      bool appended = apple9_render_cache_install_programs(cache, package);
-      if (!appended) {
-         /* A batch must never evict programs named by its earlier draws. */
-         if (cache->installing_draws)
-            return false;
-         /* Compact archive generation rollover.  The previous user has
-          * already retired before cache_bind, so retain the physical BO while
-          * rebuilding its contents around the selected pipeline. */
-         if (getenv("AGX_APPLE9_PACKAGE_TRACE")) {
-            fprintf(stderr,
-                    "APPLE9_RENDER_CACHE_ROLLOVER next=%#x need=%#x "
-                    "limit=%#x\n",
-                    cache->resident_archive_next,
-                    package->archive.fragment_block_size +
-                       package->archive.vertex_prolog_block_size +
-                       package->archive.vertex_main_block_size,
-                    cache->resident_archive_limit);
-         }
-         list_for_each_entry(struct agx_apple9_render_package, candidate,
-                             &cache->packages, link) {
-            candidate->fragment_call = 0;
-            candidate->vertex_prolog_call = 0;
-            candidate->vertex_call = 0;
-         }
-         memcpy(resident, source, AGX_APPLE9_RENDER_ARCHIVE_SIZE);
-         memcpy(fixed_usc, source, AGX_APPLE9_RENDER_ARCHIVE_SIZE);
-         cache->resident_archive_next = package->archive.end;
-         package->fragment_call = package->archive.fragment_call;
-         package->vertex_prolog_call = package->archive.vertex_prolog_call;
-         package->vertex_call = package->archive.vertex_call;
-      }
-   }
-   apple9_publish_package_state(cache, package);
-   for (unsigned view = 0; view < 2; view++) {
-      uint8_t *dst = view ? fixed_usc : resident;
-      apple9_put_u24(dst + AGX_APPLE9_RENDER_FRAGMENT_CALL_OFFSET, package->fragment_call);
-      apple9_put_u24(dst + package->vertex_prolog_call_offset, package->vertex_prolog_call);
-      apple9_put_u24(dst + AGX_APPLE9_RENDER_VERTEX_CALL_OFFSET, package->vertex_call);
-   }
-   if (package->vertex_buffer_size) {
-      const uint32_t fixed_fragment = AGX_APPLE9_RENDER_FIXED_PIPELINE_OFFSET +
-         AGX_APPLE9_RENDER_FRAGMENT_CALL_OFFSET - AGX_APPLE9_RENDER_PIPELINE_SOURCE_OFFSET;
-      apple9_put_u24(fixed_usc + fixed_fragment, package->fragment_call);
-   }
-
+   if (cache->current != package || cache->fixed_usc_dirty)
+      apple9_publish_package_state(cache, package);
    if (!agx_apple9_install_render_archive(cache->dev))
       return false;
-
    cache->current = package;
    cache->fixed_usc_dirty = false;
    cache->generation++;
-   if (getenv("AGX_APPLE9_PACKAGE_TRACE")) {
-      fprintf(stderr,
-              "APPLE9_RENDER_GENERATION id=%llu storage=%#llx logical=%#llx "
-              "resident=%#llx target=%#llx size=%ux%u\n",
-              (unsigned long long)cache->generation,
-              (unsigned long long)package->bo->va->addr,
-              (unsigned long long)cache->logical_va->addr,
-              (unsigned long long)cache->resident_bo->va->addr,
-              (unsigned long long)package->color_target, package->width,
-              package->height);
-      fprintf(stderr,
-              "APPLE9_RENDER_CACHE fs_call=%#x vs_call=%#x "
-              "prolog_call=%#x archive_next=%#x\n",
-              package->fragment_call, package->vertex_call,
-              package->vertex_prolog_call, cache->resident_archive_next);
-   }
-   return true;
-}
-
-struct apple9_render_archive_plan {
-   bool append_fits;
-   bool fresh_fits;
-   uint64_t end;
-};
-
-static bool
-apple9_plan_render_archive(const struct agx_apple9_render_cache *cache,
-                          const struct agx_apple9_uniform_draw *draws,
-                          unsigned count,
-                          const struct agx_apple9_render_package *extra,
-                          struct apple9_render_archive_plan *plan)
-{
-   if (!cache || (count && !draws) ||
-       count + (extra != NULL) > AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS)
-      return false;
-
-   /* Plan the same stage interning performed by cache_bind. Count shared
-    * shaders once, including a program used by several linked pipelines. */
-   struct {
-      const struct apple9_render_program *program;
-      uint32_t size;
-      unsigned stage;
-      bool resident, in_first;
-   } programs[AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS * 3];
-   unsigned program_count = 0;
-   const struct agx_apple9_render_package *first = count ? draws[0].package : extra;
-   if (!first)
-      return false;
-   for (unsigned i = 0; i < count + (extra != NULL); ++i) {
-      const struct agx_apple9_render_package *p =
-         i < count ? draws[i].package : extra;
-      if (!p || !p->sealed || p->color_target != first->color_target ||
-          p->nr_targets != first->nr_targets || p->samples != first->samples ||
-          memcmp(p->color_formats, first->color_formats, sizeof(p->color_formats)) ||
-          memcmp(p->color_targets, first->color_targets, sizeof(p->color_targets)) ||
-          p->width != first->width || p->height != first->height)
-         return false;
-      const uint32_t sizes[] = {
-         p->archive.fragment_block_size, p->archive.vertex_prolog_block_size,
-         p->archive.vertex_main_block_size};
-      const uint32_t calls[] = {
-         p->fragment_call, p->vertex_prolog_call, p->vertex_call};
-      for (unsigned stage = 0; stage < 3; ++stage) {
-         unsigned j;
-         for (j = 0; j < program_count; ++j) {
-            if (programs[j].stage == stage && programs[j].size == sizes[stage] &&
-                programs[j].program == p->programs[stage])
-               break;
-         }
-         if (j == program_count) {
-            programs[j].program = p->programs[stage];
-            programs[j].size = sizes[stage];
-            programs[j].stage = stage;
-            programs[j].resident = false;
-            programs[j].in_first = i == 0;
-            program_count++;
-         }
-         programs[j].resident |= calls[stage] != 0;
-      }
-   }
-   uint64_t append_end = cache->resident_archive_next;
-   uint64_t end = first->archive.end;
-   bool append_fits = cache->current != NULL;
-   bool fresh_fits = end <= cache->resident_archive_limit;
-   const uint32_t prefix = AGX_APPLE9_RENDER_BLOCK_HEADER_SIZE +
-                           AGX_APPLE9_RENDER_CONSTANT_SIZE;
-   for (unsigned i = 0; i < program_count; ++i) {
-      uint32_t call;
-      if (!programs[i].resident) {
-         append_fits &= append_end + prefix <= UINT32_MAX &&
-                        apple9_archive_call(append_end + prefix, &call);
-         append_end += programs[i].size;
-      }
-      if (!programs[i].in_first) {
-         fresh_fits &= end + prefix <= UINT32_MAX &&
-                       apple9_archive_call(end + prefix, &call);
-         end += programs[i].size;
-      }
-   }
-   plan->append_fits = append_fits && append_end <= cache->resident_archive_limit;
-   plan->fresh_fits = fresh_fits && end <= cache->resident_archive_limit;
-   plan->end = end;
    return true;
 }
 
 bool
-agx_apple9_render_cache_can_add_draw(
-   const struct agx_apple9_render_cache *cache,
-   const struct agx_apple9_uniform_draw *draws, unsigned count,
-   const struct agx_apple9_render_package *package)
+agx_apple9_render_cache_bind_draws(struct agx_apple9_render_cache *cache,
+                                   const struct agx_apple9_uniform_draw *draws,
+                                   unsigned count)
 {
-   struct apple9_render_archive_plan plan;
-   return package && apple9_plan_render_archive(cache, draws, count, package,
-                                                &plan) && plan.fresh_fits;
-}
-
-/* Install the complete draw set before publishing any per-draw calls. The
- * submission lock and previous-owner wait also protect archive rollover. */
-bool
-agx_apple9_render_cache_bind_draws(
-   struct agx_apple9_render_cache *cache,
-   const struct agx_apple9_uniform_draw *draws, unsigned count)
-{
-   if (!cache || !draws || !count || count > AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS)
-      return false;
-
-   bool single_package = true;
-   for (unsigned i = 1; i < count; ++i)
-      single_package &= draws[i].package == draws[0].package;
-   if (single_package)
-      return agx_apple9_render_cache_bind(cache, draws[0].package);
-
-   struct apple9_render_archive_plan plan;
-   if (!apple9_plan_render_archive(cache, draws, count, NULL, &plan))
-      return false;
-   uint64_t end = plan.end;
-
-   /* Check storage and entry encoding before installing any draw's programs. */
-   if (!plan.append_fits) {
-      if (!plan.fresh_fits) {
-         fprintf(stderr,
-                 "Apple9 batch shader archive exceeds storage or entry range: "
-                 "end=%#llx storage=%#x\n",
-                 (unsigned long long)end, cache->resident_archive_limit);
-         return false;
-      }
-      if (getenv("AGX_APPLE9_PACKAGE_TRACE"))
-         fprintf(stderr, "APPLE9_RENDER_BATCH_ROLLOVER end=%#llx limit=%#x\n",
-                 (unsigned long long)end, cache->resident_archive_limit);
-      list_for_each_entry(struct agx_apple9_render_package, p,
-                          &cache->packages, link) {
-         p->fragment_call = p->vertex_prolog_call = p->vertex_call = 0;
-      }
-      cache->current = NULL;
-      cache->state_initialized = false;
-   }
-
-   cache->installing_draws = true;
-   /* Select shared attachments once. The per-draw uploader supplies each
-    * draw's shader-dependent state; interning later programs must not copy
-    * their whole state images over that attachment owner. */
-   bool ok = agx_apple9_render_cache_bind(cache, draws[0].package);
-   for (unsigned i = 1; ok && i < count; ++i) {
-      bool seen = false;
-      for (unsigned j = 0; j < i; ++j)
-         seen |= draws[j].package == draws[i].package;
-      if (!seen)
-         ok = apple9_render_cache_install_programs(cache, draws[i].package);
-   }
-   cache->installing_draws = false;
-   return ok;
+   return cache && draws && count &&
+          count <= AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS &&
+          agx_apple9_render_cache_bind(cache, draws[0].package);
 }
 
 void
@@ -3413,41 +2154,6 @@ agx_apple9_render_cache_invalidate_fixed_usc(
 {
    if (cache)
       cache->fixed_usc_dirty = true;
-}
-
-bool
-agx_apple9_render_cache_upload_vertex_buffer(
-   struct agx_apple9_render_cache *cache, const void *data, size_t size)
-{
-   if (!cache || !cache->current || !data || !size ||
-       size != cache->current->vertex_buffer_size)
-      return false;
-
-   const size_t allocation_size = ALIGN_POT(size, 0x100);
-   if (allocation_size > 0x2000)
-      return false;
-
-   uint8_t *fixed_state =
-      (uint8_t *)agx_bo_map(cache->dev->apple9_render_fixed_usc) +
-      AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET;
-   uint8_t *resident_state = (uint8_t *)agx_bo_map(cache->resident_bo) +
-                             AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET;
-
-   /* The queue's fixed USC base resolves to apple9_render_fixed_usc, while
-    * the package-relative compiler view resolves through resident_bo. Keep
-    * the per-draw vertex payload coherent in both views. */
-   for (unsigned i = 0; i < 2; ++i) {
-      uint8_t *state = i ? resident_state : fixed_state;
-      memset(state + 0x200, 0, allocation_size);
-      memcpy(state + 0x200, data, size);
-   }
-   if (getenv("AGX_APPLE9_PACKAGE_TRACE")) {
-      fprintf(stderr, "APPLE9_VERTEX_RESIDENT_BYTES");
-      for (unsigned i = 0; i < MIN2(size, 64); ++i)
-         fprintf(stderr, "%s%02x", i ? "" : " ", resident_state[0x200 + i]);
-      fprintf(stderr, "\n");
-   }
-   return true;
 }
 
 /* Per-draw launch records use the shared builder and a common graphics root
@@ -3476,6 +2182,12 @@ static_assert(APPLE9_UNIFORM_CF_TABLES + AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS *
 static_assert(APPLE9_CF_BINDINGS_SIZE <= APPLE9_UNIFORM_CF_STRIDE,
               "each coefficient table must fit its per-draw slot");
 
+uint32_t
+agx_apple9_render_draw_fragment_word(unsigned draw)
+{
+   return draw < AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS
+             ? APPLE9_UNIFORM_FS_LAUNCH + draw * APPLE9_UNIFORM_STRIDE : 0;
+}
 
 bool
 agx_apple9_render_cache_upload_uniforms(
@@ -3489,10 +2201,16 @@ agx_apple9_render_cache_upload_uniforms(
       return false;
    uint8_t *views[] = {agx_bo_map(cache->resident_bo),
                        agx_bo_map(cache->dev->apple9_render_fixed_usc)};
+   for (unsigned v = 0; v < ARRAY_SIZE(views); v++) {
+      apple9_init_render_entries(views[v]);
+      agx_bo_note_cpu_write(
+         v ? cache->dev->apple9_render_fixed_usc : cache->resident_bo, 0,
+         AGX_APPLE9_RENDER_ENTRY_REGION_SIZE);
+   }
    uint8_t *context = agx_bo_map(cache->resident_state_bo);
    for (unsigned i = 0; i < count; ++i) {
       const struct agx_apple9_render_package *package = draws[i].package;
-      if (!package || !package->fragment_call || !package->vertex_prolog_call)
+      if (!package || !package->code[0] || !package->code[1])
          return false;
       unsigned record = APPLE9_UNIFORM_RECORDS + i * 0x100;
       /* All graphics stages reserve texture, sampler and buffer roots. This
@@ -3533,8 +2251,12 @@ agx_apple9_render_cache_upload_uniforms(
             params.shader_base = cache->dev->shader_base;
             params.resource_table = params.shader_base + record +
                                     (stage ? fs_record : 0);
-            params.main_call = stage ? package->fragment_call
-                                     : package->vertex_prolog_call;
+            uint32_t entry = apple9_render_entry(i, stage);
+            if (!apple9_archive_call(entry, &params.main_call) ||
+                !apple9_build_body_entry(view + entry,
+                                         params.shader_base + entry,
+                                         package->code[stage]->va->addr))
+               return false;
             params.publication_count = package->publication_count[stage];
             params.publication_count_valid = package->publication_count_valid[stage];
             if (package->scratch_size[stage]) {
@@ -3703,18 +2425,6 @@ agx_apple9_render_package_pipeline_word(
    return AGX_APPLE9_RENDER_PACKAGE_OFFSET;
 }
 
-uint32_t
-agx_apple9_render_package_program_word(
-   const struct agx_device *dev,
-   const struct agx_apple9_render_package *package, uint32_t offset)
-{
-   if (!dev || !package || !package->bo || !package->bo->va)
-      return 0;
-
-   uint64_t value = AGX_APPLE9_RENDER_PACKAGE_OFFSET + offset;
-   return value <= UINT32_MAX ? value : 0;
-}
-
 struct agx_apple9_ppp_update {
    uint32_t relative;
    uint32_t control;
@@ -3778,17 +2488,14 @@ agx_apple9_link_render_pipeline_with_prolog(
 
    const unsigned scalar_outputs = 4 + vertex.varying_components + vertex.writes_point_size;
    *pipeline = (struct agx_apple9_render_pipeline){
-      .vertex_prolog = vertex_prolog,
       .vertex = vertex,
       .fragment = fragment,
-      /* Filled from the installed archive BO before VDM emission. */
+      /* Filled from the installed entry BO before VDM emission. */
       .pipeline_word = 0,
       /* EXP-M4-57: this is a launch address in 64-byte units. The native
        * second draw advances it by three for another 0xc0-byte wrapper,
        * while the scalar output interface remains identical. */
-      .vertex_launch = (vertex_prolog.binary
-                           ? AGX_APPLE9_RENDER_FIXED_VERTEX_LAUNCH_OFFSET
-                           : AGX_APPLE9_RENDER_VERTEX_LAUNCH_OFFSET) / 0x40,
+      .vertex_launch = AGX_APPLE9_RENDER_VERTEX_LAUNCH_OFFSET / 0x40,
       .vertex_state_class = scalar_outputs | (scalar_outputs << 8),
       .primitive = AGX_PRIMITIVE_TRIANGLES,
    };
@@ -3832,16 +2539,6 @@ agx_apple9_emit_direct_draw(uint8_t *out,
 
    struct agx_apple9_ppp_update ppp[ARRAY_SIZE(direct_ppp)];
    memcpy(ppp, direct_ppp, sizeof(ppp));
-
-   /*
-    * The first PPP reference carries a vertex-fetch envelope bit in its
-    * relative word.  Caller-owned T8132 streams use 0x4040 for the inline
-    * gl_VertexID path and 0x0040 for both measured VBO layouts.  All other
-    * VDM bytes, including the referenced state itself, are identical after
-    * address normalization.
-    */
-   if (pipeline->vertex_prolog.binary)
-      ppp[0].relative = 0x0040;
 
    if (pipeline->uniform_draw) {
       uint32_t state = APPLE9_DRAW_PIPELINE_PPP +
@@ -3916,4 +2613,11 @@ agx_apple9_render_cache_set_clear_color(struct agx_apple9_render_cache *cache,
       memcpy(fixed + AGX_APPLE9_RENDER_FIXED_TARGET_GRAPH_OFFSET + offset,
              color, 16 * cache->current->nr_targets);
    }
+}
+
+struct agx_bo *
+agx_apple9_render_code_bo(const struct agx_apple9_render_package *package,
+                          unsigned stage)
+{
+   return package && stage < 2 ? package->code[stage] : NULL;
 }

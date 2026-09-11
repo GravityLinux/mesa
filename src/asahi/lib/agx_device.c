@@ -6,6 +6,7 @@
  */
 
 #include "agx_device.h"
+#include "agx_apple9_layout.h"
 #include <inttypes.h>
 #include "clc/asahi_clc.h"
 #include "drm-uapi/asahi_drm.h"
@@ -74,10 +75,16 @@ agx_apple9_bind_fixed_usc(struct agx_device *dev, struct agx_bo *bo)
                          AGX_APPLE9_FIXED_USC_ARENA_SIZE, 0,
                          DRM_ASAHI_BIND_READ);
 
+   static_assert((AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET & 0x3fff) == 0 &&
+                 (AGX_APPLE9_RENDER_COMPILER_STATE_END & 0x3fff) == 0,
+                 "Render state permissions require whole GPU pages");
+   static_assert(AGX_APPLE9_RENDER_COMPILER_STATE_END <= 0x058000,
+                 "Render state must precede the next writable region");
    static const struct {
       uint32_t start, end;
    } writable[] = {
-      {0x018000, 0x038000}, {0x058000, 0x078000}, {0x080000, 0x184000},
+      {AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET,
+       AGX_APPLE9_RENDER_COMPILER_STATE_END}, {0x058000, 0x078000}, {0x080000, 0x184000},
       {0x220000, 0x228000}, {0x230000, 0x340000}, {0x348000, 0x350000},
    };
    uint32_t cursor = 0;
@@ -131,25 +138,17 @@ agx_apple9_switch_fixed_usc_locked(struct agx_device *dev,
 }
 
 bool
-agx_apple9_install_compute_archive(struct agx_device *dev)
+agx_apple9_install_compute_entries(struct agx_device *dev, const void *entries)
 {
-   if (!dev || !dev->apple9_compute_archive ||
-       !dev->apple9_compute_archive_shadow)
+   if (!dev || !dev->apple9_compute_archive || !entries)
       return false;
-
    simple_mtx_lock(&dev->apple9_archive_lock);
-   bool populated = dev->apple9_archive_next != 0;
-   if (populated &&
-       dev->apple9_compute_archive_installed_generation !=
-          dev->apple9_compute_archive_generation) {
-      memcpy(agx_bo_map(dev->apple9_compute_archive),
-             dev->apple9_compute_archive_shadow,
-             AGX_APPLE9_COMPUTE_ARCHIVE_SIZE);
-      dev->apple9_compute_archive_installed_generation =
-         dev->apple9_compute_archive_generation;
-   }
-   bool installed = populated && agx_apple9_switch_fixed_usc_locked(
-      dev, dev->apple9_compute_archive);
+   memcpy(agx_bo_map(dev->apple9_compute_archive), entries,
+          AGX_APPLE9_COMPUTE_ARCHIVE_SIZE);
+   agx_bo_note_cpu_write(dev->apple9_compute_archive, 0,
+                         AGX_APPLE9_COMPUTE_ARCHIVE_SIZE);
+   bool installed =
+      agx_apple9_switch_fixed_usc_locked(dev, dev->apple9_compute_archive);
    simple_mtx_unlock(&dev->apple9_archive_lock);
    return installed;
 }
@@ -333,7 +332,7 @@ agx_bo_alloc(struct agx_device *dev, size_t size, size_t align,
    /*
     * AGX_BO_EXEC describes contents, not addressability.  Compact Apple8/9
     * users request LOW_VA explicitly. Apple9 immutable source packages may
-    * use arbitrary storage while one separate resident archive stays bound in
+    * use arbitrary storage while one separate entry/state arena stays bound in
     * the compact fixed-base aperture.
     */
 
@@ -870,7 +869,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
 
    /*
     * Apple9 launch wrappers encode their address as a compact 8-KiB chunk
-    * relative to the queue's USC base.  Allocate the queue archive and batch
+    * relative to the queue's USC base.  Allocate the queue entry table and batch
     * packages from the bottom of the USC heap so they remain in that compact
     * window.  Older generations use 32-bit USC offsets and retain Mesa's
     * usual high-to-low allocation policy.
@@ -956,15 +955,6 @@ agx_open_device(void *memctx, struct agx_device *dev)
 
       memset(agx_bo_map(dev->apple9_compute_archive), 0,
              dev->apple9_compute_archive->size);
-      dev->apple9_compute_archive_shadow =
-         calloc(1, AGX_APPLE9_COMPUTE_ARCHIVE_SIZE);
-      if (!dev->apple9_compute_archive_shadow) {
-         fprintf(stderr,
-                 "Failed to allocate Apple9 compute archive shadow\n");
-         return false;
-      }
-      dev->apple9_compute_archive_generation = 0;
-      dev->apple9_compute_archive_installed_generation = 0;
       dev->apple9_fixed_usc_owner = dev->apple9_compute_archive;
 
       dev->apple9_render_fixed_usc =
@@ -997,8 +987,6 @@ agx_open_device(void *memctx, struct agx_device *dev)
       }
       memset(agx_bo_map(dev->apple9_render_context), 0,
              dev->apple9_render_context->size);
-      dev->apple9_archive_next = 0;
-      dev->apple9_archive_entry_count = 0;
    }
 
    /* Bind read-only zero page at 2^32. This is in our reservation, and can be
@@ -1083,7 +1071,6 @@ agx_close_device(struct agx_device *dev)
    agx_bo_unreference(dev, dev->apple9_render_context);
    agx_bo_unreference(dev, dev->apple9_render_fixed_usc);
    agx_bo_unreference(dev, dev->apple9_compute_archive);
-   free(dev->apple9_compute_archive_shadow);
    if (dev->chip == AGX_CHIP_G16G || dev->chip == AGX_CHIP_G17P)
       simple_mtx_destroy(&dev->apple9_archive_lock);
    agx_bo_unreference(dev, dev->printf.bo);

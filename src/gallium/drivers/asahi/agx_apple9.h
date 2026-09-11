@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include "util/format/u_formats.h"
 
+#include "asahi/lib/agx_apple9_layout.h"
 #include "asahi/compiler/agx_apple9_profile.h"
 #include "asahi/compiler/agx_compile.h"
 #include "asahi/compiler/agx_compile_apple9.h"
@@ -29,6 +30,8 @@ struct agx_device;
 struct agx_bo;
 struct agx_apple9_render_package;
 struct agx_apple9_render_cache;
+struct agx_bo *
+agx_apple9_render_code_bo(const struct agx_apple9_render_package *, unsigned);
 
 /* Patch only the validated per-invocation extent fields in a launch record. */
 bool agx_apple9_patch_scratch_frame(uint8_t *launch, size_t size,
@@ -43,12 +46,14 @@ struct agx_apple9_render_stage {
    uint32_t scratch_size;
    uint16_t publication_count;
    bool publication_count_valid;
+   uint32_t resource_ssbo_mask, resource_write_mask;
    uint8_t resource_count;
    uint8_t resource_binding[AGX_APPLE9_MAX_GRAPHICS_BUFFERS];
    uint32_t texture_mask, sampler_mask;
    struct agx_apple9_texture_mapping texture_mapping;
    bool uses_texel_fetch;
    bool uses_discard;
+   bool reads_tile;
    bool disable_tri_merging;
 
    /* Scalar interface counts used by the bounded Apple9 stage linker. */
@@ -63,19 +68,9 @@ struct agx_apple9_render_stage {
 };
 
 struct agx_apple9_render_pipeline {
-   /* Vertex fetch/prolog and API vertex main are distinct archive programs. */
-   struct agx_apple9_render_stage vertex_prolog;
+   /* Vertex fetch is lowered into the API vertex program. */
    struct agx_apple9_render_stage vertex;
    struct agx_apple9_render_stage fragment;
-
-   /*
-    * Vertex-resource layout key. Zero selects the source-built vertex-ID
-    * path. The source address identifies the batch-retained BO; the live
-    * byte extent is uploaded into Metal's fixed-USC resource heap at the
-    * synchronized submission boundary.
-    */
-   uint64_t vertex_buffer;
-   uint32_t vertex_buffer_size;
 
    /* Color surfaces in draw-buffer order; RT0 may be supplied by the
     * single-target package API when this array is zero. */
@@ -136,8 +131,6 @@ bool agx_apple9_render_cache_upload_uniforms(
 #define AGX_APPLE9_COMPUTE_ARCHIVE_HEADER_SIZE 0x0340u
 #define AGX_APPLE9_COMPUTE_BLOCK_HEADER_SIZE   0x0040u
 #define AGX_APPLE9_COMPUTE_MAIN_OFFSET         0x03c0u
-#define AGX_APPLE9_COMPUTE_MAIN_MAX_SIZE                                       \
-   (AGX_APPLE9_COMPUTE_CODE_SIZE - AGX_APPLE9_COMPUTE_MAIN_OFFSET)
 #define AGX_APPLE9_COMPUTE_STATE_OFFSET          0x18000u
 #define AGX_APPLE9_COMPUTE_DIVISION_TABLE_OFFSET 0x70000u
 #define AGX_APPLE9_COMPUTE_DIVISION_TABLE_SIZE   0x02000u
@@ -156,54 +149,23 @@ bool agx_apple9_render_cache_upload_uniforms(
 
 #define AGX_APPLE9_RENDER_PACKAGE_OFFSET        0x01000000u
 #define AGX_APPLE9_RENDER_PACKAGE_SIZE          0x00400000u
-/* The package reserves zeroed space through the compiler-state boundary.
- * Compact entry calls are checked separately against their measured range. */
-#define AGX_APPLE9_RENDER_ARCHIVE_SIZE          0x00018000u
-#define AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET 0x00018000u
-#define AGX_APPLE9_RENDER_COMPILER_STATE_SIZE   0x00020000u
 #define AGX_APPLE9_RENDER_RESOURCE_OFFSET       0x00200000u
-/* Fixed-USC location selected by the VBO launch wrapper's compact 0x00a8
- * resource operand.  The package owns the source image at +0x200000; cache
- * binding installs it here before submission. */
-#define AGX_APPLE9_RENDER_FIXED_RESOURCE_OFFSET 0x00150000u
-#define AGX_APPLE9_RENDER_FIXED_RESOURCE_SIZE   0x00004000u
-/* The compatibility package keeps Metal's fixed vertex runtime 0xb0000
- * bytes later so it can own the caller attachment range independently. */
-#define AGX_APPLE9_RENDER_FIXED_RUNTIME_OFFSET  0x000d8000u
-#define AGX_APPLE9_RENDER_RUNTIME_SOURCE_OFFSET 0x00188000u
-#define AGX_APPLE9_RENDER_FIXED_RUNTIME_SIZE    0x00074000u
-/* The vertex-fetch fixed program selects its launch wrapper from the same
- * native USC arena.  Packages own a relocatable source copy at +0x220000,
- * while the live context consumes the synchronized copy at +0x170000. */
-#define AGX_APPLE9_RENDER_FIXED_VERTEX_LAUNCH_OFFSET 0x00170000u
-#define AGX_APPLE9_RENDER_FIXED_VERTEX_LAUNCH_SIZE   0x00004000u
-/* Remaining fixed-USC views consumed by the VBO compiler envelope. */
+/* Attachment-state views in the fixed USC address space. */
 #define AGX_APPLE9_RENDER_FIXED_TARGET_GRAPH_OFFSET  0x00160000u
 #define AGX_APPLE9_RENDER_TARGET_GRAPH_SOURCE_OFFSET 0x00210000u
-#define AGX_APPLE9_RENDER_FIXED_PIPELINE_OFFSET      0x00180000u
-#define AGX_APPLE9_RENDER_PIPELINE_SOURCE_OFFSET     0x00230000u
-#define AGX_APPLE9_RENDER_FIXED_DIMENSIONS_OFFSET    0x00190000u
-#define AGX_APPLE9_RENDER_DIMENSIONS_SOURCE_OFFSET   0x00240000u
 #define AGX_APPLE9_RENDER_ARCHIVE_HEADER_SIZE        0x0340u
 #define AGX_APPLE9_RENDER_BLOCK_HEADER_SIZE          0x0040u
-#define AGX_APPLE9_RENDER_CONSTANT_SIZE              0x0040u
+#define AGX_APPLE9_RENDER_CONSTANT_RESERVED_SIZE     0x0040u
 #define AGX_APPLE9_RENDER_FIRST_MAIN_OFFSET          0x03c0u
 #define AGX_APPLE9_RENDER_CONTEXT_BASE               UINT64_C(0x1000000000)
 #define AGX_APPLE9_RENDER_FIXED_ENCODER                                        \
    (AGX_APPLE9_RENDER_CONTEXT_BASE + UINT64_C(0x18000))
 #define AGX_APPLE9_RENDER_FIXED_ENCODER_SIZE        0x00008000u
-#define AGX_APPLE9_RENDER_FIXED_VBO_TABLE_OFFSET    0x00040000u
-#define AGX_APPLE9_RENDER_FIXED_VBO_METADATA_OFFSET 0x000d0000u
 #define AGX_APPLE9_RENDER_STATE_ADDRESS             UINT64_C(0x1000004000)
 #define AGX_APPLE9_RENDER_STATE_SIZE                0x00068000u
 #define AGX_APPLE9_RENDER_ENCODER_BASE              UINT64_C(0x1003000000)
 #define AGX_APPLE9_RENDER_ENCODER_STRIDE            0x00100000u
 #define AGX_APPLE9_RENDER_ENCODER_SLOTS             128u
-#define AGX_APPLE9_RENDER_RELOAD_OFFSET             0x00230000u
-#define AGX_APPLE9_RENDER_LOAD_OFFSET               0x00230240u
-#define AGX_APPLE9_RENDER_STORE_OFFSET              0x00230480u
-#define AGX_APPLE9_RENDER_LOAD_RSRC                 0x00000040u
-#define AGX_APPLE9_RENDER_VERTEX_RESOURCE_OFFSET    0x002000a0u
 #define AGX_APPLE9_RENDER_VERTEX_LAUNCH_OFFSET      0x00220000u
 
 enum agx_apple9_render_region_kind {
@@ -212,8 +174,7 @@ enum agx_apple9_render_region_kind {
 };
 
 /*
- * Empirically validated mutable regions in the otherwise opaque package.
- * Unknown package words deliberately have no semantic names here.
+ * Attachment descriptor ranges in the generated package state.
  */
 struct agx_apple9_render_region {
    enum agx_apple9_render_region_kind kind;
@@ -221,41 +182,19 @@ struct agx_apple9_render_region {
    uint32_t size;
 };
 
-/*
- * Apple9 graphics code uses the same self-describing archive grammar as
- * compute: a 0x340-byte helper directory followed by 0x40-byte block headers,
- * a 0x40-byte constant program, and a 0x40-aligned machine-code main.  The
- * stage launch programs carry compact archive calls (18 bits validated), so
- * neither stage has a fixed-size slot.
- */
-struct agx_apple9_render_archive_layout {
-   uint32_t fragment_block;
-   uint32_t fragment_main;
-   uint32_t fragment_block_size;
-   uint32_t vertex_prolog_block;
-   uint32_t vertex_prolog_main;
-   uint32_t vertex_prolog_block_size;
-   uint32_t vertex_main_block;
-   uint32_t vertex_main;
-   uint32_t vertex_main_block_size;
-   uint32_t vertex_fetch_runtime_a_block;
-   uint32_t vertex_fetch_runtime_b_block;
-   uint32_t end;
-   uint32_t fragment_call;
-   uint32_t vertex_prolog_call;
-   uint32_t vertex_call;
-};
+/* The fixed USC table contains a helper directory and small stage entries.
+ * Each entry transfers to an independently allocated compiler-generated body.
+ * Headers retain the hardware archive grammar, without packing bodies here. */
 
 bool agx_apple9_compute_enabled(const struct agx_device *dev);
 
-/*
- * Apple9 executable code is one queue-rooted, append-only archive.  A shader
- * variant owns one sized block in that archive; dispatch-local launch, state,
- * and Tier-2 resource records live in a separate batch package.
- */
-bool agx_apple9_upload_compute_shader(
-   struct agx_device *dev, const void *main, size_t main_size,
-   const struct agx_apple9_compute_profile *profile, uint32_t *main_offset);
+/* Batch-local entries transfer to immutable independently allocated bodies. */
+#define AGX_APPLE9_COMPUTE_MAX_ENTRIES                                         \
+   ((AGX_APPLE9_COMPUTE_CODE_SIZE - AGX_APPLE9_COMPUTE_ARCHIVE_HEADER_SIZE) /  \
+    0xc0u)
+bool agx_apple9_build_compute_entry(
+   void *mapping, unsigned dispatch, uint64_t shader_base, uint64_t body,
+   const struct agx_apple9_compute_profile *profile, uint32_t *entry_offset);
 
 size_t agx_apple9_compute_launch_size(
    const struct agx_apple9_compute_profile *profile);
@@ -369,11 +308,7 @@ bool agx_apple9_build_compute_geometry_fields(
    void *record, size_t record_size, uint64_t record_address,
    const struct agx_apple9_compute_geometry *geometry);
 
-/* Source-build one complete executable archive containing one main. */
-bool agx_apple9_build_compute_archive_image(
-   void *mapping, size_t mapping_size, const void *main, size_t main_size,
-   const struct agx_apple9_compute_profile *profile, uint32_t *main_offset);
-
+/* Build dispatch state and launch records referring to an existing entry. */
 bool agx_apple9_build_compute_dispatch(
    void *mapping, size_t mapping_size, uint64_t usc_exec_base,
    uint64_t package_base, uint32_t main_offset, uint32_t launch_offset,
@@ -389,12 +324,6 @@ bool agx_apple9_build_compute_dispatch_persistent(
    const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
    unsigned resource_count,
    const struct agx_apple9_compute_geometry *geometry);
-
-void
-agx_apple9_build_compute_package(void *mapping, uint64_t base, const void *main,
-                                 size_t main_size, const uint64_t *resources,
-                                 unsigned resource_count,
-                                 const struct agx_apple9_compute_profile *);
 
 bool agx_apple9_emit_direct_dispatch(
    void *out, uint64_t launch, const uint32_t global[3],
@@ -415,10 +344,6 @@ void agx_apple9_pack_nearest_sampler(void *out);
 
 const struct agx_apple9_render_region *
 agx_apple9_render_package_regions(size_t *count);
-
-bool agx_apple9_layout_render_archive(
-   const struct agx_apple9_render_pipeline *pipeline,
-   struct agx_apple9_render_archive_layout *layout);
 
 bool agx_apple9_build_render_package_image(
    void *mapping, size_t mapping_size,
@@ -455,12 +380,9 @@ agx_apple9_render_package_acquire(struct agx_apple9_render_package *package);
 void
 agx_apple9_render_package_release(struct agx_apple9_render_package *package);
 
-/*
- * Apple9 keeps one queue USC base.  Immutable source packages may have
- * arbitrary storage VAs, but one physical resident archive remains bound at
- * the fixed logical entry. Stage blocks are interned into that archive and
- * command-visible state is switched only after earlier users retire.
- */
+/* Apple9 keeps one queue USC base. Entry and command state is switched after
+ * earlier users retire. Immutable shader BOs are shared by cached packages;
+ * in-flight batches retain their packages and shader BO references. */
 struct agx_apple9_render_cache *
 agx_apple9_render_cache_create(struct agx_device *dev);
 
@@ -473,22 +395,13 @@ agx_apple9_render_cache_get(struct agx_apple9_render_cache *cache,
                             uint64_t color_target, unsigned width,
                             unsigned height);
 
-/* Read-only admission check using the same stage interning as submission.
- * Caller holds the screen fixed-USC generation lock. */
-bool agx_apple9_render_cache_can_add_draw(
-   const struct agx_apple9_render_cache *cache,
-   const struct agx_apple9_uniform_draw *draws, unsigned count,
-   const struct agx_apple9_render_package *package);
-
+/* Publish selected package state. Caller holds the screen fixed-USC lock. */
 bool agx_apple9_render_cache_bind(struct agx_apple9_render_cache *cache,
                                   struct agx_apple9_render_package *package);
 
 /* Caller holds the screen fixed-USC generation lock. */
 void agx_apple9_render_cache_invalidate_fixed_usc(
    struct agx_apple9_render_cache *cache);
-
-bool agx_apple9_render_cache_upload_vertex_buffer(
-   struct agx_apple9_render_cache *cache, const void *data, size_t size);
 
 bool
 agx_apple9_render_cache_upload_encoder(struct agx_apple9_render_cache *cache,
@@ -522,9 +435,8 @@ uint32_t agx_apple9_render_package_pipeline_word(
    const struct agx_device *dev,
    const struct agx_apple9_render_package *package);
 
-uint32_t agx_apple9_render_package_program_word(
-   const struct agx_device *dev,
-   const struct agx_apple9_render_package *package, uint32_t offset);
+/* Fixed-USC launch offset for a batch-owned fragment program, or zero. */
+uint32_t agx_apple9_render_draw_fragment_word(unsigned draw);
 
 /*
  * Apple9 command and shader ABIs are intentionally kept outside the older

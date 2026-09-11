@@ -169,7 +169,9 @@ agx_batch_init(struct agx_context *ctx,
    util_dynarray_init(&batch->apple9_attachments, ctx);
 
    batch->clear = 0;
-   batch->apple9_msaa_reloaded = false;
+   batch->apple9_color_reloaded = false;
+   batch->apple9_color_reload_draw = ~0u;
+   batch->apple9_color_store_draw = ~0u;
    batch->draw = 0;
    batch->load = 0;
    batch->resolve = 0;

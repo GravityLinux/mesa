@@ -13,6 +13,71 @@ describe the shader entry, resource/state addresses, publication requirements,
 independent frame extents, fragment tile layout, and compute threadgroup-memory
 allocation. `agx_apple9.c` supplies the live resources and compiler metadata.
 
+## Independent shader entry ABI (T8132)
+
+Normal GLSL compilation produces complete VS, FS and CS bodies through NIR,
+Apple9 virtual IR, shared register allocation, scheduling and encoding. Each
+body starts at byte zero of its own executable, low-VA, writeback BO, sized
+from the actual binary. Bodies are immutable and need no relocation when a
+pipeline or submission changes. Internal branches remain relative to their
+instruction address. Body size is bounded by allocation and compiler limits,
+not a 64/96/128 KiB shared code arena.
+
+The fixed USC region now holds only helper metadata, small entry blocks,
+launch records and state. A graphics submission reserves two 0xc0-byte entry
+blocks per draw after the 0x340-byte helper directory. Each block has a
+0x40-byte header, a 0x40-byte constant reservation and an entry at +0x80.
+The 56-draw capacity fits in a 32 KiB entry region; compiler state remains
+at +0x20000. Compute uses the same block size in a batch-local 64 KiB entry
+table, with its existing generated constant helper in the constant area.
+Batch limits count entries and command/resource space, independently of body
+size. There is no shader-body packing, archive residency planner, or
+code-size rollover path.
+
+The launch recipe selects the small entry through its compact main-call
+field. The entry uses the compiler's `JMP_EXEC_ANY` encoder to transfer active
+lanes directly to the body. This ten-byte instruction carries a signed,
+instruction-start-relative byte displacement in six bytes. The entry requires
+even addresses within the same 4 GiB USC heap and bounds the displacement to
+that heap's reach. An immediately following STOP terminates if no lanes are
+active. The transfer creates no return address and consumes no GPR, resource
+argument, publication or scratch slot. Bodies end through the compiler's
+ordinary stage completion and STOP; they do not return to the entry.
+
+The body resource contract is the stage ABI described below. Graphics roots
+are texture, sampler and buffer-table arguments; compute has three hidden
+arguments followed by compacted visible buffers. These are argument-space
+values, not fixed body GPR assignments. Ordinary body allocation uses 64
+32-bit GPRs. The shared allocator reserves r0:r1 for control/wait and copy
+support, extending the reservation through r3 when spill parallel-copy
+support is needed. Entry setup's temporary GPR choices impose no additional
+body reservation. The compiler reports publication high-water marks and
+aligned scratch byte requirements to the launch builder. The current
+per-invocation spill limit is 4096 bytes; changing the code allocation does
+not change that limit or the independently described atomic-frame contract.
+
+Graphics packages intern byte-identical bodies by stage and size, sharing
+immutable BO ownership. The package cache evicts only inactive packages;
+each in-flight batch pins its packages and independently references both
+stage BOs. Compute shader objects own their body BOs, and each dispatch batch
+references the BO before shader deletion can release it. CPU writes are
+reported through the normal BO dirty-range interface. Submission waits for
+previous fixed-USC users before publishing the batch's entry table and
+switching graphics/compute state. Body allocations therefore remain valid
+through execution, while entry storage is reused only after retirement.
+
+Native M4 validation includes ordinary compiled bodies of 230942 bytes (VS),
+246100 bytes (FS) and 203284 bytes (CS), with input-dependent control flow and
+spills. Isolated placement controls separately executed compiler bodies at
+2.25 and 3.75 GiB USC offsets and a backwards transfer. Those controls verify
+branch reach; they are absent from the production driver. The encoding's
+full signed 48-bit range is unit tested but is not a claim of hardware
+execution outside the 4 GiB heap. Evidence and negative destination-STOP
+controls are in the workspace's `tmp/entry191/` and `tmp/independent192/`.
+The external launch-fragment dependency described below remains: retiring
+the packed-body implementation does not imply every launcher operation has
+been decoded or source-generated.
+
 ## Resource ABI
 
 Vertex and fragment stages always reserve texture, sampler, and buffer roots
@@ -180,9 +245,10 @@ Versions 2, 3 and 4 remain comparison inputs. Distinct filenames let the
 installed driver retain its existing data while the development build uses
 version 5. The old standalone launcher/constant files and legacy interleaved-VBO file
 are no longer runtime dependencies. Preserve the original files as research
-inputs. The broader `g16_render_package.bin.zst` state template and compute
-division data remain external dependencies; this change does not replace the
-complete render-state/relocation graph.
+inputs. Render programs, their archive, and package state are generated without
+an external render seed; see `README.apple9-render-seed.md`. Compute division
+data remains external. The shared version-5 launch-fragment library described
+here remains a separate runtime dependency.
 
 ## Validation
 

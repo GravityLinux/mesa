@@ -1585,18 +1585,6 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
          return NULL;
       }
 
-      if (compiled->b.info.binary_size > AGX_APPLE9_COMPUTE_MAIN_MAX_SIZE) {
-         fprintf(stderr,
-                 "Apple9 compute main is too large for the source-built "
-                 "package: %u > %u bytes\n",
-                 compiled->b.info.binary_size,
-                 AGX_APPLE9_COMPUTE_MAIN_MAX_SIZE);
-         free(compiled->b.binary);
-         ralloc_free(early);
-         FREE(compiled);
-         return NULL;
-      }
-
       compiled->apple9_tiny = true;
       compiled->apple9_has_variable_shared_mem =
          early->info.cs.has_variable_shared_mem;
@@ -1607,8 +1595,8 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
              &compiled->apple9_compute_profile)) {
          /* Metal keys external Dynamic Caching state by address and keeps
           * that selector stable for the pipeline lifetime.  Allocate an
-          * immutable record from the device's append-only slab arena even
-          * when the executable archive block is interned.  An abandoned
+          * immutable record from the device's append-only slab arena independently
+          * of the executable body BO. An abandoned
           * record remains a tombstone until device teardown, so no failed
           * compile can recycle its selector.
           */
@@ -1636,19 +1624,19 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
             return NULL;
          }
       }
-      if (!agx_apple9_upload_compute_shader(dev, compiled->b.binary,
-                                            compiled->b.info.binary_size,
-                                            &compiled->apple9_compute_profile,
-                                            &compiled->apple9_main_offset)) {
-         fprintf(stderr,
-                 "Apple9 compute archive is full or the main cannot use "
-                 "the compact archive call\n");
+      compiled->bo = agx_bo_create(
+         dev, compiled->b.info.binary_size, 0,
+         AGX_BO_EXEC | AGX_BO_LOW_VA | AGX_BO_WRITEBACK, "Apple9 compute body");
+      if (!compiled->bo) {
          agx_bo_unreference(dev, compiled->apple9_state_bo);
          free(compiled->b.binary);
          ralloc_free(early);
          FREE(compiled);
          return NULL;
       }
+      memcpy(agx_bo_map(compiled->bo), compiled->b.binary,
+             compiled->b.info.binary_size);
+      agx_bo_note_cpu_write(compiled->bo, 0, compiled->b.info.binary_size);
 
       ralloc_free(early);
       return compiled;
@@ -1865,6 +1853,9 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
             .publication_count_valid = true,
             .ubo_mask = apple9_stage.info.apple9_ubo_mask,
             .resource_count = apple9_stage.info.apple9_resource_count,
+            .resource_ssbo_mask = apple9_stage.info.apple9_resource_ssbo_mask,
+            .resource_write_mask = apple9_stage.info.apple9_resource_write_mask,
+            .reads_tile = apple9_stage.info.apple9_reads_tile,
             .varying_components = apple9_stage.info.apple9_varyings.count,
             .varyings = apple9_stage.info.apple9_varyings,
             .apple9_linear_mask = apple9_stage.info.apple9_linear_mask,
@@ -1888,6 +1879,9 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
             .publication_count_valid = true,
             .ubo_mask = apple9_stage.info.apple9_ubo_mask,
             .resource_count = apple9_stage.info.apple9_resource_count,
+            .resource_ssbo_mask = apple9_stage.info.apple9_resource_ssbo_mask,
+            .resource_write_mask = apple9_stage.info.apple9_resource_write_mask,
+            .reads_tile = apple9_stage.info.apple9_reads_tile,
             .position_components = 4,
             .texture_mask = apple9_stage.info.apple9_texture_mask,
             .sampler_mask = apple9_stage.info.apple9_sampler_mask,
@@ -5373,10 +5367,15 @@ agx_apple9_validate_resources(struct agx_context *ctx)
          &ctx->stage[i ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX];
       for (unsigned slot = 0; slot < rs->resource_count; ++slot) {
          unsigned binding = rs->resource_binding[slot];
-         if (binding == AGX_APPLE9_GRAPHICS_SYSVAL_BINDING)
+         if (!(rs->resource_ssbo_mask & BITFIELD_BIT(slot)) &&
+             binding == AGX_APPLE9_GRAPHICS_SYSVAL_BINDING)
             continue;
          bool valid;
-         if (binding >= 32) {
+         if (rs->resource_ssbo_mask & BITFIELD_BIT(slot)) {
+            valid = binding < ARRAY_SIZE(stage->ssbo) &&
+                    stage->ssbo[binding].buffer &&
+                    stage->ssbo[binding].buffer_size;
+         } else if (binding >= 32) {
             unsigned vb = binding - 32;
             valid = !i && vb < ARRAY_SIZE(ctx->vertex_buffers) &&
                     ctx->vertex_buffers[vb].buffer.resource;
@@ -5469,34 +5468,6 @@ agx_apple9_first_color_target(const struct agx_apple9_render_pipeline *pipeline)
          return pipeline->color_targets[rt];
    }
    return 0;
-}
-
-/* Check the whole draw set before allocating descriptors or emitting this
- * draw. Submission uses the same byte-identical stage interning policy. */
-static bool
-agx_apple9_draw_fits_archive(struct agx_batch *batch)
-{
-   struct agx_context *ctx = batch->ctx;
-   struct agx_screen *screen = agx_screen(ctx->base.screen);
-   struct agx_device *dev = &screen->dev;
-   struct agx_apple9_render_pipeline pipeline;
-   if (!agx_apple9_link_render_pipeline(
-          &pipeline, ctx->vs->apple9_render_stage, ctx->fs->apple9_render_stage) ||
-       !agx_apple9_collect_color_targets(batch, &pipeline))
-      return false;
-
-   uint64_t target = agx_apple9_first_color_target(&pipeline);
-   simple_mtx_lock(&screen->apple9_render_package_lock);
-   if (!screen->apple9_render_cache)
-      screen->apple9_render_cache = agx_apple9_render_cache_create(dev);
-   struct agx_apple9_render_package *package = agx_apple9_render_cache_get(
-      screen->apple9_render_cache, &pipeline, target, batch->key.width,
-      batch->key.height);
-   bool fits = agx_apple9_render_cache_can_add_draw(
-      screen->apple9_render_cache, batch->apple9_uniform_draws,
-      batch->apple9_uniform_draw_count, package);
-   simple_mtx_unlock(&screen->apple9_render_package_lock);
-   return fits;
 }
 
 static void
@@ -5644,10 +5615,8 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       agx_dirty_all(ctx);
 #endif
 
-   bool retried_apple9_batch = false;
-retry_apple9_batch:
    agx_batch_init_state(batch);
-   if (agx_apple9_direct_render_enabled(dev) && !agx_apple9_reload_msaa(batch))
+   if (agx_apple9_direct_render_enabled(dev) && !agx_apple9_reload_color(batch))
       return;
 
    /* Dirty track the reduced prim: lines vs points vs triangles. Happens before
@@ -5723,25 +5692,6 @@ retry_apple9_batch:
    if (agx_apple9_direct_render_enabled(dev) &&
        !agx_apple9_validate_resources(ctx))
       return;
-
-   if (agx_apple9_direct_render_enabled(dev) &&
-       !agx_apple9_draw_fits_archive(batch)) {
-      if (!batch->apple9_uniform_draw_count || retried_apple9_batch) {
-         fprintf(stderr, "Apple9 draw cannot fit the shader archive with required reloads\n");
-         return;
-      }
-      if (getenv("AGX_APPLE9_PACKAGE_TRACE"))
-         fprintf(stderr, "APPLE9_RENDER_ARCHIVE_SPLIT draws=%u\n",
-                 batch->apple9_uniform_draw_count);
-      retried_apple9_batch = true;
-      agx_flush_batch(ctx, batch);
-      batch = agx_get_batch(ctx);
-      /* The index upload belonged to the retired batch. Shader/descriptor
-       * state must be re-established, while API statistics count only once. */
-      if (info->index_size)
-         ib = agx_index_buffer_ptr(batch, info, draws, &ib_extent);
-      goto retry_apple9_batch;
-   }
 
    if (ctx->linked.vs->uses_base_param || ctx->gs) {
       agx_upload_draw_params(batch, indirect, draws, info);
@@ -5949,6 +5899,8 @@ retry_apple9_batch:
       struct agx_apple9_uniform_draw *record =
          &batch->apple9_uniform_draws[index];
       memset(record, 0, sizeof(*record));
+      agx_batch_add_bo(batch, agx_apple9_render_code_bo(render_package, 0));
+      agx_batch_add_bo(batch, agx_apple9_render_code_bo(render_package, 1));
       agx_apple9_render_package_acquire(render_package);
       record->package = render_package;
       record->flatshade_first = ctx->rast->base.flatshade_first;
@@ -5986,6 +5938,7 @@ retry_apple9_batch:
          cfg.min_z = minz;
          cfg.max_z = maxz;
       }
+      record->reads_tile = pipeline.fragment.reads_tile;
       record->uses_discard = pipeline.fragment.uses_discard;
       record->disable_tri_merging = pipeline.fragment.disable_tri_merging;
       for (unsigned rt = 0; rt < batch->key.nr_cbufs; ++rt) {
@@ -6044,7 +5997,16 @@ retry_apple9_batch:
          for (unsigned slot = 0; slot < rs->resource_count; ++slot) {
             unsigned binding = rs->resource_binding[slot];
             uint64_t address;
-            if (binding == AGX_APPLE9_GRAPHICS_SYSVAL_BINDING) {
+            if (rs->resource_ssbo_mask & BITFIELD_BIT(slot)) {
+               const struct pipe_shader_buffer *ssbo =
+                  &ctx->stage[shader].ssbo[binding];
+               struct agx_resource *resource = agx_resource(ssbo->buffer);
+               if (rs->resource_write_mask & BITFIELD_BIT(slot))
+                  agx_batch_writes(batch, resource, 0);
+               else
+                  agx_batch_reads(batch, resource);
+               address = agx_map_gpu(resource) + ssbo->buffer_offset;
+            } else if (binding == AGX_APPLE9_GRAPHICS_SYSVAL_BINDING) {
                struct agx_ptr sysvals = agx_pool_alloc_aligned(
                   &batch->pool, AGX_APPLE9_GRAPHICS_SYSVAL_SIZE, 16);
                memcpy(sysvals.cpu, ctx->blend_color.color, 16);
@@ -6241,7 +6203,17 @@ retry_apple9_batch:
       simple_mtx_unlock(&screen->apple9_render_package_lock);
 
       if (!pipeline.pipeline_word) {
-         fprintf(stderr, "Apple9 render archive has no encodable USC base\n");
+         fprintf(stderr, "Apple9 render entry table has no encodable USC base\n");
+         return;
+      }
+
+      /* Tile export uses the prepared fragment entry and bindings directly.
+       * It must not execute as a rasterized fragment shader. */
+      if (batch->apple9_preparing_tile_store) {
+         agx_batch_add_bo(batch, render_package_bo);
+         agx_batch_add_bo(batch, render_state_bo);
+         agx_batch_add_bo(batch, dev->apple9_render_fixed_usc);
+         agx_dirty_reset_graphics(ctx);
          return;
       }
 
@@ -6487,7 +6459,8 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
 
    struct agx_batch *batch = agx_get_compute_batch(ctx);
    if (cs->apple9_tiny) {
-      if (!agx_apple9_compute_dispatch_fits_persistent(
+      if (batch->apple9_dispatch_count >= AGX_APPLE9_COMPUTE_MAX_ENTRIES ||
+          !agx_apple9_compute_dispatch_fits_persistent(
              AGX_APPLE9_COMPUTE_PACKAGE_SIZE, batch->apple9_launch_next,
              batch->apple9_resource_next, &cs->apple9_compute_profile)) {
          if (!batch->apple9_dispatch_count) {
@@ -6699,11 +6672,19 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
          for (unsigned d = 0; d < 3; ++d)
             geometry.threads[d] = grid.count[d];
       }
-      bool package_built = agx_apple9_build_compute_dispatch_persistent(
-         agx_bo_map(batch->apple9_package), batch->apple9_package->size,
-         dev->shader_base, package_base, cs->apple9_main_offset, launch_offset,
-         cs->apple9_state_address, resource_offset, &cs->apple9_compute_profile,
-         resource_addresses, resource_count, &geometry);
+      uint32_t entry_offset;
+      bool entry_built = agx_apple9_build_compute_entry(
+         agx_bo_map(batch->apple9_package), batch->apple9_dispatch_count,
+         dev->shader_base, cs->bo->va->addr, &cs->apple9_compute_profile,
+         &entry_offset);
+      bool package_built =
+         entry_built &&
+         agx_apple9_build_compute_dispatch_persistent(
+            agx_bo_map(batch->apple9_package), batch->apple9_package->size,
+            dev->shader_base, package_base, entry_offset, launch_offset,
+            cs->apple9_state_address, resource_offset,
+            &cs->apple9_compute_profile, resource_addresses, resource_count,
+            &geometry);
       if (!package_built) {
          fprintf(stderr,
                  "Apple9 compute package construction failed after layout "
@@ -6718,9 +6699,8 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
          fprintf(stderr,
                  "APPLE9_DISPATCH index=%u main=%#x launch=%#x state=%#llx "
                  "resource=%#x call=%#x call_bytes=%02x%02x%02x prefix=",
-                 batch->apple9_dispatch_count, cs->apple9_main_offset,
-                 launch_offset, (unsigned long long)cs->apple9_state_address,
-                 resource_offset,
+                 batch->apple9_dispatch_count, entry_offset, launch_offset,
+                 (unsigned long long)cs->apple9_state_address, resource_offset,
                  launch[call_offset] | (launch[call_offset + 1] << 8) |
                     (launch[call_offset + 2] << 16),
                  launch[call_offset], launch[call_offset + 1],
@@ -6757,6 +6737,7 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
          agx_query_increment_cpu(ctx, statistic, apple9_invocation_count);
       }
 
+      agx_batch_add_bo(batch, cs->bo);
       agx_batch_add_bo(batch, dev->apple9_compute_archive);
       if (cs->apple9_state_bo)
          agx_batch_add_bo(batch, cs->apple9_state_bo);

@@ -1154,20 +1154,17 @@ agx_clear(struct pipe_context *pctx, unsigned buffers,
 
    unsigned fastclear = buffers & ~(batch->draw | batch->load);
    unsigned slowclear = buffers & ~fastclear;
-   /* A clear submitted without an API draw needs a complete graphics package.
-    * Mesa's ordinary clear rectangle handles this without depending on the
-    * native compiler's independent zero-draw helper setup. */
-   if (agx_apple9_direct_render_enabled(agx_device(pctx->screen)) &&
-       !batch->apple9_render_package) {
-      slowclear |= fastclear;
-   }
-
-   /* Different attachments may be cleared or loaded independently. Use the
-    * ordinary clear shader so the compatibility load selection stays uniform. */
-   if (agx_apple9_direct_render_enabled(agx_device(pctx->screen)) &&
-       batch->key.nr_cbufs > 1) {
-      slowclear |= fastclear;
-      fastclear = 0;
+   /* The generated background/partial-load entry reloads attachments. Color
+    * clears must therefore execute as ordinary Mesa fragment draws. Depth and
+    * stencil keep their fixed-function fast-clear path. */
+   if (agx_apple9_direct_render_enabled(agx_device(pctx->screen))) {
+      unsigned color_fast = fastclear & PIPE_CLEAR_COLOR;
+      slowclear |= color_fast;
+      fastclear &= ~color_fast;
+      /* A depth/stencil-only clear also needs a complete graphics package
+       * when no draw has created one yet. */
+      if (!batch->apple9_render_package)
+         slowclear |= fastclear;
    }
 
    assert(scissor_state == NULL &&
@@ -1764,33 +1761,25 @@ agx_flush_render(struct agx_context *ctx, struct agx_batch *batch,
       struct agx_apple9_render_package *render_package =
          batch->apple9_render_package;
       bool package_ready = render_package != NULL;
-      uint32_t load_usc = agx_apple9_render_package_program_word(
-         dev, render_package, (batch->clear & PIPE_CLEAR_COLOR0)
-                                 ? AGX_APPLE9_RENDER_LOAD_OFFSET
-                                 : AGX_APPLE9_RENDER_RELOAD_OFFSET);
-      uint32_t store_usc = agx_apple9_render_package_program_word(
-         dev, render_package, AGX_APPLE9_RENDER_STORE_OFFSET);
+      uint32_t load_usc = agx_apple9_render_draw_fragment_word(
+         batch->apple9_color_reload_draw);
+      uint32_t store_usc =
+         agx_apple9_render_draw_fragment_word(batch->apple9_color_store_draw);
       if (!package_ready || !load_usc || !store_usc) {
          fprintf(stderr, "failed to prepare Apple9 color target\n");
          return false;
       }
 
-      /* These are offsets into the caller's USC package.  m1n1 combines
-       * them with the admitted Apple9 render aperture; no PBE target alias or
-       * source-fixture attachment remains necessary. */
+      /* Both tile helpers use batch-owned compiled entries and bindings. */
       cmdbuf->bg.usc = load_usc;
-      /* T8132's native clear/load pair differs in this resource bit even
-       * when both select the same partial-reload program. */
-      cmdbuf->bg.rsrc_spec = (batch->clear & PIPE_CLEAR_COLOR0)
-                               ? AGX_APPLE9_RENDER_LOAD_RSRC : 0;
+      cmdbuf->bg.rsrc_spec = 0;
       if (getenv("AGX_APPLE9_TRACE"))
          fprintf(stderr, "APPLE9_TILE_STATE targets=%u sample_bytes=%u\n",
                  batch->key.nr_cbufs, cmdbuf->sample_size_B);
       cmdbuf->eot.usc = store_usc;
       cmdbuf->eot.rsrc_spec = 0;
-      cmdbuf->partial_bg.usc = agx_apple9_render_package_program_word(
-         dev, render_package, AGX_APPLE9_RENDER_RELOAD_OFFSET);
-      cmdbuf->partial_bg.rsrc_spec = cmdbuf->bg.rsrc_spec;
+      cmdbuf->partial_bg.usc = load_usc;
+      cmdbuf->partial_bg.rsrc_spec = 0;
       cmdbuf->partial_eot.usc = store_usc;
       cmdbuf->partial_eot.rsrc_spec = 0;
    }
@@ -1842,7 +1831,8 @@ agx_flush_batch(struct agx_context *ctx, struct agx_batch *batch)
    }
 
    if (apple9_compute) {
-      bool installed = agx_apple9_install_compute_archive(dev);
+      bool installed = agx_apple9_install_compute_entries(
+         dev, agx_bo_map(batch->apple9_package));
       if (!installed) {
          fprintf(stderr, "failed to install Apple9 compute generation\n");
          simple_mtx_unlock(&screen->apple9_render_package_lock);
@@ -1873,29 +1863,6 @@ agx_flush_batch(struct agx_context *ctx, struct agx_batch *batch)
              batch->apple9_uniform_draw_count)) {
          fprintf(stderr, "failed to upload Apple9 graphics UBO bindings\n");
          abort();
-      }
-      if (batch->apple9_vertex_bo) {
-         const uint8_t *vertex_data =
-            (const uint8_t *)agx_bo_map(batch->apple9_vertex_bo) +
-            batch->apple9_vertex_offset;
-         if (getenv("AGX_APPLE9_PACKAGE_TRACE")) {
-            fprintf(stderr, "APPLE9_VERTEX_UPLOAD_BYTES");
-            for (unsigned i = 0;
-                 i < MIN2(batch->apple9_vertex_size, 64); ++i)
-               fprintf(stderr, "%s%02x", i ? "" : " ", vertex_data[i]);
-            fprintf(stderr, "\n");
-         }
-         bool uploaded = agx_apple9_render_cache_upload_vertex_buffer(
-            screen->apple9_render_cache, vertex_data,
-            batch->apple9_vertex_size);
-         if (!uploaded) {
-            fprintf(stderr,
-                    "failed to upload Apple9 vertex resource heap\n");
-            agx_apple9_render_cache_invalidate_fixed_usc(
-               screen->apple9_render_cache);
-            simple_mtx_unlock(&screen->apple9_render_package_lock);
-            abort();
-         }
       }
    }
 
@@ -1966,7 +1933,7 @@ agx_destroy_context(struct pipe_context *pctx)
 
    agx_bg_eot_cleanup(&ctx->bg_eot);
    agx_destroy_meta_shaders(ctx);
-   agx_destroy_msaa_reload(ctx);
+   agx_destroy_color_reload(ctx);
 
    /* Lock around the syncobj destruction, to avoid racing
     * command submission in another context.

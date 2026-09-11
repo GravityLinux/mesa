@@ -1,0 +1,18 @@
+/* SPDX-License-Identifier: MIT */
+#ifndef AGX_APPLE9_LAYOUT_H
+#define AGX_APPLE9_LAYOUT_H
+
+/* Fixed USC entry table and independently placed compiler state. Shader
+ * bodies use ordinary executable BOs in the USC heap. Offsets below are
+ * relative to the USC/package base, not the render-context address space. */
+#define AGX_APPLE9_RENDER_ENTRY_REGION_SIZE     0x00008000u
+#define AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET 0x00020000u
+#define AGX_APPLE9_RENDER_COMPILER_STATE_SIZE   0x00020000u
+#define AGX_APPLE9_RENDER_COMPILER_STATE_END \
+   (AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET + AGX_APPLE9_RENDER_COMPILER_STATE_SIZE)
+#define AGX_APPLE9_RENDER_COLOR_TEXTURE_OFFSET \
+   (AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET + 0x220u)
+#define AGX_APPLE9_RENDER_COLOR_BUFFER_OFFSET \
+   (AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET + 0x420u)
+
+#endif
