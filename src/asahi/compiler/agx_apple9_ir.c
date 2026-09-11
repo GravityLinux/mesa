@@ -5466,12 +5466,7 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       /* Compiler-authored branches fit in signed 32 bits. Sign-extension to
        * the architectural 48-bit start-relative displacement is explicit. */
       const int64_t displacement = (int32_t)instruction->immediate;
-      uint8_t bytes[10] = {0x0f, any ? 0x00 : 0x01, 0x54};
-      const uint64_t encoded = (uint64_t)displacement;
-      for (unsigned byte = 0; byte < 6; ++byte)
-         bytes[3 + byte] = encoded >> (8 * byte);
-      packed_init(packed, bytes, sizeof(bytes));
-      return true;
+      return agx_apple9_pack_branch(any, displacement, packed);
    }
    case AGX_APPLE9_VIR_BREAK_MASK_UNWIND: {
       const unsigned scope_tag =
@@ -5496,6 +5491,20 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
    if (reason != NULL)
       *reason = "Apple9 packer cannot encode this virtual instruction";
    return false;
+}
+
+bool
+agx_apple9_pack_branch(bool any, int64_t displacement,
+                       struct agx_apple9_packed_instruction *packed)
+{
+   if (!packed || (displacement & 1) || displacement < -(INT64_C(1) << 47) ||
+       displacement >= (INT64_C(1) << 47))
+      return false;
+   uint8_t bytes[10] = {0x0f, any ? 0x00 : 0x01, 0x54};
+   for (unsigned byte = 0; byte < 6; ++byte)
+      bytes[3 + byte] = (uint64_t)displacement >> (8 * byte);
+   packed_init(packed, bytes, sizeof(bytes));
+   return true;
 }
 
 bool

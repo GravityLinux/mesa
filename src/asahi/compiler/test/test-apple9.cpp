@@ -8174,3 +8174,22 @@ TEST(Apple9Allocator, SharedPublicationsCoverFullNamespace)
    agx_apple9_vir_finish(&p);
    ralloc_free(nir.shader);
 }
+
+TEST(Apple9, EntryBranchAddressRange)
+{
+   struct agx_apple9_packed_instruction packed;
+   for (int64_t displacement : {INT64_C(0xf0123456), -INT64_C(0xf0123456),
+                                -(INT64_C(1) << 47), (INT64_C(1) << 47) - 2}) {
+      ASSERT_TRUE(agx_apple9_pack_branch(true, displacement, &packed));
+      ASSERT_EQ(packed.length, 10u);
+      EXPECT_EQ(packed.bytes[0], 0x0f);
+      EXPECT_EQ(packed.bytes[1], 0x00);
+      EXPECT_EQ(packed.bytes[2], 0x54);
+      for (unsigned i = 0; i < 6; i++)
+         EXPECT_EQ(packed.bytes[3 + i],
+                   ((uint64_t)displacement >> (8 * i)) & 0xff);
+   }
+   EXPECT_FALSE(agx_apple9_pack_branch(true, INT64_C(1) << 47, &packed));
+   EXPECT_FALSE(agx_apple9_pack_branch(true, -(INT64_C(1) << 47) - 2, &packed));
+   EXPECT_FALSE(agx_apple9_pack_branch(true, 3, &packed));
+}

@@ -552,6 +552,12 @@ struct agx_apple9_packed_instruction {
    uint8_t length;
 };
 
+/* Start-relative byte displacement, encoded in the branch's signed 48-bit
+ * field. Unlike local CFG offsets, entry transfers may cross the signed-32-bit
+ * range. */
+bool agx_apple9_pack_branch(bool any, int64_t displacement,
+                            struct agx_apple9_packed_instruction *packed);
+
 bool agx_apple9_pack_vir_instruction(
    const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    struct agx_apple9_packed_instruction *packed, const char **reason);
