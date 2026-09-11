@@ -19,7 +19,7 @@ extern "C" {
 
 #define AGX_APPLE9_VREG_INVALID UINT32_MAX
 #define AGX_APPLE9_PHYS_INVALID UINT8_MAX
-#define AGX_APPLE9_MAX_VIR_SRCS 6
+#define AGX_APPLE9_MAX_VIR_SRCS 7
 /*
  * A deliberately small semantic IR for the first real Apple9 compiler.
  *
@@ -496,6 +496,9 @@ bool agx_apple9_vir_emit_phi_edge(
    struct agx_apple9_vir_program *program,
    const struct agx_apple9_vir_copy *copies, unsigned count);
 
+bool
+agx_apple9_vir_set_device_store_address(struct agx_apple9_vir_program *program,
+                                        uint32_t address);
 bool agx_apple9_vir_emit_device_store(struct agx_apple9_vir_program *program,
                                       unsigned binding, uint32_t index,
                                       const uint32_t *data, unsigned components,

@@ -145,6 +145,7 @@ struct agx_shader_info {
    bool apple9_writes_point_size;
    bool apple9_reads_point_coord;
    /* Ordered graphics table entries: API UBOs 0..31, vertex bindings 32..63. */
+   uint32_t apple9_resource_ssbo_mask, apple9_resource_write_mask;
    uint8_t apple9_resource_count;
    uint8_t apple9_resource_binding[AGX_APPLE9_MAX_GRAPHICS_BUFFERS];
    /* Live API bindings; descriptor tables compact each mask independently. */

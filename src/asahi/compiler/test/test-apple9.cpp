@@ -8175,6 +8175,27 @@ TEST(Apple9Allocator, SharedPublicationsCoverFullNamespace)
    ralloc_free(nir.shader);
 }
 
+TEST(Apple9Allocator, IndirectStoreRejectsBrokenAddressTuple)
+{
+   agx_apple9_vir_program p;
+   agx_apple9_vir_init(&p);
+   uint32_t address = agx_apple9_vir_input(&p, 8);
+   agx_apple9_vir_input(&p, 9);
+   uint32_t index = agx_apple9_vir_input(&p, 12);
+   uint32_t value = agx_apple9_vir_input(&p, 14);
+   ASSERT_TRUE(agx_apple9_vir_emit_device_store(&p, 0, index, &value, 1, 32));
+   ASSERT_TRUE(agx_apple9_vir_set_device_store_address(&p, address));
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&p, &reason)) << reason;
+   ASSERT_TRUE(agx_apple9_allocate_vir(&p, &reason)) << reason;
+   ASSERT_TRUE(agx_apple9_validate_vir_allocation(&p, &reason)) << reason;
+   auto *store = p.instructions[p.instruction_count - 1];
+   unsigned hi = store->src[store->memory_components + 2];
+   p.phys[hi] = p.phys[store->src[store->memory_components + 1]] + 2;
+   EXPECT_FALSE(agx_apple9_validate_vir_allocation(&p, &reason));
+   agx_apple9_vir_finish(&p);
+}
+
 TEST(Apple9, EntryBranchAddressRange)
 {
    struct agx_apple9_packed_instruction packed;

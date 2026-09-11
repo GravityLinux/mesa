@@ -39,6 +39,9 @@ apple9_source_width(const struct agx_apple9_vir_instr *ins, unsigned source)
    if ((ins->op == AGX_APPLE9_VIR_DEVICE_STORE ||
         ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC) && source == 0)
       return MAX2(ins->memory_components, 1);
+   if (ins->encoding == AGX_APPLE9_ENC_DEVICE_STORE_INDIRECT &&
+       source == ins->memory_components + 1)
+      return 2;
    if (ins->encoding == AGX_APPLE9_ENC_DEVICE_LOAD_INDIRECT && source == 1)
       return 2;
    return 1;
@@ -49,6 +52,12 @@ apple9_source_constraint(const struct agx_apple9_vir_instr *ins, unsigned source
 {
    if (ins->op == AGX_APPLE9_VIR_DEVICE_STORE ||
        ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC) {
+      if (ins->encoding == AGX_APPLE9_ENC_DEVICE_STORE_INDIRECT &&
+          source > ins->memory_components)
+         return agx_apple9_find_operand(ins->encoding,
+                                        source == ins->memory_components + 1
+                                           ? AGX_APPLE9_OPERAND_SRC1
+                                           : AGX_APPLE9_OPERAND_SRC2);
       enum agx_apple9_operand_role role =
          source ? AGX_APPLE9_OPERAND_INDEX
          : ins->op == AGX_APPLE9_VIR_DEVICE_STORE ? AGX_APPLE9_OPERAND_STORE_DATA

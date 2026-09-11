@@ -2390,44 +2390,9 @@ apple9_emit_device_store_vir(struct apple9_emitter *emitter,
                              const struct agx_apple9_vir_instr *instruction,
                              const uint8_t *phys, const char **reason)
 {
-   const unsigned components = instruction->memory_components;
-   if (instruction->op != AGX_APPLE9_VIR_DEVICE_STORE || components < 1 ||
-       components > 4 || instruction->nr_srcs != components + 1)
-      goto invalid;
-
    struct agx_apple9_packed_instruction packed;
-   unsigned data[4];
-   for (unsigned c = 0; c < components; ++c)
-      data[c] = phys[instruction->src[c]];
-   const unsigned index = phys[instruction->src[components]];
-   const bool release_index =
-      !(instruction->live_after_mask & (1u << components));
-
-   bool adjacent = true;
-   for (unsigned c = 1; c < components; ++c)
-      adjacent &= data[c] == data[0] + c;
-
-   if (!adjacent)
-      goto invalid;
-
-   bool packed_ok =
-      components == 1
-         ? agx_apple9_pack_device_store_scalar(
-              data[0], index, instruction->immediate, instruction->memory_bits,
-              (enum agx_apple9_scoreboard_slot)instruction->scoreboard_slot,
-              release_index, &packed)
-         : agx_apple9_pack_device_store_vector_u32(
-              data[0], index, instruction->immediate, components,
-              (enum agx_apple9_scoreboard_slot)instruction->scoreboard_slot,
-              release_index, &packed);
-   if (!packed_ok || !apple9_emit_packed(emitter, &packed))
-      goto invalid;
-   return true;
-
-invalid:
-   if (reason != NULL && *reason == NULL)
-      *reason = "Apple9 VIR device-store legalization failed";
-   return false;
+   return agx_apple9_pack_vir_instruction(instruction, phys, &packed, reason) &&
+          apple9_emit_packed(emitter, &packed);
 }
 
 static bool
@@ -2486,10 +2451,29 @@ apple9_emit_buffer_store(struct apple9_dag_lower *lower,
    if (store->lowered_index == AGX_APPLE9_VREG_INVALID)
       return false;
 
-   return agx_apple9_vir_emit_device_store(
-      &lower->program,
-      lower->argument_base + store->argument,
-      store->lowered_index, store->output, store->components, store->bit_size);
+   uint32_t address = AGX_APPLE9_VREG_INVALID;
+   if (lower->nir->info.stage != MESA_SHADER_COMPUTE) {
+      uint32_t pointer_index = apple9_dag_imm(lower, store->argument);
+      const struct agx_apple9_device_load_contract contract = {
+         .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
+         .flags = AGX_APPLE9_DEVICE_LOAD_HAS_NEXT,
+         .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
+      };
+      address = agx_apple9_vir_emit_device_load_vector(
+         &lower->program, lower->argument_base, pointer_index, 2, &contract);
+      if (address == AGX_APPLE9_VREG_INVALID ||
+          !agx_apple9_vir_set_device_load_contract(
+             &lower->program, address, AGX_APPLE9_DEVICE_LOAD_HAS_NEXT,
+             AGX_APPLE9_SCOREBOARD_SLOT_AUTO))
+         return false;
+   }
+   if (!agx_apple9_vir_emit_device_store(&lower->program,
+                                         lower->argument_base + store->argument,
+                                         store->lowered_index, store->output,
+                                         store->components, store->bit_size))
+      return false;
+   return address == AGX_APPLE9_VREG_INVALID ||
+          agx_apple9_vir_set_device_store_address(&lower->program, address);
 }
 
 static bool
@@ -3809,10 +3793,13 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
        nir->info.fs.needs_coarse_quad_helper_invocations || nir->info.writes_memory);
    if (nir->info.stage != MESA_SHADER_COMPUTE) {
       out->info.apple9_resource_count = resource_map.count;
+      out->info.apple9_resource_write_mask = resource_map.write_mask;
       for (unsigned i = 0; i < resource_map.count; ++i) {
          unsigned binding = resource_map.resource[i].binding;
          out->info.apple9_resource_binding[i] = binding;
-         if (binding < 32)
+         if (resource_map.resource[i].kind == AGX_APPLE9_COMPUTE_RESOURCE_SSBO)
+            out->info.apple9_resource_ssbo_mask |= BITFIELD_BIT(i);
+         else if (binding < 32)
             out->info.apple9_ubo_mask |= BITFIELD_BIT(binding);
       }
    }
