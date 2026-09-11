@@ -554,25 +554,26 @@ apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
    }
    case nir_instr_type_intrinsic: {
       nir_intrinsic_op op = nir_instr_as_intrinsic(instr)->intrinsic;
-      if (graphics && (op == nir_intrinsic_load_vertex_id ||
-                       op == nir_intrinsic_load_vertex_id_zero_base ||
-                       op == nir_intrinsic_load_pixel_coord ||
-                       op == nir_intrinsic_load_frag_coord_w ||
-                       op == nir_intrinsic_load_frag_coord_z ||
-                       op == nir_intrinsic_load_point_coord ||
-                       op == nir_intrinsic_load_front_face ||
-                       op == nir_intrinsic_ddx || op == nir_intrinsic_ddy ||
-                       op == nir_intrinsic_ddx_fine || op == nir_intrinsic_ddy_fine ||
-                       op == nir_intrinsic_load_barycentric_pixel ||
-                       op == nir_intrinsic_load_interpolated_input ||
-                       op == nir_intrinsic_load_input ||
-                       op == nir_intrinsic_load_local_pixel_agx ||
-                       op == nir_intrinsic_load_sample_mask_in ||
-                       op == nir_intrinsic_sample_mask_agx ||
-                       op == nir_intrinsic_store_output ||
-                       op == nir_intrinsic_store_local_pixel_agx ||
-                       op == nir_intrinsic_demote ||
-                       op == nir_intrinsic_demote_if))
+      if (graphics &&
+          (op == nir_intrinsic_load_vertex_id ||
+           op == nir_intrinsic_load_vertex_id_zero_base ||
+           op == nir_intrinsic_load_pixel_coord ||
+           op == nir_intrinsic_load_frag_coord_w ||
+           op == nir_intrinsic_load_frag_coord_z ||
+           op == nir_intrinsic_load_point_coord ||
+           op == nir_intrinsic_load_front_face || op == nir_intrinsic_ddx ||
+           op == nir_intrinsic_ddy || op == nir_intrinsic_ddx_fine ||
+           op == nir_intrinsic_ddy_fine ||
+           op == nir_intrinsic_load_barycentric_pixel ||
+           op == nir_intrinsic_load_interpolated_input ||
+           op == nir_intrinsic_load_input ||
+           op == nir_intrinsic_load_tile_pixel_agx ||
+           op == nir_intrinsic_load_local_pixel_agx ||
+           op == nir_intrinsic_load_sample_mask_in ||
+           op == nir_intrinsic_sample_mask_agx ||
+           op == nir_intrinsic_store_output ||
+           op == nir_intrinsic_store_local_pixel_agx ||
+           op == nir_intrinsic_demote || op == nir_intrinsic_demote_if))
          return true;
       return op == nir_intrinsic_load_global_invocation_id ||
              op == nir_intrinsic_load_workgroup_id ||
@@ -627,6 +628,7 @@ struct apple9_dag_lower {
    bool tile_read;
    bool tile_write;
    bool tile_access;
+   bool tile_coords;
    uint32_t coverage_control;
    uint32_t coverage_mask;
    struct apple9_scalar_load *loads;
@@ -1584,7 +1586,10 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
               nir_intrinsic_load_input)) {
          value = apple9_lower_interpolated_input(lower, scalar);
       } else if (nir_def_instr_type(scalar.def) == nir_instr_type_intrinsic &&
-                 nir_def_as_intrinsic(scalar.def)->intrinsic == nir_intrinsic_load_local_pixel_agx) {
+                 (nir_def_as_intrinsic(scalar.def)->intrinsic ==
+                     nir_intrinsic_load_local_pixel_agx ||
+                  nir_def_as_intrinsic(scalar.def)->intrinsic ==
+                     nir_intrinsic_load_tile_pixel_agx)) {
          nir_intrinsic_instr *intr = nir_def_as_intrinsic(scalar.def);
          if (lower->nir->info.stage != MESA_SHADER_FRAGMENT ||
              scalar.comp >= intr->num_components || intr->num_components > 2 ||
@@ -1592,21 +1597,35 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
              (nir_intrinsic_format(intr) != PIPE_FORMAT_R32_UINT &&
               nir_intrinsic_format(intr) != PIPE_FORMAT_R32G32_UINT) ||
              (nir_intrinsic_base(intr) & 3) ||
-             intr->src[0].ssa->bit_size != 32)
+             (intr->src[0].ssa->bit_size != 16 &&
+              intr->src[0].ssa->bit_size != 32))
             return AGX_APPLE9_VREG_INVALID;
          assert(lower->tile_access && lower->tile_read);
-         uint32_t sample_mask = apple9_lower_dag_scalar(lower,
-            nir_get_scalar(intr->src[0].ssa, 0));
+         const bool coords =
+            intr->intrinsic == nir_intrinsic_load_tile_pixel_agx;
+         if (coords && (!nir_src_is_const(intr->src[0]) ||
+                        !nir_src_as_uint(intr->src[0]) ||
+                        nir_src_as_uint(intr->src[0]) > 15 ||
+                        intr->src[1].ssa->bit_size != 32 ||
+                        intr->src[1].ssa->num_components != 1))
+            return AGX_APPLE9_VREG_INVALID;
+         uint32_t source = apple9_lower_dag_scalar(
+            lower, nir_get_scalar(intr->src[coords ? 1 : 0].ssa, 0));
          value = apple9_dag_emit(lower, AGX_APPLE9_VIR_TILE_LOAD,
-                                AGX_APPLE9_ENC_TILE_LOAD_MASK, &sample_mask, 1,
-                                nir_intrinsic_base(intr) / 4 + scalar.comp);
+                                 coords ? AGX_APPLE9_ENC_TILE_LOAD_COORDS
+                                        : AGX_APPLE9_ENC_TILE_LOAD_MASK,
+                                 &source, 1,
+                                 nir_intrinsic_base(intr) / 4 + scalar.comp);
          if (value != AGX_APPLE9_VREG_INVALID) {
             struct agx_apple9_vir_instr *load =
                lower->program.instructions[lower->program.instruction_count - 1];
             load->producer_scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_AUTO;
+            if (coords)
+               load->tile_sample_mask = nir_src_as_uint(intr->src[0]);
          }
       } else if (nir_def_instr_type(scalar.def) == nir_instr_type_intrinsic &&
-                 nir_def_as_intrinsic(scalar.def)->intrinsic == nir_intrinsic_load_sample_mask_in) {
+                 nir_def_as_intrinsic(scalar.def)->intrinsic ==
+                    nir_intrinsic_load_sample_mask_in) {
          value = apple9_dag_emit(lower, AGX_APPLE9_VIR_GET_SR,
             AGX_APPLE9_ENC_GET_COVERAGE, NULL, 0, 0x10c2);
       } else if (subgroup_size) {
@@ -3551,18 +3570,21 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
             if (instr->type != nir_instr_type_intrinsic)
                continue;
             nir_intrinsic_op op = nir_instr_as_intrinsic(instr)->intrinsic;
-            reads |= op == nir_intrinsic_load_local_pixel_agx;
+            reads |= op == nir_intrinsic_load_local_pixel_agx ||
+                     op == nir_intrinsic_load_tile_pixel_agx;
+            lower.tile_coords |= op == nir_intrinsic_load_tile_pixel_agx;
             writes |= op == nir_intrinsic_store_local_pixel_agx;
          }
       }
       if (reads || writes || has_texture || nir->info.fs.uses_discard) {
-         if (!agx_apple9_vir_emit_side_effect(&lower.program,
-                AGX_APPLE9_VIR_TILE_ACCESS, AGX_APPLE9_ENC_TILE_ACCESS,
-                NULL, 0, 0x600))
+         if (!agx_apple9_vir_emit_side_effect(
+                &lower.program, AGX_APPLE9_VIR_TILE_ACCESS,
+                AGX_APPLE9_ENC_TILE_ACCESS, NULL, 0,
+                lower.tile_coords ? 0xf00 : 0x600))
             goto fail;
          lower.tile_access = true;
       }
-      if (reads || writes) {
+      if ((reads || writes) && !lower.tile_coords) {
          if (!agx_apple9_vir_emit_side_effect(&lower.program,
                 AGX_APPLE9_VIR_TILE_ACCESS, AGX_APPLE9_ENC_TILE_ACCESS,
                 NULL, 0, writes ? 0x80c : 0x808))
@@ -3570,6 +3592,8 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
          lower.tile_read = reads;
          lower.tile_write = writes;
       }
+      if (lower.tile_coords)
+         lower.tile_read = reads;
    }
 
 
@@ -3587,10 +3611,11 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
 
    /* Finalize tile writes once after all color outputs. The release marks
     * completion of the fragment's tile transaction, including MRT stores. */
-   if (nir->info.stage == MESA_SHADER_FRAGMENT && lower.color_stores &&
-       !agx_apple9_vir_emit_side_effect(&lower.program,
-          AGX_APPLE9_VIR_TILE_FENCE, AGX_APPLE9_ENC_TILE_FENCE,
-          NULL, 0, 0x020c))
+   if (nir->info.stage == MESA_SHADER_FRAGMENT &&
+       (lower.color_stores || lower.tile_read) &&
+       !agx_apple9_vir_emit_side_effect(
+          &lower.program, AGX_APPLE9_VIR_TILE_FENCE, AGX_APPLE9_ENC_TILE_FENCE,
+          NULL, 0, lower.tile_coords ? 0x0300 : 0x020c))
       goto fail;
 
    if (lower.emitted_load_count != lower.load_instruction_count) {
@@ -3782,6 +3807,7 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    out->info.apple9_reads_point_coord = lower.reads_point_coord;
    out->info.apple9_writes_point_size = nir->info.stage == MESA_SHADER_VERTEX &&
       (nir->info.outputs_written & BITFIELD64_BIT(VARYING_SLOT_PSIZ));
+   out->info.apple9_reads_tile = lower.tile_read;
    out->info.apple9_flat_mask = lower.flat_mask;
    out->info.apple9_texture_mask = texture_mask;
    out->info.apple9_sampler_mask = sampler_mask;

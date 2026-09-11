@@ -8175,6 +8175,36 @@ TEST(Apple9Allocator, SharedPublicationsCoverFullNamespace)
    ralloc_free(nir.shader);
 }
 
+TEST(Apple9Encoding, ExplicitTileReadUsesCoordinatesAndImmediateSamples)
+{
+   agx_apple9_vir_instr load = {};
+   load.op = AGX_APPLE9_VIR_TILE_LOAD;
+   load.encoding = AGX_APPLE9_ENC_TILE_LOAD_COORDS;
+   load.dest = 0;
+   load.nr_srcs = 1;
+   load.src[0] = 1;
+   load.producer_scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_1;
+   uint8_t phys[] = {25, 8};
+   agx_apple9_packed_instruction packed = {};
+   const char *reason = nullptr;
+   for (unsigned sample = 0; sample < 4; ++sample) {
+      load.tile_sample_mask = 1 << sample;
+      ASSERT_TRUE(agx_apple9_pack_vir_instruction(&load, phys, &packed, &reason));
+      EXPECT_EQ(packed.length, 12u);
+      EXPECT_EQ(packed.bytes[3], 50);
+      EXPECT_EQ(packed.bytes[4], 8);
+      EXPECT_EQ(packed.bytes[6], 1 << sample);
+      EXPECT_EQ(packed.bytes[11], 0x10);
+   }
+   load.tile_sample_mask = 0;
+   EXPECT_FALSE(agx_apple9_pack_vir_instruction(&load, phys, &packed, &reason));
+   load.tile_sample_mask = 16;
+   EXPECT_FALSE(agx_apple9_pack_vir_instruction(&load, phys, &packed, &reason));
+   load.tile_sample_mask = 1;
+   phys[1] = 64;
+   EXPECT_FALSE(agx_apple9_pack_vir_instruction(&load, phys, &packed, &reason));
+}
+
 TEST(Apple9Allocator, IndirectStoreRejectsBrokenAddressTuple)
 {
    agx_apple9_vir_program p;

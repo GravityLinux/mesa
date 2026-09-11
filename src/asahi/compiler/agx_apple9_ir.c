@@ -5225,12 +5225,14 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       if (instruction->nr_srcs ||
           instruction->encoding != (access ? AGX_APPLE9_ENC_TILE_ACCESS
                                            : AGX_APPLE9_ENC_TILE_FENCE) ||
-          (access ? instruction->immediate != 0x600 &&
+          (access ? instruction->immediate != 0xf00 &&
+                       instruction->immediate != 0x600 &&
                        (instruction->immediate & ~0xfc) != 0x800 &&
                        instruction->immediate != 1
-                  : (instruction->immediate & ~0xfc) != 0 &&
-                    (instruction->immediate & ~0xfc) != 0x200 &&
-                    instruction->immediate != 1))
+                  : instruction->immediate != 0x300 &&
+                       (instruction->immediate & ~0xfc) != 0 &&
+                       (instruction->immediate & ~0xfc) != 0x200 &&
+                       instruction->immediate != 1))
          return false;
       const uint8_t bytes[] = {
          instruction->op == AGX_APPLE9_VIR_TILE_ACCESS ? 0x87 : 0x07,
@@ -5382,20 +5384,40 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       return true;
    }
    case AGX_APPLE9_VIR_TILE_LOAD: {
-      bool dynamic = instruction->nr_srcs == 1;
-      if (instruction->encoding != (dynamic ? AGX_APPLE9_ENC_TILE_LOAD_MASK : AGX_APPLE9_ENC_TILE_LOAD) ||
-          instruction->nr_srcs > 1 || instruction->immediate >= 16 ||
-          phys[instruction->dest] >= 64 ||
-          (dynamic && phys[instruction->src[0]] >= 64) ||
-          instruction->producer_scoreboard_slot < AGX_APPLE9_SCOREBOARD_SLOT_1 ||
+      bool coords = instruction->encoding == AGX_APPLE9_ENC_TILE_LOAD_COORDS;
+      bool dynamic = instruction->encoding == AGX_APPLE9_ENC_TILE_LOAD_MASK;
+      if ((!coords && !dynamic &&
+           instruction->encoding != AGX_APPLE9_ENC_TILE_LOAD) ||
+          instruction->nr_srcs != (coords || dynamic ? 1 : 0) ||
+          instruction->immediate >= 16 || phys[instruction->dest] >= 64 ||
+          ((coords || dynamic) && phys[instruction->src[0]] >= 64) ||
+          (coords && (!instruction->tile_sample_mask ||
+                      instruction->tile_sample_mask > 15)) ||
+          instruction->producer_scoreboard_slot <
+             AGX_APPLE9_SCOREBOARD_SLOT_1 ||
           instruction->producer_scoreboard_slot > AGX_APPLE9_SCOREBOARD_SLOT_6)
          return false;
       unsigned tag = 0x4e | ((instruction->producer_scoreboard_slot - 1) << 7);
-      unsigned mask = dynamic ? (phys[instruction->src[0]] << 1) |
-         !(instruction->live_after_mask & 1) : 1;
-      const uint8_t bytes[] = {0x67, dynamic ? 0x06 : 0x0e, 0x54,
-         phys[instruction->dest] << 1, 0, instruction->immediate << 1, mask,
-         tag & 0xff, tag >> 8, 0, 0, dynamic ? 0x20 : 0};
+      unsigned mask = coords    ? instruction->tile_sample_mask
+                      : dynamic ? (phys[instruction->src[0]] << 1) |
+                                     !(instruction->live_after_mask & 1)
+                                : 1;
+      const uint8_t bytes[] = {0x67,
+                               coords    ? 0x16
+                               : dynamic ? 0x06
+                                         : 0x0e,
+                               0x54,
+                               phys[instruction->dest] << 1,
+                               coords ? phys[instruction->src[0]] : 0,
+                               instruction->immediate << 1,
+                               mask,
+                               tag & 0xff,
+                               tag >> 8,
+                               0,
+                               0,
+                               coords    ? 0x10
+                               : dynamic ? 0x20
+                                         : 0};
       packed_init(packed, bytes, sizeof(bytes));
       return true;
    }

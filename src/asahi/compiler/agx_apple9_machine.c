@@ -1045,6 +1045,20 @@ static const struct agx_apple9_encoding_info encodings[] = {
                           63, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                           AGX_APPLE9_EVIDENCE_BYTE_DIFF)},
       },
+   [AGX_APPLE9_ENC_TILE_LOAD_COORDS] =
+      {
+         .name = "tile_load_coords",
+         .length = 12,
+         .operand_count = 2,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .operands = {GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32,
+                          63, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                          AGX_APPLE9_EVIDENCE_HARDWARE),
+                      GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
+                          63, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                          AGX_APPLE9_EVIDENCE_HARDWARE)},
+      },
    [AGX_APPLE9_ENC_TILE_STORE_MASK] =
       {
          .name = "tile_store_mask",

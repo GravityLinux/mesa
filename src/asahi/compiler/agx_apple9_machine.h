@@ -163,6 +163,7 @@ enum agx_apple9_encoding {
    AGX_APPLE9_ENC_SPILL_STORE,
    AGX_APPLE9_ENC_SPILL_LOAD,
    AGX_APPLE9_ENC_DEVICE_STORE_INDIRECT,
+   AGX_APPLE9_ENC_TILE_LOAD_COORDS,
    AGX_APPLE9_ENC_COUNT,
 
    /* Semantic IR pseudos have no machine encoding.  Keep them out of the

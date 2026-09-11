@@ -266,6 +266,7 @@ struct agx_apple9_vir_instr {
     * also define an adjacent dest_components tuple; stores have no SSA
     * destination and carry their ordered data values in src[0..N-1]. */
    uint8_t memory_components;
+   uint8_t tile_sample_mask;
    enum agx_apple9_atomic_op atomic_op;
    bool atomic_discard;
    uint8_t texture_index, sampler_index;

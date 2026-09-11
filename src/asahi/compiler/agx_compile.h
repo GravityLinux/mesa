@@ -142,6 +142,7 @@ struct agx_shader_info {
    struct agx_apple9_interp_mask apple9_linear_mask, apple9_flat_mask;
    uint16_t apple9_publication_count;
    bool apple9_reads_z;
+   bool apple9_reads_tile;
    bool apple9_writes_point_size;
    bool apple9_reads_point_coord;
    /* Ordered graphics table entries: API UBOs 0..31, vertex bindings 32..63. */
