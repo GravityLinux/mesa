@@ -222,7 +222,12 @@ agx_create_blend_state(struct pipe_context *ctx,
       unsigned rti = state->independent_blend_enable ? i : 0;
       struct pipe_rt_blend_state rt = state->rt[rti];
 
-      if (state->logicop_enable || !rt.blend_enable) {
+      if (state->advanced_blend_func && !state->logicop_enable) {
+         key->rt[i].advanced_blend = true;
+         key->rt[i].mode = agx_pack_blend_advanced(
+            state->advanced_blend_func, PIPE_BLEND_OVERLAP_UNCORRELATED,
+            true, true, false);
+      } else if (state->logicop_enable || !rt.blend_enable) {
          /* No blending, but we get the colour mask below */
          key->rt[i].mode = agx_pack_blend_standard(
             PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO,
@@ -1530,7 +1535,8 @@ agx_apple9_bounded_render_signature(const nir_shader *nir)
       return !(nir->info.inputs_read & ~(user | BITFIELD64_BIT(VARYING_SLOT_POS) |
                                         BITFIELD64_BIT(VARYING_SLOT_PNTC))) &&
              !(colors & ~((BITFIELD64_MASK(8) << FRAG_RESULT_DATA0) |
-                          BITFIELD64_BIT(FRAG_RESULT_COLOR)));
+                          BITFIELD64_BIT(FRAG_RESULT_COLOR) |
+                          BITFIELD64_BIT(FRAG_RESULT_DEPTH)));
    }
 
    return false;
@@ -1870,10 +1876,12 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
             .apple9_flat_mask = apple9_stage.info.apple9_flat_mask,
             .render_targets = key_->fs.apple9_nr_targets,
             .texture_mask = apple9_stage.info.apple9_texture_mask,
+            .image_mask = apple9_stage.info.apple9_image_mask,
             .sampler_mask = apple9_stage.info.apple9_sampler_mask,
             .texture_mapping = apple9_texture_mapping,
             .uses_texel_fetch = apple9_stage.info.apple9_uses_texel_fetch,
             .uses_discard = apple9_stage.info.apple9_uses_discard,
+            .writes_depth = apple9_stage.info.depth_layout != FRAG_DEPTH_LAYOUT_UNCHANGED,
             .disable_tri_merging = apple9_stage.info.disable_tri_merging,
          };
       } else {
@@ -1890,6 +1898,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
             .reads_tile = apple9_stage.info.apple9_reads_tile,
             .position_components = 4,
             .texture_mask = apple9_stage.info.apple9_texture_mask,
+            .image_mask = apple9_stage.info.apple9_image_mask,
             .sampler_mask = apple9_stage.info.apple9_sampler_mask,
             .texture_mapping = apple9_texture_mapping,
             .uses_texel_fetch = apple9_stage.info.apple9_uses_texel_fetch,
@@ -2439,6 +2448,16 @@ agx_apple9_sampler_key(const struct agx_stage *stage,
          continue;
       const struct pipe_sampler_state *state = &sampler->base;
       struct agx_apple9_sampler_key *sk = &key[i];
+      sk->wrap[0] = state->wrap_s;
+      sk->wrap[1] = state->wrap_t;
+      sk->wrap[2] = state->wrap_r;
+      sk->min_filter = state->min_img_filter;
+      sk->mag_filter = state->mag_img_filter;
+      sk->mip_filter = state->min_mip_filter;
+      sk->compare_func = state->compare_func;
+      sk->min_lod = state->min_lod;
+      sk->max_lod = state->max_lod;
+      sk->lod_bias = CLAMP(state->lod_bias, -16.f, 16.f);
       if (state->wrap_s == PIPE_TEX_WRAP_CLAMP)
          sk->flags |= AGX_APPLE9_CLAMP_S;
       if (state->wrap_t == PIPE_TEX_WRAP_CLAMP)
@@ -2709,6 +2728,14 @@ agx_update_fs(struct agx_batch *batch)
                             ctx->blend->key.alpha_to_one,
             .unsupported = ctx->blend->key.logicop_enable,
          };
+         if (ctx->blend->key.rt[rt].advanced_blend) {
+            struct agx_blend_advanced advanced =
+               agx_unpack_blend_advanced(ctx->blend->key.rt[rt].mode);
+            key.apple9_blend[rt].advanced_mode = advanced.op;
+            key.apple9_blend[rt].advanced_overlap = advanced.overlap;
+            key.apple9_blend[rt].src_premultiplied = advanced.src_premultiplied;
+            key.apple9_blend[rt].dst_premultiplied = advanced.dst_premultiplied;
+         }
       }
       agx_apple9_sampler_key(&ctx->stage[MESA_SHADER_FRAGMENT],
                              key.apple9_samplers);
@@ -5353,6 +5380,21 @@ agx_legalize_xfb(struct agx_context *ctx)
    }
 }
 
+/* T8132 sampling validates a 16-bit row-stride field in 16-byte units,
+ * minus one. Imported layouts must be representable without a copy. */
+static bool
+agx_apple9_native_linear_texture(struct agx_resource *rsrc)
+{
+   const struct pipe_resource *src = &rsrc->base;
+   uint64_t stride = rsrc->layout.linear_stride_B;
+   return rsrc->layout.tiling == AIL_TILING_LINEAR &&
+          src->target == PIPE_TEXTURE_2D && !src->last_level &&
+          src->nr_samples <= 1 && src->array_size == 1 &&
+          !rsrc->layout.compressed && stride && !(stride & 15) &&
+          stride <= AGX_APPLE9_MAX_LINEAR_STRIDE &&
+          !(agx_map_texture_gpu(rsrc, 0) & 15);
+}
+
 /* Validate resources before retaining a draw or allocating its descriptors.
  * A rejected shader/state must not leave a partly populated draw in a batch. */
 static bool
@@ -5409,14 +5451,22 @@ agx_apple9_validate_resources(struct agx_context *ctx)
          if (!view ||
              (view->base.target != PIPE_TEXTURE_1D &&
               view->base.target != PIPE_TEXTURE_2D &&
+              view->base.target != PIPE_TEXTURE_2D_ARRAY &&
               view->base.target != PIPE_TEXTURE_3D &&
               view->base.target != PIPE_TEXTURE_CUBE) ||
              !agx_apple9_texture_format_supported(view->format) ||
              view->rsrc->layout.compressed || view->rsrc->base.nr_samples > 1 ||
              view->base.u.tex.first_layer ||
-             view->rsrc->layout.tiling != AIL_TILING_GPU) {
-            fprintf(stderr, "Apple9 texture binding %u has an unsupported view\n",
-                    binding);
+             (view->rsrc->layout.tiling != AIL_TILING_GPU &&
+              !agx_apple9_native_linear_texture(view->rsrc))) {
+            fprintf(stderr, "Apple9 texture binding %u has an unsupported view "
+                    "(target=%u format=%s tiling=%u compressed=%u samples=%u layer=%u)\n",
+                    binding, view ? view->base.target : 0,
+                    view ? util_format_short_name(view->format) : "unbound",
+                    view ? view->rsrc->layout.tiling : 0,
+                    view ? view->rsrc->layout.compressed : 0,
+                    view ? view->rsrc->base.nr_samples : 0,
+                    view ? view->base.u.tex.first_layer : 0);
             return false;
          }
       }
@@ -5948,11 +5998,13 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       }
       record->reads_tile = pipeline.fragment.reads_tile;
       record->uses_discard = pipeline.fragment.uses_discard;
+      record->writes_depth = pipeline.fragment.writes_depth;
       record->disable_tri_merging = pipeline.fragment.disable_tri_merging;
       for (unsigned rt = 0; rt < batch->key.nr_cbufs; ++rt) {
          struct agx_blend_standard blend =
             agx_unpack_blend_standard(ctx->blend->key.rt[rt].mode);
-         record->reads_tile |= blend.rgb_func != PIPE_BLEND_ADD ||
+         record->reads_tile |= ctx->blend->key.rt[rt].advanced_blend ||
+                               blend.rgb_func != PIPE_BLEND_ADD ||
                                blend.alpha_func != PIPE_BLEND_ADD ||
                                blend.rgb_src_factor != PIPE_BLENDFACTOR_ONE ||
                                blend.alpha_src_factor != PIPE_BLENDFACTOR_ONE ||
@@ -6025,6 +6077,23 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
                   struct agx_sampler_state *sampler = ctx->stage[shader].samplers[api];
                   bias[i] = sampler ? CLAMP(sampler->base.lod_bias, -16.f, 16.f) : 0;
                }
+               for (unsigned i = 0; i < 32; ++i) {
+                  uint32_t *info = (uint32_t *)((uint8_t *)sysvals.cpu +
+                     AGX_APPLE9_TEXTURE_INFO_OFFSET + i * AGX_APPLE9_TEXTURE_INFO_STRIDE);
+                  memset(info, 0, AGX_APPLE9_TEXTURE_INFO_STRIDE);
+                  struct agx_sampler_view *view = ctx->stage[shader].textures[i];
+                  if (!view)
+                     continue;
+                  struct pipe_resource *texture = &view->rsrc->base;
+                  unsigned level = view->base.u.tex.first_level;
+                  info[0] = u_minify(texture->width0, level);
+                  info[1] = u_minify(texture->height0, level);
+                  info[2] = view->base.target == PIPE_TEXTURE_3D
+                     ? u_minify(texture->depth0, level)
+                     : view->base.u.tex.last_layer - view->base.u.tex.first_layer + 1;
+                  info[3] = view->base.u.tex.last_level - level + 1;
+                  info[4] = MAX2(texture->nr_samples, 1);
+               }
                address = sysvals.gpu;
             } else if (binding >= 32) {
                const struct pipe_vertex_buffer *vb =
@@ -6049,13 +6118,13 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       for (unsigned stage = 0; stage < 2; ++stage) {
          const struct agx_apple9_render_stage *rs =
             stage ? &pipeline.fragment : &pipeline.vertex;
-         if (!rs->texture_mask)
+         if (!rs->texture_mask && !rs->image_mask)
             continue;
          struct agx_stage *shader = &ctx->stage[
             stage ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX];
          struct agx_ptr textures = agx_pool_alloc_aligned(
             &batch->pool,
-            util_bitcount(rs->texture_mask) *
+            (util_bitcount(rs->texture_mask) + util_bitcount(rs->image_mask)) *
                AGX_APPLE9_TEXTURE_TABLE_STRIDE,
             64);
          struct agx_ptr samplers = agx_pool_alloc_aligned(
@@ -6077,14 +6146,16 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
             memset(descriptor, 0, 32);
             struct agx_resource *resource = view->rsrc;
             if ((view->base.target != PIPE_TEXTURE_2D && view->base.target != PIPE_TEXTURE_1D &&
-                 view->base.target != PIPE_TEXTURE_3D && view->base.target != PIPE_TEXTURE_CUBE) ||
+                 view->base.target != PIPE_TEXTURE_3D && view->base.target != PIPE_TEXTURE_CUBE &&
+                 view->base.target != PIPE_TEXTURE_2D_ARRAY) ||
                 !agx_apple9_texture_format_supported(view->format) ||
                 resource->layout.compressed || resource->base.nr_samples > 1 ||
                 view->base.u.tex.first_layer ||
-                resource->layout.tiling != AIL_TILING_GPU) {
+                (resource->layout.tiling != AIL_TILING_GPU &&
+                 !agx_apple9_native_linear_texture(resource))) {
                fprintf(
                   stderr,
-                  "Apple9 texture requires a supported uncompressed 2D format and GPU tiling\n");
+                  "Apple9 texture requires a supported format and sampleable layout\n");
                abort();
             }
             agx_batch_reads(batch, resource);
@@ -6102,7 +6173,13 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
             uint64_t address = agx_map_texture_gpu(resource, 0) >> 4;
             if (view->base.target == PIPE_TEXTURE_3D)
                address |= (uint64_t)(resource->base.depth0 - 1) << 46;
-            if (resource->layout.page_aligned_layers)
+            if (view->base.target == PIPE_TEXTURE_2D_ARRAY)
+               address |= (uint64_t)(resource->base.array_size - 1) << 46;
+            /* Linear rows use bits 110..125, sharing the tiled depth field.
+             * Do not apply the tiled page-alignment flag to this descriptor. */
+            if (resource->layout.tiling == AIL_TILING_LINEAR)
+               address |= ((uint64_t)(resource->layout.linear_stride_B >> 4) - 1) << 46;
+            else if (resource->layout.page_aligned_layers)
                address |= UINT64_C(1) << 62;
             if (resource->base.last_level)
                address |= UINT64_C(1) << 63;
@@ -6121,6 +6198,48 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
                        index, binding, textures.gpu,
                        agx_map_texture_gpu(resource, 0), resource->base.width0,
                        resource->base.height0, util_format_name(view->format));
+         }
+         u_foreach_bit(binding, rs->image_mask) {
+            struct pipe_image_view *view = &shader->images[binding];
+            struct agx_resource *resource = agx_resource(view->resource);
+            assert(resource && !resource->layout.compressed);
+            uint8_t *descriptor = (uint8_t *)textures.cpu +
+                                  slot++ * AGX_APPLE9_TEXTURE_TABLE_STRIDE;
+            struct agx_pbe_packed legacy;
+            agx_batch_upload_pbe(batch, &legacy, view, true, false, false, false);
+            memset(descriptor, 0, AGX_APPLE9_TEXTURE_TABLE_STRIDE);
+            memcpy(descriptor, &legacy, 8);
+            unsigned level = view->u.tex.level;
+            uint64_t address = (agx_map_texture_gpu(resource, view->u.tex.first_layer) +
+                               resource->layout.level_offsets_B[level] -
+                               resource->layout.level_offsets_B[0]) >> 4;
+            uint32_t header[2];
+            memcpy(header, descriptor, 8);
+            header[0] = (header[0] & 0x00ffffff) |
+                        ((u_minify(resource->base.width0, level) - 1) << 24);
+            header[1] = ((u_minify(resource->base.width0, level) - 1) >> 8) |
+                        ((u_minify(resource->base.height0, level) - 1) << 6) |
+                        (header[1] & 0x01000000);
+            /* Packed tile words already follow the format's memory channel
+             * order. Unlike RGBA8 tile words, they need no PBE swizzle. */
+            enum pipe_format physical = agx_apple9_color_tile_format(view->format);
+            if (agx_apple9_color_is_packed(physical))
+               header[0] = (header[0] & ~0x00ff0000u) | 0x00e40000;
+            memcpy(descriptor, header, 8);
+            /* Apple9 PBE addresses use 40 bits in 16-byte units. Linear
+             * row stride occupies bits 108.., also in 16-byte units. */
+            if (resource->layout.tiling == AIL_TILING_LINEAR)
+               address |= ((uint64_t)(ail_get_linear_stride_B(&resource->layout, level) >> 4) - 1) << 44;
+            memcpy(descriptor + 8, &address, 8);
+            if (getenv("AGX_APPLE9_TRACE")) {
+               fprintf(stderr, "APPLE9_BLOCK_IMAGE_DRAW draw=%u binding=%u desc=", index, binding);
+               for (unsigned word = 0; word < 8; ++word) {
+                  uint32_t value;
+                  memcpy(&value, descriptor + 4 * word, 4);
+                  fprintf(stderr, "%08x%s", value, word == 7 ? "\n" : " ");
+               }
+            }
+            agx_batch_writes(batch, resource, level);
          }
          slot = 0;
          u_foreach_bit(binding, rs->sampler_mask) {

@@ -21,7 +21,8 @@ enum agx_apple9_compute_abi {
 
 /* Validated direct descriptor selection capacity, independent of API slots. */
 #define AGX_APPLE9_GRAPHICS_MAX_TEXTURES 16
-#define AGX_APPLE9_GRAPHICS_MAX_SAMPLERS 16
+/* Sixteen API samplers plus the private nearest texel-fetch sampler. */
+#define AGX_APPLE9_GRAPHICS_MAX_SAMPLERS 17
 
 #define AGX_APPLE9_COMPUTE_MAX_RESOURCES 18
 /* Conservative per-invocation limit exercised on T8132 in all three stages. */

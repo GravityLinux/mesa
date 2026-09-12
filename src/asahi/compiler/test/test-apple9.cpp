@@ -6813,9 +6813,9 @@ TEST(Apple9Compiler, VertexTextureSamplingUsesExplicitLod)
    }
 }
 
-TEST(Apple9Compiler, VolumeCubeAndShadowAcceptDynamicCoordinatesAndLod)
+TEST(Apple9Compiler, VolumeCubeArrayAndShadowAcceptDynamicCoordinatesAndLod)
 {
-   for (unsigned kind = 0; kind < 4; ++kind)
+   for (unsigned kind = 0; kind < 5; ++kind)
    for (auto op : {nir_texop_txl, nir_texop_txb})
    for (bool reverse : {false, true}) {
       nir_builder b = nir_builder_init_simple_shader(
@@ -6823,7 +6823,7 @@ TEST(Apple9Compiler, VolumeCubeAndShadowAcceptDynamicCoordinatesAndLod)
       b.shader->info.num_ubos = 1;
       nir_def *input = nir_load_ubo(&b, 4, 32, nir_imm_int(&b, 0),
          nir_imm_int(&b, 0), .align_mul = 16, .range = 16);
-      bool shadow = kind >= 2;
+      bool shadow = kind == 2 || kind == 3;
       bool scalar = kind == 3;
       nir_tex_instr *tex = nir_tex_instr_create(b.shader, shadow ? 3 : 2);
       tex->op = op;
@@ -6831,6 +6831,7 @@ TEST(Apple9Compiler, VolumeCubeAndShadowAcceptDynamicCoordinatesAndLod)
                          kind == 1 ? GLSL_SAMPLER_DIM_CUBE : GLSL_SAMPLER_DIM_2D;
       tex->dest_type = nir_type_float32;
       tex->is_shadow = shadow;
+      tex->is_array = kind == 4;
       tex->is_new_style_shadow = scalar;
       tex->coord_components = shadow ? 2 : 3;
       tex->texture_index = 3;
@@ -7337,6 +7338,30 @@ TEST(Apple9Compiler, StandardBlendEquationsAndFactors)
    }
 }
 
+TEST(Apple9Compiler, AdvancedBlendUsesOrdinaryColorLowering)
+{
+   for (unsigned mode = PIPE_ADVANCED_BLEND_MULTIPLY;
+        mode <= PIPE_ADVANCED_BLEND_HSL_LUMINOSITY; ++mode) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "advanced_blend");
+      nir_store_output(&b, nir_imm_vec4(&b, .2, .4, .6, .8), nir_imm_int(&b, 0),
+         .write_mask = 15, .src_type = nir_type_float32,
+         .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+      b.shader->info.io_lowered = true;
+      agx_apple9_blend blend = {};
+      blend.advanced_mode = mode;
+      blend.src_premultiplied = blend.dst_premultiplied = true;
+      blend.colormask = 15;
+      agx_apple9_varying_layout varyings = {};
+      agx_shader_part out = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_fragment_blend(
+         b.shader, &varyings, &blend, &out, &reason)) << mode << ": " << reason;
+      free(out.binary);
+      ralloc_free(b.shader);
+   }
+}
+
 TEST(Apple9Allocator, TexturePublicationsHaveIndependentStorageAndPendingLifetime)
 {
    for (unsigned placement : {0u, 1u, 2u}) {
@@ -7365,7 +7390,7 @@ TEST(Apple9Allocator, TexturePublicationsHaveIndependentStorageAndPendingLifetim
           * lifetime. Put another publication before its result handoff. */
          unsigned second_params = 0;
          for (unsigned i = 1; i < p.instruction_count; ++i) {
-            if (p.instructions[i]->op == AGX_APPLE9_VIR_TEXTURE_COORDS) {
+            if (p.instructions[i]->op == AGX_APPLE9_VIR_PUBLICATION_TUPLE) {
                second_params = i;
                break;
             }
@@ -7380,7 +7405,7 @@ TEST(Apple9Allocator, TexturePublicationsHaveIndependentStorageAndPendingLifetim
       unsigned count = 0;
       for (unsigned i = 0; i < p.instruction_count; ++i) {
          auto &ins = *p.instructions[i];
-         if (ins.op != AGX_APPLE9_VIR_TEXTURE_COORDS)
+         if (ins.op != AGX_APPLE9_VIR_PUBLICATION_TUPLE)
             continue;
          ASSERT_LT(count, 2u);
          pubs[count++] = ins.dest;
@@ -7406,18 +7431,21 @@ TEST(Apple9Allocator, TexturePublicationsHaveIndependentStorageAndPendingLifetim
 
 TEST(Apple9Compiler, TexelFetchUsesDynamicLodWithoutSamplerBinding)
 {
+   for (unsigned kind = 0; kind < 3; ++kind)
    for (bool reverse_sources : {false, true}) {
       nir_builder b = nir_builder_init_simple_shader(
          MESA_SHADER_FRAGMENT, &agx_nir_options, "apple9_texel_fetch");
       b.shader->info.num_ubos = 1;
       nir_def *lod = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0),
          nir_imm_int(&b, 0), .align_mul = 4, .range = 4);
-      nir_def *coord = nir_vec2(&b, nir_imm_int(&b, 3), nir_imm_int(&b, 5));
+      nir_def *coord = kind ? nir_vec3(&b, nir_imm_int(&b, 3), nir_imm_int(&b, 5), nir_imm_int(&b, 1))
+                            : nir_vec2(&b, nir_imm_int(&b, 3), nir_imm_int(&b, 5));
       nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
       tex->op = nir_texop_txf;
-      tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+      tex->sampler_dim = kind == 2 ? GLSL_SAMPLER_DIM_3D : GLSL_SAMPLER_DIM_2D;
+      tex->is_array = kind == 1;
       tex->dest_type = nir_type_float32;
-      tex->coord_components = 2;
+      tex->coord_components = kind ? 3 : 2;
       tex->texture_index = 7;
       tex->sampler_index = 31; /* Has no meaning for an integer fetch. */
       unsigned c = reverse_sources ? 1 : 0;
@@ -7435,6 +7463,106 @@ TEST(Apple9Compiler, TexelFetchUsesDynamicLodWithoutSamplerBinding)
       const char *reason = nullptr;
       ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason))
          << (reason ?: "");
+      EXPECT_EQ(compiled.info.apple9_texture_mask, 1u << 7);
+      EXPECT_EQ(compiled.info.apple9_sampler_mask, 0u);
+      EXPECT_TRUE(compiled.info.apple9_uses_texel_fetch);
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
+}
+
+TEST(Apple9Compiler, SixteenApiSamplersLeaveRoomForTexelFetch)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "all_samplers_and_fetch");
+   nir_def *sum = nir_imm_vec4(&b, 0, 0, 0, 0);
+   for (unsigned i = 0; i < 17; ++i) {
+      bool fetch = i == 16;
+      nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
+      tex->op = fetch ? nir_texop_txf : nir_texop_txl;
+      tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+      tex->dest_type = nir_type_float32;
+      tex->coord_components = 2;
+      tex->texture_index = i % 16;
+      tex->sampler_index = i % 16;
+      tex->src[0].src_type = nir_tex_src_coord;
+      tex->src[0].src = nir_src_for_ssa(fetch ? nir_imm_ivec2(&b, 0, 0)
+                                            : nir_imm_vec2(&b, .5, .5));
+      tex->src[1].src_type = nir_tex_src_lod;
+      tex->src[1].src = nir_src_for_ssa(nir_imm_int(&b, 0));
+      nir_def_init(&tex->instr, &tex->def, 4, 32);
+      nir_builder_instr_insert(&b, &tex->instr);
+      sum = nir_fadd(&b, sum, &tex->def);
+   }
+   nir_store_output(&b, nir_fmul_imm(&b, sum, 1.0 / 17.0), nir_imm_int(&b, 0),
+      .write_mask = 15, .src_type = nir_type_float32,
+      .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+   b.shader->info.io_lowered = true;
+   agx_shader_part compiled = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason)) << reason;
+   EXPECT_EQ(compiled.info.apple9_texture_mask, 0xffffu);
+   EXPECT_EQ(compiled.info.apple9_sampler_mask, 0xffffu);
+   EXPECT_TRUE(compiled.info.apple9_uses_texel_fetch);
+   free(compiled.binary);
+   ralloc_free(b.shader);
+}
+
+TEST(Apple9Compiler, TextureOffsetsLowerPerMipThroughOrdinaryFetches)
+{
+   for (unsigned kind = 0; kind < 3; ++kind)
+   for (bool shadow : {false, true}) {
+      if (kind == 2 && shadow)
+         continue;
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "offset_filtering");
+      b.shader->info.num_ubos = 1;
+      nir_def *lod = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0),
+         nir_imm_int(&b, 0), .align_mul = 4, .range = 4);
+      nir_tex_instr *tex = nir_tex_instr_create(b.shader, shadow ? 4 : 3);
+      tex->op = nir_texop_txl;
+      tex->sampler_dim = kind == 2 ? GLSL_SAMPLER_DIM_3D : GLSL_SAMPLER_DIM_2D;
+      tex->is_array = kind == 1;
+      tex->is_shadow = shadow;
+      tex->is_new_style_shadow = shadow;
+      tex->dest_type = nir_type_float32;
+      tex->coord_components = kind ? 3 : 2;
+      tex->texture_index = 7;
+      tex->sampler_index = 5;
+      tex->src[0].src_type = nir_tex_src_coord;
+      tex->src[0].src = nir_src_for_ssa(kind ? nir_imm_vec3(&b, .375, .625, .25)
+                                                   : nir_imm_vec2(&b, .375, .625));
+      tex->src[1].src_type = nir_tex_src_lod;
+      tex->src[1].src = nir_src_for_ssa(lod);
+      tex->src[2].src_type = nir_tex_src_offset;
+      tex->src[2].src = nir_src_for_ssa(kind == 2 ? nir_imm_ivec3(&b, 1, -2, 3)
+                                                      : nir_imm_ivec2(&b, 1, -2));
+      if (shadow) {
+         tex->src[3].src_type = nir_tex_src_comparator;
+         tex->src[3].src = nir_src_for_ssa(nir_imm_float(&b, .4));
+      }
+      nir_def_init(&tex->instr, &tex->def, shadow ? 1 : 4, 32);
+      nir_builder_instr_insert(&b, &tex->instr);
+      nir_def *color = shadow ? nir_replicate(&b, &tex->def, 4) : &tex->def;
+      nir_store_output(&b, color, nir_imm_int(&b, 0), .write_mask = 15,
+         .src_type = nir_type_float32,
+         .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+      b.shader->info.io_lowered = true;
+      agx_apple9_sampler_key key[32] = {};
+      key[5].wrap[0] = PIPE_TEX_WRAP_REPEAT;
+      key[5].wrap[1] = PIPE_TEX_WRAP_MIRROR_REPEAT;
+      key[5].wrap[2] = PIPE_TEX_WRAP_CLAMP_TO_EDGE;
+      key[5].min_filter = PIPE_TEX_FILTER_LINEAR;
+      key[5].mag_filter = PIPE_TEX_FILTER_NEAREST;
+      key[5].mip_filter = PIPE_TEX_MIPFILTER_LINEAR;
+      key[5].compare_func = PIPE_FUNC_LEQUAL;
+      key[5].min_lod = -8;
+      key[5].max_lod = 8;
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_nir_lower_apple9_texture_offsets(b.shader, key, &reason)) << (reason ?: "");
+      nir_validate_shader(b.shader, "offsets lowered to filtered fetches");
+      agx_shader_part compiled = {};
+      ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason)) << (reason ?: "");
       EXPECT_EQ(compiled.info.apple9_texture_mask, 1u << 7);
       EXPECT_EQ(compiled.info.apple9_sampler_mask, 0u);
       EXPECT_TRUE(compiled.info.apple9_uses_texel_fetch);
@@ -7529,12 +7657,12 @@ TEST(Apple9Compiler, ExplicitGradientsUseEightWordPublications)
    }
 }
 
-TEST(Apple9Encoding, FetchPublicationsDoNotIntroduceUnrequestedWaits)
+TEST(Apple9Encoding, LodPublicationsDoNotIntroduceUnrequestedWaits)
 {
    uint8_t phys[] = {4, 16, 20, 21};
    agx_apple9_vir_instr ins = {};
-   ins.op = AGX_APPLE9_VIR_TEXTURE_COORDS;
-   ins.encoding = AGX_APPLE9_ENC_TEXTURE_FETCH_PARAMS;
+   ins.op = AGX_APPLE9_VIR_PUBLICATION_TUPLE;
+   ins.encoding = AGX_APPLE9_ENC_TEXTURE_LOD_PARAMS;
    ins.dest = 0;
    ins.dest_components = 4;
    ins.nr_srcs = 3;
@@ -7546,13 +7674,12 @@ TEST(Apple9Encoding, FetchPublicationsDoNotIntroduceUnrequestedWaits)
       agx_apple9_packed_instruction packed;
       const char *reason = nullptr;
       ASSERT_TRUE(agx_apple9_pack_vir_instruction(&ins, phys, &packed, &reason));
-      ASSERT_EQ(packed.length, 32u);
-      for (unsigned offset : {0u, 10u}) {
+      ASSERT_EQ(packed.length, 30u);
+      for (unsigned offset : {0u, 10u, 20u}) {
          EXPECT_EQ(packed.bytes[offset + 5] & 0xe0, 0);
          EXPECT_EQ(packed.bytes[offset + 7] & 0xe0, 0);
          EXPECT_NE(packed.bytes[offset + 2] & 0x20, 0);
       }
-      EXPECT_EQ((packed.bytes[28] >> 7) & 1, !(live & 4));
    }
 }
 
@@ -7612,6 +7739,33 @@ TEST(Apple9Compiler, RepeatedDemotionReusesCoveragePublication)
    EXPECT_EQ(acquires, 1u);
    EXPECT_EQ(releases, 1u);
    free(part.binary);
+   ralloc_free(b.shader);
+}
+
+TEST(Apple9Compiler, DepthWritesInitializeCoverageWithoutDiscard)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "fragment_depth_coverage");
+   b.shader->info.num_ubos = 1;
+   nir_def *z = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0),
+      nir_imm_int(&b, 0), .align_mul = 4, .range = 4);
+   nir_store_output(&b, z, nir_imm_int(&b, 0),
+      .write_mask = 1, .src_type = nir_type_float32,
+      .io_semantics = {.location = FRAG_RESULT_DEPTH, .num_slots = 1});
+   b.shader->info.io_lowered = true;
+   agx_shader_part compiled = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason))
+      << (reason ?: "");
+   EXPECT_EQ(compiled.info.depth_layout, FRAG_DEPTH_LAYOUT_ANY);
+   EXPECT_TRUE(compiled.info.apple9_uses_discard);
+   const uint8_t *code = (const uint8_t *)compiled.binary;
+   unsigned coverage_reads = 0;
+   for (unsigned i = 0; i + 4 <= compiled.info.binary_size; ++i)
+      coverage_reads += (code[i] & 0xf) == 0xc && code[i+1] == 0xc2 &&
+                        code[i+2] == 0x10 && code[i+3] == 0x06;
+   EXPECT_EQ(coverage_reads, 1u);
+   free(compiled.binary);
    ralloc_free(b.shader);
 }
 
@@ -8328,4 +8482,66 @@ TEST(Apple9, EntryBranchAddressRange)
    EXPECT_FALSE(agx_apple9_pack_branch(true, INT64_C(1) << 47, &packed));
    EXPECT_FALSE(agx_apple9_pack_branch(true, -(INT64_C(1) << 47) - 2, &packed));
    EXPECT_FALSE(agx_apple9_pack_branch(true, 3, &packed));
+}
+
+TEST(Apple9Compiler, BlockExportCompilesDynamicCoordinatesAndSparseImages)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "block export");
+   b.shader->info.num_images = 8;
+   nir_def *group = nir_load_workgroup_id(&b);
+   nir_def *xy = nir_imul_imm(&b, nir_trim_vector(&b, group, 2), 32);
+   for (unsigned binding : {2u, 7u}) {
+      nir_image_store_block_agx(&b, nir_imm_int(&b, binding),
+         nir_imm_int(&b, binding == 2 ? 0 : 8), nir_pad_vec4(&b, xy),
+         .image_dim = GLSL_SAMPLER_DIM_2D,
+         .format = PIPE_FORMAT_R8G8B8A8_UNORM);
+   }
+   b.shader->info.io_lowered = true;
+   agx_shader_part compiled = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason)) << (reason ?: "");
+   EXPECT_EQ(compiled.info.apple9_image_mask, (1u << 2) | (1u << 7));
+   EXPECT_EQ(compiled.info.apple9_texture_mask, 0u);
+   unsigned exports = 0;
+   const auto *code = static_cast<const uint8_t *>(compiled.binary);
+   for (unsigned i = 0; i + 18 <= compiled.info.binary_size; ++i) {
+      if (code[i] == 0x57 && code[i+8] == 0xa8 && code[i+9] == 0x75) {
+         EXPECT_EQ(code[i+3] & 7, 0);
+         EXPECT_LE(code[i+3], 24);
+         EXPECT_EQ(code[i+5], exports << 4);
+         EXPECT_EQ(code[i+12], 7);
+         EXPECT_EQ(code[i+13], 0x12);
+         ++exports;
+      }
+   }
+   EXPECT_EQ(exports, 2u);
+   free(compiled.binary);
+   ralloc_free(b.shader);
+}
+
+TEST(Apple9Encoding, BlockExportUsesAllocatedTupleAndImageSlot)
+{
+   agx_apple9_vir_instr store = {};
+   store.op = AGX_APPLE9_VIR_BLOCK_IMAGE_STORE;
+   store.encoding = AGX_APPLE9_ENC_BLOCK_IMAGE_STORE;
+   store.nr_srcs = 3;
+   store.src[0] = 0;
+   store.src[1] = 1;
+   store.src[2] = 2;
+   store.texture_index = 9;
+   store.immediate = 1;
+   uint8_t phys[] = {8, 9, 10};
+   agx_apple9_packed_instruction packed = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_pack_vir_instruction(&store, phys, &packed, &reason));
+   EXPECT_EQ(packed.length, 18u);
+   EXPECT_EQ(packed.bytes[3], 16);
+   EXPECT_EQ(packed.bytes[5], 0x90);
+   EXPECT_EQ(packed.bytes[9], 0x15);
+   phys[1] = 10;
+   EXPECT_FALSE(agx_apple9_pack_vir_instruction(&store, phys, &packed, &reason));
+   phys[1] = 9;
+   store.texture_index = 16;
+   EXPECT_FALSE(agx_apple9_pack_vir_instruction(&store, phys, &packed, &reason));
 }

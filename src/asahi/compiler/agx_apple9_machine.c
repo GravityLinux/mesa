@@ -778,15 +778,15 @@ static const struct agx_apple9_encoding_info encodings[] = {
                           7, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                           AGX_APPLE9_EVIDENCE_HARDWARE)},
       },
-   [AGX_APPLE9_ENC_TEXTURE_FETCH_PARAMS] =
+   [AGX_APPLE9_ENC_BLOCK_STORE_PARAMS] =
       {
-         .name = "texture_fetch_params",
-         .length = 32,
+         .name = "block_store_params",
+         .length = 30,
          .operand_count = 4,
          .allocator_safe = true,
          .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
          .operands = {GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32,
-                          7, 8, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                          15, 8, AGX_APPLE9_OPERAND_ALLOCATABLE,
                           AGX_APPLE9_EVIDENCE_HARDWARE),
                       GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
                           63, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
@@ -798,29 +798,18 @@ static const struct agx_apple9_encoding_info encodings[] = {
                           63, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                           AGX_APPLE9_EVIDENCE_HARDWARE)},
       },
-   [AGX_APPLE9_ENC_TEXTURE_FETCH] =
-      {
-         .name = "texture_fetch",
-         .length = 14,
-         .operand_count = 5,
-         .allocator_safe = true,
-         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
-         .operands = {GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32,
-                          15, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
-                          AGX_APPLE9_EVIDENCE_HARDWARE),
-                      GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
-                          7, 8, AGX_APPLE9_OPERAND_ALLOCATABLE,
-                          AGX_APPLE9_EVIDENCE_HARDWARE),
-                      GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32,
-                          7, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
-                          AGX_APPLE9_EVIDENCE_HARDWARE),
-                      GPR(AGX_APPLE9_OPERAND_SRC2, AGX_APPLE9_WIDTH_32,
-                          7, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
-                          AGX_APPLE9_EVIDENCE_HARDWARE),
-                      GPR(AGX_APPLE9_OPERAND_SRC3, AGX_APPLE9_WIDTH_32,
-                          7, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
-                          AGX_APPLE9_EVIDENCE_HARDWARE)},
-      },
+   [AGX_APPLE9_ENC_BLOCK_IMAGE_STORE] = {
+      .name = "block_image_store", .length = 18,
+      .operand_count = 3, .allocator_safe = true,
+      .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      .operands = {
+         GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 15, 8,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
+         GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32, 15, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
+         GPR(AGX_APPLE9_OPERAND_SRC2, AGX_APPLE9_WIDTH_32, 15, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE)},
+   },
    [AGX_APPLE9_ENC_TEXTURE_LOD_PARAMS] =
       {
          .name = "texture_lod_params",
@@ -1018,6 +1007,37 @@ static const struct agx_apple9_encoding_info encodings[] = {
                  AGX_APPLE9_PUBLICATION_COUNT - 1,
                  2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_PUBLICATION,
                  AGX_APPLE9_EVIDENCE_HARDWARE)},
+      },
+   [AGX_APPLE9_ENC_PUBLICATION_PAIR] =
+      {
+         .name = "publication_pair",
+         .length = 20,
+         .operand_count = 3,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .operands = {
+            GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 62, 4,
+                AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_PUBLICATION,
+                AGX_APPLE9_EVIDENCE_HARDWARE),
+            GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63, 2,
+                AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
+            GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32, 63, 2,
+                AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE)},
+      },
+   [AGX_APPLE9_ENC_DEPTH_STORE] =
+      {
+         .name = "depth_store",
+         .length = 6,
+         .operand_count = 2,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .operands = {
+            GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 62, 4,
+                AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_PUBLICATION,
+                AGX_APPLE9_EVIDENCE_HARDWARE),
+            GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32, 63, 2,
+                AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_PUBLICATION,
+                AGX_APPLE9_EVIDENCE_HARDWARE)},
       },
    [AGX_APPLE9_ENC_COVERAGE] =
       {

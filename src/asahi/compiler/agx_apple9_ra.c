@@ -93,7 +93,7 @@ apple9_publication(const struct agx_apple9_vir_instr *ins)
 {
    return ins->encoding == AGX_APPLE9_ENC_FLOAT2_EXPORT ||
           ins->encoding == AGX_APPLE9_ENC_LOGIC_EXPORT ||
-          ins->op == AGX_APPLE9_VIR_TEXTURE_COORDS;
+          ins->op == AGX_APPLE9_VIR_PUBLICATION_TUPLE;
 }
 
 static bool
@@ -457,7 +457,11 @@ apple9_physical_selected(struct apple9_shared_ra *ra,
                        : common->dest[0].value / 2
                  : AGX_APPLE9_VREG_INVALID;
    bool dead_dest = ins.dest_components && !pub && agx_is_null(common->dest[0]);
-   if (dead_dest) {
+   if (dead_dest && ins.publication_handoff) {
+      /* Unused texture channels still need the read that releases their
+       * borrowed publication. Consume them into the reserved copy temporary. */
+      ins.dest = COPY_REG;
+   } else if (dead_dest) {
       assert(ins.op == AGX_APPLE9_VIR_DEVICE_ATOMIC);
       ins.atomic_discard = true;
       ins.dest_components = 0;
@@ -610,7 +614,8 @@ apple9_completion_barrier(const struct agx_apple9_vir_instr *ins)
    return apple9_after_logical_end(ins) ||
           ins->op == AGX_APPLE9_VIR_TILE_ACCESS ||
           ins->op == AGX_APPLE9_VIR_TILE_FENCE ||
-          ins->op == AGX_APPLE9_VIR_COVERAGE;
+          ins->op == AGX_APPLE9_VIR_COVERAGE ||
+          ins->op == AGX_APPLE9_VIR_DEPTH_STORE;
 }
 
 static bool
@@ -649,7 +654,8 @@ apple9_pending_hazard(const struct agx_apple9_vir_instr *ins,
       return true;
    /* These compound encodings contain a fixed slot-1 publication and wait. */
    return (ins->encoding == AGX_APPLE9_ENC_GET_DRAW_ID ||
-           ins->encoding == AGX_APPLE9_ENC_GET_COVERAGE) &&
+           ins->encoding == AGX_APPLE9_ENC_GET_COVERAGE ||
+           ins->encoding == AGX_APPLE9_ENC_BLOCK_IMAGE_STORE) &&
           producer->producer_scoreboard_slot == AGX_APPLE9_SCOREBOARD_SLOT_1;
 }
 

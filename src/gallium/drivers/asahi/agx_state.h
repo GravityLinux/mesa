@@ -554,7 +554,7 @@ struct asahi_fs_shader_key {
    struct agx_apple9_blend apple9_blend[PIPE_MAX_COLOR_BUFS];
    struct agx_apple9_sampler_key apple9_samplers[32];
 };
-static_assert(sizeof(struct asahi_fs_shader_key) == 876, "no holes");
+static_assert(sizeof(struct asahi_fs_shader_key) == 1548, "no holes");
 
 union asahi_shader_key {
    struct asahi_vs_shader_key vs;

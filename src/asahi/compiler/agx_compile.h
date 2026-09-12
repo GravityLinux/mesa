@@ -150,7 +150,7 @@ struct agx_shader_info {
    uint8_t apple9_resource_count;
    uint8_t apple9_resource_binding[AGX_APPLE9_MAX_GRAPHICS_BUFFERS];
    /* Live API bindings; descriptor tables compact each mask independently. */
-   uint32_t apple9_texture_mask, apple9_sampler_mask;
+   uint32_t apple9_texture_mask, apple9_sampler_mask, apple9_image_mask;
    bool apple9_uses_texel_fetch;
    bool apple9_uses_discard;
 

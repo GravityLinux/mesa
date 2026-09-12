@@ -560,14 +560,14 @@ agx_apple9_vir_emit_device_load_vector(
 static uint32_t
 apple9_vir_emit_texture(struct agx_apple9_vir_program *program,
                         const uint32_t coords[2], uint32_t one,
-                        unsigned texture, unsigned sampler, bool fetch, bool lod, bool bias)
+                        unsigned texture, unsigned sampler, bool lod, bool bias)
 {
    if (!program || !coords || coords[0] >= program->value_count ||
        coords[1] >= program->value_count || one >= program->value_count ||
-       texture >= 16 || sampler >= 16)
+       texture >= 16 || sampler >= AGX_APPLE9_GRAPHICS_MAX_SAMPLERS)
       return AGX_APPLE9_VREG_INVALID;
 
-   unsigned parameters = (fetch || lod) ? 4 : 2;
+   unsigned parameters = lod ? 4 : 2;
    uint32_t published = program->value_count;
    if (!apple9_vir_append_values(program, parameters))
       return AGX_APPLE9_VREG_INVALID;
@@ -575,9 +575,8 @@ apple9_vir_emit_texture(struct agx_apple9_vir_program *program,
    if (!instruction)
       return AGX_APPLE9_VREG_INVALID;
    *instruction = (struct agx_apple9_vir_instr){
-      .op = AGX_APPLE9_VIR_TEXTURE_COORDS,
-      .encoding = fetch ? AGX_APPLE9_ENC_TEXTURE_FETCH_PARAMS
-                  : lod ? AGX_APPLE9_ENC_TEXTURE_LOD_PARAMS
+      .op = AGX_APPLE9_VIR_PUBLICATION_TUPLE,
+      .encoding = lod ? AGX_APPLE9_ENC_TEXTURE_LOD_PARAMS
                         : AGX_APPLE9_ENC_TEXTURE_COORDS,
       .dest = published, .dest_components = parameters,
       .nr_srcs = 3, .src = {coords[0], coords[1], one},
@@ -592,8 +591,7 @@ apple9_vir_emit_texture(struct agx_apple9_vir_program *program,
    *instruction = (struct agx_apple9_vir_instr){
       .texture_index = texture, .sampler_index = sampler,
       .op = AGX_APPLE9_VIR_TEXTURE_SAMPLE,
-      .encoding = fetch ? AGX_APPLE9_ENC_TEXTURE_FETCH
-                  : lod ? AGX_APPLE9_ENC_TEXTURE_LOD
+      .encoding = lod ? AGX_APPLE9_ENC_TEXTURE_LOD
                         : AGX_APPLE9_ENC_TEXTURE_SAMPLE,
       .immediate = bias,
       .dest = result, .dest_components = 4,
@@ -607,11 +605,66 @@ apple9_vir_emit_texture(struct agx_apple9_vir_program *program,
 }
 
 uint32_t
+agx_apple9_vir_emit_publication_pair(struct agx_apple9_vir_program *program,
+                                     const uint32_t src[2])
+{
+   if (!program || !src || src[0] >= program->value_count || src[1] >= program->value_count)
+      return AGX_APPLE9_VREG_INVALID;
+   uint32_t result = program->value_count;
+   if (!apple9_vir_append_values(program, 2))
+      return AGX_APPLE9_VREG_INVALID;
+   struct agx_apple9_vir_instr *ins = apple9_vir_append_instruction(program);
+   if (!ins)
+      return AGX_APPLE9_VREG_INVALID;
+   *ins = (struct agx_apple9_vir_instr){
+      .op = AGX_APPLE9_VIR_PUBLICATION_TUPLE,
+      .encoding = AGX_APPLE9_ENC_PUBLICATION_PAIR,
+      .dest = result, .dest_components = 2,
+      .src = {src[0], src[1]}, .nr_srcs = 2,
+   };
+   return result;
+}
+
+/* Publish a coordinate/byte-offset tuple, then export the implicit tile.
+ * The synchronous store contract releases its publication and joins the
+ * memory operation before the next VIR instruction. */
+bool
+agx_apple9_vir_emit_block_image_store(
+   struct agx_apple9_vir_program *program, const uint32_t src[3],
+   unsigned image, unsigned format)
+{
+   if (image >= 16 || format > 15)
+      return false;
+   for (unsigned i = 0; i < 3; ++i)
+      if (src[i] >= program->value_count)
+         return false;
+   uint32_t tuple = program->value_count;
+   if (!apple9_vir_append_values(program, 4))
+      return false;
+   struct agx_apple9_vir_instr *ins = apple9_vir_append_instruction(program);
+   if (!ins)
+      return false;
+   *ins = (struct agx_apple9_vir_instr){
+      .op = AGX_APPLE9_VIR_PUBLICATION_TUPLE,
+      .encoding = AGX_APPLE9_ENC_BLOCK_STORE_PARAMS,
+      .dest = tuple, .dest_components = 4,
+      .nr_srcs = 3, .src = {src[0], src[1], src[2]},
+   };
+   uint32_t sources[] = {tuple, tuple + 1, tuple + 2};
+   if (!agx_apple9_vir_emit_side_effect(program,
+          AGX_APPLE9_VIR_BLOCK_IMAGE_STORE, AGX_APPLE9_ENC_BLOCK_IMAGE_STORE,
+          sources, 3, format))
+      return false;
+   program->instructions[program->instruction_count - 1]->texture_index = image;
+   return true;
+}
+
+uint32_t
 agx_apple9_vir_emit_texture_sample(struct agx_apple9_vir_program *program,
                                   const uint32_t coords[2], uint32_t one,
                                   unsigned texture, unsigned sampler)
 {
-   return apple9_vir_emit_texture(program, coords, one, texture, sampler, false, false, false);
+   return apple9_vir_emit_texture(program, coords, one, texture, sampler, false, false);
 }
 
 uint32_t
@@ -620,7 +673,7 @@ agx_apple9_vir_emit_texture_lod(struct agx_apple9_vir_program *program,
                                unsigned texture, unsigned sampler, bool bias)
 {
    return apple9_vir_emit_texture(program, coords, packed_lod, texture, sampler,
-                                  false, true, bias);
+                                  true, bias);
 }
 
 uint32_t
@@ -630,10 +683,10 @@ agx_apple9_vir_emit_texture_volume(struct agx_apple9_vir_program *program,
                                   unsigned dimension, bool bias, bool shadow)
 {
    if (!program || !coords || coords[2] >= program->value_count ||
-       (shadow ? dimension != 0 : (dimension != 1 && dimension != 3)))
+       (shadow ? dimension > 2 : (dimension != 1 && dimension != 2 && dimension != 3)))
       return AGX_APPLE9_VREG_INVALID;
    uint32_t result = apple9_vir_emit_texture(program, coords, packed_lod,
-      texture, sampler, false, true, bias);
+      texture, sampler, true, bias);
    if (result == AGX_APPLE9_VREG_INVALID)
       return result;
    struct agx_apple9_vir_instr *params = program->instructions[program->instruction_count - 2];
@@ -651,7 +704,7 @@ agx_apple9_vir_emit_texture_grad(struct agx_apple9_vir_program *program,
                                 const uint32_t src[6],
                                 unsigned texture, unsigned sampler)
 {
-   if (!program || !src || texture >= 16 || sampler >= 16)
+   if (!program || !src || texture >= 16 || sampler >= AGX_APPLE9_GRAPHICS_MAX_SAMPLERS)
       return AGX_APPLE9_VREG_INVALID;
    for (unsigned i = 0; i < 6; ++i)
       if (src[i] >= program->value_count)
@@ -663,7 +716,7 @@ agx_apple9_vir_emit_texture_grad(struct agx_apple9_vir_program *program,
    if (!instruction)
       return AGX_APPLE9_VREG_INVALID;
    *instruction = (struct agx_apple9_vir_instr){
-      .op = AGX_APPLE9_VIR_TEXTURE_COORDS,
+      .op = AGX_APPLE9_VIR_PUBLICATION_TUPLE,
       .encoding = AGX_APPLE9_ENC_TEXTURE_GRAD_PARAMS,
       .dest = published, .dest_components = 8, .nr_srcs = 6,
    };
@@ -683,14 +736,6 @@ agx_apple9_vir_emit_texture_grad(struct agx_apple9_vir_program *program,
       .producer_scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_1,
    };
    return result;
-}
-
-uint32_t
-agx_apple9_vir_emit_texture_fetch(struct agx_apple9_vir_program *program,
-                                 const uint32_t coords[2], uint32_t lod,
-                                 unsigned texture, unsigned sampler)
-{
-   return apple9_vir_emit_texture(program, coords, lod, texture, sampler, true, false, false);
 }
 
 uint32_t
@@ -1414,9 +1459,10 @@ apple9_vir_producer_instruction(const struct agx_apple9_vir_program *program,
 static bool
 apple9_vir_is_graphics_output(enum agx_apple9_vir_opcode op)
 {
-   return op == AGX_APPLE9_VIR_COVERAGE || op == AGX_APPLE9_VIR_VARY_STORE ||
+   return op == AGX_APPLE9_VIR_COVERAGE || op == AGX_APPLE9_VIR_DEPTH_STORE || op == AGX_APPLE9_VIR_VARY_STORE ||
           op == AGX_APPLE9_VIR_TILE_ACCESS ||
-          op == AGX_APPLE9_VIR_TILE_STORE || op == AGX_APPLE9_VIR_TILE_FENCE;
+          op == AGX_APPLE9_VIR_TILE_STORE || op == AGX_APPLE9_VIR_TILE_FENCE ||
+          op == AGX_APPLE9_VIR_BLOCK_IMAGE_STORE;
 }
 
 static bool
@@ -1476,7 +1522,7 @@ apple9_vir_publishes(const struct agx_apple9_vir_instr *instruction)
 {
    return instruction->encoding == AGX_APPLE9_ENC_FLOAT2_EXPORT ||
           instruction->encoding == AGX_APPLE9_ENC_LOGIC_EXPORT ||
-          instruction->op == AGX_APPLE9_VIR_TEXTURE_COORDS;
+          instruction->op == AGX_APPLE9_VIR_PUBLICATION_TUPLE;
 }
 
 static unsigned
@@ -1492,7 +1538,7 @@ apple9_publication_end(const struct agx_apple9_vir_program *program,
                        unsigned producer)
 {
    const struct agx_apple9_vir_instr *pub = program->instructions[producer];
-   if (pub->op != AGX_APPLE9_VIR_TEXTURE_COORDS &&
+   if (pub->op != AGX_APPLE9_VIR_PUBLICATION_TUPLE &&
        pub->encoding != AGX_APPLE9_ENC_LOGIC_EXPORT)
       return program->instruction_count;
 
@@ -1502,7 +1548,8 @@ apple9_publication_end(const struct agx_apple9_vir_program *program,
            use; use = use->next) {
          const struct agx_apple9_vir_instr *sample = use->instruction;
          unsigned position = apple9_node(sample)->position;
-         if (sample->op == AGX_APPLE9_VIR_COVERAGE) {
+         if (sample->op == AGX_APPLE9_VIR_COVERAGE || sample->op == AGX_APPLE9_VIR_DEPTH_STORE ||
+             sample->op == AGX_APPLE9_VIR_BLOCK_IMAGE_STORE) {
             end = MAX2(end, position);
             continue;
          }
@@ -1536,16 +1583,17 @@ apple9_validate_value_files(const struct agx_apple9_vir_program *program,
          goto invalid;
       if (apple9_vir_publishes(ins) &&
           ((apple9_vir_dest_components(ins) != 1 &&
-             ins->op != AGX_APPLE9_VIR_TEXTURE_COORDS) ||
+             ins->op != AGX_APPLE9_VIR_PUBLICATION_TUPLE) ||
            ins->dest >= program->value_count ||
            program->fixed_phys[ins->dest] != AGX_APPLE9_PHYS_INVALID))
          goto invalid;
       for (unsigned j = 0; j < ins->nr_srcs; ++j) {
          if (ins->src[j] >= program->value_count ||
              program->publication[ins->src[j]] !=
-                (ins->op == AGX_APPLE9_VIR_COVERAGE ||
+                (ins->op == AGX_APPLE9_VIR_COVERAGE || ins->op == AGX_APPLE9_VIR_DEPTH_STORE ||
                  ins->op == AGX_APPLE9_VIR_VARY_STORE ||
-                 ins->op == AGX_APPLE9_VIR_TEXTURE_SAMPLE))
+                 ins->op == AGX_APPLE9_VIR_TEXTURE_SAMPLE ||
+                 ins->op == AGX_APPLE9_VIR_BLOCK_IMAGE_STORE))
             goto invalid;
       }
       if (ins->op == AGX_APPLE9_VIR_PHI_SRC &&
@@ -1947,11 +1995,12 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
          continue;
       }
 
-      if (instruction->op == AGX_APPLE9_VIR_COVERAGE ||
+      if (instruction->op == AGX_APPLE9_VIR_COVERAGE || instruction->op == AGX_APPLE9_VIR_DEPTH_STORE ||
           instruction->op == AGX_APPLE9_VIR_VARY_STORE ||
           instruction->op == AGX_APPLE9_VIR_TILE_ACCESS ||
           instruction->op == AGX_APPLE9_VIR_TILE_STORE ||
-          instruction->op == AGX_APPLE9_VIR_TILE_FENCE) {
+          instruction->op == AGX_APPLE9_VIR_TILE_FENCE ||
+          instruction->op == AGX_APPLE9_VIR_BLOCK_IMAGE_STORE) {
          unsigned gprs[AGX_APPLE9_MAX_ENCODING_OPERANDS], count;
          struct agx_apple9_packed_instruction packed;
          if (instruction->dest != AGX_APPLE9_VREG_INVALID ||
@@ -1968,13 +2017,13 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
       }
 
       const unsigned components = apple9_vir_dest_components(instruction);
-      if (components > (instruction->op == AGX_APPLE9_VIR_TEXTURE_COORDS ? 8 : 4) ||
+      if (components > (instruction->op == AGX_APPLE9_VIR_PUBLICATION_TUPLE ? 8 : 4) ||
           components > program->value_count ||
           instruction->dest > program->value_count - components ||
           (components > 1 && instruction->op != AGX_APPLE9_VIR_DEVICE_LOAD &&
            instruction->op != AGX_APPLE9_VIR_ITER_FLAT &&
            instruction->op != AGX_APPLE9_VIR_COLLECT &&
-           instruction->op != AGX_APPLE9_VIR_TEXTURE_COORDS &&
+           instruction->op != AGX_APPLE9_VIR_PUBLICATION_TUPLE &&
            instruction->op != AGX_APPLE9_VIR_TEXTURE_SAMPLE)) {
          if (reason != NULL)
             *reason = "Apple9 instruction has an invalid destination tuple";
@@ -2609,7 +2658,7 @@ agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
          }
          continue;
       }
-      if (components > (instruction->op == AGX_APPLE9_VIR_TEXTURE_COORDS ? 8 : 4) ||
+      if (components > (instruction->op == AGX_APPLE9_VIR_PUBLICATION_TUPLE ? 8 : 4) ||
           components > program->value_count ||
           dest > program->value_count - components) {
          free(last_use);
@@ -5228,6 +5277,17 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       packed_init(packed, bytes, sizeof(bytes));
       return true;
    }
+   case AGX_APPLE9_VIR_DEPTH_STORE: {
+      if (instruction->encoding != AGX_APPLE9_ENC_DEPTH_STORE ||
+          instruction->nr_srcs != 2 || phys[instruction->src[0]] >= 63 ||
+          (phys[instruction->src[0]] & 1) ||
+          phys[instruction->src[1]] != phys[instruction->src[0]] + 1)
+         return false;
+      uint8_t bytes[] = {0xd7, 0x14, 0x54,
+                         phys[instruction->src[0]] << 1, 0, 3};
+      packed_init(packed, bytes, sizeof(bytes));
+      return true;
+   }
    case AGX_APPLE9_VIR_COVERAGE: {
       if (instruction->encoding != AGX_APPLE9_ENC_COVERAGE ||
           instruction->nr_srcs != 1 || phys[instruction->src[0]] >= 64)
@@ -5243,7 +5303,8 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       if (instruction->nr_srcs ||
           instruction->encoding != (access ? AGX_APPLE9_ENC_TILE_ACCESS
                                            : AGX_APPLE9_ENC_TILE_FENCE) ||
-          (access ? instruction->immediate != 0xf00 &&
+          (access ? instruction->immediate != 0x700 &&
+                       instruction->immediate != 0xf00 &&
                        instruction->immediate != 0x600 &&
                        (instruction->immediate & ~0xfc) != 0x800 &&
                        instruction->immediate != 1
@@ -5262,26 +5323,59 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       packed_init(packed, bytes, sizeof(bytes));
       return true;
    }
-   case AGX_APPLE9_VIR_TEXTURE_COORDS: {
-      if (instruction->encoding == AGX_APPLE9_ENC_TEXTURE_FETCH_PARAMS ||
+   case AGX_APPLE9_VIR_PUBLICATION_TUPLE: {
+      if (instruction->encoding == AGX_APPLE9_ENC_PUBLICATION_PAIR) {
+         unsigned base = phys[instruction->dest];
+         if (instruction->nr_srcs != 2 || instruction->dest_components != 2 ||
+             base > 62 || (base & 1))
+            return false;
+         uint8_t bytes[20];
+         for (unsigned c = 0; c < 2; ++c) {
+            unsigned source = instruction->src[c];
+            bool keep = (instruction->live_after_mask & (1u << c)) ||
+                        (c == 0 && instruction->src[1] == source);
+            uint8_t registers[] = {base + c, phys[source]};
+            struct agx_apple9_vir_instr publish = {
+               .op = AGX_APPLE9_VIR_IOR,
+               .encoding = AGX_APPLE9_ENC_LOGIC_EXPORT,
+               .dest = 0, .nr_srcs = 2, .src = {1, 1},
+               .live_after_mask = keep ? 3 : 0,
+            };
+            struct agx_apple9_packed_instruction part;
+            if (!pack_logic(&publish, registers, &part) || part.length != 10)
+               return false;
+            set_bits(part.bytes, 25, 6, 0);
+            set_bits(part.bytes, 42, 1, 0);
+            set_bits(part.bytes, 31, 1, 0);
+            set_bits(part.bytes, 20, 1, 0);
+            set_bits(part.bytes, 24, 1, 0);
+            set_bits(part.bytes, 43, 1, 0);
+            part.bytes[8] |= 0x10;
+            memcpy(bytes + 10 * c, part.bytes, 10);
+         }
+         packed_init(packed, bytes, sizeof(bytes));
+         return true;
+      }
+
+      if (instruction->encoding == AGX_APPLE9_ENC_BLOCK_STORE_PARAMS ||
           instruction->encoding == AGX_APPLE9_ENC_TEXTURE_LOD_PARAMS ||
           instruction->encoding == AGX_APPLE9_ENC_TEXTURE_VOLUME_PARAMS ||
           instruction->encoding == AGX_APPLE9_ENC_TEXTURE_GRAD_PARAMS) {
+         bool block = instruction->encoding == AGX_APPLE9_ENC_BLOCK_STORE_PARAMS;
          bool gradient = instruction->encoding == AGX_APPLE9_ENC_TEXTURE_GRAD_PARAMS;
          bool volume = instruction->encoding == AGX_APPLE9_ENC_TEXTURE_VOLUME_PARAMS;
          unsigned base = phys[instruction->dest];
          if (instruction->nr_srcs != (gradient ? 6 : volume ? 4 : 3) ||
              instruction->dest_components != (gradient ? 8 : 4) ||
-             base > (gradient ? 0 : 4) || (base & 3))
+             base > (block ? 12 : gradient ? 0 : 4) || (base & 3))
             return false;
          uint8_t bytes[64];
-         bool lod_params = volume || instruction->encoding == AGX_APPLE9_ENC_TEXTURE_LOD_PARAMS;
-         for (unsigned c = 0; c < (gradient ? 6 : volume ? 4 : lod_params ? 3 : 2); ++c) {
+         for (unsigned c = 0; c < (gradient ? 6 : volume ? 4 : 3); ++c) {
             unsigned source = instruction->src[c];
             bool keep = instruction->live_after_mask & (1u << c);
             for (unsigned j = c + 1; j < instruction->nr_srcs; ++j)
                keep |= instruction->src[j] == source;
-            uint8_t registers[] = {base + (volume ? c : gradient && c >= 2 ? c + 2 : c == 2 ? 3 : c), phys[source]};
+            uint8_t registers[] = {base + (block || volume ? c : gradient && c >= 2 ? c + 2 : c == 2 ? 3 : c), phys[source]};
             struct agx_apple9_vir_instr publish = {
                .op = AGX_APPLE9_VIR_IOR,
                .encoding = AGX_APPLE9_ENC_LOGIC_EXPORT,
@@ -5293,26 +5387,7 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
                return false;
             memcpy(bytes + 10 * c, part.bytes, 10);
          }
-         if (gradient || lod_params) {
-            packed_init(packed, bytes, gradient ? 60 : volume ? 40 : 30);
-            return true;
-         }
-         /* Parameter block word3 contains signed Q6 LOD. Opcode17 converts
-          * the low signed16 source halfword with saturation. Word2 is the
-          * reserved/offset portion of the four-word parameter block. */
-         uint8_t lod[12] = {0x17, 0x05, 0x54, 0, 0, 0, 0, 4,
-                            0xf0, 0xc0, 0x0c, 0};
-         unsigned source = phys[instruction->src[2]];
-         if (source >= 64)
-            return false;
-         set_bits(lod, 25, 7, base + 3);
-         set_bits(lod, 41, 8, source * 2);
-         if (instruction->live_after_mask & 4) {
-            set_bits(lod, 49, 1, 1);
-            set_bits(lod, 71, 1, 0);
-         }
-         memcpy(bytes + 20, lod, sizeof(lod));
-         packed_init(packed, bytes, 20 + sizeof(lod));
+         packed_init(packed, bytes, gradient ? 60 : volume ? 40 : 30);
          return true;
       }
       if (instruction->encoding != AGX_APPLE9_ENC_TEXTURE_COORDS ||
@@ -5338,14 +5413,32 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       packed_init(packed, bytes, sizeof(bytes));
       return true;
    }
+   case AGX_APPLE9_VIR_BLOCK_IMAGE_STORE: {
+      unsigned coord = phys[instruction->src[0]];
+      if (instruction->encoding != AGX_APPLE9_ENC_BLOCK_IMAGE_STORE ||
+          instruction->nr_srcs != 3 || coord > 12 || (coord & 3) ||
+          phys[instruction->src[1]] != coord + 1 ||
+          phys[instruction->src[2]] != coord + 2 ||
+          instruction->texture_index >= 16 || instruction->immediate > 15)
+         return false;
+      /* Source tuple: pixel X, pixel Y, tile byte offset in bits 16..31.
+       * The low halfword selects mip level zero. The PBE
+       * descriptor supplies destination layout, bounds and conversion.
+       * Release the tuple and synchronously join export slot 1. */
+      const uint8_t bytes[] = {
+         0x57, 0x10, 0x54, coord << 1, 0, instruction->texture_index << 4,
+         0, 0x80, 0xa8, (instruction->immediate << 4) | 5, 1, 0,
+         0x07, 0x12, 0x54, 0, 3, 0};
+      packed_init(packed, bytes, sizeof(bytes));
+      return true;
+   }
    case AGX_APPLE9_VIR_TEXTURE_SAMPLE: {
-      bool fetch = instruction->encoding == AGX_APPLE9_ENC_TEXTURE_FETCH;
       bool lod = instruction->encoding == AGX_APPLE9_ENC_TEXTURE_LOD;
       bool gradient = instruction->encoding == AGX_APPLE9_ENC_TEXTURE_GRAD;
-      bool extended = fetch || lod || gradient;
+      bool extended = lod || gradient;
       if ((!extended && instruction->encoding != AGX_APPLE9_ENC_TEXTURE_SAMPLE) ||
           instruction->nr_srcs != (gradient ? 1 : extended ? 4 : 2) || instruction->dest_components != 4 ||
-          instruction->texture_index >= 16 || instruction->sampler_index >= 16 ||
+          instruction->texture_index >= 16 || instruction->sampler_index >= AGX_APPLE9_GRAPHICS_MAX_SAMPLERS ||
           instruction->immediate > (lod ? 1u : 0u) ||
           instruction->producer_scoreboard_slot != AGX_APPLE9_SCOREBOARD_SLOT_1)
          return false;
@@ -5371,13 +5464,6 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
          5 | (dst << 3), 0x80 | coord | ((texture >> 1) << 3), 0x0c, 0xb8,
          0xb0 | (sampler >> 1), 0, 0, 0, (texture & 1) << 7,
          sampler & 1, 0x10, 0, 1, 0};
-      if (fetch) {
-         bytes[6] = 0x80;
-         bytes[7] = 0x24;
-         bytes[8] = (texture & 1) << 7;
-         bytes[9] = sampler & 1;
-         bytes[10] = 0;
-      }
       if (gradient) {
          bytes[6] = 4;
          bytes[7] = 1;
@@ -5386,6 +5472,13 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       if (lod) {
          bytes[6] = instruction->immediate ? 4 : 0;
          bytes[7] = instruction->immediate ? 0 : 1;
+      }
+      /* Array samples share word 3: uint16 layer in the low half,
+       * signed Q6 LOD in bits 16..27. The array mode must retain the
+       * dynamic LOD selector; the immediate-LOD form ignores those bits. */
+      if (instruction->texture_dimension == 2) {
+         bytes[6] = instruction->immediate ? 0x0c : 0x08;
+         bytes[7] = instruction->immediate ? 4 : 5;
       }
       if (instruction->texture_dimension == 3) {
          bytes[6] = instruction->immediate ? 0x90 : 0x88;
@@ -5407,7 +5500,7 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       if ((!coords && !dynamic &&
            instruction->encoding != AGX_APPLE9_ENC_TILE_LOAD) ||
           instruction->nr_srcs != (coords || dynamic ? 1 : 0) ||
-          instruction->immediate >= 16 || phys[instruction->dest] >= 64 ||
+          instruction->immediate >= 32 || phys[instruction->dest] >= 64 ||
           ((coords || dynamic) && phys[instruction->src[0]] >= 64) ||
           (coords && (!instruction->tile_sample_mask ||
                       instruction->tile_sample_mask > 15)) ||
@@ -5443,7 +5536,7 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       bool dynamic = instruction->nr_srcs == 2;
       if (instruction->encoding != (dynamic ? AGX_APPLE9_ENC_TILE_STORE_MASK : AGX_APPLE9_ENC_TILE_STORE) ||
           instruction->nr_srcs < 1 || instruction->nr_srcs > 2 ||
-          instruction->immediate >= 16 || phys[instruction->src[0]] >= 64 ||
+          instruction->immediate >= 32 || phys[instruction->src[0]] >= 64 ||
           (dynamic && phys[instruction->src[1]] >= 64))
          return false;
       /* Raw tile words with an independently allocated sample-mask source. */

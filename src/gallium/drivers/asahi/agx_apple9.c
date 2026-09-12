@@ -976,7 +976,14 @@ agx_apple9_pack_r32f_texture(void *out, uint64_t address, uint32_t width,
 bool
 agx_apple9_texture_format_supported(enum pipe_format format)
 {
+   if (agx_apple9_color_is_wide(format) || agx_apple9_color_is_packed(format))
+      return true;
    switch (format) {
+   case PIPE_FORMAT_R8_SNORM:
+   case PIPE_FORMAT_R8G8_SNORM:
+   case PIPE_FORMAT_R8G8B8A8_SNORM:
+   case PIPE_FORMAT_R8G8B8X8_SNORM:
+   case PIPE_FORMAT_R9G9B9E5_FLOAT:
    case PIPE_FORMAT_R8_UNORM:
    case PIPE_FORMAT_R8G8_UNORM:
    case PIPE_FORMAT_R8G8B8A8_UNORM:
@@ -1000,6 +1007,9 @@ agx_apple9_texture_format_supported(enum pipe_format format)
    case PIPE_FORMAT_Z24_UNORM_S8_UINT:
    case PIPE_FORMAT_Z32_FLOAT_S8X24_UINT:
    case PIPE_FORMAT_R16_UNORM:
+   case PIPE_FORMAT_R16_SNORM:
+   case PIPE_FORMAT_R16G16_UNORM:
+   case PIPE_FORMAT_R16G16_SNORM:
    case PIPE_FORMAT_Z16_UNORM:
       return true;
    default:

@@ -24,6 +24,9 @@ extern "C" {
 #define AGX_APPLE9_TEXTURE_TABLE_STRIDE 32
 #define AGX_APPLE9_SAMPLER_TABLE_STRIDE 32
 
+/* Linear sampled textures encode (row_bytes / 16) - 1 in 16 bits. */
+#define AGX_APPLE9_MAX_LINEAR_STRIDE (1u << 20)
+
 bool agx_apple9_texture_format_supported(enum pipe_format format);
 
 struct agx_device;
@@ -49,10 +52,11 @@ struct agx_apple9_render_stage {
    uint32_t resource_ssbo_mask, resource_write_mask;
    uint8_t resource_count;
    uint8_t resource_binding[AGX_APPLE9_MAX_GRAPHICS_BUFFERS];
-   uint32_t texture_mask, sampler_mask;
+   uint32_t texture_mask, sampler_mask, image_mask;
    struct agx_apple9_texture_mapping texture_mapping;
    bool uses_texel_fetch;
    bool uses_discard;
+   bool writes_depth;
    bool reads_tile;
    bool disable_tri_merging;
 
@@ -113,6 +117,7 @@ struct agx_apple9_uniform_draw {
    uint16_t scissor_min[2], scissor_max[2];
    bool reads_tile;
    bool uses_discard;
+   bool writes_depth;
    bool disable_tri_merging;
    bool flatshade_first;
 };

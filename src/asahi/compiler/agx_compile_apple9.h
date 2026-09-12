@@ -11,6 +11,7 @@
 
 #include "agx_compile.h"
 #include "util/format/u_formats.h"
+#include "util/format/u_format.h"
 #include "agx_apple9_profile.h"
 
 #ifdef __cplusplus
@@ -72,7 +73,9 @@ bool agx_compile_apple9_fragment(nir_shader *nir,
 #define AGX_APPLE9_GRAPHICS_SYSVAL_BINDING 64
 #define AGX_APPLE9_SAMPLER_BIAS_OFFSET 16
 #define AGX_APPLE9_SAMPLER_BIAS_COUNT 32
-#define AGX_APPLE9_GRAPHICS_SYSVAL_SIZE (16 + AGX_APPLE9_SAMPLER_BIAS_COUNT * sizeof(float))
+#define AGX_APPLE9_TEXTURE_INFO_OFFSET (16 + AGX_APPLE9_SAMPLER_BIAS_COUNT * sizeof(float))
+#define AGX_APPLE9_TEXTURE_INFO_STRIDE 32
+#define AGX_APPLE9_GRAPHICS_SYSVAL_SIZE (AGX_APPLE9_TEXTURE_INFO_OFFSET + 32 * AGX_APPLE9_TEXTURE_INFO_STRIDE)
 
 /* Standard independent RGB/alpha blending, plus the RGBA write mask. */
 struct agx_apple9_blend {
@@ -83,16 +86,15 @@ struct agx_apple9_blend {
    uint8_t samples; /* Zero retains single-sample compiler callers. */
    uint8_t disabled_samples;
    uint8_t alpha_to_coverage, alpha_to_one;
+   uint8_t advanced_mode, advanced_overlap;
+   uint8_t src_premultiplied, dst_premultiplied;
 };
 
 static inline unsigned
 agx_apple9_color_components(enum pipe_format format)
 {
-   switch (format) {
-   case PIPE_FORMAT_R16_FLOAT: return 1;
-   case PIPE_FORMAT_R16G16_FLOAT: return 2;
-   default: return 4;
-   }
+   return format == PIPE_FORMAT_NONE ? 4 :
+      util_format_description(format)->nr_channels;
 }
 
 static inline bool
@@ -103,10 +105,95 @@ agx_apple9_color_is_half(enum pipe_format format)
           format == PIPE_FORMAT_R16G16B16A16_FLOAT;
 }
 
+/* A render target's tile representation need not match its memory packing.
+ * The PBE converts unpacked 16-bit components to packed destinations. */
+static inline enum pipe_format
+agx_apple9_color_tile_format(enum pipe_format format)
+{
+   switch (format) {
+   case PIPE_FORMAT_R5G6B5_UNORM:
+   case PIPE_FORMAT_B5G6R5_UNORM:
+   case PIPE_FORMAT_R5G5B5A1_UNORM:
+   case PIPE_FORMAT_B5G5R5A1_UNORM:
+   case PIPE_FORMAT_R4G4B4A4_UNORM:
+   case PIPE_FORMAT_B4G4R4A4_UNORM:
+      return PIPE_FORMAT_R16G16B16A16_FLOAT;
+   case PIPE_FORMAT_R10G10B10A2_UINT:
+      return PIPE_FORMAT_R16G16B16A16_UINT;
+   default:
+      return format;
+   }
+}
+
 static inline unsigned
 agx_apple9_color_words(enum pipe_format format)
 {
-   return format == PIPE_FORMAT_R16G16B16A16_FLOAT ? 2 : 1;
+   if (format == PIPE_FORMAT_NONE)
+      return 1;
+   return DIV_ROUND_UP(
+      util_format_get_blocksize(agx_apple9_color_tile_format(format)), 4);
+}
+
+/* Raw tile accesses preserve format bits, including exact integer outputs. */
+static inline enum pipe_format
+agx_apple9_color_raw_format(unsigned words)
+{
+   return words == 4 ? PIPE_FORMAT_R32G32B32A32_UINT :
+          words == 3 ? PIPE_FORMAT_R32G32B32_UINT :
+          words == 2 ? PIPE_FORMAT_R32G32_UINT : PIPE_FORMAT_R32_UINT;
+}
+
+static inline bool
+agx_apple9_color_is_wide(enum pipe_format format)
+{
+   const struct util_format_description *desc = util_format_description(format);
+   return desc->layout == UTIL_FORMAT_LAYOUT_PLAIN &&
+          (desc->nr_channels == 1 || desc->nr_channels == 2 || desc->nr_channels == 4) &&
+          ((desc->channel[0].pure_integer &&
+            (desc->channel[0].size == 8 || desc->channel[0].size == 16 ||
+             desc->channel[0].size == 32)) ||
+           (desc->channel[0].type == UTIL_FORMAT_TYPE_FLOAT && desc->channel[0].size == 32));
+}
+
+static inline bool
+agx_apple9_color_is_packed(enum pipe_format format)
+{
+   switch (format) {
+   case PIPE_FORMAT_R5G6B5_UNORM:
+   case PIPE_FORMAT_B5G6R5_UNORM:
+   case PIPE_FORMAT_R5G5B5A1_UNORM:
+   case PIPE_FORMAT_B5G5R5A1_UNORM:
+   case PIPE_FORMAT_R4G4B4A4_UNORM:
+   case PIPE_FORMAT_B4G4R4A4_UNORM:
+   case PIPE_FORMAT_R10G10B10A2_UNORM:
+   case PIPE_FORMAT_B10G10R10A2_UNORM:
+   case PIPE_FORMAT_R10G10B10A2_UINT:
+   case PIPE_FORMAT_R11G11B10_FLOAT:
+      return true;
+   default:
+      return false;
+   }
+}
+
+/* The NIR format describes the physical tile representation. Signedness and
+ * destination conversion come from the PBE descriptor. Only the packed tile
+ * representations listed below can be exported without expansion. */
+static inline unsigned
+agx_apple9_block_export_format(enum pipe_format format)
+{
+   const struct util_format_description *desc = util_format_description(format);
+   if (format == PIPE_FORMAT_R10G10B10A2_UNORM ||
+       format == PIPE_FORMAT_B10G10R10A2_UNORM ||
+       format == PIPE_FORMAT_R11G11B10_FLOAT)
+      return 7;
+   if (!desc->channel[0].pure_integer && desc->channel[0].size == 8)
+      return 7;
+   switch (desc->channel[0].size) {
+   case 8: return 5;
+   case 16: return 1;
+   case 32: return 3;
+   default: return ~0u;
+   }
 }
 
 enum agx_apple9_sampler_flags {
@@ -119,7 +206,14 @@ enum agx_apple9_sampler_flags {
 struct agx_apple9_sampler_key {
    uint32_t flags;
    float border[4];
+   uint8_t wrap[3];
+   uint8_t min_filter, mag_filter, mip_filter, compare_func, reserved;
+   float min_lod, max_lod, lod_bias;
 };
+
+bool agx_nir_lower_apple9_texture_offsets(
+   nir_shader *nir, const struct agx_apple9_sampler_key key[32],
+   const char **reason);
 
 struct agx_apple9_texture_mapping {
    uint8_t samplers[32];
