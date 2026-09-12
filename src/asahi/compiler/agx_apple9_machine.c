@@ -717,9 +717,9 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .allocator_safe = true,
          .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
       },
-   [AGX_APPLE9_ENC_GET_VERTEX_ID] =
+   [AGX_APPLE9_ENC_GET_DRAW_ID] =
       {
-         .name = "get_vertex_id",
+         .name = "get_draw_id",
          .length = 14,
          .operand_count = 1,
          .allocator_safe = true,

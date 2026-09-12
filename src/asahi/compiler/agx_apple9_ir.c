@@ -4935,14 +4935,16 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       return agx_apple9_pack_get_global_id(phys[instruction->dest],
                                            instruction->immediate, packed);
    case AGX_APPLE9_VIR_GET_SR:
-      if (instruction->encoding == AGX_APPLE9_ENC_GET_VERTEX_ID ||
+      if (instruction->encoding == AGX_APPLE9_ENC_GET_DRAW_ID ||
           instruction->encoding == AGX_APPLE9_ENC_GET_COVERAGE) {
          bool coverage = instruction->encoding == AGX_APPLE9_ENC_GET_COVERAGE;
          const unsigned dst = phys[instruction->dest];
-         if (dst >= 16 || instruction->immediate != (coverage ? 0x10c2 : 0x10dd) ||
+         bool valid_selector = coverage ? instruction->immediate == 0x10c2
+            : (instruction->immediate == 0x10dd || instruction->immediate == 0x10d8);
+         if (dst >= 16 || !valid_selector ||
              instruction->nr_srcs)
             return false;
-         /* Vertex ID and coverage return through hardware wait group 0
+         /* Draw IDs and coverage return through hardware wait group 0
           * (internal scoreboard slot 1), unlike synchronous SR reads. Materialize it immediately with an allocated identity IOR.
           * This bounded pair also leaves the slot free for subsequent work. */
          struct agx_apple9_vir_instr copy = {
@@ -4959,7 +4961,7 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
                                      AGX_APPLE9_DEPENDENCY_MASK_45_47_61_63,
                                      AGX_APPLE9_SCOREBOARD_SLOT_1))
             return false;
-         uint8_t bytes[14] = {(dst << 4) | 0x0c, coverage ? 0xc2 : 0xdd, 0x10, 0x06};
+         uint8_t bytes[14] = {(dst << 4) | 0x0c, instruction->immediate & 0xff, 0x10, 0x06};
          memcpy(bytes + 4, move.bytes, move.length);
          packed_init(packed, bytes, sizeof(bytes));
          return true;

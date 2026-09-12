@@ -648,7 +648,7 @@ apple9_pending_hazard(const struct agx_apple9_vir_instr *ins,
        ins->immediate == producer->immediate)
       return true;
    /* These compound encodings contain a fixed slot-1 publication and wait. */
-   return (ins->encoding == AGX_APPLE9_ENC_GET_VERTEX_ID ||
+   return (ins->encoding == AGX_APPLE9_ENC_GET_DRAW_ID ||
            ins->encoding == AGX_APPLE9_ENC_GET_COVERAGE) &&
           producer->producer_scoreboard_slot == AGX_APPLE9_SCOREBOARD_SLOT_1;
 }

@@ -153,6 +153,7 @@ bool agx_apple9_vertex_format_supported(enum pipe_format format);
  * the fetch. Multiple attributes sharing a binding use one resource argument. */
 struct agx_apple9_vertex_layout {
    uint32_t stride[16];
+   uint32_t divisor[16]; /* Zero selects the per-vertex stream. */
    bool clip_halfz;
    bool ignore_point_size; /* Valid only when rasterizing non-point primitives. */ /* Convert GL [-w,w] depth to hardware [0,w]. */
    enum pipe_format format[16];

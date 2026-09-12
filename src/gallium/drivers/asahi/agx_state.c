@@ -2480,8 +2480,9 @@ agx_update_vs(struct agx_batch *batch, unsigned index_size_B)
 retry_apple9_inputs:
       for (unsigned i = 0; i < MIN2(ctx->attributes->num_attribs, 16); ++i) {
          const struct agx_velem_key *a = &ctx->attributes->key[i];
-         if (!a->instanced && agx_apple9_vertex_format_supported(a->format)) {
+         if (agx_apple9_vertex_format_supported(a->format)) {
             key.apple9_inputs.stride[i] = a->stride;
+            key.apple9_inputs.divisor[i] = a->divisor;
             key.apple9_inputs.format[i] = a->format;
             unsigned binding = ctx->attributes->buffers[i];
             const struct pipe_vertex_buffer *vb = &ctx->vertex_buffers[binding];

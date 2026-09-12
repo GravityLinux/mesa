@@ -134,6 +134,10 @@ apple9_system_source(nir_scalar scalar, struct apple9_system_source *source)
       base = 0xdd;
       components = 1;
       break;
+   case nir_intrinsic_load_instance_id:
+      base = 0xd8;
+      components = 1;
+      break;
    case nir_intrinsic_load_workgroup_id:
       base = 0x9c;
       break;
@@ -251,6 +255,16 @@ apple9_lower_memory_pack(nir_builder *b, nir_alu_instr *alu, void *data)
    nir_def *value;
    b->cursor = nir_before_instr(&alu->instr);
    switch (alu->op) {
+   case nir_op_f2f32: {
+      nir_def *source = nir_ssa_for_alu_src(b, alu, 0);
+      if (source->bit_size != 16)
+         return false;
+      value = apple9_unpack_half(b, nir_u2u32(b, source));
+      break;
+   }
+   case nir_op_f2f16:
+      value = nir_u2u16(b, apple9_pack_half(b, nir_ssa_for_alu_src(b, alu, 0)));
+      break;
    case nir_op_pack_half_2x16_split:
       value = nir_ior(b, apple9_pack_half(b, nir_ssa_for_alu_src(b, alu, 0)),
                         nir_ishl_imm(b, apple9_pack_half(b, nir_ssa_for_alu_src(b, alu, 1)), 16));
@@ -557,6 +571,7 @@ apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
       if (graphics &&
           (op == nir_intrinsic_load_vertex_id ||
            op == nir_intrinsic_load_vertex_id_zero_base ||
+           op == nir_intrinsic_load_instance_id ||
            op == nir_intrinsic_load_pixel_coord ||
            op == nir_intrinsic_load_frag_coord_w ||
            op == nir_intrinsic_load_frag_coord_z ||
@@ -722,7 +737,8 @@ apple9_dag_system(struct apple9_dag_lower *lower,
                                          ? AGX_APPLE9_VIR_GET_GLOBAL_ID
                                          : AGX_APPLE9_VIR_GET_SR;
       enum agx_apple9_encoding encoding =
-         system.selector == 0xdd ? AGX_APPLE9_ENC_GET_VERTEX_ID
+         (system.selector == 0xdd || system.selector == 0xd8)
+                                 ? AGX_APPLE9_ENC_GET_DRAW_ID
          : system.zext16         ? AGX_APPLE9_ENC_GET_SR_ZEXT16
                                  : AGX_APPLE9_ENC_GET_SR;
       uint32_t immediate =
@@ -2796,13 +2812,17 @@ apple9_emit_graphics_output(struct apple9_dag_lower *lower,
       }
       uint32_t value =
          apple9_lower_dag_scalar(lower, nir_get_scalar(intr->src[0].ssa, c));
-      uint32_t scale = apple9_dag_imm(lower, integer ? 0 : fui(1.0f));
+      /* Mesa may erase user-varying types while lowering IO. Publish their
+       * bits without FP arithmetic: multiplying an integer payload by float
+       * one would quiet NaNs and flush subnormals. The UVS transport is untyped. */
+      bool raw = integer || (location != VARYING_SLOT_POS && location != VARYING_SLOT_PSIZ);
+      uint32_t scale = apple9_dag_imm(lower, raw ? 0 : fui(1.0f));
       uint32_t sources[] = {value, scale};
       if (value == AGX_APPLE9_VREG_INVALID || scale == AGX_APPLE9_VREG_INVALID)
          return false;
       value = apple9_dag_emit(
-         lower, integer ? AGX_APPLE9_VIR_IXOR : AGX_APPLE9_VIR_FMUL,
-         integer ? AGX_APPLE9_ENC_LOGIC_EXPORT : AGX_APPLE9_ENC_FLOAT2_EXPORT,
+         lower, raw ? AGX_APPLE9_VIR_IXOR : AGX_APPLE9_VIR_FMUL,
+         raw ? AGX_APPLE9_ENC_LOGIC_EXPORT : AGX_APPLE9_ENC_FLOAT2_EXPORT,
          sources, 2, 0);
       /* The allocator retains this publication independently of GPR liveness. */
       if (value == AGX_APPLE9_VREG_INVALID ||
@@ -4386,8 +4406,8 @@ apple9_lower_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    return true;
 }
 
-/* Naturally aligned homogeneous channels. Packed bitfields and integer
- * shader inputs can use the ordinary Mesa vertex-format fallback for now. */
+/* Vertex channels preserve integer values; packed 32-bit formats are
+ * extracted with ordinary NIR shifts and masks. */
 bool
 agx_apple9_vertex_format_supported(enum pipe_format format)
 {
@@ -4402,12 +4422,18 @@ agx_apple9_vertex_format_supported(enum pipe_format format)
       const struct util_format_channel_description *ch = &desc->channel[c];
       if (ch->type == UTIL_FORMAT_TYPE_VOID)
          continue;
-      if (!ch->size || ch->pure_integer || (ch->shift % ch->size))
+      if (!ch->size)
          return false;
-      if (ch->type == UTIL_FORMAT_TYPE_FLOAT && ch->size == 32)
+      if (desc->block.bits == 32 && ch->size <= 32 &&
+          ch->shift + ch->size <= 32 &&
+          (ch->type == UTIL_FORMAT_TYPE_UNSIGNED || ch->type == UTIL_FORMAT_TYPE_SIGNED))
+         continue;
+      if (ch->shift % ch->size)
+         return false;
+      if (ch->type == UTIL_FORMAT_TYPE_FLOAT && (ch->size == 16 || ch->size == 32))
          continue;
       if ((ch->type == UTIL_FORMAT_TYPE_UNSIGNED || ch->type == UTIL_FORMAT_TYPE_SIGNED) &&
-          (ch->size == 8 || ch->size == 16))
+          (ch->size == 8 || ch->size == 16 || ch->size == 32))
          continue;
       return false;
    }
@@ -4453,7 +4479,9 @@ apple9_lower_vertex_input(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    const struct util_format_description *desc =
       util_format_description(lower->layout->format[attribute]);
    b->cursor = nir_before_instr(&intr->instr);
-   nir_def *index = nir_load_vertex_id(b);
+   unsigned divisor = lower->layout->divisor[attribute];
+   nir_def *index = divisor ? nir_udiv_imm(b, nir_load_instance_id(b), divisor)
+                            : nir_load_vertex_id(b);
    nir_def *offset = nir_iadd_imm(b,
       nir_imul_imm(b, index, lower->layout->stride[attribute]),
       lower->layout->offset[attribute]);
@@ -4462,33 +4490,48 @@ apple9_lower_vertex_input(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       unsigned component = nir_intrinsic_component(intr) + c;
       unsigned swizzle = desc->swizzle[component];
       if (swizzle >= PIPE_SWIZZLE_0) {
-         components[c] = nir_imm_float(b, swizzle == PIPE_SWIZZLE_1 ? 1 : 0);
+         unsigned value = swizzle == PIPE_SWIZZLE_1;
+         components[c] = util_format_is_pure_integer(lower->layout->format[attribute])
+                            ? nir_imm_int(b, value) : nir_imm_float(b, value);
          continue;
       }
       const struct util_format_channel_description *ch = &desc->channel[swizzle];
-      unsigned bytes = ch->size / 8;
-      unsigned add = lower->layout->offset[attribute] + ch->shift / 8;
+      bool packed = (ch->size % 8) || (ch->shift % 8);
+      unsigned bytes = packed ? 4 : ch->size / 8;
+      unsigned add = lower->layout->offset[attribute] + (packed ? 0 : ch->shift / 8);
       if (!bytes || (lower->layout->stride[attribute] % bytes) || (add % bytes)) {
          lower->valid = false;
          return false;
       }
-      nir_def *value = nir_load_ubo(b, 1, ch->size,
+      nir_def *value = nir_load_ubo(b, 1, packed ? 32 : ch->size,
          nir_imm_int(b, 32 + lower->layout->buffer[attribute]),
-         nir_iadd_imm(b, offset, ch->shift / 8),
+         nir_iadd_imm(b, offset, packed ? 0 : ch->shift / 8),
          .align_mul = bytes, .range = ~0u);
-      if (ch->type != UTIL_FORMAT_TYPE_FLOAT) {
+      if (packed) {
+         value = nir_ushr_imm(b, value, ch->shift);
+         value = ch->type == UTIL_FORMAT_TYPE_SIGNED
+                    ? nir_ishr_imm(b, nir_ishl_imm(b, value, 32 - ch->size), 32 - ch->size)
+                    : nir_iand_imm(b, value, BITFIELD_MASK(ch->size));
+      }
+      if (ch->type == UTIL_FORMAT_TYPE_FLOAT) {
+         if (ch->size == 16)
+            value = apple9_unpack_half(b, nir_u2u32(b, value));
+      } else if (ch->pure_integer) {
+         value = ch->type == UTIL_FORMAT_TYPE_SIGNED ? nir_i2i32(b, value)
+                                                    : nir_u2u32(b, value);
+      } else {
          unsigned bits = ch->size;
          if (ch->type == UTIL_FORMAT_TYPE_SIGNED) {
             value = nir_i2i32(b, value);
             value = nir_i2f32(b, value);
             if (ch->normalized)
                value = nir_fmax(b, nir_fmul_imm(b, value,
-                  1.0 / ((1u << (bits - 1)) - 1)), nir_imm_float(b, -1));
+                  1.0 / ((UINT64_C(1) << (bits - 1)) - 1)), nir_imm_float(b, -1));
          } else {
             value = nir_u2u32(b, value);
             value = nir_u2f32(b, value);
             if (ch->normalized)
-               value = nir_fmul_imm(b, value, 1.0 / ((1u << bits) - 1));
+               value = nir_fmul_imm(b, value, 1.0 / ((UINT64_C(1) << bits) - 1));
          }
       }
       components[c] = value;
