@@ -1068,7 +1068,50 @@ agx_set_framebuffer_state(struct pipe_context *pctx,
 
    util_copy_framebuffer_state(&ctx->framebuffer, state);
 
-   for (unsigned i = 0; i < state->nr_cbufs; ++i) {
+   /* The direct Apple9 tile launch currently requires a color attachment.
+    * Supply private storage for depth/stencil-only framebuffers, including
+    * clears used by WebGL to initialize new attachments. No application
+    * color resource is bound or modified by this emulation. */
+   if (agx_apple9_direct_render_enabled(agx_device(pctx->screen)) &&
+       state->width && state->height) {
+      bool has_color = false;
+      for (unsigned i = 0; i < state->nr_cbufs; ++i)
+         has_color |= state->cbufs[i].texture != NULL;
+      if (!has_color) {
+         unsigned samples = util_framebuffer_get_num_samples(state);
+         struct pipe_resource *dummy = ctx->apple9_dummy_color;
+         if (!dummy || dummy->width0 != state->width ||
+             dummy->height0 != state->height || dummy->nr_samples != samples) {
+            struct pipe_resource templ = {
+               .target = PIPE_TEXTURE_2D,
+               .format = PIPE_FORMAT_R8_UNORM,
+               .width0 = state->width,
+               .height0 = state->height,
+               .depth0 = 1,
+               .array_size = 1,
+               .nr_samples = samples,
+               .nr_storage_samples = samples,
+               .bind = PIPE_BIND_RENDER_TARGET,
+            };
+            dummy = pctx->screen->resource_create(pctx->screen, &templ);
+            if (!dummy) {
+               fprintf(stderr, "failed to allocate Apple9 depth-only color storage\n");
+               abort();
+            }
+            pipe_resource_reference(&ctx->apple9_dummy_color, NULL);
+            ctx->apple9_dummy_color = dummy;
+         }
+         ctx->framebuffer.nr_cbufs = 1;
+         ctx->framebuffer.cbufs[0].format = dummy->format;
+         ctx->framebuffer.cbufs[0].nr_samples = 0;
+         ctx->framebuffer.cbufs[0].level = 0;
+         ctx->framebuffer.cbufs[0].first_layer = 0;
+         ctx->framebuffer.cbufs[0].last_layer = 0;
+         pipe_resource_reference(&ctx->framebuffer.cbufs[0].texture, dummy);
+      }
+   }
+
+   for (unsigned i = 0; i < ctx->framebuffer.nr_cbufs; ++i) {
       agx_legalize_compression(ctx,
                                agx_resource(ctx->framebuffer.cbufs[i].texture),
                                ctx->framebuffer.cbufs[i].format);
@@ -1912,9 +1955,21 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       }
    }
 
-   if (apple9_render)
-      compiled->apple9_render_stage.program_id =
-         atomic_fetch_add_explicit(&apple9_program_serial, 1, memory_order_relaxed) + 1;
+   if (apple9_render) {
+      struct agx_apple9_render_stage *stage = &compiled->apple9_render_stage;
+      stage->program_id = atomic_fetch_add_explicit(&apple9_program_serial, 1,
+                                                    memory_order_relaxed) +
+                          1;
+      stage->bo = agx_bo_create(dev, stage->binary_size, 0,
+                                AGX_BO_EXEC | AGX_BO_LOW_VA | AGX_BO_WRITEBACK,
+                                "Apple9 compiled shader");
+      if (!stage->bo) {
+         fprintf(stderr, "Failed to allocate Apple9 compiled shader\n");
+         abort();
+      }
+      memcpy(agx_bo_map(stage->bo), stage->binary, stage->binary_size);
+      agx_bo_note_cpu_write(stage->bo, 0, stage->binary_size);
+   }
 
    if (apple9_render)
       memcpy(compiled->apple9_render_stage.resource_binding,
@@ -2911,6 +2966,7 @@ agx_delete_compiled_shader(struct agx_device *dev,
    if (so->gs_copy)
       agx_delete_compiled_shader(dev, so->gs_copy);
 
+   agx_bo_unreference(dev, so->apple9_render_stage.bo);
    free(so->apple9_render_binary);
    free(so->b.binary);
    agx_bo_unreference(dev, so->apple9_state_bo);
@@ -3003,7 +3059,7 @@ agx_destroy_compute_blitter(struct pipe_context *ctx, struct asahi_blitter *bl)
    if (bl->detile_cs)
       ctx->delete_compute_state(ctx, bl->detile_cs);
    for (unsigned n = 0; n < 2; ++n)
-      for (unsigned f = 0; f < 4; ++f)
+      for (unsigned f = 0; f < ARRAY_SIZE(bl->resolve_cs[n]); ++f)
          if (bl->resolve_cs[n][f])
             ctx->delete_compute_state(ctx, bl->resolve_cs[n][f]);
    hash_table_foreach(bl->blit_cs, ent) {
@@ -5518,16 +5574,6 @@ agx_apple9_collect_color_targets(const struct agx_batch *batch,
    return any_target;
 }
 
-static uint64_t
-agx_apple9_first_color_target(const struct agx_apple9_render_pipeline *pipeline)
-{
-   for (unsigned rt = 0; rt < 8; ++rt) {
-      if (pipeline->color_targets[rt])
-         return pipeline->color_targets[rt];
-   }
-   return 0;
-}
-
 static void
 agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
              unsigned drawid_offset,
@@ -5536,11 +5582,27 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
 {
    struct agx_context *ctx = agx_context(pctx);
    if (agx_apple9_direct_render_enabled(agx_device(pctx->screen)) &&
-       (info->mode == MESA_PRIM_TRIANGLE_FAN ||
+       info->primitive_restart) {
+      /* Split at restart indices before converting primitive topology. The
+       * source-generated direct VDM stream currently emits restart-free draws. */
+      if (num_draws > 1)
+         util_draw_multi(pctx, info, drawid_offset, indirect, draws, num_draws);
+      else
+         util_draw_vbo_without_prim_restart(pctx, info, drawid_offset, indirect,
+                                           draws);
+      return;
+   }
+   if (agx_apple9_direct_render_enabled(agx_device(pctx->screen)) &&
+       /* Widen byte indices here, after splitting restart segments. Letting
+        * u_vbuf widen first loses the original restart-marker contract. */
+       (info->index_size == 1 ||
+        info->mode == MESA_PRIM_TRIANGLE_FAN ||
         info->mode == MESA_PRIM_TRIANGLE_STRIP)) {
       if (!ctx->apple9_primconvert)
          ctx->apple9_primconvert =
-            util_primconvert_create(pctx, BITFIELD_BIT(MESA_PRIM_TRIANGLES));
+            util_primconvert_create(pctx, BITFIELD_BIT(MESA_PRIM_POINTS) |
+               BITFIELD_BIT(MESA_PRIM_LINES) | BITFIELD_BIT(MESA_PRIM_LINE_STRIP) |
+               BITFIELD_BIT(MESA_PRIM_LINE_LOOP) | BITFIELD_BIT(MESA_PRIM_TRIANGLES));
       if (!ctx->apple9_primconvert)
          abort();
       util_primconvert_save_flatshade_first(
@@ -5558,6 +5620,30 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
 
    if (num_draws > 1) {
       util_draw_multi(pctx, info, drawid_offset, indirect, draws, num_draws);
+      return;
+   }
+
+   /* The native indexed packet fetches from a dword-aligned address, even
+    * for 16-bit indices. Re-upload an unaligned range through the existing
+    * user-index path before acquiring a batch: mapping may flush a writer.
+    * Aligned index buffers keep the direct GPU path. */
+   if (agx_apple9_direct_render_enabled(dev) && !indirect &&
+       info->index_size && !info->has_user_indices && draws->count &&
+       ((agx_map_gpu(agx_resource(info->index.resource)) +
+         (uint64_t)draws->start * info->index_size) & 3)) {
+      struct pipe_transfer *transfer = NULL;
+      void *indices = pipe_buffer_map_range(
+         pctx, info->index.resource, draws->start * info->index_size,
+         draws->count * info->index_size, PIPE_MAP_READ, &transfer);
+      if (!indices)
+         return;
+      struct pipe_draw_info aligned_info = *info;
+      struct pipe_draw_start_count_bias aligned_draw = *draws;
+      aligned_info.has_user_indices = true;
+      aligned_info.index.user = indices;
+      aligned_draw.start = 0;
+      agx_draw_vbo(pctx, &aligned_info, drawid_offset, NULL, &aligned_draw, 1);
+      pipe_buffer_unmap(pctx, transfer);
       return;
    }
 
@@ -5931,23 +6017,28 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
          fprintf(stderr, "Apple9 direct render requires one to eight color surfaces\n");
          return;
       }
-      uint64_t target = agx_apple9_first_color_target(&pipeline);
-
-      simple_mtx_lock(&screen->apple9_render_package_lock);
-      if (!screen->apple9_render_cache)
-         screen->apple9_render_cache = agx_apple9_render_cache_create(dev);
-      struct agx_apple9_render_package *render_package =
-         agx_apple9_render_cache_get(screen->apple9_render_cache, &pipeline,
-                                     target, batch->key.width,
-                                     batch->key.height);
-      if (!render_package) {
-         fprintf(stderr, "failed to install Apple9 render generation\n");
-         simple_mtx_unlock(&screen->apple9_render_package_lock);
-         /* A missing package cannot produce a valid command buffer. */
+      simple_mtx_lock(&screen->apple9_graphics_lock);
+      if (!screen->apple9_graphics)
+         screen->apple9_graphics = agx_apple9_graphics_create(dev);
+      simple_mtx_unlock(&screen->apple9_graphics_lock);
+      if (!screen->apple9_graphics) {
+         fprintf(stderr, "Failed to initialize Apple9 graphics state\n");
          abort();
       }
-      if (!batch->apple9_render_package)
-         batch->apple9_render_package = render_package;
+      if (!batch->apple9_render_initialized) {
+         batch->apple9_framebuffer = (struct agx_apple9_framebuffer){
+            .width = batch->key.width,
+            .height = batch->key.height,
+            .count = MAX2(pipeline.fragment.render_targets, 1),
+            .samples = MAX2(pipeline.samples, 1),
+         };
+         memcpy(batch->apple9_framebuffer.targets, pipeline.color_targets,
+                sizeof(pipeline.color_targets));
+         memcpy(batch->apple9_framebuffer.formats, pipeline.color_formats,
+                sizeof(pipeline.color_formats));
+         batch->apple9_root_varyings = pipeline.vertex.varying_components;
+         batch->apple9_render_initialized = true;
+      }
       bool depth_enabled = ctx->zs->base.depth_enabled && batch->key.zsbuf.texture;
       unsigned index = batch->apple9_uniform_draw_count;
       if (index >= AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS) {
@@ -5957,10 +6048,10 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       struct agx_apple9_uniform_draw *record =
          &batch->apple9_uniform_draws[index];
       memset(record, 0, sizeof(*record));
-      agx_batch_add_bo(batch, agx_apple9_render_code_bo(render_package, 0));
-      agx_batch_add_bo(batch, agx_apple9_render_code_bo(render_package, 1));
-      agx_apple9_render_package_acquire(render_package);
-      record->package = render_package;
+      const struct agx_apple9_uniform_draw *previous =
+         index ? &batch->apple9_uniform_draws[index - 1] : NULL;
+      agx_batch_add_bo(batch, pipeline.vertex.bo);
+      agx_batch_add_bo(batch, pipeline.fragment.bo);
       record->flatshade_first = ctx->rast->base.flatshade_first;
       memcpy(record->viewport_translate, ctx->viewport[0].translate,
              sizeof(record->viewport_translate));
@@ -5982,19 +6073,28 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       record->scissor_min[1] = miny;
       record->scissor_max[0] = maxx;
       record->scissor_max[1] = maxy;
-      record->scissor_index = batch->scissor.size / AGX_SCISSOR_LENGTH;
-      struct agx_scissor_packed *scissor =
-         util_dynarray_grow_bytes(&batch->scissor, 1, AGX_SCISSOR_LENGTH);
+      struct agx_scissor_packed scissor;
       float minz, maxz;
       util_viewport_zmin_zmax(&ctx->viewport[0], ctx->rast->base.clip_halfz,
                              &minz, &maxz);
-      agx_pack(scissor, SCISSOR, cfg) {
+      agx_pack(&scissor, SCISSOR, cfg) {
          cfg.min_x = minx;
          cfg.min_y = miny;
          cfg.max_x = maxx;
          cfg.max_y = maxy;
          cfg.min_z = minz;
          cfg.max_z = maxz;
+      }
+      const uint8_t *old_scissor =
+         previous ? (const uint8_t *)batch->scissor.data +
+                       previous->scissor_index * AGX_SCISSOR_LENGTH
+                  : NULL;
+      if (old_scissor && !memcmp(old_scissor, &scissor, sizeof(scissor))) {
+         record->scissor_index = previous->scissor_index;
+      } else {
+         record->scissor_index = batch->scissor.size / AGX_SCISSOR_LENGTH;
+         memcpy(util_dynarray_grow_bytes(&batch->scissor, 1, sizeof(scissor)),
+                &scissor, sizeof(scissor));
       }
       record->reads_tile = pipeline.fragment.reads_tile;
       record->uses_discard = pipeline.fragment.uses_discard;
@@ -6020,14 +6120,30 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       bool depth_bias_enabled = ctx->rast->depth_bias &&
                                 reduced_prim == MESA_PRIM_TRIANGLES;
       if (depth_bias_enabled) {
-         record->depth_bias_index = batch->depth_bias.size / AGX_DEPTH_BIAS_LENGTH;
-         agx_upload_depth_bias(batch, &ctx->rast->base);
+         if (previous && (previous->depth_control & (1u << 17)) &&
+             !(ctx->dirty & AGX_DIRTY_RS)) {
+            record->depth_bias_index = previous->depth_bias_index;
+         } else {
+            record->depth_bias_index =
+               batch->depth_bias.size / AGX_DEPTH_BIAS_LENGTH;
+            agx_upload_depth_bias(batch, &ctx->rast->base);
+         }
       }
       record->depth_control = 0x200 | (1u << 16) |
                               (depth_bias_enabled ? (1u << 17) : 0) |
                               (stencil_enabled ? (3u << 18) : 0);
+      if (ctx->active_queries && ctx->occlusion_query) {
+         record->occlusion_index = agx_get_oq_index(batch, ctx->occlusion_query);
+         record->visibility_mode =
+            ctx->occlusion_query->type == PIPE_QUERY_OCCLUSION_COUNTER
+               ? AGX_VISIBILITY_MODE_COUNTING : AGX_VISIBILITY_MODE_BOOLEAN;
+         record->depth_control |= record->visibility_mode << 14;
+      }
+      if (ctx->rast->base.rasterizer_discard)
+         record->depth_control |= 1u << 21;
       record->raster_control = ctx->rast->base.cull_face |
-                               (ctx->rast->base.front_ccw ? 1u << 16 : 0);
+                               (ctx->rast->base.front_ccw ? 1u << 16 : 0) |
+                               (ctx->rast->base.rasterizer_discard ? 1u << 17 : 0);
       record->object_type = reduced_prim == MESA_PRIM_POINTS ? agx_point_object_type(ctx->rast)
                            : reduced_prim == MESA_PRIM_LINES ? AGX_OBJECT_TYPE_LINE
                                                             : AGX_OBJECT_TYPE_TRIANGLE;
@@ -6045,15 +6161,7 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
             stage ? &pipeline.fragment : &pipeline.vertex;
          mesa_shader_stage shader =
             stage ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX;
-         struct agx_ptr table = {0};
-         if (rs->resource_count) {
-            table = agx_pool_alloc_aligned(
-               &batch->pool, rs->resource_count * sizeof(uint64_t), 64);
-            if (stage)
-               record->fragment_table = table.gpu;
-            else
-               record->vertex_table = table.gpu;
-         }
+         record->buffer_count[stage] = rs->resource_count;
          for (unsigned slot = 0; slot < rs->resource_count; ++slot) {
             unsigned binding = rs->resource_binding[slot];
             uint64_t address;
@@ -6112,8 +6220,23 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
                agx_batch_reads(batch, ubo);
                address = agx_map_gpu(ubo) + cb->buffer_offset;
             }
-            ((uint64_t *)table.cpu)[slot] = address;
+            record->buffers[stage][slot] = address;
          }
+         bool reuse =
+            previous && previous->buffer_count[stage] == rs->resource_count;
+         for (unsigned slot = 0; reuse && slot < rs->resource_count; slot++)
+            reuse =
+               previous->buffers[stage][slot] == record->buffers[stage][slot];
+         uint64_t address =
+            reuse ? (stage ? previous->fragment_table : previous->vertex_table)
+            : rs->resource_count ? agx_pool_upload_aligned(
+                                      &batch->pool, record->buffers[stage],
+                                      rs->resource_count * sizeof(uint64_t), 64)
+                                 : 0;
+         if (stage)
+            record->fragment_table = address;
+         else
+            record->vertex_table = address;
       }
       for (unsigned stage = 0; stage < 2; ++stage) {
          const struct agx_apple9_render_stage *rs =
@@ -6314,31 +6437,28 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
                PIPE_TEX_WRAP_CLAMP_TO_EDGE, PIPE_TEX_WRAP_CLAMP_TO_EDGE, 1);
          }
       }
-      pipeline.uniform_draw = ++batch->apple9_uniform_draw_count;
+      ++batch->apple9_uniform_draw_count;
       pipeline.index_size = info->index_size;
       pipeline.primitive = agx_primitive_for_pipe(info->mode);
       pipeline.index_buffer = ib;
       pipeline.index_extent =
          MIN2(ib_extent, (uint64_t)draws->count * info->index_size);
-      pipeline.package = render_package;
-      struct agx_bo *render_package_bo =
-         agx_apple9_render_cache_bo(screen->apple9_render_cache);
-      struct agx_bo *render_state_bo =
-         agx_apple9_render_cache_state_bo(screen->apple9_render_cache);
-      pipeline.pipeline_word =
-         agx_apple9_render_package_pipeline_word(dev, render_package);
-      simple_mtx_unlock(&screen->apple9_render_package_lock);
-
-      if (!pipeline.pipeline_word) {
-         fprintf(stderr, "Apple9 render entry table has no encodable USC base\n");
-         return;
+      if (!agx_apple9_prepare_draw(dev, &batch->pipeline_pool,
+                                   &batch->apple9_context_pool, &pipeline,
+                                   record, previous, index)) {
+         fprintf(stderr, "Failed to encode Apple9 draw state\n");
+         abort();
       }
-
+      pipeline.ppp = record->ppp;
+      pipeline.vertex_launch = record->launch[0] / 0x40;
+      pipeline.pipeline_word = AGX_APPLE9_RENDER_HEADER_OFFSET;
+      struct agx_bo *render_header =
+         agx_apple9_graphics_bo(screen->apple9_graphics);
       /* Tile export uses the prepared fragment entry and bindings directly.
        * It must not execute as a rasterized fragment shader. */
       if (batch->apple9_preparing_tile_store) {
-         agx_batch_add_bo(batch, render_package_bo);
-         agx_batch_add_bo(batch, render_state_bo);
+         agx_batch_add_bo(batch, render_header);
+         agx_batch_add_bo(batch, dev->apple9_render_context);
          agx_batch_add_bo(batch, dev->apple9_render_fixed_usc);
          agx_dirty_reset_graphics(ctx);
          return;
@@ -6351,8 +6471,8 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       out = agx_apple9_emit_direct_draw(
          append, &pipeline, draws->count, info->instance_count,
          info->index_size ? draws->index_bias : draws->start);
-      agx_batch_add_bo(batch, render_package_bo);
-      agx_batch_add_bo(batch, render_state_bo);
+      agx_batch_add_bo(batch, render_header);
+      agx_batch_add_bo(batch, dev->apple9_render_context);
       agx_batch_add_bo(batch, dev->apple9_render_fixed_usc);
    } else {
       out = agx_encode_state(batch, batch->vdm.current);

@@ -12,7 +12,7 @@
 /*
  * A main program and its client package form one Apple9 ABI.  The current
  * generated entry setup supports up to eighteen visible resources. The
- * compiler compacts API bindings into the argument window after three roots.
+ * compiler compacts API bindings into the argument window after the group-count root.
  */
 enum agx_apple9_compute_abi {
    AGX_APPLE9_COMPUTE_ABI_INVALID = 0,
@@ -27,7 +27,7 @@ enum agx_apple9_compute_abi {
 #define AGX_APPLE9_COMPUTE_MAX_RESOURCES 18
 /* Conservative per-invocation limit exercised on T8132 in all three stages. */
 #define AGX_APPLE9_MAX_SCRATCH_BYTES 4096
-#define AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE 3
+#define AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE 1
 
 #define AGX_APPLE9_COMPUTE_STATE_LITERAL_STORAGE_CAPACITY 8
 

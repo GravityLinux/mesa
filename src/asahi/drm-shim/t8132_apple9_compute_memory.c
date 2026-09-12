@@ -19,9 +19,6 @@
 #define INPUT_EXTRA_VALUES (VALUE_COUNT * 3u)
 #define LOCAL_SIZE_X       32u
 #define RECIPROCAL_DENOMINATOR_COUNT 1024u
-#define CEIL_DIV_CASES_PER_DENOMINATOR 8u
-#define CEIL_DIV_CASE_COUNT                                                \
-   (RECIPROCAL_DENOMINATOR_COUNT * CEIL_DIV_CASES_PER_DENOMINATOR)
 #define PAYLOAD_BYTES   ((VALUE_COUNT + INPUT_EXTRA_VALUES) * sizeof(uint32_t))
 #define MIN_GUARD_BYTES 256u
 
@@ -106,7 +103,6 @@ enum workload {
    WORKLOAD_RECIPROCAL_RETAIN,
    WORKLOAD_RECIPROCAL_MATERIALIZED,
    WORKLOAD_RECIPROCAL_DENOMINATORS,
-   WORKLOAD_CEIL_DIV_GRID_DOMAIN,
    WORKLOAD_PRESSURE40,
    WORKLOAD_FOUR_RESOURCE_MIX,
 };
@@ -181,8 +177,6 @@ workload_name(enum workload workload)
       return "reciprocal-materialized";
    case WORKLOAD_RECIPROCAL_DENOMINATORS:
       return "reciprocal-denominators-1-1024";
-   case WORKLOAD_CEIL_DIV_GRID_DOMAIN:
-      return "ceil-div-grid-domain";
    case WORKLOAD_PRESSURE40:
       return "pressure40";
    case WORKLOAD_FOUR_RESOURCE_MIX:
@@ -563,16 +557,6 @@ build_program(enum workload workload)
       "void main(){uint i=gl_GlobalInvocationID.x;"
       "o.v[i]=floatBitsToUint(1.0/float(i+1u));}\n";
 
-   static const char ceil_div_grid_domain[] =
-      "#version 320 es\n"
-      "layout(local_size_x=32) in;\n"
-      "layout(std430,binding=0) readonly buffer N { uint v[]; } n;\n"
-      "layout(std430,binding=1) readonly buffer D { uint v[]; } d;\n"
-      "layout(std430,binding=2) buffer O { uint v[]; } o;\n"
-      "void main(){uint i=gl_GlobalInvocationID.x;uint nn=n.v[i],dd=d.v[i];"
-      "uint q=uint(fma(float(nn),1.0/float(dd),0.5));uint p=q*dd;"
-      "o.v[i]=(p<nn)?q+1u:q;}\n";
-
    static const char pressure40[] =
       "#version 310 es\n"
       "layout(local_size_x=32) in;\n"
@@ -704,9 +688,6 @@ build_program(enum workload workload)
       break;
    case WORKLOAD_RECIPROCAL_DENOMINATORS:
       source = reciprocal_denominators;
-      break;
-   case WORKLOAD_CEIL_DIV_GRID_DOMAIN:
-      source = ceil_div_grid_domain;
       break;
    case WORKLOAD_PRESSURE40:
       source = pressure40;
@@ -1071,7 +1052,6 @@ write_expected_output(enum workload workload, uint8_t *output,
          break;
       }
       case WORKLOAD_RECIPROCAL_DENOMINATORS:
-      case WORKLOAD_CEIL_DIV_GRID_DOMAIN:
          fail("workload uses a dedicated oracle");
          break;
       case WORKLOAD_PRESSURE40:
@@ -1221,113 +1201,6 @@ run_reciprocal_denominator_case(void)
    glDeleteProgram(program);
    glDeleteBuffers(1, &buffer);
    free(initial);
-}
-
-static uint32_t
-ceil_div_numerator(uint32_t denominator, unsigned variant)
-{
-   switch (variant) {
-   case 0:
-      return 0;
-   case 1:
-      return 1;
-   case 2:
-      return denominator - 1u;
-   case 3:
-      return denominator;
-   case 4:
-      return denominator + 1u;
-   case 5:
-      return 65535u * denominator - 1u;
-   case 6:
-      return 65535u * denominator;
-   case 7: {
-      uint32_t quotient = (denominator * 31337u) % 65535u;
-      uint32_t remainder = denominator == 1u
-                              ? 0u
-                              : ((denominator * 97u + 17u) % denominator) + 1u;
-      return quotient * denominator + remainder;
-   }
-   default:
-      fail("invalid ceil-div test variant");
-      return 0;
-   }
-}
-
-static void
-run_ceil_div_grid_domain_case(void)
-{
-   GLint alignment_value = 0;
-   glGetIntegerv(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT, &alignment_value);
-   if (alignment_value <= 0)
-      fail("invalid ceil-div SSBO alignment");
-
-   const size_t alignment = (size_t)alignment_value > sizeof(uint32_t)
-                               ? (size_t)alignment_value
-                               : sizeof(uint32_t);
-   const size_t payload_offset = align_up(MIN_GUARD_BYTES, alignment);
-   const size_t payload_size = CEIL_DIV_CASE_COUNT * sizeof(uint32_t);
-   const size_t buffer_size = payload_offset + payload_size + MIN_GUARD_BYTES;
-   uint8_t *numerators = malloc(buffer_size);
-   uint8_t *denominators = malloc(buffer_size);
-   uint8_t *expected = malloc(buffer_size);
-   if (!numerators || !denominators || !expected)
-      fail("allocate ceil-div buffers");
-
-   seed_buffer(numerators, buffer_size, 0);
-   seed_buffer(denominators, buffer_size, 1);
-   seed_buffer(expected, buffer_size, 2);
-   for (uint32_t denominator = 1;
-        denominator <= RECIPROCAL_DENOMINATOR_COUNT; ++denominator) {
-      for (unsigned variant = 0;
-           variant < CEIL_DIV_CASES_PER_DENOMINATOR; ++variant) {
-         const size_t index =
-            (denominator - 1u) * CEIL_DIV_CASES_PER_DENOMINATOR + variant;
-         const uint32_t numerator =
-            ceil_div_numerator(denominator, variant);
-         const uint32_t quotient =
-            numerator / denominator + (numerator % denominator != 0u);
-         write_word(numerators,
-                    payload_offset + index * sizeof(uint32_t), numerator);
-         write_word(denominators,
-                    payload_offset + index * sizeof(uint32_t), denominator);
-         write_word(expected,
-                    payload_offset + index * sizeof(uint32_t), quotient);
-      }
-   }
-
-   GLuint buffers[3] = {0};
-   glGenBuffers(3, buffers);
-   const uint8_t *images[3] = {numerators, denominators, expected};
-   for (unsigned binding = 0; binding < 3; ++binding) {
-      glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffers[binding]);
-      glBufferData(GL_SHADER_STORAGE_BUFFER, buffer_size, images[binding],
-                   GL_DYNAMIC_COPY);
-      glBindBufferRange(GL_SHADER_STORAGE_BUFFER, binding, buffers[binding],
-                        payload_offset, payload_size);
-   }
-   check_gl("create ceil-div buffers");
-
-   GLuint program = build_program(WORKLOAD_CEIL_DIV_GRID_DOMAIN);
-   glUseProgram(program);
-   glDispatchCompute(CEIL_DIV_CASE_COUNT / LOCAL_SIZE_X, 1, 1);
-   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
-                   GL_SHADER_STORAGE_BARRIER_BIT);
-   glFinish();
-   check_gl("execute ceil-div grid domain");
-
-   verify_buffer(buffers[0], "ceil-div numerators", numerators, buffer_size);
-   verify_buffer(buffers[1], "ceil-div denominators", denominators,
-                 buffer_size);
-   verify_buffer(buffers[2], "ceil-div quotients", expected, buffer_size);
-   printf("T8132_APPLE9_CEIL_DIV_PASS denominators=%u cases=%u\n",
-          RECIPROCAL_DENOMINATOR_COUNT, CEIL_DIV_CASE_COUNT);
-
-   glDeleteProgram(program);
-   glDeleteBuffers(3, buffers);
-   free(expected);
-   free(denominators);
-   free(numerators);
 }
 
 static uint32_t
@@ -1520,7 +1393,6 @@ static const char *const memory_cases[] = {
    "reciprocal-retain",
    "reciprocal-materialized",
    "reciprocal-denominators-1-1024",
-   "ceil-div-grid-domain",
    "pressure40",
    "four-resource-mix",
 };
@@ -1537,11 +1409,6 @@ t8132_apple9_run_memory_case(const char *name)
 {
    if (!strcmp(name, "reciprocal-denominators-1-1024")) {
       run_reciprocal_denominator_case();
-      return;
-   }
-
-   if (!strcmp(name, "ceil-div-grid-domain")) {
-      run_ceil_div_grid_domain_case();
       return;
    }
 

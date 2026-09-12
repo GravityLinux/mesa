@@ -3970,7 +3970,8 @@ apple9_system_value_shader(enum apple9_test_system_value system,
 }
 
 static nir_shader *
-apple9_num_workgroups_shader(bool variable_local_size, unsigned component)
+apple9_num_workgroups_shader(bool variable_local_size, unsigned component,
+                             bool atomic = false)
 {
    nir_builder b = apple9_compute_builder("apple9_num_workgroups");
    if (variable_local_size) {
@@ -3984,8 +3985,13 @@ apple9_num_workgroups_shader(bool variable_local_size, unsigned component)
    }
 
    nir_def *groups = nir_load_num_workgroups(&b);
-   apple9_store_output(&b, apple9_global_id_x(&b),
-                       nir_channel(&b, groups, component));
+   nir_def *value = nir_channel(&b, groups, component);
+   if (atomic) {
+      b.shader->info.num_ssbos = 2;
+      value = nir_ssbo_atomic(&b, 32, nir_imm_int(&b, 1), nir_imm_int(&b, 0),
+                             value, .atomic_op = nir_atomic_op_iadd);
+   }
+   apple9_store_output(&b, apple9_global_id_x(&b), value);
    return b.shader;
 }
 
@@ -5669,32 +5675,36 @@ TEST(Apple9Compiler, CachedSystemValueDominatesConditionalUses)
    ralloc_free(b.shader);
 }
 
-TEST(Apple9Compiler, NumWorkgroupsUsesRuntimeCeilingDivision)
+TEST(Apple9Compiler, NumWorkgroupsLoadsPublishedCounts)
 {
-   for (bool variable : {false, true}) {
-      for (unsigned component = 0; component < 3; ++component) {
-         SCOPED_TRACE(testing::Message()
-                      << "variable=" << variable << " component=" << component);
-         nir_shader *nir = apple9_num_workgroups_shader(variable, component);
-         struct agx_shader_part compiled = {};
-         struct agx_apple9_compute_profile profile = {};
-         const char *reason = nullptr;
-         ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
-            << (reason ? reason : "no diagnostic");
+   for (bool atomic : {false, true}) {
+      for (bool variable : {false, true}) {
+         for (unsigned component = 0; component < 3; ++component) {
+            SCOPED_TRACE(testing::Message()
+                         << "atomic=" << atomic << " variable=" << variable
+                         << " component=" << component);
+            nir_shader *nir =
+               apple9_num_workgroups_shader(variable, component, atomic);
+            struct agx_shader_part compiled = {};
+            struct agx_apple9_compute_profile profile = {};
+            const char *reason = nullptr;
+            ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
+               << (reason ? reason : "no diagnostic");
 
-         EXPECT_EQ(profile.variable_local_size, variable);
-         EXPECT_EQ(apple9_binary_count_reciprocals(&compiled), 1u);
-         if (variable) {
-            EXPECT_EQ(profile.local_size[component], 0u);
-            EXPECT_TRUE(apple9_binary_contains_get_sr_zext16(&compiled,
-                                                             0x98 + component));
-         } else {
-            static const uint32_t expected[] = {7, 5, 3};
-            EXPECT_EQ(profile.local_size[component], expected[component]);
+            EXPECT_EQ(profile.variable_local_size, variable);
+            EXPECT_EQ(apple9_binary_count_reciprocals(&compiled), 0u);
+            if (variable) {
+               EXPECT_EQ(profile.local_size[component], 0u);
+               EXPECT_FALSE(apple9_binary_contains_get_sr_zext16(
+                  &compiled, 0x98 + component));
+            } else {
+               static const uint32_t expected[] = {7, 5, 3};
+               EXPECT_EQ(profile.local_size[component], expected[component]);
+            }
+
+            free(compiled.binary);
+            ralloc_free(nir);
          }
-
-         free(compiled.binary);
-         ralloc_free(nir);
       }
    }
 }

@@ -31,18 +31,14 @@ bool agx_apple9_texture_format_supported(enum pipe_format format);
 
 struct agx_device;
 struct agx_bo;
-struct agx_apple9_render_package;
-struct agx_apple9_render_cache;
-struct agx_bo *
-agx_apple9_render_code_bo(const struct agx_apple9_render_package *, unsigned);
-
-/* Patch only the validated per-invocation extent fields in a launch record. */
-bool agx_apple9_patch_scratch_frame(uint8_t *launch, size_t size,
-                                   unsigned call_offset, unsigned bytes);
+struct agx_pool;
+struct agx_apple9_graphics;
 
 struct agx_apple9_render_stage {
    /* Stable compiled-object identity; zero for externally supplied stages. */
    uint64_t program_id;
+   /* Owned by the compiled shader; each using batch retains a BO reference. */
+   struct agx_bo *bo;
    const uint8_t *binary;
    size_t binary_size;
    uint32_t ubo_mask;
@@ -76,22 +72,19 @@ struct agx_apple9_render_pipeline {
    struct agx_apple9_render_stage vertex;
    struct agx_apple9_render_stage fragment;
 
-   /* Color surfaces in draw-buffer order; RT0 may be supplied by the
-    * single-target package API when this array is zero. */
+   /* Color surfaces in draw-buffer order; absent attachments have address 0. */
    uint64_t color_targets[8];
    enum pipe_format color_formats[8];
    uint8_t samples;
 
-   /* Optional Mesa-owned backing used by the fixed-VA compatibility path. */
-   const struct agx_apple9_render_package *package;
+   /* Batch-owned PPP record, relative to the render-context aperture. */
+   uint32_t ppp;
 
    /* Apple9 VDM linkage words produced by the bounded pipeline linker. */
    uint32_t pipeline_word;
    uint32_t vertex_launch;
    uint32_t vertex_state_class;
 
-   /* One-based index into the batch-owned graphics resource snapshots. */
-   uint32_t uniform_draw;
    uint64_t index_buffer;
    uint32_t index_extent;
    uint8_t index_size;
@@ -99,11 +92,20 @@ struct agx_apple9_render_pipeline {
 
 };
 
-/* Bounded per-draw shader, buffer and depth snapshots, independent of
- * vertex/primitive count. Each snapshot retains its source package. */
+/* Per-draw resource and fixed-function inputs. Encoded allocations belong to
+ * the batch; the only submission-time publication is the short entry table. */
 #define AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS 56
 struct agx_apple9_uniform_draw {
-   struct agx_apple9_render_package *package;
+   uint64_t code[2];
+   uint8_t entries[2][32];
+   uint32_t launch[2], ppp, coefficients;
+   uint64_t program_id[2];
+   uint16_t tile_bytes, cf_count;
+   uint8_t samples;
+   /* CPU copy for bounded record reuse; never read back write-combined BOs. */
+   uint8_t ppp_record[0x100];
+   uint64_t buffers[2][AGX_APPLE9_MAX_GRAPHICS_BUFFERS];
+   uint8_t buffer_count[2];
    uint64_t vertex_table;
    uint64_t fragment_table;
    /* Graphics stage indices: vertex = 0, fragment = 1. */
@@ -114,6 +116,8 @@ struct agx_apple9_uniform_draw {
    float viewport_translate[3], viewport_scale[3];
    uint32_t scissor_index;
    uint16_t depth_bias_index;
+   uint16_t occlusion_index;
+   uint8_t visibility_mode;
    uint16_t scissor_min[2], scissor_max[2];
    bool reads_tile;
    bool uses_discard;
@@ -122,13 +126,32 @@ struct agx_apple9_uniform_draw {
    bool flatshade_first;
 };
 
-bool agx_apple9_render_cache_bind_draws(
-   struct agx_apple9_render_cache *cache,
-   const struct agx_apple9_uniform_draw *draws, unsigned count);
+/* Attachment identity is independent of compiled shader identity. */
+struct agx_apple9_framebuffer {
+   uint64_t targets[8];
+   enum pipe_format formats[8];
+   uint16_t width, height;
+   uint8_t count, samples;
+};
 
-bool agx_apple9_render_cache_upload_uniforms(
-   struct agx_apple9_render_cache *cache,
-   const struct agx_apple9_uniform_draw *draws, unsigned count);
+struct agx_apple9_graphics *agx_apple9_graphics_create(struct agx_device *dev);
+void agx_apple9_graphics_destroy(struct agx_apple9_graphics *graphics);
+void agx_apple9_graphics_invalidate(struct agx_apple9_graphics *graphics);
+struct agx_bo *agx_apple9_graphics_bo(struct agx_apple9_graphics *graphics);
+
+bool agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
+                             struct agx_pool *context_pool,
+                             const struct agx_apple9_render_pipeline *pipeline,
+                             struct agx_apple9_uniform_draw *draw,
+                             const struct agx_apple9_uniform_draw *previous,
+                             unsigned index);
+
+bool
+agx_apple9_graphics_publish(struct agx_apple9_graphics *graphics,
+                            const struct agx_apple9_framebuffer *framebuffer,
+                            const struct agx_apple9_uniform_draw *draws,
+                            unsigned count, unsigned varying_components,
+                            const float clear_color[8][4]);
 
 #define AGX_APPLE9_COMPUTE_PACKAGE_SIZE        0x100000u
 #define AGX_APPLE9_COMPUTE_CODE_OFFSET         0x00000u
@@ -137,8 +160,6 @@ bool agx_apple9_render_cache_upload_uniforms(
 #define AGX_APPLE9_COMPUTE_BLOCK_HEADER_SIZE   0x0040u
 #define AGX_APPLE9_COMPUTE_MAIN_OFFSET         0x03c0u
 #define AGX_APPLE9_COMPUTE_STATE_OFFSET          0x18000u
-#define AGX_APPLE9_COMPUTE_DIVISION_TABLE_OFFSET 0x70000u
-#define AGX_APPLE9_COMPUTE_DIVISION_TABLE_SIZE   0x02000u
 #define AGX_APPLE9_COMPUTE_LAUNCH_OFFSET         0x90000u
 #define AGX_APPLE9_COMPUTE_RESOURCE_OFFSET       0xe0000u
 #define AGX_APPLE9_COMPUTE_RESOURCE_TABLE_OFFSET 0x14a0u
@@ -146,14 +167,13 @@ bool agx_apple9_render_cache_upload_uniforms(
 #define AGX_APPLE9_COMPUTE_LAUNCH_REGION_END     0x98000u
 #define AGX_APPLE9_COMPUTE_RESOURCE_STRIDE       0x20u
 #define AGX_APPLE9_COMPUTE_SUPERSET_RESOURCE_STRIDE 0x100u
-#define AGX_APPLE9_COMPUTE_GEOMETRY_THREADS_OFFSET 0xc0u
-#define AGX_APPLE9_COMPUTE_GEOMETRY_LOCAL_OFFSET 0xccu
+#define AGX_APPLE9_COMPUTE_GEOMETRY_GROUPS_OFFSET 0xc0u
 #define AGX_APPLE9_COMPUTE_STATE_STRIDE          0x40u
 #define AGX_APPLE9_COMPUTE_CDM_RECORD_SIZE       0x2cu
 #define AGX_APPLE9_COMPUTE_INDIRECT_CDM_RECORD_SIZE 0x28u
 
-#define AGX_APPLE9_RENDER_PACKAGE_OFFSET        0x01000000u
-#define AGX_APPLE9_RENDER_PACKAGE_SIZE          0x00400000u
+#define AGX_APPLE9_RENDER_HEADER_OFFSET         0x01000000u
+#define AGX_APPLE9_RENDER_HEADER_APERTURE_SIZE  0x00400000u
 #define AGX_APPLE9_RENDER_RESOURCE_OFFSET       0x00200000u
 /* Attachment-state views in the fixed USC address space. */
 #define AGX_APPLE9_RENDER_FIXED_TARGET_GRAPH_OFFSET  0x00160000u
@@ -163,30 +183,8 @@ bool agx_apple9_render_cache_upload_uniforms(
 #define AGX_APPLE9_RENDER_CONSTANT_RESERVED_SIZE     0x0040u
 #define AGX_APPLE9_RENDER_FIRST_MAIN_OFFSET          0x03c0u
 #define AGX_APPLE9_RENDER_CONTEXT_BASE               UINT64_C(0x1000000000)
-#define AGX_APPLE9_RENDER_FIXED_ENCODER                                        \
-   (AGX_APPLE9_RENDER_CONTEXT_BASE + UINT64_C(0x18000))
-#define AGX_APPLE9_RENDER_FIXED_ENCODER_SIZE        0x00008000u
-#define AGX_APPLE9_RENDER_STATE_ADDRESS             UINT64_C(0x1000004000)
+#define AGX_APPLE9_RENDER_STATE_ADDRESS              UINT64_C(0x1000004000)
 #define AGX_APPLE9_RENDER_STATE_SIZE                0x00068000u
-#define AGX_APPLE9_RENDER_ENCODER_BASE              UINT64_C(0x1003000000)
-#define AGX_APPLE9_RENDER_ENCODER_STRIDE            0x00100000u
-#define AGX_APPLE9_RENDER_ENCODER_SLOTS             128u
-#define AGX_APPLE9_RENDER_VERTEX_LAUNCH_OFFSET      0x00220000u
-
-enum agx_apple9_render_region_kind {
-   AGX_APPLE9_RENDER_REGION_COLOR_TEXTURE,
-   AGX_APPLE9_RENDER_REGION_COLOR_BUFFER,
-};
-
-/*
- * Attachment descriptor ranges in the generated package state.
- */
-struct agx_apple9_render_region {
-   enum agx_apple9_render_region_kind kind;
-   uint32_t offset;
-   uint32_t size;
-};
-
 /* The fixed USC table contains a helper directory and small stage entries.
  * Each entry transfers to an independently allocated compiler-generated body.
  * Headers retain the hardware archive grammar, without packing bodies here. */
@@ -208,8 +206,8 @@ unsigned agx_apple9_compute_resource_count(
    const struct agx_apple9_compute_profile *profile);
 
 /* Exact per-dispatch resource-record footprint selected by the package ABI.
- * The direct-buffer ABI uses one 0x100-byte record containing three hidden
- * pointers, up to eighteen visible pointers, and inline geometry tuples. */
+ * The direct-buffer ABI uses one 0x100-byte record containing one hidden
+ * pointer, up to eighteen visible pointers, and inline group counts. */
 size_t agx_apple9_compute_resource_record_size(
    const struct agx_apple9_compute_profile *profile);
 
@@ -286,11 +284,9 @@ bool agx_apple9_compute_state_address_supported(uint64_t usc_exec_base,
                                                 uint64_t state_address);
 
 /*
- * Launch-visible geometry has two intentionally different representations.
- * A direct dispatch publishes total thread counts.  An indirect dispatch
- * publishes a GPU pointer to raw threadgroup counts plus the local-size scale
- * used by the opaque launch program.  Keeping the alternatives tagged avoids
- * reading agx_grid.count[] from its indirect-pointer union member.
+ * Direct dispatches provide total threads and local size for CPU conversion
+ * to group counts. Indirect dispatches provide the GPU group-count pointer.
+ * Keep the alternatives tagged to avoid reading the wrong union member.
  */
 enum agx_apple9_compute_geometry_mode {
    AGX_APPLE9_COMPUTE_GEOMETRY_DIRECT,
@@ -306,9 +302,7 @@ struct agx_apple9_compute_geometry {
    uint32_t local[3];
 };
 
-/* Populate only the geometry-owned fields of a zeroed 0x100-byte superset
- * resource record.  This is intentionally independent of opaque carrier
- * data so the direct/indirect contract can be unit tested exactly. */
+/* Populate the group-count pointer and inline counts in a resource record. */
 bool agx_apple9_build_compute_geometry_fields(
    void *record, size_t record_size, uint64_t record_address,
    const struct agx_apple9_compute_geometry *geometry);
@@ -347,102 +341,6 @@ void agx_apple9_pack_sampler(void *out, bool min_linear, bool mag_linear,
                          unsigned wrap_s, unsigned wrap_t, unsigned max_anisotropy);
 void agx_apple9_pack_nearest_sampler(void *out);
 
-const struct agx_apple9_render_region *
-agx_apple9_render_package_regions(size_t *count);
-
-bool agx_apple9_build_render_package_image(
-   void *mapping, size_t mapping_size,
-   const struct agx_apple9_render_pipeline *pipeline);
-
-/* Offline probe; normal G16 uses the resident fixed logical mapping. */
-bool agx_apple9_relocate_render_package_base(void *mapping, size_t mapping_size,
-                                             uint32_t package_offset);
-
-bool agx_apple9_relocate_render_package_image(void *mapping,
-                                              size_t mapping_size,
-                                              uint64_t color_target,
-                                              unsigned width, unsigned height);
-
-struct agx_apple9_render_package *agx_apple9_render_package_create(
-   struct agx_device *dev, const struct agx_apple9_render_pipeline *pipeline);
-
-void
-agx_apple9_render_package_destroy(struct agx_device *dev,
-                                  struct agx_apple9_render_package *package);
-
-bool agx_apple9_render_package_matches(
-   const struct agx_apple9_render_package *package,
-   const struct agx_apple9_render_pipeline *pipeline);
-
-bool
-agx_apple9_render_package_prepare(struct agx_apple9_render_package *package,
-                                  uint64_t color_target, unsigned width,
-                                  unsigned height);
-
-void
-agx_apple9_render_package_acquire(struct agx_apple9_render_package *package);
-
-void
-agx_apple9_render_package_release(struct agx_apple9_render_package *package);
-
-/* Apple9 keeps one queue USC base. Entry and command state is switched after
- * earlier users retire. Immutable shader BOs are shared by cached packages;
- * in-flight batches retain their packages and shader BO references. */
-struct agx_apple9_render_cache *
-agx_apple9_render_cache_create(struct agx_device *dev);
-
-void agx_apple9_render_cache_destroy(struct agx_device *dev,
-                                     struct agx_apple9_render_cache *cache);
-
-struct agx_apple9_render_package *
-agx_apple9_render_cache_get(struct agx_apple9_render_cache *cache,
-                            const struct agx_apple9_render_pipeline *pipeline,
-                            uint64_t color_target, unsigned width,
-                            unsigned height);
-
-/* Publish selected package state. Caller holds the screen fixed-USC lock. */
-bool agx_apple9_render_cache_bind(struct agx_apple9_render_cache *cache,
-                                  struct agx_apple9_render_package *package);
-
-/* Caller holds the screen fixed-USC generation lock. */
-void agx_apple9_render_cache_invalidate_fixed_usc(
-   struct agx_apple9_render_cache *cache);
-
-bool
-agx_apple9_render_cache_upload_encoder(struct agx_apple9_render_cache *cache,
-                                       const void *data, size_t size);
-
-bool agx_apple9_render_cache_is_current(
-   const struct agx_apple9_render_cache *cache,
-   const struct agx_apple9_render_package *package);
-
-struct agx_bo *
-agx_apple9_render_cache_bo(const struct agx_apple9_render_cache *cache);
-
-struct agx_bo *
-agx_apple9_render_cache_state_bo(const struct agx_apple9_render_cache *cache);
-
-/* Source-build the caller-owned fixed-function state named by Apple9 VDM. */
-bool agx_apple9_build_render_state_image(void *mapping, size_t mapping_size,
-                                         unsigned width, unsigned height);
-
-bool agx_apple9_build_render_state_image_for_varyings(
-   void *mapping, size_t mapping_size, unsigned width, unsigned height,
-   unsigned varying_components);
-
-struct agx_bo *
-agx_apple9_render_package_bo(const struct agx_apple9_render_package *package);
-
-struct agx_bo *
-agx_apple9_render_state_bo(const struct agx_apple9_render_package *package);
-
-uint32_t agx_apple9_render_package_pipeline_word(
-   const struct agx_device *dev,
-   const struct agx_apple9_render_package *package);
-
-/* Fixed-USC launch offset for a batch-owned fragment program, or zero. */
-uint32_t agx_apple9_render_draw_fragment_word(unsigned draw);
-
 /*
  * Apple9 command and shader ABIs are intentionally kept outside the older
  * genxml path.  G16 and G17 share the Apple9 core shader ISA with each other;
@@ -470,9 +368,6 @@ agx_apple9_direct_draw_size(const struct agx_apple9_render_pipeline *pipeline);
 uint8_t *agx_apple9_emit_direct_draw(
    uint8_t *out, const struct agx_apple9_render_pipeline *pipeline,
    unsigned vertex_count, unsigned instance_count, unsigned vertex_start);
-
-void agx_apple9_render_cache_set_clear_color(struct agx_apple9_render_cache *cache,
-                                             const float color[8][4]);
 
 #ifdef __cplusplus
 }

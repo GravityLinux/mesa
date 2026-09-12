@@ -395,14 +395,9 @@ struct agx_encoder {
    uint8_t *current;
    uint8_t *end;
 
-   /* GPU address consumed by the command. Usually bo->va->addr, but Apple9
-    * render encoders have a caller-owned alias in the render aperture. */
+   /* GPU address consumed by the command. Usually bo->va->addr; Apple9
+    * submission copies render encoders to the serialized render context. */
    uint64_t gpu;
-
-   /* Apple9 retains a unique storage alias while publishing the consumed VDM
-    * pages at a fixed context-relative address for one serialized batch. */
-   uint64_t storage_gpu;
-   uint64_t gpu_alias_size;
 };
 
 struct agx_batch {
@@ -474,8 +469,11 @@ struct agx_batch {
    struct agx_encoder vdm;
    struct agx_encoder cdm;
 
-   /* First draw owns attachment state; each draw retains its shader package. */
-   struct agx_apple9_render_package *apple9_render_package;
+   /* Attachment snapshot and immutable draw allocations live with the batch. */
+   bool apple9_render_initialized;
+   struct agx_apple9_framebuffer apple9_framebuffer;
+   unsigned apple9_root_varyings;
+   struct agx_pool apple9_context_pool;
    unsigned apple9_uniform_draw_count;
    struct agx_apple9_uniform_draw
       apple9_uniform_draws[AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS];
@@ -619,7 +617,7 @@ struct asahi_blitter {
    bool active;
    struct hash_table *blit_cs;
    void *detile_cs;
-   void *resolve_cs[2][4];
+   void *resolve_cs[2][PIPE_FORMAT_COUNT];
 
    /* [filter] */
    void *sampler[2];
@@ -727,6 +725,7 @@ struct agx_context {
 
    struct blitter_context *blitter;
    struct agx_color_reload *color_reload;
+   struct pipe_resource *apple9_dummy_color;
    struct primconvert_context *apple9_primconvert;
    struct asahi_blitter compute_blitter;
 
@@ -930,8 +929,8 @@ struct agx_screen {
    nir_shader_compiler_options apple9_graphics_nir_options;
 
    /* Fixed-base Apple9 render generations, owned by Gallium. */
-   struct agx_apple9_render_cache *apple9_render_cache;
-   simple_mtx_t apple9_render_package_lock;
+   struct agx_apple9_graphics *apple9_graphics;
+   simple_mtx_t apple9_graphics_lock;
    /* Last submission using the shared fixed-USC generation, compute or
     * render. Ownership switches wait for this point before changing bytes. */
    uint64_t apple9_fixed_usc_seqid;
@@ -985,13 +984,6 @@ struct agx_resource {
    struct agx_bo *bo;
 
    struct renderonly_scanout *scanout;
-
-   /* Linear external storage for a tiled render target. The direct Apple9
-    * store path writes tiled images; sharing resolves into this resource. */
-   struct pipe_resource *linear_export;
-   /* Cleared by CPU/GPU writes; repeated sharing of unchanged contents can
-    * reuse the previous tiled-to-linear resolve. */
-   bool linear_export_valid;
 
    BITSET_DECLARE(data_valid, PIPE_MAX_TEXTURE_LEVELS);
 

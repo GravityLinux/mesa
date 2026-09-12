@@ -15,16 +15,6 @@
 #include "agx_state.h"
 #include "vdrm.h"
 
-static_assert(AGX_APPLE9_RENDER_ENCODER_SLOTS == AGX_MAX_BATCHES,
-              "each live batch needs a disjoint Apple9 VDM slot");
-static_assert(AGX_APPLE9_RENDER_ENCODER_BASE >=
-                 AGX_APPLE9_RENDER_CONTEXT_BASE &&
-              AGX_APPLE9_RENDER_ENCODER_BASE +
-                    AGX_APPLE9_RENDER_ENCODER_SLOTS *
-                       AGX_APPLE9_RENDER_ENCODER_STRIDE <=
-                 AGX_APPLE9_RENDER_CONTEXT_BASE + UINT64_C(0x100000000),
-              "Apple9 VDM slots must fit in the 4-GiB render aperture");
-
 #define foreach_active(ctx, idx)                                               \
    BITSET_FOREACH_SET(idx, ctx->batches.active, AGX_MAX_BATCHES)
 
@@ -115,8 +105,13 @@ agx_batch_init(struct agx_context *ctx,
 
    agx_bo_reference(screen->rodata);
    agx_pool_init(&batch->pool, dev, "Batch pool", 0, true);
-   agx_pool_init(&batch->pipeline_pool, dev, "Batch low VA pool", AGX_BO_LOW_VA,
-                 true);
+   agx_pool_init(
+      &batch->pipeline_pool, dev, "Batch low VA pool",
+      AGX_BO_LOW_VA |
+         (agx_apple9_direct_render_enabled(dev) ? AGX_BO_WRITEBACK : 0),
+      true);
+   agx_pool_init(&batch->apple9_context_pool, dev, "Apple9 batch context state",
+                 AGX_BO_CONTEXT | AGX_BO_WRITEBACK, false);
 
    /* These allocations can happen only once and will just be zeroed (not freed)
     * during batch clean up. The memory is owned by the context.
@@ -130,7 +125,7 @@ agx_batch_init(struct agx_context *ctx,
 
    batch->apple9_dispatch_count = 0;
    batch->apple9_package = NULL;
-   batch->apple9_render_package = NULL;
+   batch->apple9_render_initialized = false;
    batch->apple9_uniform_draw_count = 0;
    batch->apple9_launch_next = AGX_APPLE9_COMPUTE_LAUNCH_OFFSET;
    batch->apple9_resource_next = AGX_APPLE9_COMPUTE_RESOURCE_OFFSET +
@@ -142,25 +137,6 @@ agx_batch_init(struct agx_context *ctx,
    } else {
       batch->vdm = agx_encoder_allocate(batch, dev);
       memset(&batch->cdm, 0, sizeof(batch->cdm));
-
-      if (agx_apple9_direct_render_enabled(dev)) {
-         unsigned slot = agx_batch_idx(batch);
-         assert(slot < AGX_APPLE9_RENDER_ENCODER_SLOTS);
-         assert(batch->vdm.bo->size <= AGX_APPLE9_RENDER_ENCODER_STRIDE);
-         uint64_t address = AGX_APPLE9_RENDER_ENCODER_BASE +
-                            slot * AGX_APPLE9_RENDER_ENCODER_STRIDE;
-
-         /* Apple9 VDM pointers are relative to this render aperture. Create
-          * the final caller VM_BIND here so the kernel adapter can consume
-          * cmdbuf.vdm_base unchanged instead of fabricating an alias. */
-         int ret = agx_bo_bind(dev, batch->vdm.bo, address,
-                               batch->vdm.bo->size, 0,
-                               DRM_ASAHI_BIND_READ);
-         assert(ret == 0 && "failed to bind Apple9 VDM in render aperture");
-         batch->vdm.gpu = address;
-         batch->vdm.storage_gpu = address;
-         batch->vdm.gpu_alias_size = batch->vdm.bo->size;
-      }
    }
 
    util_dynarray_init(&batch->scissor, ctx);
@@ -306,31 +282,15 @@ agx_batch_cleanup(struct agx_context *ctx, struct agx_batch *batch, bool reset)
    }
 
    agx_bo_unreference(dev, screen->rodata);
-   if (batch->vdm.bo && batch->vdm.gpu_alias_size &&
-       batch->vdm.gpu != batch->vdm.bo->va->addr &&
-       batch->vdm.gpu != batch->vdm.storage_gpu) {
-      int ret = agx_bo_bind(dev, NULL, batch->vdm.gpu,
-                            batch->vdm.gpu_alias_size, 0,
-                            DRM_ASAHI_BIND_UNBIND);
-      assert(ret == 0 && "failed to unbind Apple9 VDM aperture alias");
-   }
-   if (batch->vdm.bo && batch->vdm.storage_gpu &&
-       batch->vdm.storage_gpu != batch->vdm.bo->va->addr) {
-      int ret = agx_bo_bind(dev, NULL, batch->vdm.storage_gpu,
-                            batch->vdm.bo->size, 0,
-                            DRM_ASAHI_BIND_UNBIND);
-      assert(ret == 0 && "failed to unbind Apple9 VDM storage alias");
-   }
    agx_bo_unreference(dev, batch->vdm.bo);
    agx_bo_unreference(dev, batch->cdm.bo);
    agx_bo_unreference(dev, batch->apple9_package);
    batch->apple9_package = NULL;
-   for (unsigned i = 0; i < batch->apple9_uniform_draw_count; ++i)
-      agx_apple9_render_package_release(batch->apple9_uniform_draws[i].package);
-   batch->apple9_render_package = NULL;
+   batch->apple9_render_initialized = false;
    batch->apple9_uniform_draw_count = 0;
    agx_pool_cleanup(&batch->pool);
    agx_pool_cleanup(&batch->pipeline_pool);
+   agx_pool_cleanup(&batch->apple9_context_pool);
 
    util_dynarray_fini(&batch->scissor);
    util_dynarray_fini(&batch->depth_bias);
@@ -615,7 +575,6 @@ agx_batch_writes_internal(struct agx_batch *batch, struct agx_resource *rsrc,
    agx_flush_readers_except(ctx, rsrc, batch, "Write from other batch", false);
 
    BITSET_SET(rsrc->data_valid, level);
-   rsrc->linear_export_valid = false;
 
    /* Nothing to do if we're already writing */
    if (writer == batch)

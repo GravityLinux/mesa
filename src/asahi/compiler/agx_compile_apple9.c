@@ -98,11 +98,6 @@ struct apple9_system_source {
  * SIMD indices, and workgroup-size components use the same narrow GET_SR plus
  * zero-extension pair and differ only in the selector.  Native asymmetric-3D
  * executions establish selectors 0x98..0x9a as the local-size XYZ tuple.
- *
- * Selectors 0xa8..0xaa are a different dispatch-time tuple used by Metal's
- * load_num_workgroups lowering.  Their bare values track the CDM local tuple,
- * while the public group count is derived from caller-owned global-thread
- * metadata.  Do not alias that packaging contract to load_workgroup_size.
  */
 static bool
 apple9_system_source(nir_scalar scalar, struct apple9_system_source *source)
@@ -876,51 +871,7 @@ apple9_dag_hidden_load(struct apple9_dag_lower *lower, unsigned binding,
    return value;
 }
 
-/* Compute ceil(numerator / divisor) for the complete Apple9 dispatch domain.
- * T8132 exhaustively satisfies |D * frcp(float(D)) - 1| <= 2^-18 for
- * D=1..1024.  Together with N <= 65535*1024, this makes the rounded quotient
- * candidate either floor(N/D) or ceil(N/D); one exact integer comparison
- * selects the latter. */
-static uint32_t
-apple9_dag_ceil_udiv(struct apple9_dag_lower *lower, uint32_t numerator,
-                     uint32_t divisor)
-{
-   if (numerator == AGX_APPLE9_VREG_INVALID ||
-       divisor == AGX_APPLE9_VREG_INVALID)
-      return AGX_APPLE9_VREG_INVALID;
-
-   uint32_t numerator_f =
-      apple9_dag_emit(lower, AGX_APPLE9_VIR_U2F32, AGX_APPLE9_ENC_UINT_TO_FLOAT,
-                      &numerator, 1, 0);
-   uint32_t divisor_f =
-      apple9_dag_emit(lower, AGX_APPLE9_VIR_U2F32, AGX_APPLE9_ENC_UINT_TO_FLOAT,
-                      &divisor, 1, 0);
-   uint32_t reciprocal =
-      apple9_dag_emit(lower, AGX_APPLE9_VIR_FRCP,
-                      AGX_APPLE9_ENC_FLOAT_SPECIAL, &divisor_f, 1, 0x03);
-   uint32_t half = apple9_dag_imm(lower, 0x3f000000);
-   uint32_t estimate_sources[3] = {numerator_f, reciprocal, half};
-   uint32_t estimate =
-      apple9_dag_emit(lower, AGX_APPLE9_VIR_FMA, AGX_APPLE9_ENC_FLOAT3_EXTENDED,
-                      estimate_sources, ARRAY_SIZE(estimate_sources), 0);
-   uint32_t quotient =
-      apple9_dag_emit(lower, AGX_APPLE9_VIR_F2U32, AGX_APPLE9_ENC_FLOAT_TO_UINT,
-                      &estimate, 1, 0);
-   uint32_t zero = apple9_dag_zero(lower);
-   uint32_t product_sources[3] = {quotient, divisor, zero};
-   uint32_t product = apple9_dag_emit(
-      lower, AGX_APPLE9_VIR_IMAD, AGX_APPLE9_ENC_INT_MAD_EXTENDED,
-      product_sources, ARRAY_SIZE(product_sources), 0);
-   uint32_t one = apple9_dag_imm(lower, 1);
-   uint32_t increment_sources[2] = {quotient, one};
-   uint32_t incremented = apple9_dag_emit(
-      lower, AGX_APPLE9_VIR_IADD, AGX_APPLE9_ENC_INT_ADD_EXTENDED,
-      increment_sources, ARRAY_SIZE(increment_sources), 0);
-
-   return apple9_emit_dag_select_raw(lower, product, numerator, incremented,
-                                     quotient, AGX_APPLE9_SELECT_ULT);
-}
-
+/* Both dispatch modes publish a pointer to three 32-bit group counts. */
 static uint32_t
 apple9_dag_num_workgroups(struct apple9_dag_lower *lower, unsigned component)
 {
@@ -929,45 +880,7 @@ apple9_dag_num_workgroups(struct apple9_dag_lower *lower, unsigned component)
       return AGX_APPLE9_VREG_INVALID;
    }
 
-   /* Hidden resource 0 is q0 and resource 1 is q1.  Direct dispatches publish
-    * total threads and 1; indirect dispatches publish group counts and local
-    * size.  This is the native normalized package contract. */
-   uint32_t q0 = apple9_dag_hidden_load(lower, 0, component);
-   if (q0 == AGX_APPLE9_VREG_INVALID)
-      return AGX_APPLE9_VREG_INVALID;
-
-   uint32_t divisor;
-   if (lower->nir->info.workgroup_size_variable) {
-      divisor = apple9_dag_system(lower, (struct apple9_system_source){
-                                            .selector = 0x98 + component,
-                                            .zext16 = true,
-                                         });
-   } else {
-      const uint32_t local = lower->nir->info.workgroup_size[component];
-      if (!local) {
-         lower->reason = "Apple9 load_num_workgroups has an invalid local size";
-         return AGX_APPLE9_VREG_INVALID;
-      }
-      if (local == 1)
-         return q0;
-      divisor = apple9_dag_imm(lower, local);
-   }
-
-   uint32_t q1 = apple9_dag_hidden_load(lower, 1, component);
-   uint32_t direct = apple9_dag_ceil_udiv(lower, q0, divisor);
-   uint32_t one = apple9_dag_imm(lower, 1);
-   uint32_t mode_sources[2] = {q1, one};
-   uint32_t mode =
-      apple9_dag_emit(lower, AGX_APPLE9_VIR_IXOR, AGX_APPLE9_ENC_LOGIC_EXTENDED,
-                      mode_sources, ARRAY_SIZE(mode_sources), 0);
-   if (q1 == AGX_APPLE9_VREG_INVALID || direct == AGX_APPLE9_VREG_INVALID ||
-       one == AGX_APPLE9_VREG_INVALID || mode == AGX_APPLE9_VREG_INVALID)
-      return AGX_APPLE9_VREG_INVALID;
-
-   /* q1 == 1 selects the direct ceiling quotient; otherwise q0 is already the
-    * caller's indirect group count. */
-   return apple9_emit_dag_select_raw(lower, mode, one, direct, q0,
-                                     AGX_APPLE9_SELECT_ULT);
+   return apple9_dag_hidden_load(lower, 0, component);
 }
 
 static uint32_t
@@ -2245,7 +2158,6 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
                        struct util_dynarray *stores,
                        struct util_dynarray *atomics, const char **reason)
 {
-   bool uses_num_workgroups = false;
 
    if ((map->count < 1 && nir->info.stage == MESA_SHADER_COMPUTE) ||
        map->count > ARRAY_SIZE(map->resource)) {
@@ -2270,8 +2182,6 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
             continue;
 
          nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-         uses_num_workgroups |=
-            intr->intrinsic == nir_intrinsic_load_num_workgroups;
          if (intr->intrinsic != nir_intrinsic_load_ssbo &&
              intr->intrinsic != nir_intrinsic_load_ubo &&
              intr->intrinsic != nir_intrinsic_store_ssbo &&
@@ -2431,17 +2341,6 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
    if (stores->size == 0 && atomics->size == 0 &&
        nir->info.stage == MESA_SHADER_COMPUTE) {
       *reason = "Apple9 requires at least one SSBO side effect";
-      return false;
-   }
-
-   /* The own-source atomic package publishes its eight caller resources at
-    * q0..q7 and has no hidden direct/indirect geometry tuple. The normal
-    * superset carrier publishes that tuple at q0..q2. Until those two launch
-    * contracts are unified, silently lowering load_num_workgroups would read
-    * the first caller SSBO address as dispatch metadata. */
-   if (atomics->size != 0 && uses_num_workgroups) {
-      *reason =
-         "Apple9 atomic package does not publish the num-workgroups metadata";
       return false;
    }
 
