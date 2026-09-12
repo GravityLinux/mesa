@@ -5148,6 +5148,23 @@ TEST(Apple9Compiler, SpecialFunctionsUseAllocatedOperandsAndLifetimes)
    }
 }
 
+TEST(Apple9Compiler, IntegerAbsoluteLowersFromOrdinaryNir)
+{
+   nir_builder b = apple9_compute_builder("apple9_integer_absolute");
+   b.shader->info.num_ssbos = 2;
+   nir_def *gid = apple9_global_id_x(&b);
+   nir_def *value = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 1),
+      nir_imul_imm(&b, gid, 4), .access = ACCESS_NON_WRITEABLE);
+   apple9_store_output(&b, gid, nir_iabs(&b, value));
+   agx_shader_part compiled = {};
+   agx_apple9_compute_profile profile = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason))
+      << (reason ?: "");
+   free(compiled.binary);
+   ralloc_free(b.shader);
+}
+
 TEST(Apple9Compiler, SaturationLowersVectorComponents)
 {
    nir_builder b = apple9_compute_builder("apple9_saturate");
