@@ -5635,6 +5635,40 @@ TEST(Apple9Compiler, GenericComputeSystemRegisterTable)
       AGX_APPLE9_COMPUTE_ABI_DIRECT_BUFFERS);
 }
 
+TEST(Apple9Compiler, CachedSystemValueDominatesConditionalUses)
+{
+   nir_builder b = apple9_compute_builder("conditional_system_value");
+   b.shader->info.num_ssbos = 2;
+   nir_def *gid = apple9_global_id_x(&b);
+   nir_if *nif = nir_push_if(&b, nir_ult_imm(&b, gid, 16));
+   apple9_store_binding(&b, 0, gid,
+                       nir_iadd_imm(&b, nir_load_local_invocation_index(&b), 100));
+   nir_push_else(&b, nif);
+   apple9_store_binding(&b, 1, gid,
+                       nir_iadd_imm(&b, nir_load_local_invocation_index(&b), 200));
+   nir_pop_if(&b, nif);
+
+   struct agx_shader_part compiled = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, nullptr, &reason))
+      << (reason ? reason : "no diagnostic");
+
+   const uint8_t push[] = {0x0f, 0x05, 0x54, 0x01};
+   const uint8_t *binary = (const uint8_t *)compiled.binary;
+   size_t first_push = 0;
+   while (first_push + sizeof(push) <= compiled.info.binary_size &&
+          memcmp(binary + first_push, push, sizeof(push)))
+      ++first_push;
+   ASSERT_LE(first_push + sizeof(push), compiled.info.binary_size);
+   /* Inspect the unconditional prefix: lanes bypassing the first arm must
+    * already have their local index before either arm consumes the cache. */
+   struct agx_shader_part prefix = compiled;
+   prefix.info.binary_size = first_push;
+   EXPECT_TRUE(apple9_binary_contains_get_sr_zext16(&prefix, 0xa7));
+   free(compiled.binary);
+   ralloc_free(b.shader);
+}
+
 TEST(Apple9Compiler, NumWorkgroupsUsesRuntimeCeilingDivision)
 {
    for (bool variable : {false, true}) {

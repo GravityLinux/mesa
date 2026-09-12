@@ -3516,6 +3516,29 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
       *reason = "could not initialize Apple9 control-flow zero";
       goto fail;
    }
+   /* System values are cached by selector across the whole shader. Read them
+    * before divergent control flow so a first use in one arm cannot leave
+    * lanes in another arm with an undefined cached value. This also applies
+    * to instance IDs introduced by vertex attribute lowering. */
+   if (lower.structured_cf) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (!nir_intrinsic_infos[intr->intrinsic].has_dest)
+               continue;
+            for (unsigned c = 0; c < intr->def.num_components; ++c) {
+               struct apple9_system_source system;
+               if (apple9_system_source(nir_get_scalar(&intr->def, c), &system) &&
+                   apple9_dag_system(&lower, system) == AGX_APPLE9_VREG_INVALID) {
+                  *reason = "could not initialize Apple9 system value";
+                  goto fail;
+               }
+            }
+         }
+      }
+   }
    if (nir->info.stage == MESA_SHADER_FRAGMENT &&
        BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_FRONT_FACE) &&
        apple9_dag_system(&lower, (struct apple9_system_source){.selector = 0xc5}) ==
