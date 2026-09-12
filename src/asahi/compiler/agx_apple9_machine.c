@@ -966,6 +966,35 @@ static const struct agx_apple9_encoding_info encodings[] = {
                           2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                           AGX_APPLE9_EVIDENCE_HARDWARE)},
       },
+   [AGX_APPLE9_ENC_CENTROID_POSITION] =
+      {
+         .name = "centroid_position",
+         .length = 8,
+         .operand_count = 2,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_BYTE_DIFF,
+         .dependency_layout = AGX_APPLE9_DEPENDENCY_MASK_12_17,
+         .operands = {
+            GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 63, 2,
+                AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+            GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63, 4,
+                AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+         },
+      },
+   [AGX_APPLE9_ENC_ITER_COORD] =
+      {
+         .name = "iter_coord",
+         .length = 10,
+         .operand_count = 2,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_BYTE_DIFF,
+         .operands = {
+            GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 63, 2,
+                AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+            GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63, 1,
+                AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+         },
+      },
    [AGX_APPLE9_ENC_ITER] =
       {
          .name = "iter",

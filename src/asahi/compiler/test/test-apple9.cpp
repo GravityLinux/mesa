@@ -7103,6 +7103,40 @@ TEST(Apple9Compiler, FragmentInterpolationModesUseDistinctCoefficientContracts)
    }
 }
 
+TEST(Apple9Compiler, CentroidAndCenterInterpolationShareOrdinaryAllocatedInputs)
+{
+   for (unsigned mode : {INTERP_MODE_SMOOTH, INTERP_MODE_NOPERSPECTIVE}) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "centroid_inputs");
+      nir_def *centroid = nir_load_barycentric_centroid(&b, 32, .interp_mode = mode);
+      nir_def *center = nir_load_barycentric_pixel(&b, 32, .interp_mode = mode);
+      nir_def *a = nir_load_interpolated_input(
+         &b, 4, 32, centroid, nir_imm_int(&b, 0), .dest_type = nir_type_float32,
+         .io_semantics = {.location = VARYING_SLOT_VAR0, .num_slots = 1});
+      nir_def *c = nir_load_interpolated_input(
+         &b, 4, 32, center, nir_imm_int(&b, 0), .dest_type = nir_type_float32,
+         .io_semantics = {.location = VARYING_SLOT_VAR1, .num_slots = 1});
+      nir_store_output(&b, nir_fadd(&b, a, c), nir_imm_int(&b, 0),
+         .write_mask = 15, .src_type = nir_type_float32,
+         .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+      b.shader->info.io_lowered = true;
+      agx_apple9_varying_layout producer = {};
+      producer.mask[VARYING_SLOT_VAR0] = producer.mask[VARYING_SLOT_VAR1] = 15;
+      producer.count = 8;
+      agx_apple9_blend blend = {};
+      blend.rgb_src = blend.alpha_src = PIPE_BLENDFACTOR_ONE;
+      blend.rgb_dst = blend.alpha_dst = PIPE_BLENDFACTOR_ZERO;
+      blend.samples = 4;
+      blend.colormask = 15;
+      agx_shader_part out = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_fragment_mrt(
+         b.shader, &producer, &blend, 1, &out, &reason)) << reason;
+      free(out.binary);
+      ralloc_free(b.shader);
+   }
+}
+
 TEST(Apple9Compiler, IntegerVertexExportsPreserveBitPatterns)
 {
    nir_builder b = nir_builder_init_simple_shader(

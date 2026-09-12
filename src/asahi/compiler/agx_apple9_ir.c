@@ -5176,9 +5176,25 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       packed_init(packed, bytes, sizeof(bytes));
       return true;
    }
+   case AGX_APPLE9_VIR_CENTROID_POSITION: {
+      if (instruction->encoding != AGX_APPLE9_ENC_CENTROID_POSITION ||
+          instruction->nr_srcs != 1 || instruction->immediate ||
+          phys[instruction->dest] >= 64 || phys[instruction->src[0]] >= 64)
+         return false;
+      /* Authored M4 centroid and mixed-interpolation shaders: coverage is an
+       * ordinary GPR input; the result is a packed interpolation position. */
+      const uint8_t bytes[] = {0xaf, 0x04, 0x54,
+         phys[instruction->dest] << 1, 0x03, phys[instruction->src[0]] << 2,
+         0x0a, 0x01};
+      packed_init(packed, bytes, sizeof(bytes));
+      return true;
+   }
    case AGX_APPLE9_VIR_ITER: {
-      if (instruction->encoding != AGX_APPLE9_ENC_ITER ||
-          instruction->nr_srcs || phys[instruction->dest] >= 64 ||
+      bool explicit_coord = instruction->encoding == AGX_APPLE9_ENC_ITER_COORD;
+      if ((!explicit_coord && instruction->encoding != AGX_APPLE9_ENC_ITER) ||
+          instruction->nr_srcs != (explicit_coord ? 1 : 0) ||
+          (explicit_coord && phys[instruction->src[0]] >= 64) ||
+          phys[instruction->dest] >= 64 ||
           instruction->immediate > AGX_APPLE9_MAX_VARYING_COMPONENTS + 3)
          return false;
       /* Ordinary center coefficients: 0 for 1/W, followed by user components
@@ -5190,8 +5206,8 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       const uint8_t bytes[] = {0x2f, 0x05,
                                0x54, phys[instruction->dest] << 1,
                                0x03, (imm & 0xff) << 1,
-                               0,    2,
-                               0x10, 0};
+                               explicit_coord ? phys[instruction->src[0]] : 0, 2,
+                               explicit_coord ? ((instruction->live_after_mask & 1) ? 0x08 : 0x20) : 0x10, 0};
       packed_init(packed, bytes, sizeof(bytes));
       return true;
    }

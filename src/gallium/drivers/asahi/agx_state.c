@@ -1759,6 +1759,12 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       nir_shader *apple9_nir =
          nir_deserialize(NULL, &agx_nir_options, &apple9_reader);
       bool fragment = so->type == MESA_SHADER_FRAGMENT;
+      if (fragment && key_->fs.nr_samples <= 1) {
+         /* With one raster sample, centroid and sample interpolation select
+          * the pixel center. Apply this to the early NIR used by Apple9 too. */
+         const nir_lower_single_sampled_options options = {0};
+         NIR_PASS(_, apple9_nir, nir_lower_single_sampled, &options);
+      }
       const struct agx_apple9_sampler_key *samplers =
          fragment ? key_->fs.apple9_samplers : key_->vs.apple9_samplers;
       bool compiled_stage =
@@ -2677,6 +2683,7 @@ agx_update_fs(struct agx_batch *batch)
    /* Get main shader */
    struct asahi_fs_shader_key key = {0};
    if (agx_apple9_direct_render_enabled(dev)) {
+      key.nr_samples = nr_samples;
       key.apple9_varyings = ctx->vs->apple9_render_stage.varyings;
       key.apple9_nr_targets = MAX2(batch->key.nr_cbufs, 1);
       for (unsigned rt = 0; rt < key.apple9_nr_targets; ++rt) {

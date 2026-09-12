@@ -580,6 +580,7 @@ apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
            op == nir_intrinsic_ddy || op == nir_intrinsic_ddx_fine ||
            op == nir_intrinsic_ddy_fine ||
            op == nir_intrinsic_load_barycentric_pixel ||
+           op == nir_intrinsic_load_barycentric_centroid ||
            op == nir_intrinsic_load_interpolated_input ||
            op == nir_intrinsic_load_input ||
            op == nir_intrinsic_load_tile_pixel_agx ||
@@ -1361,6 +1362,7 @@ apple9_lower_interpolated_input(struct apple9_dag_lower *lower,
    bool flat = intr->intrinsic == nir_intrinsic_load_input;
    nir_intrinsic_instr *bary = flat ? NULL : nir_src_as_intrinsic(intr->src[0]);
    unsigned offset = flat ? 0 : 1;
+   bool centroid = bary && bary->intrinsic == nir_intrinsic_load_barycentric_centroid;
    bool linear =
       bary && nir_intrinsic_interp_mode(bary) == INTERP_MODE_NOPERSPECTIVE;
    /* Legacy color inputs retain NONE for glShadeModel. The state tracker
@@ -1371,11 +1373,11 @@ apple9_lower_interpolated_input(struct apple9_dag_lower *lower,
        scalar.def->bit_size != 32 || component >= 4 ||
        !nir_src_is_const(intr->src[offset]) ||
        (!flat &&
-        (!bary || bary->intrinsic != nir_intrinsic_load_barycentric_pixel ||
+        (!bary || (!centroid && bary->intrinsic != nir_intrinsic_load_barycentric_pixel) ||
          (!linear && nir_intrinsic_interp_mode(bary) != INTERP_MODE_SMOOTH &&
           nir_intrinsic_interp_mode(bary) != INTERP_MODE_NONE)))) {
       lower->reason =
-         "Apple9 fragment input requires center smooth, linear, or flat 32-bit user varyings";
+         "Apple9 fragment input requires center/centroid smooth, linear, or flat 32-bit user varyings";
       return AGX_APPLE9_VREG_INVALID;
    }
    unsigned location = nir_intrinsic_io_semantics(intr).location +
@@ -1389,25 +1391,36 @@ apple9_lower_interpolated_input(struct apple9_dag_lower *lower,
       agx_apple9_interp_mask_set(&lower->flat_mask, index);
       return agx_apple9_vir_emit_iter_flat(&lower->program, index + 1);
    }
+   uint32_t position = centroid ? apple9_lower_dag_scalar(
+      lower, nir_get_scalar(&bary->def, 0)) : AGX_APPLE9_VREG_INVALID;
+   enum agx_apple9_encoding encoding = centroid ? AGX_APPLE9_ENC_ITER_COORD
+                                               : AGX_APPLE9_ENC_ITER;
    if (linear) {
       agx_apple9_interp_mask_set(&lower->linear_mask, index);
-      return apple9_dag_emit(lower, AGX_APPLE9_VIR_ITER, AGX_APPLE9_ENC_ITER,
-                             NULL, 0, index + 1);
+      return apple9_dag_emit(lower, AGX_APPLE9_VIR_ITER, encoding,
+                             centroid ? &position : NULL, centroid, index + 1);
    }
-   if (!lower->perspective_ready) {
+   uint32_t reciprocal;
+   if (centroid || !lower->perspective_ready) {
       uint32_t denominator = apple9_dag_emit(
-         lower, AGX_APPLE9_VIR_ITER, AGX_APPLE9_ENC_ITER, NULL, 0, 0);
-      lower->perspective_reciprocal =
-         apple9_dag_emit(lower, AGX_APPLE9_VIR_FRCP,
-                         AGX_APPLE9_ENC_FLOAT_SPECIAL, &denominator, 1, 3);
-      lower->perspective_ready = true;
+         lower, AGX_APPLE9_VIR_ITER, encoding,
+         centroid ? &position : NULL, centroid, 0);
+      reciprocal = apple9_dag_emit(lower, AGX_APPLE9_VIR_FRCP,
+         AGX_APPLE9_ENC_FLOAT_SPECIAL, &denominator, 1, 3);
+      if (!centroid) {
+         lower->perspective_reciprocal = reciprocal;
+         lower->perspective_ready = true;
+      }
+   } else {
+      reciprocal = lower->perspective_reciprocal;
    }
    uint32_t coefficient = apple9_dag_emit(
-      lower, AGX_APPLE9_VIR_ITER, AGX_APPLE9_ENC_ITER, NULL, 0, index + 1);
+      lower, AGX_APPLE9_VIR_ITER, encoding,
+      centroid ? &position : NULL, centroid, index + 1);
    /* Keep raw varyings available to homogeneous clipping. Native shade-7
     * coefficients pair with a coefficient-aware projective multiply, which
     * handles the rasterizer's primitive-constant representation. */
-   uint32_t src[] = {coefficient, lower->perspective_reciprocal};
+   uint32_t src[] = {coefficient, reciprocal};
    return apple9_dag_emit(lower, AGX_APPLE9_VIR_FMUL_PROJECT,
                           AGX_APPLE9_ENC_FLOAT2_PROJECT, src, 2, index + 1);
 }
@@ -1639,6 +1652,13 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
             if (coords)
                load->tile_sample_mask = nir_src_as_uint(intr->src[0]);
          }
+      } else if (nir_def_instr_type(scalar.def) == nir_instr_type_intrinsic &&
+                 nir_def_as_intrinsic(scalar.def)->intrinsic ==
+                    nir_intrinsic_load_barycentric_centroid) {
+         uint32_t coverage = apple9_dag_emit(lower, AGX_APPLE9_VIR_GET_SR,
+            AGX_APPLE9_ENC_GET_COVERAGE, NULL, 0, 0x10c2);
+         value = apple9_dag_emit(lower, AGX_APPLE9_VIR_CENTROID_POSITION,
+            AGX_APPLE9_ENC_CENTROID_POSITION, &coverage, 1, 0);
       } else if (nir_def_instr_type(scalar.def) == nir_instr_type_intrinsic &&
                  nir_def_as_intrinsic(scalar.def)->intrinsic ==
                     nir_intrinsic_load_sample_mask_in) {
