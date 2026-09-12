@@ -245,14 +245,10 @@ void
 agx_bo_free(struct agx_device *dev, struct agx_bo *bo)
 {
    const uint64_t handle = bo->handle;
+   struct agx_va *va = bo->va;
 
    if (bo->_map)
       munmap(bo->_map, bo->size);
-
-   /* Free the VA. No need to unmap the BO or unbind the VA, as the kernel will
-    * take care of that when we close it.
-    */
-   agx_va_free(dev, bo->va, false);
 
    if (bo->prime_fd != -1)
       close(bo->prime_fd);
@@ -263,7 +259,17 @@ agx_bo_free(struct agx_device *dev, struct agx_bo *bo)
    __sync_synchronize();
 
    struct drm_gem_close args = {.handle = handle};
-   drmIoctl(dev->fd, DRM_IOCTL_GEM_CLOSE, &args);
+   if (drmIoctl(dev->fd, DRM_IOCTL_GEM_CLOSE, &args)) {
+      fprintf(stderr, "DRM_IOCTL_GEM_CLOSE failed: %m\n");
+      /* Keep the address reserved if the old mapping may still exist. */
+      free(va);
+      return;
+   }
+
+   /* GEM_CLOSE removes the kernel mappings. Only then allow another thread
+    * to reuse the address: BO allocation does not hold bo_map_lock while
+    * allocating and binding its VA. */
+   agx_va_free(dev, va, false);
 }
 
 static int
@@ -279,7 +285,7 @@ agx_drm_bo_bind(struct agx_device *dev, struct drm_asahi_gem_bind_op *ops,
 
    int ret = drmIoctl(dev->fd, DRM_IOCTL_ASAHI_VM_BIND, &vm_bind);
    if (ret) {
-      fprintf(stderr, "DRM_IOCTL_ASAHI_VM_BIND failed\n");
+      fprintf(stderr, "DRM_IOCTL_ASAHI_VM_BIND failed: %m\n");
    }
 
    return ret;
