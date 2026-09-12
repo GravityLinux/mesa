@@ -375,7 +375,10 @@ agx_bo_alloc(struct agx_device *dev, size_t size, size_t align,
    bo->handle = bo->uapi_handle = handle;
    bo->prime_fd = -1;
 
-   enum agx_va_flags va_flags = flags & AGX_BO_LOW_VA ? AGX_VA_USC : 0;
+   assert(!(flags & AGX_BO_LOW_VA) || !(flags & AGX_BO_CONTEXT));
+   enum agx_va_flags va_flags = flags & AGX_BO_CONTEXT  ? AGX_VA_CONTEXT
+                                : flags & AGX_BO_LOW_VA ? AGX_VA_USC
+                                                        : 0;
    bo->va = agx_va_alloc(dev, size, bo->align, va_flags, 0);
    if (!bo->va) {
       fprintf(stderr, "Failed to allocate BO VMA\n");
@@ -872,6 +875,17 @@ agx_open_device(void *memctx, struct agx_device *dev)
    simple_mtx_init(&dev->vma_lock, mtx_plain);
    util_vma_heap_init(&dev->main_heap, user_start, user_size);
    util_vma_heap_init(&dev->usc_heap, dev->shader_base, shader_size);
+   /* The low 64 MiB contain existing fixed context/firmware aliases. The
+    * kernel owns the top of this aperture on native G16. PPP and VDM records
+    * occupy the remaining interval and are retained by their submitting batch.
+    * Keep this heap disjoint from main_heap and the fixed USC aperture. */
+   uint64_t context_start = AGX_APPLE9_FIXED_RENDER_CONTEXT_BASE + 0x4000000ull;
+   uint64_t context_end =
+      MIN2(vm_create.kernel_start,
+           AGX_APPLE9_FIXED_RENDER_CONTEXT_BASE + (1ull << 32));
+   util_vma_heap_init(&dev->context_heap, context_start,
+                      fixed_apple9_usc_base ? context_end - context_start : 0);
+   dev->context_heap.alloc_high = false;
 
    /*
     * Apple9 launch wrappers encode their address as a compact 8-KiB chunk
@@ -1089,6 +1103,7 @@ agx_close_device(struct agx_device *dev)
 
    util_vma_heap_finish(&dev->main_heap);
    util_vma_heap_finish(&dev->usc_heap);
+   util_vma_heap_finish(&dev->context_heap);
    glsl_type_singleton_decref();
 
    close(dev->fd);

@@ -133,6 +133,7 @@ struct agx_device {
    uint64_t shader_base;
    struct util_vma_heap main_heap;
    struct util_vma_heap usc_heap;
+   struct util_vma_heap context_heap;
    uint64_t guard_size;
 
    /* To emulate sparse-resident buffers, we map buffers in both the bottom half

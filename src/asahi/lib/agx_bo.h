@@ -38,6 +38,9 @@ enum agx_bo_flags {
    /* BO is read-only from the GPU side
     */
    AGX_BO_READONLY = 1 << 5,
+
+   /* Apple9 PPP/VDM records use 32-bit offsets from the render context. */
+   AGX_BO_CONTEXT = 1 << 6,
 };
 
 enum agx_va_flags {
@@ -46,6 +49,9 @@ enum agx_va_flags {
 
    /* VA must be fixed, otherwise allocated by the driver. */
    AGX_VA_FIXED = (1 << 1),
+
+   /* Within the Apple9 render-context aperture, outside kernel storage. */
+   AGX_VA_CONTEXT = (1 << 2),
 };
 
 struct agx_va {

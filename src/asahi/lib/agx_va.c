@@ -9,6 +9,9 @@
 static struct util_vma_heap *
 agx_vma_heap(struct agx_device *dev, enum agx_va_flags flags)
 {
+   assert(!(flags & AGX_VA_USC) || !(flags & AGX_VA_CONTEXT));
+   if (flags & AGX_VA_CONTEXT)
+      return &dev->context_heap;
    return (flags & AGX_VA_USC) ? &dev->usc_heap : &dev->main_heap;
 }
 
