@@ -21,20 +21,13 @@ extern "C" {
 bool agx_nir_lower_apple9_math(nir_shader *shader);
 
 /*
- * Compile the deliberately bounded Apple9 straight-line NIR subset.
- *
- * This is a real instruction selector, not a lookup of complete shaders.  It
- * The compositional profile accepts one scalar 32-bit store to buffer(0),
- * indexed by global_invocation_id.x.  A second, separately captured profile
- * accepts two scalar float loads from buffers 0/1, one fadd, and a scalar
- * float store to buffer 2 at that same index.  The compiler selects exact
- * Apple9 instructions for both profiles and rejects every other memory/control
- * graph; it never falls back to a plausible but unproved package. Control
- * flow, spilling, vectors, and general memory operations remain later
- * milestones.
+ * Compile compute NIR through Apple9's semantic instruction selection and
+ * register allocator. Arithmetic, memory operations, and structured control
+ * flow share the same lowering used by graphics shaders. Unsupported NIR or
+ * resource requirements return a diagnostic; no shader replay is substituted.
  *
  * On failure, *reason points at a static diagnostic string when reason is
- * non-NULL.  On success, out owns a malloc-backed main-program binary and may
+ * non-NULL. On success, out owns a malloc-backed main-program binary and may
  * be released with free(out->binary), like agx_compile_shader_nir output.
  */
 bool agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
@@ -42,27 +35,23 @@ bool agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
                              const char **reason);
 
 /*
- * Compile structured FP32 graphics NIR through the common semantic VIR and
- * register allocator. Fragment inputs support pixel-center smooth FP32 user
- * components; RT0 is a complete vec4 packed to RGBA8. Vertex inputs use vertex
- * ID and formatted vertex elements; exports cover position plus up to twelve
- * user scalars across VAR0..VAR31, compacted by semantic location and
- * component. Fragment variants use the producer's layout, including unused
- * outputs. User UVS values stay unprojected for clipping and require
- * perspective CF bindings. The FS uses coefficient-aware projective
- * multiplication, which handles both ordinary and primitive-constant
- * coefficient representations. Constant array offsets and component holes are
- * supported. Up to 32 buffer resources per stage use a shader-loaded address
- * table and common memory lowering. Distinct vertex buffers and UBOs share that
- * budget. The resource-binding array records address-table order;
- * apple9_ubo_mask records API UBO bindings. Branches and loops use the common
- * execution-mask model, including lowered continuation constructs. Fragment
- * window XY uses upper-left integer pixel coordinates, matching Gallium's
- * advertised convention; API center/origin transforms belong to the caller.
- * Fragment sampling supports up to sixteen 2D textures and sixteen samplers,
- * independently compacted from live API bindings. Window Z/W, SSBOs, other
- * interpolation modes, and MRT fail closed. The caller supplies hardware clip
- * coordinates and compatible stage and render-target state.
+ * Compile graphics NIR through the common semantic VIR and register allocator.
+ * Vertex attributes and fragment varyings are packed by semantic location and
+ * component; fragment variants use the producer's layout. Smooth inputs use
+ * coefficient-aware perspective multiplication. Flat and noperspective inputs
+ * have separate coefficient modes. Centroid inputs evaluate coefficients at
+ * an allocated position selected from the fragment's sample coverage; callers
+ * can lower single-sample inputs with the common NIR pass.
+ *
+ * Buffer resources use a shader-loaded address table. Texture and sampler
+ * bindings are compacted independently. Ordinary NIR lowering handles arrays,
+ * cube projection, texture queries, explicit gradients, and texel fetches.
+ * Structured branches and loops use the common execution-mask model. Fragment
+ * outputs include format-aware color stores, blending, and depth export.
+ *
+ * The caller supplies hardware clip coordinates and compatible stage and
+ * render-target state. The single-target entry point below retains RGBA8
+ * defaults; the MRT entry point takes explicit attachment formats and state.
  */
 bool agx_compile_apple9_fragment(nir_shader *nir,
                                  struct agx_shader_part *out,

@@ -211,75 +211,19 @@ and NaNs return NaN. Full-range reduction still has substantial code and
 register cost. Large combined expressions can exceed the current allocator's
 no-spill register budget.
 
-## External development inputs
+## Source-generated launch ABI
 
-The repository deliberately does not contain captured Metal package blobs.
-During this bring-up phase, five recapturable inputs from two own-source
-eight-buffer carriers are loaded from hardcoded paths under
-`/home/nsheth/Projects/asahi/tmp/agx-apple9`:
+The development driver generates complete compute and graphics launchers;
+external carrier files and division tables are no longer runtime inputs.
+See `src/gallium/drivers/asahi/README.apple9-launchers.md` for the current
+parameterized encoding and unresolved hardware semantics.
 
-```text
-/home/nsheth/Projects/asahi/tmp/agx-apple9/carrier8/constant.bin
-/home/nsheth/Projects/asahi/tmp/agx-apple9/carrier8/launch.bin
-/home/nsheth/Projects/asahi/tmp/agx-apple9/carrier8/division.bin
-/home/nsheth/Projects/asahi/tmp/agx-apple9/carrier8-atomic/constant.bin
-/home/nsheth/Projects/asahi/tmp/agx-apple9/carrier8-atomic/launch.bin
-```
-
-The carrier resource record has three hidden entries followed by eight visible
-buffer entries and a zero sentinel. For direct dispatch, q0 points to the
-record's total-thread tuple and q1 to `{1,1,1}`. For indirect dispatch, q0 is
-the caller's raw group-count pointer and q1 points to the record's local-size
-scale tuple. The unchanged launch program derives the common execution
-geometry from that tagged representation. The third hidden entry points to the
-relocated 8-KiB integer-division helper table in `division.bin`.
-Unused visible entries are padded with a valid mapped pointer that the compiled
-main cannot reference. The full one-through-eight prefix has passed exact
-hardware output and input/guard-preservation checks through ordinary GLSL,
-Gallium, the DRM UAPI, and the G16 shim.
-
-The atomic carrier was captured from the own-source eight-buffer workload in
-`EXP-M4-48-atomic-package`. It publishes the eight caller buffers directly at
-q0--q7, with no hidden geometry or division-table resources. Mesa replaces its
-own-source stage main with the compiled main and patches the launch/archive and
-resource pointers semantically. Direct dispatch, fixed or runtime local size,
-and all ordinary compute system registers are supported. This capture does not
-establish an indirect-dispatch launcher or a `gl_NumWorkGroups` hidden-resource
-contract; those combinations reject instead of reading caller buffers as
-metadata. The two carrier families are loaded independently, so missing atomic
-development inputs do not disable ordinary compute and vice versa.
-
-File lengths are taken from the files. The driver validates only the regions
-it actually installs or patches; it does not require an exact whole-file size.
-
-Two optional, currently non-gated render research inputs use the same
-directory:
-
-```text
-/home/nsheth/Projects/asahi/tmp/agx-apple9/g16_render_package.bin.zst
-/home/nsheth/Projects/asahi/tmp/agx-apple9/render_interleaved_vbo_launch.bin
-```
-
-They do not restore the removed render compiler. They are retained outside Git
-only so future packaging work can reuse the current semantic relocation and
-archive experiments without putting opaque Metal data in repository history.
-
-The current local T8132 input hashes are:
-
-```text
-a3586e009bd675feb6b67d72b6f8b9500bde15487584c1a054925ac9af2d75ce  carrier8/constant.bin
-62e85e9dd6cca4dd033cb101ad860da28934d8f92d7498d7bd11b42eff0957c3  carrier8/launch.bin
-fbb72c3f6ffb8e4a2fd17c9155d5ae32d7e704eeb5c0c906bef6d315c7299e80  carrier8/division.bin
-9baa760c5185b9e5645bd1299e5ec948674258d6cbb0dc68b1394f1e45f3fd27  carrier8-atomic/constant.bin
-f712c5923161763e175403a715a66e4959239298e3905ce09d03bfe0e026d2ec  carrier8-atomic/launch.bin
-9c7912148f4d4b48b59ba8e720e9dc94d0988f191294394af79849b21fb99cfe  g16_render_package.bin.zst
-da8e9c9df75305fb8d11cd8d468e8cf0f35bb5172e7465777b6d258f243b145b  render_interleaved_vbo_launch.bin
-```
-
-The compute files are development inputs, not stable ABI. Recapture notes
-should record their source workload, OS/build, package role, and hash outside
-the Mesa repository until their remaining fields are replaced by semantic
-builders.
+Compute argument zero points to three 32-bit workgroup counts. Direct dispatch
+uploads CPU-computed counts; indirect dispatch uses the caller's GPU buffer
+at its dispatch offset. Compacted SSBO/UBO arguments begin at one, including
+for shaders with atomics. `gl_NumWorkGroups` loads counts directly, with no
+division table or shader-side ceiling division. The historical capture files
+remain outside the repository as research records only.
 
 ## Build
 
