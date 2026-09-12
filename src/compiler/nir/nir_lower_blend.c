@@ -911,6 +911,12 @@ nir_def *
 nir_color_blend(nir_builder *b, nir_def *src, nir_def *src1, nir_def *dst,
                 const nir_lower_blend_rt *rt, bool scalar_blend_const)
 {
+   if (rt->advanced_blend) {
+      nir_lower_blend_options options = {0};
+      options.rt[0] = *rt;
+      return nir_blend_advanced(b, &options, 0, src, dst);
+   }
+
    if (util_format_is_pure_integer(rt->format) || nir_blend_replace_rt(rt))
       return src;
 
