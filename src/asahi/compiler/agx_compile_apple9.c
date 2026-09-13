@@ -212,37 +212,19 @@ apple9_memory_format(nir_intrinsic_op op, uint8_t bytes, uint8_t bit_size,
                                       .align = size};
 }
 
-/* IEEE binary16 conversion expressed in the existing 32-bit instruction set.
- * Keep round-to-even, subnormals, signed zero and non-finite values explicit;
- * this also legalizes ordinary shader packHalf2x16/unpackHalf2x16 operations. */
+/* Keep format conversion in NIR's native half operations until selection.
+ * The machine conversion preserves finite subnormals and signed zero, rounds
+ * to nearest even, and returns a canonical quiet NaN for either NaN sign. */
 static nir_def *
 apple9_pack_half(nir_builder *b, nir_def *src)
 {
-   nir_def *abs = nir_iand_imm(b, src, 0x7fffffff);
-   nir_def *sign = nir_iand_imm(b, nir_ushr_imm(b, src, 16), 0x8000);
-   nir_def *round = nir_iadd_imm(b, nir_iand_imm(b, nir_ushr_imm(b, abs, 13), 1), 0xfff);
-   nir_def *normal = nir_iadd_imm(b, nir_ushr_imm(b, nir_iadd(b, abs, round), 13), -0x1c000);
-   /* Clamp the unused conversion path too, so f2u never sees infinity/NaN. */
-   nir_def *small = nir_umin(b, abs, nir_imm_int(b, 0x38800000));
-   nir_def *subnormal = nir_f2u32(b, nir_fround_even(b, nir_fmul_imm(b, small, 0x1p24)));
-   nir_def *half = nir_bcsel(b, nir_ult_imm(b, abs, 0x38800000), subnormal, normal);
-   half = nir_bcsel(b, nir_uge_imm(b, abs, 0x47800000), nir_imm_int(b, 0x7c00), half);
-   half = nir_bcsel(b, nir_ult(b, nir_imm_int(b, 0x7f800000), abs), nir_imm_int(b, 0x7e00), half);
-   return nir_ior(b, sign, half);
+   return nir_pack_half_2x16_split(b, src, nir_imm_float(b, 0));
 }
 
 static nir_def *
 apple9_unpack_half(nir_builder *b, nir_def *src)
 {
-   nir_def *sign = nir_ishl_imm(b, nir_iand_imm(b, src, 0x8000), 16);
-   nir_def *mantissa = nir_iand_imm(b, src, 0x3ff);
-   nir_def *exp = nir_iand_imm(b, src, 0x7c00);
-   nir_def *normal = nir_iadd_imm(b, nir_ishl_imm(b, nir_iand_imm(b, src, 0x7fff), 13), 0x38000000);
-   nir_def *subnormal = nir_fmul_imm(b, nir_u2f32(b, mantissa), 0x1p-24);
-   nir_def *nonfinite = nir_ior_imm(b, nir_ishl_imm(b, mantissa, 13), 0x7f800000);
-   nir_def *value = nir_bcsel(b, nir_ieq_imm(b, exp, 0), subnormal, normal);
-   value = nir_bcsel(b, nir_ieq_imm(b, exp, 0x7c00), nonfinite, value);
-   return nir_ior(b, sign, value);
+   return nir_channel(b, nir_unpack_half_2x16(b, src), 0);
 }
 
 /* Mesa's generic pack lowering leaves these scalar split operations for
@@ -254,30 +236,14 @@ apple9_lower_memory_pack(nir_builder *b, nir_alu_instr *alu, void *data)
    nir_def *value;
    b->cursor = nir_before_instr(&alu->instr);
    switch (alu->op) {
-   case nir_op_f2f32: {
-      nir_def *source = nir_ssa_for_alu_src(b, alu, 0);
-      if (source->bit_size != 16)
-         return false;
-      value = apple9_unpack_half(b, nir_u2u32(b, source));
-      break;
-   }
-   case nir_op_f2f16:
-      value = nir_u2u16(b, apple9_pack_half(b, nir_ssa_for_alu_src(b, alu, 0)));
-      break;
-   case nir_op_pack_half_2x16_split:
-      value = nir_ior(b, apple9_pack_half(b, nir_ssa_for_alu_src(b, alu, 0)),
-                        nir_ishl_imm(b, apple9_pack_half(b, nir_ssa_for_alu_src(b, alu, 1)), 16));
-      break;
-   case nir_op_pack_half_2x16: {
-      nir_def *source = nir_ssa_for_alu_src(b, alu, 0);
-      value = nir_ior(b, apple9_pack_half(b, nir_channel(b, source, 0)),
-                        nir_ishl_imm(b, apple9_pack_half(b, nir_channel(b, source, 1)), 16));
-      break;
-   }
-   case nir_op_unpack_half_2x16: {
-      nir_def *source = nir_ssa_for_alu_src(b, alu, 0);
-      value = nir_vec2(b, apple9_unpack_half(b, source),
-                         apple9_unpack_half(b, nir_ushr_imm(b, source, 16)));
+   case nir_op_uadd_sat: {
+      /* Constant division and late algebraic optimization can introduce
+       * saturating addition. Keep the carry test in the operand's width. */
+      nir_def *a = nir_ssa_for_alu_src(b, alu, 0);
+      nir_def *c = nir_ssa_for_alu_src(b, alu, 1);
+      nir_def *sum = nir_iadd(b, a, c);
+      value = nir_bcsel(b, nir_ult(b, sum, a),
+                       nir_imm_intN_t(b, -1, sum->bit_size), sum);
       break;
    }
    case nir_op_i2f32:
@@ -339,6 +305,11 @@ apple9_element_index(nir_intrinsic_instr *intr, nir_def *offset,
       return false;
    unsigned stride = components == 1 ? 1 : components == 2 ? 2 : 4;
    unsigned bytes = element_size * stride;
+   /* The vector format scales its index by the full padded vector size.
+    * Never silently discard low address bits if a later pass changes the
+    * alignment established by memory legalization. */
+   if (components > 1 && nir_intrinsic_align(intr) < bytes)
+      return false;
    nir_builder b = nir_builder_at(nir_before_instr(&intr->instr));
    nir_scalar scalar = apple9_chase_trivial(nir_get_scalar(offset, 0));
    uint32_t constant;
@@ -529,6 +500,11 @@ apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
       case nir_op_i2f32:
       case nir_op_f2i32:
       case nir_op_f2u32:
+      case nir_op_f2f16:
+      case nir_op_f2f32:
+      case nir_op_pack_half_2x16:
+      case nir_op_pack_half_2x16_split:
+      case nir_op_unpack_half_2x16:
       case nir_op_i2i8:
       case nir_op_i2i16:
       case nir_op_i2i32:
@@ -656,6 +632,8 @@ struct apple9_dag_lower {
    unsigned ssa_map_count;
    uint32_t system_vreg[256];
    uint32_t zero_vreg;
+   struct agx_apple9_block *binding_pointer_block;
+   uint32_t binding_pointer[AGX_APPLE9_MAX_GRAPHICS_BUFFERS];
    uint32_t perspective_reciprocal;
    struct agx_apple9_interp_mask linear_mask, flat_mask;
    bool perspective_ready;
@@ -738,6 +716,39 @@ apple9_dag_zero(struct apple9_dag_lower *lower)
    if (lower->zero_vreg == AGX_APPLE9_VREG_INVALID)
       lower->zero_vreg = apple9_dag_imm(lower, 0);
    return lower->zero_vreg;
+}
+
+static uint32_t
+apple9_graphics_buffer_address(struct apple9_dag_lower *lower, unsigned argument)
+{
+   assert(lower->nir->info.stage != MESA_SHADER_COMPUTE);
+   assert(argument < ARRAY_SIZE(lower->binding_pointer));
+   if (lower->binding_pointer_block != lower->program.current_block) {
+      lower->binding_pointer_block = lower->program.current_block;
+      memset(lower->binding_pointer, 0xff, sizeof(lower->binding_pointer));
+   }
+   if (lower->binding_pointer[argument] != AGX_APPLE9_VREG_INVALID)
+      return lower->binding_pointer[argument];
+
+   /* The draw's binding table is immutable even when its buffers are
+    * writable. Cache only that pointer, and only within its defining block. */
+   uint32_t index = apple9_dag_imm(lower, argument);
+   if (index == AGX_APPLE9_VREG_INVALID)
+      return index;
+   const struct agx_apple9_device_load_contract contract = {
+      .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
+      .flags = AGX_APPLE9_DEVICE_LOAD_HAS_NEXT,
+      .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
+   };
+   uint32_t address = agx_apple9_vir_emit_device_load_vector(
+      &lower->program, lower->argument_base, index, 2, &contract);
+   if (address == AGX_APPLE9_VREG_INVALID ||
+       !agx_apple9_vir_set_device_load_contract(
+          &lower->program, address, AGX_APPLE9_DEVICE_LOAD_HAS_NEXT,
+          AGX_APPLE9_SCOREBOARD_SLOT_AUTO))
+      return AGX_APPLE9_VREG_INVALID;
+   lower->binding_pointer[argument] = address;
+   return address;
 }
 
 static uint32_t
@@ -1194,76 +1205,53 @@ static uint32_t
 apple9_dag_shift_imm(struct apple9_dag_lower *lower, nir_op op, uint32_t source,
                      unsigned amount)
 {
-   if (source == AGX_APPLE9_VREG_INVALID || amount >= 32)
-      return AGX_APPLE9_VREG_INVALID;
+   if (source == AGX_APPLE9_VREG_INVALID)
+      return source;
+   amount &= 31;
    if (amount == 0)
       return source;
-
-   if (op == nir_op_ishl) {
-      uint32_t scale = apple9_dag_imm(lower, 1u << amount);
-      uint32_t zero = apple9_dag_zero(lower);
-      uint32_t sources[3] = {source, scale, zero};
-      if (scale == AGX_APPLE9_VREG_INVALID || zero == AGX_APPLE9_VREG_INVALID)
-         return AGX_APPLE9_VREG_INVALID;
-      return apple9_dag_emit(lower, AGX_APPLE9_VIR_IMAD,
-                             AGX_APPLE9_ENC_INT_MAD_EXTENDED, sources,
-                             ARRAY_SIZE(sources), 0);
-   }
-
-   /* The proven ASHR form has compact-bank source and destination fields.
-    * Allocation places these operands directly from the machine constraints. */
-   uint32_t shifted =
-      apple9_dag_emit(lower, AGX_APPLE9_VIR_ISHR, AGX_APPLE9_ENC_SHIFT_EXTENDED,
-                      &source, 1, amount);
-   if (op != nir_op_ushr || shifted == AGX_APPLE9_VREG_INVALID)
-      return shifted;
-
-   uint32_t mask = apple9_dag_imm(lower, UINT32_MAX >> amount);
-   uint32_t sources[2] = {shifted, mask};
-   return mask == AGX_APPLE9_VREG_INVALID
-             ? AGX_APPLE9_VREG_INVALID
-             : apple9_dag_emit(lower, AGX_APPLE9_VIR_IAND,
-                               AGX_APPLE9_ENC_LOGIC_EXTENDED, sources,
-                               ARRAY_SIZE(sources), 0);
+   return apple9_dag_emit(lower,
+      op == nir_op_ishr ? AGX_APPLE9_VIR_ISHR :
+      op == nir_op_ushr ? AGX_APPLE9_VIR_USHR : AGX_APPLE9_VIR_ISHL,
+      op == nir_op_ishr ? AGX_APPLE9_ENC_SHIFT_EXTENDED
+                       : AGX_APPLE9_ENC_SHIFT_LOGICAL_IMMEDIATE,
+      &source, 1, amount);
 }
 
 static uint32_t
 apple9_dag_shift_variable(struct apple9_dag_lower *lower, nir_op op,
-                          uint32_t source, uint32_t amount)
+                          uint32_t source, nir_scalar shift)
 {
+   uint32_t amount = apple9_lower_dag_scalar(lower, shift);
    if (source == AGX_APPLE9_VREG_INVALID || amount == AGX_APPLE9_VREG_INVALID)
       return AGX_APPLE9_VREG_INVALID;
 
-   uint32_t result = source;
-   uint32_t zero = apple9_dag_zero(lower);
-   if (zero == AGX_APPLE9_VREG_INVALID)
-      return zero;
-
-   /* NIR shifts consume the low five amount bits.  A five-stage conditional
-    * barrel shift is a correctness lowering built entirely from validated
-    * Apple9 operations; the incompletely decoded native register-shift form
-    * can replace it later as an instruction-selection optimization. */
-   for (unsigned bit = 0; bit < 5; ++bit) {
-      uint32_t mask = apple9_dag_imm(lower, BITFIELD_BIT(bit));
-      uint32_t condition_sources[2] = {amount, mask};
-      uint32_t condition =
-         mask == AGX_APPLE9_VREG_INVALID
-            ? AGX_APPLE9_VREG_INVALID
-            : apple9_dag_emit(lower, AGX_APPLE9_VIR_IAND,
-                              AGX_APPLE9_ENC_LOGIC_EXTENDED, condition_sources,
-                              ARRAY_SIZE(condition_sources), 0);
-      uint32_t shifted =
-         apple9_dag_shift_imm(lower, op, result, BITFIELD_BIT(bit));
-      if (condition == AGX_APPLE9_VREG_INVALID ||
-          shifted == AGX_APPLE9_VREG_INVALID)
-         return AGX_APPLE9_VREG_INVALID;
-      result = apple9_emit_dag_select_raw(lower, zero, condition, shifted,
-                                          result, AGX_APPLE9_SELECT_ULT);
-      if (result == AGX_APPLE9_VREG_INVALID)
-         return result;
+   /* Hardware shifts saturate outside 0..31, whereas NIR masks the amount.
+    * Reuse an existing five-bit AND when the frontend already supplied it. */
+   bool bounded = false;
+   if (nir_def_instr_type(shift.def) == nir_instr_type_alu &&
+       nir_scalar_alu_op(shift) == nir_op_iand) {
+      for (unsigned s = 0; s < 2; ++s) {
+         uint32_t mask;
+         if (apple9_const_u32(nir_scalar_chase_alu_src(shift, s), &mask) &&
+             mask <= 31)
+            bounded = true;
+      }
    }
-
-   return result;
+   if (!bounded) {
+      uint32_t sources[] = {amount, apple9_dag_imm(lower, 31)};
+      amount = apple9_dag_emit(lower, AGX_APPLE9_VIR_IAND,
+                               AGX_APPLE9_ENC_LOGIC_EXTENDED, sources, 2, 0);
+   }
+   if (amount == AGX_APPLE9_VREG_INVALID)
+      return amount;
+   uint32_t sources[] = {source, amount};
+   return apple9_dag_emit(lower,
+      op == nir_op_ishr ? AGX_APPLE9_VIR_ISHR :
+      op == nir_op_ushr ? AGX_APPLE9_VIR_USHR : AGX_APPLE9_VIR_ISHL,
+      op == nir_op_ishr ? AGX_APPLE9_ENC_SHIFT_ARITH_REGISTER
+                       : AGX_APPLE9_ENC_SHIFT_LOGICAL_REGISTER,
+      sources, 2, 0);
 }
 
 /* Returns the packed user scalar index, excluding the four position words. */
@@ -1653,21 +1641,9 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
 
          uint32_t address = AGX_APPLE9_VREG_INVALID;
          if (lower->nir->info.stage != MESA_SHADER_COMPUTE) {
-            uint32_t pointer_index = apple9_dag_imm(lower, load->argument);
-            const struct agx_apple9_device_load_contract pointer_contract = {
-               .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
-               .flags = AGX_APPLE9_DEVICE_LOAD_HAS_NEXT,
-               .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
-            };
-            address = agx_apple9_vir_emit_device_load_vector(
-               &lower->program, lower->argument_base, pointer_index, 2,
-               &pointer_contract);
+            address = apple9_graphics_buffer_address(lower, load->argument);
             if (address == AGX_APPLE9_VREG_INVALID)
                return address;
-            if (!agx_apple9_vir_set_device_load_contract(
-                   &lower->program, address, AGX_APPLE9_DEVICE_LOAD_HAS_NEXT,
-                   AGX_APPLE9_SCOREBOARD_SLOT_AUTO))
-               return AGX_APPLE9_VREG_INVALID;
          }
 
          unsigned read_count = 0;
@@ -1816,19 +1792,77 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                   value =
                      apple9_dag_shift_imm(lower, nir_op_ishr, shifted, shift);
             }
+         } else if (op == nir_op_f2f16 || op == nir_op_f2f32 ||
+                    op == nir_op_unpack_half_2x16) {
+            nir_scalar source_scalar = nir_scalar_chase_alu_src(scalar, 0);
+            unsigned half = 0;
+            if (op == nir_op_unpack_half_2x16) {
+               nir_alu_instr *alu = nir_instr_as_alu(nir_def_instr(scalar.def));
+               source_scalar = nir_get_scalar(alu->src[0].src.ssa,
+                                               alu->src[0].swizzle[0]);
+               half = scalar.comp;
+            }
+            bool narrow = op == nir_op_f2f16;
+            if ((narrow && source_scalar.def->bit_size != 32) ||
+                (op == nir_op_f2f32 && source_scalar.def->bit_size != 16) ||
+                half > 1) {
+               lower->reason = "unsupported Apple9 float conversion width";
+               return AGX_APPLE9_VREG_INVALID;
+            }
+            uint32_t source = apple9_lower_dag_scalar(lower, source_scalar);
+            if (source != AGX_APPLE9_VREG_INVALID)
+               value = apple9_dag_emit(lower,
+                  narrow ? AGX_APPLE9_VIR_F2F16 : AGX_APPLE9_VIR_UNPACK_HALF,
+                  narrow ? AGX_APPLE9_ENC_FLOAT_TO_HALF_ZEXT
+                         : AGX_APPLE9_ENC_HALF_TO_FLOAT, &source, 1, half);
+         } else if (op == nir_op_pack_half_2x16 ||
+                    op == nir_op_pack_half_2x16_split) {
+            nir_alu_instr *alu = nir_instr_as_alu(nir_def_instr(scalar.def));
+            nir_scalar inputs[2];
+            for (unsigned c = 0; c < 2; ++c) {
+               unsigned s = op == nir_op_pack_half_2x16_split ? c : 0;
+               unsigned channel = op == nir_op_pack_half_2x16_split ? 0 : c;
+               inputs[c] = nir_get_scalar(alu->src[s].src.ssa,
+                                           alu->src[s].swizzle[channel]);
+            }
+            uint32_t source = apple9_lower_dag_scalar(lower, inputs[0]);
+            if (source == AGX_APPLE9_VREG_INVALID)
+               return source;
+            uint32_t upper;
+            if (apple9_const_u32(inputs[1], &upper) && upper == 0) {
+               value = apple9_dag_emit(lower, AGX_APPLE9_VIR_F2F16,
+                  AGX_APPLE9_ENC_FLOAT_TO_HALF_ZEXT, &source, 1, 0);
+            } else {
+               uint32_t sources[] = {source,
+                  apple9_lower_dag_scalar(lower, inputs[1])};
+               if (sources[1] != AGX_APPLE9_VREG_INVALID)
+                  value = apple9_dag_emit(lower, AGX_APPLE9_VIR_PACK_HALF_2X16,
+                     AGX_APPLE9_ENC_PACK_HALF_2X16, sources, 2, 0);
+            }
          } else if (op == nir_op_bcsel) {
             uint32_t if_true = apple9_lower_dag_source(lower, scalar, 1);
             uint32_t if_false = apple9_lower_dag_source(lower, scalar, 2);
-            uint32_t condition = apple9_lower_bool_scalar(
-               lower, nir_scalar_chase_alu_src(scalar, 0));
-            uint32_t zero = apple9_dag_zero(lower);
-            if (if_true != AGX_APPLE9_VREG_INVALID &&
-                if_false != AGX_APPLE9_VREG_INVALID &&
-                condition != AGX_APPLE9_VREG_INVALID &&
-                zero != AGX_APPLE9_VREG_INVALID)
-               value =
-                  apple9_emit_dag_select_raw(lower, zero, condition, if_true,
-                                             if_false, AGX_APPLE9_SELECT_ULT);
+            nir_scalar predicate =
+               apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 0));
+            struct apple9_compare compare;
+            if (if_true == AGX_APPLE9_VREG_INVALID ||
+                if_false == AGX_APPLE9_VREG_INVALID) {
+               value = AGX_APPLE9_VREG_INVALID;
+            } else if (nir_def_instr_type(predicate.def) == nir_instr_type_alu &&
+                       apple9_normalize_compare(nir_scalar_alu_op(predicate),
+                                                &compare)) {
+               /* SELECT compares its operands directly. Materialize a
+                * boolean only for users that actually need its value. */
+               value = apple9_emit_dag_select(lower, predicate, if_true, if_false);
+            } else {
+               uint32_t condition = apple9_lower_bool_scalar(lower, predicate);
+               uint32_t zero = apple9_dag_zero(lower);
+               if (condition != AGX_APPLE9_VREG_INVALID &&
+                   zero != AGX_APPLE9_VREG_INVALID)
+                  value = apple9_emit_dag_select_raw(
+                     lower, zero, condition, if_true, if_false,
+                     AGX_APPLE9_SELECT_ULT);
+            }
          } else if (op == nir_op_b2i32) {
             value = apple9_lower_bool_scalar(
                lower, nir_scalar_chase_alu_src(scalar, 0));
@@ -1951,21 +1985,19 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 1));
             uint32_t amount;
             uint32_t source = apple9_lower_dag_source(lower, scalar, 0);
-            value = apple9_const_u32(shift, &amount) && amount < 32
+            value = apple9_const_u32(shift, &amount)
                        ? apple9_dag_shift_imm(lower, op, source, amount)
                        : apple9_dag_shift_variable(
-                            lower, op, source,
-                            apple9_lower_dag_scalar(lower, shift));
+                            lower, op, source, shift);
          } else if (op == nir_op_ishr || op == nir_op_ushr) {
             nir_scalar shift =
                apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 1));
             uint32_t amount;
             uint32_t source = apple9_lower_dag_source(lower, scalar, 0);
-            value = apple9_const_u32(shift, &amount) && amount < 32
+            value = apple9_const_u32(shift, &amount)
                        ? apple9_dag_shift_imm(lower, op, source, amount)
                        : apple9_dag_shift_variable(
-                            lower, op, source,
-                            apple9_lower_dag_scalar(lower, shift));
+                            lower, op, source, shift);
          } else if (op == nir_op_ffma || op == nir_op_ffma_weak) {
             uint32_t sources[3] = {
                apple9_lower_dag_source(lower, scalar, 0),
@@ -1979,6 +2011,31 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                                        AGX_APPLE9_ENC_FLOAT3_EXTENDED, sources,
                                        3, 0);
          } else {
+            if (op == nir_op_iadd) {
+               for (unsigned i = 0; i < 2; ++i) {
+                  nir_scalar mul = apple9_chase_trivial(
+                     nir_scalar_chase_alu_src(scalar, i));
+                  if (nir_def_instr_type(mul.def) != nir_instr_type_alu ||
+                      (nir_scalar_alu_op(mul) != nir_op_imul &&
+                       nir_scalar_alu_op(mul) != nir_op_amul))
+                     continue;
+                  /* Low-product IMAD has the same wrapping arithmetic as
+                   * NIR's multiply followed by add, including signed data. */
+                  uint32_t sources[] = {
+                     apple9_lower_dag_source(lower, mul, 0),
+                     apple9_lower_dag_source(lower, mul, 1),
+                     apple9_lower_dag_source(lower, scalar, 1 - i),
+                  };
+                  if (sources[0] != AGX_APPLE9_VREG_INVALID &&
+                      sources[1] != AGX_APPLE9_VREG_INVALID &&
+                      sources[2] != AGX_APPLE9_VREG_INVALID)
+                     value = apple9_dag_emit(
+                        lower, AGX_APPLE9_VIR_IMAD,
+                        AGX_APPLE9_ENC_INT_MAD_EXTENDED, sources, 3, 0);
+                  lower->ssa_to_vreg[key] = value;
+                  return value;
+               }
+            }
             enum agx_apple9_vir_opcode vir_op = apple9_dag_binary_opcode(op);
             enum agx_apple9_encoding encoding = apple9_dag_binary_encoding(op);
             if (encoding != AGX_APPLE9_ENC_COUNT) {
@@ -2463,18 +2520,8 @@ apple9_emit_buffer_store(struct apple9_dag_lower *lower,
 
    uint32_t address = AGX_APPLE9_VREG_INVALID;
    if (lower->nir->info.stage != MESA_SHADER_COMPUTE) {
-      uint32_t pointer_index = apple9_dag_imm(lower, store->argument);
-      const struct agx_apple9_device_load_contract contract = {
-         .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
-         .flags = AGX_APPLE9_DEVICE_LOAD_HAS_NEXT,
-         .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
-      };
-      address = agx_apple9_vir_emit_device_load_vector(
-         &lower->program, lower->argument_base, pointer_index, 2, &contract);
-      if (address == AGX_APPLE9_VREG_INVALID ||
-          !agx_apple9_vir_set_device_load_contract(
-             &lower->program, address, AGX_APPLE9_DEVICE_LOAD_HAS_NEXT,
-             AGX_APPLE9_SCOREBOARD_SLOT_AUTO))
+      address = apple9_graphics_buffer_address(lower, store->argument);
+      if (address == AGX_APPLE9_VREG_INVALID)
          return false;
    }
    if (!agx_apple9_vir_emit_device_store(&lower->program,
@@ -3452,11 +3499,8 @@ apple9_emit_cf_list(struct apple9_dag_lower *lower,
    return true;
 }
 
-static bool
-apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
-                   struct agx_apple9_compute_profile *profile,
-                   const struct agx_apple9_varying_layout *varyings,
-                   const char **reason)
+static void
+apple9_legalize_buffer_accesses(nir_shader *nir)
 {
    const nir_lower_mem_access_bit_sizes_options memory_options = {
       .modes = nir_var_mem_ssbo | nir_var_mem_ubo,
@@ -3489,6 +3533,63 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
       progress |= nir_opt_dce(nir);
    } while (progress);
 
+}
+
+static void
+apple9_prepare_dag(nir_shader *nir)
+{
+   /* Legalization preserves vectors it is given, but does not discover
+    * adjacent scalar accesses. Canonicalize their addresses first and let
+    * NIR retain its alignment, aliasing and wrapping-offset checks. */
+   nir_opt_constant_folding(nir);
+   nir_opt_cse(nir);
+   nir_opt_dce(nir);
+   const nir_load_store_vectorize_options vector_options = {
+      .modes = nir_var_mem_ubo | nir_var_mem_ssbo,
+      .callback = agx_mem_vectorize_cb,
+   };
+   nir_opt_load_store_vectorize(nir, &vector_options);
+
+   apple9_legalize_buffer_accesses(nir);
+   bool progress;
+
+   /* Match the common Asahi if-conversion policy. NIR checks side effects
+    * and speculation legality; phi removal must follow control-flow edits. */
+   const nir_opt_peephole_select_options select_options = {
+      .limit = 64,
+      .expensive_alu_ok = true,
+   };
+   do {
+      progress = nir_opt_peephole_select(nir, &select_options);
+      progress |= nir_opt_copy_prop(nir);
+      progress |= nir_opt_remove_phis(nir);
+      progress |= nir_opt_dead_cf(nir);
+      progress |= nir_opt_cse(nir);
+      progress |= nir_opt_dce(nir);
+   } while (progress);
+
+   /* FMA formation and other late algebraic rules belong after lowering in
+    * every shader, not only shaders which happened to contain division.
+    * Re-legalize scalar packing/extraction introduced by those rules. */
+   nir_opt_algebraic_late(nir);
+   nir_shader_alu_pass(nir, apple9_lower_memory_pack,
+                      nir_metadata_control_flow, NULL);
+   do {
+      progress = nir_opt_constant_folding(nir);
+      progress |= nir_opt_copy_prop(nir);
+      progress |= nir_opt_cse(nir);
+      progress |= nir_opt_dce(nir);
+   } while (progress);
+
+}
+
+static bool
+apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
+                       struct agx_apple9_compute_profile *profile,
+                       const struct agx_apple9_varying_layout *varyings,
+                       const struct apple9_buffer_map *resources,
+                       bool preamble, const char **reason)
+{
    /* Selection follows NIR order, so shorten live ranges after lowering and
     * before collecting loads or assigning virtual registers. Use the same
     * movement options as the Apple8 backend; NIR checks load reorderability.
@@ -3503,10 +3604,7 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    struct util_dynarray loads = UTIL_DYNARRAY_INIT;
    struct util_dynarray stores = UTIL_DYNARRAY_INIT;
    struct util_dynarray atomics = UTIL_DYNARRAY_INIT;
-   struct apple9_buffer_map resource_map = {0};
-
-   if (!apple9_collect_buffer_map(nir, &resource_map, reason))
-      return false;
+   struct apple9_buffer_map resource_map = *resources;
 
    if (!apple9_find_buffer_dag(nir, &resource_map, &loads, &stores, &atomics,
                                reason)) {
@@ -3700,7 +3798,7 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
       goto fail;
    }
 
-   if (nir->info.stage == MESA_SHADER_VERTEX && lower.position_mask != 15) {
+   if (!preamble && nir->info.stage == MESA_SHADER_VERTEX && lower.position_mask != 15) {
       *reason = "Apple9 render requires complete position";
       goto fail;
    }
@@ -3873,7 +3971,8 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    /* List final packed bytes after branch fixups, without changing codegen.
     * A row can contain multiple instructions for an expanded VIR pseudo. */
    if (getenv("AGX_APPLE9_ASM") != NULL) {
-      fprintf(stderr, "APPLE9_ASM_BEGIN stage=%u\n", nir->info.stage);
+      fprintf(stderr, "%s_ASM_BEGIN stage=%u\n",
+              preamble ? "APPLE9_PREAMBLE" : "APPLE9", nir->info.stage);
       for (unsigned i = 0; i < lower.program.instruction_count; ++i) {
          const struct agx_apple9_vir_instr *ins = lower.program.instructions[i];
          fprintf(stderr, "APPLE9_ASM offset=%u op=%u enc=%u dst=",
@@ -3916,7 +4015,8 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
          saves += ins->op == AGX_APPLE9_VIR_SPILL_STORE;
          fills += ins->op == AGX_APPLE9_VIR_SPILL_LOAD;
       }
-      fprintf(stderr, "APPLE9_CODEGEN stage=%u bytes=%u instructions=%u copies=%u waits=%u saves=%u fills=%u gprs=%u scratch=%u\n",
+      fprintf(stderr, "%s_CODEGEN stage=%u bytes=%u instructions=%u copies=%u waits=%u saves=%u fills=%u gprs=%u scratch=%u\n",
+              preamble ? "APPLE9_PREAMBLE" : "APPLE9",
               nir->info.stage, emitter.bytes.size, lower.program.instruction_count,
               copies, waits, saves, fills, lower.program.peak_live_gprs,
               lower.program.scratch_size);
@@ -3957,7 +4057,7 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    }
    if (varyings)
       out->info.apple9_varyings = *varyings;
-   if (nir->info.stage == MESA_SHADER_FRAGMENT)
+   if (!preamble && nir->info.stage == MESA_SHADER_FRAGMENT)
       out->info.varyings.fs.nr_cf = varyings->count + 1 + lower.reads_z +
                                   2 * lower.reads_point_coord;
    out->info.main_size = emitter.bytes.size;
@@ -4011,18 +4111,33 @@ fail:
    return false;
 }
 
+static bool
+apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
+                  struct agx_apple9_compute_profile *profile,
+                  const struct agx_apple9_varying_layout *varyings,
+                  const char **reason)
+{
+   apple9_prepare_dag(nir);
+   struct apple9_buffer_map resources = {0};
+   if (!apple9_collect_buffer_map(nir, &resources, reason))
+      return false;
+
+   return apple9_compile_dag_body(nir, out, profile, varyings, &resources,
+                                 false, reason);
+}
+
 static void
 apple9_lower_idiv(nir_shader *nir)
 {
-   /* Integer division uses NIR's quotient/refinement lowering. The backend
-    * has ordinary 32-bit multiplies; expand the high product into those
-    * operations until a native high-product encoding is modeled. */
+   /* Optimize constants before quotient/refinement lowering. High products
+    * remain semantic NIR and select the upper word of a native wide multiply. */
+   bool optimized = nir_opt_idiv_const(nir, 32);
    const nir_lower_idiv_options idiv = {0};
-   if (nir_lower_idiv(nir, &idiv)) {
+   if (nir_lower_idiv(nir, &idiv) || optimized) {
       agx_nir_lower_accurate_frcp(nir);
       const nir_shader_compiler_options *original_options = nir->options;
       nir_shader_compiler_options alu_options = *original_options;
-      alu_options.lower_mul_high = true;
+      alu_options.lower_mul_high = false;
       alu_options.lower_extract_byte = true;
       alu_options.lower_extract_word = true;
       alu_options.lower_iabs = true;

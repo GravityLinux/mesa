@@ -124,6 +124,41 @@ TEST(Apple9Packer, WideMultiplyRequiresAlignedAdjacentProductWords)
    EXPECT_FALSE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason));
 }
 
+TEST(Apple9Compiler, NativeHalfPackingAndHighMultiplyReachOrdinaryNir)
+{
+   for (unsigned operation = 0; operation < 8; ++operation) {
+      nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE,
+         &agx_nir_options, "native_convert_%u", operation);
+      b.shader->info.workgroup_size[0] = 32;
+      b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
+      b.shader->info.num_ssbos = 2;
+      auto input = nir_load_ssbo(&b, 2, 32, nir_imm_int(&b, 1),
+         nir_imm_int(&b, 0), .access = ACCESS_NON_WRITEABLE, .align_mul = 8);
+      auto a = nir_channel(&b, input, 0), c = nir_channel(&b, input, 1);
+      nir_def *result = operation == 0 ? nir_pack_half_2x16_split(&b, a, c)
+         : operation == 1 ? nir_unpack_half_2x16(&b, a)
+         : operation == 2 ? nir_u2u32(&b, nir_f2f16(&b, a))
+         : operation == 3 ? nir_f2f32(&b, nir_u2u16(&b, a))
+         : operation == 4 ? nir_umul_high(&b, a, c) : nir_imul_high(&b, a, c);
+      if (operation >= 6) {
+         auto product = operation == 6 ? nir_umul_2x32_64(&b, a, c)
+                                       : nir_imul_2x32_64(&b, a, c);
+         result = nir_vec2(&b, nir_unpack_64_2x32_split_x(&b, product),
+                               nir_unpack_64_2x32_split_y(&b, product));
+      }
+      nir_store_ssbo(&b, result, nir_imm_int(&b, 0), nir_imm_int(&b, 0), .align_mul = 8);
+      agx_shader_part compiled = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, nullptr, &reason))
+         << operation << ": " << (reason ?: "");
+      /* These all fit one short native operation plus the buffer interface.
+       * The old software half conversions/high product exceeded this bound. */
+      EXPECT_LT(compiled.info.main_size, 180u) << operation;
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
+}
+
 TEST(Apple9Packer, RegisterShiftsHaveIndependentSourceReleaseFlags)
 {
    uint8_t phys[] = {80,95,64};

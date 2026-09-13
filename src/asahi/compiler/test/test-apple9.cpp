@@ -3170,8 +3170,11 @@ apple9_deep_if_shader(unsigned depth)
    nir_if *nested[32];
 
    assert(depth <= ARRAY_SIZE(nested));
-   for (unsigned i = 0; i < depth; ++i)
+   for (unsigned i = 0; i < depth; ++i) {
       nested[i] = nir_push_if(&b, nir_ult_imm(&b, gid, 32 - i));
+      apple9_store_output(&b, nir_iadd_imm(&b, nir_ishl_imm(&b, gid, 5), i),
+                          nir_iadd_imm(&b, gid, i));
+   }
 
    apple9_store_output(&b, gid, nir_iadd_imm(&b, gid, 0x100));
    for (unsigned i = depth; i > 0; --i)
@@ -4507,7 +4510,7 @@ TEST(Apple9Compiler, SingleRegionSupportsEntryAndMergeStoresAndEmptyArms)
    }
 }
 
-TEST(Apple9Compiler, MultipleScalarAndVectorPhisUseMaskedEdgeCopies)
+TEST(Apple9Compiler, PureScalarAndVectorPhisBecomeSelects)
 {
    nir_shader *nir = apple9_multiple_phi_shader();
    struct agx_shader_part compiled = {};
@@ -4518,11 +4521,11 @@ TEST(Apple9Compiler, MultipleScalarAndVectorPhisUseMaskedEdgeCopies)
    const uint8_t push[] = {0x0f, 0x05, 0x54, 0x01};
    const uint8_t else_mask[] = {0x0f, 0x04, 0x04, 0x19};
    const uint8_t pop[] = {0x0f, 0x06, 0x04, 0x01, 0x00, 0x00};
-   EXPECT_EQ(apple9_binary_count_sequence(&compiled, push, sizeof(push)), 1u);
+   EXPECT_EQ(apple9_binary_count_sequence(&compiled, push, sizeof(push)), 0u);
    EXPECT_EQ(
       apple9_binary_count_sequence(&compiled, else_mask, sizeof(else_mask)),
-      1u);
-   EXPECT_EQ(apple9_binary_count_sequence(&compiled, pop, sizeof(pop)), 1u);
+      0u);
+   EXPECT_EQ(apple9_binary_count_sequence(&compiled, pop, sizeof(pop)), 0u);
 
    unsigned vector_stores = 0;
    for (unsigned i = 0; i + 14 <= compiled.info.binary_size; ++i) {
@@ -4562,7 +4565,7 @@ TEST(Apple9Compiler, ArbitraryPureBooleansMaterializeThenCompareWithZero)
    }
 }
 
-TEST(Apple9Compiler, SimplePhiUsesMaskedEdgeCopies)
+TEST(Apple9Compiler, PurePhiBecomesDirectSelect)
 {
    nir_shader *nir = apple9_simple_phi_shader();
    struct agx_shader_part compiled = {};
@@ -4573,19 +4576,18 @@ TEST(Apple9Compiler, SimplePhiUsesMaskedEdgeCopies)
    const uint8_t push[] = {0x0f, 0x05, 0x54, 0x01};
    const uint8_t else_mask[] = {0x0f, 0x04, 0x04, 0x19};
    const uint8_t pop[] = {0x0f, 0x06, 0x04, 0x01, 0x00, 0x00};
-   EXPECT_EQ(apple9_binary_count_sequence(&compiled, push, sizeof(push)), 1u);
+   EXPECT_EQ(apple9_binary_count_sequence(&compiled, push, sizeof(push)), 0u);
    EXPECT_EQ(
       apple9_binary_count_sequence(&compiled, else_mask, sizeof(else_mask)),
-      1u);
-   EXPECT_EQ(apple9_binary_count_sequence(&compiled, pop, sizeof(pop)), 1u);
+      0u);
+   EXPECT_EQ(apple9_binary_count_sequence(&compiled, pop, sizeof(pop)), 0u);
 
    const uint8_t *binary = (const uint8_t *)compiled.binary;
    unsigned selects = 0;
    for (unsigned i = 0; i + 10 <= compiled.info.binary_size; ++i)
-      selects += binary[i] == 0x02 && binary[i + 4] == 0x82;
-   /* CFG phis are resolved by masked predecessor-edge copies. Explicit bcsel
-    * remains a separate instruction-selection path, but this shader has none. */
-   EXPECT_EQ(selects, 0u);
+      selects += (binary[i] & 0xf) == 0x02 && binary[i + 4] == 0x82;
+   /* The comparison feeds one select directly, without a boolean temporary. */
+   EXPECT_EQ(selects, 1u);
    free(compiled.binary);
    ralloc_free(nir);
 }
@@ -4639,7 +4641,7 @@ TEST(Apple9Compiler, DeepIfNestingDoesNotConsumePredicateBanks)
    ralloc_free(nir);
 }
 
-TEST(Apple9Compiler, NestedVectorPhisResolveAtEachReconvergence)
+TEST(Apple9Compiler, NestedPureVectorPhisBecomeSelects)
 {
    nir_shader *nir = apple9_nested_phi_shader();
    struct agx_shader_part compiled = {};
@@ -4649,17 +4651,17 @@ TEST(Apple9Compiler, NestedVectorPhisResolveAtEachReconvergence)
 
    const uint8_t else_mask[] = {0x0f, 0x04, 0x04, 0x19};
    const uint8_t pop[] = {0x0f, 0x06, 0x04, 0x01, 0x00, 0x00};
-   EXPECT_EQ(apple9_binary_count_exec_pushes(&compiled), 2u);
+   EXPECT_EQ(apple9_binary_count_exec_pushes(&compiled), 0u);
    EXPECT_EQ(
       apple9_binary_count_sequence(&compiled, else_mask, sizeof(else_mask)),
-      2u);
-   EXPECT_EQ(apple9_binary_count_sequence(&compiled, pop, sizeof(pop)), 2u);
+      0u);
+   EXPECT_EQ(apple9_binary_count_sequence(&compiled, pop, sizeof(pop)), 0u);
 
    const uint8_t *binary = (const uint8_t *)compiled.binary;
    unsigned selects = 0;
    for (unsigned i = 0; i + 10 <= compiled.info.binary_size; ++i)
-      selects += binary[i] == 0x02 && binary[i + 4] == 0x82;
-   EXPECT_EQ(selects, 0u);
+      selects += (binary[i] & 0xf) == 0x02 && binary[i + 4] == 0x82;
+   EXPECT_GT(selects, 0u);
    free(compiled.binary);
    ralloc_free(nir);
 }
@@ -5304,7 +5306,8 @@ TEST(Apple9Compiler, MultipleStoresShareOneWritableResource)
          EXPECT_EQ(bytes[4], AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE);
       }
    }
-   EXPECT_EQ(stores, 2u);
+   /* Adjacent stores coalesce while keeping one writable binding. */
+   EXPECT_EQ(stores, 1u);
    free(compiled.binary);
    ralloc_free(nir);
 }
@@ -5557,7 +5560,7 @@ TEST(Apple9Compiler, ArbitraryLoadedIndexNeedsNoRangeProof)
    ralloc_free(nir);
 }
 
-TEST(Apple9Compiler, VariableShiftsUseGeneralValidatedLowering)
+TEST(Apple9Compiler, VariableShiftsUseNativeRegisterOperands)
 {
    for (nir_op op : {nir_op_ishl, nir_op_ishr, nir_op_ushr}) {
       nir_shader *nir = apple9_variable_shift_shader(op);
@@ -5567,7 +5570,7 @@ TEST(Apple9Compiler, VariableShiftsUseGeneralValidatedLowering)
       ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
          << (reason ? reason : "no diagnostic");
       EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_DIRECT_BUFFERS);
-      EXPECT_GT(compiled.info.binary_size, 100u);
+      EXPECT_LT(compiled.info.binary_size, 100u);
       free(compiled.binary);
       ralloc_free(nir);
    }
