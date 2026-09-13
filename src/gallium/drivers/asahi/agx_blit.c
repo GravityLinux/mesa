@@ -667,8 +667,7 @@ try_copy_via_blit(struct pipe_context *pctx, struct pipe_resource *dst,
    }
 }
 
-/* Raw 32-bit tiled-to-linear copies. Layout parameters are uniforms so one
- * normally compiled shader serves different image dimensions and strides. */
+/* Morton addressing shared by raw layout copies, reloads, and resolves. */
 static nir_def *
 asahi_spread_bits(nir_builder *b, nir_def *v)
 {
@@ -1101,7 +1100,8 @@ static void *
 asahi_raw_resolve_shader(struct pipe_context *pctx, unsigned samples,
                          enum pipe_format format)
 {
-   const nir_shader_compiler_options *options = pctx->screen->nir_options[MESA_SHADER_COMPUTE];
+   const nir_shader_compiler_options *options =
+      pctx->screen->nir_options[MESA_SHADER_COMPUTE];
    nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, options,
                                                   "tiled color resolve");
    b.shader->info.workgroup_size[0] = 32;
@@ -1125,7 +1125,11 @@ asahi_raw_resolve_shader(struct pipe_context *pctx, unsigned samples,
    unsigned words = DIV_ROUND_UP(bytes, 4);
    bool integer = util_format_is_pure_integer(format);
    src = nir_iadd(&b, p[13], nir_imul_imm(&b, src, samples * bytes));
-   dst = nir_iadd(&b, p[17], nir_imul_imm(&b, dst, bytes));
+   /* A nonzero destination row stride selects linear window storage. */
+   nir_def *dst_bytes = nir_bcsel(&b, nir_ine_imm(&b, p[19], 0),
+      nir_iadd(&b, nir_imul_imm(&b, dx, bytes), nir_imul(&b, dy, p[19])),
+      nir_imul_imm(&b, dst, bytes));
+   dst = nir_iadd(&b, p[17], dst_bytes);
    nir_def *sum = nir_imm_vec4(&b, 0, 0, 0, 0);
    nir_def *packed = NULL;
    for (unsigned sample = 0; sample < (integer ? 1 : samples); ++sample) {
@@ -1211,7 +1215,9 @@ asahi_raw_resolve(struct pipe_context *pctx, const struct pipe_blit_info *info)
        info->src.box.depth != 1 || info->dst.box.depth != 1 ||
        !info->src.box.width || !info->src.box.height ||
        s->layout.compressed || d->layout.compressed ||
-       s->layout.tiling != AIL_TILING_GPU || d->layout.tiling != AIL_TILING_GPU ||
+       s->layout.tiling != AIL_TILING_GPU ||
+       (d->layout.tiling != AIL_TILING_GPU &&
+        d->layout.tiling != AIL_TILING_LINEAR) ||
        s->bo == d->bo || s->layout.size_B > UINT32_MAX || d->layout.size_B > UINT32_MAX)
       return false;
    unsigned levels[] = {info->src.level, info->dst.level};
@@ -1225,17 +1231,24 @@ asahi_raw_resolve(struct pipe_context *pctx, const struct pipe_blit_info *info)
       if (box->z < 0 || levels[i] > r->base.last_level ||
           box->z >= r->base.array_size)
          return false;
-      struct ail_tile tile = r->layout.tilesize_el[levels[i]];
-      if (!util_is_power_of_two_nonzero(tile.width_el) ||
-          !util_is_power_of_two_nonzero(tile.height_el))
-         return false;
+
       params[2 + 4 * i] = box->x - (box->width < 0);
       params[3 + 4 * i] = box->y - (box->height < 0);
       params[4 + 4 * i] = box->width < 0 ? -1 : 1;
       params[5 + 4 * i] = box->height < 0 ? -1 : 1;
-      params[10 + 4 * i] = util_logbase2(tile.width_el);
-      params[11 + 4 * i] = util_logbase2(tile.height_el);
-      params[12 + 4 * i] = DIV_ROUND_UP(r->layout.stride_el[levels[i]], tile.width_el);
+      if (r->layout.tiling == AIL_TILING_LINEAR) {
+         assert(i == 1);
+         params[19] = ail_get_linear_stride_B(&r->layout, levels[i]);
+      } else {
+         struct ail_tile tile = r->layout.tilesize_el[levels[i]];
+         if (!util_is_power_of_two_nonzero(tile.width_el) ||
+             !util_is_power_of_two_nonzero(tile.height_el))
+            return false;
+         params[10 + 4 * i] = util_logbase2(tile.width_el);
+         params[11 + 4 * i] = util_logbase2(tile.height_el);
+         params[12 + 4 * i] =
+            DIV_ROUND_UP(r->layout.stride_el[levels[i]], tile.width_el);
+      }
       params[13 + 4 * i] = ail_get_level_offset_B(&r->layout, levels[i]) +
                            r->layout.layer_stride_B * box->z;
    }
@@ -1295,104 +1308,263 @@ asahi_raw_resolve(struct pipe_context *pctx, const struct pipe_blit_info *info)
    return true;
 }
 
-static void *
-asahi_detile_shader(struct pipe_context *pctx)
+/* Raw copies preserve storage bits rather than converting through a sampled
+ * color format. One invocation copies up to 16 bytes of a storage block, which
+ * includes all samples for MSAA. Geometry is uniform, not baked into shaders. */
+struct asahi_copy_surface {
+   uint32_t x, y, layer_stride, row_stride, tile_w_log2, tile_h_log2, columns;
+};
+
+struct asahi_copy_params {
+   uint32_t width;
+   struct asahi_copy_surface src, dst;
+};
+
+static nir_def *
+asahi_copy_address(nir_builder *b, nir_def *x, nir_def *y, nir_def *z,
+                   unsigned first,
+                   unsigned block_log2, bool tiled)
 {
-   const nir_shader_compiler_options *options = pctx->screen->nir_options[MESA_SHADER_COMPUTE];
-   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, options,
-                                                  "32-bit detile");
+   nir_def *p[7];
+   for (unsigned i = 0; i < ARRAY_SIZE(p); ++i)
+      p[i] = nir_load_ubo(b, 1, 32, nir_imm_int(b, 0),
+                         nir_imm_int(b, (first + i) * 4), .align_mul = 4,
+                         .range = sizeof(struct asahi_copy_params));
+
+   unsigned unit_log2 = MIN2(block_log2, 4);
+   unsigned units_log2 = block_log2 - unit_log2;
+   nir_def *block_x = nir_iadd(b, nir_ushr_imm(b, x, units_log2), p[0]);
+   nir_def *block_y = nir_iadd(b, y, p[1]);
+   nir_def *offset;
+   if (tiled) {
+      offset = nir_ishl_imm(
+         b, asahi_tiled_pixel(b, block_x, block_y, p[4], p[5], p[6]),
+         block_log2);
+   } else {
+      offset = nir_iadd(b, nir_imul(b, block_y, p[3]),
+                       nir_ishl_imm(b, block_x, block_log2));
+   }
+   offset = nir_iadd(b, offset, nir_imul(b, z, p[2]));
+   return nir_iadd(b, offset,
+                   nir_ishl_imm(b, nir_iand_imm(b, x, BITFIELD_MASK(units_log2)),
+                                unit_log2));
+}
+
+static void *
+asahi_copy_shader(struct pipe_context *pctx, unsigned block_log2,
+                   unsigned tiled_mask)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, pctx->screen->nir_options[MESA_SHADER_COMPUTE],
+      "raw resource copy");
    b.shader->info.workgroup_size[0] = 32;
    b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
    b.shader->info.num_ssbos = 2;
    b.shader->info.num_ubos = 1;
-   nir_def *p[6];
-   for (unsigned i = 0; i < ARRAY_SIZE(p); ++i)
-      p[i] = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0), nir_imm_int(&b, i * 4),
-                          .align_mul = 4, .range = sizeof(uint32_t) * 6);
+
    nir_def *id = nir_load_global_invocation_id(&b, 32);
    nir_def *x = nir_channel(&b, id, 0), *y = nir_channel(&b, id, 1);
-   nir_push_if(&b, nir_iand(&b, nir_ult(&b, x, p[0]), nir_ult(&b, y, p[1])));
-   nir_def *tw = nir_ishl(&b, nir_imm_int(&b, 1), p[2]);
-   nir_def *th = nir_ishl(&b, nir_imm_int(&b, 1), p[3]);
-   nir_def *ix = asahi_spread_bits(&b, nir_iand(&b, x, nir_iadd_imm(&b, tw, -1)));
-   nir_def *iy = asahi_spread_bits(&b, nir_iand(&b, y, nir_iadd_imm(&b, th, -1)));
-   nir_def *tile = nir_iadd(&b, nir_ushr(&b, x, p[2]),
-      nir_imul(&b, nir_ushr(&b, y, p[3]), p[4]));
-   nir_def *src = nir_iadd(&b, nir_ishl(&b, tile, nir_iadd(&b, p[2], p[3])),
-      nir_ior(&b, ix, nir_ishl_imm(&b, iy, 1)));
-   nir_def *dst = nir_iadd(&b, nir_imul(&b, y, p[5]), x);
-   nir_def *value = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 0),
-      nir_ishl_imm(&b, src, 2), .align_mul = 4, .access = ACCESS_NON_WRITEABLE);
-   nir_store_ssbo(&b, value, nir_imm_int(&b, 1), nir_ishl_imm(&b, dst, 2),
-      .align_mul = 4, .write_mask = 1, .access = ACCESS_NON_READABLE);
+   nir_def *z = nir_channel(&b, id, 2);
+   nir_def *width = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0),
+                               nir_imm_int(&b, 0), .align_mul = 4,
+                               .range = sizeof(struct asahi_copy_params));
+   nir_push_if(&b, nir_ult(&b, x, width));
+   nir_def *src = asahi_copy_address(&b, x, y, z, 1, block_log2,
+                                    tiled_mask & 1);
+   nir_def *dst = asahi_copy_address(&b, x, y, z, 8, block_log2,
+                                    tiled_mask & 2);
+   unsigned unit_bytes = 1u << MIN2(block_log2, 4);
+   unsigned bits = MIN2(unit_bytes, 4) * 8;
+   unsigned components = MAX2(unit_bytes / 4, 1);
+   nir_def *value = nir_load_ssbo(
+      &b, components, bits, nir_imm_int(&b, 0), src,
+      .align_mul = unit_bytes, .access = ACCESS_NON_WRITEABLE);
+   nir_store_ssbo(&b, value, nir_imm_int(&b, 1), dst,
+                  .align_mul = unit_bytes,
+                  .write_mask = BITFIELD_MASK(components),
+                  .access = ACCESS_NON_READABLE);
    nir_pop_if(&b, NULL);
    return pipe_shader_from_nir(pctx, b.shader);
 }
 
-static bool
-asahi_detile_copy(struct pipe_context *pctx, struct pipe_resource *dst,
-                  unsigned dst_level, unsigned dstx, unsigned dsty, unsigned dstz,
-                  struct pipe_resource *src, unsigned src_level,
-                  const struct pipe_box *box)
+static void
+asahi_copy_dispatch(struct pipe_context *pctx, void *shader,
+                     struct pipe_shader_buffer buffers[2],
+                     const struct asahi_copy_params *params,
+                     unsigned height, unsigned depth)
 {
    struct agx_context *ctx = agx_context(pctx);
-   struct agx_resource *s = agx_resource(src), *d = agx_resource(dst);
-   if ((src->target != PIPE_TEXTURE_2D && src->target != PIPE_TEXTURE_RECT) ||
-       (dst->target != PIPE_TEXTURE_2D && dst->target != PIPE_TEXTURE_RECT) ||
-       src->format != dst->format || src->nr_samples > 1 || dst->nr_samples > 1 ||
-       util_format_get_blocksize(src->format) != 4 ||
-       util_format_get_blockwidth(src->format) != 1 ||
-       util_format_get_blockheight(src->format) != 1 ||
-       s->layout.compressed || d->layout.compressed ||
-       s->layout.tiling != AIL_TILING_GPU || d->layout.tiling != AIL_TILING_LINEAR ||
-       src_level || dst_level || dstx || dsty || dstz || box->x || box->y || box->z ||
-       box->depth != 1 || box->width <= 0 || box->height <= 0 ||
-       box->width != src->width0 || box->height != src->height0 ||
-       dst->width0 < src->width0 || dst->height0 < src->height0 || s->bo == d->bo ||
-       s->layout.size_B > UINT32_MAX || d->layout.size_B > UINT32_MAX)
-      return false;
-
-   perf_debug_ctx(ctx, "GPU detile %ux%u", src->width0, src->height0);
-   struct ail_tile tile = s->layout.tilesize_el[0];
-   if (!util_is_power_of_two_nonzero(tile.width_el) ||
-       !util_is_power_of_two_nonzero(tile.height_el) ||
-       tile.width_el > 65536 || tile.height_el > 65536 ||
-       (d->layout.linear_stride_B & 3))
-      return false;
-   if (!ctx->compute_blitter.detile_cs)
-      ctx->compute_blitter.detile_cs = asahi_detile_shader(pctx);
-   if (!ctx->compute_blitter.detile_cs)
-      return false;
-
    struct agx_stage *stage = &ctx->stage[MESA_SHADER_COMPUTE];
    struct pipe_shader_buffer saved[2] = {stage->ssbo[0], stage->ssbo[1]};
-   for (unsigned i = 0; i < 2; i++) {
+   for (unsigned i = 0; i < 2; ++i) {
       saved[i].buffer = NULL;
       pipe_resource_reference(&saved[i].buffer, stage->ssbo[i].buffer);
    }
    unsigned writable = stage->ssbo_writable_mask & 3;
    asahi_compute_save(ctx);
-   uint32_t params[] = {src->width0, src->height0,
-      util_logbase2(tile.width_el), util_logbase2(tile.height_el),
-      DIV_ROUND_UP(s->layout.stride_el[0], tile.width_el),
-      d->layout.linear_stride_B / 4};
-   struct pipe_constant_buffer cb = {.user_buffer = params, .buffer_size = sizeof(params)};
-   pctx->set_constant_buffer(pctx, MESA_SHADER_COMPUTE, 0, &cb);
-   struct pipe_shader_buffer buffers[] = {
-      {.buffer = src, .buffer_size = s->layout.size_B},
-      {.buffer = dst, .buffer_size = d->layout.size_B},
+   struct pipe_constant_buffer cb = {
+      .user_buffer = params, .buffer_size = sizeof(*params),
    };
+   pctx->set_constant_buffer(pctx, MESA_SHADER_COMPUTE, 0, &cb);
    pctx->set_shader_buffers(pctx, MESA_SHADER_COMPUTE, 0, 2, buffers, 2);
-   pctx->bind_compute_state(pctx, ctx->compute_blitter.detile_cs);
-   struct pipe_grid_info grid = {.block = {32, 1, 1},
-      .grid = {DIV_ROUND_UP(src->width0, 32), src->height0, 1}};
+   pctx->bind_compute_state(pctx, shader);
+   struct pipe_grid_info grid = {
+      .block = {32, 1, 1},
+      .grid = {DIV_ROUND_UP(params->width, 32), height, depth},
+   };
    pctx->launch_grid(pctx, &grid);
    pctx->set_shader_buffers(pctx, MESA_SHADER_COMPUTE, 0, 2, saved, writable);
-   for (unsigned i = 0; i < 2; i++)
+   for (unsigned i = 0; i < 2; ++i)
       pipe_resource_reference(&saved[i].buffer, NULL);
    asahi_compute_restore(ctx);
-   /* Exports must be ready for the external consumer when flush_resource returns. */
-   agx_flush_writer(ctx, d, "detile copy");
+}
+
+static void **
+asahi_copy_variant(struct agx_context *ctx, unsigned block_log2,
+                    unsigned tiled_mask)
+{
+   assert(block_log2 < ARRAY_SIZE(ctx->compute_blitter.copy_cs));
+   void **shader = &ctx->compute_blitter.copy_cs[block_log2][tiled_mask];
+   if (!*shader)
+      *shader = asahi_copy_shader(&ctx->base, block_log2, tiled_mask);
+   return shader;
+}
+
+static bool
+asahi_copy_buffer(struct pipe_context *pctx, struct pipe_resource *dst,
+                   unsigned dst_offset, struct pipe_resource *src,
+                   unsigned src_offset, unsigned size)
+{
+   struct agx_context *ctx = agx_context(pctx);
+   /* As in the common Asahi path, vectorize aligned copies and copy any tail
+    * bytewise. Unaligned buffers never require a CPU mapping. */
+   while (size) {
+      uint64_t src_address = agx_map_gpu(agx_resource(src)) + src_offset;
+      uint64_t dst_address = agx_map_gpu(agx_resource(dst)) + dst_offset;
+      uint64_t alignment = src_address | dst_address;
+      unsigned limit = size;
+      /* Peel a common unaligned prefix before the vector body. */
+      if (!((src_address ^ dst_address) & 15) && (alignment & 15))
+         limit = MIN2(limit, 16 - (src_address & 15));
+      else if (!((src_address ^ dst_address) & 3) && (alignment & 3))
+         limit = MIN2(limit, 4 - (src_address & 3));
+      unsigned log2 = !(alignment & 15) && limit >= 16 ? 4 :
+                      !(alignment & 3) && limit >= 4 ? 2 : 0;
+      void *shader = *asahi_copy_variant(ctx, log2, 0);
+      if (!shader)
+         return false;
+      /* Respect the advertised per-axis dispatch limit, including very
+       * large bytewise copies whose endpoints cannot share alignment. */
+      unsigned count = MIN2(limit >> log2, 32u * 65535u);
+      unsigned bytes = count << log2;
+      struct pipe_shader_buffer buffers[2] = {
+         {.buffer = src, .buffer_offset = src_offset, .buffer_size = bytes},
+         {.buffer = dst, .buffer_offset = dst_offset, .buffer_size = bytes},
+      };
+      struct asahi_copy_params params = {.width = count};
+      asahi_copy_dispatch(pctx, shader, buffers, &params, 1, 1);
+      src_offset += bytes;
+      dst_offset += bytes;
+      size -= bytes;
+   }
+   return true;
+}
+
+static bool
+asahi_copy_surface_init(struct asahi_copy_surface *out,
+                         struct pipe_shader_buffer *buffer,
+                         struct agx_resource *rsrc, unsigned level,
+                         unsigned x, unsigned y, unsigned z)
+{
+   const struct ail_layout *layout = &rsrc->layout;
+   if (level >= layout->levels || layout->compressed ||
+       layout->size_B > UINT32_MAX ||
+       (layout->tiling != AIL_TILING_LINEAR && layout->tiling != AIL_TILING_GPU))
+      return false;
+
+   unsigned bw = util_format_get_blockwidth(layout->format);
+   unsigned bh = util_format_get_blockheight(layout->format);
+   if (x % bw || y % bh)
+      return false;
+   uint64_t offset = (uint64_t)layout->level_offsets_B[level] -
+                     layout->level_offsets_B[0] +
+                     (uint64_t)z * layout->layer_stride_B;
+   uint64_t available = layout->size_B - layout->level_offsets_B[0];
+   if (offset >= available)
+      return false;
+   *buffer = (struct pipe_shader_buffer){
+      .buffer = &rsrc->base, .buffer_offset = offset,
+      .buffer_size = available - offset,
+   };
+   *out = (struct asahi_copy_surface){
+      .x = x / bw, .y = y / bh, .layer_stride = layout->layer_stride_B,
+   };
+   if (layout->tiling == AIL_TILING_LINEAR) {
+      out->row_stride = ail_get_linear_stride_B(layout, level);
+   } else {
+      struct ail_tile tile = layout->tilesize_el[level];
+      out->tile_w_log2 = util_logbase2(tile.width_el);
+      out->tile_h_log2 = util_logbase2(tile.height_el);
+      out->columns = DIV_ROUND_UP(layout->stride_el[level], tile.width_el);
+   }
+   return true;
+}
+
+static bool
+asahi_copy_texture(struct pipe_context *pctx, struct pipe_resource *dst,
+                    unsigned dst_level, unsigned dstx, unsigned dsty,
+                    unsigned dstz, struct pipe_resource *src,
+                    unsigned src_level, const struct pipe_box *box)
+{
+   struct agx_context *ctx = agx_context(pctx);
+   struct agx_resource *s = agx_resource(src), *d = agx_resource(dst);
+   if (src->target == PIPE_BUFFER || dst->target == PIPE_BUFFER)
+      return false;
+   struct agx_resource *sources[2] = {s, s->separate_stencil};
+   struct agx_resource *targets[2] = {d, d->separate_stencil};
+   if (!!sources[1] != !!targets[1])
+      return false;
+
+   unsigned planes = sources[1] ? 2 : 1;
+   struct asahi_copy_params params[2];
+   struct pipe_shader_buffer buffers[2][2];
+   void *shaders[2];
+   for (unsigned plane = 0; plane < planes; ++plane) {
+      const struct ail_layout *sl = &sources[plane]->layout;
+      const struct ail_layout *dl = &targets[plane]->layout;
+      unsigned bytes = util_format_get_blocksize(sl->format);
+      unsigned bw = util_format_get_blockwidth(sl->format);
+      unsigned bh = util_format_get_blockheight(sl->format);
+      if (bytes != util_format_get_blocksize(dl->format) ||
+          bw != util_format_get_blockwidth(dl->format) ||
+          bh != util_format_get_blockheight(dl->format) ||
+          sl->sample_count_sa != dl->sample_count_sa)
+         return false;
+      bytes *= sl->sample_count_sa;
+      if (!util_is_power_of_two_nonzero(bytes) || bytes > 64)
+         return false;
+      unsigned log2 = util_logbase2(bytes);
+      unsigned tiled_mask = (sl->tiling == AIL_TILING_GPU) |
+                            ((dl->tiling == AIL_TILING_GPU) << 1);
+      if (!asahi_copy_surface_init(&params[plane].src, &buffers[plane][0],
+                                   sources[plane], src_level,
+                                   box->x, box->y, box->z) ||
+          !asahi_copy_surface_init(&params[plane].dst, &buffers[plane][1],
+                                   targets[plane], dst_level,
+                                   dstx, dsty, dstz))
+         return false;
+      params[plane].width = DIV_ROUND_UP(box->width, bw) << (log2 - MIN2(log2, 4));
+      shaders[plane] = *asahi_copy_variant(ctx, log2, tiled_mask);
+      if (!shaders[plane])
+         return false;
+   }
+
+   for (unsigned plane = 0; plane < planes; ++plane) {
+      unsigned bh = util_format_get_blockheight(sources[plane]->layout.format);
+      asahi_copy_dispatch(pctx, shaders[plane], buffers[plane], &params[plane],
+                           DIV_ROUND_UP(box->height, bh), box->depth);
+      BITSET_SET(targets[plane]->data_valid, dst_level);
+   }
    return true;
 }
 
@@ -1402,10 +1574,14 @@ agx_resource_copy_region(struct pipe_context *pctx, struct pipe_resource *dst,
                          unsigned dstz, struct pipe_resource *src,
                          unsigned src_level, const struct pipe_box *src_box)
 {
-   /* Compile eligible raw layout copies through the Apple9 compute path.
-    * Other formats retain Gallium's synchronized mapped-copy fallback. */
    if (agx_apple9_direct_render_enabled(agx_device(pctx->screen))) {
-      if (asahi_detile_copy(pctx, dst, dst_level, dstx, dsty, dstz, src, src_level, src_box))
+      if (!src_box->width || !src_box->height || !src_box->depth)
+         return;
+      bool buffers = src->target == PIPE_BUFFER && dst->target == PIPE_BUFFER;
+      if (buffers ? asahi_copy_buffer(pctx, dst, dstx, src, src_box->x,
+                                      src_box->width) :
+                    asahi_copy_texture(pctx, dst, dst_level, dstx, dsty, dstz,
+                                       src, src_level, src_box))
          return;
       util_resource_copy_region(pctx, dst, dst_level, dstx, dsty, dstz, src,
                                  src_level, src_box);

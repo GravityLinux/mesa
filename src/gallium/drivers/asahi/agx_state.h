@@ -616,7 +616,7 @@ DERIVE_HASH_TABLE(asahi_blit_key);
 struct asahi_blitter {
    bool active;
    struct hash_table *blit_cs;
-   void *detile_cs;
+   void *copy_cs[7][4];
    void *resolve_cs[2][PIPE_FORMAT_COUNT];
 
    /* [filter] */
@@ -1171,6 +1171,7 @@ void agx_memory_barrier(struct pipe_context *pctx, unsigned flags);
 
 /* Use these instead of batch_add_bo for proper resource tracking */
 void agx_batch_reads(struct agx_batch *batch, struct agx_resource *rsrc);
+void agx_batch_writes_raw(struct agx_batch *batch, struct agx_resource *rsrc);
 void agx_batch_writes(struct agx_batch *batch, struct agx_resource *rsrc,
                       unsigned level);
 void agx_batch_writes_range(struct agx_batch *batch, struct agx_resource *rsrc,

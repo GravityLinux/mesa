@@ -565,9 +565,10 @@ agx_batch_reads(struct agx_batch *batch, struct agx_resource *rsrc)
                            false);
 }
 
-static void
-agx_batch_writes_internal(struct agx_batch *batch, struct agx_resource *rsrc,
-                          unsigned level)
+/* Raw compute bindings carry no mip information. Track BO hazards here;
+ * texture copy/resolve callers mark the subresources they actually write. */
+void
+agx_batch_writes_raw(struct agx_batch *batch, struct agx_resource *rsrc)
 {
    struct agx_context *ctx = batch->ctx;
    struct agx_batch *writer = agx_writer_get(ctx, rsrc->bo->handle);
@@ -575,8 +576,6 @@ agx_batch_writes_internal(struct agx_batch *batch, struct agx_resource *rsrc,
    assert(batch->initialized);
 
    agx_flush_readers_except(ctx, rsrc, batch, "Write from other batch", false);
-
-   BITSET_SET(rsrc->data_valid, level);
 
    /* Nothing to do if we're already writing */
    if (writer == batch)
@@ -604,7 +603,8 @@ void
 agx_batch_writes(struct agx_batch *batch, struct agx_resource *rsrc,
                  unsigned level)
 {
-   agx_batch_writes_internal(batch, rsrc, level);
+   agx_batch_writes_raw(batch, rsrc);
+   BITSET_SET(rsrc->data_valid, level);
 
    if (rsrc->base.target == PIPE_BUFFER) {
       /* Assume BOs written by the GPU are fully valid */
@@ -618,7 +618,8 @@ agx_batch_writes_range(struct agx_batch *batch, struct agx_resource *rsrc,
                        unsigned offset, unsigned size)
 {
    assert(rsrc->base.target == PIPE_BUFFER);
-   agx_batch_writes_internal(batch, rsrc, 0);
+   agx_batch_writes_raw(batch, rsrc);
+   BITSET_SET(rsrc->data_valid, 0);
    util_range_add(&rsrc->base, &rsrc->valid_buffer_range, offset,
                   offset + size);
 }

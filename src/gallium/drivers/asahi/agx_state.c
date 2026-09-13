@@ -3013,8 +3013,10 @@ agx_init_meta_shaders(struct agx_context *ctx)
 static void
 agx_destroy_compute_blitter(struct pipe_context *ctx, struct asahi_blitter *bl)
 {
-   if (bl->detile_cs)
-      ctx->delete_compute_state(ctx, bl->detile_cs);
+   for (unsigned size = 0; size < ARRAY_SIZE(bl->copy_cs); ++size)
+      for (unsigned tiling = 0; tiling < ARRAY_SIZE(bl->copy_cs[size]); ++tiling)
+         if (bl->copy_cs[size][tiling])
+            ctx->delete_compute_state(ctx, bl->copy_cs[size][tiling]);
    for (unsigned n = 0; n < 2; ++n)
       for (unsigned f = 0; f < ARRAY_SIZE(bl->resolve_cs[n]); ++f)
          if (bl->resolve_cs[n][f])
@@ -6124,7 +6126,8 @@ retry_batch:;
                   &ctx->stage[shader].ssbo[binding];
                struct agx_resource *resource = agx_resource(ssbo->buffer);
                if (rs->resource_write_mask & BITFIELD_BIT(slot))
-                  agx_batch_writes(batch, resource, 0);
+                  agx_batch_writes_range(batch, resource, ssbo->buffer_offset,
+                                         ssbo->buffer_size);
                else
                   agx_batch_reads(batch, resource);
                address = agx_map_gpu(resource) + ssbo->buffer_offset;
@@ -6585,8 +6588,7 @@ agx_apple9_add_compute_attachment(struct agx_batch *batch,
                                   struct agx_resource *resource)
 {
    /* Attachments are optional firmware hints, not bounds on shader writes.
-    * Coalesce all ranges of one BO into the same whole-resource hint so a
-    * long command stream does not exceed the UAPI's 16-attachment limit.
+    * Coalesce all ranges of one BO into the same whole-resource hint.
     * Precise read/write hazards remain range-tracked below. */
    struct drm_asahi_attachment attachment = {
       .pointer = agx_map_gpu(resource),
@@ -6600,7 +6602,14 @@ agx_apple9_add_compute_attachment(struct agx_batch *batch,
          return;
    }
 
-   util_dynarray_append(&batch->apple9_attachments, attachment);
+   /* A batch can write more distinct resources than the firmware can accept
+    * hints for. Keep the advertised bound without dropping resource references
+    * or hazards, or splitting otherwise valid compute command streams. */
+   struct agx_device *dev = agx_device(batch->ctx->base.screen);
+   if (util_dynarray_num_elements(&batch->apple9_attachments,
+                                  struct drm_asahi_attachment) <
+       dev->params.max_attachments)
+      util_dynarray_append(&batch->apple9_attachments, attachment);
 }
 
 static void
@@ -6950,8 +6959,11 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
             agx_batch_reads(batch, resources[i]);
          if (write_mask & BITFIELD_BIT(i)) {
             agx_apple9_add_compute_attachment(batch, resources[i]);
-            agx_batch_writes_range(batch, resources[i],
-                                   resource_offsets[i], resource_sizes[i]);
+            if (resources[i]->base.target == PIPE_BUFFER)
+               agx_batch_writes_range(batch, resources[i],
+                                      resource_offsets[i], resource_sizes[i]);
+            else
+               agx_batch_writes_raw(batch, resources[i]);
             batch->incoherent_writes = true;
          }
       }
