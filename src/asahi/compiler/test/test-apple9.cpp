@@ -8873,6 +8873,36 @@ TEST_F(Apple9Completion, TextureNonleadingHandoffRetainsTupleForLaterReads)
 }
 
 /* Golden results from independently authored T8132 cube-coordinate shaders. */
+TEST(Apple9Packer, CubeWritesMagnitudeFacePairAndHalfCoordinates)
+{
+   const uint8_t expected[3][12] = {
+      {0x17,1,0x54,4,3,0,5,0x12,0x54,0x21,0x92,0},
+      {0x17,1,0x54,3,3,0,5,0x12,0x54,0x21,0x92,4},
+      {0x17,1,0x54,0,3,0,4,0x10,0x50,0x2f,0x92,8},
+   };
+   for (unsigned mode = 0; mode < 3; ++mode) {
+      agx_apple9_vir_program p;
+      agx_apple9_vir_init(&p);
+      uint32_t src[] = {agx_apple9_vir_input(&p, 0),
+                        agx_apple9_vir_input(&p, 1),
+                        agx_apple9_vir_input(&p, 2)};
+      uint32_t result = agx_apple9_vir_emit_cube(&p, src, mode);
+      ASSERT_NE(result, AGX_APPLE9_VREG_INVALID);
+      auto *ins = p.instructions[0];
+      EXPECT_EQ(ins->dest_components, mode == 0 ? 2 : 1);
+      EXPECT_EQ(p.value_count, 3 + ins->dest_components);
+      ins->live_after_mask = mode == 2 ? 0 : 7;
+      const uint8_t phys[] = {0, 1, 2, uint8_t(mode == 0 ? 4 : mode == 1 ? 3 : 0), 5};
+      agx_apple9_packed_instruction packed;
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_pack_vir_instruction(ins, phys, &packed, &reason))
+         << (reason ?: "");
+      ASSERT_EQ(packed.length, 12);
+      EXPECT_EQ(memcmp(packed.bytes, expected[mode], 12), 0);
+      agx_apple9_vir_finish(&p);
+   }
+}
+
 TEST(Apple9Packer, TextureCompletionTags)
 {
    /* Paired tag bytes from controlled retags of our own M4 Metal shaders. */

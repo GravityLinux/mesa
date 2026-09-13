@@ -529,6 +529,24 @@ agx_apple9_vir_emit_device_load(
 }
 
 uint32_t
+agx_apple9_vir_emit_cube(struct agx_apple9_vir_program *program,
+                         const uint32_t src[3], unsigned mode)
+{
+   if (mode > 2)
+      return AGX_APPLE9_VREG_INVALID;
+   uint32_t value = agx_apple9_vir_emit(program, AGX_APPLE9_VIR_CUBE,
+                                       AGX_APPLE9_ENC_CUBE, src, 3, mode);
+   if (value == AGX_APPLE9_VREG_INVALID)
+      return value;
+   if (mode == 0) {
+      if (!apple9_vir_append_values(program, 1))
+         return AGX_APPLE9_VREG_INVALID;
+      program->instructions[program->instruction_count - 1]->dest_components = 2;
+   }
+   return value;
+}
+
+uint32_t
 agx_apple9_vir_emit_device_load_vector(
    struct agx_apple9_vir_program *program, unsigned binding, uint32_t index,
    unsigned components, const struct agx_apple9_device_load_contract *contract)
@@ -4353,6 +4371,28 @@ pack_iadd(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
 }
 
 static bool
+pack_cube(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
+           struct agx_apple9_packed_instruction *packed)
+{
+   if (instruction->encoding != AGX_APPLE9_ENC_CUBE ||
+       instruction->nr_srcs != 3 || instruction->immediate > 2 ||
+       instruction->dest_components != (instruction->immediate == 0 ? 2 : 1))
+      return false;
+   uint8_t bytes[12] = {0x17, 1, 0x54, 0, 3, 0, 0, 0, 0x50, 0x2f, 0x92, 0};
+   set_bits(bytes, 24, 7, phys[instruction->dest]);
+   set_bits(bytes, 90, 2, instruction->immediate);
+   for (unsigned i = 0; i < 3; ++i) {
+      set_bits(bytes, 41 + 9 * i, 7, phys[instruction->src[i]]);
+      if (instruction->live_after_mask & BITFIELD_BIT(i)) {
+         set_bits(bytes, 48 + 9 * i, 1, 1);
+         set_bits(bytes, 73 + i, 1, 0);
+      }
+   }
+   packed_init(packed, bytes, sizeof(bytes));
+   return true;
+}
+
+static bool
 pack_imad(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
           struct agx_apple9_packed_instruction *packed)
 {
@@ -5419,6 +5459,15 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
          bytes[6] = instruction->immediate ? 0x14 : 0x00;
          bytes[7] = instruction->immediate ? 0x00 : 0x03;
       }
+      if (instruction->texture_fetch) {
+         if (!lod || instruction->texture_shadow || instruction->immediate ||
+             instruction->texture_dimension == 1)
+            return false;
+         bytes[6] = instruction->texture_dimension == 2 ? 0xa0 :
+                    instruction->texture_dimension == 3 ? 0x98 : 0x80;
+         bytes[7] = instruction->texture_dimension == 3 ? 1 : 0x24;
+         bytes[10] = 0;
+      }
       if (instruction->texture_shadow) {
          bytes[6] |= 0x20;
          bytes[10] = 0;
@@ -5516,6 +5565,8 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
           instruction->nr_srcs != 2)
          break;
       return pack_iadd(instruction, phys, packed);
+   case AGX_APPLE9_VIR_CUBE:
+      return pack_cube(instruction, phys, packed);
    case AGX_APPLE9_VIR_IMAD:
       return pack_imad(instruction, phys, packed);
    case AGX_APPLE9_VIR_IAND:

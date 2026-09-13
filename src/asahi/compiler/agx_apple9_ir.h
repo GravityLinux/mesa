@@ -62,6 +62,7 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_FMIN,
    AGX_APPLE9_VIR_FMAX,
    AGX_APPLE9_VIR_FMA,
+   AGX_APPLE9_VIR_CUBE,
    AGX_APPLE9_VIR_FRCP,
    AGX_APPLE9_VIR_FRSQ,
    /* rsqrt-like factor with 1 at signed zero and +infinity. */
@@ -265,6 +266,7 @@ struct agx_apple9_vir_instr {
    uint32_t src[AGX_APPLE9_MAX_VIR_SRCS];
    uint8_t texture_dimension;
    bool texture_shadow;
+   bool texture_fetch;
    /* An incoming phi use names its successor's SSA definition. This is
     * edge metadata, not a mutable register assignment before allocation. */
    uint32_t target;
@@ -436,6 +438,11 @@ uint32_t agx_apple9_vir_emit_iter_flat(struct agx_apple9_vir_program *program,
 uint32_t agx_apple9_vir_emit_device_load(
    struct agx_apple9_vir_program *program, unsigned binding, uint32_t index,
    const struct agx_apple9_device_load_contract *contract);
+/* mode 0 returns magnitude and a face in the low 16 bits of the next GPR.
+ * Modes 1/2 return the signed half-coordinate for U/V, respectively. */
+uint32_t agx_apple9_vir_emit_cube(struct agx_apple9_vir_program *program,
+                                 const uint32_t src[3], unsigned mode);
+
 uint32_t agx_apple9_vir_emit_device_load_vector(
    struct agx_apple9_vir_program *program, unsigned binding, uint32_t index,
    unsigned components, const struct agx_apple9_device_load_contract *contract);

@@ -463,7 +463,8 @@ apple9_texture_supported(const nir_tex_instr *tex)
    /* Offset filtering is expanded with sampler state before selection. */
    if (nir_tex_instr_src_index(tex, nir_tex_src_offset) >= 0)
       return false;
-   bool explicit_lod = tex->op == nir_texop_txl || tex->op == nir_texop_txb;
+   bool explicit_lod = tex->op == nir_texop_txl || tex->op == nir_texop_txb ||
+                       tex->op == nir_texop_txf;
    bool gradient = tex->op == nir_texop_txd;
    bool array = tex->is_array && tex->sampler_dim == GLSL_SAMPLER_DIM_2D;
    bool volume = array || tex->sampler_dim == GLSL_SAMPLER_DIM_3D ||
@@ -1411,6 +1412,27 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
       for (unsigned c = 0; c < tex->coord_components; ++c)
          coords[c] = apple9_lower_dag_scalar(
             lower, nir_get_scalar(tex->src[coord_source].src.ssa, c));
+      if (tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE) {
+         uint32_t major = agx_apple9_vir_emit_cube(&lower->program, coords, 0);
+         uint32_t u = agx_apple9_vir_emit_cube(&lower->program, coords, 1);
+         uint32_t v = agx_apple9_vir_emit_cube(&lower->program, coords, 2);
+         if (major == AGX_APPLE9_VREG_INVALID || u == AGX_APPLE9_VREG_INVALID ||
+             v == AGX_APPLE9_VREG_INVALID)
+            return AGX_APPLE9_VREG_INVALID;
+         uint32_t reciprocal = apple9_dag_emit(lower, AGX_APPLE9_VIR_FRCP,
+            AGX_APPLE9_ENC_FLOAT_SPECIAL, &major, 1, 2);
+         uint32_t sources[] = {u, reciprocal, apple9_dag_imm(lower, 0x3f000000)};
+         coords[0] = apple9_dag_emit(lower, AGX_APPLE9_VIR_FMA,
+            AGX_APPLE9_ENC_FLOAT3_EXTENDED, sources, 3, 0);
+         sources[0] = v;
+         coords[1] = apple9_dag_emit(lower, AGX_APPLE9_VIR_FMA,
+            AGX_APPLE9_ENC_FLOAT3_EXTENDED, sources, 3, 0);
+         /* The face operation only defines the low half of its second GPR. */
+         sources[0] = major + 1;
+         sources[1] = apple9_dag_imm(lower, 0xffff);
+         coords[2] = apple9_dag_emit(lower, AGX_APPLE9_VIR_IAND,
+            AGX_APPLE9_ENC_LOGIC_EXTENDED, sources, 2, 0);
+      }
       uint32_t layer_or_face = tex->coord_components == 3 ? coords[2] : 0;
       if (tex->is_shadow) {
          int comparator = nir_tex_instr_src_index(tex, nir_tex_src_comparator);
@@ -1438,14 +1460,19 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
          result = agx_apple9_vir_emit_texture_grad(
             &lower->program, sources, texture,
             util_bitcount(lower->sampler_mask & BITFIELD_MASK(tex->sampler_index)));
-      } else if (tex->op == nir_texop_txl || tex->op == nir_texop_txb) {
+      } else if (tex->op == nir_texop_txl || tex->op == nir_texop_txb ||
+                 tex->op == nir_texop_txf) {
          bool bias = tex->op == nir_texop_txb;
          int lod_source = nir_tex_instr_src_index(
             tex, bias ? nir_tex_src_bias : nir_tex_src_lod);
          uint32_t lod = apple9_lower_dag_scalar(
             lower, nir_get_scalar(tex->src[lod_source].src.ssa, 0));
+         bool fetch = tex->op == nir_texop_txf;
+         /* Integer LOD uses the same Q6 field as filtered sampling. */
+         uint32_t packed_lod = fetch
+            ? apple9_dag_shift_imm(lower, nir_op_ishl, lod, 22)
+            : apple9_pack_texture_lod(lower, lod);
          if (tex->coord_components == 3 || tex->is_shadow) {
-            uint32_t packed_lod = apple9_pack_texture_lod(lower, lod);
             if (tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE || tex->is_array) {
                uint32_t fields[] = {packed_lod, layer_or_face};
                packed_lod = apple9_dag_emit(lower, AGX_APPLE9_VIR_IOR,
@@ -1459,9 +1486,11 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                bias, tex->is_shadow);
          } else
             result = agx_apple9_vir_emit_texture_lod(
-            &lower->program, coords, apple9_pack_texture_lod(lower, lod), texture,
+            &lower->program, coords, packed_lod, texture,
             util_bitcount(lower->sampler_mask & BITFIELD_MASK(tex->sampler_index)),
             bias);
+         if (fetch && result != AGX_APPLE9_VREG_INVALID)
+            lower->program.instructions[lower->program.instruction_count - 1]->texture_fetch = true;
       } else {
          uint32_t one = apple9_dag_imm(lower, 0x3f800000);
          result = agx_apple9_vir_emit_texture_sample(
@@ -4126,44 +4155,6 @@ agx_nir_lower_apple9_sampler_state(
    return true;
 }
 
-/* Apple9's cube sampler consumes projected UV and a face number. The
- * native projection operation selects the greatest absolute component, with
- * X then Y winning ties. Express the projection in ordinary NIR so it can
- * participate in optimization and register allocation. Component 2 becomes
- * the integer face field consumed by the final texture parameter packer. */
-static bool
-apple9_lower_cube_coordinates(nir_builder *b, nir_instr *instr, void *data)
-{
-   if (instr->type != nir_instr_type_tex)
-      return false;
-   nir_tex_instr *tex = nir_instr_as_tex(instr);
-   if (tex->sampler_dim != GLSL_SAMPLER_DIM_CUBE || !apple9_texture_supported(tex))
-      return false;
-   int src = nir_tex_instr_src_index(tex, nir_tex_src_coord);
-   b->cursor = nir_before_instr(instr);
-   nir_def *p = tex->src[src].src.ssa;
-   nir_def *x = nir_channel(b, p, 0), *y = nir_channel(b, p, 1);
-   nir_def *z = nir_channel(b, p, 2);
-   nir_def *ax = nir_fabs(b, x), *ay = nir_fabs(b, y), *az = nir_fabs(b, z);
-   nir_def *major_x = nir_iand(b, nir_fge(b, ax, ay), nir_fge(b, ax, az));
-   nir_def *major_y = nir_fge(b, ay, az);
-   nir_def *major = nir_bcsel(b, major_x, x, nir_bcsel(b, major_y, y, z));
-   nir_def *negative = nir_flt_imm(b, major, 0.0f);
-   nir_def *sc = nir_bcsel(b, major_x,
-      nir_bcsel(b, negative, z, nir_fneg(b, z)),
-      nir_bcsel(b, major_y, x, nir_bcsel(b, negative, nir_fneg(b, x), x)));
-   nir_def *tc = nir_bcsel(b, major_x, nir_fneg(b, y),
-      nir_bcsel(b, major_y, nir_bcsel(b, negative, nir_fneg(b, z), z), nir_fneg(b, y)));
-   nir_def *scale = nir_fmul_imm(b, nir_frcp(b, nir_fabs(b, major)), 0.5f);
-   nir_def *u = nir_fadd_imm(b, nir_fmul(b, sc, scale), 0.5f);
-   nir_def *v = nir_fadd_imm(b, nir_fmul(b, tc, scale), 0.5f);
-   nir_def *face = nir_iadd(b, nir_b2i32(b, negative),
-      nir_bcsel(b, major_x, nir_imm_int(b, 0),
-         nir_bcsel(b, major_y, nir_imm_int(b, 2), nir_imm_int(b, 4))));
-   nir_src_rewrite(&tex->src[src].src, nir_vec3(b, u, v, face));
-   return true;
-}
-
 static nir_def *
 apple9_texture_info(nir_builder *b, unsigned texture, unsigned field)
 {
@@ -4220,26 +4211,8 @@ apple9_lower_texel_fetch(nir_builder *b, nir_instr *instr, void *data)
    int lod = nir_tex_instr_src_index(tex, nir_tex_src_lod);
    if (coord < 0 || lod < 0)
       return false;
-   b->cursor = nir_before_instr(instr);
-   nir_def *level = tex->src[lod].src.ssa;
-   nir_def *size = nir_get_texture_size(b, tex);
-   nir_tex_instr *query = nir_instr_as_tex(nir_def_instr(size));
-   nir_src_rewrite(&query->src[nir_tex_instr_src_index(query, nir_tex_src_lod)].src,
-                   level);
-   nir_def *coordinates[3];
-   for (unsigned c = 0; c < tex->coord_components; ++c) {
-      nir_def *value = nir_i2f32(b, nir_channel(b, tex->src[coord].src.ssa, c));
-      /* Array layers are indices, not normalized spatial coordinates. */
-      if (!(tex->is_array && c + 1 == tex->coord_components))
-         value = nir_fdiv(b, nir_fadd_imm(b, value, 0.5f),
-                         nir_i2f32(b, nir_channel(b, size, c)));
-      coordinates[c] = value;
-   }
-   nir_src_rewrite(&tex->src[coord].src, nir_vec(b, coordinates, tex->coord_components));
-   nir_src_rewrite(&tex->src[lod].src, nir_i2f32(b, level));
-   /* Sampling texel centers with the private nearest sampler implements an
-    * integer fetch at the selected mip for 2D, array, and 3D textures. */
-   tex->op = nir_texop_txl;
+   /* The read instruction consumes integer spatial coordinates. It uses a
+    * private sampler descriptor, just as the common AGX texel-fetch path does. */
    tex->sampler_index = APPLE9_FETCH_SAMPLER;
    return true;
 }
@@ -5040,8 +5013,6 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
    nir_shader_instructions_pass(nir, apple9_lower_texture_queries_and_layers,
                                 nir_metadata_control_flow, NULL);
    nir_shader_instructions_pass(nir, apple9_lower_sampler_bias,
-                                nir_metadata_control_flow, NULL);
-   nir_shader_instructions_pass(nir, apple9_lower_cube_coordinates,
                                 nir_metadata_control_flow, NULL);
    /* Integer division uses NIR's quotient/refinement lowering. The backend
     * has ordinary 32-bit multiplies; expand the high product into those

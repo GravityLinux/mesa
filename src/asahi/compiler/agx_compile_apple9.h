@@ -44,8 +44,9 @@ bool agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
  * can lower single-sample inputs with the common NIR pass.
  *
  * Buffer resources use a shader-loaded address table. Texture and sampler
- * bindings are compacted independently. Ordinary NIR lowering handles arrays,
- * cube projection, texture queries, explicit gradients, and texel fetches.
+ * bindings are compacted independently. Cube projection and integer fetches
+ * select native operations; queries and explicit gradients use ordinary NIR
+ * lowering.
  * Structured branches and loops use the common execution-mask model. Fragment
  * outputs include format-aware color stores, blending, and depth export.
  *
