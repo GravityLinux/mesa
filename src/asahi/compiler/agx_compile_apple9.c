@@ -534,6 +534,7 @@ apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
       case nir_op_fadd:
       case nir_op_fsub:
       case nir_op_fmul:
+      case nir_op_fsat:
       case nir_op_frsq:
       case nir_op_fsqrt:
       case nir_op_fsin_factor_agx:
@@ -2023,6 +2024,11 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                        ? apple9_dag_shift_imm(lower, op, source, amount)
                        : apple9_dag_shift_variable(
                             lower, op, source, shift);
+         } else if (op == nir_op_fsat) {
+            uint32_t source = apple9_lower_dag_source(lower, scalar, 0);
+            if (source != AGX_APPLE9_VREG_INVALID)
+               value = apple9_dag_emit(lower, AGX_APPLE9_VIR_FSAT,
+                  AGX_APPLE9_ENC_FLOAT2_IMMEDIATE_EXTENDED, &source, 1, 0);
          } else if (op == nir_op_ffma || op == nir_op_ffma_weak) {
             uint32_t sources[3] = {
                apple9_lower_dag_source(lower, scalar, 0),

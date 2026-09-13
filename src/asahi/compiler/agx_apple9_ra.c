@@ -191,6 +191,7 @@ apple9_source_constraint(const struct agx_apple9_vir_instr *ins, unsigned source
    for (unsigned o = 0, s = 0; o < info->operand_count; ++o) {
       const struct agx_apple9_operand_constraint *c = &info->operands[o];
       if (!(c->files & AGX_APPLE9_FILE_GPR) ||
+          agx_apple9_inline_source_file(ins, c->role) ||
           c->role == AGX_APPLE9_OPERAND_DEST)
          continue;
       if (s++ == source)

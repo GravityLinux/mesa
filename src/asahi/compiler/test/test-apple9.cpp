@@ -5151,7 +5151,7 @@ TEST(Apple9Compiler, IntegerAbsoluteLowersFromOrdinaryNir)
    ralloc_free(b.shader);
 }
 
-TEST(Apple9Compiler, SaturationLowersVectorComponents)
+TEST(Apple9Compiler, SaturationKeepsNativeVectorSemantics)
 {
    nir_builder b = apple9_compute_builder("apple9_saturate");
    nir_def *input = nir_imm_vec4(&b, -2.0, -0.0, 0.375, 2.0);
@@ -5159,7 +5159,9 @@ TEST(Apple9Compiler, SaturationLowersVectorComponents)
    nir_intrinsic_instr *store =
       nir_store_ssbo(&b, clamped, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
                      .write_mask = 0xf, .align_mul = 16);
-   ASSERT_TRUE(agx_nir_lower_apple9_math(b.shader));
+   EXPECT_FALSE(agx_nir_lower_apple9_math(b.shader));
+   ASSERT_EQ(nir_def_as_alu(clamped)->op, nir_op_fsat);
+   ASSERT_TRUE(nir_opt_constant_folding(b.shader));
    ASSERT_TRUE(nir_src_is_const(store->src[0]));
    const nir_const_value *value = nir_src_as_const_value(store->src[0]);
    EXPECT_EQ(value[0].u32, 0u);

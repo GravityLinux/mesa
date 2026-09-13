@@ -71,6 +71,7 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_FMUL_PROJECT,
    AGX_APPLE9_VIR_FADD_IMM,
    AGX_APPLE9_VIR_FMUL_IMM,
+   AGX_APPLE9_VIR_FSAT,
    AGX_APPLE9_VIR_FMIN,
    AGX_APPLE9_VIR_FMAX,
    AGX_APPLE9_VIR_FMA,
@@ -295,6 +296,14 @@ struct agx_apple9_vir_instr {
 
    /* Floating source modifiers apply absolute value before negation. */
    uint8_t src_abs_mask, src_neg_mask;
+   /* Floating ALU operand slots can name uniform words or exact constants.
+    * src[] contains only their GPR inputs, in operand order. Liveness and SSA
+    * use lists refer to that compact GPR list; these masks and modifiers refer
+    * to the hardware operand slots. Uniform and immediate masks are disjoint. */
+   uint8_t alu_src_uniform_mask, alu_src_immediate_mask;
+   uint32_t alu_src_value[3];
+   /* Clamp the floating result to [0, 1], mapping NaN to positive zero. */
+   bool saturate;
 
    /* Scoreboard slot published by an asynchronous producer, including scalar
     * ALU exports to publication storage. Ordinary GPR ALU instructions leave
@@ -343,6 +352,17 @@ struct agx_apple9_vir_instr {
     * slot and are kept on the use until the graphics compiler is generalized.
     */
 };
+
+static inline unsigned
+agx_apple9_inline_source_file(const struct agx_apple9_vir_instr *I,
+                              enum agx_apple9_operand_role role)
+{
+   unsigned s = role - AGX_APPLE9_OPERAND_SRC0;
+   if (s >= 3)
+      return 0;
+   return ((I->alu_src_uniform_mask >> s) & 1 ? AGX_APPLE9_FILE_UNIFORM : 0) |
+          ((I->alu_src_immediate_mask >> s) & 1 ? AGX_APPLE9_FILE_IMMEDIATE : 0);
+}
 
 /* Instruction storage and block identity survive every insertion/removal.
  * Layout links are independent of ownership, allowing forward branch targets. */
@@ -429,6 +449,7 @@ void agx_apple9_vir_move_before(struct agx_apple9_vir_program *program,
                               struct agx_apple9_vir_instr *before);
 void agx_apple9_vir_reindex(struct agx_apple9_vir_program *program);
 bool agx_apple9_instr_is_pure_alu(const struct agx_apple9_vir_instr *instruction);
+bool agx_apple9_supports_saturate(const struct agx_apple9_vir_instr *instruction);
 bool agx_apple9_optimize_vir(struct agx_apple9_vir_program *program);
 bool agx_apple9_encode_float_immediate(uint32_t value, uint8_t *encoded);
 

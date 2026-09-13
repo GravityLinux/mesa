@@ -153,7 +153,7 @@ math_filter(const nir_instr *instr, UNUSED const void *data)
    const nir_alu_instr *alu = nir_instr_as_alu(instr);
    return alu->def.bit_size == 32 &&
           (alu->op == nir_op_iabs || alu->op == nir_op_fsin || alu->op == nir_op_fcos ||
-           alu->op == nir_op_fsat || alu->op == nir_op_fcanonicalize);
+           alu->op == nir_op_fcanonicalize);
 }
 
 static nir_def *
@@ -164,16 +164,10 @@ lower_math(nir_builder *b, nir_instr *instr, UNUSED void *data)
    nir_def *components[NIR_MAX_VEC_COMPONENTS];
    for (unsigned i = 0; i < alu->def.num_components; ++i) {
       nir_def *x = nir_channel(b, source, i);
-      /* GLSL clamp/smoothstep may arrive as fsat even though Apple9 does
-       * not yet model an ALU saturation modifier. Use its ordinary FP32
-       * min/max operations, preserving the NIR clamp ordering. */
       if (alu->op == nir_op_iabs) {
          components[i] = nir_imax(b, x, nir_ineg(b, x));
       } else if (alu->op == nir_op_fcanonicalize) {
          components[i] = nir_fmul_imm(b, x, 1.0f);
-      } else if (alu->op == nir_op_fsat) {
-         components[i] = nir_fmin(b, nir_fmax(b, x, nir_imm_float(b, 0)),
-                                  nir_imm_float(b, 1));
       } else if (b->shader->info.stage == MESA_SHADER_VERTEX ||
                  b->shader->info.stage == MESA_SHADER_FRAGMENT) {
          components[i] = lower_graphics_sincos(b, x, alu->op == nir_op_fcos);
