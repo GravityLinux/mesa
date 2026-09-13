@@ -953,8 +953,6 @@ read_pixels_es3_error_check(struct gl_context *ctx, GLenum format, GLenum type,
       if (internalFormat == GL_RGB10_A2 &&
           type == GL_UNSIGNED_INT_2_10_10_10_REV)
          return GL_NO_ERROR;
-      if (internalFormat == GL_RGB10_A2UI && type == GL_UNSIGNED_BYTE)
-         return GL_NO_ERROR;
       if (type == GL_UNSIGNED_SHORT) {
          switch (internalFormat) {
          case GL_R16:
