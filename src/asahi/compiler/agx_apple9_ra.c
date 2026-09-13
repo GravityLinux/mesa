@@ -483,7 +483,6 @@ apple9_physical_selected(struct apple9_shared_ra *ra,
    ins.phi_block = NULL;
    ins.phi_edge = ins.completion_consumer = NULL;
    ins.scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_NONE;
-   ins.device_load_index_first_consumer = false;
    ins.device_load_index_kind = (ins.live_after_mask & 1)
                                    ? AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR
                                    : AGX_APPLE9_DEVICE_LOAD_INDEX_LAST_USE_GPR;
@@ -533,9 +532,27 @@ struct apple9_pending {
    struct agx_apple9_vir_instr producer;
 };
 
+/* Scalar export producers complete asynchronously in the publication namespace.
+ * Their completion tag is independent of the publication's storage index. */
+static bool
+apple9_scalar_publication(const struct agx_apple9_vir_instr *ins)
+{
+   return ins->encoding == AGX_APPLE9_ENC_FLOAT2_EXPORT ||
+          ins->encoding == AGX_APPLE9_ENC_LOGIC_EXPORT;
+}
+
+static bool
+apple9_async_sr(const struct agx_apple9_vir_instr *ins)
+{
+   return ins->encoding == AGX_APPLE9_ENC_GET_DRAW_ID ||
+          ins->encoding == AGX_APPLE9_ENC_GET_COVERAGE;
+}
+
 static bool
 apple9_async(const struct agx_apple9_vir_instr *ins)
 {
+   if (apple9_scalar_publication(ins) || apple9_async_sr(ins))
+      return true;
    switch (ins->op) {
    case AGX_APPLE9_VIR_DEVICE_LOAD:
    case AGX_APPLE9_VIR_TEXTURE_SAMPLE:
@@ -566,7 +583,10 @@ apple9_retire(struct agx_apple9_vir_program *out,
       return true;
    const struct agx_apple9_vir_instr *producer = &pending[slot].producer;
    unsigned reg = producer->dest;
-   if (producer->op == AGX_APPLE9_VIR_SPILL_STORE) {
+   if (producer->op == AGX_APPLE9_VIR_SPILL_STORE ||
+       apple9_scalar_publication(producer)) {
+      /* Publications have no GPR result to materialize. Wait using the
+       * reserved scratch operand while retaining the publication itself. */
       reg = WAIT_REG;
       if (!apple9_physical_immediate(out, reg, 0))
          return false;
@@ -586,26 +606,45 @@ apple9_can_fold_wait(const struct agx_apple9_vir_instr *ins,
       return false;
    if (p->producer.op == AGX_APPLE9_VIR_SPILL_STORE)
       return true;
+   if (apple9_scalar_publication(&p->producer))
+      return ins->op == AGX_APPLE9_VIR_VARY_STORE &&
+             ins->src[0] == p->producer.dest;
    if (ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC &&
        (ins->atomic_discard || ins->atomic_op == AGX_APPLE9_ATOMIC_CMPXCHG ||
         p->producer.op != AGX_APPLE9_VIR_DEVICE_LOAD ||
         p->producer.dest_components != 1 || ins->src[0] != p->producer.dest))
       return false;
-   /* An explicit bit-copy materializes the result for subsequent users.
-    * Other consumers may take the pending result directly at its last use. */
+   /* An identity copy explicitly requests materialization, independently of
+    * which tuple components or later uses need the completed value. */
    if (apple9_identity(ins) && ins->src[0] == p->producer.dest)
       return true;
-   if (p->producer.op == AGX_APPLE9_VIR_TEXTURE_SAMPLE)
+   /* Texture tuple handoffs are validated here for compact float consumers,
+    * including retained non-leading components (EXP-M4-63). */
+   bool texture = p->producer.op == AGX_APPLE9_VIR_TEXTURE_SAMPLE;
+   if (texture && ins->encoding != AGX_APPLE9_ENC_FLOAT2_COMPACT)
       return false;
+   /* Completion makes the producer tuple available. Keeping operands live
+    * is independent of releasing its slot. These ALU and address forms encode
+    * source retention explicitly (EXP-M4-34/35/63). */
+   bool tuple = p->producer.op == AGX_APPLE9_VIR_DEVICE_LOAD ||
+                apple9_async_sr(&p->producer) || texture;
+   bool can_retain = tuple &&
+      (ins->encoding == AGX_APPLE9_ENC_FLOAT2_COMPACT ||
+       ins->encoding == AGX_APPLE9_ENC_FLOAT2_EXPORT ||
+       ins->encoding == AGX_APPLE9_ENC_LOGIC_EXTENDED ||
+       ins->encoding == AGX_APPLE9_ENC_LOGIC_EXPORT ||
+       ins->encoding == AGX_APPLE9_ENC_DEVICE_LOAD ||
+       ins->encoding == AGX_APPLE9_ENC_DEVICE_LOAD_INDIRECT);
    unsigned consumed = 0;
    for (unsigned s = 0; s < ins->nr_srcs; ++s) {
       if (!apple9_pending_result(p, ins->src[s]))
          continue;
-      if (ins->live_after_mask & BITFIELD_BIT(s))
+      if ((ins->live_after_mask & BITFIELD_BIT(s)) && !can_retain)
          return false;
       consumed |= BITFIELD_BIT(ins->src[s] - p->producer.dest);
    }
-   return consumed == BITFIELD_MASK(p->producer.dest_components);
+   return consumed == BITFIELD_MASK(p->producer.dest_components) ||
+          (tuple && consumed != 0);
 }
 
 static bool
@@ -652,10 +691,8 @@ apple9_pending_hazard(const struct agx_apple9_vir_instr *ins,
         producer->op == AGX_APPLE9_VIR_DEVICE_ATOMIC) &&
        ins->immediate == producer->immediate)
       return true;
-   /* These compound encodings contain a fixed slot-1 publication and wait. */
-   return (ins->encoding == AGX_APPLE9_ENC_GET_DRAW_ID ||
-           ins->encoding == AGX_APPLE9_ENC_GET_COVERAGE ||
-           ins->encoding == AGX_APPLE9_ENC_BLOCK_IMAGE_STORE) &&
+   /* This compound encoding contains a fixed slot-1 publication and wait. */
+   return ins->encoding == AGX_APPLE9_ENC_BLOCK_IMAGE_STORE &&
           producer->producer_scoreboard_slot == AGX_APPLE9_SCOREBOARD_SLOT_1;
 }
 
@@ -733,18 +770,22 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
 
          if (apple9_async(&ins)) {
             unsigned slot = 0;
-            if (ins.op == AGX_APPLE9_VIR_TEXTURE_SAMPLE) {
+            if (apple9_async_sr(&ins)) {
                slot = AGX_APPLE9_SCOREBOARD_SLOT_1;
             } else {
-               const unsigned preference[] = {6, 1, 2, 3, 4, 5};
-               for (unsigned p = 0; p < ARRAY_SIZE(preference); ++p) {
-                  if (!pending[preference[p]].active) {
-                     slot = preference[p];
+               /* Samples and memory traffic share six completion tags.
+                * Keep independent operations pending until a real hazard,
+                * consumer, or tag exhaustion requires their result handoff. */
+               unsigned first = ins.op == AGX_APPLE9_VIR_TEXTURE_SAMPLE ? 1 : 6;
+               for (unsigned p = 0; p < 6; ++p) {
+                  unsigned candidate = (first - 1 + p) % 6 + 1;
+                  if (!pending[candidate].active) {
+                     slot = candidate;
                      break;
                   }
                }
                if (!slot)
-                  slot = 6;
+                  slot = first;
             }
             if (!apple9_retire(&out, pending, slot))
                goto cleanup;

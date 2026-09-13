@@ -680,9 +680,7 @@ struct apple9_dag_lower {
 };
 
 static uint8_t
-apple9_current_load_flags(struct apple9_dag_lower *lower,
-                          const struct apple9_scalar_load *load,
-                          bool native_vector)
+apple9_current_load_flags(struct apple9_dag_lower *lower)
 {
    assert(lower->active_load_instruction_count > 0);
    assert(lower->active_emitted_load_count <
@@ -692,17 +690,6 @@ apple9_current_load_flags(struct apple9_dag_lower *lower,
    uint8_t flags = lower->emitted_load_count + 1 < lower->load_instruction_count
                       ? AGX_APPLE9_DEVICE_LOAD_HAS_NEXT
                       : 0;
-
-   /* Native Metal's byte-1 bit 4 is an address-form selector, not a group
-    * boundary. It is set when an unmodified get_sr result supplies the
-    * element index directly. Scalar affine lowering destroys that form;
-    * native vector loads incorporate their natural tuple stride themselves. */
-   struct apple9_system_source system;
-   const unsigned element_add = load->index_add + load->component;
-   if (apple9_system_source(load->index, &system) &&
-       ((native_vector && load->index_add == 0) ||
-        (!native_vector && load->index_scale == 1 && element_add == 0)))
-      flags |= AGX_APPLE9_DEVICE_LOAD_RAW_SYSTEM_INDEX;
 
    return flags;
 }
@@ -1663,7 +1650,7 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                return AGX_APPLE9_VREG_INVALID;
             }
 
-            uint8_t flags = apple9_current_load_flags(lower, load, true);
+            uint8_t flags = apple9_current_load_flags(lower);
             const struct agx_apple9_device_load_contract contract = {
                .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
                .flags = flags,
@@ -1730,7 +1717,7 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
             lower->argument_base + load->argument);
          if (value != AGX_APPLE9_VREG_INVALID)
             lower->program.instructions[lower->program.instruction_count - 1]->memory_bits = load->bit_size;
-         uint8_t flags = apple9_current_load_flags(lower, load, false);
+         uint8_t flags = apple9_current_load_flags(lower);
          if (value == AGX_APPLE9_VREG_INVALID ||
              !agx_apple9_vir_set_device_load_contract(
                 &lower->program, value, flags,
@@ -3667,9 +3654,6 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
       *reason = "Apple9 DAG contains an input load outside the store graph";
       goto fail;
    }
-
-   if (nir->info.stage == MESA_SHADER_VERTEX)
-      agx_apple9_schedule_vary_stores(&lower.program);
 
    agx_apple9_place_phis(&lower.program);
    lower.program.fragment_shader = nir->info.stage == MESA_SHADER_FRAGMENT;

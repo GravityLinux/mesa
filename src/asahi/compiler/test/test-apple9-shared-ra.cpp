@@ -305,7 +305,7 @@ TEST(Apple9SharedRa, LoadWaitFoldsIntoConsumerAfterIndependentArithmetic)
       AGX_APPLE9_ENC_MOV_IMM32, nullptr, 0, 0);
    const agx_apple9_device_load_contract contract = {
       .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_DIRECT_GPR,
-      .flags = AGX_APPLE9_DEVICE_LOAD_RAW_SYSTEM_INDEX,
+      .flags = 0,
       .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
    };
    auto loaded = agx_apple9_vir_emit_device_load(&p, 1, index, &contract);

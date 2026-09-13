@@ -720,7 +720,7 @@ static const struct agx_apple9_encoding_info encodings[] = {
    [AGX_APPLE9_ENC_GET_DRAW_ID] =
       {
          .name = "get_draw_id",
-         .length = 14,
+         .length = 4,
          .operand_count = 1,
          .allocator_safe = true,
          .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
@@ -732,7 +732,7 @@ static const struct agx_apple9_encoding_info encodings[] = {
    [AGX_APPLE9_ENC_GET_COVERAGE] =
       {
          .name = "get_coverage",
-         .length = 14,
+         .length = 4,
          .operand_count = 1,
          .allocator_safe = true,
          .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
@@ -929,6 +929,7 @@ static const struct agx_apple9_encoding_info encodings[] = {
       {
          .name = "float2_export",
          .length = 8,
+         .dependency_layout = AGX_APPLE9_DEPENDENCY_MASK_45_47_61_63,
          .operand_count = 3,
          .allocator_safe = true,
          .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
@@ -999,6 +1000,7 @@ static const struct agx_apple9_encoding_info encodings[] = {
       {
          .name = "vary_store",
          .length = 8,
+         .dependency_layout = AGX_APPLE9_DEPENDENCY_MASK_12_17,
          .operand_count = 1,
          .allocator_safe = true,
          .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
@@ -1136,6 +1138,7 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .length = 14,
          .operand_count = 2,
          .allocator_safe = true,
+         .dependency_layout = AGX_APPLE9_DEPENDENCY_MASK_12_17,
          .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
          .operands =
             {
@@ -1155,6 +1158,7 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .length = 14,
          .operand_count = 4,
          .allocator_safe = true,
+         .dependency_layout = AGX_APPLE9_DEPENDENCY_MASK_12_17,
          .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
          .operands =
             {

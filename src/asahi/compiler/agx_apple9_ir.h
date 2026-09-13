@@ -202,12 +202,6 @@ enum agx_apple9_scoreboard_slot {
 };
 
 enum agx_apple9_device_load_flags {
-   /* Byte 1 bit 4 selects the native address form in which the load consumes
-    * a get_sr result directly.  It is not load-group framing: native branch
-    * shaders set it only on a raw system-indexed load, independent of that
-    * load's position in the linear load sequence. */
-   AGX_APPLE9_DEVICE_LOAD_RAW_SYSTEM_INDEX = 1u << 0,
-
    /* Byte 2 bit 4 marks that another load follows in linear issue order.
     * Native Metal leaves it set across execution-mask transitions. */
    AGX_APPLE9_DEVICE_LOAD_HAS_NEXT = 1u << 1,
@@ -244,11 +238,6 @@ struct agx_apple9_device_load_contract {
    enum agx_apple9_device_load_index_kind index_kind;
    uint8_t flags;
    uint16_t raw_token;
-
-   /* Capture-scoped byte-2 bit 1.  Native dependent-load probes correlate it
-    * with the first DEVICE_LOAD index consumer of a DEVICE_LOAD result.  It
-    * is independent of scoreboard allocation and the fields above. */
-   bool index_first_load_consumer;
 };
 
 struct agx_apple9_block;
@@ -287,8 +276,9 @@ struct agx_apple9_vir_instr {
    struct agx_apple9_vir_instr *phi_edge;
    uint8_t nr_srcs;
 
-   /* Scoreboard slot published by an asynchronous producer.  Ordinary ALU
-    * instructions leave this at NONE.  AUTO is resolved by the scheduled
+   /* Scoreboard slot published by an asynchronous producer, including scalar
+    * ALU exports to publication storage. Ordinary GPR ALU instructions leave
+    * this at NONE. AUTO is resolved by the scheduled
     * scoreboard pass and is never serialized. */
    uint8_t producer_scoreboard_slot;
    bool producer_scoreboard_assigned, scoreboard_assigned;
@@ -297,11 +287,10 @@ struct agx_apple9_vir_instr {
     * a scheduled instruction in the same block, independently of SSA uses. */
    struct agx_apple9_vir_instr *completion_consumer;
 
-   /* Device-load address/sequence fields, independent of the load/cache
-    * token. */
+   /* Device-load sequence and index lifetime, independent of completion
+    * tags. */
    uint8_t device_load_flags;
    enum agx_apple9_device_load_index_kind device_load_index_kind;
-   bool device_load_index_first_consumer;
 
    /* Raw scalar-load instruction bytes 8:9.  These encode the producer's
     * scoreboard slot. */
@@ -418,7 +407,6 @@ struct agx_apple9_block *agx_apple9_instr_block(const struct agx_apple9_vir_inst
 void agx_apple9_vir_move_before(struct agx_apple9_vir_program *program,
                               struct agx_apple9_vir_instr *instr,
                               struct agx_apple9_vir_instr *before);
-void agx_apple9_schedule_vary_stores(struct agx_apple9_vir_program *program);
 void agx_apple9_vir_reindex(struct agx_apple9_vir_program *program);
 
 uint32_t agx_apple9_vir_emit(struct agx_apple9_vir_program *program,
@@ -594,7 +582,7 @@ agx_apple9_pack_device_load_u32(unsigned dst, unsigned index, unsigned binding,
 bool agx_apple9_pack_device_load_u32_raw(
    unsigned dst, unsigned index, unsigned binding,
    enum agx_apple9_device_load_index_kind index_kind, uint8_t flags,
-   bool index_first_load_consumer, uint16_t raw_token,
+   enum agx_apple9_scoreboard_slot incoming_slot, uint16_t raw_token,
    struct agx_apple9_packed_instruction *packed);
 
 /* Aligned native vector memory forms.  A load defines components consecutive
@@ -606,12 +594,12 @@ bool agx_apple9_pack_device_load_u32_raw(
 bool agx_apple9_pack_device_load_vector_u32_raw(
    unsigned dst, unsigned index, unsigned binding, unsigned components,
    enum agx_apple9_device_load_index_kind index_kind, uint8_t flags,
-   bool index_first_load_consumer, uint16_t raw_token,
+   enum agx_apple9_scoreboard_slot incoming_slot, uint16_t raw_token,
    struct agx_apple9_packed_instruction *packed);
 bool agx_apple9_pack_device_load_scalar_raw(
    unsigned dst, unsigned index, unsigned binding, unsigned bits,
    enum agx_apple9_device_load_index_kind index_kind, uint8_t flags,
-   bool index_first_load_consumer, uint16_t raw_token,
+   enum agx_apple9_scoreboard_slot incoming_slot, uint16_t raw_token,
    struct agx_apple9_packed_instruction *packed);
 bool agx_apple9_pack_device_store_scalar(
    unsigned data, unsigned index, unsigned binding, unsigned bits,
