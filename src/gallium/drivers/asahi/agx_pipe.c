@@ -2017,77 +2017,6 @@ asahi_clear_buffer(struct pipe_context *pipe, struct pipe_resource *resource,
                           clear_value_size);
 }
 
-/* Until the Apple9 compute image blitter is implemented, generate supported
- * color mipmaps through Gallium's synchronized CPU texture-map interface.
- * This matches the bilinear downsampling used by util_gen_mipmap and keeps
- * image uploads/generation independent of captured shaders. */
-static bool
-agx_apple9_generate_mipmap(struct pipe_context *pipe, struct pipe_resource *image,
-                           enum pipe_format format, unsigned base_level,
-                           unsigned last_level, unsigned first_layer,
-                           unsigned last_layer)
-{
-   if ((image->target != PIPE_TEXTURE_2D && image->target != PIPE_TEXTURE_CUBE) ||
-       image->nr_samples > 1 || first_layer > last_layer ||
-       last_layer >= image->array_size ||
-       !agx_apple9_texture_format_supported(format) ||
-       agx_resource(image)->layout.compressed)
-      return false;
-
-   unsigned pixel_size = util_format_get_blocksize(format);
-   for (unsigned layer = first_layer; layer <= last_layer; ++layer) {
-      for (unsigned level = base_level + 1; level <= last_level; ++level) {
-         unsigned sw = u_minify(image->width0, level - 1);
-         unsigned sh = u_minify(image->height0, level - 1);
-         unsigned dw = u_minify(image->width0, level);
-         unsigned dh = u_minify(image->height0, level);
-         struct pipe_box src_box = {.z = layer, .width = sw, .height = sh, .depth = 1};
-         struct pipe_box dst_box = {.z = layer, .width = dw, .height = dh, .depth = 1};
-         struct pipe_transfer *src_transfer = NULL, *dst_transfer = NULL;
-         uint8_t *src = pipe->texture_map(pipe, image, level - 1, PIPE_MAP_READ,
-                                         &src_box, &src_transfer);
-         if (!src)
-            return false;
-         uint8_t *dst = pipe->texture_map(pipe, image, level,
-                                         PIPE_MAP_WRITE | PIPE_MAP_DISCARD_RANGE,
-                                         &dst_box, &dst_transfer);
-         if (!dst) {
-            pipe_texture_unmap(pipe, src_transfer);
-            return false;
-         }
-         for (unsigned y = 0; y < dh; ++y) {
-            float fy = (y + 0.5f) * sh / dh - 0.5f;
-            unsigned y0 = MAX2((int)floorf(fy), 0), y1 = MIN2(y0 + 1, sh - 1);
-            float wy = fy - floorf(fy);
-            for (unsigned x = 0; x < dw; ++x) {
-               float fx = (x + 0.5f) * sw / dw - 0.5f;
-               unsigned x0 = MAX2((int)floorf(fx), 0), x1 = MIN2(x0 + 1, sw - 1);
-               float wx = fx - floorf(fx);
-               float samples[4][4], result[4];
-               util_format_unpack_rgba(format, samples[0],
-                  src + y0 * src_transfer->stride + x0 * pixel_size, 1);
-               util_format_unpack_rgba(format, samples[1],
-                  src + y0 * src_transfer->stride + x1 * pixel_size, 1);
-               util_format_unpack_rgba(format, samples[2],
-                  src + y1 * src_transfer->stride + x0 * pixel_size, 1);
-               util_format_unpack_rgba(format, samples[3],
-                  src + y1 * src_transfer->stride + x1 * pixel_size, 1);
-               for (unsigned c = 0; c < 4; ++c) {
-                  float top = samples[0][c] * (1 - wx) + samples[1][c] * wx;
-                  float bottom = samples[2][c] * (1 - wx) + samples[3][c] * wx;
-                  result[c] = top * (1 - wy) + bottom * wy;
-               }
-               util_format_pack_rgba(format,
-                  dst + y * dst_transfer->stride + x * pixel_size, result, 1);
-            }
-         }
-         pipe_texture_unmap(pipe, dst_transfer);
-         pipe_texture_unmap(pipe, src_transfer);
-      }
-   }
-   return true;
-}
-
 static struct pipe_context *
 agx_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
 {
@@ -2130,8 +2059,6 @@ agx_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    pctx->clear = agx_clear;
    pctx->resource_copy_region = agx_resource_copy_region;
    pctx->blit = agx_blit;
-   if (agx_apple9_direct_render_enabled(agx_device(screen)))
-      pctx->generate_mipmap = agx_apple9_generate_mipmap;
    pctx->flush_resource = agx_flush_resource;
 
    pctx->buffer_map = u_transfer_helper_transfer_map;
@@ -2486,9 +2413,10 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
 
    caps->max_vertex_element_src_offset = 0xffff;
 
+   /* Use the state tracker's GPU blits between mip levels. */
+   caps->generate_mipmap = false;
    /* Apple9 has CPU texture transfers, but its compute image blitter is not
     * implemented yet. Use Mesa's existing CPU format-conversion fallback. */
-   caps->generate_mipmap = agx_apple9_direct_render_enabled(agx_device(pscreen));
    caps->texture_transfer_modes = agx_apple9_direct_render_enabled(agx_device(pscreen))
                                     ? PIPE_TEXTURE_TRANSFER_DEFAULT
                                     : PIPE_TEXTURE_TRANSFER_BLIT;
