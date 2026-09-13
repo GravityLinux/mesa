@@ -3802,6 +3802,32 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
       memcpy((uint8_t *)emitter.bytes.data + vir_offsets[i], packed.bytes,
              packed.length);
    }
+   /* List final packed bytes after branch fixups, without changing codegen.
+    * A row can contain multiple instructions for an expanded VIR pseudo. */
+   if (getenv("AGX_APPLE9_ASM") != NULL) {
+      fprintf(stderr, "APPLE9_ASM_BEGIN stage=%u\n", nir->info.stage);
+      for (unsigned i = 0; i < lower.program.instruction_count; ++i) {
+         const struct agx_apple9_vir_instr *ins = lower.program.instructions[i];
+         fprintf(stderr, "APPLE9_ASM offset=%u op=%u enc=%u dst=",
+                 vir_offsets[i], ins->op, ins->encoding);
+         if (ins->dest == AGX_APPLE9_VREG_INVALID)
+            fputs("-", stderr);
+         else
+            fprintf(stderr, "%c%u", lower.program.publication[ins->dest] ? 'p' : 'r',
+                    lower.program.phys[ins->dest]);
+         fputs(" src=", stderr);
+         for (unsigned j = 0; j < ins->nr_srcs; ++j)
+            fprintf(stderr, "%s%c%u", j ? "," : "",
+                    lower.program.publication[ins->src[j]] ? 'p' : 'r',
+                    lower.program.phys[ins->src[j]]);
+         fprintf(stderr, " imm=%#x wait=%u producer=%u bytes=", ins->immediate,
+                 ins->scoreboard_slot, ins->producer_scoreboard_slot);
+         for (unsigned j = vir_offsets[i]; j < vir_offsets[i + 1]; ++j)
+            fprintf(stderr, "%02x", ((const uint8_t *)emitter.bytes.data)[j]);
+         fputc('\n', stderr);
+      }
+      fputs("APPLE9_ASM_END\n", stderr);
+   }
    free(vir_offsets);
    if (getenv("AGX_APPLE9_TRACE") != NULL) {
       fputs("APPLE9_BINARY ", stderr);
