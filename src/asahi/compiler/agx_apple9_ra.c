@@ -22,6 +22,128 @@ struct apple9_shared_ra {
    bool *publication;
 };
 
+static enum agx_schedule_class
+apple9_schedule_class(const agx_instr *I)
+{
+   if (I->op == AGX_OPCODE_APPLE9 || I->op == AGX_OPCODE_APPLE9_PURE) {
+      /* GPR SSA captures arithmetic dependencies. Publications, memory and
+       * coverage still have implicit resources; serialize those operations
+       * until their complete dependency graph is exposed to shared IR. */
+      return agx_apple9_instr_is_pure_alu(I->apple9)
+                ? AGX_SCHEDULE_CLASS_NONE
+                : AGX_SCHEDULE_CLASS_BARRIER;
+   }
+   return agx_opcodes_info[I->op].schedule_class;
+}
+
+enum apple9_schedule_resource {
+   APPLE9_SCHED_STATE = BITFIELD_BIT(0),
+   APPLE9_SCHED_MEMORY = BITFIELD_BIT(1),
+   APPLE9_SCHED_PUBLICATION = BITFIELD_BIT(2),
+   APPLE9_SCHED_INTERPOLATION = BITFIELD_BIT(3),
+   APPLE9_SCHED_TILE = BITFIELD_BIT(4),
+   APPLE9_SCHED_ALL = BITFIELD_MASK(5),
+};
+
+static void
+apple9_schedule_resources(const agx_instr *I, uint32_t *reads, uint32_t *writes)
+{
+   /* Every lane operation observes the active execution/coverage state. */
+   *reads = APPLE9_SCHED_STATE;
+   *writes = 0;
+   switch (I->op) {
+   case AGX_OPCODE_MOV:
+   case AGX_OPCODE_MOV_IMM:
+   case AGX_OPCODE_COLLECT:
+   case AGX_OPCODE_SPLIT:
+   case AGX_OPCODE_PHI:
+      return;
+   case AGX_OPCODE_APPLE9:
+   case AGX_OPCODE_APPLE9_PURE:
+      break;
+   default:
+      *reads = *writes = APPLE9_SCHED_ALL;
+      return;
+   }
+   const struct agx_apple9_vir_instr *ins = I->apple9;
+   if (agx_apple9_instr_is_pure_alu(ins))
+      return;
+   if (ins->publication_handoff ||
+       ins->encoding == AGX_APPLE9_ENC_FLOAT2_EXPORT ||
+       ins->encoding == AGX_APPLE9_ENC_LOGIC_EXPORT ||
+       ins->op == AGX_APPLE9_VIR_PUBLICATION_TUPLE)
+      *reads |= *writes = APPLE9_SCHED_PUBLICATION;
+   switch (ins->op) {
+   case AGX_APPLE9_VIR_GET_GLOBAL_ID:
+   case AGX_APPLE9_VIR_GET_SR:
+   case AGX_APPLE9_VIR_DERIVATIVE:
+      return;
+   case AGX_APPLE9_VIR_DEVICE_LOAD:
+      *reads |= APPLE9_SCHED_MEMORY;
+      return;
+   case AGX_APPLE9_VIR_DEVICE_STORE:
+   case AGX_APPLE9_VIR_DEVICE_ATOMIC:
+   case AGX_APPLE9_VIR_DEVICE_ATOMIC_RESULT:
+   case AGX_APPLE9_VIR_BLOCK_IMAGE_STORE:
+      *reads |= APPLE9_SCHED_MEMORY;
+      *writes |= APPLE9_SCHED_MEMORY;
+      return;
+   case AGX_APPLE9_VIR_TEXTURE_SAMPLE:
+      *reads |= APPLE9_SCHED_MEMORY | APPLE9_SCHED_PUBLICATION;
+      *writes |= APPLE9_SCHED_PUBLICATION;
+      return;
+   case AGX_APPLE9_VIR_CENTROID_POSITION:
+   case AGX_APPLE9_VIR_ITER:
+   case AGX_APPLE9_VIR_ITER_FLAT:
+   case AGX_APPLE9_VIR_FMUL_PROJECT:
+   case AGX_APPLE9_VIR_CUBE:
+      *reads |= APPLE9_SCHED_INTERPOLATION;
+      *writes |= APPLE9_SCHED_INTERPOLATION;
+      return;
+   case AGX_APPLE9_VIR_PUBLICATION_TUPLE:
+      return;
+   default:
+      /* ALU exports/handoffs have no extra implicit state. Everything else,
+       * including predicate, tile, coverage and control transitions, remains
+       * a full resource fence until a narrower contract has been established. */
+      if (*writes == APPLE9_SCHED_PUBLICATION)
+         return;
+      *reads = *writes = APPLE9_SCHED_ALL;
+      return;
+   }
+}
+
+static unsigned
+apple9_dependency_delay(const struct agx_apple9_vir_instr *I)
+{
+   /* Scheduling priorities, not measured T8132 cycle counts. Memory receives
+    * the largest separation; transcendental pipelines come next. Candidate
+    * selection also accounts for the completed allocation's copies/spills. */
+   switch (I->op) {
+   case AGX_APPLE9_VIR_DEVICE_LOAD:
+   case AGX_APPLE9_VIR_TEXTURE_SAMPLE:
+   case AGX_APPLE9_VIR_DEVICE_ATOMIC:
+   case AGX_APPLE9_VIR_SPILL_LOAD:
+      return 16;
+   case AGX_APPLE9_VIR_FRCP:
+   case AGX_APPLE9_VIR_FRSQ:
+   case AGX_APPLE9_VIR_FSQRT_FACTOR:
+   case AGX_APPLE9_VIR_FSIN_FACTOR:
+   case AGX_APPLE9_VIR_FEXP2:
+   case AGX_APPLE9_VIR_FLOG2:
+      return 4;
+   default:
+      return 1;
+   }
+}
+
+static unsigned
+apple9_schedule_delay(const agx_instr *I)
+{
+   return (I->op == AGX_OPCODE_APPLE9 || I->op == AGX_OPCODE_APPLE9_PURE)
+             ? apple9_dependency_delay(I->apple9) : 1;
+}
+
 static bool
 apple9_identity(const struct agx_apple9_vir_instr *ins)
 {
@@ -143,6 +265,7 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
    ctx->nir = nir;
    ctx->stage = nir->info.stage;
    ctx->key = &ra->key;
+   ctx->schedule_class = apple9_schedule_class;
    ra->key.has_scratch = true;
    ctx->ra_target = (struct agx_ra_target){
       .max_registers = AGX_APPLE9_HALF_REGISTER_COUNT,
@@ -835,19 +958,26 @@ cleanup:
    return success;
 }
 
-bool
-agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
-                           nir_shader *nir, const char **reason)
+static bool
+apple9_allocate_candidate(struct agx_apple9_vir_program *program,
+                          nir_shader *nir, bool cost_constraints, bool latency,
+                          struct agx_apple9_vir_program *result,
+                          const char **reason)
 {
    struct apple9_shared_ra ra = {.program = program};
    ra.ctx = rzalloc(NULL, agx_context);
    struct agx_apple9_vir_program out;
    agx_apple9_vir_init(&out);
    bool success = false;
-   if (!ra.ctx || !agx_apple9_allocate_publications(program, reason) ||
-       !apple9_shared_dataflow(&ra, nir, reason))
+   if (!ra.ctx || !apple9_shared_dataflow(&ra, nir, reason))
       goto cleanup;
+   ra.ctx->ra_target.cost_register_constraints = cost_constraints;
+   if (latency) {
+      ra.ctx->schedule_resources = apple9_schedule_resources;
+      ra.ctx->schedule_delay = apple9_schedule_delay;
+   }
    agx_dce(ra.ctx, true);
+   agx_pressure_schedule(ra.ctx);
    agx_ra(ra.ctx);
    if (ra.ctx->scratch_size_B > 4096) {
       *reason =
@@ -927,15 +1057,115 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
    out.publication_count = program->publication_count;
    out.fragment_shader = program->fragment_shader;
    out.dependencies_finalized = out.physical = true;
-   agx_apple9_vir_finish(program);
-   *program = out;
-   for (struct agx_apple9_block *block = program->allocated_blocks; block;
+   *result = out;
+   for (struct agx_apple9_block *block = result->allocated_blocks; block;
         block = block->allocated_next)
-      block->program = program;
+      block->program = result;
    memset(&out, 0, sizeof(out));
    success = true;
 cleanup:
    agx_apple9_vir_finish(&out);
    ralloc_free(ra.ctx);
    return success;
+}
+
+struct apple9_allocation_cost {
+   uint64_t spills, instructions, bytes, dependency_gaps;
+   unsigned registers;
+   bool has_copies;
+};
+
+static struct apple9_allocation_cost
+apple9_allocation_cost(const struct agx_apple9_vir_program *p)
+{
+   struct apple9_allocation_cost cost = {.registers = p->max_phys_gpr + 1};
+   unsigned nesting = 0;
+   unsigned ready[AGX_APPLE9_GPR_COUNT] = {0}, issue = 0;
+   for (unsigned i = 0; i < p->instruction_count; ++i) {
+      const struct agx_apple9_vir_instr *I = p->instructions[i];
+      if (I->op == AGX_APPLE9_VIR_LOOP_MASK_POP && nesting)
+         --nesting;
+      /* Static loop weighting, not a cycle/occupancy estimate. It prevents
+       * saving one setup move by adding a move on every loop iteration. */
+      unsigned weight = 1u << (3 * MIN2(nesting, 3));
+      unsigned earliest = issue;
+      for (unsigned s = 0; s < I->nr_srcs; ++s) {
+         if (I->src[s] < ARRAY_SIZE(ready))
+            earliest = MAX2(earliest, ready[I->src[s]]);
+      }
+      cost.dependency_gaps += weight * (earliest - issue);
+      for (unsigned c = 0; c < I->dest_components; ++c) {
+         if (I->dest + c < ARRAY_SIZE(ready))
+            ready[I->dest + c] = earliest + apple9_dependency_delay(I);
+      }
+      issue = earliest + 1;
+      cost.spills += weight * (I->op == AGX_APPLE9_VIR_SPILL_STORE ||
+                               I->op == AGX_APPLE9_VIR_SPILL_LOAD);
+      cost.instructions += weight;
+      cost.bytes += weight * agx_apple9_encoding_info(I->encoding)->length;
+      cost.has_copies |= apple9_identity(I) && I->dest != I->src[0];
+      if (I->op == AGX_APPLE9_VIR_LOOP_MASK_PUSH)
+         ++nesting;
+   }
+   return cost;
+}
+
+static bool
+apple9_allocation_cheaper(struct apple9_allocation_cost a,
+                          struct apple9_allocation_cost b)
+{
+   if (a.spills != b.spills) return a.spills < b.spills;
+   if (a.instructions != b.instructions) return a.instructions < b.instructions;
+   if (a.bytes != b.bytes) return a.bytes < b.bytes;
+   if (a.registers != b.registers) return a.registers < b.registers;
+   return a.dependency_gaps < b.dependency_gaps;
+}
+
+bool
+agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
+                           nir_shader *nir, const char **reason)
+{
+   if (!agx_apple9_allocate_publications(program, reason))
+      return false;
+   struct agx_apple9_vir_program best, alternative;
+   agx_apple9_vir_init(&best);
+   agx_apple9_vir_init(&alternative);
+   if (!apple9_allocate_candidate(program, nir, false, false, &best, reason))
+      return false;
+
+   struct apple9_allocation_cost cost = apple9_allocation_cost(&best);
+   if (cost.has_copies || cost.spills) {
+      /* Bank hints can conflict with later tuples and phi reconciliation.
+       * Compare completed allocations so those costs are paid by the policy
+       * which caused them, including rematerialization and spill lowering. */
+      const char *unused_reason = NULL;
+      if (apple9_allocate_candidate(program, nir, true, false, &alternative,
+                                     &unused_reason) &&
+          apple9_allocation_cheaper(apple9_allocation_cost(&alternative), cost))
+         SWAP(best, alternative);
+   }
+   agx_apple9_vir_finish(&alternative);
+   cost = apple9_allocation_cost(&best);
+   unsigned long_dependencies = 0;
+   for (unsigned i = 0; i < program->instruction_count; ++i)
+      long_dependencies += apple9_dependency_delay(program->instructions[i]) > 1;
+   if (long_dependencies > 1) {
+      for (unsigned banks = 0; banks < 2; ++banks) {
+         agx_apple9_vir_init(&alternative);
+         const char *unused_reason = NULL;
+         if (apple9_allocate_candidate(program, nir, banks, true, &alternative,
+                                        &unused_reason) &&
+             apple9_allocation_cheaper(apple9_allocation_cost(&alternative), cost)) {
+            SWAP(best, alternative);
+            cost = apple9_allocation_cost(&best);
+         }
+         agx_apple9_vir_finish(&alternative);
+      }
+   }
+   agx_apple9_vir_finish(program);
+   *program = best;
+   for (struct agx_apple9_block *block = program->allocated_blocks; block;
+        block = block->allocated_next)
+      block->program = program;
+   return true;
 }
