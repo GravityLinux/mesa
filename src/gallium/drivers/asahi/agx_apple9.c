@@ -1120,22 +1120,14 @@ static const struct apple9_render_self_relocation
       {0x210600, 0x210620}, {0x210820, 0x210828},
 };
 
-/* Entry slots are per submission, not a cache of shader bodies. The caller
- * waits for prior fixed-USC users before replacing them. Each stage has its
- * own block header, reserved constant area and generated transfer. */
-#define APPLE9_ENTRY_BLOCK_SIZE 0xc0u
-#define APPLE9_ENTRY_PREFIX     0x80u
+/* A batch shares entries between draws targeting the same shader and stage.
+ * The caller waits for prior fixed-USC users before publishing another batch's
+ * table. Each slot has a header, reserved constant area and generated transfer. */
 static_assert(AGX_APPLE9_RENDER_ARCHIVE_HEADER_SIZE +
-                    2 * AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS *
-                       APPLE9_ENTRY_BLOCK_SIZE <=
+                    AGX_APPLE9_RENDER_MAX_ENTRIES *
+                       AGX_APPLE9_RENDER_ENTRY_BLOCK_SIZE <=
                  AGX_APPLE9_RENDER_ENTRY_REGION_SIZE,
-              "Per-draw entries must fit the fixed entry table");
-static uint32_t
-apple9_render_entry(unsigned draw, unsigned stage)
-{
-   return AGX_APPLE9_RENDER_ARCHIVE_HEADER_SIZE +
-          (draw * 2 + stage) * APPLE9_ENTRY_BLOCK_SIZE + APPLE9_ENTRY_PREFIX;
-}
+              "Shader entries must fit the compact entry region");
 
 static void
 apple9_init_render_entries(uint8_t *image)
@@ -1145,13 +1137,11 @@ apple9_init_render_entries(uint8_t *image)
       apple9_put_u16(image + at, 6);
    apple9_fill_helper_table(image, 0x100, 10);
    apple9_fill_helper_table(image, 0x200, 10);
-   for (unsigned draw = 0; draw < AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS; draw++) {
-      for (unsigned stage = 0; stage < 2; stage++) {
-         unsigned entry = apple9_render_entry(draw, stage);
-         apple9_put_u32(image + entry - APPLE9_ENTRY_PREFIX,
-                        APPLE9_ENTRY_BLOCK_SIZE);
-         apple9_put_u32(image + entry, 0x0e);
-      }
+   for (unsigned slot = 0; slot < AGX_APPLE9_RENDER_MAX_ENTRIES; slot++) {
+      unsigned entry = agx_apple9_entry_offset(slot);
+      apple9_put_u32(image + entry - AGX_APPLE9_RENDER_ENTRY_CODE_OFFSET,
+                     AGX_APPLE9_RENDER_ENTRY_BLOCK_SIZE);
+      apple9_put_u32(image + entry, 0x0e);
    }
 }
 
@@ -1212,7 +1202,7 @@ struct agx_apple9_graphics {
    bool initialized;
    struct agx_apple9_framebuffer framebuffer;
    unsigned varying_components;
-   uint64_t entries[AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS][2];
+   uint64_t entries[AGX_APPLE9_RENDER_MAX_ENTRIES];
 };
 
 struct agx_apple9_graphics *
@@ -1333,7 +1323,7 @@ apple9_build_attachments(struct apple9_attachment_records *records,
                          const struct agx_apple9_framebuffer *fb)
 {
    unsigned count = fb->count;
-   if (!count || count > 8 || !fb->width || !fb->height || fb->width > 16384 ||
+   if (count > 8 || !fb->width || !fb->height || fb->width > 16384 ||
        fb->height > 16384 ||
        (fb->samples != 1 && fb->samples != 2 && fb->samples != 4))
       return false;
@@ -1347,8 +1337,6 @@ apple9_build_attachments(struct apple9_attachment_records *records,
       if (fb->targets[rt])
          mask |= BITFIELD_BIT(rt);
    }
-   if (!mask)
-      return false;
    for (unsigned kind = 0; kind < 2; kind++) {
       bool texture = kind == 0;
       uint8_t *image = texture ? records->texture : records->buffer;
@@ -1464,11 +1452,12 @@ apple9_build_attachments(struct apple9_attachment_records *records,
 bool
 agx_apple9_graphics_publish(struct agx_apple9_graphics *g,
                             const struct agx_apple9_framebuffer *fb,
-                            const struct agx_apple9_uniform_draw *draws,
-                            unsigned count, unsigned varying_components,
+                            const struct agx_apple9_entry_table *entries,
+                            unsigned varying_components,
                             const float clear_color[8][4])
 {
-   if (!g || !draws || !count || count > AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS)
+   if (!g || !entries || !entries->count ||
+       entries->count > AGX_APPLE9_RENDER_MAX_ENTRIES)
       return false;
    if (!g->initialized)
       apple9_graphics_initialize(g);
@@ -1503,19 +1492,20 @@ agx_apple9_graphics_publish(struct agx_apple9_graphics *g,
       agx_bo_note_cpu_write(g->dev->apple9_render_context, 0x4044, 4);
       g->varying_components = varying_components;
    }
-   for (unsigned i = 0; i < count; i++) {
-      for (unsigned stage = 0; stage < 2; stage++) {
-         if (g->entries[i][stage] == draws[i].code[stage])
-            continue;
-         unsigned entry = apple9_render_entry(i, stage);
-         for (unsigned v = 0; v < ARRAY_SIZE(views); v++) {
-            memcpy((uint8_t *)agx_bo_map(views[v]) + entry,
-                   draws[i].entries[stage], sizeof(draws[i].entries[stage]));
-            agx_bo_note_cpu_write(views[v], entry,
-                                  sizeof(draws[i].entries[stage]));
-         }
-         g->entries[i][stage] = draws[i].code[stage];
+   for (unsigned i = 0; i < entries->count; i++) {
+      uint64_t code = entries->entries[i].code;
+      if (g->entries[i] == code)
+         continue;
+      unsigned entry = agx_apple9_entry_offset(i);
+      uint8_t body_entry[32] = {0};
+      if (!apple9_build_body_entry(body_entry, g->dev->shader_base + entry, code))
+         return false;
+      for (unsigned v = 0; v < ARRAY_SIZE(views); v++) {
+         memcpy((uint8_t *)agx_bo_map(views[v]) + entry, body_entry,
+                sizeof(body_entry));
+         agx_bo_note_cpu_write(views[v], entry, sizeof(body_entry));
       }
+      g->entries[i] = code;
    }
    if (clear_color) {
       for (unsigned copy = 0; copy < 2; copy++) {
@@ -1537,13 +1527,11 @@ agx_apple9_graphics_publish(struct agx_apple9_graphics *g,
 bool
 agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
                         struct agx_pool *context_pool,
+                        struct agx_apple9_entry_table *entries,
                         const struct agx_apple9_render_pipeline *pipeline,
                         struct agx_apple9_uniform_draw *draw,
-                        const struct agx_apple9_uniform_draw *previous,
-                        unsigned index)
+                        const struct agx_apple9_uniform_draw *previous)
 {
-   if (index >= AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS)
-      return false;
    const struct agx_apple9_render_stage *stages[] = {&pipeline->vertex,
                                                      &pipeline->fragment};
    unsigned tile_bytes = 0;
@@ -1560,11 +1548,12 @@ agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
          return false;
       draw->program_id[stage] = shader->program_id;
       draw->code[stage] = shader->bo->va->addr;
-      unsigned entry = apple9_render_entry(index, stage);
-      memset(draw->entries[stage], 0, sizeof(draw->entries[stage]));
-      if (!apple9_build_body_entry(draw->entries[stage],
-                                   dev->shader_base + entry, draw->code[stage]))
-         return false;
+   }
+   unsigned offsets[2];
+   if (!agx_apple9_entry_table_add(entries, draw->code, offsets))
+      return false;
+   for (unsigned stage = 0; stage < 2; stage++) {
+      const struct agx_apple9_render_stage *shader = stages[stage];
       uint64_t table = stage ? draw->fragment_table : draw->vertex_table;
       bool reuse =
          previous && shader->program_id &&
@@ -1588,7 +1577,7 @@ agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
       struct agx_apple9_launch_parameters params = {
          .shader_base = dev->shader_base,
          .resource_table = state.gpu,
-         .entry_offset = entry,
+         .entry_offset = offsets[stage],
          .publication_count = shader->publication_count,
          .frame_extent_a = shader->scratch_size,
          .frame_extent_b = shader->scratch_size,
@@ -1643,6 +1632,7 @@ agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
     * the varying-only estimate is insufficient to describe the captures. */
    apple9_put_u32(group + 0x18, MAX2(apple9_get_u32(group + 0x18), 1));
    apple9_put_u32(group + 0x14, draw->launch[1] / 0x40);
+   apple9_put_u32(group + 0x5c, tile_bytes ? 0x1ffff : 0);
    /* Explicit per-sample stores preserve the omitted samples and require
     * the same ordered tile access as blending. Opaque tag visibility can
     * lose mixed stencil coverage after an intervening render submission. */

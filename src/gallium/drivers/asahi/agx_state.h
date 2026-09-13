@@ -413,8 +413,8 @@ struct agx_batch {
    uint32_t clear, draw, load, resolve, feedback;
    bool initialized;
    bool apple9_color_reloaded;
-   unsigned apple9_color_reload_draw;
-   unsigned apple9_color_store_draw;
+   uint32_t apple9_color_reload_launch;
+   uint32_t apple9_color_store_launch;
    bool apple9_preparing_tile_store;
 
    uint64_t uploaded_clear_color[PIPE_MAX_COLOR_BUFS];
@@ -474,9 +474,9 @@ struct agx_batch {
    struct agx_apple9_framebuffer apple9_framebuffer;
    unsigned apple9_root_varyings;
    struct agx_pool apple9_context_pool;
-   unsigned apple9_uniform_draw_count;
-   struct agx_apple9_uniform_draw
-      apple9_uniform_draws[AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS];
+   unsigned apple9_draw_count;
+   struct agx_apple9_uniform_draw apple9_previous_draw;
+   struct agx_apple9_entry_table apple9_entries;
 
    /* Apple9 direct records appended to cdm for this command. */
    unsigned apple9_dispatch_count;
@@ -725,7 +725,6 @@ struct agx_context {
 
    struct blitter_context *blitter;
    struct agx_color_reload *color_reload;
-   struct pipe_resource *apple9_dummy_color;
    struct primconvert_context *apple9_primconvert;
    struct asahi_blitter compute_blitter;
 

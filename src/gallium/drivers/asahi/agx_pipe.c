@@ -1765,17 +1765,15 @@ agx_flush_render(struct agx_context *ctx, struct agx_batch *batch,
               &batch->tilebuffer_layout);
 
    if (agx_apple9_direct_render_enabled(dev)) {
-      if (!batch->key.nr_cbufs || batch->key.nr_cbufs > 8) {
+      if (batch->key.nr_cbufs > 8) {
          fprintf(stderr,
-                 "Apple9 direct render requires one to eight color targets\n");
+                 "Apple9 direct render supports up to eight color targets\n");
          return false;
       }
 
       bool package_ready = batch->apple9_render_initialized;
-      uint32_t load_usc =
-         batch->apple9_uniform_draws[batch->apple9_color_reload_draw].launch[1];
-      uint32_t store_usc =
-         batch->apple9_uniform_draws[batch->apple9_color_store_draw].launch[1];
+      uint32_t load_usc = batch->apple9_color_reload_launch;
+      uint32_t store_usc = batch->apple9_color_store_launch;
       if (!package_ready || !load_usc || !store_usc) {
          fprintf(stderr, "failed to prepare Apple9 color target\n");
          return false;
@@ -1856,7 +1854,7 @@ agx_flush_batch(struct agx_context *ctx, struct agx_batch *batch)
          screen->apple9_graphics &&
          agx_apple9_graphics_publish(
             screen->apple9_graphics, &batch->apple9_framebuffer,
-            batch->apple9_uniform_draws, batch->apple9_uniform_draw_count,
+            &batch->apple9_entries,
             batch->apple9_root_varyings,
             (batch->clear & PIPE_CLEAR_COLOR0) ? batch->apple9_clear_color
                                                : NULL);
@@ -1918,7 +1916,6 @@ agx_destroy_context(struct pipe_context *pctx)
       util_primconvert_destroy(ctx->apple9_primconvert);
 
    util_unreference_framebuffer_state(&ctx->framebuffer);
-   pipe_resource_reference(&ctx->apple9_dummy_color, NULL);
 
    agx_bg_eot_cleanup(&ctx->bg_eot);
    agx_destroy_meta_shaders(ctx);
@@ -2993,6 +2990,17 @@ agx_screen_create(int fd, struct renderonly *ro,
       }
 
       agx_screen->rodata = bo;
+   }
+
+   /* Reserve the graphics header aperture before application allocations.
+    * Waiting until the first draw lets a large index/output buffer occupy
+    * that address, making graphics initialization fail later. */
+   if (agx_apple9_direct_render_enabled(&agx_screen->dev)) {
+      agx_screen->apple9_graphics = agx_apple9_graphics_create(&agx_screen->dev);
+      if (!agx_screen->apple9_graphics) {
+         agx_destroy_screen(screen);
+         return NULL;
+      }
    }
 
    return screen;

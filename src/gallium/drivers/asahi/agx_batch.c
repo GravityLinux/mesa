@@ -126,7 +126,8 @@ agx_batch_init(struct agx_context *ctx,
    batch->apple9_dispatch_count = 0;
    batch->apple9_package = NULL;
    batch->apple9_render_initialized = false;
-   batch->apple9_uniform_draw_count = 0;
+   batch->apple9_draw_count = 0;
+   batch->apple9_entries.count = 0;
    batch->apple9_launch_next = AGX_APPLE9_COMPUTE_LAUNCH_OFFSET;
    batch->apple9_resource_next = AGX_APPLE9_COMPUTE_RESOURCE_OFFSET +
                                   AGX_APPLE9_COMPUTE_RESOURCE_TABLE_OFFSET;
@@ -146,8 +147,8 @@ agx_batch_init(struct agx_context *ctx,
 
    batch->clear = 0;
    batch->apple9_color_reloaded = false;
-   batch->apple9_color_reload_draw = ~0u;
-   batch->apple9_color_store_draw = ~0u;
+   batch->apple9_color_reload_launch = 0;
+   batch->apple9_color_store_launch = 0;
    batch->draw = 0;
    batch->load = 0;
    batch->resolve = 0;
@@ -287,7 +288,8 @@ agx_batch_cleanup(struct agx_context *ctx, struct agx_batch *batch, bool reset)
    agx_bo_unreference(dev, batch->apple9_package);
    batch->apple9_package = NULL;
    batch->apple9_render_initialized = false;
-   batch->apple9_uniform_draw_count = 0;
+   batch->apple9_draw_count = 0;
+   batch->apple9_entries.count = 0;
    agx_pool_cleanup(&batch->pool);
    agx_pool_cleanup(&batch->pipeline_pool);
    agx_pool_cleanup(&batch->apple9_context_pool);

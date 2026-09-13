@@ -1068,49 +1068,6 @@ agx_set_framebuffer_state(struct pipe_context *pctx,
 
    util_copy_framebuffer_state(&ctx->framebuffer, state);
 
-   /* The direct Apple9 tile launch currently requires a color attachment.
-    * Supply private storage for depth/stencil-only framebuffers, including
-    * clears used by WebGL to initialize new attachments. No application
-    * color resource is bound or modified by this emulation. */
-   if (agx_apple9_direct_render_enabled(agx_device(pctx->screen)) &&
-       state->width && state->height) {
-      bool has_color = false;
-      for (unsigned i = 0; i < state->nr_cbufs; ++i)
-         has_color |= state->cbufs[i].texture != NULL;
-      if (!has_color) {
-         unsigned samples = util_framebuffer_get_num_samples(state);
-         struct pipe_resource *dummy = ctx->apple9_dummy_color;
-         if (!dummy || dummy->width0 != state->width ||
-             dummy->height0 != state->height || dummy->nr_samples != samples) {
-            struct pipe_resource templ = {
-               .target = PIPE_TEXTURE_2D,
-               .format = PIPE_FORMAT_R8_UNORM,
-               .width0 = state->width,
-               .height0 = state->height,
-               .depth0 = 1,
-               .array_size = 1,
-               .nr_samples = samples,
-               .nr_storage_samples = samples,
-               .bind = PIPE_BIND_RENDER_TARGET,
-            };
-            dummy = pctx->screen->resource_create(pctx->screen, &templ);
-            if (!dummy) {
-               fprintf(stderr, "failed to allocate Apple9 depth-only color storage\n");
-               abort();
-            }
-            pipe_resource_reference(&ctx->apple9_dummy_color, NULL);
-            ctx->apple9_dummy_color = dummy;
-         }
-         ctx->framebuffer.nr_cbufs = 1;
-         ctx->framebuffer.cbufs[0].format = dummy->format;
-         ctx->framebuffer.cbufs[0].nr_samples = 0;
-         ctx->framebuffer.cbufs[0].level = 0;
-         ctx->framebuffer.cbufs[0].first_layer = 0;
-         ctx->framebuffer.cbufs[0].last_layer = 0;
-         pipe_resource_reference(&ctx->framebuffer.cbufs[0].texture, dummy);
-      }
-   }
-
    for (unsigned i = 0; i < ctx->framebuffer.nr_cbufs; ++i) {
       agx_legalize_compression(ctx,
                                agx_resource(ctx->framebuffer.cbufs[i].texture),
@@ -5556,22 +5513,20 @@ static bool
 agx_apple9_collect_color_targets(const struct agx_batch *batch,
                                  struct agx_apple9_render_pipeline *pipeline)
 {
-   if (!batch->key.nr_cbufs || batch->key.nr_cbufs > 8)
+   if (batch->key.nr_cbufs > 8)
       return false;
    pipeline->samples = util_framebuffer_get_num_samples(&batch->key);
-   bool any_target = false;
    for (unsigned rt = 0; rt < batch->key.nr_cbufs; ++rt) {
       const struct pipe_surface *surface = &batch->key.cbufs[rt];
       if (!surface->texture)
          continue;
-      any_target = true;
       struct agx_resource *resource = agx_resource(surface->texture);
       pipeline->color_formats[rt] = surface->format;
       pipeline->color_targets[rt] =
          agx_map_texture_gpu(resource, surface->first_layer) +
          ail_get_level_offset_B(&resource->layout, surface->level);
    }
-   return any_target;
+   return true;
 }
 
 static void
@@ -5691,14 +5646,9 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
    agx_legalize_feedback_loops(ctx);
    agx_legalize_xfb(ctx);
 
+   bool apple9_batch_retry = false;
+retry_batch:;
    struct agx_batch *batch = agx_get_batch(ctx);
-   if (agx_apple9_direct_render_enabled(dev) &&
-       batch->apple9_uniform_draw_count == AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS) {
-      /* Split before allocating any draw-local state. The new batch reloads
-       * valid attachments; clear state belongs only to the completed batch. */
-      agx_flush_batch(ctx, batch);
-      batch = agx_get_batch(ctx);
-   }
    uint64_t ib = 0;
    size_t ib_extent = 0;
 
@@ -5710,7 +5660,7 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
    /* Increment IA statistics before lowering tessellation. This ensures we
     * count the patches instead of counting the tessellated outputs.
     */
-   if (ctx->active_queries && !ctx->in_tess &&
+   if (!apple9_batch_retry && ctx->active_queries && !ctx->in_tess &&
        !ctx->active_draw_without_restart &&
        (ctx->pipeline_statistics[PIPE_STAT_QUERY_IA_VERTICES] ||
         ctx->pipeline_statistics[PIPE_STAT_QUERY_IA_PRIMITIVES] ||
@@ -5738,7 +5688,7 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
    }
 
    /* Only the rasterization stream counts */
-   if (ctx->active_queries && ctx->prims_generated[0] &&
+   if (!apple9_batch_retry && ctx->active_queries && ctx->prims_generated[0] &&
        !ctx->stage[MESA_SHADER_GEOMETRY].shader) {
 
       assert(!indirect && "we force a passthrough GS for this");
@@ -5836,6 +5786,22 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
    if (agx_apple9_direct_render_enabled(dev) &&
        !agx_apple9_validate_resources(ctx))
       return;
+
+   if (agx_apple9_direct_render_enabled(dev)) {
+      const uint64_t code[2] = {
+         ctx->vs->apple9_render_stage.bo->va->addr,
+         ctx->fs->apple9_render_stage.bo->va->addr,
+      };
+      if (!agx_apple9_entry_table_fits(&batch->apple9_entries, code)) {
+         /* Compilation and attachment helpers determine the required targets.
+          * Split before encoding this draw, retaining its already-counted IA
+          * statistics in the old batch. Retry rebuilds all batch-local state
+          * and loads the old batch's attachments without repeating the draw. */
+         agx_flush_batch_for_reason(ctx, batch, "Apple9 shader entry pressure");
+         apple9_batch_retry = true;
+         goto retry_batch;
+      }
+   }
 
    if (ctx->linked.vs->uses_base_param || ctx->gs) {
       agx_upload_draw_params(batch, indirect, draws, info);
@@ -6017,14 +5983,7 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
          fprintf(stderr, "Apple9 direct render requires one to eight color surfaces\n");
          return;
       }
-      simple_mtx_lock(&screen->apple9_graphics_lock);
-      if (!screen->apple9_graphics)
-         screen->apple9_graphics = agx_apple9_graphics_create(dev);
-      simple_mtx_unlock(&screen->apple9_graphics_lock);
-      if (!screen->apple9_graphics) {
-         fprintf(stderr, "Failed to initialize Apple9 graphics state\n");
-         abort();
-      }
+      assert(screen->apple9_graphics && "reserved at screen creation");
       if (!batch->apple9_render_initialized) {
          batch->apple9_framebuffer = (struct agx_apple9_framebuffer){
             .width = batch->key.width,
@@ -6040,16 +5999,11 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
          batch->apple9_render_initialized = true;
       }
       bool depth_enabled = ctx->zs->base.depth_enabled && batch->key.zsbuf.texture;
-      unsigned index = batch->apple9_uniform_draw_count;
-      if (index >= AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS) {
-         fprintf(stderr, "Apple9 graphics draw arena exhausted\n");
-         abort();
-      }
-      struct agx_apple9_uniform_draw *record =
-         &batch->apple9_uniform_draws[index];
-      memset(record, 0, sizeof(*record));
+      unsigned index = batch->apple9_draw_count;
+      struct agx_apple9_uniform_draw draw_record = {0};
+      struct agx_apple9_uniform_draw *record = &draw_record;
       const struct agx_apple9_uniform_draw *previous =
-         index ? &batch->apple9_uniform_draws[index - 1] : NULL;
+         batch->apple9_draw_count ? &batch->apple9_previous_draw : NULL;
       agx_batch_add_bo(batch, pipeline.vertex.bo);
       agx_batch_add_bo(batch, pipeline.fragment.bo);
       record->flatshade_first = ctx->rast->base.flatshade_first;
@@ -6437,18 +6391,20 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
                PIPE_TEX_WRAP_CLAMP_TO_EDGE, PIPE_TEX_WRAP_CLAMP_TO_EDGE, 1);
          }
       }
-      ++batch->apple9_uniform_draw_count;
       pipeline.index_size = info->index_size;
       pipeline.primitive = agx_primitive_for_pipe(info->mode);
       pipeline.index_buffer = ib;
       pipeline.index_extent =
          MIN2(ib_extent, (uint64_t)draws->count * info->index_size);
       if (!agx_apple9_prepare_draw(dev, &batch->pipeline_pool,
-                                   &batch->apple9_context_pool, &pipeline,
-                                   record, previous, index)) {
+                                   &batch->apple9_context_pool,
+                                   &batch->apple9_entries, &pipeline,
+                                   record, previous)) {
          fprintf(stderr, "Failed to encode Apple9 draw state\n");
          abort();
       }
+      batch->apple9_previous_draw = *record;
+      ++batch->apple9_draw_count;
       pipeline.ppp = record->ppp;
       pipeline.vertex_launch = record->launch[0] / 0x40;
       pipeline.pipeline_word = AGX_APPLE9_RENDER_HEADER_OFFSET;

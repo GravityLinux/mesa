@@ -127,7 +127,7 @@ TEST(Apple9Launcher, InvalidParametersCannotPublishPartialCode)
       reject(bad, AGX_APPLE9_LAUNCH_FRAGMENT);
    }
    bad = p;
-   for (unsigned bytes : {0u, 129u}) {
+   for (unsigned bytes : {129u}) {
       bad.tile_bytes = bytes;
       reject(bad, AGX_APPLE9_LAUNCH_FRAGMENT);
    }
@@ -178,7 +178,8 @@ TEST(Apple9Launcher, TileModesDoNotChangeEntryOrResources)
    struct {
       unsigned samples, bytes, mode, low;
    } cases[] = {{1, 8, 0x4b, 0x43}, {2, 24, 0x4b, 0x46}, {4, 64, 0x43, 16},
-               {1, 128, 0x4b, 0x61}};
+               {1, 128, 0x4b, 0x61}, {1, 0, 0x4b, 0x41},
+               {2, 0, 0x4b, 0x40}, {4, 0, 0x43, 0}};
    for (auto c : cases) {
       p.samples = c.samples;
       p.tile_bytes = c.bytes;

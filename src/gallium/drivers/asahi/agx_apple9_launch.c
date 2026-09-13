@@ -116,7 +116,7 @@ agx_apple9_launch_build(uint8_t *out, size_t capacity,
          !pointer_fits(params->shader_base, params->state) ||
          ((params->state - params->shader_base) & 0x3f) != 0x20)) ||
        (stage == AGX_APPLE9_LAUNCH_FRAGMENT &&
-        (!params->tile_bytes || params->tile_bytes > (params->samples == 1 ? 128 : 64) ||
+        (params->tile_bytes > (params->samples == 1 ? 128 : 64) ||
          (params->samples != 1 && params->samples != 2 &&
           params->samples != 4))))
       return false;

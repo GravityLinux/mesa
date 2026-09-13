@@ -15,6 +15,7 @@
 #include "asahi/compiler/agx_apple9_profile.h"
 #include "asahi/compiler/agx_compile.h"
 #include "asahi/compiler/agx_compile_apple9.h"
+#include "agx_apple9_entries.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -92,12 +93,10 @@ struct agx_apple9_render_pipeline {
 
 };
 
-/* Per-draw resource and fixed-function inputs. Encoded allocations belong to
- * the batch; the only submission-time publication is the short entry table. */
-#define AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS 56
+/* CPU snapshot used while encoding a draw and for adjacent state reuse.
+ * Encoded allocations belong to the batch's growing pools. */
 struct agx_apple9_uniform_draw {
    uint64_t code[2];
-   uint8_t entries[2][32];
    uint32_t launch[2], ppp, coefficients;
    uint64_t program_id[2];
    uint16_t tile_bytes, cf_count;
@@ -141,16 +140,16 @@ struct agx_bo *agx_apple9_graphics_bo(struct agx_apple9_graphics *graphics);
 
 bool agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
                              struct agx_pool *context_pool,
+                             struct agx_apple9_entry_table *entries,
                              const struct agx_apple9_render_pipeline *pipeline,
                              struct agx_apple9_uniform_draw *draw,
-                             const struct agx_apple9_uniform_draw *previous,
-                             unsigned index);
+                             const struct agx_apple9_uniform_draw *previous);
 
 bool
 agx_apple9_graphics_publish(struct agx_apple9_graphics *graphics,
                             const struct agx_apple9_framebuffer *framebuffer,
-                            const struct agx_apple9_uniform_draw *draws,
-                            unsigned count, unsigned varying_components,
+                            const struct agx_apple9_entry_table *entries,
+                            unsigned varying_components,
                             const float clear_color[8][4]);
 
 #define AGX_APPLE9_COMPUTE_PACKAGE_SIZE        0x100000u
@@ -178,7 +177,8 @@ agx_apple9_graphics_publish(struct agx_apple9_graphics *graphics,
 /* Attachment-state views in the fixed USC address space. */
 #define AGX_APPLE9_RENDER_FIXED_TARGET_GRAPH_OFFSET  0x00160000u
 #define AGX_APPLE9_RENDER_TARGET_GRAPH_SOURCE_OFFSET 0x00210000u
-#define AGX_APPLE9_RENDER_ARCHIVE_HEADER_SIZE        0x0340u
+#define AGX_APPLE9_RENDER_ARCHIVE_HEADER_SIZE \
+   AGX_APPLE9_RENDER_ENTRY_HEADER_SIZE
 #define AGX_APPLE9_RENDER_BLOCK_HEADER_SIZE          0x0040u
 #define AGX_APPLE9_RENDER_CONSTANT_RESERVED_SIZE     0x0040u
 #define AGX_APPLE9_RENDER_FIRST_MAIN_OFFSET          0x03c0u
