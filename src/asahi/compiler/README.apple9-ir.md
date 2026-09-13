@@ -82,6 +82,44 @@ dependencies retain conservative completion boundaries. Atomic publication
 records stay adjacent to their producer. Tags are retired before reuse.
 The scratch frame is rounded to 16 bytes and bounded at 4 KiB per invocation.
 
+Device-load completion applies to the full result tuple, so its first consumer
+need not read every component. Compact float and extended logic consumers,
+including their scalar export forms, can retain a load operand while retiring
+its completion slot; later reads use the ordinary GPR path. Float exports expose
+a split six-bit input mask independently of their output completion tag. These
+paths fold waits into useful instructions instead of forcing identity copies.
+EXP-M4-62 records the initial native evidence and shared-RA regression tests.
+
+Device loads also consume pending element indices and pointer pairs through
+the mask at bits 12..17. The former raw-system-index flag and first-index-use
+flag were individual bits of this mask, not separate address modes. Index and
+pointer retention remain independent lifetime controls. Draw-ID and coverage
+SR encodings are explicit asynchronous producers: their current four-byte forms
+select output slot 1, which the scheduler retires before reuse and folds into
+a capable consumer. Synchronous SR forms keep their ordinary behavior.
+
+Compact float consumers can complete texture tuples through any used component,
+retaining that component and its siblings for later GPR reads. Other texture
+consumer forms still materialize, and borrowed texture-parameter inputs remain
+live until completion. EXP-M4-63 validates these address, SR and texture paths
+with authored Metal kernels, matched producer/consumer retags across all six
+load slots, source-retention controls, and native Linux shader regressions.
+
+Independent texture operations use the same six completion tags as memory
+traffic. The texture bundle's byte 5 carries matched zero-based tag fields at
+bits 2..4 and 5..7. Controlled retags of authored T8132 Metal read and filtered
+sample shaders validate tags 1–6, including multiple pending reads. The lower
+field alone also selected the expected completion; the upper field's separate
+role is not established, so the packer follows the matched native form.
+
+The physical scheduler chooses a free tag and preserves the existing result,
+coordinate-publication, register-reuse and control-flow hazards. This permits
+independent reads to overlap in the selected stream; it does not hoist reads
+across dependencies or change execution masks. Publication storage and physical
+register pressure can still require earlier handoffs. EXP-M4-66 records the
+native evidence and Linux validation. This is distinct from overlap between
+separate copy/compute commands.
+
 Set `AGX_APPLE9_STATS=1` to print packed code bytes (including the trailing stop),
 physical instruction/copy/wait counts, SAVE/FILL counts, GPR usage, and scratch
 bytes for each compiled stage. These are code-generation metrics, not timings.
@@ -103,22 +141,24 @@ inserts a short constrained copy immediately before each such store rather than
 fixing the original SSA value's entire lifetime to that register. This occurs
 before scoreboard assignment so pending-result handoffs see the final operands.
 
-## Varying commit scheduling
+## Varying publication completion
 
-Vertex varying stores are scheduled as a contiguous tail of their execution
-region, after calculations and loads. Their publication producers stay in place;
-the separate publication namespace retains those values until the stores run.
-The pass runs before dependency assignment and allocation, preserves store order,
-and never moves a store across a block boundary or execution-mask operation.
+Scalar float and logic exports produce asynchronous publication results. The
+publication index names storage; a separately allocated completion tag names
+readiness. Export bits 58..60 encode the completion slot minus one, and varying
+stores wait through the mask at bits 12..17. Completion allocation therefore
+includes publication producers, their consumers, source-register reuse, and
+block boundaries. Retiring a publication waits without treating its storage as
+a GPR result. Publication values remain available for subsequent uses.
 
-On T8132, dense indexed grids exposed intermittent missing primitives when
-varying stores were interleaved with later device loads. The same Mesa shader
-reproduced this through public Metal submission after replacing only the bounded
-main symbol in an archive compiled from authored MSL. Moving only its stores to
-the tail passed 5,000 draws; a compiler-generated version passed another 1,000.
-Native shader controls and changes to export hint bits isolated the scheduling
-change. This is an observed scheduling constraint, not a claim that the complete
-varying-store synchronization protocol is understood.
+Varying stores stay in normal instruction order. The former pass that moved all
+stores to a block tail hid a missing producer-to-store completion dependency.
+EXP-M4-61 reproduced the original Mesa shader through public Metal: no wait
+failed 57/5,000 draws; waiting on its publication slot passed 5,000. A wrong-slot
+control failed 115/5,000, while retagging both producer and consumer to that slot
+passed 5,000. Native source-authored shaders also permit position stores before
+later loads. These results establish the dependency without claiming the rest
+of the varying-store control fields are fully understood.
 
 ## Shared uses and dependency finalization
 
@@ -182,3 +222,85 @@ launcher. This is validated through normal NIR compilation and T8132 pixel
 readback; no captured instruction sequence or fixed publication assignment is
 required. Export lifetime shortening and Metal's full 31-vector interface remain
 separate work. Compiler tests cover publication exhaustion and all canonical IDs.
+
+## Native cube coordinates and integer texture reads
+
+T8132 authored-Metal tests establish three cube-coordinate operations. `CUBE`
+mode 0 returns `max(abs(x), abs(y), abs(z))` in one 32-bit GPR and the face
+index in the low 16 bits of the next GPR. The high half of that second GPR is
+not defined by the operation. X wins absolute-value ties, then Y. Modes 1 and
+2 return the signed U and V numerators multiplied by one half. Normal texture
+lowering emits these three VIR operations, a reciprocal, two FMAs with 0.5,
+and a mask of the face's low half. The destination pair and all source values
+participate in ordinary allocation and liveness. No fixed register tuple or
+captured instruction sequence is used.
+
+The 12-byte cube family has destination bits 24..30, source fields at
+41..47, 50..56, and 59..65, keep bits 48/57/66 with complementary dead bits
+73/74/75, and operation bits 90..91. The model admits the tested source range
+r0..r63 and destinations whose complete result fits r0..r63. Input dependencies
+are materialized before the instruction; folded dependencies remain unmodeled.
+521 independently constructed executions check field movement, lifetimes,
+signs, and ties, followed by normal Linux GL cube-sampling conformance tests.
+
+Integer fetches retain integer spatial coordinates through instruction
+selection. The read modes for 2D, 2D array, and 3D are respectively `80 24`,
+`a0 24`, and `98 01` in bytes 6/7, with byte 10 zero. LOD uses the existing
+Q6 field at bits 16..27, so an integer mip level is shifted by 22; array layer
+occupies the low 16 bits of that parameter. The private fetch sampler remains,
+as in the common AGX path. Texture-size queries, normalization, half-texel
+addition, and integer/float round trips are no longer part of fetch lowering.
+These contracts were checked with authored Metal texture reads, then GLES3
+fetch and fetch-offset cases in both graphics stages and all three dimensions.
+
+
+### Native multisample block stores
+
+`image_store_block_agx` with a 2D multisample destination selects the native
+MSAA block-store mode (`0x228`; the ordinary 2D mode is `0x5a8`). It exports
+all samples in the implicit tile, with the 2×/4× sample count supplied by the
+PBE descriptor. The publication is `(pixel_x, pixel_y, 0, tile_byte_offset << 16)`;
+ordinary 2D stores use `(pixel_x, pixel_y, tile_byte_offset << 16)` in the same
+four-register allocation. The zero word is part of the validated MSAA contract;
+its other potential meanings are not modeled.
+
+The MSAA publication and store have four-source encoding contracts, participate
+in ordinary allocation and liveness, and complete through the existing export
+slot handoff. Putting the offset in the third word silently exports attachment
+zero for every MRT. Eight-target half, R16F, RG16F and mixed-format tests validate
+the fourth-word offset, including reload, blending and partial tiles. No shader
+archive, runtime instruction patch, or fixed register assignment is used by Mesa.
+The end-of-tile NIR generator supplies 32×32 tiles for 2× MSAA and 32×16 for 4×.
+
+## Software transform feedback
+
+Apple9 uses the Apple8 software-capture model: assemble complete primitives,
+execute the API vertex program on the GPU, and store its captured outputs in
+ordinary buffers. `apple9_lower_xfb` imports the shared Poly line/triangle
+input-assembly helpers into NIR and lowers capture outputs to ordinary SSBO
+stores. Vertex pulling, UBOs, samplers, integer data, register allocation and
+memory completion use the normal graphics compiler. The capture variant has
+no raster varying interface and retains values before clipping/depth conversion.
+
+A compact draw parameter record supplies first vertex, index bias, base instance,
+draw ID, chunk origin and instance boundaries. Index loads and primitive
+expansion execute on the GPU. Private SSBO bindings 26–31 are possible because
+public Apple9 graphics shaders currently expose no SSBOs; this reservation must
+be revisited when that API capability is enabled. Addresses remain runtime
+resource bindings, with no fixed-register or captured-executable template.
+
+Gallium caches strides and final output ends with the shader. Direct primitive
+counts, complete-primitive bounds, append offsets and queries are maintained on
+the CPU, as in the existing direct-query path. Indexed restart is scanned and
+expanded into a u32 buffer by an ordinary compute shader using Poly topology
+helpers. Only its resulting count is read back; indirect argument decoding also
+still uses CPU readback. Internal compute shaders normalize function temporaries
+and integer division through the same NIR lowering used by graphics. Capture
+runs as a discard draw on
+a private target and ends its producer batch, allowing the ordinary resource
+tracker to order subsequent buffer consumers. Rasterization then uses the
+original draw, with Gallium primitive conversion where needed. Geometry and
+tessellation stages are not added by this vertex-stage implementation.
+
+Hardware tests and limitations are recorded in EXP-M4-67 and the workspace's
+`tools/gpu/asahi/transform-feedback` harnesses.

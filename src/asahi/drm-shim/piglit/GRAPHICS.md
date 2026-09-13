@@ -166,3 +166,13 @@ when varying stores were separated by later loads. Scheduling the commits at
 the end of their execution region passed all 6,000 draws of the development
 reproducer. The compiler test also checks that scheduling preserves store order,
 mask boundaries, and block ownership.
+
+## Texture completion handoffs
+
+`run-completion-handoff-api.sh NEW_RESULTS_DIRECTORY` exercises first consumption
+of each texture-result component, retained reuse of that component, later reads
+of its siblings, and a dependent second texture access. Five GLSL 1.20 programs
+run 100 draws each and compare every RGBA byte against a CPU oracle. These
+checks complement the shared-allocator tests for dependent load addresses and
+explicit draw-ID/coverage completion. Native Linux can build `api.c` against
+libepoxy and run it with surfaceless EGL and the intended Mesa library.

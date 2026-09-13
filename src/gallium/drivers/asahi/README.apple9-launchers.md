@@ -66,6 +66,16 @@ previous fixed-USC users before publishing the batch's entry table and
 switching graphics/compute state. Body allocations therefore remain valid
 through execution, while entry storage is reused only after retirement.
 
+Graphics batches intern compact entries by shader BO address and stage. The
+32 KiB region holds 166 entries; repeated draws share those entries while
+launch and resource records grow in the existing batch pools. There is no
+fixed draw-count limit. A draw requiring more unique entries than remain
+flushes the batch and retries with attachment reloads, without counting its
+input-assembly statistics twice. Color load/store helpers retain their own
+launch handles, and the CPU retains only the previous draw for adjacent state
+reuse. The entry table is immutable until submission and lives with the
+batch; fixed-USC publication still uses the existing retirement synchronization.
+
 Native M4 validation includes ordinary compiled bodies of 230942 bytes (VS),
 246100 bytes (FS) and 203284 bytes (CS), with input-dependent control flow and
 spills. Isolated placement controls separately executed compiler bodies at

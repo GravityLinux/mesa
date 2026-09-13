@@ -113,3 +113,45 @@ The native regression probe is
 directory's README for the validation matrix and remaining mapping-lifetime
 limitation. Linear sampling still uses staging; this change does not claim a
 validated fixed-function PBE linear export encoding.
+
+## Native-path follow-up (2026-09-11)
+
+Indexed triangles, strips, fans, lines, loops, and points now go directly to
+VDM, including native restart comparands and 8/16/32-bit indices. The index
+pointer is byte-addressed. Its extent counts dwords from the containing dword,
+so the encoder includes the pointer's low two bits before rounding. The prior
+alignment copy, byte-index widening, topology conversion, and CPU restart
+splitting are removed. Aligned u32 draws split at restart markers serve as an
+independent reference for 7,560 pixel comparisons across lengths, starts,
+fixed/custom restart values, and instancing.
+
+Mipmap generation uses the common state-tracker/util_blitter GPU path, as the
+Apple8 driver does, instead of an Apple9 CPU implementation. Zero-color
+framebuffers allocate no dummy color resource. Fragment launches accept zero
+color tile bytes, attachment records and PPP color state are empty, and
+ordinary compiled empty tile helpers terminate the background/end dispatches.
+Depth and stencil continue through their normal hardware paths. Regression
+coverage includes 108 mip levels (uploaded and GPU-written sources, nonzero
+base levels, NPOT/one-dimensional sizes, cubes, arrays) and 90 depth/stencil
+cases (clear, draw, explicit fragment depth, scissor, and multisampling).
+
+The matching compiler selects native cube-coordinate operations and integer
+texture-read messages; see `README.apple9-ir.md` in the compiler directory.
+The focused GLES3 suites pass 1,059 cases with zero failures. Twelve additional
+cube-format cases require the unadvertised sRGB R8/RG8 extensions and report
+NotSupported. This is focused regression coverage, not a new conformance claim.
+275 compiler, six launcher, and five geometry unit tests also pass.
+
+
+### Native MSAA tile export
+
+2× and 4× MSAA color exports now use native bulk stores through ordinary
+`image_store_block_agx` lowering. The instruction preserves individual samples;
+resolve remains a separate operation. The MSAA publication includes a fourth
+word for the physical tile offset, and 4× MSAA uses a 16-pixel tile height.
+MRT, mixed formats and narrow floating-point attachments follow the same path.
+Resource creation and dma-buf import enforce 16-byte mip/layer address
+alignment and representable linear strides (positive, 16-byte aligned, at most
+1 MiB). Render-format capability checks require a native bulk encoding.
+All supported color exports therefore use the bulk path; the unreachable
+byte-addressed exporter and its SSBO bindings have been removed.
