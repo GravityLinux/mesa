@@ -733,6 +733,25 @@ apple9_retire(struct agx_apple9_vir_program *out,
 }
 
 static bool
+apple9_float_consumer(enum agx_apple9_encoding encoding)
+{
+   switch (encoding) {
+   case AGX_APPLE9_ENC_FLOAT2_COMPACT:
+   case AGX_APPLE9_ENC_FLOAT2_MODIFIER_EXTENDED:
+   case AGX_APPLE9_ENC_FLOAT2_ABS_EXTENDED:
+   case AGX_APPLE9_ENC_FLOAT2_MUL_ABS_EXTENDED:
+   case AGX_APPLE9_ENC_FLOAT2_IMMEDIATE_COMPACT:
+   case AGX_APPLE9_ENC_FLOAT2_IMMEDIATE_EXTENDED:
+   case AGX_APPLE9_ENC_FLOAT3_EXTENDED:
+   case AGX_APPLE9_ENC_FLOAT3_MODIFIER_EXTENDED:
+   case AGX_APPLE9_ENC_FLOAT3_SATURATE_EXTENDED:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool
 apple9_can_fold_wait(const struct agx_apple9_vir_instr *ins,
                      const struct apple9_pending *p)
 {
@@ -753,10 +772,10 @@ apple9_can_fold_wait(const struct agx_apple9_vir_instr *ins,
     * which tuple components or later uses need the completed value. */
    if (apple9_identity(ins) && ins->src[0] == p->producer.dest)
       return true;
-   /* Texture tuple handoffs are validated here for compact float consumers,
-    * including retained non-leading components (EXP-M4-63). */
+   /* A float consumer can perform the tuple handoff directly. This includes
+    * FMA and inline operands; liveness still names only actual GPR inputs. */
    bool texture = p->producer.op == AGX_APPLE9_VIR_TEXTURE_SAMPLE;
-   if (texture && ins->encoding != AGX_APPLE9_ENC_FLOAT2_COMPACT)
+   if (texture && !apple9_float_consumer(ins->encoding))
       return false;
    /* Completion makes the producer tuple available. Keeping operands live
     * is independent of releasing its slot. These ALU and address forms encode
@@ -764,7 +783,8 @@ apple9_can_fold_wait(const struct agx_apple9_vir_instr *ins,
    bool tuple = p->producer.op == AGX_APPLE9_VIR_DEVICE_LOAD ||
                 apple9_async_sr(&p->producer) || texture;
    bool can_retain = tuple &&
-      (ins->encoding == AGX_APPLE9_ENC_FLOAT2_COMPACT ||
+      (apple9_float_consumer(ins->encoding) ||
+       ins->encoding == AGX_APPLE9_ENC_FLOAT_SPECIAL ||
        ins->encoding == AGX_APPLE9_ENC_FLOAT2_EXPORT ||
        ins->encoding == AGX_APPLE9_ENC_LOGIC_EXTENDED ||
        ins->encoding == AGX_APPLE9_ENC_LOGIC_EXPORT ||

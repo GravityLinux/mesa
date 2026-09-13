@@ -5049,9 +5049,9 @@ TEST(Apple9Compiler, ReciprocalUsesNativeHandoffAndLifetimeForms)
       uint8_t source_lifetime;
    } cases[] = {
       {APPLE9_RECIPROCAL_DIRECT_STORE, 0x56, 0x03, 0x10},
-      {APPLE9_RECIPROCAL_RETAIN_SOURCE, 0x54, 0x03, 0x00},
+      {APPLE9_RECIPROCAL_RETAIN_SOURCE, 0x56, 0x03, 0x00},
       {APPLE9_RECIPROCAL_MATERIALIZED_SOURCE, 0x54, 0x03, 0x10},
-      {APPLE9_RECIPROCAL_RESULT_FANOUT, 0x54, 0x03, 0x00},
+      {APPLE9_RECIPROCAL_RESULT_FANOUT, 0x56, 0x03, 0x00},
    };
 
    for (const auto &test : cases) {
@@ -5125,7 +5125,7 @@ TEST(Apple9Compiler, SpecialFunctionsUseAllocatedOperandsAndLifetimes)
             EXPECT_LT(p[3] >> 1, 96u);
             EXPECT_LT(p[5] >> 2, 64u);
             EXPECT_EQ(p[6], shape == 1 || op == nir_op_fsqrt ? 0x90 : 0xb0);
-            EXPECT_EQ(p[2], shape == 0 && op != nir_op_fsqrt ? 0x56 : 0x54);
+            EXPECT_EQ(p[2], shape < 2 ? 0x56 : 0x54);
          }
          EXPECT_EQ(found, 1u);
          free(compiled.binary);
