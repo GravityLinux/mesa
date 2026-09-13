@@ -279,6 +279,9 @@ struct agx_apple9_vir_instr {
    uint8_t texture_dimension;
    bool texture_shadow;
    bool texture_fetch;
+   /* Logical RGBA channels returned in ascending channel order, packed at
+    * dest. Zero retains the default RGBA selection for VIR callers. */
+   uint8_t texture_result_mask;
    /* An incoming phi use names its successor's SSA definition. This is
     * edge metadata, not a mutable register assignment before allocation. */
    uint32_t target;
@@ -467,7 +470,7 @@ uint32_t agx_apple9_vir_emit_device_load_vector(
    struct agx_apple9_vir_program *program, unsigned binding, uint32_t index,
    unsigned components, const struct agx_apple9_device_load_contract *contract);
 /* Publish an allocated FP32 coordinate pair and sample one bound 2D texture.
- * The current graphics package supplies eight coordinate publications. */
+ * Texture coordinate selectors address the first 32 publications. */
 uint32_t
 agx_apple9_vir_emit_publication_pair(struct agx_apple9_vir_program *program,
                                      const uint32_t src[2]);

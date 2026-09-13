@@ -2350,11 +2350,12 @@ retry:
                borrows_publication |= program->publication[sample->src[s]];
             if (!borrows_publication)
                continue;
-            unsigned components = sample->dest_components;
             if (!apple9_materialize_pending_result_at(program, t, t + 1, reason))
                return false;
-            for (unsigned c = 0; c < components; ++c)
-               program->instructions[t + 1 + c]->publication_handoff = true;
+            /* One result read completes the entire tuple. Keep that handoff
+             * even if its scalar result is dead; ordinary identity copies
+             * for the other components can coalesce through shared SSA. */
+            program->instructions[t + 1]->publication_handoff = true;
             goto retry;
          }
          *reason = "Apple9 allocator exhausted export publication slots";
@@ -5574,7 +5575,7 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
          unsigned base = phys[instruction->dest];
          if (instruction->nr_srcs != (gradient ? 6 : (volume || block_ms) ? 4 : 3) ||
              instruction->dest_components != (gradient ? 8 : 4) ||
-             base > (block ? 12 : gradient ? 0 : 4) || (base & 3))
+             base > (block ? 12 : gradient ? 24 : 28) || (base & 3))
             return false;
          uint8_t bytes[64];
          for (unsigned c = 0; c < (gradient ? 6 : (volume || block_ms) ? 4 : 3); ++c) {
@@ -5599,7 +5600,7 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       }
       if (instruction->encoding != AGX_APPLE9_ENC_TEXTURE_COORDS ||
           instruction->nr_srcs != 3 || instruction->dest_components != 2 ||
-          phys[instruction->dest] > 6 || (phys[instruction->dest] & 1))
+          phys[instruction->dest] > 30 || (phys[instruction->dest] & 1))
          return false;
       uint8_t bytes[16];
       for (unsigned c = 0; c < 2; ++c) {
@@ -5648,18 +5649,21 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       bool lod = instruction->encoding == AGX_APPLE9_ENC_TEXTURE_LOD;
       bool gradient = instruction->encoding == AGX_APPLE9_ENC_TEXTURE_GRAD;
       bool extended = lod || gradient;
+      unsigned mask = instruction->texture_result_mask ?
+         instruction->texture_result_mask : 0xf;
       if ((!extended && instruction->encoding != AGX_APPLE9_ENC_TEXTURE_SAMPLE) ||
-          instruction->nr_srcs != (gradient ? 1 : extended ? 4 : 2) || instruction->dest_components != 4 ||
+          instruction->nr_srcs != (gradient ? 1 : extended ? 4 : 2) ||
+          mask > 0xf || instruction->dest_components != util_bitcount(mask) ||
           instruction->texture_index >= 16 || instruction->sampler_index >= AGX_APPLE9_GRAPHICS_MAX_SAMPLERS ||
           instruction->immediate > (lod ? 1u : 0u) ||
           instruction->producer_scoreboard_slot < AGX_APPLE9_SCOREBOARD_SLOT_1 ||
           instruction->producer_scoreboard_slot > AGX_APPLE9_SCOREBOARD_SLOT_6)
          return false;
       unsigned dst = phys[instruction->dest], coord = phys[instruction->src[0]];
-      if (dst > 28 ||
-          coord > (gradient   ? 0
-                   : extended ? 4
-                              : 6) ||
+      if (dst + instruction->dest_components > 64 ||
+          coord > (gradient   ? 24
+                   : extended ? 28
+                              : 30) ||
           (coord & (extended ? 3 : 1)) ||
           (!gradient && phys[instruction->src[1]] != coord + 1) ||
           (!gradient && extended &&
@@ -5678,7 +5682,8 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
        * leave it clear until helper liveness is explicitly modeled.
        */
       uint8_t bytes[] = {
-         5 | (dst << 3), 0x80 | coord | ((texture >> 1) << 3), 0x0c, 0xb8,
+         5 | ((dst & 31) << 3), 0x80 | (coord & 7) | ((texture >> 1) << 3),
+         0x0c | ((dst >> 5) << 6), 0xb8 | (coord >> 3),
          0xb0 | (sampler >> 1), 0, 0, 0, (texture & 1) << 7,
          sampler & 1, 0x10, 0, 1, 0};
       /* Texture completion uses paired zero-based tag fields. Matching both
@@ -5722,6 +5727,17 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
          bytes[6] |= 0x20;
          bytes[10] = 0;
       }
+      /* T8132 authored read/sample probes cover all 15 nonempty masks.
+       * This four-bit selector has a permuted encoding; it is independent
+       * of the resource, sampler, coordinate, LOD and completion fields.
+       * Results are dense and ordered R, G, B, A among the selected lanes. */
+      static const uint8_t selectors[16] = {
+         0, 0, 1, 5, 2, 8, 9, 6, 3, 4, 10, 13, 11, 12, 14, 7,
+      };
+      unsigned selector = selectors[mask];
+      set_bits(bytes, 27, 2, selector & 3);
+      set_bits(bytes, 37, 1, (selector >> 2) & 1);
+      set_bits(bytes, 86, 1, selector >> 3);
       packed_init(packed, bytes, sizeof(bytes));
       return true;
    }

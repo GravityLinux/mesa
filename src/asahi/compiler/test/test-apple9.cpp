@@ -8995,14 +8995,24 @@ TEST(Apple9Packer, TextureCompletionTags)
          if (valid) {
             EXPECT_EQ(packed.length, 14u);
             EXPECT_EQ(packed.bytes[5], tags[slot - 1]);
-            for (unsigned base : {16u, 24u, 28u}) {
+            for (unsigned base : {16u, 24u, 28u, 32u, 48u, 60u}) {
                for (unsigned c = 0; c < 4; ++c)
                   phys[4 + c] = base + c;
                ASSERT_TRUE(agx_apple9_pack_vir_instruction(&ins, phys, &packed, &reason));
-               EXPECT_EQ(packed.bytes[0], 5 | (base << 3));
+               EXPECT_EQ(packed.bytes[0], 5 | ((base & 31) << 3));
+               EXPECT_EQ((packed.bytes[2] >> 6) & 1, base >> 5);
                EXPECT_EQ(packed.bytes[5], tags[slot - 1]);
             }
-            phys[4] = 29;
+            for (unsigned base : {0u, 8u, 16u, 24u}) {
+               for (unsigned c = 0; c < 4; ++c)
+                  phys[c] = base + c;
+               ASSERT_TRUE(agx_apple9_pack_vir_instruction(&ins, phys, &packed, &reason));
+               EXPECT_EQ(packed.bytes[1] & 7, base & 7);
+               EXPECT_EQ(packed.bytes[3] & 3, base >> 3);
+            }
+            for (unsigned c = 0; c < 4; ++c)
+               phys[c] = c;
+            phys[4] = 61;
             EXPECT_FALSE(agx_apple9_pack_vir_instruction(&ins, phys, &packed, &reason));
             for (unsigned c = 0; c < 4; ++c)
                phys[4 + c] = 4 + c;

@@ -22,6 +22,65 @@ protected:
    }
 };
 
+TEST(Apple9Compiler, TextureChannelSelectionReachesPackedNativeResults)
+{
+   /* Independently compiled T8132 read/sample shaders for the complete mask
+    * set. These are only the channel bits, excluding resources and LOD. */
+   const uint8_t channel3[] = {0,0xa0,0xa8,0xa8,0xb0,0xa0,0xa8,0xb0,
+                              0xb8,0xa0,0xb0,0xa8,0xb8,0xa0,0xb0,0xb8};
+   const uint8_t channel4[] = {0,0x90,0x90,0xb0,0x90,0x90,0x90,0xb0,
+                              0x90,0xb0,0x90,0xb0,0x90,0xb0,0xb0,0xb0};
+   const unsigned channel10 = BITFIELD_BIT(5) | BITFIELD_BIT(6) |
+      BITFIELD_BIT(10) | BITFIELD_BIT(11) | BITFIELD_BIT(12) |
+      BITFIELD_BIT(13) | BITFIELD_BIT(14);
+   for (unsigned mask = 1; mask < 16; ++mask) {
+      SCOPED_TRACE(mask);
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "packed_texture_%u", mask);
+      nir_tex_instr *tex = nir_tex_instr_create(b.shader, 1);
+      tex->op = nir_texop_tex;
+      tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+      tex->dest_type = nir_type_float32;
+      tex->coord_components = 2;
+      tex->texture_index = 3;
+      tex->sampler_index = 5;
+      tex->src[0].src_type = nir_tex_src_coord;
+      tex->src[0].src = nir_src_for_ssa(nir_imm_vec2(&b, .375, .625));
+      nir_def_init(&tex->instr, &tex->def, 4, 32);
+      nir_builder_instr_insert(&b, &tex->instr);
+      nir_def *result = nullptr;
+      for (unsigned c = 0; c < 4; ++c) {
+         if (!(mask & BITFIELD_BIT(c)))
+            continue;
+         auto component = nir_fmul_imm(&b, nir_channel(&b, &tex->def, c), 1 << c);
+         result = result ? nir_fadd(&b, result, component) : component;
+      }
+      nir_store_output(&b, nir_vec4(&b, result, result, result, nir_imm_float(&b, 1)),
+         nir_imm_int(&b, 0), .write_mask = 15, .src_type = nir_type_float32,
+         .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+      b.shader->info.io_lowered = true;
+      agx_shader_part compiled = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason))
+         << (reason ?: "");
+      const auto *code = static_cast<const uint8_t *>(compiled.binary);
+      unsigned samples = 0;
+      for (unsigned i = 0; i + 14 <= compiled.info.binary_size; i += 2) {
+         if ((code[i] & 7) != 5 || !(code[i + 1] & 0x80) ||
+             code[i + 2] != 0x0c || code[i + 12] != 1)
+            continue;
+         EXPECT_EQ(code[i + 3], channel3[mask]);
+         EXPECT_EQ(code[i + 4], channel4[mask]);
+         EXPECT_EQ(bool(code[i + 10] & 0x40), bool(channel10 & BITFIELD_BIT(mask)));
+         EXPECT_LE((code[i] >> 3) + util_bitcount(mask), 32u);
+         ++samples;
+      }
+      EXPECT_EQ(samples, 1u);
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
+}
+
 TEST_F(Apple9Optimization, FoldsWrappingArithmeticAndArithmeticRightShift)
 {
    auto sum = add(imm(0xffffffff), imm(2));

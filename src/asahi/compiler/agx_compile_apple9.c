@@ -1502,9 +1502,21 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
          lower->reason = "could not emit Apple9 texture sample";
          return result;
       }
-      for (unsigned c = 0; c < 4; ++c)
-         lower->ssa_to_vreg[scalar.def->index * 4 + c] = result + c;
-      value = result + scalar.comp;
+      /* Texture returns are a packed tuple, not four fixed channel slots.
+       * Preserve logical swizzles while allocating only the channels read
+       * by NIR. In particular, a .zw use returns two adjacent registers. */
+      unsigned mask = nir_def_components_read(scalar.def) & 0xf;
+      assert(mask & BITFIELD_BIT(scalar.comp));
+      struct agx_apple9_vir_instr *sample =
+         lower->program.instructions[lower->program.instruction_count - 1];
+      sample->texture_result_mask = mask;
+      sample->dest_components = util_bitcount(mask);
+      unsigned packed = 0;
+      for (unsigned c = 0; c < 4; ++c) {
+         if (mask & BITFIELD_BIT(c))
+            lower->ssa_to_vreg[scalar.def->index * 4 + c] = result + packed++;
+      }
+      value = lower->ssa_to_vreg[key];
    } else {
       struct apple9_system_source system;
       const bool subgroup_size =

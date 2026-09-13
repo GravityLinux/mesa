@@ -562,7 +562,7 @@ TEST(Apple9SharedRa, PhysicalSpillLoweringPreservesLiveSourcesAndLoopPhis)
 
 TEST(Apple9SharedRa, TexturePublicationPressurePreservesEarlyHandoffs)
 {
-   for (unsigned count : {2u, 3u, 6u}) {
+   for (unsigned count : {2u, 3u, 6u, 8u, 9u, 12u}) {
       SCOPED_TRACE(count);
       nir_builder nir = nir_builder_init_simple_shader(
          MESA_SHADER_COMPUTE, &agx_nir_options, "publication_pressure");
@@ -588,8 +588,8 @@ TEST(Apple9SharedRa, TexturePublicationPressurePreservesEarlyHandoffs)
       unsigned handoffs = 0;
       for (unsigned i = 0; i < p.instruction_count; ++i)
          handoffs += p.instructions[i]->publication_handoff;
-      EXPECT_EQ(handoffs, (count - 2) * 4);
-      EXPECT_LE(p.publication_count, 8u);
+      EXPECT_EQ(handoffs, count > 8 ? count - 8 : 0);
+      EXPECT_LE(p.publication_count, 32u);
       ASSERT_TRUE(agx_apple9_allocate_shared(&p, nir.shader, &reason)) << reason;
       unsigned retained = 0;
       for (unsigned i = 0; i < p.instruction_count; ++i)
@@ -612,8 +612,8 @@ TEST(Apple9SharedRa, PublicationHandoffStaysInProducerBlock)
    auto first = agx_apple9_vir_emit_texture_lod(&p, coords, zero, 0, 0, true);
    auto successor = agx_apple9_block_create(&p);
    agx_apple9_block_begin(&p, successor);
-   agx_apple9_vir_emit_texture_lod(&p, coords, zero, 1, 0, true);
-   agx_apple9_vir_emit_texture_lod(&p, coords, zero, 2, 0, true);
+   for (unsigned t = 1; t <= 8; ++t)
+      agx_apple9_vir_emit_texture_lod(&p, coords, zero, t, 0, true);
    p.output = first;
    const char *reason = nullptr;
    ASSERT_TRUE(agx_apple9_allocate_publications(&p, &reason)) << reason;
@@ -626,7 +626,7 @@ TEST(Apple9SharedRa, PublicationHandoffStaysInProducerBlock)
          ++copies;
       }
    }
-   EXPECT_EQ(copies, 4u);
+   EXPECT_EQ(copies, 1u);
    EXPECT_NE(p.output, first);
    agx_apple9_vir_finish(&p);
 }
