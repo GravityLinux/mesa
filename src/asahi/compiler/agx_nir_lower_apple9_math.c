@@ -6,23 +6,6 @@
 #include "compiler/nir/nir_builder.h"
 #include "agx_compile_apple9.h"
 
-/* A 32x32 -> 64 product using only the low multiply. Each intermediate
- * fits in a u32; carry propagation is explicit. */
-static nir_def *
-mul_high_constant(nir_builder *b, nir_def *x, uint32_t c)
-{
-   nir_def *lo = nir_iand_imm(b, x, 0xffff);
-   nir_def *hi = nir_ushr_imm(b, x, 16);
-   nir_def *p0 = nir_imul_imm(b, lo, c & 0xffff);
-   nir_def *p1 =
-      nir_iadd(b, nir_imul_imm(b, hi, c & 0xffff), nir_ushr_imm(b, p0, 16));
-   nir_def *p2 =
-      nir_iadd(b, nir_imul_imm(b, lo, c >> 16), nir_iand_imm(b, p1, 0xffff));
-   return nir_iadd(
-      b, nir_imul_imm(b, hi, c >> 16),
-      nir_iadd(b, nir_ushr_imm(b, p1, 16), nir_ushr_imm(b, p2, 16)));
-}
-
 static nir_def *
 select_word(nir_builder *b, nir_def **words, nir_def *index, unsigned offset)
 {
@@ -62,7 +45,7 @@ lower_sincos(nir_builder *b, nir_def *x, bool cosine)
    nir_def *product[10];
    for (unsigned i = 0; i < 8; ++i) {
       nir_def *lo = nir_imul_imm(b, mantissa, two_over_pi[i]);
-      nir_def *hi = mul_high_constant(b, mantissa, two_over_pi[i]);
+      nir_def *hi = nir_umul_high(b, mantissa, nir_imm_int(b, two_over_pi[i]));
       product[i] = nir_iadd(b, lo, carry);
       carry = nir_iadd(b, hi, nir_b2i32(b, nir_ult(b, product[i], lo)));
    }

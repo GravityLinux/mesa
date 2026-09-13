@@ -4221,7 +4221,7 @@ TEST(Apple9Compiler, SequentialAtomicReturnsUseGeneralPublicationSlots)
    ralloc_free(nir);
 }
 
-TEST(Apple9Compiler, PendingLoadMaterializesBeforeReturningAtomic)
+TEST(Apple9Compiler, PendingLoadCompletesInReturningAtomic)
 {
    nir_shader *nir = apple9_pending_load_atomic_shader(false, false);
    struct agx_shader_part compiled = {};
@@ -4230,7 +4230,7 @@ TEST(Apple9Compiler, PendingLoadMaterializesBeforeReturningAtomic)
       << (reason ? reason : "no diagnostic");
    EXPECT_EQ(apple9_binary_first_atomic_dependency(
                 &compiled, AGX_APPLE9_ATOMIC_ADD),
-             0u);
+             1u << (AGX_APPLE9_SCOREBOARD_SLOT_6 - 1));
    free(compiled.binary);
    ralloc_free(nir);
 }
@@ -4249,17 +4249,22 @@ TEST(Apple9Compiler, LiveAfterPendingAtomicOperandIsMaterializedSelectively)
    ralloc_free(nir);
 }
 
-TEST(Apple9Compiler, AtomicAndStoresConsumeMaterializedLoads)
+TEST(Apple9Compiler, AtomicAndStoresCompleteTheirPendingLoads)
 {
    nir_shader *nir = apple9_pending_load_atomic_shader(false, true);
    struct agx_shader_part compiled = {};
    const char *reason = nullptr;
    ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, nullptr, &reason))
       << (reason ? reason : "no diagnostic");
-   EXPECT_EQ(apple9_binary_first_atomic_dependency(
-                &compiled, AGX_APPLE9_ATOMIC_ADD),
-             0u);
-   EXPECT_EQ(apple9_binary_count_pending_stores(&compiled), 0u);
+   unsigned dependency = apple9_binary_first_atomic_dependency(
+      &compiled, AGX_APPLE9_ATOMIC_ADD);
+   /* Independent loads may now overlap. The atomic still directly consumes
+    * one pending completion, whose tag depends on the selected schedule. */
+   EXPECT_NE(dependency, 0u);
+   EXPECT_EQ(dependency & (dependency - 1), 0u);
+   EXPECT_LE(dependency, 1u << (AGX_APPLE9_SCOREBOARD_SLOT_6 - 1));
+   EXPECT_GE(apple9_binary_count_pending_stores(&compiled), 1u);
+   EXPECT_LE(apple9_binary_count_pending_stores(&compiled), 2u);
    free(compiled.binary);
    ralloc_free(nir);
 }

@@ -538,6 +538,12 @@ apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
       case nir_op_iadd:
       case nir_op_isub:
       case nir_op_imul:
+      case nir_op_imul_high:
+      case nir_op_umul_high:
+      case nir_op_imul_2x32_64:
+      case nir_op_umul_2x32_64:
+      case nir_op_unpack_64_2x32_split_x:
+      case nir_op_unpack_64_2x32_split_y:
       case nir_op_amul:
       case nir_op_iand:
       case nir_op_ior:
@@ -1379,8 +1385,12 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
    scalar = apple9_chase_trivial(scalar);
    if (scalar.def->bit_size == 1)
       return apple9_lower_bool_scalar(lower, scalar);
+   bool wide_product = scalar.def->bit_size == 64 &&
+      nir_def_instr_type(scalar.def) == nir_instr_type_alu &&
+      (nir_scalar_alu_op(scalar) == nir_op_imul_2x32_64 ||
+       nir_scalar_alu_op(scalar) == nir_op_umul_2x32_64);
    if ((scalar.def->bit_size != 8 && scalar.def->bit_size != 16 &&
-        scalar.def->bit_size != 32) ||
+        scalar.def->bit_size != 32 && !wide_product) ||
        scalar.comp >= 4) {
       lower->reason =
          "Apple9 DAG compiler supports 8-, 16- and 32-bit scalar components";
@@ -1903,6 +1913,27 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                encoding = AGX_APPLE9_ENC_LOGIC_EXTENDED;
             }
             value = apple9_dag_emit(lower, vir_op, encoding, sources, 2, 0);
+         } else if (op == nir_op_unpack_64_2x32_split_x ||
+                    op == nir_op_unpack_64_2x32_split_y) {
+            /* Extended multiply exposes the hardware product tuple directly.
+             * General 64-bit arithmetic remains outside this scalar backend. */
+            uint32_t product = apple9_lower_dag_source(lower, scalar, 0);
+            if (product != AGX_APPLE9_VREG_INVALID)
+               value = product + (op == nir_op_unpack_64_2x32_split_y);
+         } else if (op == nir_op_imul_high || op == nir_op_umul_high ||
+                    op == nir_op_imul_2x32_64 || op == nir_op_umul_2x32_64) {
+            uint32_t sources[] = {
+               apple9_lower_dag_source(lower, scalar, 0),
+               apple9_lower_dag_source(lower, scalar, 1),
+            };
+            if (sources[0] != AGX_APPLE9_VREG_INVALID &&
+                sources[1] != AGX_APPLE9_VREG_INVALID) {
+               uint32_t product = agx_apple9_vir_emit_mul_wide(
+                  &lower->program, sources,
+                  op == nir_op_imul_high || op == nir_op_imul_2x32_64);
+               if (product != AGX_APPLE9_VREG_INVALID)
+                  value = product + !wide_product;
+            }
          } else if (op == nir_op_imul || op == nir_op_amul) {
             uint32_t sources[3] = {
                apple9_lower_dag_source(lower, scalar, 0),
@@ -2953,7 +2984,8 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
          }
       }
       if (def == NULL || def->bit_size == 1 ||
-          (def->bit_size != 8 && def->bit_size != 16 && def->bit_size != 32))
+          (def->bit_size != 8 && def->bit_size != 16 && def->bit_size != 32 &&
+           def->bit_size != 64))
          continue;
 
       const nir_component_mask_t read = nir_def_components_read(def);
@@ -3690,6 +3722,10 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    agx_apple9_place_phis(&lower.program);
    lower.program.fragment_shader = nir->info.stage == MESA_SHADER_FRAGMENT;
 
+   if (!agx_apple9_optimize_vir(&lower.program)) {
+      *reason = "out of memory optimizing Apple9 virtual IR";
+      goto fail;
+   }
    if (!agx_apple9_allocate_shared(&lower.program, nir, reason))
       goto fail;
 
