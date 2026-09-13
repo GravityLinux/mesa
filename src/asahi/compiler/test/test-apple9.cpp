@@ -8,6 +8,7 @@
 #include "agx_compile_apple9.h"
 
 #include "compiler/nir/nir_builder.h"
+#include "compiler/nir/nir_xfb_info.h"
 #include <gtest/gtest.h>
 #include <vector>
 #include "gallium/include/pipe/p_defines.h"
@@ -9069,4 +9070,74 @@ TEST_F(Apple9Completion, TexturesShareTagsWithMemoryAndRetireOnExhaustion)
    EXPECT_EQ(samples, 2u);
    EXPECT_EQ(peak, 6u);
    EXPECT_EQ(active, 0u);
+}
+
+TEST(Apple9Compiler, TransformFeedbackUsesOrdinaryStoresAndPolyInputAssembly)
+{
+   for (auto mode : {MESA_PRIM_POINTS, MESA_PRIM_LINES, MESA_PRIM_LINE_STRIP,
+                     MESA_PRIM_LINE_LOOP, MESA_PRIM_TRIANGLES,
+                     MESA_PRIM_TRIANGLE_STRIP, MESA_PRIM_TRIANGLE_FAN}) {
+      for (unsigned index_size : {0u, 1u, 2u, 4u}) {
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_VERTEX, &agx_nir_options, "transform_feedback");
+         nir_def *zero = nir_imm_int(&b, 0);
+         nir_def *input = nir_load_input(
+            &b, 4, 32, zero, .base = 0, .dest_type = nir_type_float32,
+            .io_semantics = {.location = VERT_ATTRIB_GENERIC0, .num_slots = 1});
+         nir_store_output(
+            &b, input, zero, .write_mask = 15, .src_type = nir_type_float32,
+            .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+         nir_def *ids =
+            nir_vec2(&b, nir_load_vertex_id(&b), nir_load_instance_id(&b));
+         nir_store_output(
+            &b, ids, zero, .base = 1, .write_mask = 3,
+            .src_type = nir_type_uint32,
+            .io_semantics = {.location = VARYING_SLOT_VAR0, .num_slots = 1});
+         auto *xfb =
+            (nir_xfb_info *)rzalloc_size(b.shader, nir_xfb_info_size(2));
+         xfb->buffers_written = 5;
+         xfb->streams_written = 1;
+         xfb->output_count = 2;
+         xfb->buffers[0].stride = 32;
+         xfb->buffers[2].stride = 16;
+         xfb->outputs[0] = {.buffer = 0,
+                            .offset = 12,
+                            .location = VARYING_SLOT_POS,
+                            .component_mask = 15};
+         xfb->outputs[1] = {.buffer = 2,
+                            .offset = 8,
+                            .location = VARYING_SLOT_VAR0,
+                            .component_mask = 3};
+         b.shader->xfb_info = xfb;
+         b.shader->info.outputs_written =
+            VARYING_BIT_POS | BITFIELD64_BIT(VARYING_SLOT_VAR0);
+         b.shader->info.inputs_read = BITFIELD64_BIT(VERT_ATTRIB_GENERIC0);
+         b.shader->info.io_lowered = true;
+         agx_apple9_vertex_layout layout = {};
+         layout.capture_xfb = true;
+         layout.xfb_mode = mode;
+         layout.xfb_index_size = index_size;
+         layout.format[0] = PIPE_FORMAT_R32G32B32A32_FLOAT;
+         layout.stride[0] = 16;
+         agx_shader_part out = {};
+         const char *reason = nullptr;
+         ASSERT_TRUE(
+            agx_compile_apple9_vertex_inputs(b.shader, &layout, &out, &reason))
+            << "mode=" << mode << " indices=" << index_size << " " << reason;
+         unsigned written = 0;
+         for (unsigned i = 0; i < out.info.apple9_resource_count; ++i) {
+            if (out.info.apple9_resource_write_mask & (1u << i)) {
+               unsigned binding = out.info.apple9_resource_binding[i];
+               EXPECT_TRUE(binding == AGX_APPLE9_XFB_BUFFER_BASE ||
+                           binding == AGX_APPLE9_XFB_BUFFER_BASE + 2);
+               written |= 1u << (binding - AGX_APPLE9_XFB_BUFFER_BASE);
+               EXPECT_NE(out.info.apple9_resource_ssbo_mask & (1u << i), 0u);
+            }
+         }
+         EXPECT_EQ(written, 5u);
+         EXPECT_EQ(out.info.apple9_varyings.count, 0u);
+         free(out.binary);
+         ralloc_free(b.shader);
+      }
+   }
 }

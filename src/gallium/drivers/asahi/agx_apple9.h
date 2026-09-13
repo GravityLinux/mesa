@@ -90,6 +90,9 @@ struct agx_apple9_render_pipeline {
    uint32_t index_extent;
    uint8_t index_size;
    uint8_t primitive;
+   bool primitive_restart;
+   bool flatshade_first;
+   uint32_t restart_index;
 
 };
 

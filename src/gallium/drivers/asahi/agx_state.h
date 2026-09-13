@@ -311,6 +311,8 @@ struct agx_uncompiled_shader {
    struct hash_table *linked_shaders;
 
    uint32_t xfb_strides[4];
+   uint32_t xfb_output_end[4];
+   uint8_t xfb_buffers_written;
    bool has_xfb_info;
    bool is_xfb_passthrough;
 
@@ -699,6 +701,14 @@ struct agx_context {
    struct pipe_scissor_state scissor[AGX_MAX_VIEWPORTS];
    struct pipe_stencil_ref stencil_ref;
    struct agx_streamout streamout;
+   struct agx_uncompiled_shader *apple9_xfb_capture;
+   uint8_t apple9_xfb_mode, apple9_xfb_index_size;
+   bool apple9_xfb_flatshade_first;
+   struct pipe_resource *apple9_xfb_target;
+   struct primconvert_context *apple9_primconvert;
+   void *apple9_xfb_fs;
+   void *apple9_xfb_rasterizer;
+   void *apple9_xfb_unroll[MESA_PRIM_COUNT][3][2];
    uint16_t sample_mask;
    struct pipe_framebuffer_state framebuffer;
 
@@ -725,7 +735,6 @@ struct agx_context {
 
    struct blitter_context *blitter;
    struct agx_color_reload *color_reload;
-   struct primconvert_context *apple9_primconvert;
    struct asahi_blitter compute_blitter;
 
    /* Map of GEM handle to (batch index + 1) that (conservatively) writes that
@@ -851,6 +860,11 @@ uint64_t agx_batch_get_so_address(struct agx_batch *batch, unsigned buffer,
                                   uint32_t *size);
 
 void agx_init_streamout_functions(struct pipe_context *ctx);
+void agx_apple9_capture_streamout(struct pipe_context *pctx,
+                                const struct pipe_draw_info *info,
+                                unsigned drawid,
+                                const struct pipe_draw_start_count_bias *draw);
+void agx_cleanup_streamout(struct pipe_context *pctx);
 
 static inline void
 agx_dirty_all(struct agx_context *ctx)

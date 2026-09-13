@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "agx_state.h"
+#include "indices/u_primconvert.h"
 #include <errno.h>
 #include <stdio.h>
 #include <stdatomic.h>
@@ -32,7 +33,6 @@ static _Atomic uint64_t apple9_program_serial;
 #include "gallium/auxiliary/util/u_draw.h"
 #include "gallium/auxiliary/util/u_framebuffer.h"
 #include "gallium/auxiliary/util/u_helpers.h"
-#include "gallium/auxiliary/util/u_prim_restart.h"
 #include "gallium/auxiliary/util/u_viewport.h"
 #include "pipe/p_context.h"
 #include "pipe/p_defines.h"
@@ -57,7 +57,6 @@ static _Atomic uint64_t apple9_program_serial;
 #include "util/u_transfer.h"
 #include "util/u_upload_mgr.h"
 #include "agx_apple9.h"
-#include "indices/u_primconvert.h"
 #include "agx_bg_eot.h"
 #include "agx_bo.h"
 #include "agx_device.h"
@@ -1558,6 +1557,8 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       nir_shader *bootstrap =
          nir_deserialize(NULL, &agx_nir_options, &bootstrap_reader);
       bool supported = agx_apple9_bounded_render_signature(bootstrap);
+      if (so->type == MESA_SHADER_VERTEX && key_->vs.apple9_inputs.capture_xfb)
+         supported = true;
       if (!supported) {
          fprintf(stderr,
                  "Apple9 bootstrap render compiler rejected unsupported "
@@ -2139,6 +2140,13 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
 
    if (so->has_xfb_info) {
       struct nir_xfb_info *xfb = nir->xfb_info;
+      so->xfb_buffers_written = xfb->buffers_written;
+      for (unsigned i = 0; i < xfb->output_count; ++i) {
+         const nir_xfb_output_info *out = &xfb->outputs[i];
+         so->xfb_output_end[out->buffer] =
+            MAX2(so->xfb_output_end[out->buffer],
+                 out->offset + 4 * util_bitcount(out->component_mask));
+      }
 
       for (unsigned i = 0; i < ARRAY_SIZE(so->xfb_strides); ++i) {
          so->xfb_strides[i] = xfb->buffers[i].stride;
@@ -2511,8 +2519,20 @@ agx_update_vs(struct agx_batch *batch, unsigned index_size_B)
    if (agx_apple9_direct_render_enabled(agx_device(ctx->base.screen))) {
       agx_apple9_sampler_key(&ctx->stage[MESA_SHADER_VERTEX],
                              key.apple9_samplers);
-      key.apple9_inputs.clip_halfz = !ctx->rast->base.clip_halfz;
-      key.apple9_inputs.ignore_point_size = batch->reduced_prim != MESA_PRIM_POINTS;
+      key.apple9_inputs.capture_xfb =
+         ctx->apple9_xfb_capture &&
+         ctx->apple9_xfb_capture == ctx->stage[MESA_SHADER_VERTEX].shader;
+      if (key.apple9_inputs.capture_xfb) {
+         key.apple9_inputs.xfb_mode = ctx->apple9_xfb_mode;
+         key.apple9_inputs.xfb_index_size = ctx->apple9_xfb_index_size;
+         key.apple9_inputs.xfb_flatshade_first =
+            ctx->apple9_xfb_flatshade_first;
+      }
+      key.apple9_inputs.clip_halfz =
+         !key.apple9_inputs.capture_xfb && !ctx->rast->base.clip_halfz;
+      key.apple9_inputs.ignore_point_size =
+         !key.apple9_inputs.capture_xfb &&
+         batch->reduced_prim != MESA_PRIM_POINTS;
       bool compact_resources = false;
 retry_apple9_inputs:
       for (unsigned i = 0; i < MIN2(ctx->attributes->num_attribs, 16); ++i) {
@@ -4833,7 +4853,8 @@ agx_needs_passthrough_gs(struct agx_context *ctx,
       ctx->stage[MESA_SHADER_TESS_EVAL].shader
          ?: ctx->stage[MESA_SHADER_VERTEX].shader;
 
-   if (last_vtx->has_xfb_info && ctx->streamout.num_targets) {
+   if (last_vtx->has_xfb_info && ctx->streamout.num_targets &&
+       !agx_apple9_direct_render_enabled(agx_device(ctx->base.screen))) {
       *xfb_only = true;
       return true;
    }
@@ -5538,37 +5559,6 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
              const struct pipe_draw_start_count_bias *draws, unsigned num_draws)
 {
    struct agx_context *ctx = agx_context(pctx);
-   if (agx_apple9_direct_render_enabled(agx_device(pctx->screen)) &&
-       info->primitive_restart) {
-      /* Split at restart indices before converting primitive topology. The
-       * source-generated direct VDM stream currently emits restart-free draws. */
-      if (num_draws > 1)
-         util_draw_multi(pctx, info, drawid_offset, indirect, draws, num_draws);
-      else
-         util_draw_vbo_without_prim_restart(pctx, info, drawid_offset, indirect,
-                                           draws);
-      return;
-   }
-   if (agx_apple9_direct_render_enabled(agx_device(pctx->screen)) &&
-       /* Widen byte indices here, after splitting restart segments. Letting
-        * u_vbuf widen first loses the original restart-marker contract. */
-       (info->index_size == 1 ||
-        info->mode == MESA_PRIM_TRIANGLE_FAN ||
-        info->mode == MESA_PRIM_TRIANGLE_STRIP)) {
-      if (!ctx->apple9_primconvert)
-         ctx->apple9_primconvert =
-            util_primconvert_create(pctx, BITFIELD_BIT(MESA_PRIM_POINTS) |
-               BITFIELD_BIT(MESA_PRIM_LINES) | BITFIELD_BIT(MESA_PRIM_LINE_STRIP) |
-               BITFIELD_BIT(MESA_PRIM_LINE_LOOP) | BITFIELD_BIT(MESA_PRIM_TRIANGLES));
-      if (!ctx->apple9_primconvert)
-         abort();
-      util_primconvert_save_flatshade_first(
-         ctx->apple9_primconvert, ctx->rast->base.flatshade_first);
-      util_primconvert_draw_vbo(ctx->apple9_primconvert, info, drawid_offset,
-                                indirect, draws, num_draws);
-      return;
-   }
-
    struct agx_device *dev = agx_device(pctx->screen);
    struct agx_screen *screen = agx_screen(pctx->screen);
 
@@ -5577,30 +5567,6 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
 
    if (num_draws > 1) {
       util_draw_multi(pctx, info, drawid_offset, indirect, draws, num_draws);
-      return;
-   }
-
-   /* The native indexed packet fetches from a dword-aligned address, even
-    * for 16-bit indices. Re-upload an unaligned range through the existing
-    * user-index path before acquiring a batch: mapping may flush a writer.
-    * Aligned index buffers keep the direct GPU path. */
-   if (agx_apple9_direct_render_enabled(dev) && !indirect &&
-       info->index_size && !info->has_user_indices && draws->count &&
-       ((agx_map_gpu(agx_resource(info->index.resource)) +
-         (uint64_t)draws->start * info->index_size) & 3)) {
-      struct pipe_transfer *transfer = NULL;
-      void *indices = pipe_buffer_map_range(
-         pctx, info->index.resource, draws->start * info->index_size,
-         draws->count * info->index_size, PIPE_MAP_READ, &transfer);
-      if (!indices)
-         return;
-      struct pipe_draw_info aligned_info = *info;
-      struct pipe_draw_start_count_bias aligned_draw = *draws;
-      aligned_info.has_user_indices = true;
-      aligned_info.index.user = indices;
-      aligned_draw.start = 0;
-      agx_draw_vbo(pctx, &aligned_info, drawid_offset, NULL, &aligned_draw, 1);
-      pipe_buffer_unmap(pctx, transfer);
       return;
    }
 
@@ -5631,6 +5597,57 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
    if (indirect && info->mode == MESA_PRIM_PATCHES && info->index_size) {
       perf_debug_ctx(ctx, "indexed indirect with tess");
       util_draw_indirect(pctx, info, drawid_offset, indirect);
+      return;
+   }
+
+   if (agx_apple9_direct_render_enabled(dev) && !ctx->apple9_xfb_capture &&
+       ctx->streamout.num_targets &&
+       ctx->stage[MESA_SHADER_VERTEX].shader->has_xfb_info) {
+      if (indirect) {
+         util_draw_indirect(pctx, info, drawid_offset, indirect);
+         return;
+      }
+      agx_apple9_capture_streamout(pctx, info, drawid_offset, draws);
+      if (ctx->rast->base.rasterizer_discard)
+         return;
+   }
+
+   const unsigned apple9_native_prims =
+      BITFIELD_BIT(MESA_PRIM_POINTS) | BITFIELD_BIT(MESA_PRIM_LINES) |
+      BITFIELD_BIT(MESA_PRIM_LINE_STRIP) | BITFIELD_BIT(MESA_PRIM_LINE_LOOP) |
+      BITFIELD_BIT(MESA_PRIM_TRIANGLES) |
+      BITFIELD_BIT(MESA_PRIM_TRIANGLE_STRIP) |
+      BITFIELD_BIT(MESA_PRIM_TRIANGLE_FAN);
+   /* The common path needs GS lowering for first-provoking-vertex fans.
+    * Preserve primitive conversion for that desktop GL case on Apple9. */
+   bool apple9_fan_first = info->mode == MESA_PRIM_TRIANGLE_FAN &&
+      ctx->rast->base.flatshade_first &&
+      ctx->stage[MESA_SHADER_FRAGMENT].shader->info.inputs_flat_shaded;
+   if (agx_apple9_direct_render_enabled(dev) &&
+       (!(apple9_native_prims & BITFIELD_BIT(info->mode)) || apple9_fan_first)) {
+      if (!ctx->apple9_primconvert) {
+         struct primconvert_config config = {
+            /* Restart segments are concatenated by primconvert, so its
+             * output must consist of independent primitives. */
+            .primtypes_mask = BITFIELD_BIT(MESA_PRIM_POINTS) |
+                              BITFIELD_BIT(MESA_PRIM_LINES) |
+                              BITFIELD_BIT(MESA_PRIM_TRIANGLES),
+            .restart_primtypes_mask = 0,
+         };
+         ctx->apple9_primconvert =
+            util_primconvert_create_config(pctx, &config);
+         if (!ctx->apple9_primconvert)
+            return;
+      }
+      util_primconvert_save_rasterizer_state(ctx->apple9_primconvert,
+                                             &ctx->rast->base);
+      /* Capture consumed the original primitive order above. Conversion is
+       * solely for rasterization and must not capture the expanded draw again. */
+      unsigned saved_targets = ctx->streamout.num_targets;
+      ctx->streamout.num_targets = 0;
+      util_primconvert_draw_vbo(ctx->apple9_primconvert, info, drawid_offset,
+                                indirect, draws, num_draws);
+      ctx->streamout.num_targets = saved_targets;
       return;
    }
 
@@ -5963,17 +5980,13 @@ retry_batch:;
    uint8_t *out;
 
    if (agx_apple9_direct_render_enabled(dev)) {
-      /*
-       * Keep the first Apple9 path deliberately strict.  It is a real Mesa
-       * command stream, but unsupported state must not be silently encoded as
-       * the older packet ABI.  General indexed/indirect/multidraw lowering is
-       * added as each Apple9 packet is understood.
-       */
+      /* Apple9 encodes all GLES primitive modes and index widths directly,
+       * including restart. Indirect draws are lowered before this point. */
       assert(!ctx->gs && !ctx->in_tess);
-      assert(!indirect && !info->primitive_restart);
-      assert(!info->index_size || info->index_size == 2 || info->index_size == 4);
-      assert(info->mode == MESA_PRIM_POINTS || info->mode == MESA_PRIM_TRIANGLES || info->mode == MESA_PRIM_LINES ||
-             info->mode == MESA_PRIM_LINE_STRIP || info->mode == MESA_PRIM_LINE_LOOP);
+      assert(!indirect);
+      assert(!info->index_size || info->index_size == 1 ||
+             info->index_size == 2 || info->index_size == 4);
+      assert(apple9_native_prims & BITFIELD_BIT(info->mode));
       assert(draws->count > 0 && info->instance_count > 0);
 
       struct agx_apple9_render_pipeline pipeline;
@@ -6394,7 +6407,10 @@ retry_batch:;
                PIPE_TEX_WRAP_CLAMP_TO_EDGE, PIPE_TEX_WRAP_CLAMP_TO_EDGE, 1);
          }
       }
+      pipeline.flatshade_first = ctx->rast->base.flatshade_first;
       pipeline.index_size = info->index_size;
+      pipeline.primitive_restart = info->primitive_restart;
+      pipeline.restart_index = info->primitive_restart ? info->restart_index : 0;
       pipeline.primitive = agx_primitive_for_pipe(info->mode);
       pipeline.index_buffer = ib;
       pipeline.index_extent =

@@ -235,14 +235,32 @@ bool agx_apple9_vertex_format_supported(enum pipe_format format);
 /* Vertex pulling uses ordinary typed buffer loads in the API main. Buffer
  * addresses remain draw state; format, stride and attribute offset specialize
  * the fetch. Multiple attributes sharing a binding use one resource argument. */
+/* Private bindings for the software transform-feedback vertex job. Public
+ * Apple9 vertex shaders do not expose SSBOs; these use the normal resource ABI.
+ */
+#define AGX_APPLE9_XFB_PARAMS      26
+#define AGX_APPLE9_XFB_BUFFER_BASE 27
+#define AGX_APPLE9_XFB_INDICES     31
+
+struct agx_apple9_xfb_params {
+   uint32_t first_vertex, index_bias, base_instance, draw_id;
+   uint32_t first_capture, vertices_per_instance, instance_bias, reserved;
+};
+
 struct agx_apple9_vertex_layout {
    uint32_t stride[16];
    uint32_t divisor[16]; /* Zero selects the per-vertex stream. */
-   bool clip_halfz;
-   bool ignore_point_size; /* Valid only when rasterizing non-point primitives. */ /* Convert GL [-w,w] depth to hardware [0,w]. */
+   bool clip_halfz;      /* Convert GL [-w,w] depth to hardware [0,w]. */
+   bool capture_xfb;
+   uint8_t xfb_mode;
+   uint8_t xfb_index_size;
+   bool xfb_flatshade_first;
+   bool
+      ignore_point_size; /* Valid only when rasterizing non-point primitives. */
    enum pipe_format format[16];
    uint32_t offset[16]; /* Attribute byte offset within its vertex buffer. */
-   uint8_t buffer[16]; /* Gallium vertex-buffer binding, independent of location. */
+   uint8_t
+      buffer[16]; /* Gallium vertex-buffer binding, independent of location. */
 };
 
 bool agx_compile_apple9_vertex_inputs(

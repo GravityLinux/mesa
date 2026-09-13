@@ -1647,9 +1647,10 @@ agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
    if (draw->disable_tri_merging ||
        draw->object_type != AGX_OBJECT_TYPE_TRIANGLE)
       apple9_put_u32(group + 0x50, apple9_get_u32(group + 0x50) | (1u << 26));
-   /* Native raster packet: cull front/back bits0/1, front winding bit16.
-    * Preserve the independently configured clipping/provoking fields. */
-   apple9_put_u32(group + 0x70, (apple9_get_u32(group + 0x70) & ~0x30003u) |
+   /* Native raster packet: cull front/back bits 0/1, provoking vertex
+    * bits 7/8, front winding bit 16. Preserve the clipping fields. */
+   apple9_put_u32(group + 0x70, (apple9_get_u32(group + 0x70) & ~0x30183u) |
+                                   ((draw->flatshade_first ? 1u : 3u) << 7) |
                                    draw->raster_control);
    apple9_put_u32(group + 0x50, apple9_get_u32(group + 0x50) |
                                    (draw->visibility_mode << 14) |
@@ -1795,9 +1796,9 @@ agx_apple9_emit_direct_draw(uint8_t *out,
       pipeline->pipeline_word,
       pipeline->vertex_launch,
       pipeline->vertex_state_class,
-      0x00000000,
-      0x00000000,
-      0x00000500,
+      pipeline->flatshade_first ? 0u : 2u, /* VDM provoking vertex */
+      0x00000000, /* VDM padding */
+      0x00000500, /* first PPP state update header */
    };
    memcpy(out, header, sizeof(header));
    out += sizeof(header);
@@ -1813,24 +1814,28 @@ agx_apple9_emit_direct_draw(uint8_t *out,
    apple9_put_u32(out, pipeline->ppp + 0xf0);
    out += 4;
    if (pipeline->index_size) {
-      assert(pipeline->index_size == 2 || pipeline->index_size == 4);
+      assert(pipeline->index_size == 1 || pipeline->index_size == 2 ||
+             pipeline->index_size == 4);
       assert(pipeline->index_buffer >= (1ull << 40) &&
              pipeline->index_buffer < (1ull << 40) + (1ull << 32));
-      assert(!(pipeline->index_buffer & 3));
       assert(pipeline->index_extent);
-      /* M4 CMD-4 and native EXP-M4-58: indices use a 32-bit offset
-       * into the fixed USC aperture. Extent is a dword count minus one. */
+      /* Indices use a byte address relative to the USC aperture. The range
+       * is measured from its containing dword, so include the leading bytes
+       * before rounding. This preserves byte/halfword starts without copies.
+       * Bit 16 enables restart independently of the primitive topology. */
       uint32_t draw[] = {
-         0x40000001, /* publish restart comparand (restart disabled below) */
-         pipeline->index_size == 2 ? 0xffff : 0xffffffff,
-         (pipeline->index_size == 2 ? 0x61f20000 : 0x61f40000) |
-            (pipeline->primitive << 8),
+         0x40000001, /* publish the draw's restart comparand */
+         pipeline->restart_index,
+         (0x61f00000 | (util_logbase2(pipeline->index_size) << 17)) |
+            (pipeline->primitive << 8) |
+            (pipeline->primitive_restart ? (1u << 16) : 0),
          (uint32_t)pipeline->index_buffer,
          vertex_count,
          instance_count,
          vertex_start, /* signed baseVertex, represented in two's complement */
-         DIV_ROUND_UP(pipeline->index_extent, 4) - 1,
-         1, /* indexed tail word, shared by the measured u16/u32 forms */
+         DIV_ROUND_UP(pipeline->index_extent +
+                      (pipeline->index_buffer & 3), 4) - 1,
+         1, /* indexed tail word, shared by the measured u8/u16/u32 forms */
          0xc0000000,
       };
       memcpy(out, draw, sizeof(draw));

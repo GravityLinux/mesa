@@ -46,7 +46,6 @@
 #include "util/xmlconfig.h"
 #include "agx_bg_eot.h"
 #include "agx_apple9.h"
-#include "indices/u_primconvert.h"
 #include "agx_bo.h"
 #include "agx_device.h"
 #include "agx_disk_cache.h"
@@ -1912,12 +1911,11 @@ agx_destroy_context(struct pipe_context *pctx)
 
    if (ctx->blitter)
       util_blitter_destroy(ctx->blitter);
-   if (ctx->apple9_primconvert)
-      util_primconvert_destroy(ctx->apple9_primconvert);
 
    util_unreference_framebuffer_state(&ctx->framebuffer);
 
    agx_bg_eot_cleanup(&ctx->bg_eot);
+   agx_cleanup_streamout(pctx);
    agx_destroy_meta_shaders(ctx);
    agx_destroy_color_reload(ctx);
 

@@ -11,6 +11,8 @@
 #include "compiler/nir/nir_builder.h"
 #include "compiler/nir/nir_builtin_builder.h"
 #include "compiler/nir/nir_lower_blend.h"
+#include "compiler/nir/nir_xfb_info.h"
+#include "poly/cl/libpoly.h"
 #include "compiler/nir/nir_format_convert.h"
 #include "util/format/u_format.h"
 #include "util/u_dynarray.h"
@@ -4662,6 +4664,120 @@ agx_apple9_vertex_format_supported(enum pipe_format format)
    return true;
 }
 
+/* The capture job is an ordinary vertex program over the decomposed stream.
+ * Poly's GPU input assembly preserves API vertex/instance identities, including
+ * duplicate indexed and strip vertices, independently of the hardware cache. */
+struct apple9_xfb_lower {
+   nir_def *raw_id;
+   nir_def *vertex, *instance, *base_instance, *draw_id;
+};
+
+static bool
+apple9_lower_xfb_intrinsic(nir_builder *b, nir_intrinsic_instr *intr,
+                           void *data)
+{
+   struct apple9_xfb_lower *lower = data;
+   nir_def *replacement = NULL;
+   switch (intr->intrinsic) {
+   case nir_intrinsic_load_vertex_id:
+   case nir_intrinsic_load_vertex_id_zero_base:
+      if (&intr->def != lower->raw_id)
+         replacement = lower->vertex;
+      break;
+   case nir_intrinsic_load_instance_id:
+      replacement = lower->instance;
+      break;
+   case nir_intrinsic_load_base_instance:
+      replacement = lower->base_instance;
+      break;
+   case nir_intrinsic_load_draw_id:
+      replacement = lower->draw_id;
+      break;
+   default:
+      break;
+   }
+   if (replacement) {
+      nir_def_replace(&intr->def, replacement);
+      return true;
+   }
+   if (intr->intrinsic != nir_intrinsic_store_output)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_io_xfb xfb = nir_intrinsic_io_xfb(intr);
+   for (unsigned c = 0; c < 4; ++c) {
+      if (!xfb.out[c].num_components)
+         continue;
+      unsigned buffer = xfb.out[c].buffer;
+      unsigned stride = b->shader->info.xfb_stride[buffer] * 4;
+      nir_component_mask_t mask = nir_component_mask(xfb.out[c].num_components);
+      mask = (mask << c) >> nir_intrinsic_component(intr);
+      nir_def *value = nir_channels(b, intr->src[0].ssa, mask);
+      nir_def *offset = nir_iadd_imm(b, nir_imul_imm(b, lower->raw_id, stride),
+                                     xfb.out[c].offset * 4);
+      nir_store_ssbo(b, value,
+                     nir_imm_int(b, AGX_APPLE9_XFB_BUFFER_BASE + buffer),
+                     offset, .align_mul = 4,
+                     .write_mask = nir_component_mask(value->num_components));
+   }
+   /* Capture precedes clipping and rasterization. The capture-only pass has
+    * no raster outputs, irrespective of the API program's varying interface. */
+   nir_instr_remove(&intr->instr);
+   return true;
+}
+
+static void
+apple9_lower_xfb(nir_shader *nir, const struct agx_apple9_vertex_layout *layout)
+{
+   nir_io_add_intrinsic_xfb_info(nir);
+   nir_builder b =
+      nir_builder_at(nir_before_impl(nir_shader_get_entrypoint(nir)));
+   struct apple9_xfb_lower lower = {0};
+   lower.raw_id = nir_load_vertex_id_zero_base(&b);
+   nir_def *params[8];
+   for (unsigned i = 0; i < ARRAY_SIZE(params); ++i)
+      params[i] =
+         nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, AGX_APPLE9_XFB_PARAMS),
+                       nir_imm_int(&b, i * 4), .align_mul = 4,
+                       .access = ACCESS_NON_WRITEABLE);
+   unsigned vertices = mesa_vertices_per_prim(layout->xfb_mode);
+   nir_def *logical = nir_iadd(&b, lower.raw_id, params[4]);
+   nir_def *instance = nir_udiv(&b, logical, params[5]);
+   nir_def *within = nir_umod(&b, logical, params[5]);
+   nir_def *prim = nir_udiv_imm(&b, within, vertices);
+   nir_def *vert = nir_umod_imm(&b, within, vertices);
+   nir_def *mode = nir_imm_int(&b, layout->xfb_mode);
+   nir_def *id = within;
+   if (vertices == 2)
+      id = poly_vertex_id_for_line_class(&b, mode, prim, vert,
+                                         nir_udiv_imm(&b, params[5], vertices));
+   else if (vertices == 3)
+      id = poly_vertex_id_for_tri_class(
+         &b, mode, prim, vert, nir_imm_bool(&b, layout->xfb_flatshade_first));
+   id = nir_iadd(&b, id, params[0]);
+   if (layout->xfb_index_size) {
+      id = nir_load_ssbo(&b, 1, layout->xfb_index_size * 8,
+                         nir_imm_int(&b, AGX_APPLE9_XFB_INDICES),
+                         nir_imul_imm(&b, id, layout->xfb_index_size),
+                         .align_mul = layout->xfb_index_size,
+                         .access = ACCESS_NON_WRITEABLE);
+      id = nir_iadd(&b, nir_u2u32(&b, id), params[1]);
+   }
+   lower.vertex = id;
+   lower.instance = nir_iadd(&b, instance, params[6]);
+   lower.base_instance = params[2];
+   lower.draw_id = params[3];
+   nir_shader_intrinsics_pass(nir, apple9_lower_xfb_intrinsic,
+                              nir_metadata_control_flow, &lower);
+   b.cursor = nir_after_impl(nir_shader_get_entrypoint(nir));
+   nir_store_output(
+      &b, nir_imm_vec4(&b, 0, 0, 0, 1), nir_imm_int(&b, 0), .write_mask = 15,
+      .src_type = nir_type_float32,
+      .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+   nir->info.outputs_written = BITFIELD64_BIT(VARYING_SLOT_POS);
+   nir->xfb_info = NULL;
+}
+
 struct apple9_vertex_lower {
    const struct agx_apple9_vertex_layout *layout;
    bool valid;
@@ -4704,6 +4820,8 @@ apple9_lower_vertex_input(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    unsigned divisor = lower->layout->divisor[attribute];
    nir_def *index = divisor ? nir_udiv_imm(b, nir_load_instance_id(b), divisor)
                             : nir_load_vertex_id(b);
+   if (divisor && lower->layout->capture_xfb)
+      index = nir_iadd(b, index, nir_load_base_instance(b));
    nir_def *offset = nir_iadd_imm(b,
       nir_imul_imm(b, index, lower->layout->stride[attribute]),
       lower->layout->offset[attribute]);
@@ -4977,6 +5095,8 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
          *reason = "Apple9 vertex inputs require supported naturally aligned formats";
          return false;
       }
+      if (layout && layout->capture_xfb)
+         apple9_lower_xfb(nir, layout);
    }
    /* Use the same structured mask/loop model as compute. Continuations become
     * masked regions with one backedge before instruction selection. */
