@@ -56,9 +56,12 @@ for standalone encoding/IR fixtures; production NIR compilation does not call it
 `agx_ra_target` supplies target limits in 16-bit units without changing Apple7/8
 zero-default behavior. Apple9 reserves two full registers (r0-r1), increasing to
 four (r0-r3) when spill/parallel-copy scratch temporaries are required. Ordinary
-values can occupy the remaining registers through r63. Instruction-local
+values can occupy the remaining registers through r95. Instruction-local
 constraints describe each operand's legal range, alignment, fixed register,
-and destructive-input behavior. The shared allocator places operands in their
+and destructive-input behavior. Register-demand calculation includes the
+minimum physical extent of those constraints, so rematerialization cannot
+shrink the register file below an operand’s required bank. The shared allocator
+places operands in their
 legal banks and relocates live occupants with a parallel copy when necessary;
 there is no post-allocation bank-repair sequence.
 
@@ -70,9 +73,26 @@ instruction's destination cannot unexpectedly overwrite its inputs. Shared
 SSA kill information supplies Apple9 source-release bits. Pure opaque operations
 can be removed when dead, and redundant identity copies are eliminated.
 
+Most arithmetic, conversion, special-function, comparison, device-memory,
+interpolation, tile, and export-source forms address r0..r95. Wide unary source
+fields cross byte 5 into instruction bit 48; that register bit is independent
+of source lifetime. Select destinations use bits 4..7, 22..23, and 60.
+System-register reads and their narrow zero-extension companion instead have
+six-bit destinations at bits 4..7 and 22..23. Atomic result records add bit 60
+to that destination map. The shader allocator applies the result-record
+constraint to the returning atomic definition.
+
+Texture result tuples have a five-bit base at instruction bits 3..7 and must
+fit through r31. Texture coordinates and depth/export publications use their
+own namespaces and retain their separate limits. Perspective-coefficient
+multiply still has a six-bit GPR model: its coefficient index occupies the
+ordinary compact ALU high-register fields.
+
 After allocation, Apple9 lowers physical MOV/SWAP and memory moves. A SAVE
 releases its data register, so a live allocated value is copied to the reserved
-copy temporary first. FILL retains the scratch word for later uses and loop
+copy temporary first. A rematerialized literal destined above r63 also uses
+that temporary followed by a full-register copy, since the long immediate
+form has only six destination bits. FILL retains the scratch word for later uses and loop
 iterations. The physical completion scheduler tracks pending operations and
 places waits at consumers or hazards, folding a wait into a suitable consumer
 when its operand lifetime permits. It also accounts for register overwrites,
@@ -238,7 +258,7 @@ captured instruction sequence is used.
 The 12-byte cube family has destination bits 24..30, source fields at
 41..47, 50..56, and 59..65, keep bits 48/57/66 with complementary dead bits
 73/74/75, and operation bits 90..91. The model admits the tested source range
-r0..r63 and destinations whose complete result fits r0..r63. Input dependencies
+r0..r95 and destinations whose complete result fits r0..r95. Input dependencies
 are materialized before the instruction; folded dependencies remain unmodeled.
 521 independently constructed executions check field movement, lifetimes,
 signs, and ties, followed by normal Linux GL cube-sampling conformance tests.
@@ -304,3 +324,93 @@ tessellation stages are not added by this vertex-stage implementation.
 
 Hardware tests and limitations are recorded in EXP-M4-67 and the workspace's
 `tools/gpu/asahi/transform-feedback` harnesses.
+
+## Optimization and allocation policy
+
+Apple9 runs constant-division optimization before general division lowering,
+then memory vectorization with NIR's alignment and aliasing checks. Late
+algebraic optimization, scalar packing legalization, profitable if-conversion,
+and cleanup run for every shader. Selection fuses multiply/add and comparisons
+feeding selects. The backend's own pure SSA expressions receive wrapping
+integer folding, CSE, exact minifloat selection, and floating source-modifier
+selection before shared allocation. CSE ends at block/mask boundaries and
+uniform-window writes. Buffer contents are never treated as pure expressions;
+only immutable graphics binding-table addresses are reused within a block.
+
+The T8132 occupancy table remains unmeasured. Apple9 does not use the older
+GPU's occupancy/rematerialization thresholds. Shared allocation considers
+operand-bank scarcity and completed physical candidates: baseline placement,
+constraint-aware placement, and resource/latency scheduling. Selection compares
+loop-weighted spills, instructions, bytes, register extent, then estimated
+unhidden dependencies. A larger pressure reduction cannot justify a worse
+completed stream under this cost ordering. The latency priorities are relative
+heuristics, not measured instruction-cycle counts.
+
+The scheduler tracks execution state, device memory, publications,
+interpolation state, and tile state. A write follows every preceding reader of
+the same resource, while independent reads can overlap. Unmodeled stateful
+operations remain barriers. PHI/PRELOAD instructions retain their block-entry
+invariant before target resource dependencies are applied. Physical completion
+tracking still runs after allocation and resolves actual register and tag
+hazards introduced by copies and spills.
+
+## Native arithmetic forms
+
+A 32-by-32 multiply can produce an aligned two-register 64-bit result. Signed
+and unsigned forms share the low word and have distinct high-word semantics.
+NIR high-multiply and extended multiply/unpack operations select this tuple;
+ordinary unsupported 64-bit arithmetic is not implied.
+
+Arithmetic and logical shifts have native register and immediate forms.
+Register amounts use a low-16-bit hardware amount with saturation beyond the
+32-bit data width. NIR's modulo-32 semantics therefore require an explicit
+low-five-bit mask unless already established by the source expression.
+Source-retention fields are part of each shift family's contract.
+
+Binary16 conversion uses native half writes and half reads. Two half writes
+form a complete 32-bit packed value; a lone half result has an explicit high
+half zero-extension companion whose destination is limited to r63. Half-pair
+packing and unpacking otherwise address the full validated GPR file.
+
+Float abs/neg modifiers compose on the source values, before arithmetic. The
+absolute-value FADD form is ten bytes and the FMUL form is twelve bytes.
+Product negation and addend modifiers are independent in FMA. Inline constants
+use only exactly representable minifloats; zero, NaN, infinity, and source
+lifetime behavior are not approximated to fit an encoding.
+
+## Uniform preambles
+
+The ordinary NIR path extracts eligible uniform UBO expressions into a linear
+setup function. Boolean and half intermediates may move with an expression;
+transferred results are 32-bit words. The full resource map is fixed before
+extraction and shared by setup and main, including resources used only in the
+preamble. Unused vector components are trimmed before assigning uniform words.
+Unsupported dependencies, masked setup, scratch, and setup bodies exceeding
+2048 bytes retain the original main shader.
+
+Words 48 through 63 of the argument window hold preamble results. Compute roots
+and state occupy at most words 0 through 41; graphics roots occupy 0 through 11.
+`IOR_UNIFORM` explicitly reads one word with a GPR operand, preserving integer
+bits, signed zero, subnormals, and NaN payloads when used as a move with zero.
+`STORE_UNIFORM` consumes its GPR operand. Its clobber constraint lets shared SSA
+allocation preserve a value that remains live; the packer rejects a surviving
+unpreserved source. Both forms have machine-table operand constraints.
+
+The compiler appends the setup body, including STOP, after the main body.
+Apple9-specific offset/size fields describe it; the older USC preshader fields
+are not reused. The launcher initializes roots and stage state, then uses the
+ordinary relative-branch encoder to enter the persistent setup body. Setup's
+STOP completes the argument context and starts the selected main shader.
+Keeping setup in the shader BO avoids recopying code into every launch record.
+The BO has the main shader's existing ownership and batch lifetime.
+
+`AGX_APPLE9_STATS` reports setup with `APPLE9_PREAMBLE_CODEGEN` and main with
+`APPLE9_CODEGEN`. Preamble work must be accounted for separately rather than
+subtracted from total work. Authored atomic-counter probes observed ten setup
+executions for both 4,096 and 262,144 main invocations, and one setup execution
+for a single workgroup. This establishes amortization for those dispatches;
+it is not a universal promise of one execution per API draw.
+
+The complete optimization changes and numerical/code-generation evidence are
+recorded in the parent workspace's
+`linux-m4-integration/tools/gpu/asahi/codegen-quality-fixes/REPORT.md`.

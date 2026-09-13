@@ -310,3 +310,37 @@ memory formats. MSAA and unsupported address/stride alignment retain the
 scalar helper. Original-source probes, validation and
 measurements are documented in the parent workspace's
 `linux-m4-integration/tools/gpu/asahi/plasma-es3/block-export/README.md`.
+
+## Compiler-generated uniform setup
+
+Apple9 main shaders may now have a compiler-generated UBO/ALU preamble. The
+compiler stores its complete body, ending in STOP, after main in the shader BO
+and reports its byte offset and size. Both parts keep the original complete
+resource map. Setup writes results into argument words 48..63, beyond all root
+and compute-state arguments. The ordinary main compiler reads those words
+through modeled uniform operands.
+
+After frame and root initialization, a launch record optionally tail-branches
+to the persistent setup body. It uses the shared signed relative-branch encoder,
+with even addresses and the same validated 4 GiB USC reach as main entries.
+Setup STOP completes argument initialization and triggers the already selected
+main entry; no return address or additional main invocation is introduced.
+The inactive-lane fallthrough is STOP. Launch allocations remain 256 bytes for
+graphics and 1024 bytes for compute, independent of preamble size. All code stays
+in the shader BO, with its existing compiled-object and batch references.
+
+The launch builder reads parameters only, including launch and preamble GPU
+addresses. It reads no caller-owned executable bytes and leaves the output
+unchanged when parameter validation fails. The driver validates compiler
+preamble bounds before passing its address. Host tests cover branch placement
+after the final argument transfer, forward/backward targets, address bounds,
+and failure atomicity. Native tests cover changing UBO contents and bindings
+between dispatches/draws, exact integer transfer, VS/FS use, and uniform math.
+
+An initial implementation that copied setup into each launch record was
+replaced after a controlled workload showed additional launch overhead. The
+persistent-body version returned that workload to approximately baseline time.
+The numerical checks and counter/throughput observations are recorded in
+`linux-m4-integration/tools/gpu/asahi/codegen-quality-fixes/REPORT.md` in the
+parent workspace. These measurements do not establish GPU instruction-cycle
+latencies or a T8132 occupancy table.
