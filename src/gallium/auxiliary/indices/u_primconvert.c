@@ -253,8 +253,10 @@ primconvert_init_draw(struct primconvert_context *pc,
             ptr += new_info->index_size * direct_draws[i].count;
             dst_ptr += new_info->index_size * tmp_count;
          }
-         /* step 7: set the final index count, which is the converted total index count from the original draw rewrite */
-         new_draw->count = u_index_count_converted_indices(pc->cfg.primtypes_mask, true, info->mode, total_index_count);
+         /* Count the indices actually emitted. For strips/fans, converting
+          * the concatenated input count would invent primitives across
+          * restart boundaries and expose unwritten indices at the end. */
+         new_draw->count = (dst_ptr - (uint8_t *)dst) / new_info->index_size;
       } else
          trans_func(src, draw.start, draw.count, new_draw->count, info->restart_index, dst);
 
