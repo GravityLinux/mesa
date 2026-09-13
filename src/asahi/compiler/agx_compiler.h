@@ -517,6 +517,15 @@ struct agx_ra_target {
 
 typedef struct {
    struct agx_ra_target ra_target;
+   /* Opaque target instructions may refine the shared scheduling classes. */
+   enum agx_schedule_class (*schedule_class)(const agx_instr *instruction);
+   /* Optional target implicit-resource graph, replacing scheduling classes.
+    * Readers may overlap; a writer orders all preceding readers and writers.
+    * Resource bit assignments belong to the target. */
+   void (*schedule_resources)(const agx_instr *instruction,
+                              uint32_t *reads, uint32_t *writes);
+   /* Relative dependency separation in issue positions, not hardware cycles. */
+   unsigned (*schedule_delay)(const agx_instr *instruction);
    nir_shader *nir;
    mesa_shader_stage stage;
    bool is_preamble;

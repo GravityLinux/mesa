@@ -17,6 +17,8 @@ struct sched_ctx {
 
    /* Live set */
    struct u_sparse_bitset live;
+   agx_context *ctx;
+   unsigned position;
 };
 
 struct sched_node {
@@ -24,6 +26,12 @@ struct sched_node {
 
    /* Instruction this node represents */
    agx_instr *instr;
+   unsigned ready;
+};
+
+struct resource_reader {
+   struct sched_node *node;
+   struct resource_reader *next;
 };
 
 static void
@@ -57,6 +65,8 @@ create_dag(agx_context *ctx, agx_block *block, void *memctx)
 
    /* Last memory store, to serialize loads and stores against */
    struct sched_node *memory_store = NULL;
+   struct sched_node *resource_writer[32] = {0};
+   struct resource_reader *resource_readers[32] = {0};
 
    agx_foreach_instr_in_block(block, I) {
       /* Don't touch control flow */
@@ -77,8 +87,37 @@ create_dag(agx_context *ctx, agx_block *block, void *memctx)
          last_write[I->dest[d].value] = node;
       }
 
+      if (ctx->schedule_resources) {
+         /* PHIs/preloads define block-entry values. Their position is an IR
+          * invariant even when a target supplies its own resource hazards. */
+         if (agx_opcodes_info[I->op].schedule_class == AGX_SCHEDULE_CLASS_PRELOAD)
+            serialize(node, &preload);
+         else
+            add_dep(node, preload);
+         uint32_t reads = 0, writes = 0;
+         ctx->schedule_resources(I, &reads, &writes);
+         u_foreach_bit(r, reads | writes) {
+            add_dep(node, resource_writer[r]);
+            if (writes & BITFIELD_BIT(r)) {
+               for (struct resource_reader *p = resource_readers[r]; p;
+                    p = p->next)
+                  add_dep(node, p->node);
+               resource_readers[r] = NULL;
+               resource_writer[r] = node;
+            } else {
+               struct resource_reader *p = rzalloc(memctx, struct resource_reader);
+               p->node = node;
+               p->next = resource_readers[r];
+               resource_readers[r] = p;
+            }
+         }
+         continue;
+      }
+
       /* Classify the instruction and add dependencies according to the class */
-      enum agx_schedule_class dep = agx_opcodes_info[I->op].schedule_class;
+      enum agx_schedule_class dep = ctx->schedule_class
+                                      ? ctx->schedule_class(I)
+                                      : agx_opcodes_info[I->op].schedule_class;
       assert(dep != AGX_SCHEDULE_CLASS_INVALID && "invalid instruction seen");
 
       bool barrier = dep == AGX_SCHEDULE_CLASS_BARRIER;
@@ -159,9 +198,18 @@ static struct sched_node *
 choose_instr(struct sched_ctx *s)
 {
    int32_t min_delta = INT32_MAX;
+   unsigned best_dependency = 0;
    struct sched_node *best = NULL;
+   if (s->ctx->schedule_delay) {
+      unsigned earliest = UINT_MAX;
+      list_for_each_entry(struct sched_node, n, &s->dag->heads, dag.link)
+         earliest = MIN2(earliest, n->ready);
+      s->position = MAX2(s->position, earliest);
+   }
 
    list_for_each_entry(struct sched_node, n, &s->dag->heads, dag.link) {
+      if (s->ctx->schedule_delay && n->ready > s->position)
+         continue;
       /* Heuristic: hoist sample_mask/zs_emit. This allows depth/stencil tests
        * to run earlier, and potentially to discard the entire quad invocation
        * earlier, reducing how much redundant fragment shader we run.
@@ -187,10 +235,23 @@ choose_instr(struct sched_ctx *s)
          return n;
 
       int32_t delta = calculate_pressure_delta(n->instr, &s->live);
+      unsigned dependency = 0;
+      if (s->ctx->schedule_delay) {
+         /* Choose a consumer soon enough to expose its long-latency producer.
+          * Otherwise pressure alone exhausts all independent work before the
+          * producer even reaches the ready list. */
+         util_dynarray_foreach(&n->dag.edges, struct dag_edge, edge) {
+            struct sched_node *producer = (struct sched_node *)edge->child;
+            dependency = MAX2(dependency,
+                                s->ctx->schedule_delay(producer->instr) - 1);
+         }
+      }
 
-      if (delta < min_delta) {
+      if (dependency > best_dependency ||
+          (dependency == best_dependency && delta < min_delta)) {
          best = n;
          min_delta = delta;
+         best_dependency = dependency;
       }
    }
 
@@ -227,6 +288,14 @@ pressure_schedule_block(agx_context *ctx, agx_block *block, struct sched_ctx *s)
       struct sched_node *node = choose_instr(s);
       pressure += calculate_pressure_delta(node->instr, &s->live);
       max_pressure = MAX2(pressure, max_pressure);
+      if (ctx->schedule_delay) {
+         util_dynarray_foreach(&node->dag.edges, struct dag_edge, edge) {
+            struct sched_node *producer = (struct sched_node *)edge->child;
+            producer->ready = MAX2(producer->ready, s->position +
+                                     ctx->schedule_delay(producer->instr));
+         }
+         ++s->position;
+      }
       dag_prune_head(s->dag, &node->dag);
 
       schedule[nr_ins++] = node;
@@ -234,7 +303,8 @@ pressure_schedule_block(agx_context *ctx, agx_block *block, struct sched_ctx *s)
    }
 
    /* Bail if it looks like it's worse */
-   if (max_pressure >= orig_max_pressure) {
+   if (max_pressure > orig_max_pressure ||
+       (max_pressure == orig_max_pressure && !ctx->schedule_delay)) {
       free(schedule);
       return;
    }
@@ -255,7 +325,7 @@ agx_pressure_schedule(agx_context *ctx)
    void *memctx = ralloc_context(ctx);
 
    agx_foreach_block(ctx, block) {
-      struct sched_ctx sctx = {.dag = create_dag(ctx, block, memctx)};
+      struct sched_ctx sctx = {.dag = create_dag(ctx, block, memctx), .ctx = ctx};
       u_sparse_bitset_init(&sctx.live, ctx->alloc, memctx);
 
       pressure_schedule_block(ctx, block, &sctx);
