@@ -3972,17 +3972,55 @@ fail:
    return false;
 }
 
+static void
+apple9_lower_idiv(nir_shader *nir)
+{
+   /* Integer division uses NIR's quotient/refinement lowering. The backend
+    * has ordinary 32-bit multiplies; expand the high product into those
+    * operations until a native high-product encoding is modeled. */
+   const nir_lower_idiv_options idiv = {0};
+   if (nir_lower_idiv(nir, &idiv)) {
+      agx_nir_lower_accurate_frcp(nir);
+      const nir_shader_compiler_options *original_options = nir->options;
+      nir_shader_compiler_options alu_options = *original_options;
+      alu_options.lower_mul_high = true;
+      alu_options.lower_extract_byte = true;
+      alu_options.lower_extract_word = true;
+      alu_options.lower_iabs = true;
+      alu_options.has_fcanonicalize = false;
+      nir->options = &alu_options;
+      nir_lower_alu(nir);
+      nir_opt_algebraic(nir);
+      nir_opt_algebraic_late(nir);
+      nir->options = original_options;
+   }
+}
+
 bool
 agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
                         struct agx_apple9_compute_profile *profile,
                         const char **reason_out)
 {
-   agx_nir_lower_apple9_math(nir);
-
    /* Make every source-level continue an ordinary structured masked region
     * ending at the loop latch. This upstream NIR pass preserves SSA and leaves
     * one backedge, matching the Apple9 loop machine directly. */
    nir_lower_continue_constructs(nir);
+
+   /* Internal compute shaders may use function temporaries just like API
+    * frontends. Normalize them to the SSA form consumed by this backend. */
+   nir_lower_vars_to_ssa(nir);
+   bool progress;
+   do {
+      progress = nir_opt_constant_folding(nir);
+      progress |= nir_opt_copy_prop(nir);
+      progress |= nir_opt_remove_phis(nir);
+      progress |= nir_opt_dead_cf(nir);
+      progress |= nir_opt_dce(nir);
+   } while (progress);
+   apple9_lower_idiv(nir);
+   agx_nir_lower_apple9_math(nir);
+   nir_lower_alu_to_scalar(nir, NULL, NULL);
+   nir_lower_all_phis_to_scalar(nir);
 
    if (getenv("AGX_APPLE9_TRACE_NIR") != NULL)
       nir_print_shader(nir, stderr);
@@ -5014,25 +5052,7 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
                                 nir_metadata_control_flow, NULL);
    nir_shader_instructions_pass(nir, apple9_lower_sampler_bias,
                                 nir_metadata_control_flow, NULL);
-   /* Integer division uses NIR's quotient/refinement lowering. The backend
-    * has ordinary 32-bit multiplies; expand the high product into those
-    * operations until a native high-product encoding is modeled. */
-   const nir_lower_idiv_options idiv = {0};
-   if (nir_lower_idiv(nir, &idiv)) {
-      agx_nir_lower_accurate_frcp(nir);
-      const nir_shader_compiler_options *original_options = nir->options;
-      nir_shader_compiler_options alu_options = *original_options;
-      alu_options.lower_mul_high = true;
-      alu_options.lower_extract_byte = true;
-      alu_options.lower_extract_word = true;
-      alu_options.lower_iabs = true;
-      alu_options.has_fcanonicalize = false;
-      nir->options = &alu_options;
-      nir_lower_alu(nir);
-      nir_opt_algebraic(nir);
-      nir_opt_algebraic_late(nir);
-      nir->options = original_options;
-   }
+   apple9_lower_idiv(nir);
    /* Format lowering can introduce powers and other high-level ALU ops. */
    nir_opt_algebraic(nir);
    agx_nir_lower_apple9_math(nir);

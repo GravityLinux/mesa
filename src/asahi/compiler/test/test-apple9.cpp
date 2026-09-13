@@ -4130,6 +4130,27 @@ apple9_expect_compile(nir_shader *nir, enum agx_apple9_compute_abi expected_abi)
    ralloc_free(nir);
 }
 
+TEST(Apple9Compiler, InternalComputeLowersTemporariesAndIntegerDivision)
+{
+   for (bool dynamic : {false, true}) {
+      nir_builder b = apple9_compute_builder("internal_compute_loop");
+      b.shader->info.num_ubos = 1;
+      nir_def *limit = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0),
+                                   nir_imm_int(&b, 0), .align_mul = 4, .range = 4);
+      nir_variable *counter = nir_local_variable_create(
+         b.impl, glsl_uint_type(), "counter");
+      nir_store_var(&b, counter, nir_imm_int(&b, 0), 1);
+      nir_push_loop(&b)->control = nir_loop_control_dont_unroll;
+      nir_def *i = nir_load_var(&b, counter);
+      nir_break_if(&b, nir_uge(&b, i, limit));
+      nir_def *divisor = dynamic ? limit : nir_imm_int(&b, 3);
+      apple9_store_output(&b, i, nir_udiv(&b, i, divisor));
+      nir_store_var(&b, counter, nir_iadd_imm(&b, i, 1), 1);
+      nir_pop_loop(&b, nullptr);
+      apple9_expect_compile(b.shader, AGX_APPLE9_COMPUTE_ABI_DIRECT_BUFFERS);
+   }
+}
+
 TEST(Apple9Compiler, ConstantStoreUsesGenericPipeline)
 {
    apple9_expect_compile(apple9_constant_store_shader(42),
@@ -4446,7 +4467,8 @@ TEST(Apple9Compiler, SingleRegionSupportsEntryAndMergeStoresAndEmptyArms)
       unsigned elses;
       unsigned stores;
    } cases[] = {
-      {APPLE9_REGION_EMPTY, 1, 1, 2},
+      /* Both empty arms disappear; surrounding stores must survive. */
+      {APPLE9_REGION_EMPTY, 0, 0, 2},
       {APPLE9_REGION_THEN_ONLY, 1, 1, 3},
       {APPLE9_REGION_ELSE_ONLY, 1, 1, 3},
       {APPLE9_REGION_BOTH, 1, 1, 4},
