@@ -213,3 +213,61 @@ TEST(Apple9Miptree, WideAtlasDoesNotAddTailGap)
    EXPECT_EQ(layout.tilesize_el[8].width_el, 2);
    EXPECT_EQ(layout.tilesize_el[8].height_el, 2);
 }
+
+
+/* Render views may select any mip and layer after allocation. All legal
+ * color layouts must preserve the 16-byte descriptor address granularity. */
+TEST(Layout, RenderViewAlignment)
+{
+   for (pipe_format format : {PIPE_FORMAT_R8_UNORM, PIPE_FORMAT_R16_FLOAT,
+                             PIPE_FORMAT_R8G8B8A8_UNORM,
+                             PIPE_FORMAT_R16G16B16A16_FLOAT,
+                             PIPE_FORMAT_R32G32B32A32_FLOAT,
+                             PIPE_FORMAT_R5G6B5_UNORM}) {
+      for (unsigned width : {1u, 2u, 7u, 16u, 31u, 33u, 65u, 257u, 16384u}) {
+         for (unsigned samples : {1u, 2u, 4u}) {
+            for (bool volume : {false, true}) {
+               ail_layout layout = {};
+               layout.width_px = width;
+               layout.height_px = MIN2(width, 33);
+               layout.depth_px = 6;
+               layout.sample_count_sa = samples;
+               layout.levels = samples == 1 ? util_logbase2(width) + 1 : 1;
+               layout.tiling = AIL_TILING_GPU;
+               layout.format = format;
+               layout.mipmapped_z = volume;
+               layout.renderable = true;
+               ail_make_miptree(&layout);
+               EXPECT_EQ(layout.layer_stride_B & 15, 0u);
+               for (unsigned level = 0; level < layout.levels; ++level) {
+                  for (unsigned layer = 0; layer < 6; ++layer)
+                     EXPECT_EQ((layout.level_offsets_B[level] +
+                                ail_get_layer_offset_B(&layout, layer)) & 15, 0u);
+               }
+            }
+         }
+         for (unsigned offset : {0u, 16u, 65520u}) {
+            for (bool imported_stride : {false, true}) {
+               ail_layout layout = {};
+               layout.width_px = width;
+               layout.height_px = MIN2(width, 33);
+               layout.depth_px = 6;
+               layout.sample_count_sa = 1;
+               layout.levels = 1;
+               layout.tiling = AIL_TILING_LINEAR;
+               layout.format = format;
+               layout.renderable = true;
+               layout.level_offsets_B[0] = offset;
+               layout.linear_stride_B = imported_stride ? (1u << 20) : 0;
+               ail_make_miptree(&layout);
+               EXPECT_EQ(layout.linear_stride_B & 15, 0u);
+               EXPECT_LE(layout.linear_stride_B, 1u << 20);
+               EXPECT_EQ(layout.layer_stride_B & 15, 0u);
+               for (unsigned layer = 0; layer < 6; ++layer)
+                  EXPECT_EQ((layout.level_offsets_B[0] +
+                             ail_get_layer_offset_B(&layout, layer)) & 15, 0u);
+            }
+         }
+      }
+   }
+}

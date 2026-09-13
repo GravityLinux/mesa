@@ -161,6 +161,32 @@ agx_resource_setup(struct agx_resource *nresource)
    };
 }
 
+/* Every Apple9 texture may later become a render attachment, regardless of
+ * its initial bind flags. Enforce the descriptor layout at creation/import,
+ * before an unsupported layout can reach sampling or native bulk export.
+ * BO virtual addresses are page aligned; mip and layer offsets preserve the
+ * PBE's 16-byte address granularity. Buffer resources use separate addressing. */
+static bool
+agx_resource_layout_valid(struct agx_device *dev, const struct agx_resource *rsrc)
+{
+   if (!agx_apple9_direct_render_enabled(dev) || rsrc->base.target == PIPE_BUFFER)
+      return true;
+
+   const struct ail_layout *layout = &rsrc->layout;
+   if (layout->layer_stride_B & 15)
+      return false;
+   for (unsigned level = 0; level < layout->levels; ++level) {
+      if (layout->level_offsets_B[level] & 15)
+         return false;
+   }
+   if (layout->tiling == AIL_TILING_LINEAR) {
+      unsigned stride = ail_get_linear_stride_B(layout, 0);
+      if (!stride || (stride & 15) || stride > AGX_APPLE9_MAX_LINEAR_STRIDE)
+         return false;
+   }
+   return true;
+}
+
 static struct pipe_resource *
 agx_resource_from_handle(struct pipe_screen *pscreen,
                          const struct pipe_resource *templat,
@@ -236,6 +262,11 @@ agx_resource_from_handle(struct pipe_screen *pscreen,
    }
 
    ail_make_miptree(&rsc->layout);
+   if (!agx_resource_layout_valid(dev, rsc)) {
+      agx_bo_unreference(dev, rsc->bo);
+      FREE(rsc);
+      return NULL;
+   }
 
    if (prsc->target == PIPE_BUFFER) {
       assert(rsc->layout.tiling == AIL_TILING_LINEAR);
@@ -546,6 +577,10 @@ agx_resource_create_with_modifiers(struct pipe_screen *screen,
    pipe_reference_init(&nresource->base.reference, 1);
 
    ail_make_miptree(&nresource->layout);
+   if (!agx_resource_layout_valid(dev, nresource)) {
+      FREE(nresource);
+      return NULL;
+   }
 
    /* Fail Piglit's obnoxious allocations */
    if (nresource->layout.size_B >= (1ull << 32)) {
@@ -2641,6 +2676,9 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
             format != PIPE_FORMAT_R16_FLOAT &&
             format != PIPE_FORMAT_R16G16_FLOAT &&
             format != PIPE_FORMAT_R16G16B16A16_FLOAT)))
+         return false;
+      if ((usage & PIPE_BIND_RENDER_TARGET) &&
+          agx_apple9_block_export_format(agx_apple9_color_tile_format(format)) > 15)
          return false;
       if ((usage & PIPE_BIND_SAMPLER_VIEW) &&
           ((target != PIPE_TEXTURE_2D && target != PIPE_TEXTURE_1D &&
