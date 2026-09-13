@@ -508,6 +508,11 @@ struct agx_ra_target {
    bool late_kill_sources;
    bool preserve_source_kills;
    bool defer_spill_lowering;
+   /* An occupancy table from another target is not a rematerialization cost
+    * model. Targets without measured breakpoints can retain real spilling
+    * while declining this optional code-size/occupancy tradeoff. */
+   bool disable_occupancy_rematerialization;
+   bool cost_register_constraints;
 };
 
 typedef struct {

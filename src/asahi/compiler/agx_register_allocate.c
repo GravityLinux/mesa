@@ -115,6 +115,12 @@ struct ra_ctx {
 
    /* Operand placements committed for the current constrained instruction. */
    BITSET_WORD *pinned;
+
+   /* Soft placement hints. Instruction constraints remain the only hard
+    * restrictions, since different uses can need incompatible banks. */
+   const struct agx_reg_constraint *preferred;
+   const unsigned *scarcity;
+   unsigned demand;
 };
 
 /*
@@ -279,6 +285,26 @@ agx_calc_register_demand(agx_context *ctx, bool remat)
             max_demand = MAX2(max_demand, I->imm + size);
          }
 
+         /* Occupancy and rematerialization may shrink the register file.
+          * A constrained operand still needs its physical range to exist,
+          * even when very few SSA values are live at once.
+          */
+         if (I->reg_constraints) {
+            for (unsigned o = 0; o < I->nr_dests + I->nr_srcs; ++o) {
+               agx_index index = o < I->nr_dests
+                                    ? I->dest[o]
+                                    : I->src[o - I->nr_dests];
+               if (index.type != AGX_INDEX_NORMAL || index.memory)
+                  continue;
+               struct agx_reg_constraint c = I->reg_constraints[o];
+               unsigned width =
+                  util_next_power_of_two(agx_index_size_16(index));
+               unsigned first = ALIGN_POT(MAX2(c.min, reserved_size(ctx)),
+                                         MAX2(width, c.align));
+               max_demand = MAX2(max_demand, first + width);
+            }
+         }
+
          /* Handle late-kill registers from last instruction */
          demand -= late_kill_count;
          late_kill_count = 0;
@@ -332,18 +358,62 @@ agx_calc_register_demand(agx_context *ctx, bool remat)
    return max_demand;
 }
 
+struct placement_cost {
+   unsigned moves, preference, growth, scarcity, reg;
+};
+
+static struct placement_cost
+placement_cost(struct ra_ctx *rctx, unsigned ssa, unsigned reg, unsigned count)
+{
+   struct placement_cost cost = {.reg = reg};
+   if (!rctx->preferred)
+      return cost;
+   struct agx_reg_constraint c = rctx->preferred[ssa];
+   if (c.min <= c.max) {
+      cost.preference = reg < c.min || reg > c.max || (reg % c.align);
+   }
+
+   /* Leave scarce banks available without raising the footprint beyond the
+    * pressure already required by this program (or an existing fixed use). */
+   unsigned limit = MAX2(rctx->demand, *rctx->count[RA_GPR]);
+   cost.growth = reg + count > limit ? reg + count - limit : 0;
+   for (unsigned h = reg; h < reg + count; ++h)
+      cost.scarcity += rctx->scarcity[h];
+   return cost;
+}
+
+static bool
+placement_cheaper(struct placement_cost a, struct placement_cost b)
+{
+   if (a.moves != b.moves) return a.moves < b.moves;
+   if (a.preference != b.preference) return a.preference < b.preference;
+   if (a.growth != b.growth) return a.growth < b.growth;
+   if (a.scarcity != b.scarcity) return a.scarcity < b.scarcity;
+   return a.reg < b.reg;
+}
+
 static bool
 find_regs_simple(struct ra_ctx *rctx, enum ra_class cls, unsigned count,
-                 unsigned align, unsigned *out)
+                 unsigned align, unsigned ssa, unsigned *out)
 {
+   bool found = false;
+   struct placement_cost best = {.moves = ~0u};
    for (unsigned reg = 0; reg + count <= rctx->bound[cls]; reg += align) {
       if (!BITSET_TEST_COUNT(rctx->used_regs[cls], reg, count)) {
-         *out = reg;
-         return true;
+         if (!rctx->preferred || cls != RA_GPR) {
+            *out = reg;
+            return true;
+         }
+         struct placement_cost cost = placement_cost(rctx, ssa, reg, count);
+         if (!found || placement_cheaper(cost, best)) {
+            *out = reg;
+            best = cost;
+            found = true;
+         }
       }
    }
 
-   return false;
+   return found;
 }
 
 /*
@@ -616,7 +686,7 @@ find_regs(struct ra_ctx *rctx, agx_instr *I, unsigned dest_idx, unsigned count,
 
    enum ra_class cls = ra_class_for_index(I->dest[dest_idx]);
 
-   if (find_regs_simple(rctx, cls, count, align, &reg)) {
+   if (find_regs_simple(rctx, cls, count, align, I->dest[dest_idx].value, &reg)) {
       return reg;
    } else {
       assert(!rctx->early_killed && "no live range splits with early kill");
@@ -781,7 +851,7 @@ static void
 relocate_unconstrained(struct ra_ctx *rctx, unsigned ssa)
 {
    unsigned reg, count = rctx->ncomps[ssa];
-   if (find_regs_simple(rctx, RA_GPR, count, count, &reg)) {
+   if (find_regs_simple(rctx, RA_GPR, count, count, ssa, &reg)) {
       BITSET_SET_COUNT(rctx->used_regs[RA_GPR], reg, count);
       set_ssa_to_reg(rctx, ssa, reg);
    } else {
@@ -816,14 +886,30 @@ place_constrained_value(struct ra_ctx *rctx, agx_index value,
    /* Unlike unconstrained splitting, the legal bank may be completely full.
     * Choose a legal region, then move its occupants to the rest of the file.
     * Only this instruction's already-placed operands are pinned. */
-   unsigned chosen = ~0, best = ~0;
+   unsigned chosen = ~0;
+   struct placement_cost best = {.moves = ~0u};
    for (unsigned reg = first; reg <= last; reg += align) {
       if (BITSET_TEST_COUNT(rctx->pinned, reg, count))
          continue;
-      unsigned cost = 0;
-      for (unsigned h = reg; h < reg + count; ++h)
-         cost += BITSET_TEST(rctx->used_regs[RA_GPR], h);
-      if (cost < best) {
+      struct placement_cost cost = placement_cost(rctx, ssa, reg, count);
+      if (rctx->preferred) {
+         /* Even a one-half overlap evicts the complete tuple. Counting only
+          * the overlapping halves can prefer a much more expensive move. */
+         for (unsigned h = reserved_size(rctx->shader); h < rctx->bound[RA_GPR];) {
+            if (!BITSET_TEST(rctx->used_regs[RA_GPR], h)) {
+               ++h;
+               continue;
+            }
+            unsigned owner = rctx->reg_to_ssa[h], width = rctx->ncomps[owner];
+            if (h < reg + count && reg < h + width)
+               cost.moves += width;
+            h += width;
+         }
+      } else {
+         for (unsigned h = reg; h < reg + count; ++h)
+            cost.moves += BITSET_TEST(rctx->used_regs[RA_GPR], h);
+      }
+      if (chosen == ~0u || placement_cheaper(cost, best)) {
          best = cost;
          chosen = reg;
       }
@@ -1525,6 +1611,42 @@ lower_exports(agx_context *ctx)
    agx_emit_parallel_copies(&b, copies, nr);
 }
 
+static void
+constraint_preferences(agx_context *ctx, struct agx_reg_constraint *preferred,
+                       unsigned *scarcity, unsigned max_regs)
+{
+   for (unsigned v = 0; v < ctx->alloc; ++v)
+      preferred[v] = (struct agx_reg_constraint){0, max_regs - 1, 1};
+
+   agx_foreach_instr_global(ctx, I) {
+      if (!I->reg_constraints)
+         continue;
+      agx_foreach_ssa_src(I, s) {
+         struct agx_reg_constraint c = I->reg_constraints[I->nr_dests + s];
+         if (I->src[s].memory ||
+             (c.min == c.max && c.max < reserved_size(ctx)))
+            continue;
+         struct agx_reg_constraint *p = &preferred[I->src[s].value];
+         p->min = MAX2(p->min, c.min);
+         p->max = MIN2(p->max, c.max);
+         p->align = MAX2(p->align, c.align);
+      }
+      for (unsigned o = 0; o < I->nr_dests + I->nr_srcs; ++o) {
+         agx_index idx = o < I->nr_dests ? I->dest[o] : I->src[o - I->nr_dests];
+         if (idx.type != AGX_INDEX_NORMAL || idx.memory)
+            continue;
+         struct agx_reg_constraint c = I->reg_constraints[o];
+         unsigned width = util_next_power_of_two(agx_index_size_16(idx));
+         unsigned end = MIN2(c.max + width, max_regs);
+         if (end <= c.min || (c.min == 0 && end == max_regs))
+            continue;
+         unsigned weight = DIV_ROUND_UP(max_regs, end - c.min);
+         for (unsigned h = c.min; h < end; ++h)
+            scarcity[h] += weight;
+      }
+   }
+}
+
 void
 agx_ra(agx_context *ctx)
 {
@@ -1616,7 +1738,8 @@ agx_ra(agx_context *ctx)
    /* If we need multiple waves, see if we can rematerialize constants to save
     * waves. If we only have a single wave regardless, this is pointless.
     */
-   if (effective_demand > agx_round_registers(1) && !spilling) {
+   if (!ctx->ra_target.disable_occupancy_rematerialization &&
+       effective_demand > agx_round_registers(1) && !spilling) {
       unsigned effective_demand_remat = agx_calc_register_demand(ctx, true);
 
       /* Worst-case assume we need 6 16-bit registers for constants, for a
@@ -1713,9 +1836,10 @@ agx_ra(agx_context *ctx)
    /* Round up the demand to the maximum number of registers we can use without
     * affecting occupancy. This reduces live range splitting.
     */
-   unsigned max_regs = agx_occupancy_for_register_count(demand).max_registers;
-   if (ctx->key->is_helper || force_spilling || ctx->ra_target.max_registers)
-      max_regs = max_possible_regs;
+   unsigned max_regs =
+      (ctx->key->is_helper || force_spilling || ctx->ra_target.max_registers)
+         ? max_possible_regs
+         : agx_occupancy_for_register_count(demand).max_registers;
 
    max_regs = ROUND_DOWN_TO(max_regs, reg_file_alignment);
 
@@ -1727,6 +1851,14 @@ agx_ra(agx_context *ctx)
    assert((max_regs % reg_file_alignment) == 0 && "occupancy limits aligned");
    assert(max_regs >= (6 * 2) && "space for vertex shader preloading");
    assert(max_regs <= max_possible_regs);
+
+   struct agx_reg_constraint *preferred = NULL;
+   unsigned scarcity[AGX_NUM_REGS] = {0};
+   if (ctx->ra_target.cost_register_constraints) {
+      preferred = calloc(ctx->alloc, sizeof(*preferred));
+      if (preferred)
+         constraint_preferences(ctx, preferred, scarcity, max_regs);
+   }
 
    unsigned reg_count = 0, mem_slot_count = 0;
 
@@ -1748,6 +1880,9 @@ agx_ra(agx_context *ctx)
          .bound[RA_MEM] = AGX_NUM_MODELED_REGS,
          .count[RA_GPR] = &reg_count,
          .count[RA_MEM] = &mem_slot_count,
+         .preferred = preferred,
+         .scarcity = scarcity,
+         .demand = demand,
       });
    }
 
@@ -1909,4 +2044,5 @@ agx_ra(agx_context *ctx)
    free(sizes);
    free(classes);
    free(visited);
+   free(preferred);
 }

@@ -8,6 +8,64 @@
 #include <gtest/gtest.h>
 #include "agx_test.h"
 
+TEST(Apple9SharedRa, PlacementCostsLeaveSpaceForRestrictedDefinitions)
+{
+   unsigned moves[2] = {};
+   for (unsigned policy = 0; policy < 2; ++policy) {
+      void *memctx = ralloc_context(nullptr);
+      auto ctx = rzalloc(memctx, agx_context);
+      list_inithead(&ctx->blocks);
+      nir_builder nir = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "scarce_bank_cost");
+      agx_shader_key key = {};
+      key.has_scratch = true;
+      ctx->nir = nir.shader; ctx->stage = MESA_SHADER_COMPUTE; ctx->key = &key;
+      ctx->ra_target.max_registers = 32;
+      ctx->ra_target.reserved_registers = 4;
+      ctx->ra_target.late_kill_sources = true;
+      ctx->ra_target.cost_register_constraints = policy;
+      ctx->ra_target.disable_occupancy_rematerialization = true;
+      auto block = agx_test_block(ctx);
+      auto b = agx_init_builder(ctx, agx_after_block(block));
+      agx_index v[12];
+      for (unsigned i = 0; i < 12; ++i)
+         v[i] = agx_mov_imm(&b, 32, i + 1);
+      auto low = agx_iadd_to(&b, agx_temp(ctx, AGX_SIZE_32), v[0], v[1], 0);
+      low->reg_constraints = rzalloc_array(ctx, agx_reg_constraint, 3);
+      low->reg_constraints[0] = {4,6,2};
+      low->reg_constraints[1] = low->reg_constraints[2] = {0,30,2};
+      auto sum = low->dest[0];
+      for (unsigned i = 0; i < 12; ++i)
+         sum = agx_iadd(&b, sum, v[i], 0);
+      agx_export(&b, sum, 0);
+      agx_ra(ctx);
+      ASSERT_EQ(ctx->scratch_size_B, 0u);
+      ASSERT_LT(ctx->max_reg, 32u);
+      uint32_t regs[32] = {};
+      agx_foreach_instr_in_block(block, I) {
+         auto read = [&](agx_index x) {
+            return x.type == AGX_INDEX_IMMEDIATE ? x.value : regs[x.value];
+         };
+         switch (I->op) {
+         case AGX_OPCODE_MOV_IMM: regs[I->dest[0].value] = I->imm; break;
+         case AGX_OPCODE_MOV:
+            regs[I->dest[0].value] = read(I->src[0]); ++moves[policy]; break;
+         case AGX_OPCODE_IADD:
+            regs[I->dest[0].value] = read(I->src[0]) + read(I->src[1]); break;
+         case AGX_OPCODE_SWAP: {
+            auto a = I->src[0].value, c = I->src[1].value;
+            std::swap(regs[a], regs[c]); ++moves[policy]; break;
+         }
+         case AGX_OPCODE_EXPORT: regs[I->imm] = read(I->src[0]); break;
+         default: FAIL() << "unexpected opcode " << I->op;
+         }
+      }
+      EXPECT_EQ(regs[0], 81u);
+      ralloc_free(nir.shader); ralloc_free(memctx);
+   }
+   EXPECT_LT(moves[1], moves[0]);
+}
+
 TEST(Apple9SharedRa, InstructionConstraintsRelocateLiveValuesOutOfFullBanks)
 {
    void *memctx = ralloc_context(nullptr);
@@ -560,4 +618,77 @@ TEST(Apple9SharedRa, PublicationHandoffStaysInProducerBlock)
    EXPECT_EQ(copies, 4u);
    EXPECT_NE(p.output, first);
    agx_apple9_vir_finish(&p);
+}
+
+TEST(Apple9SharedRa, RematerializationPreservesHighOperandConstraints)
+{
+   void *memctx = ralloc_context(nullptr);
+   auto ctx = rzalloc(memctx, agx_context);
+   list_inithead(&ctx->blocks);
+   nir_builder nir = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "high_bank_rematerialization");
+   agx_shader_key key = {};
+   key.has_scratch = true;
+   ctx->nir = nir.shader;
+   ctx->stage = MESA_SHADER_COMPUTE;
+   ctx->key = &key;
+   ctx->ra_target.max_registers = 192;
+   ctx->ra_target.reserved_registers = 8;
+   ctx->ra_target.late_kill_sources = true;
+   ctx->ra_target.defer_spill_lowering = true;
+   auto block = agx_test_block(ctx);
+   auto b = agx_init_builder(ctx, agx_after_block(block));
+   agx_index values[72];
+   uint32_t expected = 0;
+   for (unsigned i = 0; i < ARRAY_SIZE(values); ++i) {
+      uint32_t value = i * 0x9e3779b9u + 0xa511e9b3u;
+      values[i] = agx_mov_imm(&b, 32, value);
+      expected += value;
+   }
+   auto sum = agx_mov_imm(&b, 32, 0);
+   std::vector<agx_instr *> constrained;
+   for (auto value : values) {
+      auto I = agx_iadd_to(&b, agx_temp(ctx, AGX_SIZE_32), value, sum, 0);
+      I->reg_constraints = rzalloc_array(ctx, agx_reg_constraint, 3);
+      I->reg_constraints[0] = {0, 190, 2};
+      I->reg_constraints[1] = {128, 190, 2};
+      I->reg_constraints[2] = {0, 190, 2};
+      constrained.push_back(I);
+      sum = I->dest[0];
+   }
+   agx_export(&b, sum, 8);
+   agx_ra(ctx);
+   EXPECT_EQ(ctx->scratch_size_B, 0u);
+   for (auto I : constrained) {
+      EXPECT_GE(I->src[0].value, 128u);
+      EXPECT_LE(I->src[0].value, 190u);
+   }
+   uint32_t regs[192] = {};
+   agx_foreach_instr_in_block(block, I) {
+      auto read = [&](agx_index x) {
+         return x.type == AGX_INDEX_IMMEDIATE ? x.value : regs[x.value];
+      };
+      switch (I->op) {
+      case AGX_OPCODE_MOV_IMM:
+         regs[I->dest[0].value] = I->imm;
+         break;
+      case AGX_OPCODE_IADD:
+         regs[I->dest[0].value] = read(I->src[0]) + read(I->src[1]);
+         break;
+      case AGX_OPCODE_MOV:
+         regs[I->dest[0].value] = read(I->src[0]);
+         break;
+      case AGX_OPCODE_SWAP:
+         std::swap(regs[I->src[0].value], regs[I->src[1].value]);
+         break;
+      case AGX_OPCODE_EXPORT:
+         regs[I->imm] = read(I->src[0]);
+         break;
+      default:
+         FAIL() << "unexpected opcode " << I->op;
+      }
+   }
+   EXPECT_EQ(regs[8], expected);
+   ralloc_free(nir.shader);
+   ralloc_free(memctx);
 }
