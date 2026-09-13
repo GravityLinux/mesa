@@ -29,6 +29,9 @@ Capability about the features and limits of the driver/GPU.
   bound.
 * ``pipe_caps.occlusion_query``: Whether occlusion queries are available.
 * ``pipe_caps.query_time_elapsed``: Whether PIPE_QUERY_TIME_ELAPSED queries are available.
+* ``pipe_caps.texture_external``: enables external texture samplers and
+  ``GL_OES_EGL_image_external`` (including its ESSL3 variant). Defaults to true;
+  drivers whose shader backend cannot lower external samplers must disable it.
 * ``pipe_caps.texture_shadow_map``: indicates whether the fragment shader hardware
   can do the depth texture / Z comparison operation in TEX instructions
   for shadow testing.

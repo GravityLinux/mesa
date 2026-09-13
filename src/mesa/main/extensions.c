@@ -299,7 +299,6 @@ _mesa_init_extensions(struct gl_extensions *extensions)
    extensions->NV_texture_rectangle = GL_TRUE;
 
    extensions->OES_EGL_image = GL_TRUE;
-   extensions->OES_EGL_image_external = GL_TRUE;
    extensions->OES_draw_texture = GL_TRUE;
 }
 

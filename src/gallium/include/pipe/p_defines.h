@@ -873,6 +873,7 @@ struct pipe_caps {
    bool occlusion_query;
    bool query_time_elapsed;
    bool texture_shadow_map;
+   bool texture_external;
    bool texture_swizzle;
    bool texture_mirror_clamp;
    bool blend_equation_separate;

@@ -146,6 +146,9 @@ u_init_pipe_screen_caps(struct pipe_screen *pscreen, int accel)
    /* Enables ARB_shadow */
    caps->texture_shadow_map = true;
 
+   /* External samplers are supported by default; incomplete backends opt out. */
+   caps->texture_external = true;
+
    caps->native_fp32_depth = true;
 
    caps->flatshade = true;

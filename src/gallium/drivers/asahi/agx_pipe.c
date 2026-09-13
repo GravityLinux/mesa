@@ -2552,10 +2552,16 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
       /* Public contexts expose the current graphics frontend contract.
        * Internal NIR compute remains available for resource copies. */
       caps->glsl_feature_level = caps->glsl_feature_level_compatibility = 110;
-      /* ES 3.0 shaders are implemented. API version detection remains limited
-       * by transform feedback; experimental sessions may override it. */
+      /* ES 3.0 shader support is independent of the desktop GLSL level. */
       caps->essl_feature_level = 300;
       caps->robust_buffer_access_behavior = false;
+      /* EGL robustness context creation requires a contract we cannot provide. */
+      caps->device_reset_status_query = false;
+      /* The Apple9 texture compiler does not lower external sampler dimensions. */
+      caps->texture_external = false;
+      /* Clip/cull-distance outputs need rasterizer system-value lowering;
+       * the Apple9 varying ABI currently carries ordinary interpolants. */
+      caps->cull_distance = false;
       /* One RGBA8 tile-output slot per active color attachment. */
       caps->max_render_targets = 8;
       /* Advanced equations are lowered with the attachment blend state.
