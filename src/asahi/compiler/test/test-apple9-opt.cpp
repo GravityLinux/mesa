@@ -681,7 +681,7 @@ TEST(Apple9Compiler, OversizePreambleFallsBackToOrdinaryMain)
    auto u = nir_load_ubo(&b, 3, 32, nir_imm_int(&b, 7), nir_imm_int(&b, 0),
       .align_mul = 16, .range = 16);
    auto x = nir_channel(&b, u, 0), y = nir_channel(&b, u, 1), z = nir_channel(&b, u, 2);
-   for (unsigned i = 0; i < 320; ++i)
+   for (unsigned i = 0; i < AGX_APPLE9_MAX_PREAMBLE_BYTES / 4 + 1; ++i)
       x = nir_ffma(&b, x, y, z);
    auto gid = nir_channel(&b, nir_load_global_invocation_id(&b, 32), 0);
    nir_store_ssbo(&b, nir_ixor(&b, x, gid), nir_imm_int(&b, 0),

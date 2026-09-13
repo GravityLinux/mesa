@@ -854,6 +854,27 @@ apple9_pending_hazard(const struct agx_apple9_vir_instr *ins,
 /* Schedule the final physical stream: allocation can introduce earlier uses,
  * register reuse and scratch traffic that do not exist in the original SSA.
  * Never carry pending work across a logical block or execution-mask change. */
+static void
+apple9_select_compact_alu(struct agx_apple9_vir_instr *I)
+{
+   if (I->scoreboard_slot || I->saturate || I->src_abs_mask || I->src_neg_mask ||
+       I->dest >= 64)
+      return;
+   for (unsigned s = 0; s < I->nr_srcs; ++s) {
+      if (I->src[s] >= 64)
+         return;
+   }
+   unsigned inline_mask = I->alu_src_uniform_mask | I->alu_src_immediate_mask;
+   if (I->encoding == AGX_APPLE9_ENC_FLOAT2_COMPACT && !inline_mask &&
+       (I->op == AGX_APPLE9_VIR_FADD || I->op == AGX_APPLE9_VIR_FMUL)) {
+      I->encoding = AGX_APPLE9_ENC_FLOAT2_BASE;
+   } else if (I->encoding == AGX_APPLE9_ENC_FLOAT3_EXTENDED &&
+              !(inline_mask & ~2) &&
+              !((I->alu_src_immediate_mask & 2) && (I->alu_src_value[1] >> 31))) {
+      I->encoding = AGX_APPLE9_ENC_FLOAT3_COMPACT;
+   }
+}
+
 static bool
 apple9_schedule_physical(struct agx_apple9_vir_program *program,
                           const char **reason)
@@ -955,6 +976,7 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
             }
             pending[slot] = (struct apple9_pending){.active = true, .producer = ins};
          }
+         apple9_select_compact_alu(&ins);
          if (!apple9_emit_physical(&out, &ins))
             goto cleanup;
       }

@@ -8711,7 +8711,8 @@ TEST(Apple9Allocator, SharedLoadHandoffRetainsValuesAndCompletesVectorSiblings)
                ++first_uses;
             }
             if (ins->op == AGX_APPLE9_VIR_FMUL &&
-                ins->encoding == AGX_APPLE9_ENC_FLOAT2_COMPACT) {
+                (ins->encoding == AGX_APPLE9_ENC_FLOAT2_COMPACT ||
+                 ins->encoding == AGX_APPLE9_ENC_FLOAT2_BASE)) {
                EXPECT_EQ(ins->scoreboard_slot, 0u);
                ++later_uses;
             }
@@ -8930,7 +8931,9 @@ TEST_F(Apple9Completion, TextureNonleadingHandoffRetainsTupleForLaterReads)
          EXPECT_NE(ins->live_after_mask & 1, 0u);
          ++first_uses;
       }
-      if (ins->op == AGX_APPLE9_VIR_FMUL && ins->encoding == AGX_APPLE9_ENC_FLOAT2_COMPACT) {
+      if (ins->op == AGX_APPLE9_VIR_FMUL &&
+          (ins->encoding == AGX_APPLE9_ENC_FLOAT2_COMPACT ||
+           ins->encoding == AGX_APPLE9_ENC_FLOAT2_BASE)) {
          EXPECT_EQ(ins->scoreboard_slot, AGX_APPLE9_SCOREBOARD_SLOT_NONE);
          ++later_uses;
       }
