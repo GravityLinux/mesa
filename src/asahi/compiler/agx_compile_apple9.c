@@ -2877,7 +2877,8 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
             continue;
          }
          if (intr->intrinsic == nir_intrinsic_image_store_block_agx) {
-            if (nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_2D ||
+            bool multisampled = nir_intrinsic_image_dim(intr) == GLSL_SAMPLER_DIM_MS;
+            if ((!multisampled && nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_2D) ||
                 nir_intrinsic_image_array(intr) || nir_intrinsic_explicit_coord(intr))
                return false;
             enum pipe_format format = nir_intrinsic_format(intr);
@@ -2896,7 +2897,8 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
              * half with mip level zero below. Destination views supply their
              * own level dimensions and base address. */
             src[2] = apple9_dag_shift_imm(lower, nir_op_ishl, src[2], 16);
-            if (!agx_apple9_vir_emit_block_image_store(&lower->program, src, image, tile_format))
+            if (!agx_apple9_vir_emit_block_image_store(&lower->program, src, image,
+                                                       tile_format, multisampled))
                return false;
             continue;
          }

@@ -644,13 +644,21 @@ agx_apple9_vir_emit_publication_pair(struct agx_apple9_vir_program *program,
 bool
 agx_apple9_vir_emit_block_image_store(
    struct agx_apple9_vir_program *program, const uint32_t src[3],
-   unsigned image, unsigned format)
+   unsigned image, unsigned format, bool multisampled)
 {
    if (image >= 16 || format > 15)
       return false;
    for (unsigned i = 0; i < 3; ++i)
       if (src[i] >= program->value_count)
          return false;
+   uint32_t fields[] = {src[0], src[1], src[2], src[2]};
+   unsigned count = multisampled ? 4 : 3;
+   if (multisampled) {
+      fields[2] = agx_apple9_vir_emit(program, AGX_APPLE9_VIR_IMM,
+         AGX_APPLE9_ENC_MOV_IMM_COMPACT, NULL, 0, 0);
+      if (fields[2] == AGX_APPLE9_VREG_INVALID)
+         return false;
+   }
    uint32_t tuple = program->value_count;
    if (!apple9_vir_append_values(program, 4))
       return false;
@@ -659,14 +667,18 @@ agx_apple9_vir_emit_block_image_store(
       return false;
    *ins = (struct agx_apple9_vir_instr){
       .op = AGX_APPLE9_VIR_PUBLICATION_TUPLE,
-      .encoding = AGX_APPLE9_ENC_BLOCK_STORE_PARAMS,
+      .encoding = multisampled ? AGX_APPLE9_ENC_BLOCK_STORE_MS_PARAMS
+                               : AGX_APPLE9_ENC_BLOCK_STORE_PARAMS,
       .dest = tuple, .dest_components = 4,
-      .nr_srcs = 3, .src = {src[0], src[1], src[2]},
+      .nr_srcs = count,
+      .src = {fields[0], fields[1], fields[2], fields[3]},
    };
-   uint32_t sources[] = {tuple, tuple + 1, tuple + 2};
+   uint32_t sources[] = {tuple, tuple + 1, tuple + 2, tuple + 3};
    if (!agx_apple9_vir_emit_side_effect(program,
-          AGX_APPLE9_VIR_BLOCK_IMAGE_STORE, AGX_APPLE9_ENC_BLOCK_IMAGE_STORE,
-          sources, 3, format))
+          AGX_APPLE9_VIR_BLOCK_IMAGE_STORE,
+          multisampled ? AGX_APPLE9_ENC_BLOCK_IMAGE_STORE_MS
+                       : AGX_APPLE9_ENC_BLOCK_IMAGE_STORE,
+          sources, count, format))
       return false;
    program->instructions[program->instruction_count - 1]->texture_index = image;
    return true;
@@ -5324,19 +5336,21 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       }
 
       if (instruction->encoding == AGX_APPLE9_ENC_BLOCK_STORE_PARAMS ||
+          instruction->encoding == AGX_APPLE9_ENC_BLOCK_STORE_MS_PARAMS ||
           instruction->encoding == AGX_APPLE9_ENC_TEXTURE_LOD_PARAMS ||
           instruction->encoding == AGX_APPLE9_ENC_TEXTURE_VOLUME_PARAMS ||
           instruction->encoding == AGX_APPLE9_ENC_TEXTURE_GRAD_PARAMS) {
-         bool block = instruction->encoding == AGX_APPLE9_ENC_BLOCK_STORE_PARAMS;
+         bool block_ms = instruction->encoding == AGX_APPLE9_ENC_BLOCK_STORE_MS_PARAMS;
+         bool block = block_ms || instruction->encoding == AGX_APPLE9_ENC_BLOCK_STORE_PARAMS;
          bool gradient = instruction->encoding == AGX_APPLE9_ENC_TEXTURE_GRAD_PARAMS;
          bool volume = instruction->encoding == AGX_APPLE9_ENC_TEXTURE_VOLUME_PARAMS;
          unsigned base = phys[instruction->dest];
-         if (instruction->nr_srcs != (gradient ? 6 : volume ? 4 : 3) ||
+         if (instruction->nr_srcs != (gradient ? 6 : (volume || block_ms) ? 4 : 3) ||
              instruction->dest_components != (gradient ? 8 : 4) ||
              base > (block ? 12 : gradient ? 0 : 4) || (base & 3))
             return false;
          uint8_t bytes[64];
-         for (unsigned c = 0; c < (gradient ? 6 : volume ? 4 : 3); ++c) {
+         for (unsigned c = 0; c < (gradient ? 6 : (volume || block_ms) ? 4 : 3); ++c) {
             unsigned source = instruction->src[c];
             bool keep = instruction->live_after_mask & (1u << c);
             for (unsigned j = c + 1; j < instruction->nr_srcs; ++j)
@@ -5353,7 +5367,7 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
                return false;
             memcpy(bytes + 10 * c, part.bytes, 10);
          }
-         packed_init(packed, bytes, gradient ? 60 : volume ? 40 : 30);
+         packed_init(packed, bytes, gradient ? 60 : (volume || block_ms) ? 40 : 30);
          return true;
       }
       if (instruction->encoding != AGX_APPLE9_ENC_TEXTURE_COORDS ||
@@ -5381,19 +5395,24 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
    }
    case AGX_APPLE9_VIR_BLOCK_IMAGE_STORE: {
       unsigned coord = phys[instruction->src[0]];
-      if (instruction->encoding != AGX_APPLE9_ENC_BLOCK_IMAGE_STORE ||
-          instruction->nr_srcs != 3 || coord > 12 || (coord & 3) ||
+      bool multisampled = instruction->encoding == AGX_APPLE9_ENC_BLOCK_IMAGE_STORE_MS;
+      if ((!multisampled && instruction->encoding != AGX_APPLE9_ENC_BLOCK_IMAGE_STORE) ||
+          instruction->nr_srcs != (multisampled ? 4 : 3) || coord > 12 || (coord & 3) ||
           phys[instruction->src[1]] != coord + 1 ||
           phys[instruction->src[2]] != coord + 2 ||
+          (multisampled && phys[instruction->src[3]] != coord + 3) ||
           instruction->texture_index >= 16 || instruction->immediate > 15)
          return false;
-      /* Source tuple: pixel X, pixel Y, tile byte offset in bits 16..31.
-       * The low halfword selects mip level zero. The PBE
-       * descriptor supplies destination layout, bounds and conversion.
-       * Release the tuple and synchronously join export slot 1. */
+      /* Publication: (X, Y, offset << 16) for 2D, and
+       * (X, Y, 0, offset << 16) for MSAA. The MSAA mode exports every
+       * sample from the implicit tile. The PBE descriptor supplies layout,
+       * bounds, conversion and sample count. Release the complete tuple
+       * and synchronously join export slot 1. */
+      unsigned mode = multisampled ? 0x228 : 0x5a8;
       const uint8_t bytes[] = {
          0x57, 0x10, 0x54, coord << 1, 0, instruction->texture_index << 4,
-         0, 0x80, 0xa8, (instruction->immediate << 4) | 5, 1, 0,
+         0, 0x80, mode & 0xff,
+         (instruction->immediate << 4) | (mode >> 8), 1, 0,
          0x07, 0x12, 0x54, 0, 3, 0};
       packed_init(packed, bytes, sizeof(bytes));
       return true;

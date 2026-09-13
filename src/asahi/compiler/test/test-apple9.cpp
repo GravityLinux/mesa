@@ -8549,38 +8549,41 @@ TEST(Apple9, EntryBranchAddressRange)
 
 TEST(Apple9Compiler, BlockExportCompilesDynamicCoordinatesAndSparseImages)
 {
-   nir_builder b = nir_builder_init_simple_shader(
-      MESA_SHADER_FRAGMENT, &agx_nir_options, "block export");
-   b.shader->info.num_images = 8;
-   nir_def *group = nir_load_workgroup_id(&b);
-   nir_def *xy = nir_imul_imm(&b, nir_trim_vector(&b, group, 2), 32);
-   for (unsigned binding : {2u, 7u}) {
-      nir_image_store_block_agx(&b, nir_imm_int(&b, binding),
-         nir_imm_int(&b, binding == 2 ? 0 : 8), nir_pad_vec4(&b, xy),
-         .image_dim = GLSL_SAMPLER_DIM_2D,
-         .format = PIPE_FORMAT_R8G8B8A8_UNORM);
-   }
-   b.shader->info.io_lowered = true;
-   agx_shader_part compiled = {};
-   const char *reason = nullptr;
-   ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason)) << (reason ?: "");
-   EXPECT_EQ(compiled.info.apple9_image_mask, (1u << 2) | (1u << 7));
-   EXPECT_EQ(compiled.info.apple9_texture_mask, 0u);
-   unsigned exports = 0;
-   const auto *code = static_cast<const uint8_t *>(compiled.binary);
-   for (unsigned i = 0; i + 18 <= compiled.info.binary_size; ++i) {
-      if (code[i] == 0x57 && code[i+8] == 0xa8 && code[i+9] == 0x75) {
-         EXPECT_EQ(code[i+3] & 7, 0);
-         EXPECT_LE(code[i+3], 24);
-         EXPECT_EQ(code[i+5], exports << 4);
-         EXPECT_EQ(code[i+12], 7);
-         EXPECT_EQ(code[i+13], 0x12);
-         ++exports;
+   for (bool multisampled : {false, true}) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "block export");
+      b.shader->info.num_images = 8;
+      nir_def *group = nir_load_workgroup_id(&b);
+      nir_def *xy = nir_imul_imm(&b, nir_trim_vector(&b, group, 2), 32);
+      for (unsigned binding : {2u, 7u}) {
+         nir_image_store_block_agx(&b, nir_imm_int(&b, binding),
+            nir_imm_int(&b, binding == 2 ? 0 : 8), nir_pad_vec4(&b, xy),
+            .image_dim = multisampled ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D,
+            .format = PIPE_FORMAT_R8G8B8A8_UNORM);
       }
+      b.shader->info.io_lowered = true;
+      agx_shader_part compiled = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason)) << (reason ?: "");
+      EXPECT_EQ(compiled.info.apple9_image_mask, (1u << 2) | (1u << 7));
+      EXPECT_EQ(compiled.info.apple9_texture_mask, 0u);
+      unsigned exports = 0;
+      const auto *code = static_cast<const uint8_t *>(compiled.binary);
+      for (unsigned i = 0; i + 18 <= compiled.info.binary_size; ++i) {
+         if (code[i] == 0x57 && code[i+8] == (multisampled ? 0x28 : 0xa8) &&
+             code[i+9] == (multisampled ? 0x72 : 0x75)) {
+            EXPECT_EQ(code[i+3] & 7, 0);
+            EXPECT_LE(code[i+3], 24);
+            EXPECT_EQ(code[i+5], exports << 4);
+            EXPECT_EQ(code[i+12], 7);
+            EXPECT_EQ(code[i+13], 0x12);
+            ++exports;
+         }
+      }
+      EXPECT_EQ(exports, 2u);
+      free(compiled.binary);
+      ralloc_free(b.shader);
    }
-   EXPECT_EQ(exports, 2u);
-   free(compiled.binary);
-   ralloc_free(b.shader);
 }
 
 TEST(Apple9Encoding, BlockExportUsesAllocatedTupleAndImageSlot)
@@ -8594,7 +8597,7 @@ TEST(Apple9Encoding, BlockExportUsesAllocatedTupleAndImageSlot)
    store.src[2] = 2;
    store.texture_index = 9;
    store.immediate = 1;
-   uint8_t phys[] = {8, 9, 10};
+   uint8_t phys[] = {8, 9, 10, 11};
    agx_apple9_packed_instruction packed = {};
    const char *reason = nullptr;
    ASSERT_TRUE(agx_apple9_pack_vir_instruction(&store, phys, &packed, &reason));
@@ -8602,6 +8605,20 @@ TEST(Apple9Encoding, BlockExportUsesAllocatedTupleAndImageSlot)
    EXPECT_EQ(packed.bytes[3], 16);
    EXPECT_EQ(packed.bytes[5], 0x90);
    EXPECT_EQ(packed.bytes[9], 0x15);
+   store.encoding = AGX_APPLE9_ENC_BLOCK_IMAGE_STORE_MS;
+   store.nr_srcs = 4;
+   store.src[3] = 3;
+   ASSERT_TRUE(agx_apple9_pack_vir_instruction(&store, phys, &packed, &reason));
+   EXPECT_EQ(packed.bytes[3], 16);
+   EXPECT_EQ(packed.bytes[5], 0x90);
+   EXPECT_EQ(packed.bytes[8], 0x28);
+   EXPECT_EQ(packed.bytes[9], 0x12);
+   phys[3] = 12;
+   EXPECT_FALSE(agx_apple9_pack_vir_instruction(&store, phys, &packed, &reason));
+   phys[3] = 11;
+   store.nr_srcs = 3;
+   EXPECT_FALSE(agx_apple9_pack_vir_instruction(&store, phys, &packed, &reason));
+   store.nr_srcs = 4;
    phys[1] = 10;
    EXPECT_FALSE(agx_apple9_pack_vir_instruction(&store, phys, &packed, &reason));
    phys[1] = 9;

@@ -454,7 +454,7 @@ agx_apple9_vir_emit_publication_pair(struct agx_apple9_vir_program *program,
 
 bool agx_apple9_vir_emit_block_image_store(
    struct agx_apple9_vir_program *program, const uint32_t src[3],
-   unsigned image, unsigned format);
+   unsigned image, unsigned format, bool multisampled);
 
 uint32_t agx_apple9_vir_emit_texture_sample(
    struct agx_apple9_vir_program *program, const uint32_t coords[2],
