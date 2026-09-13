@@ -160,8 +160,24 @@ agx_apple9_launch_build(uint8_t *out, size_t capacity,
          return false;
       at += 4;
    }
-   /* The selected stage executes through the argument context established
-    * above. End setup here; an additional direct branch duplicates execution. */
+   if (params->preamble_address) {
+      /* Keep compiled setup in the persistent shader BO. Recopying a long
+       * body into every launch record defeats instruction-cache reuse. */
+      if (((params->preamble_address | params->launch_address) & 1) ||
+          params->launch_address < params->shader_base ||
+          params->preamble_address < params->shader_base ||
+          params->launch_address - params->shader_base > UINT32_MAX - at ||
+          params->preamble_address - params->shader_base > UINT32_MAX)
+         return false;
+      int64_t displacement =
+         (int64_t)(params->preamble_address - params->shader_base) -
+         (int64_t)(params->launch_address - params->shader_base + at);
+      if (!agx_apple9_encode_branch(program + at, true, displacement))
+         return false;
+      at += 10;
+   }
+   /* The preamble's STOP, or this STOP when no setup remains, completes the
+    * argument context and starts the selected main shader. */
    write16(program + at, 0x0e);
    at += 4;
    if (at > size)

@@ -109,6 +109,7 @@ apple9_compute_profile_valid(const struct agx_apple9_compute_profile *profile,
        !agx_apple9_launch_threadgroup_memory_supported(
           profile->required_threadgroup_memory_bytes) ||
        (profile->atomic_frame_size != 0 && profile->atomic_frame_size != 4) ||
+       profile->preamble_size > AGX_APPLE9_MAX_PREAMBLE_BYTES ||
        profile->scratch_size > AGX_APPLE9_MAX_SCRATCH_BYTES ||
        (profile->scratch_size & 15))
       return false;
@@ -303,8 +304,9 @@ static bool
 apple9_build_compute_launch(uint8_t *out, uint64_t usc_exec_base,
                             uint64_t package_base, uint32_t main_offset,
                             uint64_t state_address,
-                            uint32_t resource_table_offset,
-                            const struct agx_apple9_compute_profile *profile)
+                            uint32_t resource_table_offset, uint32_t launch_offset,
+                            const struct agx_apple9_compute_profile *profile,
+                            uint64_t preamble_address)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
    if (!abi || !apple9_compute_profile_valid(profile, abi) ||
@@ -321,6 +323,8 @@ apple9_build_compute_launch(uint8_t *out, uint64_t usc_exec_base,
 
    struct agx_apple9_launch_parameters params = {
       .entry_offset = main_offset,
+      .preamble_address = preamble_address,
+      .launch_address = package_base + launch_offset,
    };
    params.shader_base = usc_exec_base;
    params.resource_table = package_base + resource_table_offset;
@@ -333,7 +337,7 @@ apple9_build_compute_launch(uint8_t *out, uint64_t usc_exec_base,
    }
    params.frame_extent_a = MAX2(params.frame_extent_a, profile->atomic_frame_size);
    return agx_apple9_launch_build(
-      out, AGX_APPLE9_COMPUTE_LAUNCH_SIZE, AGX_APPLE9_LAUNCH_COMPUTE, &params);
+      out, agx_apple9_compute_launch_size(profile), AGX_APPLE9_LAUNCH_COMPUTE, &params);
 }
 
 size_t
@@ -665,11 +669,13 @@ agx_apple9_build_compute_dispatch(
    uint32_t state_offset, uint32_t resource_table_offset,
    const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
    unsigned resource_count,
-   const struct agx_apple9_compute_geometry *geometry)
+   const struct agx_apple9_compute_geometry *geometry,
+   uint64_t preamble_address)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
    if (!mapping || !abi || !resources || !geometry ||
-       resource_count != profile->resource_binding_count)
+       resource_count != profile->resource_binding_count ||
+       !!preamble_address != !!profile->preamble_size)
       return false;
 
    size_t launch_size = agx_apple9_compute_launch_size(profile);
@@ -691,7 +697,7 @@ agx_apple9_build_compute_dispatch(
    if (!apple9_build_compute_launch(
           temporary, usc_exec_base, package_base, main_offset,
           abi->has_dynamic_state ? package_base + state_offset + 0x20 : 0,
-          resource_table_offset, profile)) {
+          resource_table_offset, launch_offset, profile, preamble_address)) {
       free(temporary);
       return false;
    }
@@ -714,11 +720,13 @@ agx_apple9_build_compute_dispatch_persistent(
    uint64_t state_address, uint32_t resource_table_offset,
    const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
    unsigned resource_count,
-   const struct agx_apple9_compute_geometry *geometry)
+   const struct agx_apple9_compute_geometry *geometry,
+   uint64_t preamble_address)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
    if (!mapping || !abi || !resources || !geometry ||
        resource_count != profile->resource_binding_count ||
+       !!preamble_address != !!profile->preamble_size ||
        (abi->has_dynamic_state && !agx_apple9_compute_state_address_supported(
                                      usc_exec_base, state_address)) ||
        (!abi->has_dynamic_state && state_address != 0) ||
@@ -735,7 +743,7 @@ agx_apple9_build_compute_dispatch_persistent(
       return false;
    if (!apple9_build_compute_launch(
           temporary, usc_exec_base, package_base, main_offset, state_address,
-          resource_table_offset, profile)) {
+          resource_table_offset, launch_offset, profile, preamble_address)) {
       free(temporary);
       return false;
    }
@@ -1568,13 +1576,21 @@ agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
          draw->launch[stage] = previous->launch[stage];
          continue;
       }
-      struct agx_ptr state = agx_pool_alloc_aligned(usc_pool, 0x200, 64);
+      if (shader->preamble_size > AGX_APPLE9_MAX_PREAMBLE_BYTES ||
+          shader->preamble_offset > shader->binary_size ||
+          shader->preamble_size > shader->binary_size - shader->preamble_offset)
+         return false;
+      unsigned launch_size = AGX_APPLE9_GRAPHICS_LAUNCH_SIZE;
+      struct agx_ptr state = agx_pool_alloc_aligned(usc_pool, 0x100 + launch_size, 64);
       uint8_t *roots = state.cpu;
       memset(roots, 0, 0x100);
       apple9_put_u64(roots, draw->texture_table[stage]);
       apple9_put_u64(roots + 8, draw->sampler_table[stage]);
       apple9_put_u64(roots + 0x10, table);
       struct agx_apple9_launch_parameters params = {
+         .preamble_address = shader->preamble_size
+            ? shader->bo->va->addr + shader->preamble_offset : 0,
+         .launch_address = state.gpu + 0x100,
          .shader_base = dev->shader_base,
          .resource_table = state.gpu,
          .entry_offset = offsets[stage],
@@ -1585,7 +1601,7 @@ agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
          .samples = stage ? samples : 0,
       };
       if (!agx_apple9_launch_build(
-             roots + 0x100, 0x100,
+             roots + 0x100, launch_size,
              stage ? AGX_APPLE9_LAUNCH_FRAGMENT : AGX_APPLE9_LAUNCH_VERTEX,
              &params))
          return false;

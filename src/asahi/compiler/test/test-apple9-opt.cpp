@@ -295,3 +295,28 @@ TEST_F(Apple9Optimization, UniformWritesEndUniformReadCseScope)
    EXPECT_EQ(agx_apple9_definition(&p, result)->src[0], before);
    EXPECT_EQ(agx_apple9_definition(&p, result)->src[1], after);
 }
+
+TEST(Apple9Compiler, OversizePreambleFallsBackToOrdinaryMain)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE,
+      &agx_nir_options, "large_uniform_expression");
+   b.shader->info.workgroup_size[0] = 32;
+   b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
+   auto u = nir_load_ubo(&b, 3, 32, nir_imm_int(&b, 7), nir_imm_int(&b, 0),
+      .align_mul = 16, .range = 16);
+   auto x = nir_channel(&b, u, 0), y = nir_channel(&b, u, 1), z = nir_channel(&b, u, 2);
+   for (unsigned i = 0; i < 320; ++i)
+      x = nir_ffma(&b, x, y, z);
+   auto gid = nir_channel(&b, nir_load_global_invocation_id(&b, 32), 0);
+   nir_store_ssbo(&b, nir_ixor(&b, x, gid), nir_imm_int(&b, 0),
+                  nir_imul_imm(&b, gid, 4), .align_mul = 4);
+   agx_shader_part compiled = {};
+   agx_apple9_compute_profile profile = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason)) << reason;
+   EXPECT_EQ(compiled.info.apple9_preamble_size, 0u);
+   EXPECT_EQ(profile.preamble_size, 0u);
+   EXPECT_GT(compiled.info.main_size, AGX_APPLE9_MAX_PREAMBLE_BYTES);
+   free(compiled.binary);
+   ralloc_free(b.shader);
+}

@@ -1861,6 +1861,8 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
          compiled->apple9_render_stage = (struct agx_apple9_render_stage){
             .binary = compiled->apple9_render_binary,
             .binary_size = apple9_stage.info.binary_size,
+            .preamble_offset = apple9_stage.info.apple9_preamble_offset,
+            .preamble_size = apple9_stage.info.apple9_preamble_size,
             .scratch_size = apple9_stage.info.scratch_size,
             .publication_count = apple9_stage.info.apple9_publication_count,
             .publication_count_valid = true,
@@ -1889,6 +1891,8 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
          compiled->apple9_render_stage = (struct agx_apple9_render_stage){
             .binary = compiled->apple9_render_binary,
             .binary_size = apple9_stage.info.binary_size,
+            .preamble_offset = apple9_stage.info.apple9_preamble_offset,
+            .preamble_size = apple9_stage.info.apple9_preamble_size,
             .scratch_size = apple9_stage.info.scratch_size,
             .publication_count = apple9_stage.info.apple9_publication_count,
             .publication_count_valid = true,
@@ -6912,7 +6916,9 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
             dev->shader_base, package_base, entry_offset, launch_offset,
             cs->apple9_state_address, resource_offset,
             &cs->apple9_compute_profile, resource_addresses, resource_count,
-            &geometry);
+            &geometry,
+            cs->apple9_compute_profile.preamble_size
+               ? cs->bo->va->addr + cs->apple9_compute_profile.preamble_offset : 0);
       if (!package_built) {
          fprintf(stderr,
                  "Apple9 compute package construction failed after layout "

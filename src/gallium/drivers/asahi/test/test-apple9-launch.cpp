@@ -191,3 +191,51 @@ TEST(Apple9Launcher, TileModesDoNotChangeEntryOrResources)
       EXPECT_EQ(out, initial);
    }
 }
+
+TEST(Apple9Launcher, PreambleTransferFollowsRootArguments)
+{
+   auto p = parameters();
+   p.launch_address = p.shader_base + 0x204000;
+   for (auto stage : {AGX_APPLE9_LAUNCH_VERTEX, AGX_APPLE9_LAUNCH_FRAGMENT,
+                      AGX_APPLE9_LAUNCH_COMPUTE}) {
+      for (uint64_t offset : {0x10000ull, 0xf0000000ull}) {
+         p.preamble_address = p.shader_base + offset;
+         std::array<uint8_t, 1024> out;
+         ASSERT_TRUE(agx_apple9_launch_build(out.data(), out.size(), stage, &p));
+         unsigned words = stage == AGX_APPLE9_LAUNCH_COMPUTE
+            ? 2 * (p.resource_count + AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE) + 4
+            : 12;
+         unsigned at = agx_apple9_launch_call_offset(stage, p.resource_count) + 18 + 4 * words;
+         EXPECT_EQ(read16(out.data() + at), 0x000fu);
+         int64_t displacement = 0;
+         for (unsigned i = 0; i < 6; ++i)
+            displacement |= (uint64_t)out[at + 3 + i] << (8 * i);
+         if (displacement & (INT64_C(1) << 47))
+            displacement |= -(INT64_C(1) << 48);
+         EXPECT_EQ(p.launch_address + at + displacement, p.preamble_address);
+         EXPECT_EQ(read16(out.data() + at + 10), 0xeu);
+         EXPECT_EQ(out.back(), 0);
+      }
+   }
+}
+
+TEST(Apple9Launcher, PreambleBoundsRejectWithoutWriting)
+{
+   auto p = parameters();
+   p.launch_address = p.shader_base + 0x204000;
+   std::array<uint8_t, 1024> out;
+   for (uint64_t address : {p.shader_base - 2, p.shader_base + 1,
+                            p.shader_base + UINT64_C(0x100000000)}) {
+      p.preamble_address = address;
+      out.fill(0xa5);
+      auto before = out;
+      EXPECT_FALSE(agx_apple9_launch_build(out.data(), out.size(), AGX_APPLE9_LAUNCH_COMPUTE, &p));
+      EXPECT_EQ(out, before);
+   }
+   p.preamble_address = p.shader_base + 0x800000;
+   p.launch_address = p.shader_base - 2;
+   out.fill(0xa5);
+   auto before = out;
+   EXPECT_FALSE(agx_apple9_launch_build(out.data(), out.size(), AGX_APPLE9_LAUNCH_COMPUTE, &p));
+   EXPECT_EQ(out, before);
+}

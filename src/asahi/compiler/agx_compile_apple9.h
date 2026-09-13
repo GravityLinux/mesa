@@ -27,7 +27,7 @@ bool agx_nir_lower_apple9_math(nir_shader *shader);
  * resource requirements return a diagnostic; no shader replay is substituted.
  *
  * On failure, *reason points at a static diagnostic string when reason is
- * non-NULL. On success, out owns a malloc-backed main-program binary and may
+ * non-NULL. On success, out owns a malloc-backed main/preamble binary and may
  * be released with free(out->binary), like agx_compile_shader_nir output.
  */
 bool agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,

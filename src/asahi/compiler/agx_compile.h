@@ -141,6 +141,9 @@ struct agx_shader_info {
    struct agx_apple9_varying_layout apple9_varyings;
    struct agx_apple9_interp_mask apple9_linear_mask, apple9_flat_mask;
    uint16_t apple9_publication_count;
+   /* Apple9 setup code is entered by the launcher, independently of USC
+    * preshader configuration used by earlier generations. */
+   uint32_t apple9_preamble_offset, apple9_preamble_size;
    bool apple9_reads_z;
    bool apple9_reads_tile;
    bool apple9_writes_point_size;

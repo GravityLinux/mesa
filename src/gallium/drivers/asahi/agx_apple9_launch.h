@@ -34,6 +34,10 @@ struct agx_apple9_launch_parameters {
    uint32_t threadgroup_memory_bytes;
    /* Visible compute buffers, after the group-count pointer. */
    unsigned resource_count;
+   /* Optional tail transfer to a compiler-owned setup body ending in STOP.
+    * Its BO has the same ownership/lifetime as the main shader. */
+   uint64_t preamble_address;
+   uint64_t launch_address;
 };
 
 /* Current T8132 execution evidence covers these allocation sizes. This does
@@ -44,7 +48,7 @@ bool agx_apple9_launch_threadgroup_memory_supported(uint32_t bytes);
 size_t agx_apple9_launch_call_offset(enum agx_apple9_launch_stage stage,
                                      unsigned resource_count);
 
-/* Build from stage parameters only. No caller-owned executable input is read.
+/* Build from stage parameters only; no executable input is read.
  * On invalid input leave the destination untouched; on success zero all unused
  * bytes through capacity. The fixed allocation sizes above include padding. */
 bool agx_apple9_launch_build(uint8_t *out, size_t capacity,

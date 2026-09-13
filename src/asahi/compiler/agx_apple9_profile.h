@@ -60,6 +60,7 @@ struct agx_apple9_compute_profile {
 
    uint32_t required_threadgroup_memory_bytes;
    uint32_t scratch_size;
+   uint32_t preamble_offset, preamble_size;
    /* Storage for returned 32-bit atomics, independently of RA spills. */
    uint16_t atomic_frame_size;
 

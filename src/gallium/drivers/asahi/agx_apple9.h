@@ -42,6 +42,7 @@ struct agx_apple9_render_stage {
    struct agx_bo *bo;
    const uint8_t *binary;
    size_t binary_size;
+   uint32_t preamble_offset, preamble_size;
    uint32_t ubo_mask;
    uint32_t scratch_size;
    uint16_t publication_count;
@@ -317,7 +318,8 @@ bool agx_apple9_build_compute_dispatch(
    uint32_t state_offset, uint32_t resource_table_offset,
    const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
    unsigned resource_count,
-   const struct agx_apple9_compute_geometry *geometry);
+   const struct agx_apple9_compute_geometry *geometry,
+   uint64_t preamble_address);
 
 bool agx_apple9_build_compute_dispatch_persistent(
    void *mapping, size_t mapping_size, uint64_t usc_exec_base,
@@ -325,7 +327,8 @@ bool agx_apple9_build_compute_dispatch_persistent(
    uint64_t state_address, uint32_t resource_table_offset,
    const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
    unsigned resource_count,
-   const struct agx_apple9_compute_geometry *geometry);
+   const struct agx_apple9_compute_geometry *geometry,
+   uint64_t preamble_address);
 
 bool agx_apple9_emit_direct_dispatch(
    void *out, uint64_t launch, const uint32_t global[3],

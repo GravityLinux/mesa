@@ -600,6 +600,8 @@ apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
              op == nir_intrinsic_load_subgroup_id ||
              op == nir_intrinsic_load_subgroup_size ||
              op == nir_intrinsic_load_ssbo || op == nir_intrinsic_load_ubo ||
+             op == nir_intrinsic_load_preamble ||
+             op == nir_intrinsic_store_preamble ||
              op == nir_intrinsic_store_ssbo ||
              op == nir_intrinsic_ssbo_atomic ||
              op == nir_intrinsic_ssbo_atomic_swap;
@@ -1600,6 +1602,17 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                     nir_intrinsic_load_sample_mask_in) {
          value = apple9_dag_emit(lower, AGX_APPLE9_VIR_GET_SR,
             AGX_APPLE9_ENC_GET_COVERAGE, NULL, 0, 0x10c2);
+      } else if (nir_def_instr_type(scalar.def) == nir_instr_type_intrinsic &&
+                 nir_def_as_intrinsic(scalar.def)->intrinsic ==
+                    nir_intrinsic_load_preamble) {
+         nir_intrinsic_instr *intr = nir_def_as_intrinsic(scalar.def);
+         unsigned word = nir_intrinsic_base(intr) + scalar.comp;
+         if (scalar.def->bit_size != 32 || word >= AGX_APPLE9_PREAMBLE_WORDS)
+            return AGX_APPLE9_VREG_INVALID;
+         uint32_t zero = apple9_dag_zero(lower);
+         value = apple9_dag_emit(lower, AGX_APPLE9_VIR_IOR_UNIFORM,
+            AGX_APPLE9_ENC_LOGIC_UNIFORM, &zero, 1,
+            AGX_APPLE9_PREAMBLE_BASE + word);
       } else if (subgroup_size) {
          /* Native Metal materializes the architectural SIMD width. */
          value = apple9_dag_imm(lower, 32);
@@ -2270,6 +2283,7 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
       return false;
    }
 
+   bool uniform_stores = false;
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
    if (!apple9_validate_cf_list(&impl->body, reason))
       return false;
@@ -2287,6 +2301,7 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
             continue;
 
          nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         uniform_stores |= intr->intrinsic == nir_intrinsic_store_preamble;
          if (intr->intrinsic != nir_intrinsic_load_ssbo &&
              intr->intrinsic != nir_intrinsic_load_ubo &&
              intr->intrinsic != nir_intrinsic_store_ssbo &&
@@ -2443,7 +2458,7 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
       }
    }
 
-   if (stores->size == 0 && atomics->size == 0 &&
+   if (!uniform_stores && stores->size == 0 && atomics->size == 0 &&
        nir->info.stage == MESA_SHADER_COMPUTE) {
       *reason = "Apple9 requires at least one SSBO side effect";
       return false;
@@ -2979,6 +2994,22 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
             if (!agx_apple9_vir_emit_block_image_store(&lower->program, src, image,
                                                        tile_format, multisampled))
                return false;
+            continue;
+         }
+         if (intr->intrinsic == nir_intrinsic_store_preamble) {
+            nir_def *def = intr->src[0].ssa;
+            unsigned base = nir_intrinsic_base(intr);
+            if (def->bit_size != 32 ||
+                base + def->num_components > AGX_APPLE9_PREAMBLE_WORDS)
+               return false;
+            for (unsigned c = 0; c < def->num_components; ++c) {
+               uint32_t value = apple9_lower_dag_scalar(lower, nir_get_scalar(def, c));
+               if (value == AGX_APPLE9_VREG_INVALID ||
+                   !agx_apple9_vir_emit_side_effect(&lower->program,
+                      AGX_APPLE9_VIR_STORE_UNIFORM, AGX_APPLE9_ENC_STORE_UNIFORM,
+                      &value, 1, AGX_APPLE9_PREAMBLE_BASE + base + c))
+                  return false;
+            }
             continue;
          }
          if (intr->intrinsic == nir_intrinsic_store_ssbo) {
@@ -4111,6 +4142,83 @@ fail:
    return false;
 }
 
+struct apple9_preamble_eligibility {
+   /* 0 unknown, 1 rejected/visiting, 2 accepted. Memoize shared DAGs. */
+   uint8_t *state;
+};
+
+static bool
+apple9_preamble_source(nir_src *src, void *data);
+
+static bool
+apple9_preamble_instruction(const nir_instr *instr, const void *data)
+{
+   const struct apple9_preamble_eligibility *eligibility = data;
+   nir_def *def = nir_instr_def((nir_instr *)instr);
+   if (!def || (def->bit_size != 32 && def->bit_size != 16 && def->bit_size != 1))
+      return false;
+   uint8_t *state = &eligibility->state[def->index];
+   if (*state)
+      return *state == 2;
+   *state = 1;
+   bool accepted = false;
+   switch (instr->type) {
+   case nir_instr_type_load_const:
+      accepted = true;
+      break;
+   case nir_instr_type_alu:
+      accepted = apple9_instruction_is_in_subset((nir_instr *)instr, false) &&
+                 nir_foreach_src((nir_instr *)instr, apple9_preamble_source, (void *)data);
+      break;
+   case nir_instr_type_intrinsic:
+      accepted = nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_ubo &&
+                 nir_foreach_src((nir_instr *)instr, apple9_preamble_source, (void *)data);
+      break;
+   default:
+      break;
+   }
+   *state = accepted ? 2 : 1;
+   return accepted;
+}
+
+static bool
+apple9_preamble_source(nir_src *src, void *data)
+{
+   return apple9_preamble_instruction(nir_def_instr(src->ssa), data);
+}
+
+static bool
+apple9_preamble_avoid(const nir_instr *instr, const void *data)
+{
+   nir_def *def = nir_instr_def((nir_instr *)instr);
+   /* Boolean and half intermediates can move with an expression, but only
+    * 32-bit results have a validated argument-window transfer. */
+   return !def || def->bit_size != 32 || !apple9_preamble_instruction(instr, data);
+}
+
+static void
+apple9_preamble_def_size(nir_def *def, unsigned *size, unsigned *align,
+                        nir_preamble_class *class_)
+{
+   *size = def->num_components;
+   *align = 1;
+   *class_ = nir_preamble_class_general;
+}
+
+static float
+apple9_preamble_cost(nir_instr *instr, const void *data)
+{
+   if (!apple9_preamble_instruction(instr, data))
+      return 0;
+   return instr->type == nir_instr_type_intrinsic ? 8 : 1;
+}
+
+static float
+apple9_preamble_rewrite_cost(nir_def *def, const void *unused)
+{
+   return def->num_components;
+}
+
 static bool
 apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
                   struct agx_apple9_compute_profile *profile,
@@ -4122,6 +4230,94 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    if (!apple9_collect_buffer_map(nir, &resources, reason))
       return false;
 
+   nir_shader *main = nir_shader_clone(NULL, nir);
+   if (!main)
+      return apple9_compile_dag_body(nir, out, profile, varyings, &resources,
+                                    false, reason);
+   /* Avoid spending uniform words on unused components of frontend UBO
+    * vectors. Removing leading components can also reduce the alignment:
+    * vec4 at byte 16 may become vec3 at byte 20. Re-legalize that access
+    * before assigning a hardware vector stride or extracting a preamble. */
+   nir_opt_shrink_vectors(main, true);
+   nir_opt_constant_folding(main);
+   apple9_legalize_buffer_accesses(main);
+   nir_function_impl *main_impl = nir_shader_get_entrypoint(main);
+   nir_index_ssa_defs(main_impl);
+   struct apple9_preamble_eligibility eligibility = {
+      .state = calloc(MAX2(main_impl->ssa_alloc, 1), sizeof(uint8_t)),
+   };
+   if (!eligibility.state) {
+      ralloc_free(main);
+      return apple9_compile_dag_body(nir, out, profile, varyings, &resources,
+                                    false, reason);
+   }
+   const nir_opt_preamble_options options = {
+      .cb_data = &eligibility,
+      .def_size = apple9_preamble_def_size,
+      .preamble_storage_size[nir_preamble_class_general] = AGX_APPLE9_PREAMBLE_WORDS,
+      .instr_cost_cb = apple9_preamble_cost,
+      .rewrite_cost_cb = apple9_preamble_rewrite_cost,
+      .avoid_instr_cb = apple9_preamble_avoid,
+   };
+   unsigned sizes[nir_preamble_num_classes] = {0};
+   struct agx_shader_part setup = {0}, candidate = {0};
+   struct agx_apple9_compute_profile candidate_profile = {0};
+   const char *candidate_reason = NULL;
+   nir_shader *preamble = NULL;
+   if (main && nir_opt_preamble(main, &options, sizes)) {
+      nir_function_impl *impl = nir_shader_get_preamble(main);
+      /* Setup currently admits ordinary linear ALU/UBO work. Masked setup and
+       * scratch have independent execution contracts and are not assumed. */
+      if (impl && !apple9_cf_list_has_control_flow(&impl->body)) {
+         preamble = nir_shader_create(NULL, nir->info.stage, nir->options);
+         preamble->info.stage = nir->info.stage;
+         preamble->info.float_controls_execution_mode = nir->info.float_controls_execution_mode;
+         memcpy(preamble->info.workgroup_size, nir->info.workgroup_size,
+                sizeof(preamble->info.workgroup_size));
+         nir_function *fn = nir_function_create(preamble, "main");
+         fn->is_entrypoint = true;
+         fn->impl = nir_function_impl_clone(preamble, impl);
+         fn->impl->function = fn;
+         nir_opt_dce(main);
+         nir_opt_dce(preamble);
+         if (apple9_compile_dag_body(preamble, &setup, NULL, NULL, &resources,
+                                    true, &candidate_reason) &&
+             !setup.info.scratch_size &&
+             setup.info.main_size > 4 &&
+             setup.info.main_size <= AGX_APPLE9_MAX_PREAMBLE_BYTES &&
+             apple9_compile_dag_body(main, &candidate,
+                                    profile ? &candidate_profile : NULL,
+                                    varyings, &resources, false, &candidate_reason)) {
+            unsigned size = setup.info.main_size;
+            uint8_t *binary = realloc(candidate.binary, candidate.info.binary_size + size);
+            if (binary) {
+               memcpy(binary + candidate.info.binary_size, setup.binary, size);
+               candidate.info.apple9_preamble_offset = candidate.info.binary_size;
+               candidate.info.apple9_preamble_size = size;
+               candidate.info.binary_size += size;
+               candidate.binary = binary;
+               *out = candidate;
+               if (profile) {
+                  candidate_profile.preamble_offset = out->info.apple9_preamble_offset;
+                  candidate_profile.preamble_size = size;
+                  *profile = candidate_profile;
+               }
+               free(eligibility.state);
+               free(setup.binary);
+               ralloc_free(preamble);
+               ralloc_free(main);
+               return true;
+            }
+         }
+      }
+   }
+   if (getenv("AGX_APPLE9_TRACE") && candidate_reason)
+      fprintf(stderr, "APPLE9_PREAMBLE_FALLBACK %s\n", candidate_reason);
+   free(setup.binary);
+   free(candidate.binary);
+   free(eligibility.state);
+   ralloc_free(preamble);
+   ralloc_free(main);
    return apple9_compile_dag_body(nir, out, profile, varyings, &resources,
                                  false, reason);
 }

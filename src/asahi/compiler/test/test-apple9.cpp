@@ -9269,6 +9269,91 @@ TEST(Apple9Packer, SystemRegisterAndZeroExtensionShareDestinationBits)
    EXPECT_FALSE(agx_apple9_pack_get_sr_zext16(64, 0xa4, &invalid));
 }
 
+TEST(Apple9Compiler, PreambleRetainsCompleteResourceMap)
+{
+   nir_builder b = apple9_compute_builder("preamble_resource_map");
+   nir_def *gid = apple9_global_id_x(&b);
+   nir_def *uniform = nir_load_ubo(&b, 4, 32, nir_imm_int(&b, 7),
+      nir_imm_int(&b, 16), .align_mul = 16, .range = 16);
+   nir_def *value = nir_iadd_imm(&b,
+      nir_imul_imm(&b, nir_channel(&b, uniform, 2), 13), 9);
+   apple9_store_output(&b, gid, nir_ixor(&b, value, gid));
+   struct agx_shader_part compiled = {};
+   struct agx_apple9_compute_profile profile = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason))
+      << (reason ? reason : "no diagnostic");
+   EXPECT_GT(compiled.info.apple9_preamble_size, 0u);
+   EXPECT_EQ(compiled.info.apple9_preamble_offset, compiled.info.main_size);
+   EXPECT_EQ(compiled.info.binary_size,
+             compiled.info.main_size + compiled.info.apple9_preamble_size);
+   EXPECT_EQ(profile.preamble_size, compiled.info.apple9_preamble_size);
+   EXPECT_EQ(profile.preamble_offset, compiled.info.apple9_preamble_offset);
+   ASSERT_EQ(profile.resource_binding_count, 2u);
+   bool found_ubo = false, found_output = false;
+   for (unsigned i = 0; i < profile.resource_binding_count; ++i) {
+      if (profile.resource_kind[i] == AGX_APPLE9_COMPUTE_RESOURCE_UBO) {
+         EXPECT_EQ(profile.resource_binding[i], 7u);
+         EXPECT_TRUE(profile.resource_read_mask & (1u << i));
+         EXPECT_FALSE(profile.resource_write_mask & (1u << i));
+         found_ubo = true;
+      } else {
+         EXPECT_EQ(profile.resource_binding[i], 0u);
+         EXPECT_TRUE(profile.resource_write_mask & (1u << i));
+         found_output = true;
+      }
+   }
+   EXPECT_TRUE(found_ubo && found_output);
+   free(compiled.binary);
+   ralloc_free(b.shader);
+}
+
+TEST(Apple9Compiler, InvocationDependentUboStaysInMain)
+{
+   nir_shader *nir = apple9_ubo_load_shader();
+   struct agx_shader_part compiled = {};
+   struct agx_apple9_compute_profile profile = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason));
+   EXPECT_EQ(compiled.info.apple9_preamble_size, 0u);
+   EXPECT_EQ(compiled.info.main_size, compiled.info.binary_size);
+   free(compiled.binary);
+   ralloc_free(nir);
+}
+
+TEST(Apple9Compiler, PreambleShrinkingPreservesBufferByteAddresses)
+{
+   nir_builder b = apple9_compute_builder("preamble_vector_start");
+   nir_def *gid = apple9_global_id_x(&b);
+   nir_def *uniform = nir_load_ubo(&b, 4, 32, nir_imm_int(&b, 7),
+      nir_imm_int(&b, 16), .align_mul = 16, .range_base = 16, .range = 16);
+   nir_def *sum = nir_iadd(&b, nir_channel(&b, uniform, 1),
+                              nir_channel(&b, uniform, 3));
+   apple9_store_output(&b, gid, nir_ixor(&b, sum, gid));
+   agx_shader_part compiled = {};
+   agx_apple9_compute_profile profile = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason))
+      << (reason ?: "");
+   ASSERT_GT(compiled.info.apple9_preamble_size, 0u);
+
+   /* The live words are at byte offsets 20 and 28. Shrinking the vec4 to
+    * a vec3 starting at 20 cannot use the 16-byte-stride memory format:
+    * that format would round its address down to 16. */
+   agx_shader_part preamble = {};
+   preamble.binary = (uint8_t *)compiled.binary +
+                     compiled.info.apple9_preamble_offset;
+   preamble.info.binary_size = compiled.info.apple9_preamble_size;
+   unsigned loads[4];
+   ASSERT_EQ(apple9_binary_device_load_offsets(&preamble, loads, 4), 2u);
+   for (unsigned offset : {loads[0], loads[1]}) {
+      const uint8_t *bytes = (const uint8_t *)preamble.binary + offset;
+      EXPECT_EQ(bytes[8] & 0x0e, 0u); /* Scalar dword format. */
+   }
+   free(compiled.binary);
+   ralloc_free(b.shader);
+}
+
 TEST(Apple9Packer, UniformLogicPreservesHighRegistersAndDependencies)
 {
    agx_apple9_vir_instr ins = {};
