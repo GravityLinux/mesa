@@ -82,7 +82,7 @@ apple9_register_constraint(const struct agx_apple9_operand_constraint *c)
 {
    return (struct agx_reg_constraint){
       .min = c ? 2 * c->min_index : 0,
-      .max = c ? 2 * MIN2(c->max_index, 63) : 126,
+      .max = c ? 2 * c->max_index : AGX_APPLE9_HALF_REGISTER_COUNT - 2,
       .align = c ? MAX2(c->alignment_halves, 2) : 2,
       .clobber = c && (c->flags & AGX_APPLE9_OPERAND_CLOBBER),
    };
@@ -145,7 +145,7 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
    ctx->key = &ra->key;
    ra->key.has_scratch = true;
    ctx->ra_target = (struct agx_ra_target){
-      .max_registers = 128,
+      .max_registers = AGX_APPLE9_HALF_REGISTER_COUNT,
       .reserved_registers = 4,
       .spill_reserved_registers = 8,
       .spill_copy_register = 2,
@@ -153,6 +153,7 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
       .late_kill_sources = true,
       .preserve_source_kills = true,
       .defer_spill_lowering = true,
+      .disable_occupancy_rematerialization = true,
    };
    list_inithead(&ctx->blocks);
    unsigned block_count = p->last_block->index + 1;
@@ -320,7 +321,11 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
             ctx, struct agx_reg_constraint, common->nr_dests + nr_srcs);
          if (common->nr_dests)
             common->reg_constraints[0] = apple9_register_constraint(
-               agx_apple9_find_operand(ins->encoding, AGX_APPLE9_OPERAND_DEST));
+               ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC
+                  ? agx_apple9_find_operand(AGX_APPLE9_ENC_DEVICE_ATOMIC_RESULT,
+                                            AGX_APPLE9_OPERAND_SRC0)
+                  : agx_apple9_find_operand(ins->encoding,
+                                            AGX_APPLE9_OPERAND_DEST));
          for (unsigned s = 0; s < nr_srcs; ++s) {
             unsigned source = first_source[s];
             struct agx_reg_constraint c =
@@ -328,9 +333,6 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
             unsigned fixed = p->fixed_phys[ins->src[source]];
             if (fixed != AGX_APPLE9_PHYS_INVALID && !ra->publication[ins->src[source]])
                c.min = c.max = fixed * 2;
-            if (ins->op == AGX_APPLE9_VIR_DEVICE_STORE && source == 0 &&
-                (ins->memory_bits == 8 || ins->memory_bits == 16))
-               c.min = c.max = 0;
             common->reg_constraints[common->nr_dests + s] = c;
          }
       }
@@ -403,6 +405,15 @@ static bool
 apple9_physical_immediate(struct agx_apple9_vir_program *out, unsigned dst,
                           uint32_t value)
 {
+   /* Rematerialization and PHI copies happen after constrained allocation.
+    * The immediate form only has six destination bits; use the reserved
+    * parallel-copy temporary when the final destination is in the high bank.
+    */
+   if (dst >= 64)
+      return apple9_physical_immediate(out, COPY_REG, value) &&
+             apple9_physical_copy(out, dst, COPY_REG,
+                                  AGX_APPLE9_SCOREBOARD_SLOT_NONE);
+
    struct agx_apple9_vir_instr ins = apple9_physical_instruction(
       AGX_APPLE9_VIR_IMM,
       dst < 16 && value < 0x80 ? AGX_APPLE9_ENC_MOV_IMM_COMPACT

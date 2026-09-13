@@ -18,7 +18,7 @@
 
 #define APPLE9_FIRST_ALLOCATABLE_GPR 0
 #define APPLE9_FIRST_GENERAL_GPR     16
-#define APPLE9_LAST_ALLOCATABLE_GPR  63
+#define APPLE9_LAST_ALLOCATABLE_GPR  (AGX_APPLE9_GPR_COUNT - 1)
 
 static void
 set_bits(uint8_t *encoded, unsigned start, unsigned width, uint64_t value)
@@ -543,6 +543,20 @@ agx_apple9_vir_emit_cube(struct agx_apple9_vir_program *program,
          return AGX_APPLE9_VREG_INVALID;
       program->instructions[program->instruction_count - 1]->dest_components = 2;
    }
+   return value;
+}
+
+uint32_t
+agx_apple9_vir_emit_mul_wide(struct agx_apple9_vir_program *program,
+                            const uint32_t src[2], bool is_signed)
+{
+   uint32_t value = agx_apple9_vir_emit(
+      program, AGX_APPLE9_VIR_IMUL_WIDE, AGX_APPLE9_ENC_INT_MUL_WIDE,
+      src, 2, is_signed);
+   if (value == AGX_APPLE9_VREG_INVALID ||
+       !apple9_vir_append_values(program, 1))
+      return AGX_APPLE9_VREG_INVALID;
+   program->instructions[program->instruction_count - 1]->dest_components = 2;
    return value;
 }
 
@@ -2541,6 +2555,7 @@ agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
    bool has_side_effect = false;
    for (unsigned i = 0; i < program->instruction_count; ++i)
       has_side_effect |=
+         program->instructions[i]->op == AGX_APPLE9_VIR_STORE_UNIFORM ||
          program->instructions[i]->op == AGX_APPLE9_VIR_DEVICE_STORE ||
          program->instructions[i]->op == AGX_APPLE9_VIR_DEVICE_ATOMIC ||
          apple9_vir_is_graphics_output(program->instructions[i]->op);
@@ -2959,7 +2974,7 @@ agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
                   dest_constraint->max_index >= APPLE9_FIRST_GENERAL_GPR)) {
          /* Keep the compact bank available for instructions whose result has
           * a genuine r0-r15 encoding limit.  General values start in r16 and
-          * fall back to the low bank only after r16-r63 is occupied. This
+          * fall back to the low bank only after r16-r95 is occupied. This
           * includes PHI/COLLECT pseudo-definitions: loop phis must not
           * occupy the entire constrained coordinate/result bank. */
          const unsigned maximum = dest_constraint ? dest_constraint->max_index
@@ -3084,7 +3099,7 @@ agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
                   ? (dest_constraint != NULL &&
                            dest_constraint->max_index < APPLE9_FIRST_GENERAL_GPR
                         ? "Apple9 no-spill allocator exhausted the compact destination bank"
-                        : "Apple9 no-spill allocator exhausted r2-r63")
+                        : "Apple9 no-spill allocator exhausted r2-r95")
                   : "Apple9 no-spill allocator could not place an adjacent GPR tuple";
          return false;
       }
@@ -3299,11 +3314,11 @@ apple9_materialize_pending_result_at(struct agx_apple9_vir_program *program,
     *
     * The old umin(x, x) bridge was functionally correct, but its compact
     * destination is limited to r0-r15.  Under genuine scoreboard pressure
-    * those registers can all remain live while r16-r63 are available, which
+    * those registers can all remain live while r16-r95 are available, which
     * made materialization itself an artificial allocator bottleneck.  The
     * hardware-validated extended IOR form consumes the same pending slot,
     * implements the identical x | x bit-copy, and has a general destination.
-   */
+    */
    for (unsigned c = 0; c < components; ++c) {
       uint32_t sources[] = {pending + c, pending + c};
       materialized[c] =
@@ -3668,31 +3683,6 @@ apple9_normalize_logic_handoff_source(struct agx_apple9_vir_program *program,
    }
 }
 
-/* The current narrow-store encoding constrains its data operand to r0.
- * Constrain a short copy at the consumer, not the entire source lifetime:
- * several byte stores may otherwise pin simultaneously live values to r0. */
-static bool
-apple9_legalize_narrow_store_sources(struct agx_apple9_vir_program *program)
-{
-   for (unsigned i = 0; i < program->instruction_count; ++i) {
-      struct agx_apple9_vir_instr *store = program->instructions[i];
-      if (store->op != AGX_APPLE9_VIR_DEVICE_STORE ||
-          (store->memory_bits != 8 && store->memory_bits != 16) ||
-          program->fixed_phys[store->src[0]] == 0)
-         continue;
-      uint32_t sources[] = {store->src[0], store->src[0]};
-      uint32_t copy = agx_apple9_vir_emit(program, AGX_APPLE9_VIR_IOR,
-         AGX_APPLE9_ENC_LOGIC_EXTENDED, sources, 2, 0);
-      if (copy == AGX_APPLE9_VREG_INVALID ||
-          !agx_apple9_vir_set_fixed_phys(program, copy, 0))
-         return false;
-      agx_apple9_vir_move_before(program, program->instructions[program->instruction_count - 1], store);
-      store->src[0] = copy;
-      agx_apple9_invalidate_uses(program);
-      ++i;
-   }
-   return true;
-}
 
 bool
 agx_apple9_assign_vir_scoreboard_slots(struct agx_apple9_vir_program *program,
@@ -3717,11 +3707,6 @@ agx_apple9_assign_vir_scoreboard_slots(struct agx_apple9_vir_program *program,
    }
    if (!apple9_schedule_spill_completions(program)) {
       if (reason) *reason = "out of memory scheduling Apple9 spill completion";
-      return false;
-   }
-   if (!apple9_legalize_narrow_store_sources(program)) {
-      if (reason)
-         *reason = "could not constrain an Apple9 narrow-store source";
       return false;
    }
 
@@ -3873,13 +3858,13 @@ bool
 agx_apple9_pack_get_sr(unsigned dst, uint8_t selector, uint8_t datapath,
                        struct agx_apple9_packed_instruction *packed)
 {
-   if (dst >= AGX_APPLE9_GPR_COUNT)
+   if (dst >= 64 || (datapath & 0xc0))
       return false;
    uint8_t bytes[4] = {
       ((dst & 0xf) << 4) | 0x0c,
       selector,
-      dst >= 64 ? datapath | 0x40 : datapath,
-      0x06 | ((dst >> 4) << 5),
+      datapath | ((dst >> 4) << 6),
+      0x06,
    };
    packed_init(packed, bytes, sizeof(bytes));
    return true;
@@ -3889,7 +3874,7 @@ bool
 agx_apple9_pack_get_sr_zext16(unsigned dst, uint8_t selector,
                               struct agx_apple9_packed_instruction *packed)
 {
-   if (dst >= 16)
+   if (dst >= 64)
       return false;
 
    /*
@@ -3900,8 +3885,8 @@ agx_apple9_pack_get_sr_zext16(unsigned dst, uint8_t selector,
     * establish that the pair is shared by the complete scalar16 class.
     */
    const uint8_t bytes[8] = {
-      (dst << 4) | 0x04, selector, 0x10, 0x06,
-      (dst << 4) | 0x03, 0x00,     0x00, 0x01,
+      ((dst & 15) << 4) | 0x04, selector, 0x10 | ((dst >> 4) << 6), 0x06,
+      ((dst & 15) << 4) | 0x03, 0x00,     (dst >> 4) << 6,          0x01,
    };
    packed_init(packed, bytes, sizeof(bytes));
    return true;
@@ -3925,7 +3910,8 @@ pack_i2f32(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
 {
    const unsigned dst = phys[instruction->dest];
    const unsigned src = phys[instruction->src[0]];
-   if (instruction->nr_srcs != 1 || dst >= 64 || src >= 64 ||
+   if (instruction->nr_srcs != 1 || dst >= AGX_APPLE9_GPR_COUNT ||
+       src >= AGX_APPLE9_GPR_COUNT ||
        (instruction->op != AGX_APPLE9_VIR_U2F32 &&
         instruction->op != AGX_APPLE9_VIR_I2F32))
       return false;
@@ -3946,8 +3932,8 @@ pack_i2f32(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
       0x54,
       dst << 1,
       0x03,
-      src << 2,
-      retain_source ? 0x8c : 0xac,
+      (src & 63) << 2,
+      (retain_source ? 0x8c : 0xac) | (src >> 6),
       instruction->op == AGX_APPLE9_VIR_I2F32 ? 0x60 : 0x20,
    };
    packed_init(packed, bytes, sizeof(bytes));
@@ -3960,7 +3946,8 @@ pack_f2i32(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
 {
    const unsigned dst = phys[instruction->dest];
    const unsigned src = phys[instruction->src[0]];
-   if (instruction->nr_srcs != 1 || dst >= 64 || src >= 64 ||
+   if (instruction->nr_srcs != 1 || dst >= AGX_APPLE9_GPR_COUNT ||
+       src >= AGX_APPLE9_GPR_COUNT ||
        (instruction->op != AGX_APPLE9_VIR_F2I32 &&
         instruction->op != AGX_APPLE9_VIR_F2U32))
       return false;
@@ -3970,11 +3957,16 @@ pack_f2i32(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
     * continuation's format bit must also match signedness: the signed format
     * with an unsigned operation saturates at 65535, not UINT32_MAX. */
    const uint8_t bytes[] = {
-      0x27, 0x07,
-      0x54, dst << 1,
-      0x03, src << 2,
-      (instruction->live_after_mask & 1) ? 0x96 : 0xb4, instruction->op == AGX_APPLE9_VIR_F2I32 ? 0x48 : 0x08,
-      instruction->op == AGX_APPLE9_VIR_F2I32 ? 0x03 : 0x02, 0x00,
+      0x27,
+      0x07,
+      0x54,
+      dst << 1,
+      0x03,
+      (src & 63) << 2,
+      ((instruction->live_after_mask & 1) ? 0x96 : 0xb4) | (src >> 6),
+      instruction->op == AGX_APPLE9_VIR_F2I32 ? 0x48 : 0x08,
+      instruction->op == AGX_APPLE9_VIR_F2I32 ? 0x03 : 0x02,
+      0x00,
    };
    packed_init(packed, bytes, sizeof(bytes));
    return true;
@@ -3987,7 +3979,8 @@ pack_fspecial(const struct agx_apple9_vir_instr *instruction, const uint8_t *phy
    const unsigned dst = phys[instruction->dest];
    const unsigned src = phys[instruction->src[0]];
    if (instruction->encoding != AGX_APPLE9_ENC_FLOAT_SPECIAL ||
-       instruction->nr_srcs != 1 || dst >= AGX_APPLE9_GPR_COUNT || src >= 64 ||
+       instruction->nr_srcs != 1 || dst >= AGX_APPLE9_GPR_COUNT ||
+       src >= AGX_APPLE9_GPR_COUNT ||
        (instruction->immediate != 0x02 && instruction->immediate != 0x03))
       return false;
 
@@ -4043,36 +4036,72 @@ pack_fspecial(const struct agx_apple9_vir_instr *instruction, const uint8_t *phy
     * FP32. Reciprocal instead places source type in byte 7 bits [3:2].
     * Both forms consume pending producers through the independent mask. */
    const uint8_t bytes[10] = {
-      0x2f | (family << 7), function, 0x54, dst << 1,
-      instruction->immediate, src << 2,
-      instruction->op == AGX_APPLE9_VIR_FRCP
-         ? ((instruction->live_after_mask & 1u) ? 0x00 : 0x10)
-         : ((instruction->live_after_mask & 1u) ? 0x90 : 0xb0),
-      precision, rounding, 0,
+      0x2f | (family << 7),
+      function,
+      0x54,
+      dst << 1,
+      instruction->immediate,
+      (src & 63) << 2,
+      (src >> 6) | (instruction->op == AGX_APPLE9_VIR_FRCP
+                       ? ((instruction->live_after_mask & 1u) ? 0x00 : 0x10)
+                       : ((instruction->live_after_mask & 1u) ? 0x90 : 0xb0)),
+      precision,
+      rounding,
+      0,
    };
    packed_init(packed, bytes, sizeof(bytes));
    return true;
 }
 
 static bool
-pack_ishr_imm(const struct agx_apple9_vir_instr *instruction,
-              const uint8_t *phys, struct agx_apple9_packed_instruction *packed)
+pack_shift(const struct agx_apple9_vir_instr *I, const uint8_t *phys,
+           struct agx_apple9_packed_instruction *packed)
 {
-   const unsigned dst = phys[instruction->dest];
-   const unsigned src = phys[instruction->src[0]];
-   const unsigned amount = instruction->immediate;
-   if (instruction->op != AGX_APPLE9_VIR_ISHR || instruction->nr_srcs != 1 ||
-       dst >= 16 || src >= 16 || amount >= 32)
+   bool arithmetic = I->op == AGX_APPLE9_VIR_ISHR;
+   bool variable = I->nr_srcs == 2;
+   enum agx_apple9_encoding encoding = arithmetic
+      ? (variable ? AGX_APPLE9_ENC_SHIFT_ARITH_REGISTER
+                  : AGX_APPLE9_ENC_SHIFT_EXTENDED)
+      : (variable ? AGX_APPLE9_ENC_SHIFT_LOGICAL_REGISTER
+                  : AGX_APPLE9_ENC_SHIFT_LOGICAL_IMMEDIATE);
+   unsigned dst = phys[I->dest], src = phys[I->src[0]];
+   if (I->encoding != encoding || (I->nr_srcs != 1 && !variable) ||
+       dst >= AGX_APPLE9_GPR_COUNT || src >= AGX_APPLE9_GPR_COUNT ||
+       (!arithmetic && I->op != AGX_APPLE9_VIR_USHR &&
+        I->op != AGX_APPLE9_VIR_ISHL) ||
+       (variable ? (phys[I->src[1]] >= AGX_APPLE9_GPR_COUNT || I->immediate)
+                 : I->immediate >= 32))
       return false;
 
-   /* T8132 EXP-0139 validates arithmetic semantics and every amount 0..31.
-    * The own-source corpus independently isolates byte3 as dst<<1, byte5 as
-    * src<<2, and byte6 as amount<<2. Pending dependencies share the integer
-    * one-hot field at bits 12..17. */
-   const uint8_t bytes[] = {
-      0xa7, 0x01, 0x54, dst << 1, 0x02, src << 2, amount << 2, 0x78, 0x62, 0x00,
-   };
-   packed_init(packed, bytes, sizeof(bytes));
+   uint8_t bytes[12] = {0xa7, 0, 0x54, 0, 0x02, 0, 0, 0, 0xf0, 0x11, 0x01, 0};
+   if (arithmetic) {
+      bytes[1] = 1;
+      bytes[7] = variable ? 0xd8 : 0x78;
+      bytes[8] = variable ? 0xe2 : 0x62;
+      bytes[9] = 0;
+   } else {
+      if (I->op == AGX_APPLE9_VIR_ISHL)
+         bytes[0] = 0x27;
+      if (variable) {
+         bytes[9] = 0x13;
+         bytes[10] = 0x05;
+      }
+   }
+   set_bits(bytes, 25, 7, dst);
+   set_bits(bytes, 42, 7, src);
+   if (variable)
+      set_bits(bytes, 51, 7, phys[I->src[1]]);
+   else
+      set_bits(bytes, 50, 5, I->immediate);
+
+   /* These datapaths have dedicated release flags, distinct from IMAD's
+    * descriptor auxiliaries. The register amount consumes its low 16 bits;
+    * selection explicitly limits NIR's shift amounts to five bits. */
+   if (I->live_after_mask & 1)
+      set_bits(bytes, arithmetic ? 62 : 72, 1, 0);
+   if (variable && (I->live_after_mask & 2))
+      set_bits(bytes, arithmetic ? 63 : 73, 1, 0);
+   packed_init(packed, bytes, arithmetic ? 10 : 12);
    return true;
 }
 
@@ -4178,8 +4207,8 @@ agx_apple9_pack_device_load_vector_u32_raw(
    enum agx_apple9_scoreboard_slot incoming_slot, uint16_t raw_token,
    struct agx_apple9_packed_instruction *packed)
 {
-   if (components < 1 || components > 4 || dst + components > 64 ||
-       binding > UINT8_MAX ||
+   if (components < 1 || components > 4 ||
+       dst + components > AGX_APPLE9_GPR_COUNT || binding > UINT8_MAX ||
        (flags & ~AGX_APPLE9_DEVICE_LOAD_HAS_NEXT) ||
        !apple9_device_load_raw_token_valid(raw_token))
       return false;
@@ -4230,8 +4259,8 @@ agx_apple9_pack_device_store_scalar(
    enum agx_apple9_scoreboard_slot scoreboard_slot, bool release_index,
    struct agx_apple9_packed_instruction *packed)
 {
-   if (data >= 64 || index >= AGX_APPLE9_GPR_COUNT || binding > UINT8_MAX ||
-       (bits != 8 && bits != 16 && bits != 32) || (bits != 32 && data != 0))
+   if (data >= AGX_APPLE9_GPR_COUNT || index >= AGX_APPLE9_GPR_COUNT ||
+       binding > UINT8_MAX || (bits != 8 && bits != 16 && bits != 32))
       return false;
    uint8_t bytes[14] = {
       0xe7, 0x00, 0x54, 0x00, 0x00, 0x00, 0x20,
@@ -4265,7 +4294,8 @@ agx_apple9_pack_device_store_vector_u32(
    enum agx_apple9_scoreboard_slot scoreboard_slot, bool release_index,
    struct agx_apple9_packed_instruction *packed)
 {
-   if (components < 1 || components > 4 || data + components > 64 ||
+   if (components < 1 || components > 4 ||
+       data + components > AGX_APPLE9_GPR_COUNT ||
        index >= AGX_APPLE9_GPR_COUNT || binding > UINT8_MAX)
       return false;
 
@@ -4442,6 +4472,39 @@ pack_imad(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
 }
 
 static bool
+pack_mul_wide(const struct agx_apple9_vir_instr *I, const uint8_t *phys,
+              struct agx_apple9_packed_instruction *packed)
+{
+   unsigned dst = phys[I->dest], a = phys[I->src[0]], b = phys[I->src[1]];
+   if (I->encoding != AGX_APPLE9_ENC_INT_MUL_WIDE || I->nr_srcs != 2 ||
+       I->dest_components != 2 || I->immediate > 1 || (dst & 1) ||
+       dst + 1 >= AGX_APPLE9_GPR_COUNT || a >= AGX_APPLE9_GPR_COUNT ||
+       b >= AGX_APPLE9_GPR_COUNT || phys[I->dest + 1] != dst + 1)
+      return false;
+
+   /* This form writes both product words, not just mul-high to dst.
+    * The two multiplicand lifetime fields are shared with low IMAD; the
+    * addend descriptor is disabled. Signedness affects the upper word. */
+   uint8_t bytes[] = {0x9f, 0x00, 0x54, 0x00, 0x02, 0x00,
+                     0x00, 0x00, 0xe0, 0x26, 0x0a, 0x00};
+   if (I->immediate)
+      bytes[10] = 0x1e;
+   set_bits(bytes, 25, 7, dst);
+   set_bits(bytes, 42, 7, a);
+   set_bits(bytes, 51, 7, b);
+   if (I->live_after_mask & 1) {
+      set_bits(bytes, 49, 1, 1);
+      set_bits(bytes, 73, 1, 0);
+   }
+   if (I->live_after_mask & 2) {
+      set_bits(bytes, 58, 1, 1);
+      set_bits(bytes, 74, 1, 0);
+   }
+   packed_init(packed, bytes, sizeof(bytes));
+   return true;
+}
+
+static bool
 pack_compact_binary_gprs(uint8_t *bytes, unsigned dst, unsigned a, unsigned b,
                          unsigned destination_count)
 {
@@ -4470,14 +4533,22 @@ pack_float2(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    if ((instruction->op == AGX_APPLE9_VIR_FMUL_PROJECT) !=
        (instruction->encoding == AGX_APPLE9_ENC_FLOAT2_PROJECT))
       return false;
-   uint8_t bytes[8] = {0x09, 0x05, 0x1c, 0x01, 0x00, 0x00};
+   if (instruction->nr_srcs != 2 ||
+       ((instruction->src_abs_mask | instruction->src_neg_mask) & ~3))
+      return false;
+   if ((instruction->encoding == AGX_APPLE9_ENC_FLOAT2_PROJECT ||
+        instruction->encoding == AGX_APPLE9_ENC_FLOAT2_EXPORT) &&
+       (instruction->src_abs_mask || instruction->src_neg_mask))
+      return false;
+   uint8_t bytes[12] = {0x09, 0x05, 0x1c, 0x01, 0x00, 0x00};
    if (instruction->op == AGX_APPLE9_VIR_FMUL ||
        instruction->op == AGX_APPLE9_VIR_FMUL_PROJECT)
       set_bits(bytes, 16, 3,
                instruction->op == AGX_APPLE9_VIR_FMUL_PROJECT ? 7 : 5);
    else
       set_bits(bytes, 16, 3, 4);
-   if (instruction->op == AGX_APPLE9_VIR_FSUB)
+   if ((instruction->op == AGX_APPLE9_VIR_FSUB) ^
+       !!(instruction->src_neg_mask & 2))
       set_bits(bytes, 43, 1, 1);
 
    /*
@@ -4522,8 +4593,9 @@ pack_float2(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    } else if (instruction->encoding == AGX_APPLE9_ENC_FLOAT2_EXPORT) {
       /* Authored large-interface probes use the scattered register
        * map with the extended export destination publication. */
-      if (phys[instruction->dest] >= AGX_APPLE9_PUBLICATION_COUNT || phys[instruction->src[0]] >= 64 ||
-          phys[instruction->src[1]] >= 64)
+      if (phys[instruction->dest] >= AGX_APPLE9_PUBLICATION_COUNT ||
+          phys[instruction->src[0]] >= AGX_APPLE9_GPR_COUNT ||
+          phys[instruction->src[1]] >= AGX_APPLE9_GPR_COUNT)
          return false;
       bytes[4] |= 0x41;
       if (instruction->producer_scoreboard_slot > AGX_APPLE9_SCOREBOARD_SLOT_6)
@@ -4532,11 +4604,53 @@ pack_float2(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
          set_bits(bytes, 58, 3, instruction->producer_scoreboard_slot - 1);
       packed_init(packed, bytes, 8);
    } else {
-      if (instruction->encoding != AGX_APPLE9_ENC_FLOAT2_COMPACT)
+      bool negate = instruction->encoding == AGX_APPLE9_ENC_FLOAT2_MODIFIER_EXTENDED;
+      bool abs_add = instruction->encoding == AGX_APPLE9_ENC_FLOAT2_ABS_EXTENDED;
+      bool abs_mul = instruction->encoding == AGX_APPLE9_ENC_FLOAT2_MUL_ABS_EXTENDED;
+      if (instruction->encoding != AGX_APPLE9_ENC_FLOAT2_COMPACT &&
+          !negate && !abs_add && !abs_mul)
          return false;
-      packed_init(packed, bytes, 6);
+      if ((instruction->src_abs_mask && !abs_add && !abs_mul) ||
+          ((instruction->src_neg_mask & 1) && !negate && !abs_add && !abs_mul) ||
+          (abs_add && instruction->op == AGX_APPLE9_VIR_FMUL) ||
+          (abs_mul && instruction->op != AGX_APPLE9_VIR_FMUL))
+         return false;
+      unsigned length = 6;
+      if (negate || abs_add || abs_mul) {
+         bytes[4] = negate ? 1 : 2;
+         bytes[7] = 0x80;
+         set_bits(bytes, 49, 1, instruction->src_neg_mask & 1);
+         if (abs_add || abs_mul)
+            set_bits(bytes, 64, 2, instruction->src_abs_mask);
+         length = negate ? 8 : abs_add ? 10 : 12;
+      }
+      packed_init(packed, bytes, length);
    }
    return true;
+}
+
+bool
+agx_apple9_encode_float_immediate(uint32_t bits, uint8_t *encoded)
+{
+   const uint32_t magnitude = bits & 0x7fffffffu;
+   *encoded = 0;
+   bool found = false;
+
+   for (unsigned exponent = 8; exponent < 16 && !found; ++exponent) {
+      for (unsigned mantissa = 0; mantissa < 8; ++mantissa) {
+         float value = exponent == 8 ? (mantissa / 8.0f) * 0.25f
+                                     : (1.0f + mantissa / 8.0f) *
+                                          (1u << (exponent - 8)) * 0.125f;
+         uint32_t candidate;
+         memcpy(&candidate, &value, sizeof(candidate));
+         if (candidate == magnitude) {
+            *encoded = (exponent << 4) | (mantissa << 1) | 1;
+            found = true;
+            break;
+         }
+      }
+   }
+   return found;
 }
 
 static bool
@@ -4550,25 +4664,10 @@ pack_float2_immediate(const struct agx_apple9_vir_instr *instruction,
     * uniform register file instead of an immediate.
     */
    const uint32_t bits = instruction->immediate;
-   const uint32_t magnitude = bits & 0x7fffffffu;
-   uint8_t encoded = 0;
-   bool found = false;
-
-   for (unsigned exponent = 8; exponent < 16 && !found; ++exponent) {
-      for (unsigned mantissa = 0; mantissa < 8; ++mantissa) {
-         float value = exponent == 8 ? (mantissa / 8.0f) * 0.25f
-                                     : (1.0f + mantissa / 8.0f) *
-                                          (1u << (exponent - 8)) * 0.125f;
-         uint32_t candidate;
-         memcpy(&candidate, &value, sizeof(candidate));
-         if (candidate == magnitude) {
-            encoded = (exponent << 4) | (mantissa << 1) | 1;
-            found = true;
-            break;
-         }
-      }
-   }
-   if (!found)
+   uint8_t encoded;
+   if (instruction->nr_srcs != 1 ||
+       !agx_apple9_encode_float_immediate(bits, &encoded) ||
+       instruction->src_abs_mask || (instruction->src_neg_mask & ~1))
       return false;
 
    /*
@@ -4580,8 +4679,17 @@ pack_float2_immediate(const struct agx_apple9_vir_instr *instruction,
    if (instruction->op == AGX_APPLE9_VIR_FMUL_IMM)
       set_bits(bytes, 16, 3, 5);
    set_bits(bytes, 19, 1, bits >> 31);
-   set_bits(bytes, 4, 4, phys[instruction->dest]);
-   set_bits(bytes, 25, 6, phys[instruction->src[0]]);
+   unsigned dst = phys[instruction->dest], src = phys[instruction->src[0]];
+   set_bits(bytes, 4, 4, dst & 15);
+   set_bits(bytes, 22, 2, (dst >> 4) & 3);
+   set_bits(bytes, 44, 1, dst >> 6);
+   set_bits(bytes, 25, 6, src & 63);
+   set_bits(bytes, 42, 1, src >> 6);
+   set_bits(bytes, 43, 1, instruction->src_neg_mask & 1);
+   if (instruction->live_after_mask & 1) {
+      set_bits(bytes, 31, 1, 1);
+      set_bits(bytes, 20, 1, 0);
+   }
    packed_init(packed, bytes, sizeof(bytes));
    return true;
 }
@@ -4590,7 +4698,13 @@ static bool
 pack_fma(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
          struct agx_apple9_packed_instruction *packed)
 {
-   uint8_t bytes[8] = {0x09, 0x01, 0x1e, 0x05, 0x81, 0x08, 0x02, 0x00};
+   bool extended = instruction->encoding == AGX_APPLE9_ENC_FLOAT3_MODIFIER_EXTENDED;
+   if ((instruction->encoding != AGX_APPLE9_ENC_FLOAT3_EXTENDED && !extended) ||
+       instruction->nr_srcs != 3 ||
+       ((instruction->src_abs_mask | instruction->src_neg_mask) & ~7) ||
+       ((instruction->src_abs_mask & 3) && !extended))
+      return false;
+   uint8_t bytes[12] = {0x09, 0x01, 0x1e, 0x05, 0x81, 0x08, 0x02, 0x00};
    unsigned dst = phys[instruction->dest];
    unsigned a = phys[instruction->src[0]];
    unsigned b = phys[instruction->src[1]];
@@ -4620,7 +4734,16 @@ pack_fma(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    set_bits(bytes, 58, 1, b >> 6);
    set_bits(bytes, 41, 6, c & 0x3f);
    set_bits(bytes, 38, 1, c >> 6);
-   packed_init(packed, bytes, sizeof(bytes));
+   set_bits(bytes, 35, 1, !!(instruction->src_abs_mask & 4));
+   set_bits(bytes, 36, 1, !!(instruction->src_neg_mask & 4));
+   set_bits(bytes, 59, 1, !!(instruction->src_neg_mask & 1) ^
+                         !!(instruction->src_neg_mask & 2));
+   if (extended) {
+      set_bits(bytes, 32, 2, 3);
+      bytes[9] = 0x80;
+      set_bits(bytes, 80, 2, instruction->src_abs_mask & 3);
+   }
+   packed_init(packed, bytes, extended ? 12 : 8);
    return true;
 }
 
@@ -4634,8 +4757,9 @@ pack_logic(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
       return false;
 
    if (instruction->encoding == AGX_APPLE9_ENC_LOGIC_EXPORT &&
-       (phys[instruction->dest] >= AGX_APPLE9_PUBLICATION_COUNT || phys[instruction->src[0]] >= 64 ||
-        phys[instruction->src[1]] >= 64))
+       (phys[instruction->dest] >= AGX_APPLE9_PUBLICATION_COUNT ||
+        phys[instruction->src[0]] >= AGX_APPLE9_GPR_COUNT ||
+        phys[instruction->src[1]] >= AGX_APPLE9_GPR_COUNT))
       return false;
 
    /* Begin without a pending-result dependency, including when used inside
@@ -4689,6 +4813,40 @@ pack_logic(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
          return false;
       if (instruction->producer_scoreboard_slot)
          set_bits(bytes, 58, 3, instruction->producer_scoreboard_slot - 1);
+   }
+   packed_init(packed, bytes, sizeof(bytes));
+   return true;
+}
+
+static bool
+pack_uniform(const struct agx_apple9_vir_instr *ins, const uint8_t *phys,
+             struct agx_apple9_packed_instruction *packed)
+{
+   if (ins->nr_srcs != 1 || ins->immediate >= 64)
+      return false;
+   unsigned src = phys[ins->src[0]];
+   if (ins->op == AGX_APPLE9_VIR_STORE_UNIFORM) {
+      uint8_t bytes[4];
+      if (ins->encoding != AGX_APPLE9_ENC_STORE_UNIFORM || ins->live_after_mask ||
+          !agx_apple9_encode_argument_word(bytes, ins->immediate, src, false))
+         return false;
+      packed_init(packed, bytes, sizeof(bytes));
+      return true;
+   }
+   unsigned dst = phys[ins->dest];
+   if (ins->encoding != AGX_APPLE9_ENC_LOGIC_UNIFORM ||
+       dst >= AGX_APPLE9_GPR_COUNT || src >= AGX_APPLE9_GPR_COUNT)
+      return false;
+   uint8_t bytes[10] = {0x0b, 0x01, 0x37, 0x01, 0x82, 0x08};
+   set_bits(bytes, 8, 7, 2 * ins->immediate + 1);
+   set_bits(bytes, 4, 4, dst & 15);
+   set_bits(bytes, 22, 2, (dst >> 4) & 3);
+   set_bits(bytes, 44, 1, dst >> 6);
+   set_bits(bytes, 25, 6, src & 63);
+   set_bits(bytes, 42, 1, src >> 6);
+   if (ins->live_after_mask & 1) {
+      set_bits(bytes, 31, 1, 1);
+      set_bits(bytes, 20, 1, 0);
    }
    packed_init(packed, bytes, sizeof(bytes));
    return true;
@@ -4760,24 +4918,10 @@ pack_select(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    unsigned if_true = phys[instruction->src[2]];
    unsigned if_false = phys[instruction->src[3]];
 
-   /*
-    * Apple9 has distinct low-register and high-pressure envelopes for the
-    * same explicit-false select fields.  The low form comes from the exact
-    * caller-owned computed_select_values MSL used by the DAG hardware test;
-    * EXP-M4-16 supplies the independently validated high-register form.
-    */
-   uint8_t bytes[10];
-   bool low_form = cmp_a < 64 && cmp_b < 64 && if_true < 64 && if_false < 64;
-   if (low_form) {
-      /* Explicit-GPR baseline for four ALU-produced, last-use operands. */
-      const uint8_t low[10] = {0x02, 0x01, 0x1f, 0x01, 0x82,
-                               0x00, 0x05, 0x00, 0x80, 0x00};
-      memcpy(bytes, low, sizeof(bytes));
-   } else {
-      const uint8_t extended[10] = {0x12, 0x85, 0x67, 0x87, 0x02,
-                                    0xd8, 0x05, 0xd0, 0x00, 0xda};
-      memcpy(bytes, extended, sizeof(bytes));
-   }
+   /* All register banks share the same source lifetime fields. Start with
+    * last-use operands, then retain the sources whose SSA values survive. */
+   uint8_t bytes[10] = {0x02, 0x01, 0x1f, 0x01, 0x82,
+                        0x00, 0x05, 0x00, 0x80, 0x00};
 
    const unsigned condition = instruction->immediate & 0xff;
    if (condition != AGX_APPLE9_SELECT_FEQ &&
@@ -4798,7 +4942,7 @@ pack_select(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    if (instruction->immediate & AGX_APPLE9_SELECT_EQUALITY)
       bytes[4] |= 0x04;
 
-   if (low_form) {
+   {
       /*
        * This baseline already carries native destination state 1 and
        * consumer state 0 for four ALU-produced operands.  Load-fed EXP-M4-17
@@ -4828,7 +4972,9 @@ pack_select(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
       }
    }
 
-   set_bits(bytes, 4, 4, dst);
+   set_bits(bytes, 4, 4, dst & 15);
+   set_bits(bytes, 22, 2, (dst >> 4) & 3);
+   set_bits(bytes, 60, 1, dst >> 6);
    set_bits(bytes, 9, 6, cmp_a & 0x3f);
    set_bits(bytes, 56, 1, cmp_a >> 6);
    set_bits(bytes, 25, 6, cmp_b & 0x3f);
@@ -4876,7 +5022,7 @@ pack_predicate_compare(const struct agx_apple9_vir_instr *instruction,
 
    const unsigned src0 = phys[instruction->src[0]];
    const unsigned src1 = phys[instruction->src[1]];
-   if (src0 >= 64 || src1 >= 64)
+   if (src0 >= AGX_APPLE9_GPR_COUNT || src1 >= AGX_APPLE9_GPR_COUNT)
       return false;
 
    const unsigned predicate_bank =
@@ -4905,18 +5051,22 @@ pack_predicate_compare(const struct agx_apple9_vir_instr *instruction,
    }
 
    if (short_form) {
-      const uint8_t bytes[6] = {opcode,    (uint8_t)((src0 << 1) | 1),
-                                control,   (uint8_t)((src1 << 1) | 1),
-                                condition, 0xc0};
+      uint8_t bytes[6] = {opcode,    (uint8_t)(((src0 & 63) << 1) | 1),
+                          control,   (uint8_t)(((src1 & 63) << 1) | 1),
+                          condition, 0xc0};
+      set_bits(bytes, short_form ? 40 : 56, 1, src0 >> 6);
+      set_bits(bytes, short_form ? 42 : 58, 1, src1 >> 6);
       packed_init(packed, bytes, sizeof(bytes));
    } else {
-      const uint8_t bytes[10] = {
-         opcode,    (uint8_t)((src0 << 1) | 1),
-         control,   (uint8_t)((src1 << 1) | 1),
+      uint8_t bytes[10] = {
+         opcode,    (uint8_t)(((src0 & 63) << 1) | 1),
+         control,   (uint8_t)(((src1 & 63) << 1) | 1),
          0x06,      0x00,
          condition, loop_form ? 0x00 : 0xc0,
          0x00,      0x00,
       };
+      set_bits(bytes, short_form ? 40 : 56, 1, src0 >> 6);
+      set_bits(bytes, short_form ? 42 : 58, 1, src1 >> 6);
       packed_init(packed, bytes, sizeof(bytes));
    }
    return true;
@@ -4932,6 +5082,60 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       *reason = NULL;
 
    switch (instruction->op) {
+   case AGX_APPLE9_VIR_F2F16:
+   case AGX_APPLE9_VIR_PACK_HALF_2X16:
+   case AGX_APPLE9_VIR_UNPACK_HALF: {
+      bool pair = instruction->op == AGX_APPLE9_VIR_PACK_HALF_2X16;
+      bool widen = instruction->op == AGX_APPLE9_VIR_UNPACK_HALF;
+      enum agx_apple9_encoding encoding = pair ? AGX_APPLE9_ENC_PACK_HALF_2X16
+         : widen ? AGX_APPLE9_ENC_HALF_TO_FLOAT
+                 : AGX_APPLE9_ENC_FLOAT_TO_HALF_ZEXT;
+      unsigned dst = phys[instruction->dest];
+      if (instruction->encoding != encoding ||
+          instruction->nr_srcs != (pair ? 2 : 1) ||
+          dst >= (pair || widen ? AGX_APPLE9_GPR_COUNT : 64) ||
+          instruction->immediate > (widen ? 1 : 0))
+         return false;
+
+      /* Compact FALU conversion shares the scattered GPR map. A narrowing
+       * write changes just one destination half. Both halves are defined
+       * here: either two conversions or the native zero-extension companion.
+       * The paired form materializes pending sources before entering this
+       * sequence, since its two conversions have separate dependency fields. */
+      uint8_t bytes[12] = {0};
+      for (unsigned s = 0; s < (pair ? 2 : 1); ++s) {
+         unsigned src = phys[instruction->src[s]];
+         if (src >= AGX_APPLE9_GPR_COUNT || (pair && src == dst))
+            return false;
+         uint8_t *part = bytes + 6 * s;
+         memcpy(part, (uint8_t[]){0x01, 0x01, 0x1c, 0x81, 0x00, 0x02}, 6);
+         set_bits(part, 4, 4, dst & 15);
+         set_bits(part, 22, 2, (dst >> 4) & 3);
+         set_bits(part, 44, 1, dst >> 6);
+         set_bits(part, 9, 6, src & 63);
+         set_bits(part, 40, 1, src >> 6);
+         set_bits(part, 34, 1, s);
+         if (widen) {
+            set_bits(part, 0, 4, 9);
+            set_bits(part, 8, 1, 0);
+            set_bits(part, 35, 1, instruction->immediate);
+         }
+         if ((instruction->live_after_mask & (1u << s)) ||
+             (pair && s == 0 && instruction->src[0] == instruction->src[1])) {
+            set_bits(part, 15, 1, 1);
+            set_bits(part, 19, 1, 0);
+         }
+      }
+      if (!widen && !pair) {
+         bytes[6] = ((dst & 15) << 4) | 3;
+         bytes[8] = (dst >> 4) << 6;
+         bytes[9] = 1;
+      }
+      packed_init(packed, bytes, pair ? 12 : widen ? 6 : 10);
+      return true;
+   }
+   case AGX_APPLE9_VIR_IMUL_WIDE:
+      return pack_mul_wide(instruction, phys, packed);
    case AGX_APPLE9_VIR_SPILL_STORE: {
       unsigned slot = instruction->producer_scoreboard_slot;
       unsigned word = instruction->immediate;
@@ -4981,14 +5185,17 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
          const unsigned dst = phys[instruction->dest];
          bool valid_selector = coverage ? instruction->immediate == 0x10c2
             : (instruction->immediate == 0x10dd || instruction->immediate == 0x10d8);
-         if (dst >= 16 || !valid_selector ||
-             instruction->nr_srcs ||
-             instruction->producer_scoreboard_slot != AGX_APPLE9_SCOREBOARD_SLOT_1)
+         if (dst >= 64 || !valid_selector || instruction->nr_srcs ||
+             instruction->producer_scoreboard_slot !=
+                AGX_APPLE9_SCOREBOARD_SLOT_1)
             return false;
          /* The physical scheduler owns the completion handoff. This SR
           * encoding publishes to slot 1; synchronous SR forms remain distinct. */
          const uint8_t bytes[4] = {
-            (dst << 4) | 0x0c, instruction->immediate & 0xff, 0x10, 0x06,
+            ((dst & 15) << 4) | 0x0c,
+            instruction->immediate & 0xff,
+            0x10 | ((dst >> 4) << 6),
+            0x06,
          };
          packed_init(packed, bytes, sizeof(bytes));
          return true;
@@ -5054,7 +5261,8 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
          return false;
       if (instruction->encoding == AGX_APPLE9_ENC_DEVICE_LOAD_INDIRECT) {
          const unsigned address = phys[instruction->src[1]];
-         if (address >= 63 || phys[instruction->src[2]] != address + 1)
+         if (address >= AGX_APPLE9_GPR_COUNT - 1 ||
+             phys[instruction->src[2]] != address + 1)
             return false;
          /* Authored T8132 pointer-chasing mains: select a GPR address pair,
           * independently of the element index and the return scoreboard. */
@@ -5097,7 +5305,7 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
          return false;
       if (indirect) {
          unsigned address = phys[instruction->src[components + 1]];
-         if (address >= 63 ||
+         if (address >= AGX_APPLE9_GPR_COUNT - 1 ||
              phys[instruction->src[components + 2]] != address + 1)
             return false;
          packed->bytes[4] = address;
@@ -5129,7 +5337,8 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
 
       const unsigned destination = phys[instruction->src[0]];
       const unsigned slot = instruction->producer_scoreboard_slot;
-      if (destination >= 64 || slot < AGX_APPLE9_SCOREBOARD_SLOT_1 ||
+      if (destination >= AGX_APPLE9_GPR_COUNT ||
+          slot < AGX_APPLE9_SCOREBOARD_SLOT_1 ||
           slot > AGX_APPLE9_SCOREBOARD_SLOT_6)
          return false;
 
@@ -5157,12 +5366,12 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       const uint8_t bytes[] = {
          (uint8_t)(((destination & 0x0f) << 4) | 0x0c),
          0x80,
-         (uint8_t)(0x09 | ((destination >> 4) << 6)),
+         (uint8_t)(0x09 | (((destination >> 4) & 3) << 6)),
          0xa7,
          0x00,
          (uint8_t)(publication << 5),
          0x00,
-         0x00,
+         (uint8_t)((destination >> 6) << 4),
       };
       packed_init(packed, bytes, sizeof(bytes));
       return true;
@@ -5170,7 +5379,8 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
    case AGX_APPLE9_VIR_ITER_FLAT: {
       if (instruction->encoding != AGX_APPLE9_ENC_ITER_FLAT ||
           instruction->nr_srcs || instruction->dest_components != 3 ||
-          phys[instruction->dest] > 61 || instruction->immediate > AGX_APPLE9_MAX_VARYING_COMPONENTS ||
+          phys[instruction->dest] > AGX_APPLE9_GPR_COUNT - 3 ||
+          instruction->immediate > AGX_APPLE9_MAX_VARYING_COMPONENTS ||
           instruction->producer_scoreboard_slot <
              AGX_APPLE9_SCOREBOARD_SLOT_1 ||
           instruction->producer_scoreboard_slot > AGX_APPLE9_SCOREBOARD_SLOT_6)
@@ -5193,12 +5403,21 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
    case AGX_APPLE9_VIR_DERIVATIVE: {
       if (instruction->encoding != AGX_APPLE9_ENC_DERIVATIVE ||
           instruction->nr_srcs != 1 || instruction->immediate > 1 ||
-          phys[instruction->dest] >= 64 || phys[instruction->src[0]] >= 64)
+          phys[instruction->dest] >= AGX_APPLE9_GPR_COUNT ||
+          phys[instruction->src[0]] >= AGX_APPLE9_GPR_COUNT)
          return false;
       const uint8_t bytes[] = {
-         0x37, 0x05 | (instruction->immediate << 1), 0x54,
-         phys[instruction->dest] << 1, 0x03, phys[instruction->src[0]] << 2,
-         0x90 | ((instruction->live_after_mask & 1) ? 2 : 0), 0x40, 0, 0,
+         0x37,
+         0x05 | (instruction->immediate << 1),
+         0x54,
+         phys[instruction->dest] << 1,
+         0x03,
+         (phys[instruction->src[0]] & 63) << 2,
+         0x90 | ((instruction->live_after_mask & 1) ? 2 : 0) |
+            (phys[instruction->src[0]] >> 6),
+         0x40,
+         0,
+         0,
       };
       packed_init(packed, bytes, sizeof(bytes));
       return true;
@@ -5206,13 +5425,19 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
    case AGX_APPLE9_VIR_CENTROID_POSITION: {
       if (instruction->encoding != AGX_APPLE9_ENC_CENTROID_POSITION ||
           instruction->nr_srcs != 1 || instruction->immediate ||
-          phys[instruction->dest] >= 64 || phys[instruction->src[0]] >= 64)
+          phys[instruction->dest] >= AGX_APPLE9_GPR_COUNT ||
+          phys[instruction->src[0]] >= AGX_APPLE9_GPR_COUNT)
          return false;
       /* Authored M4 centroid and mixed-interpolation shaders: coverage is an
        * ordinary GPR input; the result is a packed interpolation position. */
-      const uint8_t bytes[] = {0xaf, 0x04, 0x54,
-         phys[instruction->dest] << 1, 0x03, phys[instruction->src[0]] << 2,
-         0x0a, 0x01};
+      const uint8_t bytes[] = {0xaf,
+                               0x04,
+                               0x54,
+                               phys[instruction->dest] << 1,
+                               0x03,
+                               (phys[instruction->src[0]] & 63) << 2,
+                               0x0a | (phys[instruction->src[0]] >> 6),
+                               0x01};
       packed_init(packed, bytes, sizeof(bytes));
       return true;
    }
@@ -5220,8 +5445,9 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       bool explicit_coord = instruction->encoding == AGX_APPLE9_ENC_ITER_COORD;
       if ((!explicit_coord && instruction->encoding != AGX_APPLE9_ENC_ITER) ||
           instruction->nr_srcs != (explicit_coord ? 1 : 0) ||
-          (explicit_coord && phys[instruction->src[0]] >= 64) ||
-          phys[instruction->dest] >= 64 ||
+          (explicit_coord &&
+           phys[instruction->src[0]] >= AGX_APPLE9_GPR_COUNT) ||
+          phys[instruction->dest] >= AGX_APPLE9_GPR_COUNT ||
           instruction->immediate > AGX_APPLE9_MAX_VARYING_COMPONENTS + 3)
          return false;
       /* Ordinary center coefficients: 0 for 1/W, followed by user components
@@ -5268,7 +5494,8 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
    }
    case AGX_APPLE9_VIR_COVERAGE: {
       if (instruction->encoding != AGX_APPLE9_ENC_COVERAGE ||
-          instruction->nr_srcs != 1 || phys[instruction->src[0]] >= 64)
+          instruction->nr_srcs != 1 ||
+          phys[instruction->src[0]] >= 64)
          return false;
       uint8_t bytes[] = {0x57, 0x14, 0x54,
                          phys[instruction->src[0]] << 1, 0, 1};
@@ -5429,11 +5656,15 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
           instruction->producer_scoreboard_slot > AGX_APPLE9_SCOREBOARD_SLOT_6)
          return false;
       unsigned dst = phys[instruction->dest], coord = phys[instruction->src[0]];
-      if (dst > 12 || coord > (gradient ? 0 : extended ? 4 : 6) ||
+      if (dst > 28 ||
+          coord > (gradient   ? 0
+                   : extended ? 4
+                              : 6) ||
           (coord & (extended ? 3 : 1)) ||
           (!gradient && phys[instruction->src[1]] != coord + 1) ||
-          (!gradient && extended && (phys[instruction->src[2]] != coord + 2 ||
-                     phys[instruction->src[3]] != coord + 3)))
+          (!gradient && extended &&
+           (phys[instruction->src[2]] != coord + 2 ||
+            phys[instruction->src[3]] != coord + 3)))
          return false;
       /* The four-byte prefix names the result tuple and coordinate
        * publication. The legacy database's sampler-byte 'coord' label is
@@ -5500,8 +5731,10 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       if ((!coords && !dynamic &&
            instruction->encoding != AGX_APPLE9_ENC_TILE_LOAD) ||
           instruction->nr_srcs != (coords || dynamic ? 1 : 0) ||
-          instruction->immediate >= 32 || phys[instruction->dest] >= 64 ||
-          ((coords || dynamic) && phys[instruction->src[0]] >= 64) ||
+          instruction->immediate >= 32 ||
+          phys[instruction->dest] >= AGX_APPLE9_GPR_COUNT ||
+          ((coords || dynamic) &&
+           phys[instruction->src[0]] >= AGX_APPLE9_GPR_COUNT) ||
           (coords && (!instruction->tile_sample_mask ||
                       instruction->tile_sample_mask > 15)) ||
           instruction->producer_scoreboard_slot <
@@ -5539,10 +5772,12 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
    }
    case AGX_APPLE9_VIR_TILE_STORE: {
       bool dynamic = instruction->nr_srcs == 2;
-      if (instruction->encoding != (dynamic ? AGX_APPLE9_ENC_TILE_STORE_MASK : AGX_APPLE9_ENC_TILE_STORE) ||
+      if (instruction->encoding != (dynamic ? AGX_APPLE9_ENC_TILE_STORE_MASK
+                                            : AGX_APPLE9_ENC_TILE_STORE) ||
           instruction->nr_srcs < 1 || instruction->nr_srcs > 2 ||
-          instruction->immediate >= 32 || phys[instruction->src[0]] >= 64 ||
-          (dynamic && phys[instruction->src[1]] >= 64))
+          instruction->immediate >= 32 ||
+          phys[instruction->src[0]] >= AGX_APPLE9_GPR_COUNT ||
+          (dynamic && phys[instruction->src[1]] >= AGX_APPLE9_GPR_COUNT))
          return false;
       /* Raw tile words with an independently allocated sample-mask source. */
       unsigned mask = dynamic ? phys[instruction->src[1]] << 1 : 1;
@@ -5571,7 +5806,9 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
    case AGX_APPLE9_VIR_FROUND_EVEN:
       return pack_fspecial(instruction, phys, packed);
    case AGX_APPLE9_VIR_ISHR:
-      return pack_ishr_imm(instruction, phys, packed);
+   case AGX_APPLE9_VIR_USHR:
+   case AGX_APPLE9_VIR_ISHL:
+      return pack_shift(instruction, phys, packed);
    case AGX_APPLE9_VIR_IMUL:
       break;
    case AGX_APPLE9_VIR_IADD:
@@ -5592,6 +5829,9 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
    case AGX_APPLE9_VIR_IOR:
    case AGX_APPLE9_VIR_IXOR:
       return pack_logic(instruction, phys, packed);
+   case AGX_APPLE9_VIR_IOR_UNIFORM:
+   case AGX_APPLE9_VIR_STORE_UNIFORM:
+      return pack_uniform(instruction, phys, packed);
    case AGX_APPLE9_VIR_IMIN:
    case AGX_APPLE9_VIR_IMAX:
    case AGX_APPLE9_VIR_UMIN:
@@ -5718,12 +5958,9 @@ bool
 agx_apple9_pack_branch(bool any, int64_t displacement,
                        struct agx_apple9_packed_instruction *packed)
 {
-   if (!packed || (displacement & 1) || displacement < -(INT64_C(1) << 47) ||
-       displacement >= (INT64_C(1) << 47))
+   uint8_t bytes[10];
+   if (!packed || !agx_apple9_encode_branch(bytes, any, displacement))
       return false;
-   uint8_t bytes[10] = {0x0f, any ? 0x00 : 0x01, 0x54};
-   for (unsigned byte = 0; byte < 6; ++byte)
-      bytes[3 + byte] = (uint64_t)displacement >> (8 * byte);
    packed_init(packed, bytes, sizeof(bytes));
    return true;
 }

@@ -24,6 +24,12 @@ enum agx_apple9_compute_abi {
 /* Sixteen API samplers plus the private nearest texel-fetch sampler. */
 #define AGX_APPLE9_GRAPHICS_MAX_SAMPLERS 17
 
+/* All root arguments end before word 48. Exact bitwise uniform reads have
+ * been validated through word 63. Bound the compiled setup body independently. */
+#define AGX_APPLE9_PREAMBLE_BASE 48
+#define AGX_APPLE9_PREAMBLE_WORDS 16
+#define AGX_APPLE9_MAX_PREAMBLE_BYTES 2048
+
 #define AGX_APPLE9_COMPUTE_MAX_RESOURCES 18
 /* Conservative per-invocation limit exercised on T8132 in all three stages. */
 #define AGX_APPLE9_MAX_SCRATCH_BYTES 4096

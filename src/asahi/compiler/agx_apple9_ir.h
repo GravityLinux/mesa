@@ -41,14 +41,26 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_I2F32,
    AGX_APPLE9_VIR_F2I32,
    AGX_APPLE9_VIR_F2U32,
+   /* Native binary16 conversions. Values still occupy 32-bit SSA registers. */
+   AGX_APPLE9_VIR_F2F16,
+   AGX_APPLE9_VIR_PACK_HALF_2X16,
+   /* immediate selects the low (0) or high (1) half of the source. */
+   AGX_APPLE9_VIR_UNPACK_HALF,
    AGX_APPLE9_VIR_IADD,
    AGX_APPLE9_VIR_IMUL,
    AGX_APPLE9_VIR_ISUB,
    AGX_APPLE9_VIR_IMAD,
+   /* Full 32x32 product, low word followed by high word. immediate is signed. */
+   AGX_APPLE9_VIR_IMUL_WIDE,
    AGX_APPLE9_VIR_IAND,
    AGX_APPLE9_VIR_IOR,
    AGX_APPLE9_VIR_IXOR,
+   /* immediate selects a 32-bit uniform word; IOR has one GPR source. */
+   AGX_APPLE9_VIR_IOR_UNIFORM,
+   AGX_APPLE9_VIR_STORE_UNIFORM,
    AGX_APPLE9_VIR_ISHR,
+   AGX_APPLE9_VIR_USHR,
+   AGX_APPLE9_VIR_ISHL,
    AGX_APPLE9_VIR_IMIN,
    AGX_APPLE9_VIR_IMAX,
    AGX_APPLE9_VIR_UMIN,
@@ -278,6 +290,9 @@ struct agx_apple9_vir_instr {
    struct agx_apple9_vir_instr *phi_edge;
    uint8_t nr_srcs;
 
+   /* Floating source modifiers apply absolute value before negation. */
+   uint8_t src_abs_mask, src_neg_mask;
+
    /* Scoreboard slot published by an asynchronous producer, including scalar
     * ALU exports to publication storage. Ordinary GPR ALU instructions leave
     * this at NONE. AUTO is resolved by the scheduled
@@ -410,6 +425,9 @@ void agx_apple9_vir_move_before(struct agx_apple9_vir_program *program,
                               struct agx_apple9_vir_instr *instr,
                               struct agx_apple9_vir_instr *before);
 void agx_apple9_vir_reindex(struct agx_apple9_vir_program *program);
+bool agx_apple9_instr_is_pure_alu(const struct agx_apple9_vir_instr *instruction);
+bool agx_apple9_optimize_vir(struct agx_apple9_vir_program *program);
+bool agx_apple9_encode_float_immediate(uint32_t value, uint8_t *encoded);
 
 uint32_t agx_apple9_vir_emit(struct agx_apple9_vir_program *program,
                              enum agx_apple9_vir_opcode op,
@@ -442,6 +460,8 @@ uint32_t agx_apple9_vir_emit_device_load(
  * Modes 1/2 return the signed half-coordinate for U/V, respectively. */
 uint32_t agx_apple9_vir_emit_cube(struct agx_apple9_vir_program *program,
                                  const uint32_t src[3], unsigned mode);
+uint32_t agx_apple9_vir_emit_mul_wide(struct agx_apple9_vir_program *program,
+                                     const uint32_t src[2], bool is_signed);
 
 uint32_t agx_apple9_vir_emit_device_load_vector(
    struct agx_apple9_vir_program *program, unsigned binding, uint32_t index,

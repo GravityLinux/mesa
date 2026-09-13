@@ -46,6 +46,21 @@ agx_apple9_encode_pointer_load(uint8_t out[14], unsigned dst,
    return true;
 }
 
+/* Signed, instruction-start-relative branch used by shader control flow and
+ * persistent shader entries. The low bit is reserved for instruction alignment. */
+static inline bool
+agx_apple9_encode_branch(uint8_t out[10], bool any, int64_t displacement)
+{
+   if (!out || (displacement & 1) || displacement < -(INT64_C(1) << 47) ||
+       displacement >= (INT64_C(1) << 47))
+      return false;
+   uint8_t bytes[10] = {0x0f, any ? 0x00 : 0x01, 0x54};
+   for (unsigned byte = 0; byte < 6; ++byte)
+      bytes[3 + byte] = (uint64_t)displacement >> (8 * byte);
+   memcpy(out, bytes, sizeof(bytes));
+   return true;
+}
+
 /* Transfer one pending word to the main's argument window. A first transfer
  * waits for the table-load group on slot 2; subsequent transfers reuse it.
  * Argument word 2*i is the low half of pointer i, word 2*i+1 its high half. */

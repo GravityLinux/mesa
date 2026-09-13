@@ -752,9 +752,8 @@ apple9_dag_system(struct apple9_dag_lower *lower,
             ? system.selector - 0xa0
             : system.selector | (system.zext16 ? 0 : (0x10u << 8));
 
-      /* Both GET_SR families have a proven low destination contract.
-       * Immediately move the value to the general bank so the rest of
-       * instruction selection does not inherit that constraint. */
+      /* Keep the system value in SSA; allocation applies the six-bit
+       * destination field shared by the short SR forms. */
       lower->system_vreg[system.selector] =
          apple9_dag_emit(lower, op, encoding, NULL, 0, immediate);
    }

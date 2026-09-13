@@ -280,7 +280,7 @@ TEST(Apple9SharedRa, SpilledLoopPhisPreserveParallelAssignments)
 
 #include "agx_apple9_ir.h"
 
-TEST(Apple9SharedRa, DestructiveShiftCopiesOnlyWhenItsSourceSurvives)
+TEST(Apple9SharedRa, ShiftRetainsLiveInputWithoutCopies)
 {
    for (bool retained : {false, true}) {
       SCOPED_TRACE(retained);
@@ -325,7 +325,8 @@ TEST(Apple9SharedRa, DestructiveShiftCopiesOnlyWhenItsSourceSurvives)
             break;
          case AGX_APPLE9_VIR_ISHR: {
             auto shifted_value = uint32_t(int32_t(regs[I->src[0]]) >> I->immediate);
-            regs[I->src[0]] = 0xdeadbeef;
+            if (!(I->live_after_mask & 1))
+               regs[I->src[0]] = 0xdeadbeef;
             regs[I->dest] = shifted_value;
             break;
          }
@@ -343,7 +344,7 @@ TEST(Apple9SharedRa, DestructiveShiftCopiesOnlyWhenItsSourceSurvives)
             << reason;
       }
       EXPECT_EQ(output, uint32_t(int32_t(input) >> 5) + (retained ? input : 0));
-      EXPECT_EQ(copies, retained ? 1u : 0u);
+      EXPECT_EQ(copies, 0u);
       agx_apple9_vir_finish(&p);
       ralloc_free(nir.shader);
    }
@@ -405,7 +406,9 @@ TEST(Apple9SharedRa, LoadWaitFoldsIntoConsumerAfterIndependentArithmetic)
    ralloc_free(nir.shader);
 }
 
-TEST(Apple9SharedRa, PhysicalSpillLoweringPreservesLiveSourcesAndLoopPhis)
+template <unsigned count>
+static void
+check_loop_register_pressure()
 {
    nir_builder nir = nir_builder_init_simple_shader(
       MESA_SHADER_COMPUTE, &agx_nir_options, "physical_spill_loop");
@@ -424,7 +427,6 @@ TEST(Apple9SharedRa, PhysicalSpillLoweringPreservesLiveSourcesAndLoopPhis)
       blocks[i]->nir = &logical[i];
    }
    agx_apple9_block_begin(&p, blocks[0]);
-   constexpr unsigned count = 80;
    uint32_t initial[count], phi[count], expected[count];
    for (unsigned i = 0; i < count; ++i) {
       expected[i] = (i * 0x9e3779b9u) ^ 0xa511e9b3u;
@@ -459,7 +461,10 @@ TEST(Apple9SharedRa, PhysicalSpillLoweringPreservesLiveSourcesAndLoopPhis)
    ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&p, &reason)) << reason;
    ASSERT_TRUE(agx_apple9_allocate_shared(&p, nir.shader, &reason)) << reason;
    EXPECT_TRUE(p.physical);
-   ASSERT_GT(p.scratch_size, 0u);
+   if (count > 96)
+      ASSERT_GT(p.scratch_size, 0u);
+   else
+      ASSERT_EQ(p.scratch_size, 0u);
    EXPECT_LE(p.scratch_size, 4096u);
    uint32_t regs[96] = {}, memory[1024] = {}, result = 0;
    struct pending_write {
@@ -542,11 +547,17 @@ TEST(Apple9SharedRa, PhysicalSpillLoweringPreservesLiveSourcesAndLoopPhis)
    for (unsigned i = 1; i < count; ++i)
       expected_hash = expected_hash * 33 + expected[i];
    EXPECT_EQ(result, expected_hash);
-   EXPECT_GT(saves, 0u);
-   EXPECT_GT(fills, 0u);
+   EXPECT_EQ(saves > 0, count > 96);
+   EXPECT_EQ(fills > 0, count > 96);
    EXPECT_TRUE(pending.empty());
    agx_apple9_vir_finish(&p);
    ralloc_free(nir.shader);
+}
+
+TEST(Apple9SharedRa, PhysicalSpillLoweringPreservesLiveSourcesAndLoopPhis)
+{
+   check_loop_register_pressure<80>();
+   check_loop_register_pressure<112>();
 }
 
 TEST(Apple9SharedRa, TexturePublicationPressurePreservesEarlyHandoffs)
