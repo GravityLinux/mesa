@@ -8260,6 +8260,77 @@ TEST(Apple9Allocator, VaryingStoresWaitForPublicationCompletion)
    }
 }
 
+TEST(Apple9Compiler, MultisampleOutputLoopsOnlyForDestinationDependentResults)
+{
+   for (unsigned samples : {2u, 4u}) {
+      for (unsigned variant = 0; variant < 6; ++variant) {
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_FRAGMENT, &agx_nir_options, "sample_output");
+         nir_store_output(&b, nir_load_frag_coord(&b), nir_imm_int(&b, 0),
+            .write_mask = 15, .src_type = nir_type_float32,
+            .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+         b.shader->info.io_lowered = true;
+         agx_apple9_blend blend = {};
+         blend.colormask = 15;
+         blend.rgb_src = blend.alpha_src = PIPE_BLENDFACTOR_ONE;
+         blend.rgb_dst = blend.alpha_dst = PIPE_BLENDFACTOR_ZERO;
+         blend.format = variant == 1 ? PIPE_FORMAT_R16G16B16A16_FLOAT
+                                     : PIPE_FORMAT_R8G8B8A8_UNORM;
+         blend.samples = samples;
+         if (variant == 1)
+            blend.rgb_src = PIPE_BLENDFACTOR_SRC_ALPHA;
+         else if (variant == 2)
+            blend.rgb_src = PIPE_BLENDFACTOR_DST_COLOR;
+         else if (variant == 3)
+            blend.rgb_func = PIPE_BLEND_MIN;
+         else if (variant == 4)
+            blend.colormask = 7;
+         else if (variant == 5) {
+            blend.format = PIPE_FORMAT_R32G32B32A32_UINT;
+            blend.rgb_dst = blend.alpha_dst = PIPE_BLENDFACTOR_ONE;
+         }
+         bool needs_destination = variant >= 2 && variant <= 4;
+         agx_apple9_varying_layout varyings = {};
+         agx_shader_part compiled = {};
+         const char *reason = nullptr;
+         ASSERT_TRUE(agx_compile_apple9_fragment_mrt(b.shader, &varyings, &blend, 1,
+                                                   &compiled, &reason))
+            << "variant=" << variant << " samples=" << samples << ": " << reason;
+         unsigned loads = 0, stores = 0, loop_bounds = 0, packs = 0;
+         nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type == nir_instr_type_alu) {
+                  auto *alu = nir_instr_as_alu(instr);
+                  packs += alu->op == nir_op_pack_unorm_4x8;
+                  loop_bounds += alu->op == nir_op_uge &&
+                     nir_src_is_const(alu->src[1].src) &&
+                     nir_src_as_uint(alu->src[1].src) == samples;
+               }
+               if (instr->type != nir_instr_type_intrinsic)
+                  continue;
+               auto *intr = nir_instr_as_intrinsic(instr);
+               loads += intr->intrinsic == nir_intrinsic_load_local_pixel_agx;
+               if (intr->intrinsic != nir_intrinsic_store_local_pixel_agx)
+                  continue;
+               ++stores;
+               if (!needs_destination) {
+                  auto *mask = intr->src[1].ssa;
+                  ASSERT_EQ(nir_def_instr_type(mask), nir_instr_type_intrinsic);
+                  EXPECT_EQ(nir_def_as_intrinsic(mask)->intrinsic,
+                            nir_intrinsic_load_sample_mask_in);
+               }
+            }
+         }
+         EXPECT_EQ(loads, needs_destination ? 1u : 0u) << variant;
+         EXPECT_EQ(loop_bounds, needs_destination ? 1u : 0u) << variant;
+         EXPECT_EQ(stores, 1u) << variant;
+         EXPECT_EQ(packs, variant == 1 || variant == 5 ? 0u : 1u) << variant;
+         free(compiled.binary);
+         ralloc_free(b.shader);
+      }
+   }
+}
+
 TEST(Apple9Compiler, MultisampleBlendLoopsSamplesAndPreservesFormatOffsets)
 {
    for (unsigned samples : {2u, 4u}) {

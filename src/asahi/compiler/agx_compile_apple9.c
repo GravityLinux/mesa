@@ -4928,6 +4928,25 @@ apple9_collect_color(nir_shader *nir)
 }
 
 static bool
+apple9_blend_channel_reads_destination(enum pipe_blend_func func,
+                                       enum pipe_blendfactor src,
+                                       enum pipe_blendfactor dst)
+{
+   if (func == PIPE_BLEND_MIN || func == PIPE_BLEND_MAX ||
+       dst != PIPE_BLENDFACTOR_ZERO)
+      return true;
+
+   switch (util_blendfactor_without_invert(src)) {
+   case PIPE_BLENDFACTOR_DST_COLOR:
+   case PIPE_BLENDFACTOR_DST_ALPHA:
+   case PIPE_BLENDFACTOR_SRC_ALPHA_SATURATE:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool
 apple9_lower_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
    if (intr->intrinsic != nir_intrinsic_store_output)
@@ -5000,6 +5019,19 @@ apple9_lower_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       lower->valid = false;
       return false;
    }
+   /* A raw tile word must preserve masked channels, and blending may need a
+    * different destination for each sample. Otherwise the same packed result
+    * can be written to every covered sample in one masked store. */
+   unsigned component_mask = BITFIELD_MASK(components);
+   bool reads_destination = blend &&
+      (((blend->colormask & component_mask) != component_mask) ||
+       (!integer &&
+        (blend->advanced_mode ||
+         apple9_blend_channel_reads_destination(blend->rgb_func,
+                                                blend->rgb_src, blend->rgb_dst) ||
+         apple9_blend_channel_reads_destination(blend->alpha_func,
+                                                blend->alpha_src, blend->alpha_dst))));
+   bool sample_loop = samples > 1 && reads_destination;
    enum pipe_format raw_format = agx_apple9_color_raw_format(words);
    nir_def *src_color = color;
    nir_def *coverage = samples > 1 ? nir_load_sample_mask_in(b) : nir_imm_int(b, 1);
@@ -5016,8 +5048,8 @@ apple9_lower_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    if (blend && blend->alpha_to_one)
       src_color = nir_vector_insert_imm(b, src_color, nir_imm_float(b, 1), 3);
    nir_variable *sample_index = NULL;
-   nir_def *sample_mask = nir_imm_int(b, 1);
-   if (samples > 1) {
+   nir_def *sample_mask = coverage;
+   if (sample_loop) {
       sample_index = nir_local_variable_create(b->impl, glsl_uint_type(), "color sample");
       nir_store_var(b, sample_index, nir_imm_int(b, 0), 1);
       nir_push_loop(b)->control = nir_loop_control_dont_unroll;
@@ -5030,10 +5062,13 @@ apple9_lower_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    {
       color = src_color;
       if (blend) {
-         nir_def *packed_dst = nir_load_local_pixel_agx(
-            b, words, 32, sample_mask,
-            .base = 4 * offset, .format = raw_format);
+         nir_def *packed_dst = reads_destination
+            ? nir_load_local_pixel_agx(b, words, 32, sample_mask,
+                 .base = 4 * offset, .format = raw_format)
+            : nir_undef(b, words, 32);
          nir_def *channels[4];
+         nir_def *normalized_dst = !packed_format && !raw && !fp16 && bits == 8
+            ? nir_unpack_unorm_4x8(b, packed_dst) : NULL;
          for (unsigned c = 0; c < (packed_format ? 0 : 4); ++c) {
             if (c >= components) {
                channels[c] = integer ? nir_imm_int(b, c == 3) : nir_imm_float(b, c == 3);
@@ -5046,7 +5081,8 @@ apple9_lower_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
                   ? nir_ishr_imm(b, nir_ishl_imm(b, value, 32 - bits), 32 - bits)
                   : nir_iand_imm(b, value, BITFIELD_MASK(bits));
             }
-            channels[c] = raw ? value : fp16 ? apple9_unpack_half(b, value)
+            channels[c] = normalized_dst ? nir_channel(b, normalized_dst, c)
+               : raw ? value : fp16 ? apple9_unpack_half(b, value)
                : nir_fmul_imm(b, nir_u2f32(b, value), 1.0 / 255.0);
          }
          nir_def *dst;
@@ -5081,7 +5117,15 @@ apple9_lower_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
                                       nir_channel(b, color, 3), 3);
       nir_def *packed[4] = {nir_imm_int(b, 0), nir_imm_int(b, 0),
                             nir_imm_int(b, 0), nir_imm_int(b, 0)};
-      for (unsigned c = 0; c < (packed_format ? 0 : components); ++c) {
+      bool unorm8 = !raw && !fp16 && !packed_format;
+      if (unorm8) {
+         nir_def *channels[4];
+         for (unsigned c = 0; c < 4; ++c)
+            channels[c] = c < components ? nir_channel(b, color, c)
+                                          : nir_imm_float(b, 0);
+         packed[0] = nir_pack_unorm_4x8(b, nir_vec(b, channels, 4));
+      }
+      for (unsigned c = 0; c < (packed_format || unorm8 ? 0 : components); ++c) {
          nir_def *v = nir_channel(b, color, c);
          if (raw) {
             if (bits < 32) {
@@ -5097,10 +5141,6 @@ apple9_lower_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          } else if (fp16) {
             v = apple9_pack_half(b, v);
             packed[c / 2] = nir_ior(b, packed[c / 2], nir_ishl_imm(b, v, 16 * (c & 1)));
-         } else {
-            v = nir_fmin(b, nir_fmax(b, v, nir_imm_float(b, 0)), nir_imm_float(b, 1));
-            v = nir_f2u32(b, nir_fround_even(b, nir_fmul_imm(b, v, 255)));
-            packed[0] = nir_ior(b, packed[0], nir_ishl_imm(b, v, 8 * c));
          }
       }
       if (packed_format)
@@ -5110,7 +5150,7 @@ apple9_lower_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          .base = 4 * offset, .format = raw_format,
          .write_mask = BITFIELD_MASK(words));
    }
-   if (samples > 1) {
+   if (sample_loop) {
       nir_store_var(b, sample_index, nir_iadd_imm(b, nir_load_var(b, sample_index), 1), 1);
       nir_pop_loop(b, NULL);
    }
