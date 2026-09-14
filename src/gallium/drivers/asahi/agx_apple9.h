@@ -162,7 +162,6 @@ agx_apple9_graphics_publish(struct agx_apple9_graphics *graphics,
 #define AGX_APPLE9_COMPUTE_ARCHIVE_HEADER_SIZE 0x0340u
 #define AGX_APPLE9_COMPUTE_BLOCK_HEADER_SIZE   0x0040u
 #define AGX_APPLE9_COMPUTE_MAIN_OFFSET         0x03c0u
-#define AGX_APPLE9_COMPUTE_STATE_OFFSET          0x18000u
 #define AGX_APPLE9_COMPUTE_LAUNCH_OFFSET         0x90000u
 #define AGX_APPLE9_COMPUTE_RESOURCE_OFFSET       0xe0000u
 #define AGX_APPLE9_COMPUTE_RESOURCE_TABLE_OFFSET 0x14a0u
@@ -171,7 +170,6 @@ agx_apple9_graphics_publish(struct agx_apple9_graphics *graphics,
 #define AGX_APPLE9_COMPUTE_RESOURCE_STRIDE       0x20u
 #define AGX_APPLE9_COMPUTE_SUPERSET_RESOURCE_STRIDE 0x100u
 #define AGX_APPLE9_COMPUTE_GEOMETRY_GROUPS_OFFSET 0xc0u
-#define AGX_APPLE9_COMPUTE_STATE_STRIDE          0x40u
 #define AGX_APPLE9_COMPUTE_CDM_RECORD_SIZE       0x2cu
 #define AGX_APPLE9_COMPUTE_INDIRECT_CDM_RECORD_SIZE 0x28u
 
@@ -238,20 +236,6 @@ agx_apple9_compute_write_mask(const struct agx_apple9_compute_profile *profile);
 uint32_t agx_apple9_compute_archive_call_offset(
    const struct agx_apple9_compute_profile *profile);
 
-/* Whether this exact package ABI consumes a Dynamic-Caching state record.
- * This is an ABI property, not something inferred from the literal count. */
-bool agx_apple9_compute_has_dynamic_state(
-   const struct agx_apple9_compute_profile *profile);
-
-/* Uniform interface selected by the capture-backed constant/launch pair.
- * Capacity is the number of caller-owned state words actually published,
- * not the storage remaining in the 0x40-byte state record. */
-unsigned agx_apple9_compute_state_uniform_base(
-   const struct agx_apple9_compute_profile *profile);
-
-unsigned agx_apple9_compute_state_literal_capacity(
-   const struct agx_apple9_compute_profile *profile);
-
 /*
  * Direct CDM geometry is dispatch state.  Fixed-local-size profiles require
  * the compiled tuple, while variable-local-size profiles validate the tuple
@@ -267,25 +251,8 @@ bool agx_apple9_compute_indirect_dispatch_supported(
 
 /* Pure layout preflight used to roll a full batch before mutating it. */
 bool agx_apple9_compute_dispatch_fits(
-   size_t mapping_size, uint32_t launch_offset, uint32_t state_offset,
-   uint32_t resource_table_offset,
-   const struct agx_apple9_compute_profile *profile);
-
-/* Persistent-state form used by Gallium.  State is pipeline-owned and only
- * launch/resource records consume space in the transient batch package. */
-bool agx_apple9_compute_dispatch_fits_persistent(
    size_t mapping_size, uint32_t launch_offset, uint32_t resource_table_offset,
    const struct agx_apple9_compute_profile *profile);
-
-/* Build one immutable Dynamic Caching state image transactionally. */
-bool agx_apple9_build_compute_state(
-   void *mapping, size_t mapping_size,
-   const struct agx_apple9_compute_profile *profile);
-
-/* A Dynamic Caching selector names the +0x20 payload half of an aligned
- * 0x40-byte state record inside the compact 512-MiB USC window. */
-bool agx_apple9_compute_state_address_supported(uint64_t usc_exec_base,
-                                                uint64_t state_address);
 
 /*
  * Direct dispatches provide total threads and local size for CPU conversion
@@ -311,20 +278,11 @@ bool agx_apple9_build_compute_geometry_fields(
    void *record, size_t record_size, uint64_t record_address,
    const struct agx_apple9_compute_geometry *geometry);
 
-/* Build dispatch state and launch records referring to an existing entry. */
+/* Build resource and launch records referring to an existing entry. */
 bool agx_apple9_build_compute_dispatch(
    void *mapping, size_t mapping_size, uint64_t usc_exec_base,
    uint64_t package_base, uint32_t main_offset, uint32_t launch_offset,
-   uint32_t state_offset, uint32_t resource_table_offset,
-   const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
-   unsigned resource_count,
-   const struct agx_apple9_compute_geometry *geometry,
-   uint64_t preamble_address);
-
-bool agx_apple9_build_compute_dispatch_persistent(
-   void *mapping, size_t mapping_size, uint64_t usc_exec_base,
-   uint64_t package_base, uint32_t main_offset, uint32_t launch_offset,
-   uint64_t state_address, uint32_t resource_table_offset,
+   uint32_t resource_table_offset,
    const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
    unsigned resource_count,
    const struct agx_apple9_compute_geometry *geometry,

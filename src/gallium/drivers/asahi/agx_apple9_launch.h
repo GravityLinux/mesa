@@ -22,7 +22,6 @@ enum {
 struct agx_apple9_launch_parameters {
    uint64_t shader_base;
    uint64_t resource_table;
-   uint64_t state;
    /* Byte offset of the stage entry within the USC heap. */
    uint32_t entry_offset;
    /* Compiler high-water mark in 32-bit publication slots. */

@@ -161,15 +161,6 @@ struct agx_device {
     * first page, while the inline path begins at +0x4000. */
    struct agx_bo *apple9_render_context;
    simple_mtx_t apple9_archive_lock;
-   /*
-    * Append-only Dynamic Caching state slabs.  The dynarray owns one
-    * reference to every slab until device teardown; current is a borrowed
-    * pointer into that array.  apple9_archive_lock also serializes record
-    * allocation.
-    */
-   struct util_dynarray apple9_compute_state_bos;
-   struct agx_bo *apple9_compute_state_current;
-   uint32_t apple9_compute_state_next;
 
    struct renderonly *ro;
 
@@ -214,16 +205,6 @@ struct agx_device {
 
    struct u_printf_ctx printf;
 };
-
-/*
- * Allocate one immutable Apple9 Dynamic Caching record.  The returned BO has
- * a caller reference, record points at the 0x40-byte record image, and
- * selector names its +0x20 payload.  Records are never reused before device
- * teardown, including when a caller abandons an allocated record.
- */
-bool agx_apple9_alloc_compute_state(struct agx_device *dev,
-                                    struct agx_bo **bo, void **record,
-                                    uint64_t *selector);
 
 /*
  * Select one physical arena at the fixed Apple9 USC DVA. These helpers

@@ -53,17 +53,6 @@ asahi_simple_ioctl(struct agx_device *dev, unsigned cmd, void *req)
    }
 }
 
-#define AGX_APPLE9_COMPUTE_STATE_SLAB_SIZE 0x4000u
-#define AGX_APPLE9_COMPUTE_STATE_RECORD_SIZE 0x40u
-#define AGX_APPLE9_COMPUTE_STATE_SELECTOR_OFFSET 0x20u
-
-static_assert((AGX_APPLE9_COMPUTE_STATE_SLAB_SIZE %
-               AGX_APPLE9_COMPUTE_STATE_RECORD_SIZE) == 0,
-              "Apple9 state slabs contain whole records");
-static_assert((AGX_APPLE9_COMPUTE_STATE_SLAB_SIZE /
-               AGX_APPLE9_COMPUTE_STATE_RECORD_SIZE) == 256,
-              "Apple9 state slabs contain 256 records");
-
 /* The render carrier contains executable pages and GPU-writable resource
  * records in the same fixed USC window. Reserve the whole window so ordinary
  * USC allocations cannot occupy addresses still referenced by its helpers. */
@@ -164,50 +153,6 @@ agx_apple9_install_render_archive(struct agx_device *dev)
       dev, dev->apple9_render_fixed_usc);
    simple_mtx_unlock(&dev->apple9_archive_lock);
    return installed;
-}
-
-bool
-agx_apple9_alloc_compute_state(struct agx_device *dev, struct agx_bo **bo,
-                               void **record, uint64_t *selector)
-{
-   if (!dev || !bo || !record || !selector ||
-       (dev->chip != AGX_CHIP_G16G && dev->chip != AGX_CHIP_G17P))
-      return false;
-
-   simple_mtx_lock(&dev->apple9_archive_lock);
-
-   struct agx_bo *slab = dev->apple9_compute_state_current;
-   if (!slab ||
-       dev->apple9_compute_state_next >
-          AGX_APPLE9_COMPUTE_STATE_SLAB_SIZE -
-             AGX_APPLE9_COMPUTE_STATE_RECORD_SIZE) {
-      slab = agx_bo_create(dev, AGX_APPLE9_COMPUTE_STATE_SLAB_SIZE,
-                           AGX_APPLE9_COMPUTE_STATE_SLAB_SIZE,
-                           AGX_BO_LOW_VA | AGX_BO_WRITEBACK,
-                           "Apple9 compute state slab");
-      if (!slab) {
-         simple_mtx_unlock(&dev->apple9_archive_lock);
-         return false;
-      }
-
-      memset(agx_bo_map(slab), 0, slab->size);
-      util_dynarray_append(&dev->apple9_compute_state_bos, slab);
-      dev->apple9_compute_state_current = slab;
-      dev->apple9_compute_state_next = 0;
-   }
-
-   uint32_t offset = dev->apple9_compute_state_next;
-   dev->apple9_compute_state_next += AGX_APPLE9_COMPUTE_STATE_RECORD_SIZE;
-
-   /* The device owns the allocation reference; give the shader its own. */
-   agx_bo_reference(slab);
-   *bo = slab;
-   *record = (uint8_t *)agx_bo_map(slab) + offset;
-   *selector = slab->va->addr + offset +
-               AGX_APPLE9_COMPUTE_STATE_SELECTOR_OFFSET;
-
-   simple_mtx_unlock(&dev->apple9_archive_lock);
-   return true;
 }
 
 /* clang-format off */
@@ -931,9 +876,6 @@ agx_open_device(void *memctx, struct agx_device *dev)
 
    if (dev->chip == AGX_CHIP_G16G || dev->chip == AGX_CHIP_G17P) {
       simple_mtx_init(&dev->apple9_archive_lock, mtx_plain);
-      util_dynarray_init(&dev->apple9_compute_state_bos, NULL);
-      dev->apple9_compute_state_current = NULL;
-      dev->apple9_compute_state_next = 0;
       /* The CPU authors this archive through its writable mmap, but the GPU
        * only executes/reads it.  Native T8132 uses the read-only fixed-USC PTE
        * class.  Hardware isolation also shows why the distinction matters:
@@ -1070,10 +1012,6 @@ void
 agx_close_device(struct agx_device *dev)
 {
    if (dev->chip == AGX_CHIP_G16G || dev->chip == AGX_CHIP_G17P) {
-      util_dynarray_foreach(&dev->apple9_compute_state_bos, struct agx_bo *, bo)
-         agx_bo_unreference(dev, *bo);
-      util_dynarray_fini(&dev->apple9_compute_state_bos);
-
       /* Both physical archives may also have ordinary construction VAs, but
        * exactly one has this extra fixed alias. Remove it while both BOs are
        * still alive so teardown does not depend on GEM-close side effects. */

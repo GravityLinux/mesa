@@ -29,10 +29,6 @@ static_assert(AGX_APPLE9_RENDER_COLOR_BUFFER_OFFSET + 0x20 <=
                  AGX_APPLE9_RENDER_COMPILER_STATE_END,
               "Attachment descriptors must fit the relocated state region");
 
-static_assert(AGX_APPLE9_COMPUTE_STATE_LITERAL_STORAGE_CAPACITY *
-                    sizeof(uint32_t) <=
-                 0x20,
-              "Apple9 state literals must fit after state +0x20");
 static_assert(AGX_APPLE9_COMPUTE_CODE_SIZE == AGX_APPLE9_COMPUTE_ARCHIVE_SIZE,
               "Gallium and libagx must agree on the compute archive size");
 
@@ -51,9 +47,6 @@ struct apple9_compute_abi_desc {
    uint8_t helper_slots;
    uint8_t resource_count;
    uint16_t resource_record_size;
-   bool has_dynamic_state;
-   uint8_t state_uniform_base;
-   uint8_t state_literal_capacity;
    uint32_t cdm_config;
    uint32_t cdm_constant;
    uint32_t cdm_tail;
@@ -79,7 +72,6 @@ apple9_compute_abi(const struct agx_apple9_compute_profile *profile)
       .helper_slots = 10,
       .resource_count = AGX_APPLE9_COMPUTE_MAX_RESOURCES,
       .resource_record_size = AGX_APPLE9_COMPUTE_SUPERSET_RESOURCE_STRIDE,
-      .has_dynamic_state = true,
       .cdm_config = 0x00880000,
       .cdm_constant = 0x01000040,
       .cdm_tail = 0x60000160,
@@ -138,18 +130,6 @@ apple9_compute_profile_valid(const struct agx_apple9_compute_profile *profile,
       if (profile->resource_kind[i] > AGX_APPLE9_COMPUTE_RESOURCE_UBO ||
           ((write_mask & BITFIELD_BIT(i)) &&
            profile->resource_kind[i] != AGX_APPLE9_COMPUTE_RESOURCE_SSBO))
-         return false;
-   }
-
-   if (!abi->has_dynamic_state)
-      return profile->state_literal_count == 0;
-
-   if (profile->state_literal_count > abi->state_literal_capacity)
-      return false;
-
-   for (unsigned i = profile->state_literal_count;
-        i < ARRAY_SIZE(profile->state_literals); ++i) {
-      if (profile->state_literals[i] != 0)
          return false;
    }
 
@@ -288,22 +268,9 @@ apple9_patch_compact_pointer(uint8_t *out, unsigned low_byte,
    return true;
 }
 
-bool
-agx_apple9_compute_state_address_supported(uint64_t usc_exec_base,
-                                           uint64_t state_address)
-{
-   if (!apple9_compact_pointer_supported(usc_exec_base, state_address))
-      return false;
-
-   /* Dynamic Caching selects the +0x20 payload half of a 0x40-byte record. */
-   return ((state_address - usc_exec_base) &
-           (AGX_APPLE9_COMPUTE_STATE_STRIDE - 1)) == 0x20;
-}
-
 static bool
 apple9_build_compute_launch(uint8_t *out, uint64_t usc_exec_base,
                             uint64_t package_base, uint32_t main_offset,
-                            uint64_t state_address,
                             uint32_t resource_table_offset, uint32_t launch_offset,
                             const struct agx_apple9_compute_profile *profile,
                             uint64_t preamble_address)
@@ -311,11 +278,6 @@ apple9_build_compute_launch(uint8_t *out, uint64_t usc_exec_base,
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
    if (!abi || !apple9_compute_profile_valid(profile, abi) ||
        main_offset < AGX_APPLE9_RENDER_FIRST_MAIN_OFFSET)
-      return false;
-
-   if ((abi->has_dynamic_state && !agx_apple9_compute_state_address_supported(
-                                     usc_exec_base, state_address)) ||
-       (!abi->has_dynamic_state && state_address != 0))
       return false;
 
    if (package_base > UINT64_MAX - resource_table_offset)
@@ -328,7 +290,6 @@ apple9_build_compute_launch(uint8_t *out, uint64_t usc_exec_base,
    };
    params.shader_base = usc_exec_base;
    params.resource_table = package_base + resource_table_offset;
-   params.state = state_address;
    params.resource_count = profile->resource_binding_count;
    params.threadgroup_memory_bytes = profile->required_threadgroup_memory_bytes;
    if (profile->scratch_size) {
@@ -430,30 +391,6 @@ agx_apple9_compute_archive_call_offset(
    return abi ? agx_apple9_launch_call_offset(AGX_APPLE9_LAUNCH_COMPUTE,
                                               profile->resource_binding_count)
               : 0;
-}
-
-bool
-agx_apple9_compute_has_dynamic_state(
-   const struct agx_apple9_compute_profile *profile)
-{
-   const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   return abi && abi->has_dynamic_state;
-}
-
-unsigned
-agx_apple9_compute_state_uniform_base(
-   const struct agx_apple9_compute_profile *profile)
-{
-   const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   return abi && abi->has_dynamic_state ? abi->state_uniform_base : UINT8_MAX;
-}
-
-unsigned
-agx_apple9_compute_state_literal_capacity(
-   const struct agx_apple9_compute_profile *profile)
-{
-   const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   return abi && abi->has_dynamic_state ? abi->state_literal_capacity : 0;
 }
 
 bool
@@ -572,63 +509,12 @@ apple9_compute_transient_dispatch_fits(
 }
 
 bool
-agx_apple9_compute_dispatch_fits_persistent(
+agx_apple9_compute_dispatch_fits(
    size_t mapping_size, uint32_t launch_offset, uint32_t resource_table_offset,
    const struct agx_apple9_compute_profile *profile)
 {
    return apple9_compute_transient_dispatch_fits(
       mapping_size, launch_offset, resource_table_offset, profile);
-}
-
-bool
-agx_apple9_compute_dispatch_fits(
-   size_t mapping_size, uint32_t launch_offset, uint32_t state_offset,
-   uint32_t resource_table_offset,
-   const struct agx_apple9_compute_profile *profile)
-{
-   const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   size_t resource_record_size =
-      apple9_compute_resource_record_size_for_abi(abi);
-   if (!abi || !apple9_compute_transient_dispatch_fits(
-                  mapping_size, launch_offset, resource_table_offset, profile))
-      return false;
-
-   /* Stateless launch ABIs have no state allocation at all.  Requiring the
-    * sentinel offset makes this a property of the selected ABI rather than an
-    * inference from an otherwise-valid zero-filled state record. */
-   if (!abi->has_dynamic_state)
-      return state_offset == 0;
-
-   return !(state_offset & (AGX_APPLE9_COMPUTE_STATE_STRIDE - 1)) &&
-          state_offset >= AGX_APPLE9_COMPUTE_STATE_OFFSET &&
-          state_offset < AGX_APPLE9_COMPUTE_LAUNCH_OFFSET &&
-          apple9_range_fits(mapping_size, state_offset,
-                            AGX_APPLE9_COMPUTE_STATE_STRIDE) &&
-          !apple9_ranges_overlap(
-             launch_offset, agx_apple9_compute_launch_size(profile),
-             state_offset, AGX_APPLE9_COMPUTE_STATE_STRIDE) &&
-          !apple9_ranges_overlap(state_offset, AGX_APPLE9_COMPUTE_STATE_STRIDE,
-                                 resource_table_offset,
-                                 resource_record_size);
-}
-
-bool
-agx_apple9_build_compute_state(void *mapping, size_t mapping_size,
-                               const struct agx_apple9_compute_profile *profile)
-{
-   const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   if (!mapping || !abi || !abi->has_dynamic_state ||
-       mapping_size < AGX_APPLE9_COMPUTE_STATE_STRIDE ||
-       !apple9_compute_profile_valid(profile, abi))
-      return false;
-
-   uint8_t state[AGX_APPLE9_COMPUTE_STATE_STRIDE] = {
-      AGX_APPLE9_COMPUTE_STATE_STRIDE,
-   };
-   memcpy(state + 0x20, profile->state_literals,
-          profile->state_literal_count * sizeof(profile->state_literals[0]));
-   memcpy(mapping, state, sizeof(state));
-   return true;
 }
 
 static bool
@@ -666,58 +552,7 @@ bool
 agx_apple9_build_compute_dispatch(
    void *mapping, size_t mapping_size, uint64_t usc_exec_base,
    uint64_t package_base, uint32_t main_offset, uint32_t launch_offset,
-   uint32_t state_offset, uint32_t resource_table_offset,
-   const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
-   unsigned resource_count,
-   const struct agx_apple9_compute_geometry *geometry,
-   uint64_t preamble_address)
-{
-   const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   if (!mapping || !abi || !resources || !geometry ||
-       resource_count != profile->resource_binding_count ||
-       !!preamble_address != !!profile->preamble_size)
-      return false;
-
-   size_t launch_size = agx_apple9_compute_launch_size(profile);
-   if (!agx_apple9_compute_dispatch_fits(mapping_size, launch_offset,
-                                         state_offset, resource_table_offset,
-                                         profile) ||
-       (abi->has_dynamic_state &&
-        package_base > UINT64_MAX - state_offset - 0x20))
-      return false;
-
-   uint8_t state_image[AGX_APPLE9_COMPUTE_STATE_STRIDE];
-   if (abi->has_dynamic_state && !agx_apple9_build_compute_state(
-                                    state_image, sizeof(state_image), profile))
-      return false;
-
-   uint8_t *temporary = malloc(launch_size);
-   if (!temporary)
-      return false;
-   if (!apple9_build_compute_launch(
-          temporary, usc_exec_base, package_base, main_offset,
-          abi->has_dynamic_state ? package_base + state_offset + 0x20 : 0,
-          resource_table_offset, launch_offset, profile, preamble_address)) {
-      free(temporary);
-      return false;
-   }
-
-   uint8_t *package = mapping;
-   uint8_t *launch = package + launch_offset;
-   if (abi->has_dynamic_state)
-      memcpy(package + state_offset, state_image, sizeof(state_image));
-   memcpy(launch, temporary, launch_size);
-   free(temporary);
-   return apple9_build_superset_resource_record(
-      package, mapping_size, package_base, resource_table_offset, abi,
-      resources, resource_count, geometry);
-}
-
-bool
-agx_apple9_build_compute_dispatch_persistent(
-   void *mapping, size_t mapping_size, uint64_t usc_exec_base,
-   uint64_t package_base, uint32_t main_offset, uint32_t launch_offset,
-   uint64_t state_address, uint32_t resource_table_offset,
+   uint32_t resource_table_offset,
    const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
    unsigned resource_count,
    const struct agx_apple9_compute_geometry *geometry,
@@ -727,13 +562,10 @@ agx_apple9_build_compute_dispatch_persistent(
    if (!mapping || !abi || !resources || !geometry ||
        resource_count != profile->resource_binding_count ||
        !!preamble_address != !!profile->preamble_size ||
-       (abi->has_dynamic_state && !agx_apple9_compute_state_address_supported(
-                                     usc_exec_base, state_address)) ||
-       (!abi->has_dynamic_state && state_address != 0) ||
        package_base > UINT64_MAX - resource_table_offset ||
        !apple9_compact_pointer_supported(
           usc_exec_base, package_base + resource_table_offset) ||
-       !agx_apple9_compute_dispatch_fits_persistent(
+       !agx_apple9_compute_dispatch_fits(
           mapping_size, launch_offset, resource_table_offset, profile))
       return false;
 
@@ -742,7 +574,7 @@ agx_apple9_build_compute_dispatch_persistent(
    if (!temporary)
       return false;
    if (!apple9_build_compute_launch(
-          temporary, usc_exec_base, package_base, main_offset, state_address,
+          temporary, usc_exec_base, package_base, main_offset,
           resource_table_offset, launch_offset, profile, preamble_address)) {
       free(temporary);
       return false;

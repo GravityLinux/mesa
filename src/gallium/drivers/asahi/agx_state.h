@@ -232,10 +232,6 @@ struct agx_compiled_shader {
     * static-plus-dynamic total to the exact capture-backed ABI size. */
    bool apple9_has_variable_shared_mem;
    struct agx_apple9_compute_profile apple9_compute_profile;
-   /* Immutable per-pipeline Dynamic Caching state.  The device quarantines a
-    * second reference so this compact address is not recycled early. */
-   struct agx_bo *apple9_state_bo;
-   uint64_t apple9_state_address;
 
    /* Apple9 render compiler output consumed by the pipeline linker/VDM
     * encoder. Generated stage storage is owned by this compiled shader.

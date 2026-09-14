@@ -713,11 +713,11 @@ TEST_F(Apple9Optimization, UniformWritesEndUniformReadCseScope)
 {
    auto zero = imm(0), value = agx_apple9_vir_input(&p, 4);
    auto before = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IOR_UNIFORM,
-      AGX_APPLE9_ENC_LOGIC_UNIFORM, &zero, 1, AGX_APPLE9_PREAMBLE_BASE);
+      AGX_APPLE9_ENC_LOGIC_UNIFORM, &zero, 1, AGX_APPLE9_GRAPHICS_ROOT_WORDS);
    ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_STORE_UNIFORM,
-      AGX_APPLE9_ENC_STORE_UNIFORM, &value, 1, AGX_APPLE9_PREAMBLE_BASE));
+      AGX_APPLE9_ENC_STORE_UNIFORM, &value, 1, AGX_APPLE9_GRAPHICS_ROOT_WORDS));
    auto after = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IOR_UNIFORM,
-      AGX_APPLE9_ENC_LOGIC_UNIFORM, &zero, 1, AGX_APPLE9_PREAMBLE_BASE);
+      AGX_APPLE9_ENC_LOGIC_UNIFORM, &zero, 1, AGX_APPLE9_GRAPHICS_ROOT_WORDS);
    auto result = add(before, after);
    ASSERT_TRUE(agx_apple9_optimize_vir(&p));
    ASSERT_TRUE(agx_apple9_analyze_uses(&p));

@@ -792,6 +792,7 @@ struct apple9_dag_lower {
    struct apple9_buffer_atomic *atomics;
    unsigned atomic_count;
    unsigned argument_base;
+   unsigned preamble_base;
    uint32_t texture_mask, sampler_mask, image_mask;
    unsigned load_instruction_count;
    unsigned emitted_load_count;
@@ -1755,12 +1756,13 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                     nir_intrinsic_load_preamble) {
          nir_intrinsic_instr *intr = nir_def_as_intrinsic(scalar.def);
          unsigned word = nir_intrinsic_base(intr) + scalar.comp;
-         if (scalar.def->bit_size != 32 || word >= AGX_APPLE9_PREAMBLE_WORDS)
+         if (scalar.def->bit_size != 32 ||
+             word >= AGX_APPLE9_UNIFORM_COUNT - lower->preamble_base)
             return AGX_APPLE9_VREG_INVALID;
          uint32_t zero = apple9_dag_zero(lower);
          value = apple9_dag_emit(lower, AGX_APPLE9_VIR_IOR_UNIFORM,
             AGX_APPLE9_ENC_LOGIC_UNIFORM, &zero, 1,
-            AGX_APPLE9_PREAMBLE_BASE + word);
+            lower->preamble_base + word);
       } else if (subgroup_size) {
          /* Native Metal materializes the architectural SIMD width. */
          value = apple9_dag_imm(lower, 32);
@@ -3123,14 +3125,15 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
             nir_def *def = intr->src[0].ssa;
             unsigned base = nir_intrinsic_base(intr);
             if (def->bit_size != 32 ||
-                base + def->num_components > AGX_APPLE9_PREAMBLE_WORDS)
+                base + def->num_components >
+                   AGX_APPLE9_UNIFORM_COUNT - lower->preamble_base)
                return false;
             for (unsigned c = 0; c < def->num_components; ++c) {
                uint32_t value = apple9_lower_dag_scalar(lower, nir_get_scalar(def, c));
                if (value == AGX_APPLE9_VREG_INVALID ||
                    !agx_apple9_vir_emit_side_effect(&lower->program,
                       AGX_APPLE9_VIR_STORE_UNIFORM, AGX_APPLE9_ENC_STORE_UNIFORM,
-                      &value, 1, AGX_APPLE9_PREAMBLE_BASE + base + c))
+                      &value, 1, lower->preamble_base + base + c))
                   return false;
             }
             continue;
@@ -3810,6 +3813,9 @@ apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
       .argument_base = nir->info.stage == MESA_SHADER_COMPUTE
                           ? AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE
                           : 2,
+      .preamble_base = nir->info.stage == MESA_SHADER_COMPUTE
+                         ? agx_apple9_compute_root_words(resources->count)
+                         : AGX_APPLE9_GRAPHICS_ROOT_WORDS,
       .structured_cf = apple9_cf_list_has_control_flow(&impl->body),
    };
    /* Reserve depth before assigning point-coordinate coefficients, independent
@@ -4377,7 +4383,11 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    const nir_opt_preamble_options options = {
       .cb_data = &eligibility,
       .def_size = apple9_preamble_def_size,
-      .preamble_storage_size[nir_preamble_class_general] = AGX_APPLE9_PREAMBLE_WORDS,
+      .preamble_storage_size[nir_preamble_class_general] =
+         AGX_APPLE9_UNIFORM_COUNT -
+         (nir->info.stage == MESA_SHADER_COMPUTE
+             ? agx_apple9_compute_root_words(resources.count)
+             : AGX_APPLE9_GRAPHICS_ROOT_WORDS),
       .instr_cost_cb = apple9_preamble_cost,
       .rewrite_cost_cb = apple9_preamble_rewrite_cost,
       .avoid_instr_cb = apple9_preamble_avoid,

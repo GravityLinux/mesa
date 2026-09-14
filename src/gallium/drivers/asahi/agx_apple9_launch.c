@@ -37,7 +37,7 @@ agx_apple9_launch_call_offset(enum agx_apple9_launch_stage stage,
        resource_count > AGX_APPLE9_COMPUTE_MAX_RESOURCES)
       return 0;
    unsigned roots = resource_count + AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE;
-   return 56 + 14 * ((roots + 1) / 2);
+   return 26 + 14 * ((roots + 1) / 2);
 }
 
 static void
@@ -111,10 +111,7 @@ agx_apple9_launch_build(uint8_t *out, size_t capacity,
        (params->threadgroup_memory_bytes &&
         (!compute || !agx_apple9_launch_threadgroup_memory_supported(
                         params->threadgroup_memory_bytes))) ||
-       (compute &&
-        (!agx_apple9_launch_call_offset(stage, params->resource_count) ||
-         !pointer_fits(params->shader_base, params->state) ||
-         ((params->state - params->shader_base) & 0x3f) != 0x20)) ||
+       (compute && !agx_apple9_launch_call_offset(stage, params->resource_count)) ||
        (stage == AGX_APPLE9_LAUNCH_FRAGMENT &&
         (params->tile_bytes > (params->samples == 1 ? 128 : 64) ||
          (params->samples != 1 && params->samples != 2 &&
@@ -128,22 +125,13 @@ agx_apple9_launch_build(uint8_t *out, size_t capacity,
    agx_apple9_encode_literal32(program + 8, root + 1,
                                params->resource_table >> 32);
    unsigned at = 16;
-   unsigned roots = 6;
-   if (compute) {
-      agx_apple9_encode_literal32(program + at, 40, params->state);
-      agx_apple9_encode_literal32(program + at + 8, 41, params->state >> 32);
-      at += 16;
-      roots = AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE + params->resource_count;
-   }
+   unsigned words = compute
+      ? agx_apple9_compute_root_words(params->resource_count)
+      : AGX_APPLE9_GRAPHICS_ROOT_WORDS;
+   unsigned roots = words / 2;
    for (int i = (roots - 1) & ~1; i >= 0; i -= 2) {
       if (!agx_apple9_encode_pointer_load(program + at, pending + 2 * i, root,
                                           i, i + 2 <= roots ? 2 : 1))
-         return false;
-      at += 14;
-   }
-   if (compute) {
-      if (!agx_apple9_encode_pointer_load(program + at, pending + 2 * roots, 40,
-                                          0, 2))
          return false;
       at += 14;
    }
@@ -153,7 +141,6 @@ agx_apple9_launch_build(uint8_t *out, size_t capacity,
    at += 10;
    encode_frame(program + at, params);
    at += 10;
-   unsigned words = 2 * roots + (compute ? 4 : 0);
    for (unsigned i = 0; i < words; ++i) {
       if (!agx_apple9_encode_argument_word(program + at, i, pending + i,
                                            i == 0))

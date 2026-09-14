@@ -16,7 +16,6 @@ parameters()
    agx_apple9_launch_parameters p = {};
    p.shader_base = 0x10000000000ull;
    p.resource_table = p.shader_base + 0x208000;
-   p.state = p.shader_base + 0x308020;
    p.entry_offset = 0x12340;
    p.publication_count = 9;
    p.frame_extent_a = 4;
@@ -70,8 +69,21 @@ TEST(Apple9Launcher, ResourceCountsRespectAllocationBounds)
          agx_apple9_launch_call_offset(AGX_APPLE9_LAUNCH_COMPUTE, resources);
       EXPECT_EQ(read16(out + call + 13), p.frame_extent_a);
       EXPECT_EQ(read16(out + call + 15), p.frame_extent_b);
-      /* The final state load reaches pending r56..r59 at the resource limit. */
-      EXPECT_EQ(out[call - 21], 2 * (18 + 2 * (resources + AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE)));
+      /* Publish exactly the group-count pointer plus active resource
+       * pointers, then STOP. No state load or four-word reservation follows. */
+      const unsigned words = 2 * (resources + 1);
+      const unsigned arguments = call + 18;
+      EXPECT_EQ(agx_apple9_compute_root_words(resources), words);
+      for (unsigned word = 0; word < words; ++word) {
+         const uint8_t *transfer = out + arguments + 4 * word;
+         EXPECT_EQ(transfer[0] & 0xf, 0xbu);
+         EXPECT_EQ((transfer[0] >> 4) | ((transfer[2] >> 6) << 4), word);
+         EXPECT_EQ(transfer[1] >> 1, 18 + word);
+         EXPECT_EQ(transfer[3] & 0x40, word == 0 ? 0x40 : 0);
+      }
+      EXPECT_EQ(read16(out + arguments + 4 * words), 0xeu);
+      for (unsigned i = arguments + 4 * words + 4; i < 1024; ++i)
+         EXPECT_EQ(out[i], 0u);
    }
 }
 
@@ -94,9 +106,6 @@ TEST(Apple9Launcher, InvalidParametersCannotPublishPartialCode)
    bad.resource_table = p.shader_base - 1;
    reject(bad);
    bad.resource_table = p.shader_base + 0x20000000;
-   reject(bad);
-   bad = p;
-   bad.state--;
    reject(bad);
    bad = p;
    bad.entry_offset++;
@@ -203,8 +212,8 @@ TEST(Apple9Launcher, PreambleTransferFollowsRootArguments)
          std::array<uint8_t, 1024> out;
          ASSERT_TRUE(agx_apple9_launch_build(out.data(), out.size(), stage, &p));
          unsigned words = stage == AGX_APPLE9_LAUNCH_COMPUTE
-            ? 2 * (p.resource_count + AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE) + 4
-            : 12;
+            ? agx_apple9_compute_root_words(p.resource_count)
+            : AGX_APPLE9_GRAPHICS_ROOT_WORDS;
          unsigned at = agx_apple9_launch_call_offset(stage, p.resource_count) + 18 + 4 * words;
          EXPECT_EQ(read16(out.data() + at), 0x000fu);
          int64_t displacement = 0;

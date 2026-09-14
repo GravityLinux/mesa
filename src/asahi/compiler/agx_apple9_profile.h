@@ -8,6 +8,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "agx_apple9_machine.h"
 
 /*
  * A main program and its client package form one Apple9 ABI.  The current
@@ -24,18 +25,22 @@ enum agx_apple9_compute_abi {
 /* Sixteen API samplers plus the private nearest texel-fetch sampler. */
 #define AGX_APPLE9_GRAPHICS_MAX_SAMPLERS 17
 
-/* All root arguments end before word 48. Exact bitwise uniform reads have
- * been validated through word 63. Bound the compiled setup body independently. */
-#define AGX_APPLE9_PREAMBLE_BASE 48
-#define AGX_APPLE9_PREAMBLE_WORDS 16
-#define AGX_APPLE9_MAX_PREAMBLE_BYTES 2048
+/* Graphics publishes six pointer roots. Compute publishes the group-count
+ * pointer followed by its compacted resource pointers. Preamble results start
+ * immediately after these roots and extend through the last uniform word. */
+#define AGX_APPLE9_GRAPHICS_ROOT_WORDS 12
+#define AGX_APPLE9_MAX_PREAMBLE_BYTES 8192
 
 #define AGX_APPLE9_COMPUTE_MAX_RESOURCES 18
 /* Conservative per-invocation limit exercised on T8132 in all three stages. */
 #define AGX_APPLE9_MAX_SCRATCH_BYTES 4096
 #define AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE 1
 
-#define AGX_APPLE9_COMPUTE_STATE_LITERAL_STORAGE_CAPACITY 8
+static inline unsigned
+agx_apple9_compute_root_words(unsigned resource_count)
+{
+   return 2 * (AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE + resource_count);
+}
 
 enum agx_apple9_compute_resource_kind {
    AGX_APPLE9_COMPUTE_RESOURCE_SSBO = 0,
@@ -64,9 +69,6 @@ struct agx_apple9_compute_profile {
    /* Storage for returned 32-bit atomics, independently of RA spills. */
    uint16_t atomic_frame_size;
 
-   /* Caller state published by package ABIs with a uniform window. */
-   uint32_t state_literals[AGX_APPLE9_COMPUTE_STATE_LITERAL_STORAGE_CAPACITY];
-   uint8_t state_literal_count;
 };
 
 #define AGX_APPLE9_DIRECT_BUFFERS_COMPUTE_PROFILE                            \

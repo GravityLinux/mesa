@@ -9441,6 +9441,53 @@ TEST(Apple9Compiler, PreambleShrinkingPreservesBufferByteAddresses)
    ralloc_free(b.shader);
 }
 
+TEST(Apple9Compiler, PreambleUsesAllWordsAfterTheFullComputeResourceMap)
+{
+   for (unsigned resources : {2u, 3u, 18u}) {
+      SCOPED_TRACE(resources);
+      nir_builder b = apple9_compute_builder("preamble_argument_boundary");
+      nir_def *gid = apple9_global_id_x(&b);
+      unsigned base = 2 * (resources + 1);
+      unsigned words = AGX_APPLE9_UNIFORM_COUNT - base;
+      b.shader->info.num_ubos = resources - 1;
+      for (unsigned i = 0; i < words; ++i) {
+         nir_def *value = nir_load_ubo(
+            &b, 1, 32, nir_imm_int(&b, i % (resources - 1)),
+            nir_imm_int(&b, 4 * (i / (resources - 1))),
+            .align_mul = 4, .range = 4);
+         apple9_store_output(&b, nir_iadd_imm(&b, gid, i), nir_ixor(&b, value, gid));
+      }
+      agx_shader_part compiled = {};
+      agx_apple9_compute_profile profile = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason))
+         << (reason ?: "");
+      ASSERT_EQ(profile.resource_binding_count, resources);
+      ASSERT_GT(compiled.info.apple9_preamble_size, 0u);
+      EXPECT_EQ(agx_apple9_compute_root_words(profile.resource_binding_count), base);
+
+      /* Decode COPY-to-uniform destinations in the compiled setup. UBO
+       * values feed invocation-dependent XORs, so every transferred word
+       * remains live and none can be replaced by a constant or shared result. */
+      const uint8_t *code = (const uint8_t *)compiled.binary +
+                            compiled.info.apple9_preamble_offset;
+      std::vector<bool> written(AGX_APPLE9_UNIFORM_COUNT, false);
+      for (unsigned at = 0; at + 10 <= compiled.info.apple9_preamble_size; at += 2) {
+         const uint8_t *p = code + at;
+         if (p[0] == 0x9f && p[1] == 1 && (p[2] & 0xfd) == 0x54 &&
+             (p[4] & 0xfe) == 0 && p[7] == 0xa8 && p[9] == 1) {
+            unsigned word = (p[3] >> 1) | ((p[4] & 1) << 7);
+            EXPECT_GE(word, base);
+            written[word] = true;
+         }
+      }
+      for (unsigned word = 0; word < AGX_APPLE9_UNIFORM_COUNT; ++word)
+         EXPECT_EQ(written[word], word >= base) << "uniform word " << word;
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
+}
+
 TEST(Apple9Packer, UniformLogicPreservesHighRegistersAndDependencies)
 {
    agx_apple9_vir_instr ins = {};
@@ -9516,7 +9563,7 @@ TEST_F(Apple9Completion, UniformWritePreservesSourcesUsedLater)
    for (unsigned i = 0; i < 4; ++i) {
       uint32_t src = input + i;
       ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_STORE_UNIFORM,
-         AGX_APPLE9_ENC_STORE_UNIFORM, &src, 1, AGX_APPLE9_PREAMBLE_BASE + i));
+         AGX_APPLE9_ENC_STORE_UNIFORM, &src, 1, AGX_APPLE9_GRAPHICS_ROOT_WORDS + i));
    }
    output(input, 0);
    output(input + 3, 1);

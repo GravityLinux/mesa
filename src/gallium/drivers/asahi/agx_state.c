@@ -1598,44 +1598,10 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       compiled->stage = MESA_SHADER_COMPUTE;
       compiled->so = so;
 
-      if (agx_apple9_compute_has_dynamic_state(
-             &compiled->apple9_compute_profile)) {
-         /* Metal keys external Dynamic Caching state by address and keeps
-          * that selector stable for the pipeline lifetime.  Allocate an
-          * immutable record from the device's append-only slab arena independently
-          * of the executable body BO. An abandoned
-          * record remains a tombstone until device teardown, so no failed
-          * compile can recycle its selector.
-          */
-         void *apple9_state_record = NULL;
-         if (!agx_apple9_alloc_compute_state(dev, &compiled->apple9_state_bo,
-                                             &apple9_state_record,
-                                             &compiled->apple9_state_address)) {
-            free(compiled->b.binary);
-            ralloc_free(early);
-            FREE(compiled);
-            return NULL;
-         }
-         if (!agx_apple9_compute_state_address_supported(
-                dev->shader_base, compiled->apple9_state_address) ||
-             !agx_apple9_build_compute_state(
-                apple9_state_record, AGX_APPLE9_COMPUTE_STATE_STRIDE,
-                &compiled->apple9_compute_profile)) {
-            fprintf(stderr,
-                    "Apple9 compute state is invalid or outside the compact "
-                    "USC window\n");
-            agx_bo_unreference(dev, compiled->apple9_state_bo);
-            free(compiled->b.binary);
-            ralloc_free(early);
-            FREE(compiled);
-            return NULL;
-         }
-      }
       compiled->bo = agx_bo_create(
          dev, compiled->b.info.binary_size, 0,
          AGX_BO_EXEC | AGX_BO_LOW_VA | AGX_BO_WRITEBACK, "Apple9 compute body");
       if (!compiled->bo) {
-         agx_bo_unreference(dev, compiled->apple9_state_bo);
          free(compiled->b.binary);
          ralloc_free(early);
          FREE(compiled);
@@ -2950,7 +2916,6 @@ agx_delete_compiled_shader(struct agx_device *dev,
    agx_bo_unreference(dev, so->apple9_render_stage.bo);
    free(so->apple9_render_binary);
    free(so->b.binary);
-   agx_bo_unreference(dev, so->apple9_state_bo);
    agx_bo_unreference(dev, so->bo);
    FREE(so);
 }
@@ -6692,7 +6657,7 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
    struct agx_batch *batch = agx_get_compute_batch(ctx);
    if (cs->apple9_tiny) {
       if (batch->apple9_dispatch_count >= AGX_APPLE9_COMPUTE_MAX_ENTRIES ||
-          !agx_apple9_compute_dispatch_fits_persistent(
+          !agx_apple9_compute_dispatch_fits(
              AGX_APPLE9_COMPUTE_PACKAGE_SIZE, batch->apple9_launch_next,
              batch->apple9_resource_next, &cs->apple9_compute_profile)) {
          if (!batch->apple9_dispatch_count) {
@@ -6705,7 +6670,7 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
          agx_flush_batch_for_reason(ctx, batch,
                                     "Apple9 batch package exhausted");
          batch = agx_get_compute_batch(ctx);
-         if (!agx_apple9_compute_dispatch_fits_persistent(
+         if (!agx_apple9_compute_dispatch_fits(
                 AGX_APPLE9_COMPUTE_PACKAGE_SIZE, batch->apple9_launch_next,
                 batch->apple9_resource_next, &cs->apple9_compute_profile)) {
             fprintf(
@@ -6911,10 +6876,10 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
          &entry_offset);
       bool package_built =
          entry_built &&
-         agx_apple9_build_compute_dispatch_persistent(
+         agx_apple9_build_compute_dispatch(
             agx_bo_map(batch->apple9_package), batch->apple9_package->size,
             dev->shader_base, package_base, entry_offset, launch_offset,
-            cs->apple9_state_address, resource_offset,
+            resource_offset,
             &cs->apple9_compute_profile, resource_addresses, resource_count,
             &geometry,
             cs->apple9_compute_profile.preamble_size
@@ -6931,10 +6896,10 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
          uint32_t call_offset =
             agx_apple9_compute_archive_call_offset(&cs->apple9_compute_profile);
          fprintf(stderr,
-                 "APPLE9_DISPATCH index=%u main=%#x launch=%#x state=%#llx "
+                 "APPLE9_DISPATCH index=%u main=%#x launch=%#x "
                  "resource=%#x call=%#x call_bytes=%02x%02x%02x prefix=",
                  batch->apple9_dispatch_count, entry_offset, launch_offset,
-                 (unsigned long long)cs->apple9_state_address, resource_offset,
+                 resource_offset,
                  launch[call_offset] | (launch[call_offset + 1] << 8) |
                     (launch[call_offset + 2] << 16),
                  launch[call_offset], launch[call_offset + 1],
@@ -6973,8 +6938,6 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
 
       agx_batch_add_bo(batch, cs->bo);
       agx_batch_add_bo(batch, dev->apple9_compute_archive);
-      if (cs->apple9_state_bo)
-         agx_batch_add_bo(batch, cs->apple9_state_bo);
       agx_batch_add_bo(batch, batch->apple9_package);
       for (unsigned i = 0; i < resource_count; ++i) {
          if (read_mask & BITFIELD_BIT(i))
