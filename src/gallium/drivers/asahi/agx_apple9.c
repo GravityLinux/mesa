@@ -52,7 +52,7 @@ apple9_compute_abi(const struct agx_apple9_compute_profile *profile)
       .cdm_constant = 0x01000040,
       /* Match the full post-dispatch CDM barrier used by the Apple8 path.
        * GPU cache ordering is independent of asynchronous CPU submission. */
-      .cdm_tail = 0x60000160,
+      .cdm_tail = 0x600fffff,
       .supports_indirect_dispatch = true,
    };
 
