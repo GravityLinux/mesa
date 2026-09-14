@@ -1,13 +1,13 @@
 # Apple9 parameterized launchers
 
 The T8132 driver generates complete VS, FS and CS setup programs from stage
-parameters. Root literals, resource and state loads, allocation, entry
+parameters. Root literals, resource loads, allocation, entry
 selection, publication/scratch frames, argument transfers and STOP are all
 constructed from source. Coverage shaders use the same entry ABI as other
 fragment shaders. No executable fragments, carrier files, render seed or
 external division table are required at runtime.
 
-`agx_apple9_launch.c` accepts the USC entry offset, resource/state addresses,
+`agx_apple9_launch.c` accepts the USC entry offset, resource addresses,
 compiler publication requirements, independent frame extents, tile layout and
 threadgroup-memory size. `agx_apple9.c` supplies those live parameters. The
 fragment importer, library parser, external loader and fragment exporter have
@@ -154,7 +154,6 @@ and resource count; callers supply an entry offset and live stage parameters.
 | Stage entry | USC byte offset, encoded in the tested 18-bit target field |
 | Graphics resource root | Full GPU pointer in entry pair r2:r3 |
 | Compute resource root | Full GPU pointer in the entry ABI pair r2:r3 |
-| Compute state root | Full GPU pointer in the entry ABI pair r40:r41, selecting record +0x20 |
 | Publication count P | `ceil(P / 2) << 7` in the 16-bit word at C+11 |
 | Frame extents A/B | Independent 16-bit words at C+13 and C+15 |
 | Fragment tile bytes and samples | Generated 1×/2×/4× allocation before C |
@@ -171,25 +170,24 @@ source-generated zero-size allocation form. General shared load/store/barrier lo
 still outside the implemented GLSL compiler path; allocating storage does not
 implement those operations.
 
-The compute builder chooses root pairs r2:r3 and r40:r41 and a pending-result
+The compute builder chooses root pair r2:r3 and a pending-result
 base of 18. Independent hardware tests moved the resource root to r4:r5 and
 r60:r61, and pending results to bases 8 and 24. These are setup allocation
 choices, not fixed register assignments in ordinary compiled shaders.
 
-For N visible resources, R=N+3 pointer loads populate 2*R pending words using
-one- or two-pointer loads at eight-byte offsets from the resource root. Four
-state words follow. Generated transfers publish these words to the main's
+For N visible resources, R=N+1 pointers (the group-count pointer followed by
+the resources) populate 2*R pending words using one- or two-pointer loads at
+eight-byte offsets from the resource root. Generated transfers publish these words to the main's
 argument window, with the first transfer waiting on dependency slot 2.
 Authored main-entry readouts verify both halves of every pointer against the
 CPU record, including independently allocated unused entries. Main code reads
 qword i with uniform selectors 4*i and 4*i+2. The builder computes the main-call
-position as C=56+14*ceil(R/2), with a generated frame and stage allocation record.
+position as C=26+14*ceil(R/2), with a generated frame and stage allocation record.
 
-Four state words use the same pending-load encoder as resource pointers,
-then transfer into the main argument window. EXP-175 independently observed
-all four changing values with 2/3/8/15/16/17/18 resources, source pairs r4:r5
-and r60:r61, pending base 8, and nonzero address offsets. The production
-builder uses this generalized encoder with its own setup-register choices.
+The four formerly published compute state words had no consumers. Their state
+record, pointer literal, load and transfers have been removed, saving 46 bytes
+per generated compute setup. Preamble storage starts immediately after the
+actual 2*R root words rather than reserving the maximum resource footprint.
 
 ## Generated launch control
 
@@ -197,7 +195,7 @@ The stage program consists of the following source-generated operations:
 
 | Operation | Bytes | Parameters |
 | --- | ---: | --- |
-| Root literals | 16 graphics / 32 compute | Full resource and state pointers |
+| Root literals | 16 | Full resource pointer |
 | Pending pointer loads | 14 each | Root pair, result base, offset, one/two pointers |
 | Stage allocation | 8 | Threadgroup memory or tile/sample layout |
 | Stage target | 10 | Entry offset in the USC heap |
@@ -291,10 +289,11 @@ and buffer sets, changing range offsets, a CPU hash reference, and full guard
 checks. Build with `cc -O2 .../t8132_apple9_resource_smoke.c -lEGL -lGLESv2` and
 run with the development Mesa library selected in `LD_LIBRARY_PATH`.
 
-The state-load replacement's readout controls, placement variations, integration
+Historical state-load readout controls, placement variations, integration
 checks and normal-driver regressions are recorded in
 `tmp/state-load175/RESULTS.md` in the parent workspace. The observer belongs
-only to the private research library; normal Mesa uses no readout hooks.
+only to the private research library; normal Mesa no longer publishes those
+unused words and uses no readout hooks.
 
 ## Native single-sample tile export
 
@@ -316,8 +315,9 @@ measurements are documented in the parent workspace's
 Apple9 main shaders may now have a compiler-generated UBO/ALU preamble. The
 compiler stores its complete body, ending in STOP, after main in the shader BO
 and reports its byte offset and size. Both parts keep the original complete
-resource map. Setup writes results into argument words 48..63, beyond all root
-and compute-state arguments. The ordinary main compiler reads those words
+resource map. Setup writes results into the remaining argument words through
+255: starting at word 12 for graphics, or 2*(N+1) for N compute resources.
+The ordinary main compiler reads those words
 through modeled uniform operands.
 
 After frame and root initialization, a launch record optionally tail-branches

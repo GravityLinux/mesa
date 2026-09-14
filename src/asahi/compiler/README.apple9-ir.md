@@ -152,9 +152,21 @@ slots, not SSA values. Do not run SSA use analysis or allocation on this output.
 Buffer addresses enter selection as general wrapping 32-bit byte offsets.
 `nir_lower_mem_access_bit_sizes` selects supported memory formats using access
 size and alignment, splitting partial stores and reconstructing unaligned
-loads. Selection converts the completed byte expression to a hardware element
-index. It does not require an affine NIR expression shape or move arithmetic
-across the conversion, which would change overflow behavior.
+loads. Load/store VIR represents a 64-bit base, a zero-extended 32-bit index,
+an independent index shift, and a signed 16-bit byte displacement. Selection
+folds `imul`, GLSL's `amul`, shifts and constant additions when bounds prove
+that doing so preserves the original 32-bit arithmetic. A potentially wrapping
+shift masks its source before widening; an unknown sum remains in the index.
+Atomic offsets retain their element-index conversion.
+
+T8132 hardware validates native index shifts from zero through four. Larger
+values in the public M3 descriptor failed the requested-stride probe and are
+rejected by the packer; larger source-language strides retain explicit ALU
+arithmetic. Vector width does not set the address scale. Adjacent dword
+accesses need only four-byte alignment, so normal memory vectorization can
+retain vec2/vec3/vec4 vertex fetches with strides such as 12, 20 and 28 bytes.
+The vector's complete extent and NIR's alias and bounds constraints still
+govern merging.
 
 The current narrow-store encoding requires its data operand in r0. Legalization
 inserts a short constrained copy immediately before each such store rather than
@@ -380,21 +392,42 @@ lifetime behavior are not approximated to fit an encoding.
 
 ## Uniform preambles
 
+Integer add, subtract and multiply-add accept uniform operands in every source
+position. Extended FMA also accepts a uniform first multiplicand. These are
+ordinary alternative operand files in the machine model, including uniform
+indices through 255; only GPR sources contribute to register liveness. A lone
+FMA uniform multiplicand is commuted to the second position when that permits
+the compact encoding. Two uniform multiplicands use an extended encoding.
+
 The ordinary NIR path extracts eligible uniform UBO expressions into a linear
 setup function. Boolean and half intermediates may move with an expression;
 transferred results are 32-bit words. The full resource map is fixed before
 extraction and shared by setup and main, including resources used only in the
 preamble. Unused vector components are trimmed before assigning uniform words.
 Unsupported dependencies, masked setup, scratch, and setup bodies exceeding
-2048 bytes retain the original main shader.
+8192 bytes retain the original main shader.
 
-Words 48 through 63 of the argument window hold preamble results. Compute roots
-and state occupy at most words 0 through 41; graphics roots occupy 0 through 11.
+Preamble results occupy every word after the shader's roots in the 256-word
+argument window. Graphics roots occupy words 0 through 11, leaving 244 words.
+Compute publishes one group-count pointer and N compacted resource pointers,
+so setup starts at word 2*(N+1). Three resources leave 248 words; the maximum
+18 resources leave 218. Setup and main derive this boundary from the same full
+resource map. Compute no longer allocates or publishes the four unused state
+words.
 `IOR_UNIFORM` explicitly reads one word with a GPR operand, preserving integer
 bits, signed zero, subnormals, and NaN payloads when used as a move with zero.
 `STORE_UNIFORM` consumes its GPR operand. Its clobber constraint lets shared SSA
 allocation preserve a value that remains live; the packer rejects a surviving
 unpreserved source. Both forms have machine-table operand constraints.
+
+Explicit floating LOD and bias conversion is expressed in NIR before preamble
+extraction: clamp to [-32, 2047/64], multiply by 64, floor, convert to integer,
+mask to 12 bits and place the signed Q6 field at bit 16. Integer texel-fetch
+levels shift directly to bit 22. A backend texture source identifies the packed
+word, so instruction selection cannot apply the conversion twice. Constant
+packing folds away, uniform packing can move into setup, and varying packing
+stays in main. The clamp order and floor remain explicit without fast-math
+reassociation, including for negative fractional inputs.
 
 The compiler appends the setup body, including STOP, after the main body.
 Apple9-specific offset/size fields describe it; the older USC preshader fields
@@ -414,3 +447,19 @@ it is not a universal promise of one execution per API draw.
 The complete optimization changes and numerical/code-generation evidence are
 recorded in the parent workspace's
 `linux-m4-integration/tools/gpu/asahi/codegen-quality-fixes/REPORT.md`.
+
+## Normalized unpacking
+
+UNORM and SNORM 2x16 and 4x8 NIR unpack operations select native normalized
+unpack instructions. Each instruction defines two adjacent FP32 SSA results
+in an aligned register pair. The 8-bit formats use separate low/high source
+halves; source liveness preserves the packed word until both halves have read
+it. RGBA8 destination reads for blending use the same general NIR operation.
+
+T8132 validation covers 786,432 output values across the four operations,
+including signed minima and both input halves, with bit-exact agreement with
+the CPU division reference. Host checks cover tuple allocation, high registers,
+input-half selection, source retention and ordinary NIR reachability.
+
+Detailed hardware probes and the Tokyo comparison are recorded in the parent
+workspace's `linux-m4-integration/tools/gpu/asahi/m3-compiler-20260914/REPORT.md`.
