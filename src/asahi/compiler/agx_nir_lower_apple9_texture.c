@@ -5,6 +5,58 @@
 #include "gallium/include/pipe/p_defines.h"
 #include "agx_compile_apple9.h"
 
+static bool
+lower_texture_lod(nir_builder *b, nir_instr *instr, UNUSED void *data)
+{
+   if (instr->type != nir_instr_type_tex)
+      return false;
+
+   nir_tex_instr *tex = nir_instr_as_tex(instr);
+   if (tex->op != nir_texop_txl && tex->op != nir_texop_txb &&
+       tex->op != nir_texop_txf)
+      return false;
+
+   /* A separate source type makes this pass idempotent and prevents later
+    * selection from treating packed integer bits as a floating-point LOD. */
+   if (nir_tex_instr_src_index(tex, nir_tex_src_backend1) >= 0)
+      return false;
+   int source = nir_tex_instr_src_index(
+      tex, tex->op == nir_texop_txb ? nir_tex_src_bias : nir_tex_src_lod);
+   if (source < 0 || tex->src[source].src.ssa->bit_size != 32 ||
+       tex->src[source].src.ssa->num_components != 1)
+      return false;
+
+   b->cursor = nir_before_instr(instr);
+   nir_def *lod = tex->src[source].src.ssa;
+   nir_def *packed;
+   if (tex->op == nir_texop_txf) {
+      /* Integer levels occupy the integral part of the same signed Q6 field. */
+      packed = nir_ishl_imm(b, lod, 22);
+   } else {
+      /* Preserve the established clamp order and floor, including negative
+       * fractional inputs. Expose the entire conversion before preamble
+       * extraction, so uniform LOD and bias do not repeat it in the main. */
+      uint32_t fp_math_ctrl = b->fp_math_ctrl;
+      b->fp_math_ctrl = nir_fp_no_fast_math;
+      nir_def *clamped = nir_fmin(
+         b, nir_fmax(b, lod, nir_imm_float(b, -32.0f)),
+         nir_imm_float(b, 2047.0f / 64.0f));
+      nir_def *fixed = nir_f2i32(b, nir_ffloor(b, nir_fmul_imm(b, clamped, 64.0f)));
+      packed = nir_ishl_imm(b, nir_iand_imm(b, fixed, 0xfff), 16);
+      b->fp_math_ctrl = fp_math_ctrl;
+   }
+   nir_src_rewrite(&tex->src[source].src, packed);
+   tex->src[source].src_type = nir_tex_src_backend1;
+   return true;
+}
+
+bool
+agx_nir_lower_apple9_texture_lod(nir_shader *shader)
+{
+   return nir_shader_instructions_pass(shader, lower_texture_lod,
+                                       nir_metadata_control_flow, NULL);
+}
+
 /* A texel offset is applied separately at each selected mip level, before
  * wrapping and filtering. Express that contract with ordinary NIR fetches;
  * the backend supplies its private nearest sampler for those fetches. */

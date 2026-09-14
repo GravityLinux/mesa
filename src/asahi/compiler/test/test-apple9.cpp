@@ -10,6 +10,7 @@
 #include "compiler/nir/nir_builder.h"
 #include "compiler/nir/nir_xfb_info.h"
 #include <gtest/gtest.h>
+#include <cmath>
 #include <vector>
 #include "gallium/include/pipe/p_defines.h"
 
@@ -7687,6 +7688,121 @@ TEST(Apple9Compiler, FilteredLodAndBiasUseSamplerBindings)
                   compiled.info.apple9_resource_binding[1] == AGX_APPLE9_GRAPHICS_SYSVAL_BINDING);
       free(compiled.binary);
       ralloc_free(b.shader);
+   }
+}
+
+static nir_tex_instr *
+apple9_lod_test_texture(nir_builder *b, nir_texop op, nir_def *lod)
+{
+   nir_def *coord = nir_vec2(b, nir_imm_float(b, .375), nir_imm_float(b, .625));
+   nir_tex_instr *tex = nir_tex_instr_create(b->shader, 2);
+   tex->op = op;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 2;
+   tex->src[0] = (nir_tex_src){.src = nir_src_for_ssa(coord),
+                              .src_type = nir_tex_src_coord};
+   tex->src[1] = (nir_tex_src){
+      .src = nir_src_for_ssa(lod),
+      .src_type = op == nir_texop_txb ? nir_tex_src_bias : nir_tex_src_lod};
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_builder_instr_insert(b, &tex->instr);
+   nir_store_output(b, &tex->def, nir_imm_int(b, 0),
+                    .write_mask = 15, .src_type = nir_type_float32,
+                    .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+   b->shader->info.io_lowered = true;
+   return tex;
+}
+
+TEST(Apple9Compiler, TextureLodPackingPreservesSignedQ6Boundaries)
+{
+   const float values[] = {
+      -INFINITY, -100.0f, -32.0f, std::nextafter(-32.0f, 0.0f),
+      -1.015625f, -1.0f, std::nextafter(0.0f, -1.0f), -0.0f, 0.0f,
+      std::nextafter(0.015625f, 0.0f), 0.015625f,
+      std::nextafter(0.015625f, 1.0f), 1.5f, 2047.0f / 64.0f,
+      std::nextafter(2047.0f / 64.0f, INFINITY), 32.0f, INFINITY, NAN,
+   };
+   for (auto op : {nir_texop_txl, nir_texop_txb}) {
+      for (float value : values) {
+         SCOPED_TRACE(value);
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_FRAGMENT, &agx_nir_options, "apple9_lod_rounding");
+         nir_tex_instr *tex = apple9_lod_test_texture(&b, op, nir_imm_float(&b, value));
+         ASSERT_TRUE(agx_nir_lower_apple9_texture_lod(b.shader));
+         EXPECT_FALSE(agx_nir_lower_apple9_texture_lod(b.shader));
+         nir_opt_constant_folding(b.shader);
+         nir_validate_shader(b.shader, "packed LOD is a backend operand");
+         int source = nir_tex_instr_src_index(tex, nir_tex_src_backend1);
+         ASSERT_GE(source, 0);
+         ASSERT_TRUE(nir_src_is_const(tex->src[source].src));
+         float clamped = std::fmin(std::fmax(value, -32.0f), 2047.0f / 64.0f);
+         uint32_t expected = (uint32_t(int32_t(std::floor(clamped * 64.0f))) & 0xfff) << 16;
+         EXPECT_EQ(nir_src_as_uint(tex->src[source].src), expected);
+         EXPECT_EQ(nir_tex_instr_src_index(tex, nir_tex_src_lod), -1);
+         EXPECT_EQ(nir_tex_instr_src_index(tex, nir_tex_src_bias), -1);
+         ralloc_free(b.shader);
+      }
+   }
+}
+
+TEST(Apple9Compiler, IntegerFetchLodIsPackedWithoutFloatConversion)
+{
+   for (uint32_t level : {0u, 1u, 7u, 31u, UINT32_MAX}) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "apple9_fetch_lod");
+      nir_tex_instr *tex = apple9_lod_test_texture(
+         &b, nir_texop_txf, nir_imm_int(&b, level));
+      ASSERT_TRUE(agx_nir_lower_apple9_texture_lod(b.shader));
+      nir_opt_constant_folding(b.shader);
+      int source = nir_tex_instr_src_index(tex, nir_tex_src_backend1);
+      ASSERT_GE(source, 0);
+      ASSERT_TRUE(nir_src_is_const(tex->src[source].src));
+      EXPECT_EQ(nir_src_as_uint(tex->src[source].src), level << 22);
+      ralloc_free(b.shader);
+   }
+}
+
+static unsigned
+apple9_binary_floor_count(const agx_shader_part *part)
+{
+   const uint8_t *code = (const uint8_t *)part->binary;
+   unsigned count = 0;
+   for (unsigned at = 0; at + 10 <= part->info.binary_size; at += 2) {
+      const uint8_t *p = code + at;
+      if (p[0] == 0x2f && p[1] == 0 && p[2] == 0x54 &&
+          (p[6] & 0xd0) == 0x90 && (p[7] & 0x7f) == 0x40 && p[8] == 2)
+         ++count;
+   }
+   return count;
+}
+
+TEST(Apple9Compiler, UniformLodPackingMovesToPreambleButVaryingLodStays)
+{
+   for (auto op : {nir_texop_txl, nir_texop_txb}) {
+      for (bool uniform : {false, true}) {
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_FRAGMENT, &agx_nir_options, "apple9_lod_preamble");
+         b.shader->info.num_ubos = 1;
+         nir_def *lod = uniform
+            ? nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
+                           .align_mul = 4, .range = 4)
+            : nir_channel(&b, nir_load_frag_coord(&b), 0);
+         apple9_lod_test_texture(&b, op, lod);
+         agx_shader_part compiled = {};
+         const char *reason = nullptr;
+         ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason))
+            << (reason ?: "");
+         agx_shader_part main = {}, preamble = {};
+         main.binary = compiled.binary;
+         main.info.binary_size = compiled.info.main_size;
+         preamble.binary = (uint8_t *)compiled.binary + compiled.info.apple9_preamble_offset;
+         preamble.info.binary_size = compiled.info.apple9_preamble_size;
+         EXPECT_EQ(apple9_binary_floor_count(&main), uniform ? 0u : 1u);
+         EXPECT_EQ(apple9_binary_floor_count(&preamble), uniform ? 1u : 0u);
+         free(compiled.binary);
+         ralloc_free(b.shader);
+      }
    }
 }
 

@@ -585,6 +585,12 @@ apple9_texture_supported(const nir_tex_instr *tex)
    int coord = nir_tex_instr_src_index(tex, nir_tex_src_coord);
    int lod = nir_tex_instr_src_index(tex, tex->op == nir_texop_txb
                                              ? nir_tex_src_bias : nir_tex_src_lod);
+   int packed_lod = nir_tex_instr_src_index(tex, nir_tex_src_backend1);
+   if (packed_lod >= 0) {
+      if (!explicit_lod || lod >= 0)
+         return false;
+      lod = packed_lod;
+   }
    if (gradient) {
       for (enum nir_tex_src_type type = nir_tex_src_ddx;
            type <= nir_tex_src_ddy; ++type) {
@@ -1480,32 +1486,6 @@ apple9_lower_interpolated_input(struct apple9_dag_lower *lower,
                           AGX_APPLE9_ENC_FLOAT2_PROJECT, src, 2, index + 1);
 }
 
-/* Filtered LOD/bias parameters use signed Q6 in bits16..27. Building that
- * representation directly preserves FP32 precision without requiring an
- * otherwise unnecessary conversion to the opcode17 FP16 input format. */
-static uint32_t
-apple9_pack_texture_lod(struct apple9_dag_lower *lower, uint32_t lod)
-{
-   uint32_t sources[] = {lod, apple9_dag_imm(lower, 0xc2000000)}; /* -32 */
-   sources[0] = apple9_dag_emit(lower, AGX_APPLE9_VIR_FMAX,
-                               AGX_APPLE9_ENC_MINMAX_COMPACT, sources, 2, 0);
-   sources[1] = apple9_dag_imm(lower, 0x41ffe000); /* 2047/64 */
-   sources[0] = apple9_dag_emit(lower, AGX_APPLE9_VIR_FMIN,
-                               AGX_APPLE9_ENC_MINMAX_COMPACT, sources, 2, 0);
-   sources[1] = apple9_dag_imm(lower, 0x42800000); /* 64 */
-   uint32_t fixed = apple9_dag_emit(lower, AGX_APPLE9_VIR_FMUL,
-                                   AGX_APPLE9_ENC_FLOAT2_COMPACT, sources, 2, 0);
-   fixed = apple9_dag_emit(lower, AGX_APPLE9_VIR_FFLOOR,
-                           AGX_APPLE9_ENC_FLOAT_SPECIAL, &fixed, 1, 3);
-   fixed = apple9_dag_emit(lower, AGX_APPLE9_VIR_F2I32,
-                           AGX_APPLE9_ENC_FLOAT_TO_SINT, &fixed, 1, 0);
-   sources[0] = fixed;
-   sources[1] = apple9_dag_imm(lower, 0xfff);
-   fixed = apple9_dag_emit(lower, AGX_APPLE9_VIR_IAND,
-                           AGX_APPLE9_ENC_LOGIC_EXTENDED, sources, 2, 0);
-   return apple9_dag_shift_imm(lower, nir_op_ishl, fixed, 16);
-}
-
 static uint32_t
 apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
 {
@@ -1601,15 +1581,14 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
       } else if (tex->op == nir_texop_txl || tex->op == nir_texop_txb ||
                  tex->op == nir_texop_txf) {
          bool bias = tex->op == nir_texop_txb;
-         int lod_source = nir_tex_instr_src_index(
-            tex, bias ? nir_tex_src_bias : nir_tex_src_lod);
-         uint32_t lod = apple9_lower_dag_scalar(
+         int lod_source = nir_tex_instr_src_index(tex, nir_tex_src_backend1);
+         if (lod_source < 0) {
+            lower->reason = "Apple9 texture LOD was not packed before selection";
+            return AGX_APPLE9_VREG_INVALID;
+         }
+         uint32_t packed_lod = apple9_lower_dag_scalar(
             lower, nir_get_scalar(tex->src[lod_source].src.ssa, 0));
          bool fetch = tex->op == nir_texop_txf;
-         /* Integer LOD uses the same Q6 field as filtered sampling. */
-         uint32_t packed_lod = fetch
-            ? apple9_dag_shift_imm(lower, nir_op_ishl, lod, 22)
-            : apple9_pack_texture_lod(lower, lod);
          if (tex->coord_components == 3 || tex->is_shadow) {
             if (tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE || tex->is_array) {
                uint32_t fields[] = {packed_lod, layer_or_face};
@@ -5712,6 +5691,7 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
                                 nir_metadata_control_flow, NULL);
    nir_shader_instructions_pass(nir, apple9_lower_sampler_bias,
                                 nir_metadata_control_flow, NULL);
+   agx_nir_lower_apple9_texture_lod(nir);
    apple9_lower_idiv(nir);
    /* Format lowering can introduce powers and other high-level ALU ops. */
    apple9_opt_algebraic(nir);

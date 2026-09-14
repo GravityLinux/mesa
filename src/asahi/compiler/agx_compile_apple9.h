@@ -20,6 +20,10 @@ extern "C" {
 
 bool agx_nir_lower_apple9_math(nir_shader *shader);
 
+/* After generic texture lowering, backend1 holds a packed Apple9 LOD/bias
+ * word rather than the original floating-point LOD or integer fetch level. */
+bool agx_nir_lower_apple9_texture_lod(nir_shader *shader);
+
 /*
  * Compile compute NIR through Apple9's semantic instruction selection and
  * register allocator. Arithmetic, memory operations, and structured control
