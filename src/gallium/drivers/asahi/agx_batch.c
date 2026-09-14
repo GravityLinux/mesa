@@ -123,14 +123,8 @@ agx_batch_init(struct agx_context *ctx,
       memset(batch->bo_list.set, 0, batch->bo_list.bit_count / 8);
    }
 
-   batch->apple9_dispatch_count = 0;
-   batch->apple9_package = NULL;
    batch->apple9_render_initialized = false;
    batch->apple9_draw_count = 0;
-   batch->apple9_entries.count = 0;
-   batch->apple9_launch_next = AGX_APPLE9_COMPUTE_LAUNCH_OFFSET;
-   batch->apple9_resource_next = AGX_APPLE9_COMPUTE_RESOURCE_OFFSET +
-                                  AGX_APPLE9_COMPUTE_RESOURCE_TABLE_OFFSET;
 
    if (agx_batch_is_compute(batch)) {
       batch->cdm = agx_encoder_allocate(batch, dev);
@@ -285,11 +279,8 @@ agx_batch_cleanup(struct agx_context *ctx, struct agx_batch *batch, bool reset)
    agx_bo_unreference(dev, screen->rodata);
    agx_bo_unreference(dev, batch->vdm.bo);
    agx_bo_unreference(dev, batch->cdm.bo);
-   agx_bo_unreference(dev, batch->apple9_package);
-   batch->apple9_package = NULL;
    batch->apple9_render_initialized = false;
    batch->apple9_draw_count = 0;
-   batch->apple9_entries.count = 0;
    agx_pool_cleanup(&batch->pool);
    agx_pool_cleanup(&batch->pipeline_pool);
    agx_pool_cleanup(&batch->apple9_context_pool);

@@ -15,7 +15,7 @@
 #include "asahi/compiler/agx_apple9_profile.h"
 #include "asahi/compiler/agx_compile.h"
 #include "asahi/compiler/agx_compile_apple9.h"
-#include "agx_apple9_entries.h"
+#include "asahi/lib/agx_apple9_layout.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -129,77 +129,22 @@ struct agx_apple9_uniform_draw {
    bool flatshade_first;
 };
 
-/* Attachment identity is independent of compiled shader identity. */
-struct agx_apple9_framebuffer {
-   uint64_t targets[8];
-   enum pipe_format formats[8];
-   uint16_t width, height;
-   uint8_t count, samples;
-};
-
-struct agx_apple9_graphics *agx_apple9_graphics_create(struct agx_device *dev);
-void agx_apple9_graphics_destroy(struct agx_apple9_graphics *graphics);
-void agx_apple9_graphics_invalidate(struct agx_apple9_graphics *graphics);
-struct agx_bo *agx_apple9_graphics_bo(struct agx_apple9_graphics *graphics);
+void agx_apple9_initialize_entries(struct agx_device *dev);
 
 bool agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
                              struct agx_pool *context_pool,
-                             struct agx_apple9_entry_table *entries,
                              const struct agx_apple9_render_pipeline *pipeline,
                              struct agx_apple9_uniform_draw *draw,
                              const struct agx_apple9_uniform_draw *previous);
 
-bool
-agx_apple9_graphics_publish(struct agx_apple9_graphics *graphics,
-                            const struct agx_apple9_framebuffer *framebuffer,
-                            const struct agx_apple9_entry_table *entries,
-                            unsigned varying_components,
-                            const float clear_color[8][4]);
-
-#define AGX_APPLE9_COMPUTE_PACKAGE_SIZE        0x100000u
-#define AGX_APPLE9_COMPUTE_CODE_OFFSET         0x00000u
-#define AGX_APPLE9_COMPUTE_CODE_SIZE           0x10000u
-#define AGX_APPLE9_COMPUTE_ARCHIVE_HEADER_SIZE 0x0340u
-#define AGX_APPLE9_COMPUTE_BLOCK_HEADER_SIZE   0x0040u
-#define AGX_APPLE9_COMPUTE_MAIN_OFFSET         0x03c0u
-#define AGX_APPLE9_COMPUTE_LAUNCH_OFFSET         0x90000u
-#define AGX_APPLE9_COMPUTE_RESOURCE_OFFSET       0xe0000u
-#define AGX_APPLE9_COMPUTE_RESOURCE_TABLE_OFFSET 0x14a0u
-#define AGX_APPLE9_COMPUTE_LAUNCH_ALIGN          0x40u
-#define AGX_APPLE9_COMPUTE_LAUNCH_REGION_END     0x98000u
-#define AGX_APPLE9_COMPUTE_RESOURCE_STRIDE       0x20u
+#define AGX_APPLE9_COMPUTE_RESOURCE_STRIDE 0x20u
 #define AGX_APPLE9_COMPUTE_SUPERSET_RESOURCE_STRIDE 0x100u
 #define AGX_APPLE9_COMPUTE_GEOMETRY_GROUPS_OFFSET 0xc0u
-#define AGX_APPLE9_COMPUTE_CDM_RECORD_SIZE       0x2cu
+#define AGX_APPLE9_COMPUTE_CDM_RECORD_SIZE 0x2cu
 #define AGX_APPLE9_COMPUTE_INDIRECT_CDM_RECORD_SIZE 0x28u
-
-#define AGX_APPLE9_RENDER_HEADER_OFFSET         0x01000000u
-#define AGX_APPLE9_RENDER_HEADER_APERTURE_SIZE  0x00400000u
-#define AGX_APPLE9_RENDER_RESOURCE_OFFSET       0x00200000u
-/* Attachment-state views in the fixed USC address space. */
-#define AGX_APPLE9_RENDER_FIXED_TARGET_GRAPH_OFFSET  0x00160000u
-#define AGX_APPLE9_RENDER_TARGET_GRAPH_SOURCE_OFFSET 0x00210000u
-#define AGX_APPLE9_RENDER_ARCHIVE_HEADER_SIZE \
-   AGX_APPLE9_RENDER_ENTRY_HEADER_SIZE
-#define AGX_APPLE9_RENDER_BLOCK_HEADER_SIZE          0x0040u
-#define AGX_APPLE9_RENDER_CONSTANT_RESERVED_SIZE     0x0040u
-#define AGX_APPLE9_RENDER_FIRST_MAIN_OFFSET          0x03c0u
-#define AGX_APPLE9_RENDER_CONTEXT_BASE               UINT64_C(0x1000000000)
-#define AGX_APPLE9_RENDER_STATE_ADDRESS              UINT64_C(0x1000004000)
-#define AGX_APPLE9_RENDER_STATE_SIZE                0x00068000u
-/* The fixed USC table contains a helper directory and small stage entries.
- * Each entry transfers to an independently allocated compiler-generated body.
- * Headers retain the hardware archive grammar, without packing bodies here. */
+#define AGX_APPLE9_RENDER_CONTEXT_BASE UINT64_C(0x1000000000)
 
 bool agx_apple9_compute_enabled(const struct agx_device *dev);
-
-/* Batch-local entries transfer to immutable independently allocated bodies. */
-#define AGX_APPLE9_COMPUTE_MAX_ENTRIES                                         \
-   ((AGX_APPLE9_COMPUTE_CODE_SIZE - AGX_APPLE9_COMPUTE_ARCHIVE_HEADER_SIZE) /  \
-    0xc0u)
-bool agx_apple9_build_compute_entry(
-   void *mapping, unsigned dispatch, uint64_t shader_base, uint64_t body,
-   const struct agx_apple9_compute_profile *profile, uint32_t *entry_offset);
 
 size_t agx_apple9_compute_launch_size(
    const struct agx_apple9_compute_profile *profile);
@@ -233,8 +178,6 @@ agx_apple9_compute_read_mask(const struct agx_apple9_compute_profile *profile);
 uint32_t
 agx_apple9_compute_write_mask(const struct agx_apple9_compute_profile *profile);
 
-uint32_t agx_apple9_compute_archive_call_offset(
-   const struct agx_apple9_compute_profile *profile);
 
 /*
  * Direct CDM geometry is dispatch state.  Fixed-local-size profiles require
@@ -249,16 +192,6 @@ bool agx_apple9_compute_grid_supported(
 bool agx_apple9_compute_indirect_dispatch_supported(
    const struct agx_apple9_compute_profile *profile);
 
-/* Pure layout preflight used to roll a full batch before mutating it. */
-bool agx_apple9_compute_dispatch_fits(
-   size_t mapping_size, uint32_t launch_offset, uint32_t resource_table_offset,
-   const struct agx_apple9_compute_profile *profile);
-
-/*
- * Direct dispatches provide total threads and local size for CPU conversion
- * to group counts. Indirect dispatches provide the GPU group-count pointer.
- * Keep the alternatives tagged to avoid reading the wrong union member.
- */
 enum agx_apple9_compute_geometry_mode {
    AGX_APPLE9_COMPUTE_GEOMETRY_DIRECT,
    AGX_APPLE9_COMPUTE_GEOMETRY_INDIRECT,
@@ -278,15 +211,12 @@ bool agx_apple9_build_compute_geometry_fields(
    void *record, size_t record_size, uint64_t record_address,
    const struct agx_apple9_compute_geometry *geometry);
 
-/* Build resource and launch records referring to an existing entry. */
-bool agx_apple9_build_compute_dispatch(
-   void *mapping, size_t mapping_size, uint64_t usc_exec_base,
-   uint64_t package_base, uint32_t main_offset, uint32_t launch_offset,
-   uint32_t resource_table_offset,
+/* Build immutable resource and launch records in the batch's USC pool. */
+bool agx_apple9_prepare_compute_dispatch(
+   struct agx_device *dev, struct agx_pool *usc_pool, struct agx_bo *body,
    const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
-   unsigned resource_count,
-   const struct agx_apple9_compute_geometry *geometry,
-   uint64_t preamble_address);
+   unsigned resource_count, const struct agx_apple9_compute_geometry *geometry,
+   uint64_t preamble_address, uint64_t *launch_address);
 
 bool agx_apple9_emit_direct_dispatch(
    void *out, uint64_t launch, const uint32_t global[3],

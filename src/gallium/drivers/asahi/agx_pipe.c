@@ -1207,8 +1207,6 @@ agx_clear(struct pipe_context *pctx, unsigned buffers,
       union pipe_color_union clamped =
          util_clamp_color(batch->key.cbufs[rt].format, color);
 
-      memcpy(batch->apple9_clear_color[rt], clamped.f, sizeof(clamped.f));
-
       batch->uploaded_clear_color[rt] = agx_pool_upload_aligned(
          &batch->pool, clamped.f, sizeof(clamped.f), 16);
    }
@@ -1803,68 +1801,6 @@ agx_flush_batch(struct agx_context *ctx, struct agx_batch *batch)
    struct drm_asahi_cmd_render render;
    struct drm_asahi_cmd_compute compute;
    bool has_vdm = false, has_cdm = false;
-   struct agx_screen *screen = agx_screen(ctx->base.screen);
-   struct agx_device *dev = agx_device(ctx->base.screen);
-   bool apple9_render = agx_apple9_direct_render_enabled(dev) &&
-                        batch->vdm.bo && batch->apple9_render_initialized;
-   bool apple9_compute =
-      agx_apple9_compute_enabled(dev) && batch->cdm.bo &&
-      batch->apple9_dispatch_count != 0;
-   bool apple9_fixed_usc = apple9_render || apple9_compute;
-   assert(!(apple9_render && apple9_compute));
-
-   /*
-    * Compute and VBO render share one fixed-USC DVA but retain distinct
-    * physical arenas. Owner selection plus submit is therefore one
-    * screen-wide transaction. Wait for the previous owner before changing a
-    * live mapping, and hold the lock through publication so another context
-    * cannot switch it between selection and submit.
-    */
-   if (apple9_fixed_usc) {
-      simple_mtx_lock(&screen->apple9_graphics_lock);
-      if (screen->apple9_fixed_usc_seqid) {
-         int ret = drmSyncobjTimelineWait(
-            dev->fd, &screen->flush_syncobj,
-            &screen->apple9_fixed_usc_seqid, 1, INT64_MAX,
-            DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT, NULL);
-         if (ret) {
-            fprintf(stderr,
-                    "failed to retire previous Apple9 fixed-USC user: %d\n",
-                    ret);
-            simple_mtx_unlock(&screen->apple9_graphics_lock);
-            abort();
-         }
-      }
-   }
-
-   if (apple9_compute) {
-      bool installed = agx_apple9_install_compute_entries(
-         dev, agx_bo_map(batch->apple9_package));
-      if (!installed) {
-         fprintf(stderr, "failed to install Apple9 compute generation\n");
-         simple_mtx_unlock(&screen->apple9_graphics_lock);
-         abort();
-      }
-      /* Switching the USC mapping preserves the separate render backing. */
-   }
-
-   if (apple9_render) {
-      bool bound =
-         screen->apple9_graphics &&
-         agx_apple9_graphics_publish(
-            screen->apple9_graphics, &batch->apple9_framebuffer,
-            &batch->apple9_entries,
-            batch->apple9_root_varyings,
-            (batch->clear & PIPE_CLEAR_COLOR0) ? batch->apple9_clear_color
-                                               : NULL);
-      if (!bound) {
-         fprintf(stderr, "Failed to publish Apple9 graphics state\n");
-         agx_apple9_graphics_invalidate(screen->apple9_graphics);
-         simple_mtx_unlock(&screen->apple9_graphics_lock);
-         abort();
-      }
-   }
-
    if (batch->cdm.bo) {
       agx_flush_compute(ctx, batch, &compute);
       has_cdm = true;
@@ -1879,17 +1815,11 @@ agx_flush_batch(struct agx_context *ctx, struct agx_batch *batch)
          agx_batch_discard(ctx, batch);
       else
          agx_batch_reset(ctx, batch);
-      if (apple9_fixed_usc)
-         simple_mtx_unlock(&screen->apple9_graphics_lock);
       return;
    }
 
    agx_batch_submit(ctx, batch, has_cdm ? &compute : NULL,
                     has_vdm ? &render : NULL);
-   if (apple9_fixed_usc) {
-      screen->apple9_fixed_usc_seqid = ctx->flush_last_seqid;
-      simple_mtx_unlock(&screen->apple9_graphics_lock);
-   }
 }
 
 static void
@@ -2711,8 +2641,6 @@ agx_destroy_screen(struct pipe_screen *pscreen)
    if (screen->dev.ro)
       screen->dev.ro->destroy(screen->dev.ro);
 
-   agx_apple9_graphics_destroy(screen->apple9_graphics);
-   simple_mtx_destroy(&screen->apple9_graphics_lock);
    agx_bo_unreference(&screen->dev, screen->rodata);
    u_transfer_helper_destroy(pscreen->transfer_helper);
    agx_close_device(&screen->dev);
@@ -2832,7 +2760,6 @@ agx_screen_create(int fd, struct renderonly *ro,
    assert(!ret);
 
    simple_mtx_init(&agx_screen->flush_seqid_lock, mtx_plain);
-   simple_mtx_init(&agx_screen->apple9_graphics_lock, mtx_plain);
 
    agx_screen->heap_memory_percent =
       driQueryOptionf(config->options, "heap_memory_percent");
@@ -2878,8 +2805,8 @@ agx_screen_create(int fd, struct renderonly *ro,
       screen->nir_options[i] = nir_options;
    if (agx_apple9_direct_render_enabled(&agx_screen->dev)) {
       /* The Apple9 backend supports structured loops. Expanding nested
-       * texture loops with Apple8's unroll policy can exhaust its bounded
-       * render archive. Preserve loops until we have a code-size cost model.
+       * texture loops with Apple8's unroll policy greatly increases shader
+       * size. Preserve loops until we have a code-size cost model.
        * Compute keeps its existing policy.
        */
       agx_screen->apple9_graphics_nir_options = *nir_options;
@@ -2924,16 +2851,9 @@ agx_screen_create(int fd, struct renderonly *ro,
       agx_screen->rodata = bo;
    }
 
-   /* Reserve the graphics header aperture before application allocations.
-    * Waiting until the first draw lets a large index/output buffer occupy
-    * that address, making graphics initialization fail later. */
-   if (agx_apple9_direct_render_enabled(&agx_screen->dev)) {
-      agx_screen->apple9_graphics = agx_apple9_graphics_create(&agx_screen->dev);
-      if (!agx_screen->apple9_graphics) {
-         agx_destroy_screen(screen);
-         return NULL;
-      }
-   }
+   if (agx_apple9_compute_enabled(&agx_screen->dev) ||
+       agx_apple9_direct_render_enabled(&agx_screen->dev))
+      agx_apple9_initialize_entries(&agx_screen->dev);
 
    return screen;
 }

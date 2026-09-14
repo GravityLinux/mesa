@@ -416,7 +416,6 @@ struct agx_batch {
    bool apple9_preparing_tile_store;
 
    uint64_t uploaded_clear_color[PIPE_MAX_COLOR_BUFS];
-   float apple9_clear_color[8][4];
    double clear_depth;
    unsigned clear_stencil;
 
@@ -469,18 +468,11 @@ struct agx_batch {
 
    /* Attachment snapshot and immutable draw allocations live with the batch. */
    bool apple9_render_initialized;
-   struct agx_apple9_framebuffer apple9_framebuffer;
-   unsigned apple9_root_varyings;
    struct agx_pool apple9_context_pool;
    unsigned apple9_draw_count;
    struct agx_apple9_uniform_draw apple9_previous_draw;
-   struct agx_apple9_entry_table apple9_entries;
 
    /* Apple9 direct records appended to cdm for this command. */
-   unsigned apple9_dispatch_count;
-   struct agx_bo *apple9_package;
-   uint32_t apple9_launch_next;
-   uint32_t apple9_resource_next;
    struct util_dynarray apple9_attachments;
 
    /* Scissor and depth-bias descriptors, uploaded at GPU time */
@@ -937,12 +929,6 @@ struct agx_screen {
    nir_shader_compiler_options apple9_nir_options;
    nir_shader_compiler_options apple9_graphics_nir_options;
 
-   /* Fixed-base Apple9 render generations, owned by Gallium. */
-   struct agx_apple9_graphics *apple9_graphics;
-   simple_mtx_t apple9_graphics_lock;
-   /* Last submission using the shared fixed-USC generation, compute or
-    * render. Ownership switches wait for this point before changing bytes. */
-   uint64_t apple9_fixed_usc_seqid;
 
    struct agx_bo *rodata;
 

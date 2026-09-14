@@ -353,6 +353,15 @@ agx_bo_unreference(struct agx_device *dev, struct agx_bo *bo)
    if (p_atomic_read(&bo->refcnt) == 0) {
       assert(!p_atomic_read_relaxed(&bo->writer));
 
+      if (bo->apple9_entry_offset) {
+         simple_mtx_lock(&dev->apple9_entry_lock);
+         util_vma_heap_free(&dev->apple9_entry_heap,
+                           bo->apple9_entry_offset - AGX_APPLE9_ENTRY_CODE_OFFSET,
+                           AGX_APPLE9_ENTRY_BLOCK_SIZE);
+         bo->apple9_entry_offset = 0;
+         simple_mtx_unlock(&dev->apple9_entry_lock);
+      }
+
       if (dev->debug & AGX_DBG_TRACE)
          agxdecode_track_free(dev->agxdecode, bo);
 

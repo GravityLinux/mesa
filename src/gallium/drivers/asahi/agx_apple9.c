@@ -22,16 +22,6 @@
 #include "agx_device.h"
 #include "asahi/layout/layout.h"
 
-static_assert(AGX_APPLE9_RENDER_ENTRY_REGION_SIZE <=
-                 AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET,
-              "Render entries must not overlap compiler state");
-static_assert(AGX_APPLE9_RENDER_COLOR_BUFFER_OFFSET + 0x20 <=
-                 AGX_APPLE9_RENDER_COMPILER_STATE_END,
-              "Attachment descriptors must fit the relocated state region");
-
-static_assert(AGX_APPLE9_COMPUTE_CODE_SIZE == AGX_APPLE9_COMPUTE_ARCHIVE_SIZE,
-              "Gallium and libagx must agree on the compute archive size");
-
 /* Immutable source-generated compute helpers. */
 static uint8_t apple9_compute_constant[0x40];
 static void apple9_build_sentinel_constant_program(uint8_t *out, unsigned slots);
@@ -44,7 +34,6 @@ apple9_initialize_compute_helpers(void)
 }
 
 struct apple9_compute_abi_desc {
-   uint8_t helper_slots;
    uint8_t resource_count;
    uint16_t resource_record_size;
    uint32_t cdm_config;
@@ -53,27 +42,16 @@ struct apple9_compute_abi_desc {
    bool supports_indirect_dispatch;
 };
 
-static const uint8_t *
-apple9_compute_constant_program(const struct apple9_compute_abi_desc *abi)
-{
-   return apple9_compute_constant;
-}
-
-static size_t
-apple9_compute_constant_size(const struct apple9_compute_abi_desc *abi)
-{
-   return sizeof(apple9_compute_constant);
-}
-
 static const struct apple9_compute_abi_desc *
 apple9_compute_abi(const struct agx_apple9_compute_profile *profile)
 {
    static const struct apple9_compute_abi_desc ssbo8_superset = {
-      .helper_slots = 10,
       .resource_count = AGX_APPLE9_COMPUTE_MAX_RESOURCES,
       .resource_record_size = AGX_APPLE9_COMPUTE_SUPERSET_RESOURCE_STRIDE,
       .cdm_config = 0x00880000,
       .cdm_constant = 0x01000040,
+      /* Match the full post-dispatch CDM barrier used by the Apple8 path.
+       * GPU cache ordering is independent of asynchronous CPU submission. */
       .cdm_tail = 0x60000160,
       .supports_indirect_dispatch = true,
    };
@@ -165,13 +143,6 @@ apple9_put_u64(void *ptr, uint64_t value)
 }
 
 static inline uint32_t
-apple9_get_u24(const void *ptr)
-{
-   const uint8_t *bytes = ptr;
-   return bytes[0] | (bytes[1] << 8) | (bytes[2] << 16);
-}
-
-static inline uint32_t
 apple9_get_u32(const void *ptr)
 {
    uint32_t value;
@@ -193,21 +164,6 @@ apple9_put_f32(void *ptr, float value)
    memcpy(ptr, &value, sizeof(value));
 }
 
-
-static bool
-apple9_range_fits(size_t mapping_size, uint32_t offset, size_t size)
-{
-   return offset <= mapping_size && size <= mapping_size - offset;
-}
-
-static bool
-apple9_ranges_overlap(uint32_t a_offset, size_t a_size, uint32_t b_offset,
-                      size_t b_size)
-{
-   uint64_t a_end = (uint64_t)a_offset + a_size;
-   uint64_t b_end = (uint64_t)b_offset + b_size;
-   return a_offset < b_end && b_offset < a_end;
-}
 
 static void
 apple9_fill_helper_table(uint8_t *image, unsigned base, unsigned slots)
@@ -241,55 +197,24 @@ apple9_build_sentinel_constant_program(uint8_t *out, unsigned slots)
 }
 
 static bool
-apple9_compact_pointer_supported(uint64_t usc_exec_base, uint64_t address)
-{
-   if (address < usc_exec_base)
-      return false;
-
-   return ((address - usc_exec_base) >> 13) <= UINT16_MAX;
-}
-
-static bool
-apple9_patch_compact_pointer(uint8_t *out, unsigned low_byte,
-                             unsigned middle_byte, unsigned high_byte,
-                             unsigned chunk_byte, uint64_t usc_exec_base,
-                             uint64_t address)
-{
-   if (!apple9_compact_pointer_supported(usc_exec_base, address))
-      return false;
-
-   uint64_t relative = address - usc_exec_base;
-   uint64_t chunk = relative >> 13;
-   uint32_t selector = relative & 0x1fff;
-   out[low_byte] = 0x80 | (selector & 0x7f);
-   out[middle_byte] = (out[middle_byte] & ~0x1f) | ((selector >> 6) & 0x1e);
-   out[high_byte] = (out[high_byte] & ~0x0c) | ((selector >> 9) & 0x0c);
-   apple9_put_u16(out + chunk_byte, chunk);
-   return true;
-}
-
-static bool
 apple9_build_compute_launch(uint8_t *out, uint64_t usc_exec_base,
-                            uint64_t package_base, uint32_t main_offset,
-                            uint32_t resource_table_offset, uint32_t launch_offset,
+                            uint64_t launch_address, uint64_t resource_address,
+                            uint32_t main_offset,
                             const struct agx_apple9_compute_profile *profile,
                             uint64_t preamble_address)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
    if (!abi || !apple9_compute_profile_valid(profile, abi) ||
-       main_offset < AGX_APPLE9_RENDER_FIRST_MAIN_OFFSET)
-      return false;
-
-   if (package_base > UINT64_MAX - resource_table_offset)
+       main_offset < AGX_APPLE9_ENTRY_HEADER_SIZE + AGX_APPLE9_ENTRY_CODE_OFFSET)
       return false;
 
    struct agx_apple9_launch_parameters params = {
       .entry_offset = main_offset,
       .preamble_address = preamble_address,
-      .launch_address = package_base + launch_offset,
+      .launch_address = launch_address,
    };
    params.shader_base = usc_exec_base;
-   params.resource_table = package_base + resource_table_offset;
+   params.resource_table = resource_address;
    params.resource_count = profile->resource_binding_count;
    params.threadgroup_memory_bytes = profile->required_threadgroup_memory_bytes;
    if (profile->scratch_size) {
@@ -383,16 +308,6 @@ agx_apple9_compute_write_mask(const struct agx_apple9_compute_profile *profile)
    return abi ? profile->resource_write_mask : 0;
 }
 
-uint32_t
-agx_apple9_compute_archive_call_offset(
-   const struct agx_apple9_compute_profile *profile)
-{
-   const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   return abi ? agx_apple9_launch_call_offset(AGX_APPLE9_LAUNCH_COMPUTE,
-                                              profile->resource_binding_count)
-              : 0;
-}
-
 bool
 agx_apple9_compute_grid_supported(
    const struct agx_apple9_compute_profile *profile, const uint32_t global[3],
@@ -430,171 +345,103 @@ agx_apple9_compute_indirect_dispatch_supported(
    return abi && abi->supports_indirect_dispatch;
 }
 
-static void
-apple9_init_compute_archive(uint8_t *code, unsigned helper_slots)
-{
-   assert(helper_slots > 0 && helper_slots <= 10);
-   memset(code, 0, AGX_APPLE9_COMPUTE_CODE_SIZE);
-   apple9_put_u32(code, AGX_APPLE9_COMPUTE_ARCHIVE_HEADER_SIZE);
-   for (unsigned offset = 0x40; offset < AGX_APPLE9_COMPUTE_ARCHIVE_HEADER_SIZE;
-        offset += 2)
-      apple9_put_u16(code + offset, 0x0006);
-
-   /* The archive header is shared, so retain the complete helper directory. */
-   apple9_fill_helper_table(code, 0x100, helper_slots);
-   apple9_fill_helper_table(code, 0x200, helper_slots);
-}
-
-
 static bool apple9_build_body_entry(uint8_t *out, uint64_t entry,
                                     uint64_t body);
 
-bool
-agx_apple9_build_compute_entry(void *mapping, unsigned dispatch,
-                               uint64_t shader_base, uint64_t body,
-                               const struct agx_apple9_compute_profile *profile,
-                               uint32_t *entry_offset)
+void
+agx_apple9_initialize_entries(struct agx_device *dev)
 {
-   const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   if (!mapping || !entry_offset || !abi ||
-       dispatch >= AGX_APPLE9_COMPUTE_MAX_ENTRIES ||
-       apple9_compute_constant_size(abi) != 0x40)
-      return false;
-   uint8_t *image = mapping;
-   if (!dispatch)
-      apple9_init_compute_archive(image, abi->helper_slots);
-   uint32_t block = AGX_APPLE9_COMPUTE_ARCHIVE_HEADER_SIZE + dispatch * 0xc0;
-   uint32_t entry = block + 0x80;
-   memset(image + block, 0, 0xc0);
-   apple9_put_u32(image + block, 0xc0);
-   memcpy(image + block + 0x40, apple9_compute_constant_program(abi), 0x40);
-   if (!apple9_build_body_entry(image + entry, shader_base + entry, body))
-      return false;
-   *entry_offset = entry;
-   return true;
+   uint8_t *header = dev->apple9_entry_map;
+   memset(header, 0, AGX_APPLE9_ENTRY_HEADER_SIZE);
+   apple9_put_u32(header, AGX_APPLE9_ENTRY_HEADER_SIZE);
+   for (unsigned offset = 0x40; offset < AGX_APPLE9_ENTRY_HEADER_SIZE; offset += 2)
+      apple9_put_u16(header + offset, 0x0006);
+   apple9_fill_helper_table(header, 0x100, 10);
+   apple9_fill_helper_table(header, 0x200, 10);
+   agx_bo_note_cpu_write(dev->apple9_entries, 0, AGX_APPLE9_ENTRY_HEADER_SIZE);
 }
 
-static bool
-apple9_compute_transient_dispatch_fits(
-   size_t mapping_size, uint32_t launch_offset, uint32_t resource_table_offset,
-   const struct agx_apple9_compute_profile *profile)
+/* Compiled shader objects and pending batches retain the body BO. Tying the
+ * entry allocation to that BO prevents deletion or cache reuse from changing
+ * the target of an already encoded launch. */
+static uint32_t
+apple9_shader_entry(struct agx_device *dev, struct agx_bo *body, bool compute)
 {
-   const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   size_t launch_size = agx_apple9_compute_launch_size(profile);
-   size_t resource_record_size =
-      apple9_compute_resource_record_size_for_abi(abi);
-   if (!abi || !launch_size || !apple9_compute_profile_valid(profile, abi) ||
-       (AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE + abi->resource_count) * sizeof(uint64_t) >
-          resource_record_size)
-      return false;
-
-   const uint32_t resource_start = AGX_APPLE9_COMPUTE_RESOURCE_OFFSET +
-                                   AGX_APPLE9_COMPUTE_RESOURCE_TABLE_OFFSET;
-
-   return resource_record_size >= AGX_APPLE9_COMPUTE_RESOURCE_STRIDE &&
-          !(resource_record_size & (resource_record_size - 1)) &&
-          !(launch_offset & (AGX_APPLE9_COMPUTE_LAUNCH_ALIGN - 1)) &&
-          launch_offset >= AGX_APPLE9_COMPUTE_LAUNCH_OFFSET &&
-          launch_offset < AGX_APPLE9_COMPUTE_LAUNCH_REGION_END &&
-          launch_size <= AGX_APPLE9_COMPUTE_LAUNCH_REGION_END - launch_offset &&
-          apple9_range_fits(mapping_size, launch_offset, launch_size) &&
-          resource_table_offset >= resource_start &&
-          !((resource_table_offset - resource_start) &
-            (resource_record_size - 1)) &&
-          apple9_range_fits(mapping_size, resource_table_offset,
-                            resource_record_size) &&
-          !apple9_ranges_overlap(launch_offset, launch_size,
-                                 resource_table_offset,
-                                 resource_record_size);
-}
-
-bool
-agx_apple9_compute_dispatch_fits(
-   size_t mapping_size, uint32_t launch_offset, uint32_t resource_table_offset,
-   const struct agx_apple9_compute_profile *profile)
-{
-   return apple9_compute_transient_dispatch_fits(
-      mapping_size, launch_offset, resource_table_offset, profile);
-}
-
-static bool
-apple9_build_superset_resource_record(
-   uint8_t *package, size_t mapping_size, uint64_t package_base,
-   uint32_t resource_table_offset, const struct apple9_compute_abi_desc *abi,
-   const uint64_t *resources, unsigned resource_count,
-   const struct agx_apple9_compute_geometry *geometry)
-{
-   const size_t record_size = apple9_compute_resource_record_size_for_abi(abi);
-   if (!package || !abi || !resources ||
-       !geometry || resource_count == 0 ||
-       resource_count > abi->resource_count ||
-       record_size < AGX_APPLE9_COMPUTE_SUPERSET_RESOURCE_STRIDE ||
-       package_base > UINT64_MAX - resource_table_offset -
-                         AGX_APPLE9_COMPUTE_GEOMETRY_GROUPS_OFFSET)
-      return false;
-
-   uint8_t *record = package + resource_table_offset;
-   uint64_t record_address = package_base + resource_table_offset;
-
-   memset(record, 0, record_size);
-   if (!agx_apple9_build_compute_geometry_fields(
-          record, record_size, record_address, geometry))
-      return false;
-   for (unsigned i = 0; i < abi->resource_count; ++i)
-      apple9_put_u64(record + (AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE + i) * sizeof(uint64_t),
-                     i < resource_count ? resources[i] : 0);
-   /* Remaining record bytes stay zero; geometry lives beyond all pointers. */
-
-   return true;
-}
-
-bool
-agx_apple9_build_compute_dispatch(
-   void *mapping, size_t mapping_size, uint64_t usc_exec_base,
-   uint64_t package_base, uint32_t main_offset, uint32_t launch_offset,
-   uint32_t resource_table_offset,
-   const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
-   unsigned resource_count,
-   const struct agx_apple9_compute_geometry *geometry,
-   uint64_t preamble_address)
-{
-   const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   if (!mapping || !abi || !resources || !geometry ||
-       resource_count != profile->resource_binding_count ||
-       !!preamble_address != !!profile->preamble_size ||
-       package_base > UINT64_MAX - resource_table_offset ||
-       !apple9_compact_pointer_supported(
-          usc_exec_base, package_base + resource_table_offset) ||
-       !agx_apple9_compute_dispatch_fits(
-          mapping_size, launch_offset, resource_table_offset, profile))
-      return false;
-
-   size_t launch_size = agx_apple9_compute_launch_size(profile);
-   uint8_t *temporary = malloc(launch_size);
-   if (!temporary)
-      return false;
-   if (!apple9_build_compute_launch(
-          temporary, usc_exec_base, package_base, main_offset,
-          resource_table_offset, launch_offset, profile, preamble_address)) {
-      free(temporary);
-      return false;
+   simple_mtx_lock(&dev->apple9_entry_lock);
+   uint32_t entry = body->apple9_entry_offset;
+   if (!entry) {
+      uint32_t block = util_vma_heap_alloc(&dev->apple9_entry_heap,
+                                          AGX_APPLE9_ENTRY_BLOCK_SIZE,
+                                          AGX_APPLE9_ENTRY_ALIGNMENT);
+      if (block) {
+         entry = block + AGX_APPLE9_ENTRY_CODE_OFFSET;
+         uint8_t *bytes = (uint8_t *)dev->apple9_entry_map + block;
+         memset(bytes, 0, AGX_APPLE9_ENTRY_BLOCK_SIZE);
+         apple9_put_u32(bytes, AGX_APPLE9_ENTRY_BLOCK_SIZE);
+         if (compute) {
+            util_call_once(&apple9_compute_helpers_once,
+                           apple9_initialize_compute_helpers);
+            memcpy(bytes + 0x40, apple9_compute_constant, 0x40);
+         }
+         if (apple9_build_body_entry(bytes + AGX_APPLE9_ENTRY_CODE_OFFSET,
+                                     dev->shader_base + entry, body->va->addr)) {
+            agx_bo_note_cpu_write(dev->apple9_entries, block,
+                                  AGX_APPLE9_ENTRY_BLOCK_SIZE);
+            body->apple9_entry_offset = entry;
+         } else {
+            util_vma_heap_free(&dev->apple9_entry_heap, block,
+                               AGX_APPLE9_ENTRY_BLOCK_SIZE);
+            entry = 0;
+         }
+      }
    }
+   simple_mtx_unlock(&dev->apple9_entry_lock);
+   return entry;
+}
 
-   uint8_t *package = mapping;
-   uint8_t *launch = package + launch_offset;
-   memcpy(launch, temporary, launch_size);
-   free(temporary);
-   return apple9_build_superset_resource_record(
-      package, mapping_size, package_base, resource_table_offset, abi,
-      resources, resource_count, geometry);
+bool
+agx_apple9_prepare_compute_dispatch(
+   struct agx_device *dev, struct agx_pool *usc_pool, struct agx_bo *body,
+   const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
+   unsigned resource_count, const struct agx_apple9_compute_geometry *geometry,
+   uint64_t preamble_address, uint64_t *launch_address)
+{
+   const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
+   if (!abi || !resources || !geometry || !launch_address ||
+       !apple9_compute_profile_valid(profile, abi) ||
+       resource_count != profile->resource_binding_count ||
+       !!preamble_address != !!profile->preamble_size)
+      return false;
+
+   uint32_t entry = apple9_shader_entry(dev, body, true);
+   if (!entry)
+      return false;
+
+   size_t record_size = apple9_compute_resource_record_size_for_abi(abi);
+   struct agx_ptr record = agx_pool_alloc_aligned(usc_pool, record_size, 64);
+   memset(record.cpu, 0, record_size);
+   if (!agx_apple9_build_compute_geometry_fields(record.cpu, record_size,
+                                                record.gpu, geometry))
+      return false;
+   for (unsigned i = 0; i < resource_count; i++)
+      apple9_put_u64((uint8_t *)record.cpu +
+                       (AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE + i) * 8,
+                    resources[i]);
+
+   struct agx_ptr launch = agx_pool_alloc_aligned(
+      usc_pool, agx_apple9_compute_launch_size(profile), 64);
+   if (!apple9_build_compute_launch(launch.cpu, dev->shader_base, launch.gpu,
+                                    record.gpu, entry, profile, preamble_address))
+      return false;
+   *launch_address = launch.gpu;
+   return true;
 }
 
 bool
 agx_apple9_compute_enabled(const struct agx_device *dev)
 {
-   /* The current launch wrappers, helper directory, resource ordering, and
-    * CDM constants are all exact T8132 captures.  Apple9 ISA support may be
-    * shared with G17P, but that does not prove its userspace package ABI. */
+   /* These generated launch and resource encodings have been exercised on
+    * T8132. Shared Apple9 ISA support alone does not validate G17P launch ABI. */
    return dev->chip == AGX_CHIP_G16G;
 }
 
@@ -771,31 +618,6 @@ agx_apple9_pack_nearest_sampler(void *out)
                             PIPE_TEX_WRAP_CLAMP_TO_EDGE, PIPE_TEX_WRAP_CLAMP_TO_EDGE, 1);
 }
 
-/* Native Apple9 render-context aperture used by the source-built graph. */
-#define AGX_APPLE9_DRAW_STATE         0x1000048000ull
-#define AGX_APPLE9_DIRECT_STREAM_SIZE 0x78
-
-#define AGX_APPLE9_BIND0_OFFSET      0x00000u
-#define AGX_APPLE9_DRAW_STATE_OFFSET 0x44000u
-#define AGX_APPLE9_BIND_GROUP_OFFSET 0x54000u
-#define AGX_APPLE9_VIEWPORT_OFFSET   0x64000u
-
-static void
-apple9_build_direct_bind0(uint8_t *page, unsigned varying_components)
-{
-   memset(page, 0, 0x4000);
-   for (unsigned index = 0; index < 7; ++index) {
-      unsigned base = index * 0x80;
-      apple9_put_u32(page + base, 0x00000080);
-      apple9_put_u32(page + base + 0x40, 0x10040000);
-   }
-
-   /* Public G17 direct-state serializer. */
-   apple9_put_u32(page + 0x300, 0x0000fcc0);
-   /* EXP-M4-59: user scalar count, excluding the four position words. */
-   apple9_put_u32(page + 0x44, varying_components);
-}
-
 /* The default coefficient table occupies the end of the graphics resource
  * page, after per-draw argument records. Draw-specific tables live in their
  * own slots on the following pages so mixed interpolation can use one
@@ -906,85 +728,6 @@ apple9_build_direct_bind_group(uint8_t *page, unsigned varying_components)
    apple9_put_u32(page + 0x18, varying_components / 8);
 }
 
-static void
-apple9_build_viewport(uint8_t *page, unsigned width, unsigned height)
-{
-   unsigned tiles_x = DIV_ROUND_UP(width, 32);
-   unsigned tiles_y = DIV_ROUND_UP(height, 32);
-   memset(page, 0, 0x4000);
-   apple9_put_u32(page + 0x900, 0x00000c00);
-   apple9_put_u32(page + 0x904, 0x80000000 | (tiles_x - 1));
-   apple9_put_u32(page + 0x908, tiles_y - 1);
-   apple9_put_f32(page + 0x910, width / 2.0f);
-   apple9_put_f32(page + 0x914, width / 2.0f);
-   apple9_put_f32(page + 0x918, height / 2.0f);
-   apple9_put_f32(page + 0x91c, -(height / 2.0f));
-   apple9_put_f32(page + 0x924, 1.0f);
-}
-
-static bool
-agx_apple9_build_render_state_image_for_varyings(void *mapping,
-                                                 size_t mapping_size,
-                                                 unsigned width,
-                                                 unsigned height,
-                                                 unsigned varying_components)
-{
-   if (!mapping || mapping_size < AGX_APPLE9_RENDER_STATE_SIZE || !width ||
-       width > 0x4000 || !height || height > 0x4000 ||
-       varying_components > AGX_APPLE9_MAX_VARYING_COMPONENTS)
-      return false;
-
-   uint8_t *state = mapping;
-   memset(state, 0, AGX_APPLE9_RENDER_STATE_SIZE);
-   apple9_build_direct_bind0(state + AGX_APPLE9_BIND0_OFFSET, varying_components);
-   apple9_put_u32(state + AGX_APPLE9_DRAW_STATE_OFFSET, 0x00000100);
-   apple9_build_direct_bind_group(state + AGX_APPLE9_BIND_GROUP_OFFSET,
-                                  varying_components);
-   apple9_build_viewport(state + AGX_APPLE9_VIEWPORT_OFFSET, width, height);
-   return true;
-}
-
-struct apple9_render_self_relocation {
-   uint32_t offset;
-   uint32_t relative;
-};
-
-/* Absolute self-pointers in the render-target state graph.
- * Unlike archive calls and compact instruction operands, these name their
- * containing records directly. Attachment records are published into one
- * device-owned graph, independent of compiled shader objects. */
-static const struct apple9_render_self_relocation
-   apple9_render_absolute_self_relocations[] = {
-      {0x210000, 0x210020}, {0x210008, 0x210120}, {0x210160, 0x210168},
-      {0x210300, 0x210320}, {0x210308, 0x210420}, {0x210460, 0x210468},
-      {0x210600, 0x210620}, {0x210820, 0x210828},
-};
-
-/* A batch shares entries between draws targeting the same shader and stage.
- * The caller waits for prior fixed-USC users before publishing another batch's
- * table. Each slot has a header, reserved constant area and generated transfer. */
-static_assert(AGX_APPLE9_RENDER_ARCHIVE_HEADER_SIZE +
-                    AGX_APPLE9_RENDER_MAX_ENTRIES *
-                       AGX_APPLE9_RENDER_ENTRY_BLOCK_SIZE <=
-                 AGX_APPLE9_RENDER_ENTRY_REGION_SIZE,
-              "Shader entries must fit the compact entry region");
-
-static void
-apple9_init_render_entries(uint8_t *image)
-{
-   apple9_put_u32(image, AGX_APPLE9_RENDER_ARCHIVE_HEADER_SIZE);
-   for (unsigned at = 0x40; at < AGX_APPLE9_RENDER_ARCHIVE_HEADER_SIZE; at += 2)
-      apple9_put_u16(image + at, 6);
-   apple9_fill_helper_table(image, 0x100, 10);
-   apple9_fill_helper_table(image, 0x200, 10);
-   for (unsigned slot = 0; slot < AGX_APPLE9_RENDER_MAX_ENTRIES; slot++) {
-      unsigned entry = agx_apple9_entry_offset(slot);
-      apple9_put_u32(image + entry - AGX_APPLE9_RENDER_ENTRY_CODE_OFFSET,
-                     AGX_APPLE9_RENDER_ENTRY_BLOCK_SIZE);
-      apple9_put_u32(image + entry, 0x0e);
-   }
-}
-
 static bool
 apple9_build_body_entry(uint8_t *out, uint64_t entry, uint64_t body)
 {
@@ -1002,372 +745,11 @@ apple9_build_body_entry(uint8_t *out, uint64_t entry, uint64_t body)
    return true;
 }
 
-static void
-apple9_patch_render_target(uint8_t *package, unsigned offset, bool texture,
-                           uint64_t target, unsigned width, unsigned height)
-{
-   uint32_t words[8];
-   memcpy(words, package + offset, sizeof(words));
-   unsigned width_minus_one = width - 1;
-   unsigned height_minus_one = height - 1;
-
-   /* Reuse the public G17 raw-twiddled descriptor field split.  The G16
-    * package differs in its fixed format/class bits, which are preserved. */
-   if (texture) {
-      words[0] = (words[0] & 0x0fffffff) | ((width_minus_one & 0xf) << 28);
-      words[1] = (words[1] & ~0x00ffffff) | ((width_minus_one >> 4) & 0x3ff) |
-                 ((height_minus_one & 0x3fff) << 10);
-   } else {
-      words[0] = (words[0] & 0x00ffffff) | ((width_minus_one & 0xff) << 24);
-      words[1] = (words[1] & ~0x000fffff) | ((width_minus_one >> 8) & 0x3f) |
-                 ((height_minus_one & 0x3fff) << 6);
-   }
-
-   uint64_t encoded = target >> 4;
-   words[1] &= ~(1u << 27);
-   words[2] = encoded;
-   words[3] = (words[3] & ~((1u << 31) | 0xfff)) | ((encoded >> 32) & 0xfff);
-   words[4] = 0;
-   words[5] &= ~0xfff;
-   memcpy(package + offset, words, sizeof(words));
-}
-
-/* The fixed header/short entry aperture is device-owned. Everything pointed
- * to by a draw is immutable, batch-owned storage. This object never caches or
- * diffs complete render images. */
-struct agx_apple9_graphics {
-   struct agx_device *dev;
-   struct agx_va *logical_va;
-   struct agx_bo *resident;
-   bool initialized;
-   struct agx_apple9_framebuffer framebuffer;
-   unsigned varying_components;
-   uint64_t entries[AGX_APPLE9_RENDER_MAX_ENTRIES];
-};
-
-struct agx_apple9_graphics *
-agx_apple9_graphics_create(struct agx_device *dev)
-{
-   if (!dev || dev->shader_base != UINT64_C(0x10000000000))
-      return NULL;
-   struct agx_apple9_graphics *g = calloc(1, sizeof(*g));
-   if (!g)
-      return NULL;
-   g->dev = dev;
-   uint64_t logical = dev->shader_base + AGX_APPLE9_RENDER_HEADER_OFFSET;
-   g->logical_va = agx_va_alloc(dev, AGX_APPLE9_RENDER_HEADER_APERTURE_SIZE,
-                                AGX_APPLE9_RENDER_HEADER_APERTURE_SIZE,
-                                AGX_VA_USC | AGX_VA_FIXED, logical);
-   if (!g->logical_va) {
-      free(g);
-      return NULL;
-   }
-   g->resident = agx_bo_create(dev, AGX_APPLE9_RENDER_HEADER_APERTURE_SIZE,
-                               AGX_APPLE9_RENDER_HEADER_APERTURE_SIZE,
-                               AGX_BO_WRITEBACK, "Apple9 graphics header");
-   if (!g->resident ||
-       agx_bo_bind(dev, g->resident, logical,
-                   AGX_APPLE9_RENDER_HEADER_APERTURE_SIZE, 0,
-                   DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE)) {
-      agx_bo_unreference(dev, g->resident);
-      agx_va_free(dev, g->logical_va, false);
-      free(g);
-      return NULL;
-   }
-   return g;
-}
-
-void
-agx_apple9_graphics_destroy(struct agx_apple9_graphics *g)
-{
-   if (!g)
-      return;
-   agx_bo_bind(g->dev, NULL, g->logical_va->addr,
-               AGX_APPLE9_RENDER_HEADER_APERTURE_SIZE, 0,
-               DRM_ASAHI_BIND_UNBIND);
-   agx_bo_unreference(g->dev, g->resident);
-   agx_va_free(g->dev, g->logical_va, false);
-   free(g);
-}
-
-struct agx_bo *
-agx_apple9_graphics_bo(struct agx_apple9_graphics *g)
-{
-   return g->resident;
-}
-
-void
-agx_apple9_graphics_invalidate(struct agx_apple9_graphics *g)
-{
-   if (g)
-      g->initialized = false;
-}
-
-/* Initialize invariant header/context records once. The old package builder
- * repeated this for every framebuffer/shader combination. No draw allocation
- * or incremental publication scans these apertures. */
-static void
-apple9_graphics_initialize(struct agx_apple9_graphics *g)
-{
-   struct agx_device *dev = g->dev;
-   uint8_t *resident = agx_bo_map(g->resident);
-   uint8_t *fixed = agx_bo_map(dev->apple9_render_fixed_usc);
-   memset(resident, 0, AGX_APPLE9_RENDER_HEADER_APERTURE_SIZE);
-   apple9_init_render_entries(resident);
-   apple9_build_cf_bindings(
-      resident + APPLE9_CF_BINDINGS, 0, (struct agx_apple9_interp_mask){0},
-      (struct agx_apple9_interp_mask){0}, false, false, false);
-   memcpy(fixed, resident, AGX_APPLE9_RENDER_HEADER_APERTURE_SIZE);
-   uint8_t *context = agx_bo_map(dev->apple9_render_context);
-   memset(context, 0, AGX_APPLE9_RENDER_STATE_SIZE + 0x4000);
-   apple9_build_direct_bind0(context, 0);
-   memset(context + 0x340, 0, 8);
-   agx_apple9_build_render_state_image_for_varyings(
-      context + 0x4000, AGX_APPLE9_RENDER_STATE_SIZE, 1, 1, 0);
-   agx_bo_note_cpu_write(g->resident, 0,
-                         AGX_APPLE9_RENDER_HEADER_APERTURE_SIZE);
-   agx_bo_note_cpu_write(dev->apple9_render_fixed_usc, 0,
-                         AGX_APPLE9_RENDER_HEADER_APERTURE_SIZE);
-   agx_bo_note_cpu_write(dev->apple9_render_context, 0,
-                         AGX_APPLE9_RENDER_STATE_SIZE + 0x4000);
-   memset(g->entries, 0, sizeof(g->entries));
-   g->framebuffer.count = 0;
-   g->varying_components = 0;
-   g->initialized = true;
-}
-
-static bool
-apple9_framebuffer_equal(const struct agx_apple9_framebuffer *a,
-                         const struct agx_apple9_framebuffer *b)
-{
-   if (a->width != b->width || a->height != b->height || a->count != b->count ||
-       a->samples != b->samples)
-      return false;
-   for (unsigned rt = 0; rt < a->count; rt++) {
-      if (a->targets[rt] != b->targets[rt] || a->formats[rt] != b->formats[rt])
-         return false;
-   }
-   return true;
-}
-
-/* Complete attachment records, including inactive slots. Defaults/disabled
- * fields are explicit so shrinking an MRT set cannot retain old state. */
-struct apple9_attachment_records {
-   uint8_t texture[0x100];
-   uint8_t buffer[0x100];
-   uint8_t graph[0xa00];
-};
-
-static bool
-apple9_build_attachments(struct apple9_attachment_records *records,
-                         const struct agx_apple9_framebuffer *fb)
-{
-   unsigned count = fb->count;
-   if (count > 8 || !fb->width || !fb->height || fb->width > 16384 ||
-       fb->height > 16384 ||
-       (fb->samples != 1 && fb->samples != 2 && fb->samples != 4))
-      return false;
-   memset(records, 0, sizeof(*records));
-   unsigned offsets[8], tile_bytes = 0, mask = 0;
-   for (unsigned rt = 0; rt < count; rt++) {
-      if (fb->targets[rt] & 15)
-         return false;
-      offsets[rt] = tile_bytes;
-      tile_bytes += 4 * agx_apple9_color_words(fb->formats[rt]);
-      if (fb->targets[rt])
-         mask |= BITFIELD_BIT(rt);
-   }
-   for (unsigned kind = 0; kind < 2; kind++) {
-      bool texture = kind == 0;
-      uint8_t *image = texture ? records->texture : records->buffer;
-      for (unsigned rt = 0; rt < count; rt++) {
-         if (!(mask & BITFIELD_BIT(rt)))
-            continue;
-         unsigned offset = 32 * rt;
-         uint32_t format;
-         switch (fb->formats[rt]) {
-         case PIPE_FORMAT_R8_UNORM:
-            format = texture ? 0x09680000 : 0x000000;
-            break;
-         case PIPE_FORMAT_R8G8_UNORM:
-            format = texture ? 0x09480280 : 0x040280;
-            break;
-         case PIPE_FORMAT_R8G8B8A8_UNORM:
-         case PIPE_FORMAT_R8G8B8X8_UNORM:
-            format = texture ? 0x06880a00 : 0xe40a00;
-            break;
-         case PIPE_FORMAT_R16_FLOAT:
-            format = texture ? 0x09688240 : 0x008240;
-            break;
-         case PIPE_FORMAT_R16G16_FLOAT:
-            format = texture ? 0x094888c0 : 0x0488c0;
-            break;
-         case PIPE_FORMAT_R16G16B16A16_FLOAT:
-            format = texture ? 0x06888c80 : 0xe48c80;
-            break;
-         default:
-            format = texture ? 0x060a0a00 : 0xc60a00;
-            break;
-         }
-         if (agx_apple9_color_is_wide(fb->formats[rt]) ||
-             agx_apple9_color_is_packed(fb->formats[rt])) {
-            const struct ail_pixel_format_entry *entry =
-               &ail_pixel_format[fb->formats[rt]];
-            unsigned components = agx_apple9_color_components(fb->formats[rt]);
-            unsigned swizzle = texture ? (components == 1 ? 0x09680000 :
-                                          components == 2 ? 0x09480000 : 0x06880000)
-                                       : (components == 1 ? 0 : components == 2 ? 0x040000 : 0xe40000);
-            const struct util_format_description *desc =
-               util_format_description(fb->formats[rt]);
-            if (desc->swizzle[0] == PIPE_SWIZZLE_Z)
-               swizzle = texture ? ((swizzle & ~0xffc0000u) | 0x060a0000u) : 0xc60000;
-            format = swizzle | (entry->channels << 6) | (entry->type << 13);
-         }
-         apple9_put_u32(image + offset, format);
-         apple9_patch_render_target(image, offset, texture, fb->targets[rt],
-                                    fb->width, fb->height);
-         if (fb->samples > 1) {
-            apple9_put_u32(image + offset,
-               (apple9_get_u32(image + offset) & ~0xfu) | 4);
-            apple9_put_u32(image + offset + 4,
-                           (apple9_get_u32(image + offset + 4) & ~0x09000000u) |
-                              (fb->samples == 4 ? 0x01000000u : 0));
-         }
-      }
-   }
-   uint8_t *graph = records->graph;
-   const uint64_t address = UINT64_C(0x10000000000) +
-                            AGX_APPLE9_RENDER_HEADER_OFFSET +
-                            AGX_APPLE9_RENDER_TARGET_GRAPH_SOURCE_OFFSET;
-   for (unsigned i = 0; i < ARRAY_SIZE(apple9_render_absolute_self_relocations);
-        i++) {
-      const struct apple9_render_self_relocation *r =
-         &apple9_render_absolute_self_relocations[i];
-      apple9_put_u64(
-         graph + r->offset - AGX_APPLE9_RENDER_TARGET_GRAPH_SOURCE_OFFSET,
-         address + r->relative - AGX_APPLE9_RENDER_TARGET_GRAPH_SOURCE_OFFSET);
-   }
-   memcpy(graph + 0x20, records->texture, sizeof(records->texture));
-   memcpy(graph + 0x320, records->texture, sizeof(records->texture));
-   memcpy(graph + 0x620, records->buffer, sizeof(records->buffer));
-   unsigned actions = 0;
-   for (unsigned rt = 0; rt < count; rt++) {
-      if (mask & BITFIELD_BIT(rt))
-         actions |= 2u << (2 * rt);
-   }
-   for (unsigned copy = 0; copy < 2; copy++) {
-      uint8_t *view = graph + 0x300 * copy;
-      apple9_put_u32(view + 0x168, actions | (copy ? mask << 24 : 0));
-      apple9_put_u32(view + 0x16c, copy ? 0 : mask);
-      for (unsigned rt = 0; rt < count; rt++) {
-         unsigned format =
-            (agx_apple9_color_components(fb->formats[rt]) << 5) |
-            (agx_apple9_color_is_half(fb->formats[rt]) ? 0xc : 0x3);
-         apple9_put_u32(view + 0x2d0 + 4 * rt,
-                        0x100000 | (offsets[rt] << 12) | format);
-      }
-      apple9_put_u32(view + 0x2f0, 0x400000 | (ALIGN_POT(tile_bytes, 8) << 12) |
-                                      (util_logbase2(fb->samples) * 0x500) |
-                                      mask);
-   }
-   for (unsigned rt = 0; rt < count; rt++) {
-      unsigned type = agx_apple9_color_is_half(fb->formats[rt]) ? 0xc : 0x3;
-      apple9_put_u32(graph + 0x82c + 4 * rt,
-                     (agx_apple9_color_components(fb->formats[rt]) << 26) |
-                        (fb->samples > 1 ? 0x40000 : 0x20000) | (type << 8));
-   }
-   apple9_put_u32(graph + 0x874, mask);
-   apple9_put_u32(graph + 0x878,
-                  0x400000 | fb->samples | (ALIGN_POT(tile_bytes, 8) << 4));
-   for (unsigned rt = 0; rt < count; rt++)
-      apple9_put_u32(graph + 0x87c + 4 * rt, offsets[rt]);
-   if (fb->samples > 1) {
-      apple9_put_u64(graph + 0x8c0, address + 0x8e0);
-      memset(graph + 0x8c8, 0xff, 24);
-      memcpy(graph + 0x8e0, records->buffer, 32 * count);
-   }
-   return true;
-}
-
-bool
-agx_apple9_graphics_publish(struct agx_apple9_graphics *g,
-                            const struct agx_apple9_framebuffer *fb,
-                            const struct agx_apple9_entry_table *entries,
-                            unsigned varying_components,
-                            const float clear_color[8][4])
-{
-   if (!g || !entries || !entries->count ||
-       entries->count > AGX_APPLE9_RENDER_MAX_ENTRIES)
-      return false;
-   if (!g->initialized)
-      apple9_graphics_initialize(g);
-   struct agx_bo *views[] = {g->resident, g->dev->apple9_render_fixed_usc};
-   if (!apple9_framebuffer_equal(&g->framebuffer, fb)) {
-      struct apple9_attachment_records records;
-      if (!apple9_build_attachments(&records, fb))
-         return false;
-      for (unsigned v = 0; v < ARRAY_SIZE(views); v++) {
-         uint8_t *dst = agx_bo_map(views[v]);
-         memcpy(dst + AGX_APPLE9_RENDER_COLOR_TEXTURE_OFFSET, records.texture,
-                sizeof(records.texture));
-         memcpy(dst + AGX_APPLE9_RENDER_COLOR_BUFFER_OFFSET, records.buffer,
-                sizeof(records.buffer));
-         memcpy(dst + AGX_APPLE9_RENDER_TARGET_GRAPH_SOURCE_OFFSET,
-                records.graph, sizeof(records.graph));
-         agx_bo_note_cpu_write(views[v], AGX_APPLE9_RENDER_COLOR_TEXTURE_OFFSET,
-                               sizeof(records.texture));
-         agx_bo_note_cpu_write(views[v], AGX_APPLE9_RENDER_COLOR_BUFFER_OFFSET,
-                               sizeof(records.buffer));
-         agx_bo_note_cpu_write(views[v],
-                               AGX_APPLE9_RENDER_TARGET_GRAPH_SOURCE_OFFSET,
-                               sizeof(records.graph));
-      }
-      g->framebuffer = *fb;
-   }
-   if (varying_components != g->varying_components) {
-      uint8_t *context = agx_bo_map(g->dev->apple9_render_context);
-      apple9_put_u32(context + 0x44, varying_components);
-      apple9_put_u32(context + 0x4044, varying_components);
-      agx_bo_note_cpu_write(g->dev->apple9_render_context, 0x44, 4);
-      agx_bo_note_cpu_write(g->dev->apple9_render_context, 0x4044, 4);
-      g->varying_components = varying_components;
-   }
-   for (unsigned i = 0; i < entries->count; i++) {
-      uint64_t code = entries->entries[i].code;
-      if (g->entries[i] == code)
-         continue;
-      unsigned entry = agx_apple9_entry_offset(i);
-      uint8_t body_entry[32] = {0};
-      if (!apple9_build_body_entry(body_entry, g->dev->shader_base + entry, code))
-         return false;
-      for (unsigned v = 0; v < ARRAY_SIZE(views); v++) {
-         memcpy((uint8_t *)agx_bo_map(views[v]) + entry, body_entry,
-                sizeof(body_entry));
-         agx_bo_note_cpu_write(views[v], entry, sizeof(body_entry));
-      }
-      g->entries[i] = code;
-   }
-   if (clear_color) {
-      for (unsigned copy = 0; copy < 2; copy++) {
-         unsigned off = 0x170 + copy * 0x300;
-         memcpy((uint8_t *)agx_bo_map(g->resident) +
-                   AGX_APPLE9_RENDER_TARGET_GRAPH_SOURCE_OFFSET + off,
-                clear_color, 16 * fb->count);
-         memcpy((uint8_t *)agx_bo_map(g->dev->apple9_render_fixed_usc) +
-                   AGX_APPLE9_RENDER_FIXED_TARGET_GRAPH_OFFSET + off,
-                clear_color, 16 * fb->count);
-      }
-   }
-   return agx_apple9_install_render_archive(g->dev);
-}
-
-/* USC records are compact, immutable allocations. A short entry number still
- * selects the body thunk, but roots/launches/coefficient tables do not live in
- * fixed slots and are never overwritten by subsequent batches. */
+/* Launches, roots, coefficients and PPP records are immutable batch storage.
+ * The selected entry has the lifetime of its independently owned shader BO. */
 bool
 agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
                         struct agx_pool *context_pool,
-                        struct agx_apple9_entry_table *entries,
                         const struct agx_apple9_render_pipeline *pipeline,
                         struct agx_apple9_uniform_draw *draw,
                         const struct agx_apple9_uniform_draw *previous)
@@ -1390,8 +772,11 @@ agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
       draw->code[stage] = shader->bo->va->addr;
    }
    unsigned offsets[2];
-   if (!agx_apple9_entry_table_add(entries, draw->code, offsets))
-      return false;
+   for (unsigned stage = 0; stage < 2; stage++) {
+      offsets[stage] = apple9_shader_entry(dev, stages[stage]->bo, false);
+      if (!offsets[stage])
+         return false;
+   }
    for (unsigned stage = 0; stage < 2; stage++) {
       const struct agx_apple9_render_stage *shader = stages[stage];
       uint64_t table = stage ? draw->fragment_table : draw->vertex_table;
@@ -1625,7 +1010,7 @@ size_t
 agx_apple9_direct_draw_size(const struct agx_apple9_render_pipeline *pipeline)
 {
    assert(pipeline && pipeline->vertex.binary && pipeline->fragment.binary);
-   return AGX_APPLE9_DIRECT_STREAM_SIZE + (pipeline->index_size ? 20 : 0);
+   return 0x78 + (pipeline->index_size ? 20 : 0);
 }
 
 uint8_t *

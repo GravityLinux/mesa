@@ -107,6 +107,10 @@ struct agx_bo {
    /* Current writer, if any (queue in upper 32 bits, syncobj in lower 32 bits) */
    uint64_t writer;
 
+   /* Immutable Apple9 entry in the device's compact USC arena. Its lifetime
+    * follows this BO, including references held by submitted batches. */
+   uint32_t apple9_entry_offset;
+
    /* Update atomically */
    int32_t refcnt;
 

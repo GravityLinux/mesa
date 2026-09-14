@@ -2,26 +2,15 @@
 #ifndef AGX_APPLE9_LAYOUT_H
 #define AGX_APPLE9_LAYOUT_H
 
-/* Fixed USC entry table and independently placed compiler state. Shader
- * bodies use ordinary executable BOs in the USC heap. Offsets below are
- * relative to the USC/package base, not the render-context address space. */
-#define AGX_APPLE9_RENDER_ENTRY_REGION_SIZE     0x00008000u
-#define AGX_APPLE9_RENDER_ENTRY_HEADER_SIZE     0x00000340u
-#define AGX_APPLE9_RENDER_ENTRY_BLOCK_SIZE      0x000000c0u
-#define AGX_APPLE9_RENDER_ENTRY_CODE_OFFSET     0x00000080u
-#define AGX_APPLE9_RENDER_MAX_ENTRIES \
-   ((AGX_APPLE9_RENDER_ENTRY_REGION_SIZE - AGX_APPLE9_RENDER_ENTRY_HEADER_SIZE) / \
-    AGX_APPLE9_RENDER_ENTRY_BLOCK_SIZE)
-#define AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET 0x00020000u
-#define AGX_APPLE9_RENDER_COMPILER_STATE_SIZE   0x00020000u
-#define AGX_APPLE9_RENDER_COMPILER_STATE_END \
-   (AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET + AGX_APPLE9_RENDER_COMPILER_STATE_SIZE)
-#define AGX_APPLE9_RENDER_COLOR_TEXTURE_OFFSET \
-   (AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET + 0x220u)
-#define AGX_APPLE9_RENDER_COLOR_BUFFER_OFFSET \
-   (AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET + 0x420u)
-
-/* Compact launch target is 2 * entry_offset + 0x2a in 24 bits. */
-#define AGX_APPLE9_ENTRY_MAX_OFFSET ((0xffffffu - 0x2au) / 2u)
+/* The launch target carries 2 * entry_offset + 0x2a in 24 bits. Entries
+ * reside in this compact USC range and branch to independently allocated
+ * shader bodies anywhere in the 4-GiB USC heap. An entry belongs to its
+ * shader BO and cannot be recycled while any batch references that BO. */
+#define AGX_APPLE9_ENTRY_ARENA_SIZE  0x00800000u
+#define AGX_APPLE9_ENTRY_HEADER_SIZE 0x00000340u
+#define AGX_APPLE9_ENTRY_BLOCK_SIZE  0x000000c0u
+#define AGX_APPLE9_ENTRY_CODE_OFFSET 0x00000080u
+#define AGX_APPLE9_ENTRY_ALIGNMENT   0x00000040u
+#define AGX_APPLE9_ENTRY_MAX_OFFSET  ((0xffffffu - 0x2au) / 2u)
 
 #endif

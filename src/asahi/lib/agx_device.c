@@ -53,108 +53,6 @@ asahi_simple_ioctl(struct agx_device *dev, unsigned cmd, void *req)
    }
 }
 
-/* The render carrier contains executable pages and GPU-writable resource
- * records in the same fixed USC window. Reserve the whole window so ordinary
- * USC allocations cannot occupy addresses still referenced by its helpers. */
-static int
-agx_apple9_bind_fixed_usc(struct agx_device *dev, struct agx_bo *bo)
-{
-   if (bo != dev->apple9_render_fixed_usc)
-      return agx_bo_bind(dev, bo, dev->shader_base,
-                         AGX_APPLE9_FIXED_USC_ARENA_SIZE, 0,
-                         DRM_ASAHI_BIND_READ);
-
-   static_assert((AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET & 0x3fff) == 0 &&
-                 (AGX_APPLE9_RENDER_COMPILER_STATE_END & 0x3fff) == 0,
-                 "Render state permissions require whole GPU pages");
-   static_assert(AGX_APPLE9_RENDER_COMPILER_STATE_END <= 0x058000,
-                 "Render state must precede the next writable region");
-   static const struct {
-      uint32_t start, end;
-   } writable[] = {
-      {AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET,
-       AGX_APPLE9_RENDER_COMPILER_STATE_END}, {0x058000, 0x078000}, {0x080000, 0x184000},
-      {0x220000, 0x228000}, {0x230000, 0x340000}, {0x348000, 0x350000},
-   };
-   uint32_t cursor = 0;
-   for (unsigned i = 0; i <= ARRAY_SIZE(writable); ++i) {
-      uint32_t end = i < ARRAY_SIZE(writable) ? writable[i].start
-                                              : AGX_APPLE9_FIXED_USC_ARENA_SIZE;
-      int ret = agx_bo_bind(dev, bo, dev->shader_base + cursor, end - cursor,
-                            cursor, DRM_ASAHI_BIND_READ);
-      if (ret)
-         return ret;
-      if (i == ARRAY_SIZE(writable))
-         break;
-      ret = agx_bo_bind(dev, bo, dev->shader_base + end, writable[i].end - end,
-                        end, DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE);
-      if (ret)
-         return ret;
-      cursor = writable[i].end;
-   }
-   return 0;
-}
-
-static bool
-agx_apple9_switch_fixed_usc_locked(struct agx_device *dev,
-                                   struct agx_bo *next)
-{
-   if (!next || next->size < AGX_APPLE9_FIXED_USC_ARENA_SIZE)
-      return false;
-
-   if (dev->apple9_fixed_usc_owner == next)
-      return true;
-
-   struct agx_bo *previous = dev->apple9_fixed_usc_owner;
-   if (agx_bo_bind(dev, NULL, dev->shader_base,
-                   AGX_APPLE9_FIXED_USC_ARENA_SIZE, 0,
-                   DRM_ASAHI_BIND_UNBIND))
-      return false;
-   dev->apple9_fixed_usc_owner = NULL;
-
-   if (agx_apple9_bind_fixed_usc(dev, next)) {
-      /* Remove any partially installed view before restoring its predecessor. */
-      if (!agx_bo_bind(dev, NULL, dev->shader_base,
-                       AGX_APPLE9_FIXED_USC_ARENA_SIZE, 0,
-                       DRM_ASAHI_BIND_UNBIND) &&
-          previous && !agx_apple9_bind_fixed_usc(dev, previous))
-         dev->apple9_fixed_usc_owner = previous;
-      return false;
-   }
-
-   dev->apple9_fixed_usc_owner = next;
-   return true;
-}
-
-bool
-agx_apple9_install_compute_entries(struct agx_device *dev, const void *entries)
-{
-   if (!dev || !dev->apple9_compute_archive || !entries)
-      return false;
-   simple_mtx_lock(&dev->apple9_archive_lock);
-   memcpy(agx_bo_map(dev->apple9_compute_archive), entries,
-          AGX_APPLE9_COMPUTE_ARCHIVE_SIZE);
-   agx_bo_note_cpu_write(dev->apple9_compute_archive, 0,
-                         AGX_APPLE9_COMPUTE_ARCHIVE_SIZE);
-   bool installed =
-      agx_apple9_switch_fixed_usc_locked(dev, dev->apple9_compute_archive);
-   simple_mtx_unlock(&dev->apple9_archive_lock);
-   return installed;
-}
-
-bool
-agx_apple9_install_render_archive(struct agx_device *dev)
-{
-   if (!dev || !dev->apple9_render_fixed_usc)
-      return false;
-
-   simple_mtx_lock(&dev->apple9_archive_lock);
-   bool installed = agx_apple9_switch_fixed_usc_locked(
-      dev, dev->apple9_render_fixed_usc);
-   simple_mtx_unlock(&dev->apple9_archive_lock);
-   return installed;
-}
-
 /* clang-format off */
 static const struct debug_named_value agx_debug_options[] = {
    {"trace",     AGX_DBG_TRACE,    "Trace the command stream"},
@@ -282,9 +180,8 @@ agx_bo_alloc(struct agx_device *dev, size_t size, size_t align,
 
    /*
     * AGX_BO_EXEC describes contents, not addressability.  Compact Apple8/9
-    * users request LOW_VA explicitly. Apple9 immutable source packages may
-    * use arbitrary storage while one separate entry/state arena stays bound in
-    * the compact fixed-base aperture.
+    * users request LOW_VA explicitly. Apple9 shader bodies and dispatch
+    * state use independent allocations alongside the stable entry arena.
     */
 
    struct drm_asahi_gem_create gem_create = {.size = size};
@@ -768,11 +665,11 @@ agx_open_device(void *memctx, struct agx_device *dev)
        dev->params.gpu_variant == 'G') {
       kernel_size = dev->params.vm_kernel_min_size;
       vm_create.kernel_end =
-         AGX_APPLE9_FIXED_RENDER_CONTEXT_BASE + (1ull << 32);
+         AGX_APPLE9_RENDER_CONTEXT_BASE + (1ull << 32);
       vm_create.kernel_start = vm_create.kernel_end - kernel_size;
       if (kernel_size < 0x4000000ull ||
           vm_create.kernel_end >
-             AGX_APPLE9_FIXED_RENDER_CONTEXT_BASE + (1ull << 32)) {
+             AGX_APPLE9_RENDER_CONTEXT_BASE + (1ull << 32)) {
          fprintf(stderr,
                  "G16 kernel-private heap does not fit its compact render "
                  "context\n");
@@ -824,10 +721,10 @@ agx_open_device(void *memctx, struct agx_device *dev)
     * kernel owns the top of this aperture on native G16. PPP and VDM records
     * occupy the remaining interval and are retained by their submitting batch.
     * Keep this heap disjoint from main_heap and the fixed USC aperture. */
-   uint64_t context_start = AGX_APPLE9_FIXED_RENDER_CONTEXT_BASE + 0x4000000ull;
+   uint64_t context_start = AGX_APPLE9_RENDER_CONTEXT_BASE + 0x4000000ull;
    uint64_t context_end =
       MIN2(vm_create.kernel_start,
-           AGX_APPLE9_FIXED_RENDER_CONTEXT_BASE + (1ull << 32));
+           AGX_APPLE9_RENDER_CONTEXT_BASE + (1ull << 32));
    util_vma_heap_init(&dev->context_heap, context_start,
                       fixed_apple9_usc_base ? context_end - context_start : 0);
    dev->context_heap.alloc_high = false;
@@ -875,80 +772,23 @@ agx_open_device(void *memctx, struct agx_device *dev)
    }
 
    if (dev->chip == AGX_CHIP_G16G || dev->chip == AGX_CHIP_G17P) {
-      simple_mtx_init(&dev->apple9_archive_lock, mtx_plain);
-      /* The CPU authors this archive through its writable mmap, but the GPU
-       * only executes/reads it.  Native T8132 uses the read-only fixed-USC PTE
-       * class.  Hardware isolation also shows why the distinction matters:
-       * appending a main after earlier execution is exact with READ-only
-       * leaves, while a GPU-writable mapping can fetch stale zeroes from the
-       * same bytes and address.
-       */
-      dev->apple9_compute_archive =
-         agx_bo_create(dev, AGX_APPLE9_FIXED_USC_ARENA_SIZE,
-                       AGX_APPLE9_FIXED_USC_ARENA_SIZE,
+      simple_mtx_init(&dev->apple9_entry_lock, mtx_plain);
+      util_vma_heap_init(&dev->apple9_entry_heap, AGX_APPLE9_ENTRY_HEADER_SIZE,
+                        AGX_APPLE9_ENTRY_ARENA_SIZE - AGX_APPLE9_ENTRY_HEADER_SIZE);
+      dev->apple9_entry_heap.alloc_high = false;
+      /* Entry instructions are CPU-authored and GPU-read-only. The same
+       * mapping remains installed for every graphics and compute job. */
+      dev->apple9_entries =
+         agx_bo_create(dev, AGX_APPLE9_ENTRY_ARENA_SIZE,
+                       AGX_APPLE9_ENTRY_ARENA_SIZE,
                        AGX_BO_EXEC | AGX_BO_LOW_VA | AGX_BO_WRITEBACK |
-                          AGX_BO_READONLY,
-                       "Apple9 fixed USC arena");
-      if (dev->apple9_compute_archive &&
-          dev->apple9_compute_archive->va->addr != dev->shader_base) {
-         struct agx_bo *archive = dev->apple9_compute_archive;
-         agx_va_free(dev, archive->va, true);
-         archive->va = agx_va_alloc(
-            dev, archive->size, archive->align,
-            AGX_VA_USC | AGX_VA_FIXED, dev->shader_base);
-         if (archive->va) {
-            int bind = agx_bo_bind(
-               dev, archive, archive->va->addr, archive->size, 0,
-               DRM_ASAHI_BIND_READ);
-            if (bind) {
-               agx_va_free(dev, archive->va, true);
-               archive->va = NULL;
-            }
-         }
-      }
-
-      if (!dev->apple9_compute_archive ||
-          !dev->apple9_compute_archive->va ||
-          dev->apple9_compute_archive->va->addr != dev->shader_base) {
-         fprintf(stderr,
-                 "Failed to reserve Apple9 compute archive at USC base\n");
+                          AGX_BO_READONLY, "Apple9 shader entries");
+      if (!dev->apple9_entries ||
+          dev->apple9_entries->va->addr != dev->shader_base) {
+         fprintf(stderr, "Failed to reserve compact Apple9 shader entries\n");
          return false;
       }
-
-      memset(agx_bo_map(dev->apple9_compute_archive), 0,
-             dev->apple9_compute_archive->size);
-      dev->apple9_fixed_usc_owner = dev->apple9_compute_archive;
-
-      dev->apple9_render_fixed_usc =
-         agx_bo_create(dev, AGX_APPLE9_FIXED_USC_ARENA_SIZE,
-                       AGX_APPLE9_FIXED_USC_ARENA_SIZE,
-                       AGX_BO_EXEC | AGX_BO_WRITEBACK | AGX_BO_READONLY,
-                       "Apple9 render fixed USC arena");
-      if (!dev->apple9_render_fixed_usc) {
-         fprintf(stderr,
-                 "Failed to allocate Apple9 render fixed-USC arena\n");
-         return false;
-      }
-      memset(agx_bo_map(dev->apple9_render_fixed_usc), 0,
-             dev->apple9_render_fixed_usc->size);
-
-      dev->apple9_render_context =
-         agx_bo_create(dev, AGX_APPLE9_FIXED_RENDER_CONTEXT_SIZE, 0x4000,
-                       AGX_BO_WRITEBACK,
-                       "Apple9 fixed render context");
-      int render_context_bind = dev->apple9_render_context
-         ? agx_bo_bind(dev, dev->apple9_render_context,
-                       AGX_APPLE9_FIXED_RENDER_CONTEXT_BASE,
-                       AGX_APPLE9_FIXED_RENDER_CONTEXT_SIZE, 0,
-                       DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE)
-         : -1;
-      if (!dev->apple9_render_context || render_context_bind) {
-         fprintf(stderr,
-                 "Failed to reserve Apple9 fixed render context\n");
-         return false;
-      }
-      memset(agx_bo_map(dev->apple9_render_context), 0,
-             dev->apple9_render_context->size);
+      dev->apple9_entry_map = agx_bo_map(dev->apple9_entries);
    }
 
    /* Bind read-only zero page at 2^32. This is in our reservation, and can be
@@ -987,16 +827,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
    void *bo = agx_bo_create(dev, LIBAGX_PRINTF_BUFFER_SIZE, 0, AGX_BO_WRITEBACK,
                             "Printf/abort");
 
-   /* Apple9's native render-context graph owns the legacy libagx printf
-    * address.  The bounded Apple9 compiler does not lower printf intrinsics,
-    * so retain the host-side diagnostic buffer at the first page after that
-    * graph rather than colliding with the hardware ABI. */
-   uint64_t printf_address =
-      (dev->chip == AGX_CHIP_G16G || dev->chip == AGX_CHIP_G17P)
-         ? AGX_APPLE9_FIXED_RENDER_CONTEXT_BASE +
-              AGX_APPLE9_FIXED_RENDER_CONTEXT_SIZE
-         : LIBAGX_PRINTF_BUFFER_ADDRESS;
-   ret = agx_bo_bind(dev, bo, printf_address,
+   ret = agx_bo_bind(dev, bo, LIBAGX_PRINTF_BUFFER_ADDRESS,
                      LIBAGX_PRINTF_BUFFER_SIZE, 0,
                      DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE);
    if (ret) {
@@ -1011,31 +842,16 @@ agx_open_device(void *memctx, struct agx_device *dev)
 void
 agx_close_device(struct agx_device *dev)
 {
-   if (dev->chip == AGX_CHIP_G16G || dev->chip == AGX_CHIP_G17P) {
-      /* Both physical archives may also have ordinary construction VAs, but
-       * exactly one has this extra fixed alias. Remove it while both BOs are
-       * still alive so teardown does not depend on GEM-close side effects. */
-      if (dev->apple9_fixed_usc_owner) {
-         int ret = agx_bo_bind(dev, NULL, dev->shader_base,
-                               AGX_APPLE9_FIXED_USC_ARENA_SIZE, 0,
-                               DRM_ASAHI_BIND_UNBIND);
-         if (ret)
-            fprintf(stderr,
-                    "Failed to unbind Apple9 fixed-USC alias at teardown\n");
-         else
-            dev->apple9_fixed_usc_owner = NULL;
-      }
-   }
-   agx_bo_unreference(dev, dev->apple9_render_context);
-   agx_bo_unreference(dev, dev->apple9_render_fixed_usc);
-   agx_bo_unreference(dev, dev->apple9_compute_archive);
-   if (dev->chip == AGX_CHIP_G16G || dev->chip == AGX_CHIP_G17P)
-      simple_mtx_destroy(&dev->apple9_archive_lock);
+   agx_bo_unreference(dev, dev->apple9_entries);
    agx_bo_unreference(dev, dev->printf.bo);
    agx_bo_unreference(dev, dev->zero_bo);
    agx_bo_unreference(dev, dev->scratch_bo);
    u_printf_destroy(&dev->printf);
    agx_bo_cache_evict_all(dev);
+   if (dev->chip == AGX_CHIP_G16G || dev->chip == AGX_CHIP_G17P) {
+      util_vma_heap_finish(&dev->apple9_entry_heap);
+      simple_mtx_destroy(&dev->apple9_entry_lock);
+   }
    util_sparse_array_finish(&dev->bo_map);
    agxdecode_destroy_context(dev->agxdecode);
 
