@@ -23,16 +23,14 @@ pipeline or submission changes. Internal branches remain relative to their
 instruction address. Body size is bounded by allocation and compiler limits,
 not a 64/96/128 KiB shared code arena.
 
-The fixed USC region now holds only helper metadata, small entry blocks,
-launch records and state. A graphics submission reserves two 0xc0-byte entry
-blocks per draw after the 0x340-byte helper directory. Each block has a
-0x40-byte header, a 0x40-byte constant reservation and an entry at +0x80.
-The 56-draw capacity fits in a 32 KiB entry region; compiler state remains
-at +0x20000. Compute uses the same block size in a batch-local 64 KiB entry
-table, with its existing generated constant helper in the constant area.
-Batch limits count entries and command/resource space, independently of body
-size. There is no shader-body packing, archive residency planner, or
-code-size rollover path.
+The first 8 MiB of the USC heap holds a stable, GPU-read-only entry arena.
+Its 0x340-byte helper directory is initialized once. Each shader body BO owns
+one 0xc0-byte block, with a 0x40-byte header, a 0x40-byte constant reservation
+and an entry at +0x80. Compute uses the generated terminating constant helper.
+The arena remains mapped for graphics and compute; no submission replaces
+its mapping. Launch and resource records are allocated in the batch USC pool.
+Batch limits follow command and resource space, independently of body size.
+There is no shader-body packing or code-size rollover path.
 
 The generated target record selects the small entry through its compact
 entry field. The entry uses the compiler's `JMP_EXEC_ANY` encoder to transfer active
@@ -61,20 +59,43 @@ immutable BO ownership. The package cache evicts only inactive packages;
 each in-flight batch pins its packages and independently references both
 stage BOs. Compute shader objects own their body BOs, and each dispatch batch
 references the BO before shader deletion can release it. CPU writes are
-reported through the normal BO dirty-range interface. Submission waits for
-previous fixed-USC users before publishing the batch's entry table and
-switching graphics/compute state. Body allocations therefore remain valid
-through execution, while entry storage is reused only after retirement.
+reported through the normal BO dirty-range interface. An entry is allocated
+lazily under the device entry mutex and is immutable while its body BO has
+references. The final body reference releases the entry before BO cache reuse.
+Pending batches retain both the body BO and the arena, so shader deletion and
+cache eviction cannot recycle an entry while the GPU is using it.
 
-Graphics batches intern compact entries by shader BO address and stage. The
-32 KiB region holds 166 entries; repeated draws share those entries while
-launch and resource records grow in the existing batch pools. There is no
-fixed draw-count limit. A draw requiring more unique entries than remain
-flushes the batch and retries with attachment reloads, without counting its
-input-assembly statistics twice. Color load/store helpers retain their own
-launch handles, and the CPU retains only the previous draw for adjacent state
-reuse. The entry table is immutable until submission and lives with the
-batch; fixed-USC publication still uses the existing retirement synchronization.
+Submission follows the ordinary Gallium dependency and retirement model.
+It does not wait on the CPU to install entries or switch graphics/compute
+state. Per-draw launchers, resources, PPP records and varying state live in
+batch pools; only the previous canonical draw record is retained on the CPU
+for adjacent-state reuse. Obsolete global framebuffer/context publication,
+the separate USC header alias and fixed render-context mapping are removed.
+Color load/store helpers keep their own batch launch handles.
+
+T8132 placement experiments executed graphics and compute entries beyond the
+former 18-bit target limit, including +0x7f8000 and +0x7f0000 respectively.
+The target occupies all 24 bits of `2 * entry_offset + 0x2a`; the builder
+rejects odd offsets and overflow. Removing the entire old 4 MiB header alias
+and fixed render-context mapping still passed mixed compute/render readback,
+multiple contexts and 4x MSAA with the generated tile pipeline.
+
+Asynchronous validation held the first job behind a software fence and
+verified its completion remained unsignaled: a 32-pair indirect workload
+queued 96 jobs (64 compute and 32 render), then passed 8,396,800 readback
+checks. A 64-pair direct workload reached 127 pending submissions before
+normal batch pressure, and passed 16,793,600 checks. A three-context test
+queued 240 render jobs while deleting the final round's programs and creating
+96 replacements, with exact MRT readback across the original 864 draws and
+192 pixels from the replacement programs. Diagnostic sources and logs are in the
+workspace's `tmp/apple9-async-state-20260914/`; the gate is not driver code.
+
+Compute emits the full `0x600fffff` post-dispatch CDM barrier, matching the
+Apple8 path. GPU cache ordering remains separate from CPU submission lifetime.
+Queued 64-pair direct and indirect tests also pass with the original
+`0x60000160` tail; they do not independently reproduce the reported stale-SSBO
+failure or prove that the narrower barrier is sufficient for other workloads.
+
 
 Native M4 validation includes ordinary compiled bodies of 230942 bytes (VS),
 246100 bytes (FS) and 203284 bytes (CS), with input-dependent control flow and
@@ -151,7 +172,7 @@ and resource count; callers supply an entry offset and live stage parameters.
 
 | Input | Established operation |
 | --- | --- |
-| Stage entry | USC byte offset, encoded in the tested 18-bit target field |
+| Stage entry | USC byte offset, encoded in the tested 24-bit target field |
 | Graphics resource root | Full GPU pointer in entry pair r2:r3 |
 | Compute resource root | Full GPU pointer in the entry ABI pair r2:r3 |
 | Publication count P | `ceil(P / 2) << 7` in the 16-bit word at C+11 |
@@ -204,7 +225,7 @@ The stage program consists of the following source-generated operations:
 | STOP and zero padding | 4 | Ends the setup invocation |
 
 The target field at byte 2 is `2 * entry_offset + 0x2a`. The tested field
-is 18 bits wide; the builder rejects overflowing and odd entry offsets.
+is 24 bits wide; the builder rejects overflowing and odd entry offsets.
 Header `0x0177` and control bits at byte 7 bit 1 and byte 8 bit 7 were
 constructed through live bit-forcing and cumulative clearing experiments
 around authored, normally compiled shaders. The full generated record passed
