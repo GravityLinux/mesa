@@ -352,6 +352,7 @@ agx_apple9_vir_emit(struct agx_apple9_vir_program *program,
       .target = AGX_APPLE9_VREG_INVALID,
       .immediate = immediate,
       .branch_target = NULL,
+      .memory_index_shift = op == AGX_APPLE9_VIR_DEVICE_LOAD ? 2 : 0,
       .nr_srcs = nr_srcs,
    };
    for (unsigned i = 0; i < nr_srcs; ++i)
@@ -587,8 +588,9 @@ agx_apple9_vir_emit_device_load_vector(
       return AGX_APPLE9_VREG_INVALID;
    }
 
-   program->instructions[program->instruction_count - 1]->dest_components =
-      components;
+   program->instructions[program->instruction_count - 1]->dest_components = components;
+   program->instructions[program->instruction_count - 1]->memory_index_shift =
+      components == 2 ? 3 : 4;
    return value;
 }
 
@@ -1018,6 +1020,7 @@ agx_apple9_vir_emit_device_store(struct agx_apple9_vir_program *program,
       .target = AGX_APPLE9_VREG_INVALID,
       .memory_bits = bits,
       .memory_components = components,
+      .memory_index_shift = util_logbase2(bits / 8) + (components == 1 ? 0 : components == 2 ? 1 : 2),
       .immediate = binding,
       .nr_srcs = components + 1,
    };
@@ -4415,6 +4418,21 @@ agx_apple9_pack_device_atomic(
 }
 
 static bool
+pack_memory_address(const struct agx_apple9_vir_instr *I,
+                    struct agx_apple9_packed_instruction *packed)
+{
+   /* T8132 validates shifts through four. The larger-field probe failed,
+    * so larger scales remain explicit ALU expressions. */
+   if (I->memory_index_shift > 4)
+      return false;
+   unsigned base = I->op == AGX_APPLE9_VIR_DEVICE_LOAD ? 75 : 73;
+   set_bits(packed->bytes, base + 2, 16, (uint16_t)I->memory_offset);
+   set_bits(packed->bytes, base + 22, 3,
+            I->memory_index_shift == 4 ? 0 : I->memory_index_shift + 1);
+   return true;
+}
+
+static bool
 pack_iadd(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
           struct agx_apple9_packed_instruction *packed)
 {
@@ -5451,7 +5469,7 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
          if (!(instruction->live_after_mask & 6))
             packed->bytes[9] |= 4;
       }
-      return true;
+      return pack_memory_address(instruction, packed);
    }
    case AGX_APPLE9_VIR_DEVICE_STORE: {
       const unsigned components = instruction->memory_components;
@@ -5491,7 +5509,7 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
          packed->bytes[4] = address;
          packed->bytes[12] |= 0x08;
       }
-      return true;
+      return pack_memory_address(instruction, packed);
    }
    case AGX_APPLE9_VIR_DEVICE_ATOMIC:
       if (instruction->encoding != AGX_APPLE9_ENC_DEVICE_ATOMIC ||

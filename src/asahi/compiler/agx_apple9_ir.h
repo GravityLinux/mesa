@@ -272,6 +272,10 @@ struct agx_apple9_vir_instr {
     * also define an adjacent dest_components tuple; stores have no SSA
     * destination and carry their ordered data values in src[0..N-1]. */
    uint8_t memory_components;
+   /* Address = base64 + (zero_extend(index32) << shift) + signed byte offset.
+    * Shift 0..4 is independent of element width and component count. */
+   uint8_t memory_index_shift;
+   int16_t memory_offset;
    uint8_t tile_sample_mask;
    enum agx_apple9_atomic_op atomic_op;
    bool atomic_discard;

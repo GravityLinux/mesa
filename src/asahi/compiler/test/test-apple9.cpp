@@ -3524,7 +3524,7 @@ apple9_binary_device_load_offsets(const struct agx_shader_part *compiled,
    for (unsigned i = 0; i + 14 <= compiled->info.binary_size; ++i) {
       const uint8_t *bytes = binary + i;
       if (bytes[0] != 0x67 || bytes[6] != 0x20 || bytes[7] != 0x00 ||
-          bytes[11] != 0x40)
+          (bytes[11] & 0xe0) != 0x40)
          continue;
       if (count < capacity)
          offsets[count] = i;
@@ -9352,19 +9352,20 @@ TEST(Apple9Compiler, PreambleShrinkingPreservesBufferByteAddresses)
       << (reason ?: "");
    ASSERT_GT(compiled.info.apple9_preamble_size, 0u);
 
-   /* The live words are at byte offsets 20 and 28. Shrinking the vec4 to
-    * a vec3 starting at 20 cannot use the 16-byte-stride memory format:
-    * that format would round its address down to 16. */
+   /* The live words at 20 and 28 now fit a vec3 with byte displacement 20.
+    * Its address must not be rounded to a 16-byte boundary. */
    agx_shader_part preamble = {};
-   preamble.binary = (uint8_t *)compiled.binary +
-                     compiled.info.apple9_preamble_offset;
+   preamble.binary = (uint8_t *)compiled.binary + compiled.info.apple9_preamble_offset;
    preamble.info.binary_size = compiled.info.apple9_preamble_size;
    unsigned loads[4];
-   ASSERT_EQ(apple9_binary_device_load_offsets(&preamble, loads, 4), 2u);
-   for (unsigned offset : {loads[0], loads[1]}) {
-      const uint8_t *bytes = (const uint8_t *)preamble.binary + offset;
-      EXPECT_EQ(bytes[8] & 0x0e, 0u); /* Scalar dword format. */
-   }
+   ASSERT_EQ(apple9_binary_device_load_offsets(&preamble, loads, 4), 1u);
+   const uint8_t *bytes = (const uint8_t *)preamble.binary + loads[0];
+   EXPECT_EQ(bytes[8] & 0x0e, 0x0cu); /* Three dwords, starting at byte 20. */
+   unsigned displacement = 0;
+   for (unsigned bit = 0; bit < 16; ++bit)
+      displacement |= ((bytes[(77 + bit) / 8] >> ((77 + bit) % 8)) & 1) << bit;
+   EXPECT_EQ(displacement, 20u);
+   EXPECT_EQ((bytes[12] >> 1) & 7, 1u); /* Unscaled byte index. */
    free(compiled.binary);
    ralloc_free(b.shader);
 }
@@ -9453,4 +9454,76 @@ TEST_F(Apple9Completion, UniformWritePreservesSourcesUsedLater)
       ++writes;
    }
    EXPECT_EQ(writes, 4u);
+}
+
+static unsigned
+apple9_test_bits(const uint8_t *bytes, unsigned start, unsigned count)
+{
+   unsigned value = 0;
+   for (unsigned i = 0; i < count; ++i)
+      value |= ((bytes[(start + i) / 8] >> ((start + i) % 8)) & 1) << i;
+   return value;
+}
+
+TEST(Apple9Packer, MemoryScaleAndSignedOffsetAreIndependentOfVectorWidth)
+{
+   for (bool store : {false, true}) for (unsigned components : {1u, 2u, 3u, 4u}) {
+      for (unsigned shift = 0; shift <= 4; ++shift) for (int offset : {-32768, -12, 0, 12, 32767}) {
+         agx_apple9_vir_instr I = {};
+         I.op = store ? AGX_APPLE9_VIR_DEVICE_STORE : AGX_APPLE9_VIR_DEVICE_LOAD;
+         I.encoding = store ? AGX_APPLE9_ENC_DEVICE_STORE : AGX_APPLE9_ENC_DEVICE_LOAD;
+         I.dest = store ? AGX_APPLE9_VREG_INVALID : 0;
+         I.dest_components = components; I.memory_components = components; I.memory_bits = 32;
+         I.memory_index_shift = shift; I.memory_offset = offset;
+         I.nr_srcs = store ? components + 1 : 1;
+         if (store) for (unsigned s = 0; s <= components; ++s) I.src[s] = s;
+         else I.src[0] = 4;
+         I.producer_scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_6;
+         I.device_load_raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101;
+         I.device_load_index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR;
+         const uint8_t phys[] = {60, 61, 62, 63, 64};
+         agx_apple9_packed_instruction packed; const char *reason = nullptr;
+         ASSERT_TRUE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason)) << reason;
+         unsigned base = store ? 73 : 75;
+         EXPECT_EQ((int16_t)apple9_test_bits(packed.bytes, base + 2, 16), offset);
+         unsigned encoded_shift = apple9_test_bits(packed.bytes, base + 22, 3);
+         EXPECT_EQ(encoded_shift ? encoded_shift - 1 : 4, shift);
+         I.memory_index_shift = 5;
+         EXPECT_FALSE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason));
+      }
+   }
+}
+
+TEST(Apple9Compiler, ApiArrayAddressingUsesScaleAndDisplacementForVectors)
+{
+   for (unsigned components : {2u, 3u, 4u}) {
+      for (unsigned form = 0; form < 6; ++form) {
+         SCOPED_TRACE(components);
+         SCOPED_TRACE(form);
+         nir_builder b = apple9_compute_builder("array_address_fields");
+         b.shader->info.num_ssbos = 2;
+         nir_def *gid = apple9_global_id_x(&b);
+         nir_def *index = nir_iand_imm(&b, gid, form == 5 ? 8191 : 1023);
+         nir_def *word = form == 5
+            ? nir_iadd_imm(&b, nir_ior_imm(&b, index, 4096), -8)
+            : nir_iadd_imm(&b, nir_ishl_imm(&b, index, form), 1);
+         /* The API frontend uses amul for the array's element size. */
+         nir_def *offset = nir_amul(&b, word, nir_imm_int(&b, 4));
+         nir_def *value = nir_load_ssbo(&b, components, 32, nir_imm_int(&b, 0), offset,
+                                        .align_mul = 4);
+         nir_store_ssbo(&b, value, nir_imm_int(&b, 1), nir_ishl_imm(&b, gid, 4),
+                       .align_mul = 4);
+         agx_shader_part compiled = {}; agx_apple9_compute_profile profile = {};
+         const char *reason = nullptr;
+         ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason)) << reason;
+         unsigned loads[4];
+         ASSERT_EQ(apple9_binary_device_load_offsets(&compiled, loads, 4), 1u);
+         const uint8_t *bytes = static_cast<const uint8_t *>(compiled.binary) + loads[0];
+         EXPECT_EQ((int16_t)apple9_test_bits(bytes, 77, 16), form == 5 ? -32 : 4);
+         unsigned encoded = apple9_test_bits(bytes, 97, 3);
+         EXPECT_EQ(encoded ? encoded - 1 : 4, form == 5 || form > 2 ? 2 : form + 2);
+         EXPECT_EQ(bytes[8] & 14, components == 2 ? 8 : components == 3 ? 12 : 6);
+         free(compiled.binary); ralloc_free(b.shader);
+      }
+   }
 }

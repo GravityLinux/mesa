@@ -188,8 +188,8 @@ apple9_const_u32(nir_scalar scalar, uint32_t *value)
    return true;
 }
 
-/* Choose formats from size/alignment, never from the shape of an address
- * expression. Mesa splits partial stores and accesses below tuple alignment. */
+/* Native vectors need element alignment, independently of the index scale.
+ * NIR still owns partial-store splitting, exact access extents and aliasing. */
 static nir_mem_access_size_align
 apple9_memory_format(nir_intrinsic_op op, uint8_t bytes, uint8_t bit_size,
                      uint32_t align_mul, uint32_t align_offset,
@@ -197,11 +197,11 @@ apple9_memory_format(nir_intrinsic_op op, uint8_t bytes, uint8_t bit_size,
                      const void *data)
 {
    unsigned alignment = nir_combined_align(align_mul, align_offset);
-   if (bit_size == 32 && alignment >= 16 && bytes >= 12)
+   if (bit_size == 32 && alignment >= 4 && bytes >= 12)
       return (nir_mem_access_size_align){.num_components = MIN2(bytes / 4, 4),
-                                         .bit_size = 32, .align = 16};
-   if (bit_size == 32 && alignment >= 8 && bytes >= 8)
-      return (nir_mem_access_size_align){.num_components = 2, .bit_size = 32, .align = 8};
+                                         .bit_size = 32, .align = 4};
+   if (bit_size == 32 && alignment >= 4 && bytes >= 8)
+      return (nir_mem_access_size_align){.num_components = 2, .bit_size = 32, .align = 4};
    if (bit_size == 32 && bytes >= 4 &&
        (op == nir_intrinsic_load_ssbo || op == nir_intrinsic_load_ubo))
       return (nir_mem_access_size_align){.num_components = 1, .bit_size = 32,
@@ -328,14 +328,143 @@ apple9_element_index(nir_intrinsic_instr *intr, nir_def *offset,
    return true;
 }
 
+/* Conservative lower bounds for unsigned expressions. These establish when
+ * a negative displacement cannot underflow before widening the address. */
+static uint32_t
+apple9_address_lower_bound(nir_scalar value)
+{
+   value = apple9_chase_trivial(value);
+   uint32_t constant;
+   if (apple9_const_u32(value, &constant))
+      return constant;
+   if (!nir_scalar_is_alu(value) ||
+       (nir_scalar_alu_op(value) != nir_op_ior &&
+        nir_scalar_alu_op(value) != nir_op_umax))
+      return 0;
+   uint32_t minimum = 0;
+   for (unsigned s = 0; s < 2; ++s)
+      if (apple9_const_u32(nir_scalar_chase_alu_src(value, s), &constant))
+         minimum = MAX2(minimum, constant);
+   return minimum;
+}
+
+static uint32_t
+apple9_address_upper_bound(nir_shader *nir, struct hash_table *bounds, nir_scalar value)
+{
+   uint32_t maximum = nir_unsigned_upper_bound(nir, bounds, value);
+   if (nir_scalar_is_alu(value) && nir_scalar_alu_op(value) == nir_op_iadd) {
+      for (unsigned s = 0; s < 2; ++s) {
+         uint32_t constant;
+         nir_scalar other = apple9_chase_trivial(nir_scalar_chase_alu_src(value, 1 - s));
+         if (apple9_const_u32(nir_scalar_chase_alu_src(value, s), &constant) &&
+             (int32_t)constant < 0 &&
+             apple9_address_lower_bound(other) >= -(int64_t)(int32_t)constant) {
+            maximum = MIN2(maximum, nir_unsigned_upper_bound(nir, bounds, other) + constant);
+         }
+      }
+   }
+   return maximum;
+}
+
+/* Extract only address arithmetic whose 32-bit wrap semantics are preserved.
+ * Unknown sums stay in the GPR; a folded shift masks its input if it can wrap.
+ * Reserving the trailing component bytes permits scalar selection from a
+ * vector access without changing its original 64-bit component addressing. */
+static bool
+apple9_memory_address(nir_shader *nir, nir_intrinsic_instr *intr, nir_def *offset,
+                      unsigned element_size, unsigned components, nir_scalar *index,
+                      uint8_t *shift, int16_t *displacement)
+{
+   if (offset->bit_size != 32 || offset->num_components != 1 ||
+       (element_size != 1 && element_size != 2 && element_size != 4))
+      return false;
+   nir_builder b = nir_builder_at(nir_before_instr(&intr->instr));
+   nir_scalar value = apple9_chase_trivial(nir_get_scalar(offset, 0));
+   int max_offset = INT16_MAX - (components - 1) * element_size;
+   *shift = 0;
+   *displacement = 0;
+   struct hash_table *bounds = _mesa_pointer_hash_table_create(NULL);
+   if (!bounds)
+      return false;
+   /* GLSL buffer indexing uses amul. It has the same wrapping product
+    * semantics as imul; matching both keeps this reachable from API shaders.
+    * Peel from the outside in, accumulating scale only while the remaining
+    * expression can still be evaluated as a 32-bit value without overflow. */
+   for (unsigned depth = 0; depth < 8; ++depth) {
+      uint32_t constant;
+      if (apple9_const_u32(value, &constant)) {
+         int64_t total = *displacement + ((int64_t)constant << *shift);
+         if (total <= max_offset) {
+            *displacement = total;
+            *shift = 0;
+            value = nir_get_scalar(nir_imm_int(&b, 0), 0);
+         }
+         break;
+      }
+      if (!nir_scalar_is_alu(value))
+         break;
+      nir_op op = nir_scalar_alu_op(value);
+      bool peeled = false;
+      if (op == nir_op_iadd) {
+         for (unsigned s = 0; s < 2; ++s) {
+            nir_scalar term = apple9_chase_trivial(nir_scalar_chase_alu_src(value, s));
+            nir_scalar other = apple9_chase_trivial(nir_scalar_chase_alu_src(value, 1 - s));
+            if (!apple9_const_u32(term, &constant))
+               continue;
+            int64_t add = (int32_t)constant;
+            int64_t total = *displacement + add * (1u << *shift);
+            if (total < INT16_MIN || total > max_offset)
+               break;
+            bool safe = add >= 0 &&
+               !nir_addition_might_overflow(nir, bounds, other, constant);
+            if (add < 0 && apple9_address_lower_bound(other) >= -add)
+               safe = true;
+            if (safe) {
+               *displacement = total;
+               value = other;
+               peeled = true;
+            }
+            break;
+         }
+      } else if (op == nir_op_ishl || op == nir_op_imul || op == nir_op_amul) {
+         for (unsigned s = 0; s < (op == nir_op_ishl ? 1 : 2); ++s) {
+            nir_scalar term = nir_scalar_chase_alu_src(value, op == nir_op_ishl ? 1 : s);
+            nir_scalar other = apple9_chase_trivial(nir_scalar_chase_alu_src(value, op == nir_op_ishl ? 0 : 1 - s));
+            if (!apple9_const_u32(term, &constant))
+               continue;
+            unsigned amount = op == nir_op_ishl ? (constant & 31) :
+               util_is_power_of_two_nonzero(constant) ? util_logbase2(constant) : 32;
+            if (amount + *shift > 4)
+               break;
+            uint32_t maximum = UINT32_MAX >> amount;
+            *shift += amount;
+            if (apple9_address_upper_bound(nir, bounds, other) > maximum) {
+               nir_def *base = nir_channel(&b, other.def, other.comp);
+               value = nir_get_scalar(nir_iand_imm(&b, base, maximum), 0);
+               /* The mask must apply after the remaining arithmetic. */
+            } else {
+               value = other;
+               peeled = true;
+            }
+            break;
+         }
+      }
+      if (!peeled)
+         break;
+   }
+   *index = value;
+   _mesa_hash_table_destroy(bounds, NULL);
+   return true;
+}
+
 struct apple9_scalar_load {
    nir_intrinsic_instr *intr;
    nir_block *block;
    nir_scalar index;
    unsigned argument;
    unsigned component;
-   unsigned index_scale;
-   unsigned index_add;
+   uint8_t index_shift;
+   int16_t byte_offset;
    unsigned bit_size;
 };
 
@@ -345,8 +474,8 @@ struct apple9_buffer_store {
    nir_scalar index;
    unsigned argument;
    unsigned components;
-   unsigned index_scale;
-   unsigned index_add;
+   uint8_t index_shift;
+   int16_t byte_offset;
    unsigned bit_size;
    uint32_t output[4];
    uint32_t lowered_index;
@@ -1659,9 +1788,7 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
             return AGX_APPLE9_VREG_INVALID;
          }
 
-         uint32_t index = load->index_scale == 0
-                             ? apple9_dag_zero(lower)
-                             : apple9_lower_dag_scalar(lower, load->index);
+         uint32_t index = apple9_lower_dag_scalar(lower, load->index);
          if (index == AGX_APPLE9_VREG_INVALID)
             return index;
 
@@ -1676,22 +1803,10 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
          for (unsigned i = 0; i < lower->load_count; ++i)
             read_count += lower->loads[i].intr == load->intr;
 
-         /* Preserve a native NIR vector access whenever at least two lanes
-          * survive.  The memory format supplies the std430 element stride
-          * (2 dwords for vec2, 4 for vec3/vec4), while one scoreboard slot
-          * covers the complete adjacent destination tuple.  Loading an
-          * unused lane is preferable to splitting one semantic vector access
-          * into independently scheduled scalar producers. */
+         /* Preserve the semantic vector extent with one result tuple. Index
+          * scale and byte displacement do not depend on that extent. */
          if (read_count >= 2) {
             const unsigned components = load->intr->def.num_components;
-            const unsigned expected_stride = components == 2 ? 2 : 4;
-            if (components < 2 || components > 4 ||
-                load->index_scale != expected_stride || load->index_add != 0) {
-               lower->reason =
-                  "Apple9 native vector load requires a std430 vector stride";
-               return AGX_APPLE9_VREG_INVALID;
-            }
-
             uint8_t flags = apple9_current_load_flags(lower);
             const struct agx_apple9_device_load_contract contract = {
                .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
@@ -1711,6 +1826,10 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                return AGX_APPLE9_VREG_INVALID;
             }
 
+            struct agx_apple9_vir_instr *memory =
+               lower->program.instructions[lower->program.instruction_count - 1];
+            memory->memory_index_shift = load->index_shift;
+            memory->memory_offset = load->byte_offset;
             if (address != AGX_APPLE9_VREG_INVALID &&
                 !agx_apple9_vir_set_load_address(&lower->program, base,
                                                  address))
@@ -1725,40 +1844,18 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
             return lower->ssa_to_vreg[key];
          }
 
-         if (load->index_scale > 1) {
-            uint32_t scale = apple9_dag_imm(lower, load->index_scale);
-            uint32_t zero = apple9_dag_zero(lower);
-            uint32_t sources[3] = {index, scale, zero};
-            if (scale == AGX_APPLE9_VREG_INVALID ||
-                zero == AGX_APPLE9_VREG_INVALID)
-               return AGX_APPLE9_VREG_INVALID;
-            index = apple9_dag_emit(lower, AGX_APPLE9_VIR_IMAD,
-                                    AGX_APPLE9_ENC_INT_MAD_EXTENDED, sources,
-                                    ARRAY_SIZE(sources), 0);
-            if (index == AGX_APPLE9_VREG_INVALID)
-               return index;
-         }
-
-         const unsigned element_add = load->index_add + load->component;
-         if (element_add != 0) {
-            uint32_t component = apple9_dag_imm(lower, element_add);
-            uint32_t sources[2] = {index, component};
-            if (component == AGX_APPLE9_VREG_INVALID)
-               return component;
-            index = apple9_dag_emit(lower, AGX_APPLE9_VIR_IADD,
-                                    AGX_APPLE9_ENC_INT_ADD_EXTENDED, sources,
-                                    ARRAY_SIZE(sources), 0);
-            if (index == AGX_APPLE9_VREG_INVALID)
-               return index;
-         }
-
          const uint32_t source[] = {index};
          value = apple9_dag_emit(
             lower, AGX_APPLE9_VIR_DEVICE_LOAD, AGX_APPLE9_ENC_DEVICE_LOAD,
             source, 1,
             lower->argument_base + load->argument);
-         if (value != AGX_APPLE9_VREG_INVALID)
-            lower->program.instructions[lower->program.instruction_count - 1]->memory_bits = load->bit_size;
+         if (value != AGX_APPLE9_VREG_INVALID) {
+            struct agx_apple9_vir_instr *memory =
+               lower->program.instructions[lower->program.instruction_count - 1];
+            memory->memory_bits = load->bit_size;
+            memory->memory_index_shift = load->index_shift;
+            memory->memory_offset = load->byte_offset + load->component * (load->bit_size / 8);
+         }
          uint8_t flags = apple9_current_load_flags(lower);
          if (value == AGX_APPLE9_VREG_INVALID ||
              !agx_apple9_vir_set_device_load_contract(
@@ -2336,14 +2433,18 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
                            !atomic;
          nir_def *offset = load || atomic ? intr->src[1].ssa : intr->src[2].ssa;
          nir_scalar index;
-         unsigned index_scale, index_add;
+         unsigned index_scale = 0, index_add = 0;
+         uint8_t index_shift = 0;
+         int16_t byte_offset = 0;
          const unsigned bit_size = atomic ? intr->def.bit_size
                                    : load  ? intr->def.bit_size
                                            : intr->src[0].ssa->bit_size;
          const unsigned components = atomic ? 1 : load ? intr->def.num_components
                                                        : intr->src[0].ssa->num_components;
-         if (!apple9_element_index(intr, offset, bit_size / 8, components,
-                                   &index, &index_scale, &index_add)) {
+         if (!(atomic ? apple9_element_index(intr, offset, bit_size / 8, components,
+                                              &index, &index_scale, &index_add)
+                      : apple9_memory_address(nir, intr, offset, bit_size / 8, components,
+                                              &index, &index_shift, &byte_offset))) {
             *reason =
                "Apple9 buffer compiler requires a supported 32-bit byte offset";
             return false;
@@ -2417,33 +2518,22 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
                if (!(read_mask & BITFIELD_BIT(component)))
                   continue;
 
-               if (index_add > UINT32_MAX - component) {
-                  *reason = "Apple9 vector-load field offset exceeds 32 bits";
-                  return false;
-               }
-
                struct apple9_scalar_load load = {
                   .intr = intr,
                   .block = block,
                   .index = index,
                   .argument = argument,
                   .component = component,
-                  .index_scale = index_scale,
-                  .index_add = index_add,
+                  .index_shift = index_shift,
+                  .byte_offset = byte_offset,
                   .bit_size = intr->def.bit_size,
                };
                util_dynarray_append(loads, load);
             }
          } else {
             const unsigned components = intr->src[0].ssa->num_components;
-            const unsigned expected_stride = components == 1   ? 1
-                                             : components == 2 ? 2
-                                                               : 4;
-            if (components < 1 || components > 4 ||
-                (components > 1 &&
-                 (index_scale != expected_stride || index_add != 0))) {
-               *reason =
-                  "Apple9 store index must use its natural vector stride";
+            if (components < 1 || components > 4) {
+               *reason = "Apple9 store requires one to four components";
                return false;
             }
             if (nir_intrinsic_write_mask(intr) != BITFIELD_MASK(components) ||
@@ -2466,8 +2556,8 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
                .index = index,
                .argument = argument,
                .components = components,
-               .index_scale = index_scale,
-               .index_add = index_add,
+               .index_shift = index_shift,
+               .byte_offset = byte_offset,
                .bit_size = bit_size,
                .lowered_index = AGX_APPLE9_VREG_INVALID,
             };
@@ -2510,36 +2600,7 @@ apple9_lower_buffer_store_operands(struct apple9_dag_lower *lower,
          return false;
    }
 
-   uint32_t index = store->index_scale == 0
-                       ? apple9_dag_zero(lower)
-                       : apple9_lower_dag_scalar(lower, store->index);
-   if (index == AGX_APPLE9_VREG_INVALID)
-      return false;
-
-   /* Native vector stores scale their tuple index in the memory format.
-    * Scalar stores instead consume a scalar-element index, so only they need
-    * an explicit affine address calculation here. */
-   if (store->components == 1 && store->index_scale > 1) {
-      uint32_t scale = apple9_dag_imm(lower, store->index_scale);
-      uint32_t zero = apple9_dag_zero(lower);
-      uint32_t sources[3] = {index, scale, zero};
-      if (scale == AGX_APPLE9_VREG_INVALID || zero == AGX_APPLE9_VREG_INVALID)
-         return false;
-      index = apple9_dag_emit(lower, AGX_APPLE9_VIR_IMAD,
-                              AGX_APPLE9_ENC_INT_MAD_EXTENDED, sources,
-                              ARRAY_SIZE(sources), 0);
-   }
-   if (store->components == 1 && store->index_add != 0 &&
-       index != AGX_APPLE9_VREG_INVALID) {
-      uint32_t add = apple9_dag_imm(lower, store->index_add);
-      uint32_t sources[2] = {index, add};
-      index = add == AGX_APPLE9_VREG_INVALID
-                 ? AGX_APPLE9_VREG_INVALID
-                 : apple9_dag_emit(lower, AGX_APPLE9_VIR_IADD,
-                                   AGX_APPLE9_ENC_INT_ADD_EXTENDED, sources,
-                                   ARRAY_SIZE(sources), 0);
-   }
-
+   uint32_t index = apple9_lower_dag_scalar(lower, store->index);
    store->lowered_index = index;
    return index != AGX_APPLE9_VREG_INVALID;
 }
@@ -2562,6 +2623,10 @@ apple9_emit_buffer_store(struct apple9_dag_lower *lower,
                                          store->lowered_index, store->output,
                                          store->components, store->bit_size))
       return false;
+   struct agx_apple9_vir_instr *memory =
+      lower->program.instructions[lower->program.instruction_count - 1];
+   memory->memory_index_shift = store->index_shift;
+   memory->memory_offset = store->byte_offset;
    return address == AGX_APPLE9_VREG_INVALID ||
           agx_apple9_vir_set_device_store_address(&lower->program, address);
 }
@@ -4255,7 +4320,7 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    /* Avoid spending uniform words on unused components of frontend UBO
     * vectors. Removing leading components can also reduce the alignment:
     * vec4 at byte 16 may become vec3 at byte 20. Re-legalize that access
-    * before assigning a hardware vector stride or extracting a preamble. */
+    * before selecting its memory format or extracting a preamble. */
    nir_opt_shrink_vectors(main, true);
    nir_opt_constant_folding(main);
    apple9_legalize_buffer_accesses(main);
