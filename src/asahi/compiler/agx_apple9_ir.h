@@ -303,6 +303,10 @@ struct agx_apple9_vir_instr {
     * edge metadata, not a mutable register assignment before allocation. */
    uint32_t target;
    uint32_t immediate;
+   /* STORE_UNIFORM may compute its value directly into the uniform file.
+    * immediate is the uniform word; these describe the fused integer ALU. */
+   enum agx_apple9_vir_opcode uniform_op;
+   bool uniform_signed;
    /* Stable destination identity; byte displacement is computed at packing. */
    struct agx_apple9_block *branch_target;
    /* Phi declaration and incoming edge uses remain SSA until packing. */
@@ -312,7 +316,8 @@ struct agx_apple9_vir_instr {
 
    /* Floating source modifiers apply absolute value before negation. */
    uint8_t src_abs_mask, src_neg_mask;
-   /* Floating ALU operand slots can name uniform words or exact constants.
+   /* Validated ALU operand slots can name uniform words; floating operands
+    * may also name exact constants.
     * src[] contains only their GPR inputs, in operand order. Liveness and SSA
     * use lists refer to that compact GPR list; these masks and modifiers refer
     * to the hardware operand slots. Uniform and immediate masks are disjoint. */
@@ -463,6 +468,8 @@ struct agx_apple9_block *agx_apple9_instr_block(const struct agx_apple9_vir_inst
 void agx_apple9_vir_move_before(struct agx_apple9_vir_program *program,
                               struct agx_apple9_vir_instr *instr,
                               struct agx_apple9_vir_instr *before);
+void agx_apple9_vir_remove(struct agx_apple9_vir_program *program,
+                          struct agx_apple9_vir_instr *instruction);
 void agx_apple9_vir_reindex(struct agx_apple9_vir_program *program);
 bool agx_apple9_instr_is_pure_alu(const struct agx_apple9_vir_instr *instruction);
 bool agx_apple9_supports_saturate(const struct agx_apple9_vir_instr *instruction);

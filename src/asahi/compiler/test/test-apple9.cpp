@@ -9473,11 +9473,17 @@ TEST(Apple9Packer, UniformLogicPreservesHighRegistersAndDependencies)
    EXPECT_EQ(bits(43, 1), 1u);
    EXPECT_EQ(bits(45, 3), 0u);
    EXPECT_EQ(bits(61, 3), 4u);
-   ins.immediate = 64;
+   for (unsigned u : {64u, 127u, 128u, 255u}) {
+      ins.immediate = u;
+      ASSERT_TRUE(agx_apple9_pack_vir_instruction(&ins, phys, &packed, &reason));
+      EXPECT_EQ((bits(8, 7) >> 1) | bits(19, 1) << 6 | bits(40, 1) << 7, u);
+      EXPECT_EQ(bits(25, 6) | bits(42, 1) << 6, 95u);
+   }
+   ins.immediate = 256;
    EXPECT_FALSE(agx_apple9_pack_vir_instruction(&ins, phys, &packed, &reason));
 }
 
-TEST(Apple9Packer, UniformStoreHasAnExplicitSixBitSourceConstraint)
+TEST(Apple9Packer, UniformStoreUsesEightBitDestinationAndFullGprSource)
 {
    agx_apple9_vir_instr ins = {};
    ins.op = AGX_APPLE9_VIR_STORE_UNIFORM;
@@ -9485,18 +9491,23 @@ TEST(Apple9Packer, UniformStoreHasAnExplicitSixBitSourceConstraint)
    ins.dest = AGX_APPLE9_VREG_INVALID;
    ins.src[0] = 0;
    ins.nr_srcs = 1;
-   ins.immediate = 63;
-   uint8_t phys[] = {63};
+   ins.immediate = 255;
+   uint8_t phys[] = {95};
    agx_apple9_packed_instruction packed;
    const char *reason = nullptr;
    ASSERT_TRUE(agx_apple9_pack_vir_instruction(&ins, phys, &packed, &reason));
-   const uint8_t expected[] = {0xfb, 0x7e, 0xc9, 0x04};
+   const uint8_t expected[] = {0x9f, 0x01, 0x54, 0xfe, 0x01, 0x7c, 0x01, 0xa8, 0x13, 0x01};
    ASSERT_EQ(packed.length, sizeof(expected));
    EXPECT_EQ(memcmp(packed.bytes, expected, sizeof(expected)), 0);
-   phys[0] = 64;
+   ins.immediate = 256;
    EXPECT_FALSE(agx_apple9_pack_vir_instruction(&ins, phys, &packed, &reason));
+   ins.immediate = 255;
+   phys[0] = 96;
+   EXPECT_FALSE(agx_apple9_pack_vir_instruction(&ins, phys, &packed, &reason));
+   EXPECT_TRUE(agx_apple9_encoding_accepts_gpr(AGX_APPLE9_ENC_STORE_UNIFORM,
+      AGX_APPLE9_OPERAND_SRC0, 95, 32));
    EXPECT_FALSE(agx_apple9_encoding_accepts_gpr(AGX_APPLE9_ENC_STORE_UNIFORM,
-      AGX_APPLE9_OPERAND_SRC0, 64, 32));
+      AGX_APPLE9_OPERAND_SRC0, 96, 32));
 }
 
 TEST_F(Apple9Completion, UniformWritePreservesSourcesUsedLater)
@@ -9520,12 +9531,96 @@ TEST_F(Apple9Completion, UniformWritePreservesSourcesUsedLater)
       if (ins->op != AGX_APPLE9_VIR_STORE_UNIFORM)
          continue;
       EXPECT_TRUE(completed);
-      EXPECT_EQ(ins->live_after_mask, 0u);
-      EXPECT_LT(p.phys[ins->src[0]], 64u);
+      EXPECT_EQ(ins->live_after_mask, (writes == 0 || writes == 3) ? 1u : 0u);
+      EXPECT_LT(p.phys[ins->src[0]], AGX_APPLE9_GPR_COUNT);
       ++writes;
    }
    EXPECT_EQ(writes, 4u);
 }
+
+TEST(Apple9Packer, UniformSourceBanksRemainIndependentOfHighGprs)
+{
+   struct Case { agx_apple9_vir_opcode op; agx_apple9_encoding encoding; };
+   for (auto test : {Case{AGX_APPLE9_VIR_FADD, AGX_APPLE9_ENC_FLOAT2_COMPACT},
+                    Case{AGX_APPLE9_VIR_FSUB, AGX_APPLE9_ENC_FLOAT2_COMPACT},
+                    Case{AGX_APPLE9_VIR_FMUL, AGX_APPLE9_ENC_FLOAT2_COMPACT},
+                    Case{AGX_APPLE9_VIR_IAND, AGX_APPLE9_ENC_LOGIC_EXTENDED},
+                    Case{AGX_APPLE9_VIR_IOR, AGX_APPLE9_ENC_LOGIC_EXTENDED},
+                    Case{AGX_APPLE9_VIR_IXOR, AGX_APPLE9_ENC_LOGIC_EXTENDED},
+                    Case{AGX_APPLE9_VIR_IMIN, AGX_APPLE9_ENC_MINMAX_COMPACT},
+                    Case{AGX_APPLE9_VIR_IMAX, AGX_APPLE9_ENC_MINMAX_COMPACT},
+                    Case{AGX_APPLE9_VIR_UMIN, AGX_APPLE9_ENC_MINMAX_COMPACT},
+                    Case{AGX_APPLE9_VIR_UMAX, AGX_APPLE9_ENC_MINMAX_COMPACT},
+                    Case{AGX_APPLE9_VIR_FMIN, AGX_APPLE9_ENC_MINMAX_COMPACT},
+                    Case{AGX_APPLE9_VIR_FMAX, AGX_APPLE9_ENC_MINMAX_COMPACT}}) {
+      for (unsigned u : {0u, 63u, 64u, 127u, 128u, 255u, 256u}) {
+         for (unsigned role = 0; role < 2; ++role) {
+            SCOPED_TRACE(::testing::Message() << test.op << " u" << u << " source " << role);
+            agx_apple9_vir_instr I = {};
+            I.op = test.op; I.encoding = test.encoding;
+            I.dest = 0; I.src[0] = 1; I.nr_srcs = 1;
+            I.live_after_mask = 1;
+            I.alu_src_uniform_mask = 1 << role; I.alu_src_value[role] = u;
+            const uint8_t phys[] = {95, 64};
+            agx_apple9_packed_instruction packed;
+            const char *reason = nullptr;
+            bool ok = agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason);
+            ASSERT_EQ(ok, u < 256) << (reason ?: "");
+            if (!ok) continue;
+            auto bit = [&](unsigned n) { return (packed.bytes[n / 8] >> (n % 8)) & 1; };
+            unsigned index = ((packed.bytes[1 + 2 * role] & 127) >> 1) |
+               (bit(role ? 20 : 19) << 6) | (bit(role ? 42 : 40) << 7);
+            EXPECT_EQ(index, u);
+            EXPECT_EQ(bit(role ? 41 : 39), 1);
+            EXPECT_EQ(bit(role ? 40 : 42), 1); // Other source is GPR r64.
+            EXPECT_EQ(bit(role ? 19 : 20), 0); // Its lifetime must be retained.
+         }
+      }
+   }
+}
+
+TEST(Apple9Packer, FmaUniformBanksAndCompactBoundary)
+{
+   for (unsigned mask : {2u, 4u, 6u}) {
+      agx_apple9_vir_instr I = {};
+      I.op = AGX_APPLE9_VIR_FMA; I.encoding = AGX_APPLE9_ENC_FLOAT3_EXTENDED;
+      I.dest = 0; I.src[0] = 1; I.src[1] = 2;
+      I.nr_srcs = mask == 6 ? 1 : 2;
+      I.live_after_mask = (1 << I.nr_srcs) - 1;
+      I.alu_src_uniform_mask = mask;
+      I.alu_src_value[1] = 255; I.alu_src_value[2] = 128;
+      const uint8_t phys[] = {95, 64, 65};
+      agx_apple9_packed_instruction packed;
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason));
+      auto bit = [&](unsigned n) { return (packed.bytes[n / 8] >> (n % 8)) & 1; };
+      EXPECT_EQ(bit(56), 1); // GPR A remains r64.
+      if (mask & 2) {
+         EXPECT_EQ(bit(57), 1);
+         EXPECT_EQ(((packed.bytes[3] & 127) >> 1) | bit(20) << 6 | bit(58) << 7, 255);
+      }
+      if (mask & 4) {
+         EXPECT_EQ(bit(37), 1);
+         EXPECT_EQ(((packed.bytes[5] & 127) >> 1) | bit(39) << 6 | bit(38) << 7, 128);
+      }
+      I.alu_src_value[mask & 2 ? 1 : 2] = 256;
+      EXPECT_FALSE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason));
+   }
+   agx_apple9_vir_instr I = {};
+   I.op = AGX_APPLE9_VIR_FMA; I.encoding = AGX_APPLE9_ENC_FLOAT3_COMPACT;
+   I.dest = 0; I.src[0] = 1; I.src[1] = 2; I.nr_srcs = 2;
+   I.alu_src_uniform_mask = 2;
+   const uint8_t phys[] = {4, 5, 6};
+   agx_apple9_packed_instruction packed;
+   const char *reason = nullptr;
+   I.alu_src_value[1] = 63;
+   EXPECT_TRUE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason));
+   I.alu_src_value[1] = 64;
+   EXPECT_FALSE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason));
+   I.encoding = AGX_APPLE9_ENC_FLOAT3_EXTENDED;
+   EXPECT_TRUE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason));
+}
+
 
 static unsigned
 apple9_test_bits(const uint8_t *bytes, unsigned start, unsigned count)
@@ -9534,6 +9629,72 @@ apple9_test_bits(const uint8_t *bytes, unsigned start, unsigned count)
    for (unsigned i = 0; i < count; ++i)
       value |= ((bytes[(start + i) / 8] >> ((start + i) % 8)) & 1) << i;
    return value;
+}
+
+TEST(Apple9Packer, IntegerUniformFilesPreserveHighIndicesAndGprLifetimes)
+{
+   for (bool mad : {false, true}) {
+      unsigned arity = mad ? 3 : 2;
+      for (unsigned mask = 0; mask < (1u << arity); ++mask) {
+         for (unsigned live = 0; live < (1u << arity); ++live) {
+            agx_apple9_vir_instr I = {};
+            I.op = mad ? AGX_APPLE9_VIR_IMAD : AGX_APPLE9_VIR_IADD;
+            I.encoding = mad ? AGX_APPLE9_ENC_INT_MAD_EXTENDED : AGX_APPLE9_ENC_INT_ADD_EXTENDED;
+            I.dest = 0; I.dest_components = 1;
+            I.alu_src_uniform_mask = mask; I.live_after_mask = live;
+            const unsigned uniforms[] = {255, 128, 127};
+            const uint8_t phys[] = {95, 64, 65, 66};
+            for (unsigned s = 0; s < arity; ++s) {
+               I.alu_src_value[s] = uniforms[s];
+               if (!(mask & (1u << s))) I.src[I.nr_srcs++] = s + 1;
+            }
+            const char *reason = nullptr;
+            agx_apple9_packed_instruction packed;
+            ASSERT_TRUE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason)) << reason;
+            unsigned gpr = 0;
+            for (unsigned s = 0; s < arity; ++s) {
+               bool uniform = mask & (1u << s);
+               EXPECT_EQ(apple9_test_bits(packed.bytes, (mad ? 81 : 72) + 2 * s, 1), !uniform);
+               unsigned value = apple9_test_bits(packed.bytes, 42 + 9 * s, uniform ? 8 : 7);
+               EXPECT_EQ(value, uniform ? uniforms[s] : phys[s + 1]);
+               EXPECT_EQ(apple9_test_bits(packed.bytes, (mad ? 73 : 65) + s, 1),
+                         uniform || !(live & (1u << gpr)));
+               if (!uniform) ++gpr;
+            }
+            if (mask) {
+               I.alu_src_value[ffs(mask) - 1] = 256;
+               EXPECT_FALSE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason));
+            }
+         }
+      }
+   }
+}
+
+TEST(Apple9Packer, FmaFirstUniformSupportsEveryBankAndExtendedModifierForm)
+{
+   for (auto encoding : {AGX_APPLE9_ENC_FLOAT3_EXTENDED,
+                         AGX_APPLE9_ENC_FLOAT3_MODIFIER_EXTENDED,
+                         AGX_APPLE9_ENC_FLOAT3_SATURATE_EXTENDED}) {
+      for (unsigned u : {0u, 63u, 64u, 127u, 128u, 255u}) {
+         agx_apple9_vir_instr I = {};
+         I.op = AGX_APPLE9_VIR_FMA; I.encoding = encoding;
+         I.dest = 0; I.dest_components = 1;
+         I.nr_srcs = 1; I.src[0] = 1; I.live_after_mask = 1;
+         I.alu_src_uniform_mask = 3; I.alu_src_value[0] = u; I.alu_src_value[1] = 255;
+         I.src_abs_mask = encoding == AGX_APPLE9_ENC_FLOAT3_MODIFIER_EXTENDED ? 3 : 0;
+         I.saturate = encoding != AGX_APPLE9_ENC_FLOAT3_EXTENDED;
+         const uint8_t phys[] = {95, 64};
+         agx_apple9_packed_instruction packed; const char *reason = nullptr;
+         ASSERT_TRUE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason)) << reason;
+         EXPECT_EQ(apple9_test_bits(packed.bytes, 55, 1), 1u);
+         EXPECT_EQ(apple9_test_bits(packed.bytes, 9, 6) |
+                   apple9_test_bits(packed.bytes, 19, 1) << 6 |
+                   apple9_test_bits(packed.bytes, 56, 1) << 7, u);
+         EXPECT_EQ(apple9_test_bits(packed.bytes, 38, 1), 1u); // r64 addend.
+         I.encoding = AGX_APPLE9_ENC_FLOAT3_COMPACT;
+         EXPECT_FALSE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason));
+      }
+   }
 }
 
 TEST(Apple9Packer, NormalizedUnpackOwnsBothOutputsAndPreservesSourceHalf)

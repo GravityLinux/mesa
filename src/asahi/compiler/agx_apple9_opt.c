@@ -328,12 +328,21 @@ select_float_sources(struct agx_apple9_vir_instr *I,
 }
 
 static void
-inline_float_sources(struct agx_apple9_vir_instr *I, const uint8_t *uniform_read,
+inline_alu_sources(struct agx_apple9_vir_instr *I, const uint16_t *uniform_read,
                       const bool *constant, const uint32_t *values)
 {
    bool fma = I->op == AGX_APPLE9_VIR_FMA;
-   unsigned arity = fma ? 3 : 2;
-   if ((!fma && I->op != AGX_APPLE9_VIR_FADD && I->op != AGX_APPLE9_VIR_FMUL) ||
+   bool integer = I->op == AGX_APPLE9_VIR_IADD || I->op == AGX_APPLE9_VIR_ISUB ||
+                  I->op == AGX_APPLE9_VIR_IMAD;
+   unsigned arity = fma || I->op == AGX_APPLE9_VIR_IMAD ? 3 : 2;
+   bool float2 = I->op == AGX_APPLE9_VIR_FADD || I->op == AGX_APPLE9_VIR_FSUB ||
+                 I->op == AGX_APPLE9_VIR_FMUL;
+   bool binary = float2 || I->op == AGX_APPLE9_VIR_IAND ||
+      I->op == AGX_APPLE9_VIR_IOR || I->op == AGX_APPLE9_VIR_IXOR ||
+      I->op == AGX_APPLE9_VIR_IMIN || I->op == AGX_APPLE9_VIR_IMAX ||
+      I->op == AGX_APPLE9_VIR_UMIN || I->op == AGX_APPLE9_VIR_UMAX ||
+      I->op == AGX_APPLE9_VIR_FMIN || I->op == AGX_APPLE9_VIR_FMAX;
+   if ((!fma && !binary && !integer) ||
        I->nr_srcs != arity || I->alu_src_uniform_mask || I->alu_src_immediate_mask)
       return;
 
@@ -357,12 +366,17 @@ inline_float_sources(struct agx_apple9_vir_instr *I, const uint8_t *uniform_read
       uint32_t src = I->src[0];
       I->src[0] = I->src[1]; I->src[1] = src;
       file[1] = file[0]; value[1] = value[0];
+      file[0] = 0;
       I->src_abs_mask = (I->src_abs_mask & 4) |
          ((I->src_abs_mask & 1) << 1) | ((I->src_abs_mask & 2) >> 1);
       I->src_neg_mask = (I->src_neg_mask & 4) |
          ((I->src_neg_mask & 1) << 1) | ((I->src_neg_mask & 2) >> 1);
    }
-   if (fma || (file[0] && file[1]))
+   /* Extended FMA has a uniform selector for A as well. Preserve the
+    * compact form when commuting a lone uniform to B; A immediates still
+    * require materialization. Fixed integer operands are independent. */
+   if ((fma && file[0] == AGX_APPLE9_FILE_IMMEDIATE) ||
+       (!fma && !float2 && !integer && file[0] && file[1]))
       file[0] = 0;
 
    unsigned source = 0;
@@ -469,6 +483,82 @@ fold_saturate(struct agx_apple9_vir_program *p, const uint32_t *replacement)
    return true;
 }
 
+/* Fuse a sole, adjacent integer producer into publication. Keeping the
+ * operation at its store preserves the execution mask and uniform write order.
+ * This is a preamble lowering optimization; uniform words remain outside SSA
+ * GPR allocation, and publication is still an explicit side effect. */
+static bool
+fold_uniform_stores(struct agx_apple9_vir_program *p)
+{
+   agx_apple9_invalidate_uses(p);
+   if (!agx_apple9_analyze_uses(p))
+      return false;
+   struct agx_apple9_vir_instr **remove = CALLOC(p->instruction_count, sizeof(*remove));
+   if (!remove)
+      return false;
+   unsigned nr_remove = 0;
+   for (unsigned i = 1; i < p->instruction_count; ++i) {
+      struct agx_apple9_vir_instr *store = p->instructions[i];
+      struct agx_apple9_vir_instr *alu = p->instructions[i - 1];
+      if (store->op != AGX_APPLE9_VIR_STORE_UNIFORM ||
+          store->encoding != AGX_APPLE9_ENC_STORE_UNIFORM || store->nr_srcs != 1 ||
+          store->immediate >= AGX_APPLE9_UNIFORM_COUNT ||
+          alu->dest != store->src[0] ||
+          agx_apple9_instr_block(alu) != agx_apple9_instr_block(store) ||
+          alu->alu_src_uniform_mask || alu->alu_src_immediate_mask)
+         continue;
+      enum agx_apple9_encoding encoding;
+      switch (alu->op) {
+      case AGX_APPLE9_VIR_IADD:
+      case AGX_APPLE9_VIR_ISUB:
+         encoding = AGX_APPLE9_ENC_STORE_UNIFORM_ADD;
+         break;
+      case AGX_APPLE9_VIR_IMAD:
+         encoding = AGX_APPLE9_ENC_STORE_UNIFORM_MAD;
+         break;
+      case AGX_APPLE9_VIR_IMUL_WIDE:
+         encoding = AGX_APPLE9_ENC_STORE_UNIFORM_MUL_WIDE;
+         break;
+      default:
+         continue;
+      }
+      bool wide = alu->op == AGX_APPLE9_VIR_IMUL_WIDE;
+      struct agx_apple9_vir_instr *high = i + 1 < p->instruction_count ? p->instructions[i + 1] : NULL;
+      if (wide && ((store->immediate & 1) || store->immediate + 1 >= AGX_APPLE9_UNIFORM_COUNT ||
+                   !high || high->op != AGX_APPLE9_VIR_STORE_UNIFORM ||
+                   high->encoding != AGX_APPLE9_ENC_STORE_UNIFORM || high->nr_srcs != 1 ||
+                   high->src[0] != alu->dest + 1 || high->immediate != store->immediate + 1 ||
+                   agx_apple9_instr_block(high) != agx_apple9_instr_block(store)))
+         continue;
+      bool sole = alu->dest_components == (wide ? 2 : 1);
+      for (unsigned c = 0; c < alu->dest_components; ++c) {
+         unsigned v = alu->dest + c;
+         const struct agx_apple9_use *use = agx_apple9_uses(p, v);
+         sole &= use && !use->next && use->instruction == (c ? high : store) &&
+                 p->output != v && p->fixed_phys[v] == AGX_APPLE9_PHYS_INVALID &&
+                 p->max_phys[v] == AGX_APPLE9_PHYS_INVALID;
+         for (unsigned l = 0; l < p->live_out_count; ++l)
+            sole &= p->live_out[l] != v;
+      }
+      if (!sole)
+         continue;
+      store->encoding = encoding;
+      store->uniform_op = alu->op;
+      store->uniform_signed = wide && alu->immediate;
+      store->nr_srcs = alu->nr_srcs;
+      memcpy(store->src, alu->src, alu->nr_srcs * sizeof(alu->src[0]));
+      if (wide) {
+         remove[nr_remove++] = high;
+         ++i;
+      }
+   }
+   for (unsigned i = 0; i < nr_remove; ++i)
+      agx_apple9_vir_remove(p, remove[i]);
+   free(remove);
+   agx_apple9_invalidate_uses(p);
+   return true;
+}
+
 bool
 agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
 {
@@ -479,7 +569,7 @@ agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
    uint32_t *replacement = MALLOC(p->value_count * sizeof(*replacement));
    uint32_t *values = CALLOC(p->value_count, sizeof(*values));
    bool *constant = CALLOC(p->value_count, sizeof(*constant));
-   uint8_t *uniform_read = CALLOC(p->value_count, sizeof(*uniform_read));
+   uint16_t *uniform_read = CALLOC(p->value_count, sizeof(*uniform_read));
    struct expression *keys = CALLOC(p->value_count, sizeof(*keys));
    struct agx_apple9_vir_instr **definitions =
       CALLOC(p->value_count, sizeof(*definitions));
@@ -497,7 +587,7 @@ agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
       if (block != agx_apple9_instr_block(I)) {
          block = agx_apple9_instr_block(I);
          _mesa_hash_table_clear(expressions, NULL);
-         memset(uniform_read, 0, p->value_count);
+         memset(uniform_read, 0, p->value_count * sizeof(*uniform_read));
       }
       for (unsigned s = 0; s < I->nr_srcs; ++s)
          I->src[s] = resolve(replacement, I->src[s]);
@@ -506,7 +596,7 @@ agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
          /* Uniform reads are reusable only while their argument window is
           * unchanged. Setup may publish another value to the same word. */
          _mesa_hash_table_clear(expressions, NULL);
-         memset(uniform_read, 0, p->value_count);
+         memset(uniform_read, 0, p->value_count * sizeof(*uniform_read));
          break;
       case AGX_APPLE9_VIR_EXEC_MASK_PUSH:
       case AGX_APPLE9_VIR_EXEC_MASK_ELSE:
@@ -518,7 +608,7 @@ agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
          /* A synthetic mask transition may share a logical block. Values
           * produced under its old active lanes need not cover the new ones. */
          _mesa_hash_table_clear(expressions, NULL);
-         memset(uniform_read, 0, p->value_count);
+         memset(uniform_read, 0, p->value_count * sizeof(*uniform_read));
          break;
       default:
          break;
@@ -535,7 +625,7 @@ agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
 
       fold_integer(I, constant, values);
       select_float_sources(I, definitions, constant, values);
-      inline_float_sources(I, uniform_read, constant, values);
+      inline_alu_sources(I, uniform_read, constant, values);
       for (unsigned c = 0; c < I->dest_components; ++c)
          definitions[I->dest + c] = I;
       if (I->op == AGX_APPLE9_VIR_IMM) {
@@ -543,7 +633,7 @@ agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
          values[I->dest] = I->immediate;
       }
       if (I->op == AGX_APPLE9_VIR_IOR_UNIFORM && I->nr_srcs == 1 &&
-          I->immediate < 64 && constant[I->src[0]] && !values[I->src[0]])
+          I->immediate < AGX_APPLE9_UNIFORM_COUNT && constant[I->src[0]] && !values[I->src[0]])
          uniform_read[I->dest] = I->immediate + 1;
       struct expression *key = &keys[I->dest];
       *key = (struct expression){
@@ -583,7 +673,7 @@ agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
       p->live_out[i] = resolve(replacement, p->live_out[i]);
    if (p->output != AGX_APPLE9_VREG_INVALID)
       p->output = resolve(replacement, p->output);
-   success = fold_saturate(p, replacement);
+   success = fold_saturate(p, replacement) && fold_uniform_stores(p);
 
 cleanup:
    free(uniform_read);

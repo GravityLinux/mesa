@@ -749,3 +749,74 @@ TEST(Apple9Compiler, OversizePreambleFallsBackToOrdinaryMain)
    free(compiled.binary);
    ralloc_free(b.shader);
 }
+
+TEST_F(Apple9Optimization, Uniform255SurvivesTrackingAndIntegerSourceFolding)
+{
+   auto zero = imm(0);
+   auto uniform = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IOR_UNIFORM,
+      AGX_APPLE9_ENC_LOGIC_UNIFORM, &zero, 1, 255);
+   auto input = agx_apple9_vir_input(&p, 64);
+   uint32_t src[] = {uniform, input};
+   p.output = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IXOR,
+      AGX_APPLE9_ENC_LOGIC_EXTENDED, src, 2, 0);
+   ASSERT_TRUE(agx_apple9_optimize_vir(&p));
+   ASSERT_TRUE(agx_apple9_analyze_uses(&p));
+   const auto *I = agx_apple9_definition(&p, p.output);
+   EXPECT_EQ(I->alu_src_uniform_mask, 1);
+   EXPECT_EQ(I->alu_src_value[0], 255u);
+   EXPECT_EQ(I->nr_srcs, 1);
+   EXPECT_EQ(I->src[0], input);
+   EXPECT_EQ(agx_apple9_uses(&p, uniform), nullptr);
+}
+
+TEST(Apple9Compiler, IntegerPreambleStoresFuseWithoutAllocatingUniformGprs)
+{
+   for (auto op : {AGX_APPLE9_VIR_IADD, AGX_APPLE9_VIR_ISUB,
+                   AGX_APPLE9_VIR_IMAD, AGX_APPLE9_VIR_IMUL_WIDE}) {
+      SCOPED_TRACE(op);
+      agx_apple9_vir_program p;
+      agx_apple9_vir_init(&p);
+      uint32_t src[3];
+      for (unsigned i = 0; i < 3; ++i)
+         src[i] = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_GET_GLOBAL_ID,
+            AGX_APPLE9_ENC_GET_SR, nullptr, 0, i);
+      bool wide = op == AGX_APPLE9_VIR_IMUL_WIDE;
+      auto value = wide ? agx_apple9_vir_emit_mul_wide(&p, src, true)
+         : agx_apple9_vir_emit(&p, op,
+              op == AGX_APPLE9_VIR_IMAD ? AGX_APPLE9_ENC_INT_MAD_EXTENDED
+                                       : AGX_APPLE9_ENC_INT_ADD_EXTENDED,
+              src, op == AGX_APPLE9_VIR_IMAD ? 3 : 2, 0);
+      for (unsigned c = 0; c < (wide ? 2u : 1u); ++c) {
+         uint32_t v = value + c;
+         ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_STORE_UNIFORM,
+            AGX_APPLE9_ENC_STORE_UNIFORM, &v, 1, (wide ? 254 : 255) + c));
+      }
+      ASSERT_TRUE(agx_apple9_optimize_vir(&p));
+      unsigned stores = 0;
+      for (unsigned i = 0; i < p.instruction_count; ++i) {
+         auto *I = p.instructions[i];
+         if (I->op != AGX_APPLE9_VIR_STORE_UNIFORM) continue;
+         ++stores;
+         EXPECT_EQ(I->uniform_op, op);
+         EXPECT_EQ(I->uniform_signed, wide);
+         EXPECT_EQ(I->dest, AGX_APPLE9_VREG_INVALID);
+         EXPECT_EQ(I->nr_srcs, op == AGX_APPLE9_VIR_IMAD ? 3 : 2);
+         EXPECT_EQ(I->immediate, wide ? 254u : 255u);
+      }
+      EXPECT_EQ(stores, 1u);
+      auto b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE,
+         &agx_nir_options, "uniform_destination");
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << (reason ?: "");
+      for (unsigned i = 0; i < p.instruction_count; ++i) {
+         auto *I = p.instructions[i];
+         if (I->op != AGX_APPLE9_VIR_STORE_UNIFORM) continue;
+         agx_apple9_packed_instruction packed;
+         ASSERT_TRUE(agx_apple9_pack_vir_instruction(I, p.phys, &packed, &reason)) << (reason ?: "");
+         EXPECT_EQ(packed.bytes[4] & 3, 1);
+         EXPECT_EQ((packed.bytes[3] >> 1) | ((packed.bytes[4] & 1) << 7), wide ? 254 : 255);
+      }
+      ralloc_free(b.shader);
+      agx_apple9_vir_finish(&p);
+   }
+}

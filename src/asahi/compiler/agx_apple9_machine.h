@@ -16,6 +16,7 @@ extern "C" {
 /* Apple9 uses two independently addressable 16-bit halves per 32-bit GPR. */
 #define AGX_APPLE9_PUBLICATION_COUNT 128
 #define AGX_APPLE9_GPR_COUNT           96
+#define AGX_APPLE9_UNIFORM_COUNT       256
 #define AGX_APPLE9_HALF_REGISTER_COUNT (2 * AGX_APPLE9_GPR_COUNT)
 
 enum agx_apple9_evidence {
@@ -85,7 +86,7 @@ struct agx_apple9_operand_constraint {
    /* Inclusive index range in the selected file; 0xff when not applicable. */
    uint8_t min_index;
    uint8_t max_index;
-   /* Independent limit when a floating source also admits uniform words. */
+   /* Independent uniform limit for operands admitting more than one file. */
    uint8_t uniform_max_index;
 
    /* Alignment in 16-bit allocation units. */
@@ -140,6 +141,9 @@ enum agx_apple9_encoding {
    AGX_APPLE9_ENC_LOGIC_EXPORT,
    AGX_APPLE9_ENC_LOGIC_UNIFORM,
    AGX_APPLE9_ENC_STORE_UNIFORM,
+   AGX_APPLE9_ENC_STORE_UNIFORM_ADD,
+   AGX_APPLE9_ENC_STORE_UNIFORM_MAD,
+   AGX_APPLE9_ENC_STORE_UNIFORM_MUL_WIDE,
    AGX_APPLE9_ENC_SHIFT_EXTENDED,
    AGX_APPLE9_ENC_SHIFT_ARITH_REGISTER,
    AGX_APPLE9_ENC_SHIFT_LOGICAL_IMMEDIATE,
