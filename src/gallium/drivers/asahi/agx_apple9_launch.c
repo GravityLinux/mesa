@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "agx_apple9_launch.h"
+#include "asahi/lib/agx_apple9_layout.h"
 #include "asahi/compiler/agx_apple9_encoding.h"
 #include "asahi/compiler/agx_apple9_profile.h"
 
@@ -105,7 +106,7 @@ agx_apple9_launch_build(uint8_t *out, size_t capacity,
    bool compute = stage == AGX_APPLE9_LAUNCH_COMPUTE;
    size_t size = compute ? AGX_APPLE9_COMPUTE_LAUNCH_SIZE
                          : AGX_APPLE9_GRAPHICS_LAUNCH_SIZE;
-   if (capacity < size || params->entry_offset > (0x3ffff - 0x2a) / 2 ||
+   if (capacity < size || params->entry_offset > AGX_APPLE9_ENTRY_MAX_OFFSET ||
        (params->entry_offset & 1) || params->publication_count > 1022 ||
        !pointer_fits(params->shader_base, params->resource_table) ||
        (params->threadgroup_memory_bytes &&

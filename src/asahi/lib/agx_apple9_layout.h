@@ -21,4 +21,7 @@
 #define AGX_APPLE9_RENDER_COLOR_BUFFER_OFFSET \
    (AGX_APPLE9_RENDER_COMPILER_STATE_OFFSET + 0x420u)
 
+/* Compact launch target is 2 * entry_offset + 0x2a in 24 bits. */
+#define AGX_APPLE9_ENTRY_MAX_OFFSET ((0xffffffu - 0x2au) / 2u)
+
 #endif

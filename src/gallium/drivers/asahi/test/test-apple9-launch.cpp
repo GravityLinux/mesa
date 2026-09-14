@@ -51,6 +51,23 @@ TEST(Apple9Launcher, AllStagesUseLiveEntryAndIndependentFrameExtents)
    }
 }
 
+TEST(Apple9Launcher, EntryTargetsCoverCompactArena)
+{
+   auto p = parameters();
+   for (auto stage : {AGX_APPLE9_LAUNCH_VERTEX, AGX_APPLE9_LAUNCH_FRAGMENT,
+                      AGX_APPLE9_LAUNCH_COMPUTE}) {
+      for (unsigned offset : {0x40000u, 0x700000u, 0x7f8000u, 0x7fffeau}) {
+         p.entry_offset = offset;
+         std::array<uint8_t, 1024> out;
+         ASSERT_TRUE(agx_apple9_launch_build(out.data(), out.size(), stage, &p));
+         unsigned call = agx_apple9_launch_call_offset(stage, p.resource_count);
+         unsigned target = out[call] | (out[call + 1] << 8) |
+                           (out[call + 2] << 16);
+         EXPECT_EQ(target, 2 * offset + 0x2a);
+      }
+   }
+}
+
 TEST(Apple9Launcher, ResourceCountsRespectAllocationBounds)
 {
    auto p = parameters();
@@ -110,7 +127,7 @@ TEST(Apple9Launcher, InvalidParametersCannotPublishPartialCode)
    bad = p;
    bad.entry_offset++;
    reject(bad);
-   bad.entry_offset = 0x1ffec;
+   bad.entry_offset = 0x7fffec;
    reject(bad);
    bad.entry_offset = UINT32_MAX;
    reject(bad);
