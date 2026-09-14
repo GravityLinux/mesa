@@ -9465,6 +9465,58 @@ apple9_test_bits(const uint8_t *bytes, unsigned start, unsigned count)
    return value;
 }
 
+TEST(Apple9Packer, NormalizedUnpackOwnsBothOutputsAndPreservesSourceHalf)
+{
+   for (unsigned mode : {2u, 3u, 4u, 6u}) {
+      for (unsigned half : {0u, 1u}) {
+         agx_apple9_vir_instr I = {};
+         I.op = AGX_APPLE9_VIR_UNPACK_NORM; I.encoding = AGX_APPLE9_ENC_UNPACK_NORM;
+         I.dest = 0; I.dest_components = 2; I.src[0] = 2; I.nr_srcs = 1;
+         I.immediate = mode | (half ? AGX_APPLE9_UNPACK_HIGH_HALF : 0);
+         uint8_t phys[] = {94, 95, 65};
+         agx_apple9_packed_instruction packed; const char *reason = nullptr;
+         bool valid = !half || mode == 3 || mode == 6;
+         ASSERT_EQ(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason), valid);
+         if (!valid) continue;
+         EXPECT_EQ(packed.length, 8);
+         EXPECT_EQ(apple9_test_bits(packed.bytes, 25, 7), 94u);
+         EXPECT_EQ(apple9_test_bits(packed.bytes, 42, 7), 65u);
+         EXPECT_EQ(apple9_test_bits(packed.bytes, 41, 1), half);
+         EXPECT_EQ(apple9_test_bits(packed.bytes, 60, 3), mode);
+         EXPECT_EQ(apple9_test_bits(packed.bytes, 52, 1), 1u);
+         I.live_after_mask = 1;
+         ASSERT_TRUE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason));
+         EXPECT_EQ(apple9_test_bits(packed.bytes, 49, 1), 1u);
+         EXPECT_EQ(apple9_test_bits(packed.bytes, 52, 1), 0u);
+         phys[1] = 93;
+         EXPECT_FALSE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason));
+      }
+   }
+}
+
+TEST(Apple9Compiler, NormalizedUnpackSurvivesLoweringAsPairs)
+{
+   for (auto op : {nir_op_unpack_unorm_4x8, nir_op_unpack_snorm_4x8,
+                   nir_op_unpack_unorm_2x16, nir_op_unpack_snorm_2x16}) {
+      nir_builder b = apple9_compute_builder("native_normalized_unpack");
+      nir_def *gid = apple9_global_id_x(&b);
+      nir_def *value = nir_build_alu(&b, op, gid, nullptr, nullptr, nullptr);
+      const unsigned components = value->num_components;
+      for (unsigned c = 0; c < components; ++c)
+         apple9_store_output(&b, nir_iadd_imm(&b, nir_imul_imm(&b, gid, 4), c),
+                             nir_channel(&b, value, c));
+      agx_shader_part compiled = {}; agx_apple9_compute_profile profile = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason)) << reason;
+      const auto *code = static_cast<const uint8_t *>(compiled.binary);
+      unsigned count = 0;
+      for (unsigned i = 0; i + 8 <= compiled.info.main_size; i += 2)
+         count += (code[i] == 0x17 && (code[i + 1] & 15) == 4);
+      EXPECT_EQ(count, components / 2);
+      free(compiled.binary); ralloc_free(b.shader);
+   }
+}
+
 TEST(Apple9Packer, MemoryScaleAndSignedOffsetAreIndependentOfVectorWidth)
 {
    for (bool store : {false, true}) for (unsigned components : {1u, 2u, 3u, 4u}) {

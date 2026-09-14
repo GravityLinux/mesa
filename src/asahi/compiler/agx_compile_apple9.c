@@ -633,6 +633,12 @@ apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
       case nir_op_f2f32:
       case nir_op_pack_half_2x16:
       case nir_op_pack_half_2x16_split:
+      case nir_op_pack_unorm_2x16:
+      case nir_op_pack_unorm_4x8:
+      case nir_op_unpack_unorm_2x16:
+      case nir_op_unpack_snorm_2x16:
+      case nir_op_unpack_unorm_4x8:
+      case nir_op_unpack_snorm_4x8:
       case nir_op_unpack_half_2x16:
       case nir_op_i2i8:
       case nir_op_i2i16:
@@ -1938,6 +1944,40 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                   narrow ? AGX_APPLE9_VIR_F2F16 : AGX_APPLE9_VIR_UNPACK_HALF,
                   narrow ? AGX_APPLE9_ENC_FLOAT_TO_HALF_ZEXT
                          : AGX_APPLE9_ENC_HALF_TO_FLOAT, &source, 1, half);
+         } else if (op == nir_op_unpack_unorm_2x16 || op == nir_op_unpack_snorm_2x16 ||
+                    op == nir_op_unpack_unorm_4x8 || op == nir_op_unpack_snorm_4x8) {
+            bool narrow = op == nir_op_unpack_unorm_4x8 || op == nir_op_unpack_snorm_4x8;
+            bool sign = op == nir_op_unpack_snorm_2x16 || op == nir_op_unpack_snorm_4x8;
+            unsigned mode = narrow ? (sign ? AGX_APPLE9_UNPACK_SNORM8 : AGX_APPLE9_UNPACK_UNORM8)
+                                   : (sign ? AGX_APPLE9_UNPACK_SNORM16 : AGX_APPLE9_UNPACK_UNORM16);
+            if (narrow && scalar.comp >= 2)
+               mode |= AGX_APPLE9_UNPACK_HIGH_HALF;
+            uint32_t source = apple9_lower_dag_source(lower, scalar, 0);
+            if (source == AGX_APPLE9_VREG_INVALID)
+               return source;
+            uint32_t pair = agx_apple9_vir_emit_unpack_norm(&lower->program, source, mode);
+            if (pair == AGX_APPLE9_VREG_INVALID)
+               return pair;
+            unsigned first = scalar.comp & ~1u;
+            lower->ssa_to_vreg[scalar.def->index * 4 + first] = pair;
+            lower->ssa_to_vreg[scalar.def->index * 4 + first + 1] = pair + 1;
+            return pair + (scalar.comp & 1);
+         } else if (op == nir_op_pack_unorm_2x16 ||
+                    op == nir_op_pack_unorm_4x8) {
+            bool bytes = op == nir_op_pack_unorm_4x8;
+            nir_alu_instr *alu = nir_instr_as_alu(nir_def_instr(scalar.def));
+            uint32_t sources[4];
+            for (unsigned c = 0; c < (bytes ? 4 : 2); ++c) {
+               nir_scalar input = nir_get_scalar(alu->src[0].src.ssa,
+                                                 alu->src[0].swizzle[c]);
+               sources[c] = apple9_lower_dag_scalar(lower, input);
+               if (sources[c] == AGX_APPLE9_VREG_INVALID)
+                  return AGX_APPLE9_VREG_INVALID;
+            }
+            value = apple9_dag_emit(lower,
+               bytes ? AGX_APPLE9_VIR_PACK_UNORM_4X8 : AGX_APPLE9_VIR_PACK_UNORM_2X16,
+               bytes ? AGX_APPLE9_ENC_PACK_UNORM_4X8 : AGX_APPLE9_ENC_PACK_UNORM_2X16,
+               sources, bytes ? 4 : 2, 0);
          } else if (op == nir_op_pack_half_2x16 ||
                     op == nir_op_pack_half_2x16_split) {
             nir_alu_instr *alu = nir_instr_as_alu(nir_def_instr(scalar.def));
@@ -4405,6 +4445,25 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
                                  false, reason);
 }
 
+/* Internal shaders can arrive with generic Asahi options. Preserve operations
+ * handled by this backend when running algebraic cleanup after legalization. */
+static bool
+apple9_opt_algebraic(nir_shader *nir)
+{
+   const nir_shader_compiler_options *saved = nir->options;
+   nir_shader_compiler_options options = *saved;
+   options.lower_pack_unorm_2x16 = false;
+   options.lower_pack_unorm_4x8 = false;
+   options.lower_unpack_unorm_2x16 = false;
+   options.lower_unpack_unorm_4x8 = false;
+   options.lower_unpack_snorm_2x16 = false;
+   options.lower_unpack_snorm_4x8 = false;
+   nir->options = &options;
+   bool progress = nir_opt_algebraic(nir);
+   nir->options = saved;
+   return progress;
+}
+
 static void
 apple9_lower_idiv(nir_shader *nir)
 {
@@ -4423,7 +4482,7 @@ apple9_lower_idiv(nir_shader *nir)
       alu_options.has_fcanonicalize = false;
       nir->options = &alu_options;
       nir_lower_alu(nir);
-      nir_opt_algebraic(nir);
+      apple9_opt_algebraic(nir);
       nir_opt_algebraic_late(nir);
       nir->options = original_options;
    }
@@ -5548,7 +5607,7 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
    nir_lower_all_phis_to_scalar(nir);
    bool progress;
    do {
-      progress = nir_opt_algebraic(nir);
+      progress = apple9_opt_algebraic(nir);
       progress |= nir_opt_constant_folding(nir);
       progress |= nir_opt_copy_prop(nir);
       progress |= nir_opt_remove_phis(nir);
@@ -5605,7 +5664,7 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
                                 nir_metadata_control_flow, NULL);
    apple9_lower_idiv(nir);
    /* Format lowering can introduce powers and other high-level ALU ops. */
-   nir_opt_algebraic(nir);
+   apple9_opt_algebraic(nir);
    agx_nir_lower_apple9_math(nir);
    nir_lower_alu_to_scalar(nir, NULL, NULL);
    nir_opt_constant_folding(nir);

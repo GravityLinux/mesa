@@ -410,6 +410,59 @@ TEST(Apple9Packer, WideMultiplyRequiresAlignedAdjacentProductWords)
    EXPECT_FALSE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason));
 }
 
+TEST(Apple9Packer, UnormPackingDefinesBothHalvesWithIndependentSources)
+{
+   uint8_t phys[] = {95, 64, 31, 80, 0};
+   agx_apple9_vir_instr I = {};
+   I.op = AGX_APPLE9_VIR_PACK_UNORM_4X8;
+   I.encoding = AGX_APPLE9_ENC_PACK_UNORM_4X8;
+   I.dest = 0;
+   I.nr_srcs = 4;
+   for (unsigned s = 0; s < 4; ++s)
+      I.src[s] = s + 1;
+   agx_apple9_packed_instruction packed;
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason)) << reason;
+   const uint8_t expected[] = {
+      0x97,0x04,0x54,0xbe,0x02,0x00,0xf9,0x50,0x44,0xc2,
+      0x97,0x04,0x54,0xbf,0x02,0x40,0x01,0x50,0x44,0xc2};
+   ASSERT_EQ(packed.length, sizeof(expected));
+   EXPECT_EQ(memcmp(packed.bytes, expected, sizeof(expected)), 0);
+   /* The second pair must not read a value overwritten by the first. */
+   phys[3] = 95;
+   EXPECT_FALSE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason));
+   phys[3] = 96;
+   EXPECT_FALSE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason));
+}
+
+TEST(Apple9Compiler, NativeUnormPackingSurvivesOrdinaryNirLowering)
+{
+   for (unsigned channels : {2u, 4u}) {
+      nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE,
+         &agx_nir_options, "native_unorm_%u", channels);
+      b.shader->info.workgroup_size[0] = 32;
+      b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
+      b.shader->info.num_ssbos = 2;
+      auto input = nir_load_ssbo(&b, channels, 32, nir_imm_int(&b, 1),
+         nir_imm_int(&b, 0), .access = ACCESS_NON_WRITEABLE, .align_mul = 16);
+      auto value = channels == 4 ? nir_pack_unorm_4x8(&b, input)
+                                  : nir_pack_unorm_2x16(&b, input);
+      nir_store_ssbo(&b, value, nir_imm_int(&b, 0), nir_imm_int(&b, 0), .align_mul = 4);
+      agx_shader_part compiled = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, nullptr, &reason))
+         << channels << ": " << (reason ?: "");
+      unsigned native = 0;
+      auto *code = static_cast<const uint8_t *>(compiled.binary);
+      for (unsigned i = 0; i + 9 < compiled.info.main_size; ++i)
+         native += code[i] == 0x97 && code[i + 1] == 0x04 &&
+                   code[i + 9] == (channels == 4 ? 0xc2 : 0x82);
+      EXPECT_EQ(native, channels / 2);
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
+}
+
 TEST(Apple9Compiler, NativeHalfPackingAndHighMultiplyReachOrdinaryNir)
 {
    for (unsigned operation = 0; operation < 8; ++operation) {

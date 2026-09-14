@@ -556,6 +556,18 @@ agx_apple9_vir_emit_cube(struct agx_apple9_vir_program *program,
 }
 
 uint32_t
+agx_apple9_vir_emit_unpack_norm(struct agx_apple9_vir_program *program,
+                               uint32_t src, unsigned mode)
+{
+   uint32_t value = agx_apple9_vir_emit(program, AGX_APPLE9_VIR_UNPACK_NORM,
+                                       AGX_APPLE9_ENC_UNPACK_NORM, &src, 1, mode);
+   if (value == AGX_APPLE9_VREG_INVALID || !apple9_vir_append_values(program, 1))
+      return AGX_APPLE9_VREG_INVALID;
+   program->instructions[program->instruction_count - 1]->dest_components = 2;
+   return value;
+}
+
+uint32_t
 agx_apple9_vir_emit_mul_wide(struct agx_apple9_vir_program *program,
                             const uint32_t src[2], bool is_signed)
 {
@@ -2020,6 +2032,7 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
           components > program->value_count ||
           instruction->dest > program->value_count - components ||
           (components > 1 && instruction->op != AGX_APPLE9_VIR_DEVICE_LOAD &&
+           instruction->op != AGX_APPLE9_VIR_UNPACK_NORM &&
            instruction->op != AGX_APPLE9_VIR_ITER_FLAT &&
            instruction->op != AGX_APPLE9_VIR_COLLECT &&
            instruction->op != AGX_APPLE9_VIR_PUBLICATION_TUPLE &&
@@ -5280,6 +5293,69 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       *reason = NULL;
 
    switch (instruction->op) {
+   case AGX_APPLE9_VIR_UNPACK_NORM: {
+      unsigned mode = instruction->immediate & 0xff;
+      bool narrow = mode == AGX_APPLE9_UNPACK_UNORM8 || mode == AGX_APPLE9_UNPACK_SNORM8;
+      bool high = instruction->immediate & AGX_APPLE9_UNPACK_HIGH_HALF;
+      unsigned dst = phys[instruction->dest];
+      if (instruction->encoding != AGX_APPLE9_ENC_UNPACK_NORM ||
+          instruction->nr_srcs != 1 || instruction->dest_components != 2 ||
+          (instruction->immediate & ~(0xffu | AGX_APPLE9_UNPACK_HIGH_HALF)) ||
+          (!narrow && mode != AGX_APPLE9_UNPACK_UNORM16 && mode != AGX_APPLE9_UNPACK_SNORM16) ||
+          (high && !narrow) || (dst & 1) || dst + 1 >= AGX_APPLE9_GPR_COUNT ||
+          phys[instruction->dest + 1] != dst + 1 ||
+          phys[instruction->src[0]] >= AGX_APPLE9_GPR_COUNT)
+         return false;
+      uint8_t bytes[8] = {0x17, 0x04, 0x54, 0, 0, 0, 0x04, 0x8a};
+      set_bits(bytes, 25, 7, dst);
+      set_bits(bytes, 41, 1, high);
+      set_bits(bytes, 42, 7, phys[instruction->src[0]]);
+      set_bits(bytes, 49, 1, instruction->live_after_mask & 1);
+      set_bits(bytes, 51, 1, !narrow);
+      set_bits(bytes, 52, 1, !(instruction->live_after_mask & 1));
+      set_bits(bytes, 60, 3, mode);
+      packed_init(packed, bytes, sizeof(bytes));
+      return true;
+   }
+   case AGX_APPLE9_VIR_PACK_UNORM_2X16:
+   case AGX_APPLE9_VIR_PACK_UNORM_4X8: {
+      bool bytes = instruction->op == AGX_APPLE9_VIR_PACK_UNORM_4X8;
+      enum agx_apple9_encoding encoding = bytes ? AGX_APPLE9_ENC_PACK_UNORM_4X8
+                                                : AGX_APPLE9_ENC_PACK_UNORM_2X16;
+      unsigned dst = phys[instruction->dest];
+      if (instruction->encoding != encoding || instruction->immediate ||
+          instruction->nr_srcs != (bytes ? 4 : 2) ||
+          dst >= AGX_APPLE9_GPR_COUNT)
+         return false;
+
+      /* The 8-bit form writes one destination half per pair of FP32 inputs;
+       * the 16-bit form defines the complete word. Keep all inputs until
+       * both halves are written, including repeated/swizzled components.
+       * Shared RA's late-kill contract prevents cross-instruction aliasing.
+       * T8132 probes validate both halves, all seven register bits, clamping
+       * and round-to-nearest-even conversion of the exact scaled input. */
+      uint8_t code[20] = {0};
+      for (unsigned pair = 0; pair < (bytes ? 2 : 1); ++pair) {
+         unsigned a = phys[instruction->src[2 * pair]];
+         unsigned b = phys[instruction->src[2 * pair + 1]];
+         if (a >= AGX_APPLE9_GPR_COUNT || b >= AGX_APPLE9_GPR_COUNT ||
+             a == dst || b == dst)
+            return false;
+         uint8_t *part = code + 10 * pair;
+         memcpy(part, (uint8_t[]){0x97, 0x04, 0x56, 0, 0x02,
+                                  0, 0, 0x50, 0x44, 0x82}, 10);
+         set_bits(part, 25, 7, dst);
+         set_bits(part, 42, 7, a);
+         set_bits(part, 51, 7, b);
+         if (bytes) {
+            part[2] = 0x54;
+            set_bits(part, 24, 1, pair);
+            part[9] = 0xc2;
+         }
+      }
+      packed_init(packed, code, bytes ? 20 : 10);
+      return true;
+   }
    case AGX_APPLE9_VIR_F2F16:
    case AGX_APPLE9_VIR_PACK_HALF_2X16:
    case AGX_APPLE9_VIR_UNPACK_HALF: {

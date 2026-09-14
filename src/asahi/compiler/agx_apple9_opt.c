@@ -13,7 +13,8 @@
 bool
 agx_apple9_instr_is_pure_alu(const struct agx_apple9_vir_instr *I)
 {
-   if ((I->dest_components != 1 && I->op != AGX_APPLE9_VIR_IMUL_WIDE) ||
+   if ((I->dest_components != 1 && I->op != AGX_APPLE9_VIR_IMUL_WIDE &&
+        I->op != AGX_APPLE9_VIR_UNPACK_NORM) ||
        I->publication_handoff ||
        I->encoding == AGX_APPLE9_ENC_FLOAT2_EXPORT ||
        I->encoding == AGX_APPLE9_ENC_LOGIC_EXPORT)
@@ -27,7 +28,10 @@ agx_apple9_instr_is_pure_alu(const struct agx_apple9_vir_instr *I)
    case AGX_APPLE9_VIR_F2U32:
    case AGX_APPLE9_VIR_F2F16:
    case AGX_APPLE9_VIR_PACK_HALF_2X16:
+   case AGX_APPLE9_VIR_PACK_UNORM_2X16:
+   case AGX_APPLE9_VIR_PACK_UNORM_4X8:
    case AGX_APPLE9_VIR_UNPACK_HALF:
+   case AGX_APPLE9_VIR_UNPACK_NORM:
    case AGX_APPLE9_VIR_IADD:
    case AGX_APPLE9_VIR_IMUL:
    case AGX_APPLE9_VIR_ISUB:

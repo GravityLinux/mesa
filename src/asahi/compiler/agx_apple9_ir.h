@@ -44,8 +44,12 @@ enum agx_apple9_vir_opcode {
    /* Native binary16 conversions. Values still occupy 32-bit SSA registers. */
    AGX_APPLE9_VIR_F2F16,
    AGX_APPLE9_VIR_PACK_HALF_2X16,
+   AGX_APPLE9_VIR_PACK_UNORM_2X16,
+   AGX_APPLE9_VIR_PACK_UNORM_4X8,
    /* immediate selects the low (0) or high (1) half of the source. */
    AGX_APPLE9_VIR_UNPACK_HALF,
+   /* Two normalized components to FP32. Mode plus input half in immediate. */
+   AGX_APPLE9_VIR_UNPACK_NORM,
    AGX_APPLE9_VIR_IADD,
    AGX_APPLE9_VIR_IMUL,
    AGX_APPLE9_VIR_ISUB,
@@ -119,6 +123,14 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_SPILL_STORE,
    AGX_APPLE9_VIR_SPILL_LOAD,
 };
+
+enum agx_apple9_unpack_norm_mode {
+   AGX_APPLE9_UNPACK_SNORM16 = 2,
+   AGX_APPLE9_UNPACK_SNORM8 = 3,
+   AGX_APPLE9_UNPACK_UNORM16 = 4,
+   AGX_APPLE9_UNPACK_UNORM8 = 6,
+};
+#define AGX_APPLE9_UNPACK_HIGH_HALF (1u << 8)
 
 /* Shared native five-bit operation selector used by the device and
  * threadgroup atomic families.  The current compiler emits the independently
@@ -488,6 +500,8 @@ uint32_t agx_apple9_vir_emit_device_load(
  * Modes 1/2 return the signed half-coordinate for U/V, respectively. */
 uint32_t agx_apple9_vir_emit_cube(struct agx_apple9_vir_program *program,
                                  const uint32_t src[3], unsigned mode);
+uint32_t agx_apple9_vir_emit_unpack_norm(struct agx_apple9_vir_program *program,
+                                        uint32_t src, unsigned mode);
 uint32_t agx_apple9_vir_emit_mul_wide(struct agx_apple9_vir_program *program,
                                      const uint32_t src[2], bool is_signed);
 

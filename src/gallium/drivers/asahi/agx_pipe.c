@@ -2864,6 +2864,12 @@ agx_screen_create(int fd, struct renderonly *ro,
 
    agx_screen->apple9_nir_options = agx_nir_options;
    agx_screen->apple9_nir_options.disable_inter_shader_code_motion = true;
+   agx_screen->apple9_nir_options.lower_pack_unorm_2x16 = false;
+   agx_screen->apple9_nir_options.lower_pack_unorm_4x8 = false;
+   agx_screen->apple9_nir_options.lower_unpack_unorm_2x16 = false;
+   agx_screen->apple9_nir_options.lower_unpack_unorm_4x8 = false;
+   agx_screen->apple9_nir_options.lower_unpack_snorm_2x16 = false;
+   agx_screen->apple9_nir_options.lower_unpack_snorm_4x8 = false;
    const nir_shader_compiler_options *nir_options =
       agx_apple9_compute_enabled(&agx_screen->dev)
          ? &agx_screen->apple9_nir_options
