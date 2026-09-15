@@ -729,12 +729,10 @@ agx_open_device(void *memctx, struct agx_device *dev)
                       fixed_apple9_usc_base ? context_end - context_start : 0);
    dev->context_heap.alloc_high = false;
 
-   /*
-    * Apple9 launch wrappers encode their address as a compact 8-KiB chunk
-    * relative to the queue's USC base.  Allocate the queue entry table and batch
-    * packages from the bottom of the USC heap so they remain in that compact
-    * window.  Older generations use 32-bit USC offsets and retain Mesa's
-    * usual high-to-low allocation policy.
+   /* The compact Apple9 entry arena must start at the USC base. Allocate
+    * it first from the bottom of the heap; shader bodies and batch state can
+    * use the remaining 4-GiB aperture. Resource tables use full addresses.
+    * Older generations retain Mesa's usual high-to-low allocation policy.
     */
    if (dev->params.gpu_generation >= 16)
       dev->usc_heap.alloc_high = false;

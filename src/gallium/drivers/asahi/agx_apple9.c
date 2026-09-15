@@ -760,22 +760,31 @@ agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
    for (unsigned rt = 0; rt < pipeline->fragment.render_targets; rt++)
       tile_bytes += 4 * agx_apple9_color_words(pipeline->color_formats[rt]);
    unsigned samples = MAX2(pipeline->samples, 1);
-   if (tile_bytes > (samples == 1 ? 128 : 64))
+   if (tile_bytes > (samples == 1 ? 128 : 64)) {
+      fprintf(stderr, "Apple9 draw: unsupported tile allocation %u bytes, %u samples\n",
+              tile_bytes, samples);
       return false;
+   }
    draw->samples = samples;
    draw->tile_bytes = tile_bytes;
    for (unsigned stage = 0; stage < 2; stage++) {
       const struct agx_apple9_render_stage *shader = stages[stage];
-      if (!shader->bo || !shader->publication_count_valid)
+      if (!shader->bo || !shader->publication_count_valid) {
+         fprintf(stderr, "Apple9 draw: stage %u missing shader BO or publication count\n",
+                 stage);
          return false;
+      }
       draw->program_id[stage] = shader->program_id;
       draw->code[stage] = shader->bo->va->addr;
    }
    unsigned offsets[2];
    for (unsigned stage = 0; stage < 2; stage++) {
       offsets[stage] = apple9_shader_entry(dev, stages[stage]->bo, false);
-      if (!offsets[stage])
+      if (!offsets[stage]) {
+         fprintf(stderr, "Apple9 draw: stage %u entry allocation failed for code 0x%llx\n",
+                 stage, (unsigned long long)draw->code[stage]);
          return false;
+      }
    }
    for (unsigned stage = 0; stage < 2; stage++) {
       const struct agx_apple9_render_stage *shader = stages[stage];
@@ -795,8 +804,12 @@ agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
       }
       if (shader->preamble_size > AGX_APPLE9_MAX_PREAMBLE_BYTES ||
           shader->preamble_offset > shader->binary_size ||
-          shader->preamble_size > shader->binary_size - shader->preamble_offset)
+          shader->preamble_size > shader->binary_size - shader->preamble_offset) {
+         fprintf(stderr, "Apple9 draw: stage %u invalid preamble offset %u size %u in binary %zu\n",
+                 stage, shader->preamble_offset, shader->preamble_size,
+                 (size_t)shader->binary_size);
          return false;
+      }
       unsigned launch_size = AGX_APPLE9_GRAPHICS_LAUNCH_SIZE;
       struct agx_ptr state = agx_pool_alloc_aligned(usc_pool, 0x100 + launch_size, 64);
       uint8_t *roots = state.cpu;
@@ -820,8 +833,20 @@ agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
       if (!agx_apple9_launch_build(
              roots + 0x100, launch_size,
              stage ? AGX_APPLE9_LAUNCH_FRAGMENT : AGX_APPLE9_LAUNCH_VERTEX,
-             &params))
+             &params)) {
+         fprintf(stderr,
+                 "Apple9 draw: stage %u launch rejected: entry=0x%x "
+                 "base=0x%llx roots=0x%llx launch=0x%llx preamble=0x%llx "
+                 "publications=%u scratch=%u tile=%u samples=%u\n",
+                 stage, params.entry_offset,
+                 (unsigned long long)params.shader_base,
+                 (unsigned long long)params.resource_table,
+                 (unsigned long long)params.launch_address,
+                 (unsigned long long)params.preamble_address,
+                 params.publication_count, params.frame_extent_a,
+                 params.tile_bytes, params.samples);
          return false;
+      }
       draw->launch[stage] = agx_usc_addr(dev, state.gpu + 0x100);
    }
    bool reuse_coefficients = previous && pipeline->vertex.program_id &&

@@ -15,12 +15,6 @@ write16(uint8_t *p, uint16_t value)
    p[1] = value >> 8;
 }
 
-static bool
-pointer_fits(uint64_t base, uint64_t address)
-{
-   return address >= base && ((address - base) >> 13) <= UINT16_MAX;
-}
-
 bool
 agx_apple9_launch_threadgroup_memory_supported(uint32_t bytes)
 {
@@ -108,7 +102,6 @@ agx_apple9_launch_build(uint8_t *out, size_t capacity,
                          : AGX_APPLE9_GRAPHICS_LAUNCH_SIZE;
    if (capacity < size || params->entry_offset > AGX_APPLE9_ENTRY_MAX_OFFSET ||
        (params->entry_offset & 1) || params->publication_count > 1022 ||
-       !pointer_fits(params->shader_base, params->resource_table) ||
        (params->threadgroup_memory_bytes &&
         (!compute || !agx_apple9_launch_threadgroup_memory_supported(
                         params->threadgroup_memory_bytes))) ||
@@ -122,6 +115,8 @@ agx_apple9_launch_build(uint8_t *out, size_t capacity,
    /* Build privately so even an encoder failure cannot publish partial code. */
    uint8_t program[AGX_APPLE9_COMPUTE_LAUNCH_SIZE] = {0};
    const unsigned root = 2, pending = 18;
+   /* Table loads use a full address in a GPR pair. They have no compact
+    * USC-relative pointer field or 512-MiB placement restriction. */
    agx_apple9_encode_literal32(program, root, params->resource_table);
    agx_apple9_encode_literal32(program + 8, root + 1,
                                params->resource_table >> 32);

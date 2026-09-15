@@ -104,6 +104,31 @@ TEST(Apple9Launcher, ResourceCountsRespectAllocationBounds)
    }
 }
 
+TEST(Apple9Launcher, ResourceTablesUseFullAddresses)
+{
+   auto p = parameters();
+   /* Decode the two literal operands independently of their emitter. */
+   auto literal = [](const uint8_t *bytes) -> uint32_t {
+      return (bytes[1] & 0x7fu) | ((bytes[4] & 0x1eu) << 6) |
+             ((bytes[5] & 0xcu) << 9) | (uint32_t(bytes[6]) << 13) |
+             ((bytes[7] & 0xfu) << 21) | ((bytes[3] & 0xfeu) << 24);
+   };
+   for (auto stage : {AGX_APPLE9_LAUNCH_VERTEX, AGX_APPLE9_LAUNCH_FRAGMENT,
+                     AGX_APPLE9_LAUNCH_COMPUTE}) {
+      for (uint64_t address : {p.shader_base - 0x1000,
+                               p.shader_base + 0x1fffffc0,
+                               p.shader_base + 0x20000000,
+                               p.shader_base + 0x80000000,
+                               p.shader_base + 0xfffff000}) {
+         p.resource_table = address;
+         std::array<uint8_t, 1024> out;
+         ASSERT_TRUE(agx_apple9_launch_build(out.data(), out.size(), stage, &p));
+         EXPECT_EQ(literal(out.data()), uint32_t(address));
+         EXPECT_EQ(literal(out.data() + 8), uint32_t(address >> 32));
+      }
+   }
+}
+
 TEST(Apple9Launcher, InvalidParametersCannotPublishPartialCode)
 {
    auto p = parameters();
@@ -120,11 +145,6 @@ TEST(Apple9Launcher, InvalidParametersCannotPublishPartialCode)
    reject(p, AGX_APPLE9_LAUNCH_VERTEX, 255);
    reject(p, static_cast<agx_apple9_launch_stage>(3));
    auto bad = p;
-   bad.resource_table = p.shader_base - 1;
-   reject(bad);
-   bad.resource_table = p.shader_base + 0x20000000;
-   reject(bad);
-   bad = p;
    bad.entry_offset++;
    reject(bad);
    bad.entry_offset = 0x7fffec;
