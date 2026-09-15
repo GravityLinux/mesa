@@ -560,4 +560,8 @@
    DRI_CONF_OPT_B(asahi_no_fp16, def, \
                   "Disable 16-bit float support")
 
+#define DRI_CONF_ASAHI_NO_VENDOR_IN_RENDERER(def) \
+   DRI_CONF_OPT_B(asahi_no_vendor_in_renderer, def, \
+                 "Hide the vendor in the renderer name for web compatibility")
+
 #endif
