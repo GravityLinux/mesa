@@ -767,6 +767,15 @@
     <field name="Block Type" size="3" start="29" type="VDM Block Type" exact="Barrier"/>
   </struct>
 
+  <!-- T8132 render-batch coherency requires bits 0, 1 and 4 together. The
+       individual cache domains are not yet established. -->
+  <struct name="VDM Barrier G16" size="4">
+    <field name="Unk 0" size="1" start="0" type="bool"/>
+    <field name="Unk 1" size="1" start="1" type="bool"/>
+    <field name="Unk 4" size="1" start="4" type="bool"/>
+    <field name="Block Type" size="3" start="29" type="VDM Block Type" exact="Barrier"/>
+  </struct>
+
   <enum name="Index size">
     <value name="U8" value="0"/>
     <value name="U16" value="1"/>

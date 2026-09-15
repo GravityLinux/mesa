@@ -3805,11 +3805,20 @@ agx_batch_init_state(struct agx_batch *batch)
    bool apple9_direct =
       agx_apple9_direct_render_enabled(agx_device(batch->ctx->base.screen));
 
-   if (!apple9_direct) {
+   if (apple9_direct) {
+      /* Completed render work can leave stale resources cached for the next
+       * batch. T8132 requires all three bits; the older USC-invalidate bit
+       * alone does not make texture, sampler and depth/stencil reuse coherent.
+       */
+      agx_push(out, VDM_BARRIER_G16, cfg) {
+         cfg.unk_0 = true;
+         cfg.unk_1 = true;
+         cfg.unk_4 = true;
+      }
+   } else {
       /* Barrier to enforce GPU-CPU coherency, in case this batch is back to
        * back with another that caused stale data to be cached and the CPU
-       * wrote to it in the meantime.  Apple9 uses a different barrier packet;
-       * the bounded direct stream starts at its complete vertex envelope.
+       * wrote to it in the meantime.
        */
       agx_push(out, VDM_BARRIER, cfg) {
          cfg.usc_cache_inval = true;
