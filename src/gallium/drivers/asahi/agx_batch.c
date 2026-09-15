@@ -79,15 +79,17 @@ agx_batch_mark_complete(struct agx_batch *batch)
 }
 
 struct agx_encoder
-agx_encoder_allocate(struct agx_batch *batch, struct agx_device *dev)
+agx_encoder_allocate(struct agx_device *dev, bool vdm)
 {
-   struct agx_bo *bo = agx_bo_create(dev, 0x80000, 0, 0, "Encoder");
+   unsigned flags = vdm && agx_apple9_direct_render_enabled(dev)
+                       ? AGX_BO_CONTEXT | AGX_BO_WRITEBACK
+                       : 0;
+   struct agx_bo *bo = agx_bo_create(dev, 0x80000, 0, flags, "Encoder");
    uint8_t *map = agx_bo_map(bo);
    return (struct agx_encoder){
       .bo = bo,
       .current = map,
       .end = map + bo->size,
-      .gpu = bo->va->addr,
    };
 }
 
@@ -127,10 +129,10 @@ agx_batch_init(struct agx_context *ctx,
    batch->apple9_draw_count = 0;
 
    if (agx_batch_is_compute(batch)) {
-      batch->cdm = agx_encoder_allocate(batch, dev);
+      batch->cdm = agx_encoder_allocate(dev, false);
       memset(&batch->vdm, 0, sizeof(batch->vdm));
    } else {
-      batch->vdm = agx_encoder_allocate(batch, dev);
+      batch->vdm = agx_encoder_allocate(dev, true);
       memset(&batch->cdm, 0, sizeof(batch->cdm));
    }
 

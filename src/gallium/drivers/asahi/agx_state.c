@@ -4337,7 +4337,7 @@ agx_ensure_cmdbuf_has_space(struct agx_batch *batch, struct agx_encoder *enc,
     *
     * 0x200 is not enough. 0x400 seems to work. 0x800 for safety.
     */
-   space += link_length + 0x800;
+   space += link_length + AGX_ENCODER_PADDING;
 
    /* If there is room in the command buffer, we're done */
    if (likely((enc->end - enc->current) >= space))
@@ -4347,10 +4347,22 @@ agx_ensure_cmdbuf_has_space(struct agx_batch *batch, struct agx_encoder *enc,
     * by the batch to simplify lifetime management for the BO.
     */
    size_t size = 65536;
-   struct agx_ptr T = agx_pool_alloc_aligned(&batch->pool, size, 256);
+   bool context_relative = enc->bo->flags & AGX_BO_CONTEXT;
+   struct agx_pool *pool = context_relative ? &batch->apple9_context_pool
+                                          : &batch->pool;
+   struct agx_ptr T = agx_pool_alloc_aligned(pool, size, 256);
 
-   /* Jump from the old command buffer to the new command buffer */
-   agx_cs_jump((uint32_t *)enc->current, T.gpu, vdm);
+   /* Apple9 VDM links use a 32-bit render-context offset, like the stream
+    * base and PPP records. Keep every continuation in that same heap.
+    */
+   uint64_t target = T.gpu;
+   if (context_relative) {
+      assert(vdm && target >= AGX_APPLE9_RENDER_CONTEXT_BASE &&
+             target - AGX_APPLE9_RENDER_CONTEXT_BASE <= UINT32_MAX);
+      target -= AGX_APPLE9_RENDER_CONTEXT_BASE;
+   }
+
+   agx_cs_jump((uint32_t *)enc->current, target, vdm);
 
    /* Swap out the command buffer */
    enc->current = T.cpu;
@@ -4365,7 +4377,7 @@ agx_ia_update(struct agx_batch *batch, const struct pipe_draw_info *info,
    struct agx_device *dev = agx_device(ctx->base.screen);
 
    if (!batch->cdm.bo) {
-      batch->cdm = agx_encoder_allocate(batch, dev);
+      batch->cdm = agx_encoder_allocate(dev, false);
    }
 
    uint64_t ia_vertices = agx_get_query_address(
@@ -4593,7 +4605,7 @@ agx_launch_gs_prerast(struct agx_batch *batch,
     * yet. Allocate that so we can start enqueueing compute work.
     */
    if (!batch->cdm.bo) {
-      batch->cdm = agx_encoder_allocate(batch, dev);
+      batch->cdm = agx_encoder_allocate(dev, false);
    }
 
    agx_ensure_cmdbuf_has_space(
@@ -4738,7 +4750,7 @@ agx_draw_without_restart(struct agx_batch *batch,
 
    /* Next, we unroll the index buffer used by the indirect draw */
    if (!batch->cdm.bo)
-      batch->cdm = agx_encoder_allocate(batch, dev);
+      batch->cdm = agx_encoder_allocate(dev, false);
 
    /* Allocate output indirect draw descriptors. This is exact. */
    struct agx_resource out_draws_rsrc = {0};
@@ -5063,7 +5075,7 @@ agx_draw_patches(struct agx_context *ctx, const struct pipe_draw_info *info,
    agx_batch_init_state(batch);
 
    if (!batch->cdm.bo) {
-      batch->cdm = agx_encoder_allocate(batch, dev);
+      batch->cdm = agx_encoder_allocate(dev, false);
    }
 
    agx_upload_draw_params(batch, indirect, draws, info);
@@ -6382,13 +6394,12 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
          return;
       }
 
-      /* Replace the previous terminator when appending another direct draw.
-       * Each draw carries its own vertex/PPP state, matching the G17 encoder's
-       * append-only command-buffer model without assuming state persistence. */
-      uint8_t *append = batch->vdm.current - (batch->draws ? 4 : 0);
+      /* Keep current at the terminator, so both another draw and a stream
+       * link replace it. A newly linked buffer starts at current directly.
+       */
       out = agx_apple9_emit_direct_draw(
-         append, &pipeline, draws->count, info->instance_count,
-         info->index_size ? draws->index_bias : draws->start);
+         batch->vdm.current, &pipeline, draws->count, info->instance_count,
+         info->index_size ? draws->index_bias : draws->start) - sizeof(uint32_t);
       agx_batch_add_bo(batch, dev->apple9_entries);
    } else {
       out = agx_encode_state(batch, batch->vdm.current);
@@ -6924,7 +6935,7 @@ agx_decompress_inplace(struct agx_batch *batch, struct pipe_surface *surf,
    perf_debug(dev, "Decompressing in-place due to: %s", reason);
 
    if (!batch->cdm.bo)
-      batch->cdm = agx_encoder_allocate(batch, dev);
+      batch->cdm = agx_encoder_allocate(dev, false);
 
    struct agx_ptr images = agx_pool_alloc_aligned(
       &batch->pool, sizeof(struct libagx_decompress_images), 64);

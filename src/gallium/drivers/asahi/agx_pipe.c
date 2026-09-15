@@ -1700,13 +1700,12 @@ agx_flush_render(struct agx_context *ctx, struct agx_batch *batch,
 
    assert(batch->initialized);
 
-   /* The bounded Apple9 direct encoder carries the native 4-byte stream
-    * terminator in every draw so another draw can replace it in place.  The
-    * generic finalizer below used to append a second terminator after the
-   * last draw; caller-owned T8132 streams end at the first one. */
+   /* Apple9 keeps current at the native terminator emitted by the last draw.
+    * Appending either a draw or a buffer link replaces that terminator.
+    */
    if (batch->apple9_render_initialized) {
       uint32_t terminator;
-      memcpy(&terminator, batch->vdm.current - 4, sizeof(terminator));
+      memcpy(&terminator, batch->vdm.current, sizeof(terminator));
       assert(terminator == 0xc0000000);
    } else {
       uint8_t stop[5 + 64] = {0x00, 0x00, 0x00, 0xc0, 0x00};
@@ -1748,14 +1747,8 @@ agx_flush_render(struct agx_context *ctx, struct agx_batch *batch,
     */
    agx_batch_add_bo(batch, batch->vdm.bo);
 
-   uint64_t encoder = batch->vdm.gpu;
-   if (agx_apple9_direct_render_enabled(dev)) {
-      size_t bytes = batch->vdm.current - (uint8_t *)agx_bo_map(batch->vdm.bo);
-      encoder = agx_pool_upload_aligned(&batch->apple9_context_pool,
-                                        agx_bo_map(batch->vdm.bo), bytes, 64);
-   }
-
-   agx_cmdbuf(dev, cmdbuf, &batch->pool, batch, &batch->key, encoder, scissor,
+   agx_cmdbuf(dev, cmdbuf, &batch->pool, batch, &batch->key,
+              batch->vdm.bo->va->addr, scissor,
               zbias, agx_get_occlusion_heap(batch), pipeline_background,
               pipeline_background_partial, pipeline_store,
               clear_pipeline_textures, batch->clear_depth, batch->clear_stencil,

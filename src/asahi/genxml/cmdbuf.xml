@@ -925,6 +925,7 @@
        STREAM_LINK0 struct in mesa/src/imagination/csbgen/rogue_vdm.xml for a
        probable definition -->
   <struct name="VDM Stream Link" size="8">
+    <!-- G16 uses a 32-bit render-context offset: Target hi must be zero. -->
     <field name="Target hi" size="8" start="0" type="hex"/>
     <field name="With return" size="1" start="28" type="bool"/>
     <field name="Block Type" size="3" start="29" type="VDM Block Type" exact="Stream Link"/>

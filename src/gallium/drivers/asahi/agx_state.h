@@ -388,14 +388,15 @@ uint16_t agx_sampler_heap_add(struct agx_device *dev,
                               struct agx_sampler_heap *heap,
                               struct agx_sampler_packed *sampler);
 
+/* Command fetch can read past the terminator. Every encoder allocation must
+ * preserve this mapped tail, even if no more commands will be added.
+ */
+#define AGX_ENCODER_PADDING 0x800
+
 struct agx_encoder {
    struct agx_bo *bo;
    uint8_t *current;
    uint8_t *end;
-
-   /* GPU address consumed by the command. Usually bo->va->addr; Apple9
-    * submission copies render encoders to the serialized render context. */
-   uint64_t gpu;
 };
 
 struct agx_batch {
@@ -1235,8 +1236,7 @@ void agx_resource_copy_region(struct pipe_context *pctx,
 
 /* Batch logic */
 
-struct agx_encoder agx_encoder_allocate(struct agx_batch *batch,
-                                        struct agx_device *dev);
+struct agx_encoder agx_encoder_allocate(struct agx_device *dev, bool vdm);
 
 void agx_batch_init_state(struct agx_batch *batch);
 
