@@ -73,6 +73,37 @@ for adjacent-state reuse. Obsolete global framebuffer/context publication,
 the separate USC header alias and fixed render-context mapping are removed.
 Color load/store helpers keep their own batch launch handles.
 
+VDM commands are encoded directly into their final GPU allocations. The initial
+encoder BO comes from the render-context heap; rollover allocations come from
+the batch's context pool. Submission uses the initial BO's address without
+relocating or copying command bytes. Each allocation retains the ordinary
+0x800-byte mapped command-fetch tail, including after links and terminators.
+The CPU cursor points at the native terminator, so appending a draw or a link
+replaces it without stepping before a newly allocated continuation buffer.
+
+Each render batch starts with a native VDM barrier, encoded as `0x20000013`
+on T8132. Asynchronous depth/stencil blits and texture/sampler reuse need bits
+0, 1 and 4 together. Clearing any of these bits from the tested `0xff` mask
+reproduced failures; the reduced `0x13` mask passed. The older USC invalidate
+bit 3 alone did not suffice. The individual cache domains are not yet known.
+The packet belongs at batch initialization, before the first vertex envelope;
+it does not add a CPU wait or a submission fence.
+
+On T8132, a VDM stream link encodes a 32-bit offset from the render-context
+base, with the old high-address field zero. An otherwise intact 10,002-draw
+stream with 11 absolute-address links failed the tiling event; changing only
+those links to context-relative addresses completed three replays. The normal
+GLES path then passed rollover-boundary sweeps and 100,000-draw workloads for
+both indexed and non-indexed draws.
+
+The mapped tail is necessary because command fetch can overread. A T8132
+Minecraft capture failed as its relocated stream reached within 0x400 bytes
+of an unmapped page; mapping that following page made the unchanged frame
+complete 100 times. The previous copy path lost the padding when allocating
+only the command bytes. Direct allocation preserves the encoder's existing
+guarantee by construction. These observations establish the overread hazard;
+they do not establish the exact hardware fetch width.
+
 T8132 placement experiments executed graphics and compute entries beyond the
 former 18-bit target limit, including +0x7f8000 and +0x7f0000 respectively.
 The target occupies all 24 bits of `2 * entry_offset + 0x2a`; the builder
