@@ -358,6 +358,15 @@ poly_load_per_vertex_input(nir_builder *b, nir_intrinsic_instr *intr,
 static bool
 lower_gs_inputs(nir_builder *b, nir_intrinsic_instr *intr, void *_)
 {
+   /* The common passthrough GS represents gl_PrimitiveIDIn as a scalar
+    * shader input. Normalize it before cloning the compute/raster variants. */
+   if (intr->intrinsic == nir_intrinsic_load_input &&
+       nir_intrinsic_io_semantics(intr).location == VARYING_SLOT_PRIMITIVE_ID) {
+      b->cursor = nir_before_instr(&intr->instr);
+      nir_def_replace(&intr->def, nir_load_primitive_id(b));
+      return true;
+   }
+
    if (intr->intrinsic != nir_intrinsic_load_per_vertex_input)
       return false;
 
@@ -520,6 +529,7 @@ struct lower_gs_rast_state {
    bool points;
 
    nir_variable *output_strip_length, *output_strip_base, *id_in_strip;
+   nir_def *xfb_count[NIR_MAX_XFB_STREAMS];
 };
 
 static void
@@ -607,6 +617,7 @@ lower_to_gs_rast(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    }
 
    case nir_intrinsic_set_vertex_and_primitive_count:
+      state->xfb_count[nir_intrinsic_stream_id(intr)] = intr->src[2].ssa;
       nir_instr_remove(&intr->instr);
       return true;
 
@@ -794,6 +805,11 @@ create_gs_rast_shader(const nir_shader *gs, const struct lower_gs_state *state)
             nir_xfb_output_info output = xfb->outputs[i];
             unsigned stream = xfb->buffer_to_stream[output.buffer];
             nir_push_if(b, nir_ieq_imm(b, rs.stream, stream));
+            /* A zero-output invocation may rasterize a dummy culled primitive
+             * to execute shader side effects. It has no transform-feedback
+             * primitive, and must not overwrite the next invocation's data. */
+            assert(rs.xfb_count[stream]);
+            nir_push_if(b, nir_ine_imm(b, rs.xfb_count[stream], 0));
 
             /* Get the index of this primitive in the XFB buffer. That is, the
              * base for this invocation for the stream plus the offset within
@@ -836,6 +852,7 @@ create_gs_rast_shader(const nir_shader *gs, const struct lower_gs_state *state)
                nir_store_global(
                   b, nir_channels(b, value, output.component_mask), addr);
             }
+            nir_pop_if(b, NULL);
             nir_pop_if(b, NULL);
             nir_pop_if(b, NULL);
          }
