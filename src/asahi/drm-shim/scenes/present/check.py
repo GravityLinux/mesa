@@ -26,7 +26,7 @@ env.update(PYTHONPATH=f'{m1n1}/proxyclient:{sysconfig.get_paths()["purelib"]}',
     MESA_LOADER_DRIVER_OVERRIDE='asahi', MESA_SHADER_CACHE_DISABLE='true',
     ASAHI_MESA_DEBUG='nocompress', EGL_PLATFORM='surfaceless',
     G16G_RENDER_SOURCE='1', G16G_EXECUTE_MESA_RENDER='1',
-    G16G_MESA_RENDER_STAGE='direct', AGX_APPLE9_DIRECT_RENDER='1',
+    G16G_MESA_RENDER_STAGE='direct',
     G16G_RENDER_PRESENT='tiled-bgra8', G16G_RENDER_PRESENT_ON_SWAP='1')
 expected = {'red': (255,0,0), 'still-red': (255,0,0), 'blue': (0,0,255),
     'blue-repeat': (0,0,255), 'yellow-small': (255,255,0), 'blue-restored': (0,0,255), 'cyan-pending': (0,255,255), 'cyan-invalid-swap': (0,255,255)}

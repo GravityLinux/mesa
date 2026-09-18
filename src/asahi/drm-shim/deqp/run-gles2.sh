@@ -9,7 +9,7 @@ export M1N1_SHIM_ROOT=${M1N1_SHIM_ROOT:-$workspace/m1n1-m4-agx}
 export DEQP_MESA_BUILD=${MESA_BUILD:-$workspace/mesa-m1n1-build}
 export M1N1_SHIM_LIBRARY=$DEQP_MESA_BUILD/src/asahi/drm-shim/libasahi_noop_drm_shim.so
 export G16G_RENDER_SOURCE=1 G16G_EXECUTE_MESA_RENDER=1
-export G16G_MESA_RENDER_STAGE=direct AGX_APPLE9_DIRECT_RENDER=1
+export G16G_MESA_RENDER_STAGE=direct
 export G16G_RENDER_PRESENT=tiled-bgra8 G16G_RENDER_PRESENT_ON_SWAP=1
 export G16G_NATIVE_EXECUTOR=1 EGL_PLATFORM=surfaceless
 export DEQP_BINARY=${DEQP_BINARY:-$workspace/deqp-build/modules/gles2/deqp-gles2}

@@ -56,7 +56,7 @@ native Linux T8132 driver in batches of 64, using a 256-by-256 pbuffer and
 Separate runs exercise multisample default-framebuffer varying linkage.
 
 The harness sets `EGL_PLATFORM=surfaceless`, `ASAHI_MESA_DEBUG=nocompress`,
-`AGX_APPLE9_DIRECT_RENDER=1`, `MESA_GLES_VERSION_OVERRIDE=3.0`, and
+`MESA_GLES_VERSION_OVERRIDE=3.0`, and
 `MESA_GLSL_VERSION_OVERRIDE=300`, and loads the development Mesa library.
 Shader caching is enabled. A batch timeout or device submission error stops
 the sweep. QPA files, case lists, logs, and parsed results are retained rather
