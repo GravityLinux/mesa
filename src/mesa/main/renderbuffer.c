@@ -473,6 +473,16 @@ _mesa_map_renderbuffer(struct gl_context *ctx,
    const enum pipe_map_flags transfer_flags =
       _mesa_access_flags_to_transfer_flags(mode, false);
 
+   /* A window-system loader may not supply the requested attachment (for
+    * example, a front buffer on Wayland).  Treat this like any other failed
+    * mapping instead of dereferencing the missing resource below.
+    */
+   if (!rb->texture) {
+      *mapOut = NULL;
+      *rowStrideOut = 0;
+      return;
+   }
+
    /* Note: y=0=bottom of buffer while y2=0=top of buffer.
     * 'invert' will be true for window-system buffers and false for
     * user-allocated renderbuffers and textures.
