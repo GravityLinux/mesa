@@ -144,6 +144,16 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_DEVICE_STORE,
    AGX_APPLE9_VIR_DEVICE_ATOMIC,
    AGX_APPLE9_VIR_DEVICE_ATOMIC_RESULT,
+   AGX_APPLE9_VIR_SUBGROUP_SCAN_IADD,
+   AGX_APPLE9_VIR_SUBGROUP_BROADCAST,
+   AGX_APPLE9_VIR_SUBGROUP_BALLOT,
+   AGX_APPLE9_VIR_WORKGROUP_BARRIER,
+   AGX_APPLE9_VIR_DEVICE_FENCE,
+   AGX_APPLE9_VIR_HALT,
+   AGX_APPLE9_VIR_SHARED_LOAD,
+   AGX_APPLE9_VIR_SHARED_STORE,
+   AGX_APPLE9_VIR_PRIVATE_LOAD,
+   AGX_APPLE9_VIR_PRIVATE_STORE,
    AGX_APPLE9_VIR_SPILL_STORE,
    AGX_APPLE9_VIR_SPILL_LOAD,
 };
@@ -471,7 +481,8 @@ struct agx_apple9_vir_program {
    unsigned publication_count;
    unsigned peak_live_gprs;
    unsigned max_phys_gpr;
-   unsigned scratch_size; /* Bytes per invocation, rounded to 16. */
+   unsigned private_size; /* NIR private arrays, placed after register spills. */
+   unsigned scratch_size; /* Total bytes per invocation, rounded to 16. */
    unsigned spill_slots;
 };
 
@@ -601,6 +612,9 @@ bool agx_apple9_vir_emit_device_atomic(
    struct agx_apple9_vir_program *program, unsigned binding, uint32_t index,
    const uint32_t *data, unsigned data_components,
    enum agx_apple9_atomic_op op, bool discard_result, uint32_t *result_out);
+
+bool agx_apple9_vir_set_device_atomic_address(
+   struct agx_apple9_vir_program *program, uint32_t address);
 bool agx_apple9_vir_set_device_load_contract(
    struct agx_apple9_vir_program *program, uint32_t value, uint8_t flags,
    enum agx_apple9_scoreboard_slot scoreboard_slot);

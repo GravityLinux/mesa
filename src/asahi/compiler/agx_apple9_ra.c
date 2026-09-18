@@ -5,6 +5,7 @@
 
 #include "compiler/nir/nir.h"
 #include "agx_apple9_ir.h"
+#include "agx_apple9_profile.h"
 #include "agx_builder.h"
 #include "agx_compiler.h"
 
@@ -79,9 +80,13 @@ apple9_schedule_resources(const agx_instr *I, uint32_t *reads, uint32_t *writes)
    case AGX_APPLE9_VIR_DERIVATIVE:
       return;
    case AGX_APPLE9_VIR_DEVICE_LOAD:
+   case AGX_APPLE9_VIR_PRIVATE_LOAD:
+   case AGX_APPLE9_VIR_SHARED_LOAD:
       *reads |= APPLE9_SCHED_MEMORY;
       return;
    case AGX_APPLE9_VIR_DEVICE_STORE:
+   case AGX_APPLE9_VIR_PRIVATE_STORE:
+   case AGX_APPLE9_VIR_SHARED_STORE:
    case AGX_APPLE9_VIR_DEVICE_ATOMIC:
    case AGX_APPLE9_VIR_DEVICE_ATOMIC_RESULT:
    case AGX_APPLE9_VIR_BLOCK_IMAGE_STORE:
@@ -121,6 +126,8 @@ apple9_dependency_delay(const struct agx_apple9_vir_instr *I)
     * selection also accounts for the completed allocation's copies/spills. */
    switch (I->op) {
    case AGX_APPLE9_VIR_DEVICE_LOAD:
+   case AGX_APPLE9_VIR_PRIVATE_LOAD:
+   case AGX_APPLE9_VIR_SHARED_LOAD:
    case AGX_APPLE9_VIR_TEXTURE_SAMPLE:
    case AGX_APPLE9_VIR_DEVICE_ATOMIC:
    case AGX_APPLE9_VIR_SPILL_LOAD:
@@ -161,7 +168,8 @@ apple9_source_width(const struct agx_apple9_vir_instr *ins, unsigned source)
    if ((ins->op == AGX_APPLE9_VIR_DEVICE_STORE ||
         ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC) && source == 0)
       return MAX2(ins->memory_components, 1);
-   if (ins->encoding == AGX_APPLE9_ENC_DEVICE_STORE_INDIRECT &&
+   if ((ins->encoding == AGX_APPLE9_ENC_DEVICE_STORE_INDIRECT ||
+        ins->encoding == AGX_APPLE9_ENC_DEVICE_ATOMIC_INDIRECT) &&
        source == ins->memory_components + 1)
       return 2;
    if (ins->encoding == AGX_APPLE9_ENC_DEVICE_LOAD_INDIRECT && source == 1)
@@ -174,7 +182,8 @@ apple9_source_constraint(const struct agx_apple9_vir_instr *ins, unsigned source
 {
    if (ins->op == AGX_APPLE9_VIR_DEVICE_STORE ||
        ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC) {
-      if (ins->encoding == AGX_APPLE9_ENC_DEVICE_STORE_INDIRECT &&
+      if ((ins->encoding == AGX_APPLE9_ENC_DEVICE_STORE_INDIRECT ||
+           ins->encoding == AGX_APPLE9_ENC_DEVICE_ATOMIC_INDIRECT) &&
           source > ins->memory_components)
          return agx_apple9_find_operand(ins->encoding,
                                         source == ins->memory_components + 1
@@ -690,6 +699,8 @@ apple9_async(const struct agx_apple9_vir_instr *ins)
       return true;
    switch (ins->op) {
    case AGX_APPLE9_VIR_DEVICE_LOAD:
+   case AGX_APPLE9_VIR_PRIVATE_LOAD:
+   case AGX_APPLE9_VIR_SHARED_LOAD:
    case AGX_APPLE9_VIR_TEXTURE_SAMPLE:
    case AGX_APPLE9_VIR_TILE_LOAD:
    case AGX_APPLE9_VIR_ITER_FLAT:
@@ -806,6 +817,9 @@ static bool
 apple9_completion_barrier(const struct agx_apple9_vir_instr *ins)
 {
    return apple9_after_logical_end(ins) ||
+          ins->op == AGX_APPLE9_VIR_WORKGROUP_BARRIER ||
+          ins->op == AGX_APPLE9_VIR_DEVICE_FENCE ||
+          ins->op == AGX_APPLE9_VIR_HALT ||
           ins->op == AGX_APPLE9_VIR_TILE_ACCESS ||
           ins->op == AGX_APPLE9_VIR_TILE_FENCE ||
           ins->op == AGX_APPLE9_VIR_COVERAGE ||
@@ -845,6 +859,12 @@ apple9_pending_hazard(const struct agx_apple9_vir_instr *ins,
        (producer->op == AGX_APPLE9_VIR_DEVICE_LOAD ||
         producer->op == AGX_APPLE9_VIR_DEVICE_ATOMIC) &&
        ins->immediate == producer->immediate)
+      return true;
+   if (ins->op == AGX_APPLE9_VIR_PRIVATE_STORE &&
+       producer->op == AGX_APPLE9_VIR_PRIVATE_LOAD)
+      return true;
+   if (ins->op == AGX_APPLE9_VIR_SHARED_STORE &&
+       producer->op == AGX_APPLE9_VIR_SHARED_LOAD)
       return true;
    /* This compound encoding contains a fixed slot-1 publication and wait. */
    return ins->encoding == AGX_APPLE9_ENC_BLOCK_IMAGE_STORE &&
@@ -949,6 +969,9 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
             unsigned slot = 0;
             if (apple9_async_sr(&ins)) {
                slot = AGX_APPLE9_SCOREBOARD_SLOT_1;
+            } else if (ins.op == AGX_APPLE9_VIR_SHARED_LOAD ||
+                       ins.op == AGX_APPLE9_VIR_PRIVATE_LOAD) {
+               slot = AGX_APPLE9_SCOREBOARD_SLOT_6;
             } else {
                /* Samples and memory traffic share six completion tags.
                 * Keep independent operations pending until a real hazard,
@@ -1092,8 +1115,22 @@ apple9_allocate_candidate(struct agx_apple9_vir_program *program,
    agx_apple9_vir_reindex(&out);
    if (!apple9_schedule_physical(&out, reason))
       goto cleanup;
-   out.scratch_size = ALIGN_POT(ra.ctx->scratch_size_B, 16);
-   out.spill_slots = out.scratch_size / 4;
+   unsigned spill_bytes = ALIGN_POT(ra.ctx->scratch_size_B, 16);
+   out.private_size = program->private_size;
+   out.scratch_size = spill_bytes + ALIGN_POT(out.private_size, 16);
+   out.spill_slots = spill_bytes / 4;
+   if (out.scratch_size > AGX_APPLE9_MAX_SCRATCH_BYTES) {
+      *reason = "Apple9 private arrays and spills exceed the scratch frame";
+      goto cleanup;
+   }
+   /* SAVE/FILL use the initial spill region. Indexed private instructions
+    * address a separate region in the same frame, fixed after allocation. */
+   for (unsigned i = 0; i < out.instruction_count; ++i) {
+      struct agx_apple9_vir_instr *ins = out.instructions[i];
+      if (ins->op == AGX_APPLE9_VIR_PRIVATE_LOAD ||
+          ins->op == AGX_APPLE9_VIR_PRIVATE_STORE)
+         ins->immediate += spill_bytes / 4;
+   }
    unsigned reserved = ra.ctx->has_spill_pcopy_reserved ? 4 : 2;
    for (unsigned r = 0; r < reserved; ++r)
       out.reserved_gprs[r] = true;
