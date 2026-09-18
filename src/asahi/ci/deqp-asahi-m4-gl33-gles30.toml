@@ -1,0 +1,49 @@
+# Derived from deqp-asahi-agx2-gl.toml for the M4's current API targets.
+# Keep the upstream surface settings and mustpass lists for GLES 2/3 and GL 3.3.
+[[deqp]]
+deqp = "/deqp-gles/external/openglcts/modules/glcts"
+caselists = [
+    "/deqp-gles/mustpass/gles2-main.txt",
+    "/deqp-gles/mustpass/gles3-main.txt",
+    "/deqp-gles/mustpass/gles2-khr-main.txt",
+    "/deqp-gles/mustpass/gles3-khr-main.txt",
+]
+deqp_args = [
+    "--deqp-surface-width=256", "--deqp-surface-height=256",
+    "--deqp-surface-type=pbuffer", "--deqp-visibility=hidden",
+    "--deqp-gl-config-name=rgba8888d24s8ms0",
+]
+renderer_check = "Apple M4"
+tests_per_group = 1000
+version_check = "GL ES 3.0 Mesa"
+
+[[deqp]]
+deqp = "/deqp-gl/external/openglcts/modules/glcts"
+caselists = ["/deqp-gl/mustpass/gl33-main.txt"]
+deqp_args = [
+    "--deqp-surface-width=256", "--deqp-surface-height=256",
+    "--deqp-surface-type=pbuffer", "--deqp-visibility=hidden",
+    "--deqp-gl-config-name=rgba8888d24s8ms0",
+]
+renderer_check = "Apple M4"
+tests_per_group = 1000
+
+[[deqp]]
+deqp = "/deqp-gles/modules/egl/deqp-egl-wayland"
+caselists = ["/deqp-gles/mustpass/egl-main.txt"]
+deqp_args = [
+    "--deqp-surface-width=256", "--deqp-surface-height=256",
+    "--deqp-surface-type=pbuffer", "--deqp-visibility=hidden",
+    "--deqp-gl-config-name=rgba8888d24s8ms0",
+]
+prefix = "wayland-"
+
+[[deqp]]
+deqp = "/deqp-gles/modules/egl/deqp-egl-x11"
+caselists = ["/deqp-gles/mustpass/egl-main.txt"]
+deqp_args = [
+    "--deqp-surface-width=256", "--deqp-surface-height=256",
+    "--deqp-surface-type=pbuffer", "--deqp-visibility=hidden",
+    "--deqp-gl-config-name=rgba8888d24s8ms0",
+]
+prefix = "x11-"

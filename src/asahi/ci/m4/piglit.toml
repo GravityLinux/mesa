@@ -1,0 +1,8 @@
+# Asahi has no upstream Piglit suite. This supplemental GPU profile uses the
+# same Mesa runner and all/asahi/asahi-agx2 expectation files as the CTS suite.
+[[piglit]]
+piglit_folder = "/piglit"
+profile = "gpu"
+process_isolation = true
+  [piglit.env]
+  PIGLIT_PLATFORM = "wayland"
