@@ -9419,11 +9419,24 @@ TEST(Apple9Packer, UnaryHighRegisterBitsPreserveLifetimesAndDependencies)
       agx_apple9_encoding encoding;
       unsigned immediate;
    } cases[] = {
+      {AGX_APPLE9_VIR_BIT_COUNT, AGX_APPLE9_ENC_BIT_UNARY, 0},
+      {AGX_APPLE9_VIR_UFIND_MSB, AGX_APPLE9_ENC_BIT_UNARY, 0},
+      {AGX_APPLE9_VIR_BIT_REVERSE, AGX_APPLE9_ENC_BIT_UNARY, 0},
       {AGX_APPLE9_VIR_U2F32, AGX_APPLE9_ENC_UINT_TO_FLOAT, 0},
       {AGX_APPLE9_VIR_I2F32, AGX_APPLE9_ENC_SINT_TO_FLOAT, 0},
       {AGX_APPLE9_VIR_F2I32, AGX_APPLE9_ENC_FLOAT_TO_SINT, 0},
       {AGX_APPLE9_VIR_F2U32, AGX_APPLE9_ENC_FLOAT_TO_UINT, 0},
       {AGX_APPLE9_VIR_ISHR, AGX_APPLE9_ENC_SHIFT_EXTENDED, 7},
+      {AGX_APPLE9_VIR_HRCP, AGX_APPLE9_ENC_HALF_SPECIAL, 2},
+      {AGX_APPLE9_VIR_HRCP_F32, AGX_APPLE9_ENC_HALF_SPECIAL, 3},
+      {AGX_APPLE9_VIR_HRSQ, AGX_APPLE9_ENC_HALF_SPECIAL, 2},
+      {AGX_APPLE9_VIR_HSQRT_FACTOR, AGX_APPLE9_ENC_HALF_SPECIAL, 3},
+      {AGX_APPLE9_VIR_HEXP2, AGX_APPLE9_ENC_HALF_SPECIAL, 2},
+      {AGX_APPLE9_VIR_HLOG2, AGX_APPLE9_ENC_HALF_SPECIAL, 2},
+      {AGX_APPLE9_VIR_HFLOOR, AGX_APPLE9_ENC_HALF_SPECIAL, 2},
+      {AGX_APPLE9_VIR_HCEIL, AGX_APPLE9_ENC_HALF_SPECIAL, 2},
+      {AGX_APPLE9_VIR_HTRUNC, AGX_APPLE9_ENC_HALF_SPECIAL, 2},
+      {AGX_APPLE9_VIR_HROUND_EVEN, AGX_APPLE9_ENC_HALF_SPECIAL, 2},
       {AGX_APPLE9_VIR_FRCP, AGX_APPLE9_ENC_FLOAT_SPECIAL, 3},
       {AGX_APPLE9_VIR_FRSQ, AGX_APPLE9_ENC_FLOAT_SPECIAL, 3},
       {AGX_APPLE9_VIR_FSQRT_FACTOR, AGX_APPLE9_ENC_FLOAT_SPECIAL, 3},
@@ -10002,6 +10015,133 @@ TEST(Apple9Compiler, ApiArrayAddressingUsesScaleAndDisplacementForVectors)
          EXPECT_EQ(encoded ? encoded - 1 : 4, form == 5 || form > 2 ? 2 : form + 2);
          EXPECT_EQ(bytes[8] & 14, components == 2 ? 8 : components == 3 ? 12 : 6);
          free(compiled.binary); ralloc_free(b.shader);
+      }
+   }
+}
+
+TEST(Apple9Compiler, NativeIntegerUnarySurvivesMemoryLegalization)
+{
+   for (nir_op op : {nir_op_bit_count, nir_op_ufind_msb, nir_op_bitfield_reverse}) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "integer unary");
+      b.shader->info.workgroup_size[0] = 32;
+      b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
+      nir_def *offset = nir_imul_imm(&b,
+         nir_channel(&b, nir_load_global_invocation_id(&b, 32), 0), 4);
+      nir_def *input = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 0), offset,
+                                     .align_mul = 4);
+      nir_def *value = nir_build_alu(&b, op, input, nullptr, nullptr, nullptr);
+      nir_store_ssbo(&b, value, nir_imm_int(&b, 1), offset,
+                     .write_mask = 1, .align_mul = 4);
+      agx_shader_part compiled = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, nullptr, &reason))
+         << reason;
+      unsigned count = 0;
+      auto *bytes = static_cast<const uint8_t *>(compiled.binary);
+      for (unsigned i = 0; i + 8 <= compiled.info.binary_size; ++i) {
+         if (bytes[i] == (op == nir_op_bit_count ? 0x27 : 0xa7) &&
+             (bytes[i + 1] & 0xf) == (op == nir_op_bitfield_reverse ? 4 : 5) &&
+             (bytes[i + 2] & ~3u) == 0x54 && bytes[i + 4] == 2 &&
+             bytes[i + 7] == 4)
+            count++;
+      }
+      EXPECT_EQ(count, 1u) << nir_op_infos[op].name;
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
+}
+
+TEST(Apple9Compiler, NativeHalfOperationsSurviveMemoryLegalization)
+{
+   for (nir_op op : {nir_op_fadd, nir_op_fsub, nir_op_fmul, nir_op_ffma,
+                     nir_op_fmin, nir_op_fmax, nir_op_fsat, nir_op_frcp,
+                     nir_op_frsq, nir_op_fsqrt, nir_op_fexp2, nir_op_flog2,
+                     nir_op_ffloor, nir_op_fceil, nir_op_ftrunc,
+                     nir_op_fround_even, nir_op_flt, nir_op_fge,
+                     nir_op_feq, nir_op_fneu}) {
+      SCOPED_TRACE(nir_op_infos[op].name);
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "native half operations");
+      b.shader->info.workgroup_size[0] = 32;
+      b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
+      nir_def *offset = nir_imul_imm(&b,
+         nir_channel(&b, nir_load_global_invocation_id(&b, 32), 0), 4);
+      nir_def *inputs[3];
+      for (unsigned i = 0; i < 3; ++i)
+         inputs[i] = nir_load_ssbo(&b, 1, 16, nir_imm_int(&b, i), offset,
+                                    .align_mul = 4);
+      nir_def *value = nir_build_alu(&b, op, inputs[0], inputs[1], inputs[2], nullptr);
+      value = value->bit_size == 1 ? nir_b2i32(&b, value) : nir_f2f32(&b, value);
+      nir_store_ssbo(&b, value, nir_imm_int(&b, 3), offset,
+                     .write_mask = 1, .align_mul = 4);
+      agx_shader_part compiled = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, nullptr, &reason))
+         << reason;
+      /* Loading FP16 data must reach native arithmetic directly. Widening
+       * all inputs used to leave no 16-bit operation in this program. */
+      const auto *bytes = static_cast<const uint8_t *>(compiled.binary);
+      unsigned native = 0;
+      for (unsigned i = 0; i + 6 <= compiled.info.main_size; i += 2) {
+         if ((bytes[i] & 7) == 0 &&
+             ((bytes[i + 2] & 7) == 4 || (bytes[i + 2] & 7) == 5 ||
+              (bytes[i + 2] & 7) == 6))
+            native++;
+         if ((bytes[i] & 7) == 2 && !(bytes[i + 1] & 1) &&
+             !(bytes[i + 3] & 1))
+            native++;
+         if (i + 10 <= compiled.info.main_size &&
+             (bytes[i] & 0x7f) == 0x2f &&
+             ((bytes[i + 6] & 0x18) == 8 ||
+              (bytes[i + 1] & 0xf) == 0))
+            native++;
+      }
+      EXPECT_GT(native, 0u);
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
+}
+
+TEST(Apple9Packer, HalfArithmeticKeepsRegisterExtensionsSeparateFromLifetime)
+{
+   for (agx_apple9_vir_opcode op : {AGX_APPLE9_VIR_HADD, AGX_APPLE9_VIR_HSUB,
+                                    AGX_APPLE9_VIR_HMUL, AGX_APPLE9_VIR_HFMA,
+                                    AGX_APPLE9_VIR_HMUL_MIXED}) {
+      SCOPED_TRACE(op);
+      bool fma = op == AGX_APPLE9_VIR_HFMA;
+      unsigned count = fma ? 3 : 2;
+      for (unsigned live = 0; live < (1u << count); ++live) {
+         for (unsigned slot = 0; slot <= 6; ++slot) {
+            agx_apple9_vir_instr I = {};
+            I.op = op;
+            I.encoding = fma ? AGX_APPLE9_ENC_HALF3 : AGX_APPLE9_ENC_HALF2;
+            I.dest = 0;
+            I.nr_srcs = count;
+            for (unsigned i = 0; i < count; ++i)
+               I.src[i] = i + 1;
+            I.live_after_mask = live;
+            I.scoreboard_slot = static_cast<agx_apple9_scoreboard_slot>(slot);
+            uint8_t phys[] = {31, 30, 29, 28};
+            agx_apple9_packed_instruction low, high;
+            const char *reason = nullptr;
+            ASSERT_TRUE(agx_apple9_pack_vir_instruction(&I, phys, &low, &reason))
+               << reason;
+            /* These independent bits are documented by the public FP16
+             * encoding work and tested on T8132 with 80 live values. */
+            const unsigned high_bits[] = {fma ? 60u : 44u, fma ? 56u : 40u,
+                                           fma ? 58u : 42u, 38u};
+            for (unsigned i = 0; i <= count; ++i) {
+               phys[i] += 64;
+               ASSERT_TRUE(agx_apple9_pack_vir_instruction(&I, phys, &high, &reason));
+               for (unsigned byte = 0; byte < low.length; ++byte)
+                  EXPECT_EQ(high.bytes[byte], low.bytes[byte] ^
+                     (byte == high_bits[i] / 8 ? 1 << (high_bits[i] % 8) : 0));
+               phys[i] = 96;
+               EXPECT_FALSE(agx_apple9_pack_vir_instruction(&I, phys, &high, &reason));
+               phys[i] = 31 - i;
+            }
+         }
       }
    }
 }

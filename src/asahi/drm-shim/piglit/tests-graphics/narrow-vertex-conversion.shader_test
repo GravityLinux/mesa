@@ -1,0 +1,58 @@
+# Narrow integer vertex fetches share packed memory words. An optimizer may
+# fold a widening conversion into i2f/u2f, which must still ignore or sign-extend
+# the upper bits. Uniform work exercises the shader preamble path as well.
+[require]
+GLSL >= 1.20
+
+[vertex shader]
+attribute vec2 unsigned_byte_pos;
+attribute vec2 signed_byte_pos;
+attribute vec2 unsigned_short_pos;
+attribute vec2 signed_short_pos;
+uniform int format;
+uniform vec4 transform;
+void main() {
+    vec2 pos;
+    if (format == 0)
+        pos = unsigned_byte_pos;
+    else if (format == 1)
+        pos = signed_byte_pos;
+    else if (format == 2)
+        pos = unsigned_short_pos;
+    else
+        pos = signed_short_pos;
+    gl_Position = vec4(pos * transform.zw + transform.xy, 0.0, 1.0);
+}
+
+[fragment shader]
+void main() { gl_FragColor = vec4(0.25, 0.5, 0.75, 1.0); }
+
+[vertex data]
+unsigned_byte_pos/ubyte/vec2 signed_byte_pos/byte/vec2 unsigned_short_pos/ushort/vec2 signed_short_pos/short/vec2
+0 0     -128 -128     0 0             -32768 -32768
+255 0    127 -128     65535 0          32767 -32768
+0 255   -128 127      0 65535         -32768 32767
+255 255  127 127      65535 65535      32767 32767
+
+[test]
+clear color 0 0 0 0
+uniform int format 0
+uniform vec4 transform -1 -1 0.0078431372549 0.0078431372549
+clear
+draw arrays GL_TRIANGLE_STRIP 0 4
+probe all rgba 0.25 0.5 0.75 1
+uniform int format 1
+uniform vec4 transform 0.00392156862745 0.00392156862745 0.0078431372549 0.0078431372549
+clear
+draw arrays GL_TRIANGLE_STRIP 0 4
+probe all rgba 0.25 0.5 0.75 1
+uniform int format 2
+uniform vec4 transform -1 -1 0.0000305180437934 0.0000305180437934
+clear
+draw arrays GL_TRIANGLE_STRIP 0 4
+probe all rgba 0.25 0.5 0.75 1
+uniform int format 3
+uniform vec4 transform 0.0000152590218967 0.0000152590218967 0.0000305180437934 0.0000305180437934
+clear
+draw arrays GL_TRIANGLE_STRIP 0 4
+probe all rgba 0.25 0.5 0.75 1

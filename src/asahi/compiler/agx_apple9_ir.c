@@ -4021,7 +4021,11 @@ pack_fspecial(const struct agx_apple9_vir_instr *instruction, const uint8_t *phy
 {
    const unsigned dst = phys[instruction->dest];
    const unsigned src = phys[instruction->src[0]];
-   if (instruction->encoding != AGX_APPLE9_ENC_FLOAT_SPECIAL ||
+   bool reciprocal = instruction->op == AGX_APPLE9_VIR_FRCP ||
+                     instruction->op == AGX_APPLE9_VIR_HRCP ||
+                     instruction->op == AGX_APPLE9_VIR_HRCP_F32;
+   bool half = instruction->encoding == AGX_APPLE9_ENC_HALF_SPECIAL;
+   if ((!half && instruction->encoding != AGX_APPLE9_ENC_FLOAT_SPECIAL) ||
        instruction->nr_srcs != 1 || dst >= AGX_APPLE9_GPR_COUNT ||
        src >= AGX_APPLE9_GPR_COUNT ||
        ((instruction->src_abs_mask | instruction->src_neg_mask) & ~1u) ||
@@ -4036,42 +4040,60 @@ pack_fspecial(const struct agx_apple9_vir_instr *instruction, const uint8_t *phy
    unsigned family = 0, function = 0;
    unsigned precision = 0x40, rounding = 0;
    switch (instruction->op) {
+   case AGX_APPLE9_VIR_HRCP_F32:
+   case AGX_APPLE9_VIR_HRCP:
    case AGX_APPLE9_VIR_FRCP:
       family = 1;
       precision = 0x48;
       rounding = 0x20;
       break;
+   case AGX_APPLE9_VIR_HRSQ:
    case AGX_APPLE9_VIR_FRSQ:
       family = 1;
       function = 1;
       break;
+   case AGX_APPLE9_VIR_HSQRT_FACTOR:
    case AGX_APPLE9_VIR_FSQRT_FACTOR:
       function = 1;
       break;
    case AGX_APPLE9_VIR_FSIN_FACTOR:
       function = 3;
       break;
+   case AGX_APPLE9_VIR_HEXP2:
    case AGX_APPLE9_VIR_FEXP2:
       family = 1;
       function = 2;
       break;
+   case AGX_APPLE9_VIR_HLOG2:
    case AGX_APPLE9_VIR_FLOG2:
       function = 2;
       break;
+   case AGX_APPLE9_VIR_HFLOOR:
    case AGX_APPLE9_VIR_FFLOOR:
       rounding = 2;
       break;
+   case AGX_APPLE9_VIR_HCEIL:
    case AGX_APPLE9_VIR_FCEIL:
       rounding = 4;
       break;
+   case AGX_APPLE9_VIR_HTRUNC:
    case AGX_APPLE9_VIR_FTRUNC:
       rounding = 6;
       break;
+   case AGX_APPLE9_VIR_HROUND_EVEN:
    case AGX_APPLE9_VIR_FROUND_EVEN:
       break;
    default:
       return false;
    }
+   bool wide_factor = instruction->op == AGX_APPLE9_VIR_HSQRT_FACTOR ||
+                      instruction->op == AGX_APPLE9_VIR_HRCP_F32;
+   if (half)
+      precision = reciprocal ? (wide_factor ? 0x44 : 0x46)
+                             : wide_factor ? 0x40 : 0x60;
+   if (half && reciprocal && !wide_factor)
+      rounding |= 0x10;
+
    /* EXP-M4-54 T8132 matched Metal and destructive source-reuse tests:
     * ordinary SFU uses bit 5 for source release (0x90 -> 0xb0), whereas
     * reciprocal's distinct datapath uses bit 4 (0x00 -> 0x10).
@@ -4086,20 +4108,22 @@ pack_fspecial(const struct agx_apple9_vir_instr *instruction, const uint8_t *phy
       dst << 1,
       instruction->immediate,
       (src & 63) << 2,
-      (src >> 6) | (instruction->op == AGX_APPLE9_VIR_FRCP
+      (src >> 6) | (reciprocal
                        ? ((instruction->live_after_mask & 1u) ? 0x00 : 0x10)
-                       : ((instruction->live_after_mask & 1u) ? 0x90 : 0xb0)),
+                       : ((instruction->live_after_mask & 1u)
+                             ? (half ? (wide_factor ? 0x8a : 0x8c) : 0x90)
+                             : (half ? (wide_factor ? 0xaa : 0xac) : 0xb0))),
       precision,
       rounding,
       0,
    };
    if (instruction->saturate)
-      set_bits(bytes, instruction->op == AGX_APPLE9_VIR_FRCP ? 65 : 58, 1, 1);
+      set_bits(bytes, reciprocal ? 65 : 58, 1, 1);
    /* Reciprocal has a separate datapath. Both modifier layouts preserve
     * source lifetime, including FP32 exceptional values and high GPRs. */
-   set_bits(bytes, instruction->op == AGX_APPLE9_VIR_FRCP ? 70 : 63,
+   set_bits(bytes, reciprocal ? 70 : 63,
             1, instruction->src_abs_mask);
-   set_bits(bytes, instruction->op == AGX_APPLE9_VIR_FRCP ? 71 : 64,
+   set_bits(bytes, reciprocal ? 71 : 64,
             1, instruction->src_neg_mask);
    packed_init(packed, bytes, sizeof(bytes));
    return true;
@@ -4630,6 +4654,53 @@ apple9_alu_sources(const struct agx_apple9_vir_instr *I, const uint8_t *phys,
 }
 
 static bool
+pack_half_alu(const struct agx_apple9_vir_instr *I, const uint8_t *phys,
+              struct agx_apple9_packed_instruction *packed)
+{
+   bool fma = I->op == AGX_APPLE9_VIR_HFMA;
+   bool mixed = I->op == AGX_APPLE9_VIR_HMUL_MIXED;
+   unsigned count = fma ? 3 : 2;
+   if (I->encoding != (fma ? AGX_APPLE9_ENC_HALF3 : AGX_APPLE9_ENC_HALF2) ||
+       I->nr_srcs != count || I->immediate || I->alu_src_uniform_mask ||
+       I->alu_src_immediate_mask || I->src_abs_mask || I->src_neg_mask ||
+       I->saturate || phys[I->dest] >= AGX_APPLE9_GPR_COUNT)
+      return false;
+   for (unsigned s = 0; s < count; ++s) {
+      if (phys[I->src[s]] >= AGX_APPLE9_GPR_COUNT)
+         return false;
+   }
+
+   /* Half ALU operands name 16-bit register halves. Word allocation places
+    * each scalar in its low half; source bit zero and destination bit three
+    * select the low half. Register extension and dependency fields retain
+    * the compact floating-point layout. */
+   uint8_t bytes[8] = {0, 0, fma ? 0x1e : (I->op == AGX_APPLE9_VIR_HMUL || mixed) ? 0x1d : 0x1c,
+                       0, fma ? 0x81 : 0, 0, 0, 0};
+   if (mixed) {
+      set_bits(bytes, 0, 1, 1);
+      set_bits(bytes, 8, 1, 1);
+   }
+   unsigned dst = phys[I->dest];
+   set_bits(bytes, 4, 4, dst & 15);
+   set_bits(bytes, 22, 2, (dst >> 4) & 3);
+   set_bits(bytes, fma ? 60 : 44, 1, dst >> 6);
+   for (unsigned s = 0; s < count; ++s) {
+      unsigned source = s;
+      unsigned reg = phys[I->src[source]];
+      set_bits(bytes, 9 + 16 * s, 6, reg & 63);
+      set_bits(bytes, s == 2 ? 38 : (fma ? 56 : 40) + 2 * s, 1, reg >> 6);
+      if (I->live_after_mask & (1u << source)) {
+         set_bits(bytes, 15 + 16 * s, 1, 1);
+         set_bits(bytes, s == 2 ? 39 : 19 + s, 1, 0);
+      }
+   }
+   if (I->op == AGX_APPLE9_VIR_HSUB)
+      set_bits(bytes, 43, 1, 1);
+   packed_init(packed, bytes, fma ? 8 : 6);
+   return true;
+}
+
+static bool
 pack_float2(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
             struct agx_apple9_packed_instruction *packed)
 {
@@ -5116,17 +5187,20 @@ pack_minmax(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    if (!apple9_alu_sources(instruction, phys, 2, source, &live) ||
        instruction->alu_src_immediate_mask || instruction->alu_src_uniform_mask == 3)
       return false;
-   bool floating = instruction->op == AGX_APPLE9_VIR_FMIN ||
+   bool half = instruction->encoding == AGX_APPLE9_ENC_HALF_MINMAX;
+   bool floating = half || instruction->op == AGX_APPLE9_VIR_FMIN ||
                    instruction->op == AGX_APPLE9_VIR_FMAX;
-   if (instruction->encoding != AGX_APPLE9_ENC_MINMAX_COMPACT ||
+   if ((!half && instruction->encoding != AGX_APPLE9_ENC_MINMAX_COMPACT) ||
        instruction->nr_srcs + util_bitcount(instruction->alu_src_uniform_mask) != 2 || instruction->src_abs_mask ||
        (instruction->src_neg_mask & ~(floating ? 2u : 0u)))
       return false;
    uint8_t select;
    switch (instruction->op) {
+   case AGX_APPLE9_VIR_HMAX:
    case AGX_APPLE9_VIR_FMAX:
       select = 0;
       break;
+   case AGX_APPLE9_VIR_HMIN:
    case AGX_APPLE9_VIR_FMIN:
       select = 1;
       break;
@@ -5174,6 +5248,13 @@ pack_minmax(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
       set_bits(bytes, 18, 1, 0);
       set_bits(bytes, 43, 1, 1);
    }
+   if (half) {
+      if (instruction->alu_src_uniform_mask || instruction->src_neg_mask)
+         return false;
+      set_bits(bytes, 8, 1, 0);
+      set_bits(bytes, 17, 1, 0);
+      set_bits(bytes, 24, 1, 0);
+   }
    pack_binary_uniforms(bytes, instruction, source);
    packed_init(packed, bytes, sizeof(bytes));
    return true;
@@ -5183,8 +5264,9 @@ static bool
 pack_select(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
             struct agx_apple9_packed_instruction *packed)
 {
+   bool half = instruction->encoding == AGX_APPLE9_ENC_HALF_COMPARE_SELECT;
    bool extended = instruction->encoding == AGX_APPLE9_ENC_SELECT_MODIFIER_EXTENDED;
-   if ((instruction->encoding != AGX_APPLE9_ENC_SELECT_GPR_WIDE && !extended) ||
+   if ((instruction->encoding != AGX_APPLE9_ENC_SELECT_GPR_WIDE && !extended && !half) ||
        instruction->nr_srcs != 4 ||
        ((instruction->src_abs_mask | instruction->src_neg_mask) & ~15u) ||
        (instruction->src_neg_mask & 1) ||
@@ -5280,6 +5362,12 @@ pack_select(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    set_bits(bytes, 67, 1, !!(instruction->src_abs_mask & 8));
    set_bits(bytes, 68, 1, !!(instruction->src_neg_mask & 8));
    set_bits(bytes, 59, 1, !!(instruction->src_neg_mask & 2));
+   if (half) {
+      if (instruction->src_abs_mask || instruction->src_neg_mask)
+         return false;
+      set_bits(bytes, 8, 1, 0);
+      set_bits(bytes, 24, 1, 0);
+   }
    packed_init(packed, bytes, extended ? 14 : 10);
    return true;
 }
@@ -5289,10 +5377,14 @@ pack_predicate_compare(const struct agx_apple9_vir_instr *instruction,
                        const uint8_t *phys,
                        struct agx_apple9_packed_instruction *packed)
 {
+   const bool half = instruction->encoding == AGX_APPLE9_ENC_HALF_PREDICATE_SHORT ||
+                     instruction->encoding == AGX_APPLE9_ENC_HALF_PREDICATE_EXTENDED;
    const bool short_form =
-      instruction->encoding == AGX_APPLE9_ENC_PREDICATE_COMPARE_SHORT;
+      instruction->encoding == AGX_APPLE9_ENC_PREDICATE_COMPARE_SHORT ||
+      instruction->encoding == AGX_APPLE9_ENC_HALF_PREDICATE_SHORT;
    const bool extended_form =
-      instruction->encoding == AGX_APPLE9_ENC_PREDICATE_COMPARE_EXTENDED;
+      instruction->encoding == AGX_APPLE9_ENC_PREDICATE_COMPARE_EXTENDED ||
+      instruction->encoding == AGX_APPLE9_ENC_HALF_PREDICATE_EXTENDED;
    const bool loop_form =
       instruction->encoding == AGX_APPLE9_ENC_PREDICATE_COMPARE_LOOP;
    if ((!short_form && !extended_form && !loop_form) ||
@@ -5353,6 +5445,10 @@ pack_predicate_compare(const struct agx_apple9_vir_instr *instruction,
                           condition, 0xc0};
       set_bits(bytes, short_form ? 40 : 56, 1, src0 >> 6);
       set_bits(bytes, short_form ? 42 : 58, 1, src1 >> 6);
+      if (half) {
+         bytes[1] &= ~1u;
+         bytes[3] &= ~1u;
+      }
       packed_init(packed, bytes, sizeof(bytes));
    } else {
       uint8_t bytes[10] = {
@@ -5364,6 +5460,10 @@ pack_predicate_compare(const struct agx_apple9_vir_instr *instruction,
       };
       set_bits(bytes, short_form ? 40 : 56, 1, src0 >> 6);
       set_bits(bytes, short_form ? 42 : 58, 1, src1 >> 6);
+      if (half) {
+         bytes[1] &= ~1u;
+         bytes[3] &= ~1u;
+      }
       packed_init(packed, bytes, sizeof(bytes));
    }
    return true;
@@ -6163,12 +6263,52 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       packed_init(packed, bytes, sizeof(bytes));
       return true;
    }
+   case AGX_APPLE9_VIR_HADD:
+   case AGX_APPLE9_VIR_HSUB:
+   case AGX_APPLE9_VIR_HMUL:
+   case AGX_APPLE9_VIR_HFMA:
+   case AGX_APPLE9_VIR_HMUL_MIXED:
+      return pack_half_alu(instruction, phys, packed);
+   case AGX_APPLE9_VIR_BIT_COUNT:
+   case AGX_APPLE9_VIR_UFIND_MSB:
+   case AGX_APPLE9_VIR_BIT_REVERSE: {
+      unsigned dst = phys[instruction->dest];
+      unsigned src = phys[instruction->src[0]];
+      if (instruction->encoding != AGX_APPLE9_ENC_BIT_UNARY ||
+          instruction->nr_srcs != 1 || instruction->immediate ||
+          dst >= AGX_APPLE9_GPR_COUNT || src >= AGX_APPLE9_GPR_COUNT)
+         return false;
+
+      /* T8132 integer unary probes establish the shared conversion operand
+       * layout, including zero -> -1 for UFIND_MSB, high registers, retained
+       * sources and direct pending-load consumption. Operation selection is
+       * independent of lifetime, register bits and the dependency mask. */
+      const uint8_t bytes[8] = {
+         instruction->op == AGX_APPLE9_VIR_BIT_COUNT ? 0x27 : 0xa7,
+         instruction->op == AGX_APPLE9_VIR_BIT_REVERSE ? 0x04 : 0x05,
+         0x54, dst << 1, 0x02, (src & 63) << 2,
+         ((instruction->live_after_mask & 1) ? 0x4e : 0x5c) | (src >> 6),
+         0x04,
+      };
+      packed_init(packed, bytes, sizeof(bytes));
+      return true;
+   }
    case AGX_APPLE9_VIR_U2F32:
    case AGX_APPLE9_VIR_I2F32:
       return pack_i2f32(instruction, phys, packed);
    case AGX_APPLE9_VIR_F2I32:
    case AGX_APPLE9_VIR_F2U32:
       return pack_f2i32(instruction, phys, packed);
+   case AGX_APPLE9_VIR_HRCP_F32:
+   case AGX_APPLE9_VIR_HRCP:
+   case AGX_APPLE9_VIR_HSQRT_FACTOR:
+   case AGX_APPLE9_VIR_HRSQ:
+   case AGX_APPLE9_VIR_HEXP2:
+   case AGX_APPLE9_VIR_HLOG2:
+   case AGX_APPLE9_VIR_HFLOOR:
+   case AGX_APPLE9_VIR_HCEIL:
+   case AGX_APPLE9_VIR_HTRUNC:
+   case AGX_APPLE9_VIR_HROUND_EVEN:
    case AGX_APPLE9_VIR_FRCP:
    case AGX_APPLE9_VIR_FRSQ:
    case AGX_APPLE9_VIR_FSQRT_FACTOR:
@@ -6204,6 +6344,8 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
    case AGX_APPLE9_VIR_IMAX:
    case AGX_APPLE9_VIR_UMIN:
    case AGX_APPLE9_VIR_UMAX:
+   case AGX_APPLE9_VIR_HMIN:
+   case AGX_APPLE9_VIR_HMAX:
    case AGX_APPLE9_VIR_FMIN:
    case AGX_APPLE9_VIR_FMAX:
       return pack_minmax(instruction, phys, packed);

@@ -160,3 +160,4 @@ mesa/src/asahi/drm-shim/piglit/tests-graphics/mrt/large6.shader_test
 mesa/src/asahi/drm-shim/piglit/tests-graphics/mrt/large7.shader_test
 mesa/src/asahi/drm-shim/piglit/tests-graphics/mrt/large8.shader_test
 mesa/src/asahi/drm-shim/piglit/tests-graphics/integer-division.shader_test
+mesa/src/asahi/drm-shim/piglit/tests-graphics/narrow-vertex-conversion.shader_test

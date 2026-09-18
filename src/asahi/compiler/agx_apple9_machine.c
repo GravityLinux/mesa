@@ -196,6 +196,20 @@ static const struct agx_apple9_encoding_info encodings[] = {
                    AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },
+   [AGX_APPLE9_ENC_BIT_UNARY] = {
+      .name = "bit_unary",
+      .length = 8,
+      .operand_count = 2,
+      .allocator_safe = true,
+      .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      .dependency_layout = AGX_APPLE9_DEPENDENCY_MASK_12_17,
+      .operands = {
+         GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
+         GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
+      },
+   },
    [AGX_APPLE9_ENC_UINT_TO_FLOAT] =
       {
          .name = "uint_to_float",
@@ -357,6 +371,56 @@ static const struct agx_apple9_encoding_info encodings[] = {
          GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 95, 2,
              AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
          GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
+      },
+   },
+   [AGX_APPLE9_ENC_HALF_MINMAX] = {
+      .name = "half_minmax",
+      .length = 6,
+      .operand_count = 3,
+      .allocator_safe = true,
+      .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      .dependency_layout = AGX_APPLE9_DEPENDENCY_INDEX_45_47,
+      .operands = {
+         GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
+         GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
+         GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
+      },
+   },
+   [AGX_APPLE9_ENC_HALF2] = {
+      .name = "half2",
+      .length = 6,
+      .operand_count = 3,
+      .allocator_safe = true,
+      .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      .dependency_layout = AGX_APPLE9_DEPENDENCY_INDEX_45_47,
+      .operands = {
+         GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
+         GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
+         GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
+      },
+   },
+   [AGX_APPLE9_ENC_HALF3] = {
+      .name = "half3",
+      .length = 8,
+      .operand_count = 4,
+      .allocator_safe = true,
+      .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      .dependency_layout = AGX_APPLE9_DEPENDENCY_INDEX_61_63,
+      .operands = {
+         GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
+         GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
+         GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
+         GPR(AGX_APPLE9_OPERAND_SRC2, AGX_APPLE9_WIDTH_32, 95, 2,
              AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
       },
    },
@@ -620,6 +684,27 @@ static const struct agx_apple9_encoding_info encodings[] = {
                    AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },
+   [AGX_APPLE9_ENC_HALF_SPECIAL] =
+      {
+         .name = "half_special",
+         .length = 10,
+         .operand_count = 2,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .dependency_layout = AGX_APPLE9_DEPENDENCY_MASK_12_17,
+         .operands =
+            {
+               /* Wide unary operations have seven-bit destination and
+                * source fields at bits 25..31 and 42..48. The source field
+                * crosses from byte 5 into byte 6 bit 0. */
+               GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32,
+                   95, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                   AGX_APPLE9_EVIDENCE_HARDWARE),
+               GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
+                   95, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                   AGX_APPLE9_EVIDENCE_HARDWARE),
+            },
+      },
    [AGX_APPLE9_ENC_FLOAT_SPECIAL] =
       {
          .name = "float_special",
@@ -754,6 +839,38 @@ static const struct agx_apple9_encoding_info encodings[] = {
                   AGX_APPLE9_OPERAND_SRC1,
                   AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32, 95,
                   1, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED | AGX_APPLE9_OPERAND_COMPACT_PREFERRED,
+                  AGX_APPLE9_EVIDENCE_HARDWARE),
+            },
+      },
+   [AGX_APPLE9_ENC_HALF_COMPARE_SELECT] =
+      {
+         .name = "half_compare_select",
+         .length = 10,
+         .operand_count = 5,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .dependency_layout = AGX_APPLE9_DEPENDENCY_INDEX_61_63,
+         .operands =
+            {
+               GPR(
+                  AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 95,
+                  2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_COMPACT_PREFERRED,
+                  AGX_APPLE9_EVIDENCE_HARDWARE),
+               GPR(
+                  AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 95,
+                  2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED,
+                  AGX_APPLE9_EVIDENCE_HARDWARE),
+               GPR(
+                  AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32, 95,
+                  2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED,
+                  AGX_APPLE9_EVIDENCE_HARDWARE),
+               GPR(
+                  AGX_APPLE9_OPERAND_SRC2, AGX_APPLE9_WIDTH_32, 95,
+                  2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED,
+                  AGX_APPLE9_EVIDENCE_HARDWARE),
+               GPR(
+                  AGX_APPLE9_OPERAND_SRC3, AGX_APPLE9_WIDTH_32, 95,
+                  2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED,
                   AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },
@@ -1000,6 +1117,26 @@ static const struct agx_apple9_encoding_info encodings[] = {
              AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
       },
    },
+   [AGX_APPLE9_ENC_HALF_PREDICATE_SHORT] =
+      {
+         .name = "half_predicate_short",
+         .length = 6,
+         .operand_count = 2,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .operands =
+            {
+               /* Both sources use the ordinary 32-bit descriptor
+                * (gpr << 1) | 1.  Source lifetime is encoded independently
+                * in byte 2. */
+               GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
+                   95, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                   AGX_APPLE9_EVIDENCE_HARDWARE),
+               GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32,
+                   95, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                   AGX_APPLE9_EVIDENCE_HARDWARE),
+            },
+      },
    [AGX_APPLE9_ENC_PREDICATE_COMPARE_SHORT] =
       {
          .name = "predicate_compare_short",
@@ -1012,6 +1149,23 @@ static const struct agx_apple9_encoding_info encodings[] = {
                /* Both sources use the ordinary 32-bit descriptor
                 * (gpr << 1) | 1.  Source lifetime is encoded independently
                 * in byte 2. */
+               GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
+                   95, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                   AGX_APPLE9_EVIDENCE_HARDWARE),
+               GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32,
+                   95, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                   AGX_APPLE9_EVIDENCE_HARDWARE),
+            },
+      },
+   [AGX_APPLE9_ENC_HALF_PREDICATE_EXTENDED] =
+      {
+         .name = "half_predicate_extended",
+         .length = 10,
+         .operand_count = 2,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .operands =
+            {
                GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
                    95, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                    AGX_APPLE9_EVIDENCE_HARDWARE),

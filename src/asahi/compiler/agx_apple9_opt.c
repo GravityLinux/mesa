@@ -22,6 +22,26 @@ agx_apple9_instr_is_pure_alu(const struct agx_apple9_vir_instr *I)
 
    switch (I->op) {
    case AGX_APPLE9_VIR_IMM:
+   case AGX_APPLE9_VIR_BIT_COUNT:
+   case AGX_APPLE9_VIR_UFIND_MSB:
+   case AGX_APPLE9_VIR_BIT_REVERSE:
+   case AGX_APPLE9_VIR_HADD:
+   case AGX_APPLE9_VIR_HSUB:
+   case AGX_APPLE9_VIR_HMUL:
+   case AGX_APPLE9_VIR_HFMA:
+   case AGX_APPLE9_VIR_HMIN:
+   case AGX_APPLE9_VIR_HMAX:
+   case AGX_APPLE9_VIR_HRCP_F32:
+   case AGX_APPLE9_VIR_HRCP:
+   case AGX_APPLE9_VIR_HSQRT_FACTOR:
+   case AGX_APPLE9_VIR_HMUL_MIXED:
+   case AGX_APPLE9_VIR_HRSQ:
+   case AGX_APPLE9_VIR_HEXP2:
+   case AGX_APPLE9_VIR_HLOG2:
+   case AGX_APPLE9_VIR_HFLOOR:
+   case AGX_APPLE9_VIR_HCEIL:
+   case AGX_APPLE9_VIR_HTRUNC:
+   case AGX_APPLE9_VIR_HROUND_EVEN:
    case AGX_APPLE9_VIR_U2F32:
    case AGX_APPLE9_VIR_I2F32:
    case AGX_APPLE9_VIR_F2I32:
@@ -211,6 +231,10 @@ select_float_sources(struct agx_apple9_vir_instr *I,
                      const bool *constant, const uint32_t *values)
 {
    if (I->alu_src_uniform_mask || I->alu_src_immediate_mask)
+      return;
+   /* The half comparison form keeps narrow operands in word containers.
+    * FP32 modifier folding must not change their interpretation. */
+   if (I->encoding == AGX_APPLE9_ENC_HALF_COMPARE_SELECT)
       return;
    bool special = I->encoding == AGX_APPLE9_ENC_FLOAT_SPECIAL;
    bool select = I->op == AGX_APPLE9_VIR_SELECT;
