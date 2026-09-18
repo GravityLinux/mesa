@@ -3352,7 +3352,8 @@ st_finalize_texture(struct gl_context *ctx,
 
             if (tObj->Target == GL_TEXTURE_3D)
                depth = u_minify(ptDepth, level);
-            else if (tObj->Target == GL_TEXTURE_CUBE_MAP)
+            else if (tObj->Target == GL_TEXTURE_CUBE_MAP ||
+                     tObj->Target == GL_TEXTURE_1D_ARRAY)
                depth = 1;
             else
                depth = ptLayers;
