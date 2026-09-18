@@ -4741,7 +4741,7 @@ TEST(Apple9Compiler, CountedLoopCarriesSsaAndPatchesStartRelativeBackedge)
    ralloc_free(nir);
 }
 
-TEST(Apple9Compiler, NestedLoopsUseIndependentMaskDepthAndBreakTargets)
+TEST(Apple9Compiler, NestedLoopsReuseConsumedBreakPredicates)
 {
    nir_shader *nir = apple9_nested_loop_shader();
    struct agx_shader_part compiled = {};
@@ -4754,7 +4754,7 @@ TEST(Apple9Compiler, NestedLoopsUseIndependentMaskDepthAndBreakTargets)
    const uint8_t inner_update[] = {0x8f, 0x04, 0x54, 0x26};
    const uint8_t loop_pop[] = {0x0f, 0x06, 0x04, 0x02, 0x00, 0x00};
    const uint8_t outer_break[] = {0x8f, 0x05, 0x54, 0x03, 0x00, 0x01};
-   const uint8_t inner_break[] = {0x8f, 0x05, 0x54, 0x03, 0x00, 0x02};
+   const uint8_t inner_break[] = {0x8f, 0x05, 0x54, 0x03, 0x00, 0x01};
    const uint8_t exit_if_none[] = {0x0f, 0x01, 0x54};
    EXPECT_EQ(
       apple9_binary_count_sequence(&compiled, loop_push, sizeof(loop_push)),
@@ -4769,15 +4769,46 @@ TEST(Apple9Compiler, NestedLoopsUseIndependentMaskDepthAndBreakTargets)
       apple9_binary_count_sequence(&compiled, loop_pop, sizeof(loop_pop)), 2u);
    EXPECT_EQ(
       apple9_binary_count_sequence(&compiled, outer_break, sizeof(outer_break)),
-      1u);
+      2u);
    EXPECT_EQ(
       apple9_binary_count_sequence(&compiled, inner_break, sizeof(inner_break)),
-      1u);
+      2u);
    EXPECT_EQ(apple9_binary_count_sequence(&compiled, exit_if_none,
                                           sizeof(exit_if_none)),
              0u);
    free(compiled.binary);
    ralloc_free(nir);
+}
+
+TEST(Apple9Compiler, LoopDepthDoesNotConsumePredicateBanks)
+{
+   for (unsigned depth : {6u, 16u}) {
+      SCOPED_TRACE(depth);
+      nir_builder b = apple9_compute_builder("deep_nested_loops");
+      b.shader->info.num_ubos = 1;
+      nir_def *limit = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0),
+                                   nir_imm_int(&b, 0), .align_mul = 4, .range = 4);
+      std::vector<nir_loop *> loops;
+      std::vector<nir_variable *> counters;
+      for (unsigned level = 0; level < depth; ++level) {
+         nir_variable *counter = nir_local_variable_create(
+            b.impl, glsl_uint_type(), "counter");
+         nir_store_var(&b, counter, nir_imm_int(&b, 0), 1);
+         nir_loop *loop = nir_push_loop(&b);
+         loop->control = nir_loop_control_dont_unroll;
+         nir_break_if(&b, nir_uge(&b, nir_load_var(&b, counter), limit));
+         loops.push_back(loop);
+         counters.push_back(counter);
+      }
+      apple9_store_output(&b, nir_imm_int(&b, 0), limit);
+      for (unsigned level = depth; level > 0; --level) {
+         nir_variable *counter = counters[level - 1];
+         nir_store_var(&b, counter,
+            nir_iadd_imm(&b, nir_load_var(&b, counter), 1), 1);
+         nir_pop_loop(&b, loops[level - 1]);
+      }
+      apple9_expect_compile(b.shader, AGX_APPLE9_COMPUTE_ABI_DIRECT_BUFFERS);
+   }
 }
 
 TEST(Apple9Compiler, ContinueConstructLowersToStructuredMaskedLatch)

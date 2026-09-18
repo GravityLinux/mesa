@@ -764,7 +764,6 @@ struct apple9_loop_context {
    nir_loop *nir;
    nir_block *exit;
    struct agx_apple9_block *exit_block;
-   unsigned depth;
    unsigned mask_depth;
 };
 
@@ -2817,20 +2816,16 @@ apple9_emit_jump(struct apple9_dag_lower *lower, nir_block *block,
     * the target loop independently of nested-loop depth.  A direct break is
     * tag 2, one enclosing if is tag 3, and so on. */
    const unsigned scope_tag = 2 + (lower->mask_depth - lower->loop->mask_depth);
-   if (scope_tag > UINT8_MAX || lower->loop->depth > UINT8_MAX) {
+   if (scope_tag > UINT8_MAX) {
       lower->reason = "Apple9 loop nesting exceeds the encoded break fields";
       return false;
    }
 
-   /* This jump is unconditional for the currently active lanes. Unwind still
-    * consumes a predicate in the target loop's bank; the enclosing ordinary
-    * if only populated bank zero. Publish true here, after the exit copies,
-    * so neither stale predicates nor comparisons used by those copies can
-    * decide which active lanes break. Inactive lanes remain masked out. */
-   if (lower->loop->depth >= AGX_APPLE9_PREDICATE_BANK_COUNT) {
-      lower->reason = "Apple9 loop break exhausted the predicate scratch bank";
-      return false;
-   }
+   /* Unwind consumes a predicate temporary, not a loop nesting level. The
+    * predicate dies at this instruction, so every break can reuse bank one.
+    * Publish true after the exit copies, since they may compare values. The
+    * separate scope tag unwinds the intervening execution-mask scopes. */
+   const unsigned break_bank = 1;
 
    uint32_t zero = apple9_dag_zero(lower);
    uint32_t sources[] = {zero, zero};
@@ -2839,7 +2834,7 @@ apple9_emit_jump(struct apple9_dag_lower *lower, nir_block *block,
           &lower->program, AGX_APPLE9_VIR_PREDICATE_COMPARE,
           AGX_APPLE9_ENC_PREDICATE_COMPARE_LOOP, sources, 2,
           AGX_APPLE9_PREDICATE_EXT_IEQ |
-             AGX_APPLE9_PREDICATE_BANK(lower->loop->depth))) {
+             AGX_APPLE9_PREDICATE_BANK(break_bank))) {
       lower->reason = "could not emit an Apple9 unconditional break predicate";
       return false;
    }
@@ -2847,7 +2842,7 @@ apple9_emit_jump(struct apple9_dag_lower *lower, nir_block *block,
    const bool ok = agx_apple9_vir_emit_side_effect(
       &lower->program, AGX_APPLE9_VIR_BREAK_MASK_UNWIND,
       AGX_APPLE9_ENC_BREAK_MASK_UNWIND, NULL, 0,
-      AGX_APPLE9_BREAK_IMMEDIATE(scope_tag, lower->loop->depth));
+      AGX_APPLE9_BREAK_IMMEDIATE(scope_tag, break_bank));
    if (!ok)
       lower->reason = "could not emit an Apple9 loop break";
    return ok;
@@ -3528,7 +3523,6 @@ apple9_emit_loop(struct apple9_dag_lower *lower, struct util_dynarray *stores,
       .nir = loop,
       .exit = exit,
       .exit_block = exit_block,
-      .depth = lower->loop ? lower->loop->depth + 1 : 1,
       .mask_depth = lower->mask_depth,
    };
    lower->loop = &context;

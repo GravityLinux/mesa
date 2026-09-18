@@ -1986,11 +1986,12 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
          case AGX_APPLE9_VIR_BREAK_MASK_UNWIND: {
             const unsigned scope_tag =
                AGX_APPLE9_BREAK_SCOPE_TAG(instruction->immediate);
-            const unsigned loop_depth =
-               AGX_APPLE9_BREAK_LOOP_DEPTH(instruction->immediate);
+            const unsigned predicate_bank =
+               AGX_APPLE9_BREAK_PREDICATE_BANK(instruction->immediate);
             valid &=
                instruction->encoding == AGX_APPLE9_ENC_BREAK_MASK_UNWIND &&
-               instruction->nr_srcs == 0 && scope_tag >= 2 && loop_depth >= 1;
+               instruction->nr_srcs == 0 && scope_tag >= 2 && predicate_bank >= 1 &&
+               predicate_bank < AGX_APPLE9_PREDICATE_BANK_COUNT;
             break;
          }
          default:
@@ -6306,14 +6307,14 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
    case AGX_APPLE9_VIR_BREAK_MASK_UNWIND: {
       const unsigned scope_tag =
          AGX_APPLE9_BREAK_SCOPE_TAG(instruction->immediate);
-      const unsigned loop_depth =
-         AGX_APPLE9_BREAK_LOOP_DEPTH(instruction->immediate);
+      const unsigned predicate_bank =
+         AGX_APPLE9_BREAK_PREDICATE_BANK(instruction->immediate);
       if (instruction->encoding != AGX_APPLE9_ENC_BREAK_MASK_UNWIND ||
           instruction->nr_srcs != 0 || scope_tag < 2 || scope_tag > UINT8_MAX ||
-          loop_depth == 0 || loop_depth > UINT8_MAX)
+          predicate_bank == 0 || predicate_bank >= AGX_APPLE9_PREDICATE_BANK_COUNT)
          break;
       const uint8_t bytes[] = {
-         0x8f, 0x05, 0x54, (uint8_t)scope_tag, 0x00, (uint8_t)loop_depth};
+         0x8f, 0x05, 0x54, (uint8_t)scope_tag, 0x00, (uint8_t)predicate_bank};
       packed_init(packed, bytes, sizeof(bytes));
       return true;
    }

@@ -191,12 +191,12 @@ enum agx_apple9_predicate_extended_condition {
 #define AGX_APPLE9_LOOP_MASK_INVERT 0x20u
 #define AGX_APPLE9_LOOP_MASK_PREDICATE(bank) (0x02u + 4u * (bank))
 
-/* BREAK_MASK_UNWIND packs the number of scopes crossed and the destination
- * loop nesting level into independent bytes. */
+/* BREAK_MASK_UNWIND packs the number of scopes crossed and the consumed
+ * predicate bank into independent bytes. */
 #define AGX_APPLE9_BREAK_SCOPE_TAG(immediate)  (((immediate) >> 8) & 0xffu)
-#define AGX_APPLE9_BREAK_LOOP_DEPTH(immediate) ((immediate) & 0xffu)
-#define AGX_APPLE9_BREAK_IMMEDIATE(scope_tag, loop_depth)                      \
-   (((uint32_t)(scope_tag) << 8) | (uint32_t)(loop_depth))
+#define AGX_APPLE9_BREAK_PREDICATE_BANK(immediate) ((immediate) & 0xffu)
+#define AGX_APPLE9_BREAK_IMMEDIATE(scope_tag, predicate_bank)                      \
+   (((uint32_t)(scope_tag) << 8) | (uint32_t)(predicate_bank))
 
 enum agx_apple9_select_condition {
    AGX_APPLE9_SELECT_FEQ = 0x00,
