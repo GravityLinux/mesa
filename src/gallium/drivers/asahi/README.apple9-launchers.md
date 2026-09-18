@@ -43,8 +43,8 @@ argument, publication or scratch slot. Bodies end through the compiler's
 ordinary stage completion and STOP; they do not return to the entry.
 
 The body resource contract is the stage ABI described below. Graphics roots
-are texture, sampler and buffer-table arguments; compute has one hidden
-argument followed by compacted visible buffers. These are argument-space
+are texture, sampler and buffer-table arguments. Compute selects compact direct
+buffers or six descriptor-table roots, as described below. These are argument-space
 values, not fixed body GPR assignments. Ordinary body allocation uses 64
 32-bit GPRs. The shared allocator reserves r0:r1 for control/wait and copy
 support, extending the reservation through r3 when spill parallel-copy
@@ -161,16 +161,19 @@ transfers and control records; its old auxiliary spans are omitted. The entry
 field is at byte 68 for all graphics. The original independent resource
 readouts are recorded in `tmp/graphics-resources170/RESULTS.md`.
 
-Compute uses one direct-buffer ABI with capacity for 18 combined SSBO/UBO
-resources. One hidden root points to three group counts; visible buffer
-arguments start at 1. The compiler compacts the active
-API bindings, with writable buffers last, and retains 32-bit ownership masks.
-The current GL frontend exposes 16 SSBO blocks per shader because it reserves
-half of Gallium's 32 buffer bindings for atomic counters. Hardware validation
-covers 16 SSBOs and 18 combined resources (including UBOs).
+Buffer-only compute with up to 18 combined SSBO/UBO resources uses direct
+arguments: one hidden root points to three group counts and visible buffer
+arguments start at 1. Textures or larger binding sets select six roots:
+texture descriptors, sampler descriptors, buffer addresses, group counts,
+shared memory, and a reserved zero pointer. The indirect buffer table supports
+32 combined resources. Both ABIs compact active API bindings, with writable
+buffers last, and retain 32-bit ownership masks. The graphics sysval UBO and
+sampler mapping follow API vertex/geometry shaders lowered to compute.
+Texture publications contribute to the normal compiler-sized launch frame.
 
-Each dispatch has a 0x100-byte resource record. Pointers occupy qwords 0..18;
-inline group counts live at +0xc0. Keeping
+Each dispatch has a 0x100-byte resource record. Direct pointers occupy qwords
+0..18; the table ABI publishes six pointers and uploads buffer addresses
+separately. Inline group counts live at +0xc0. Keeping
 geometry beyond the pointer window prevents larger binding sets from
 corrupting it. Direct and indirect dispatch use the same resource layout and
 CDM modes. The compute constant helper is generated from source using the
@@ -218,9 +221,17 @@ publication metadata; there is no external prolog or library-default fallback.
 
 The allocation interface currently accepts zero or the four threadgroup-memory
 sizes with execution evidence: 128, 256, 512, and 1024 bytes. Zero emits the
-source-generated zero-size allocation form. General shared load/store/barrier lowering is
-still outside the implemented GLSL compiler path; allocating storage does not
-implement those operations.
+source-generated zero-size allocation form. The compiler lowers aligned 32-bit
+shared accesses and workgroup barriers, rounding the shader's allocation to
+one of those sizes. A shared resource occupies its own argument root with value
+`0x80000000`; it has no external-buffer read/write hazard. Native probes cover
+multiple arrays, one through three buffer bindings, and partial workgroups.
+
+Internal libagx helpers also retain portable NIR before Apple8 preprocessing.
+Apple9 compiles this NIR through its ordinary compute backend and binds the
+argument block as UBO 0. The geometry prefix helper uses native integer scans,
+uniform broadcasts, shared storage, and barriers through this path. Its body
+is generated from the helper source; it is not a fixed binary sequence.
 
 The compute builder chooses root pair r2:r3 and a pending-result
 base of 18. Independent hardware tests moved the resource root to r4:r5 and
@@ -285,8 +296,9 @@ compiler's fragment completion model, including discard with spills.
   dispatch unexecuted. Both remain set. Header bit 3 and bits 9..15 passed
   independent zero/one controls; the combined source encoding leaves them zero.
 - The names of individual allocation-mode bits are unresolved. The supported
-  tile/sample combinations and compute allocation sizes are empirical bounds,
-  not a claim that arbitrary combinations or GLSL shared-memory lowering work.
+  tile/sample combinations and compute allocation sizes are empirical bounds.
+  Larger allocations and shared operations beyond aligned 32-bit loads/stores
+  and workgroup barriers remain unsupported.
 - Direct entry using roots, loads, frame, transfers and a branch alone timed
   out. The successful setup protocol is consistent with deferred stage
   invocation, but its internal context/scheduling mechanism is not established.
@@ -347,7 +359,7 @@ checks and normal-driver regressions are recorded in
 only to the private research library; normal Mesa no longer publishes those
 unused words and uses no readout hooks.
 
-## Native single-sample tile export
+## Native tile export
 
 The direct renderer's EOT helper emits `nir_image_store_block_agx` for each
 stored attachment. Apple9 lowers it through a bulk-image-store VIR operation,
@@ -357,8 +369,18 @@ PBE descriptors encode tiled or linear destination layout, level/layer address,
 bounds and format. This replaces the per-pixel loop for supported formats.
 RGB565, RGB5_A1 and RGBA4 use half-float tile components; RGB10_A2 integer
 uses 16-bit integer tile components. Their PBE descriptors convert to packed
-memory formats. MSAA and unsupported address/stride alignment retain the
-scalar helper. Original-source probes, validation and
+memory formats. Native bulk modes also export all samples of 2x/4x MSAA
+and select array layers. Layered mipmapped allocations use a generated GPU
+pixel-store loop with explicit mip offsets and layer strides. The renderer
+restores temporary image/buffer bindings after constructing either helper.
+Both the background reload and EOT export helpers prepare fragment launch
+records and retain their resources without emitting a rasterized draw. A
+fullscreen reload triangle would mark every tile as non-empty, including tiles
+the application never touches. Reloading an attachment also must not set its
+clear bit: that would request processing empty tiles even after removing the
+triangle. Real color clears use ordinary clear draws; depth/stencil fast clears
+retain the empty-tile processing required to initialize the whole attachment.
+Original-source probes, validation and
 measurements are documented in the parent workspace's
 `linux-m4-integration/tools/gpu/asahi/plasma-es3/block-export/README.md`.
 
@@ -368,7 +390,8 @@ Apple9 main shaders may now have a compiler-generated UBO/ALU preamble. The
 compiler stores its complete body, ending in STOP, after main in the shader BO
 and reports its byte offset and size. Both parts keep the original complete
 resource map. Setup writes results into the remaining argument words through
-255: starting at word 12 for graphics, or 2*(N+1) for N compute resources.
+255: starting at word 12 for graphics and descriptor-table compute, or
+`align(2*(N+1), 4)` for N directly published compute resources.
 The ordinary main compiler reads those words
 through modeled uniform operands.
 
@@ -396,3 +419,11 @@ The numerical checks and counter/throughput observations are recorded in
 `linux-m4-integration/tools/gpu/asahi/codegen-quality-fixes/REPORT.md` in the
 parent workspace. These measurements do not establish GPU instruction-cycle
 latencies or a T8132 occupancy table.
+
+
+Sample shading is compiled into the monolithic Apple9 fragment variant. The
+variant includes multisample rasterization state, independently of the physical
+attachment sample count, so disabling multisampling preserves broadcast color
+stores and the API's sample-count uniform. Per-sample interpolation, depth,
+coverage and blending have native T8132 readback coverage at two and four
+samples; single-sample fallback is checked separately.

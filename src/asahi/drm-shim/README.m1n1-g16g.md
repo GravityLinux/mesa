@@ -1,5 +1,11 @@
 # Apple9 compute through the m1n1 DRM shim
 
+For the current source-generated launcher, shader allocation and asynchronous
+submission model, see [Apple9 launchers](../../gallium/drivers/asahi/README.apple9-launchers.md).
+The carrier/archive milestones below describe earlier bring-up experiments;
+the production driver no longer installs captured launchers or replaces a
+shared graphics/compute USC mapping at submission.
+
 This development tree runs Mesa's Asahi Gallium driver against a real T8132
 through the modern Asahi DRM UAPI. The preload library presents a render node,
 embeds the m1n1 Python backend, and forwards device parameters, VM/GEM

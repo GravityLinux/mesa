@@ -25,11 +25,13 @@ producer's block. This distinction matters at loop headers. Neither insertion
 requires editing branch targets.
 
 A general unconditional break publishes a true predicate for the currently
-active lanes in the target loop's predicate bank before mask unwind. Ordinary
-conditional pushes consume bank zero; they do not establish the predicate
-required by unwind. Publish after exit-phi source selection so comparisons in
-those expressions cannot replace the break predicate. Omitting this write can
-lose break-edge values or prevent loop termination.
+active lanes before mask unwind. The unwind's final byte selects that predicate
+bank, independently of the scope count in byte three. The predicate dies at
+unwind, so all loop depths reuse bank one; ordinary conditional pushes use bank
+zero. Publish after exit-phi source selection so comparisons in those expressions
+cannot replace the break predicate. Omitting this write can lose break-edge
+values or prevent loop termination. Native nested-loop probes through depth 16
+confirm the shared-bank model, including breaks at each enclosing level.
 
 The allocation CFG comes from the original NIR blocks and logical edges, not
 from linear execution-mask layout. Both arms stay represented so edge copies
@@ -100,7 +102,9 @@ scratch aliases, device-memory ordering, and borrowed publication inputs.
 Execution-mask changes, block boundaries, and operations with implicit hardware
 dependencies retain conservative completion boundaries. Atomic publication
 records stay adjacent to their producer. Tags are retired before reuse.
-The scratch frame is rounded to 16 bytes and bounded at 4 KiB per invocation.
+The register-spill region is rounded to 16 bytes and bounded at 4 KiB per
+invocation. Indexed private arrays follow this region in the same frame; their
+combined allocation is bounded at 32 KiB, as described below.
 
 Device-load completion applies to the full result tuple, so its first consumer
 need not read every component. Compact float and extended logic consumers,
@@ -158,6 +162,15 @@ folds `imul`, GLSL's `amul`, shifts and constant additions when bounds prove
 that doing so preserves the original 32-bit arithmetic. A potentially wrapping
 shift masks its source before widening; an unknown sum remains in the index.
 Atomic offsets retain their element-index conversion.
+
+Narrow integer SSA values occupy word registers and may retain unrelated upper
+bits after truncation. Integer-to-float selection therefore zero-extends or
+sign-extends the source to 32 bits before the native conversion, for both FP16
+and FP32 results. This cannot rely on an earlier NIR widening operation:
+algebraic optimization may fold that operation into the conversion, including
+during legalization before preamble extraction. The narrow vertex conversion
+graphics regression covers packed signed and unsigned byte/short attributes
+with a uniform transform.
 
 T8132 hardware validates native index shifts from zero through four. Larger
 values in the public M3 descriptor failed the requested-stride probe and are
@@ -291,10 +304,10 @@ fetch and fetch-offset cases in both graphics stages and all three dimensions.
 `image_store_block_agx` with a 2D multisample destination selects the native
 MSAA block-store mode (`0x228`; the ordinary 2D mode is `0x5a8`). It exports
 all samples in the implicit tile, with the 2×/4× sample count supplied by the
-PBE descriptor. The publication is `(pixel_x, pixel_y, 0, tile_byte_offset << 16)`;
-ordinary 2D stores use `(pixel_x, pixel_y, tile_byte_offset << 16)` in the same
-four-register allocation. The zero word is part of the validated MSAA contract;
-its other potential meanings are not modeled.
+PBE descriptor. The publication is `(pixel_x, pixel_y, layer, tile_byte_offset << 16)`,
+with layer zero for non-array images. Array stores select `0x528` for one sample
+or `0x028` for multiple samples. Ordinary 2D stores use
+`(pixel_x, pixel_y, tile_byte_offset << 16)` in the same four-register allocation.
 
 The MSAA publication and store have four-source encoding contracts, participate
 in ordinary allocation and liveness, and complete through the existing export
@@ -407,13 +420,23 @@ preamble. Unused vector components are trimmed before assigning uniform words.
 Unsupported dependencies, masked setup, scratch, and setup bodies exceeding
 8192 bytes retain the original main shader.
 
-Preamble results occupy every word after the shader's roots in the 256-word
-argument window. Graphics roots occupy words 0 through 11, leaving 244 words.
-Compute publishes one group-count pointer and N compacted resource pointers,
-so setup starts at word 2*(N+1). Three resources leave 248 words; the maximum
-18 resources leave 218. Setup and main derive this boundary from the same full
-resource map. Compute no longer allocates or publishes the four unused state
-words.
+Preamble results occupy every word after the shader's root publication blocks
+in the 256-word argument window. Graphics roots occupy words 0 through 11,
+leaving 244 words. Buffer-only compute with up to 18 resources publishes one
+group-count pointer and N compacted resource pointers, reserving the final
+four-word block in full. Setup starts at `align(2*(N+1), 4)`: three resources
+leave 248 words and 18 resources leave 216. Texture-using compute, including
+lowered API vertex and geometry shaders, or compute with more resources uses
+six roots and begins setup at word 12. Setup and main derive both the ABI and
+this boundary from the same full resource map.
+
+T8132 software vertex shaders exposed the block boundary: with four resources,
+preamble values at words 10 and 11 were intermittently replaced by zero while
+words 12 and 13 remained correct. CPU uniform data and GPU-generated restart
+indices were correct. Explicit load waits did not fix the result. Reserving the
+whole root block passed 20 consecutive official primitive-restart runs; the
+unrounded control failed all 10 runs. This boundary is independent of GPR
+allocation and applies to every compute preamble.
 `IOR_UNIFORM` explicitly reads one word with a GPR operand, preserving integer
 bits, signed zero, subnormals, and NaN payloads when used as a move with zero.
 `STORE_UNIFORM` consumes its GPR operand. Its clobber constraint lets shared SSA
@@ -463,3 +486,193 @@ input-half selection, source retention and ordinary NIR reachability.
 
 Detailed hardware probes and the Tokyo comparison are recorded in the parent
 workspace's `linux-m4-integration/tools/gpu/asahi/m3-compiler-20260914/REPORT.md`.
+
+## Subgroup scans and shared memory
+
+Integer `exclusive_scan` selects the native 32-bit addition scan. Inclusive
+scans add the input to that result. `read_invocation` selects a broadcast with
+a subgroup-uniform lane index. Its current encoding consumes both the data
+and lane-index operands; allocator clobber constraints preserve later SSA
+uses of either. This broadcast form does not implement a divergent shuffle.
+
+Aligned 32-bit shared loads and stores scalarize through the usual NIR path.
+Their address operand is a word offset in the low half of an allocated GPR;
+the instruction selects a separate shared-memory argument root. This initial
+model constrains data and address operands to r0..r63. Shared loads use their
+own slot-6 completion encoding, with ordinary pending-result materialization
+before consumers, conflicting stores, and workgroup barriers. No registers
+are reserved for a particular shared array or prefix algorithm.
+
+T8132 validation includes partial and full subgroups, integer wraparound,
+1,024-thread workgroup scans and reductions, multiple shared arrays, and
+variable geometry transform feedback across a 2,059-input draw. These probes
+use development API overrides; they do not advertise general GL 4.3 support.
+The geometry lowering also excludes dummy culled primitives from transform
+feedback when a source invocation emitted no primitives.
+
+
+## Per-sample fragment shading
+
+Monolithic Apple9 fragment programs use the common AGX NIR sample loop at two
+or four samples. Sample ID, position, API coverage, shader coverage outputs,
+discard, depth, and tile accesses are lowered together. The sample-position
+word comes from the same helper used to program PPP. Disabling multisample
+rasterization selects center inputs while retaining the attachment's sample
+count and broadcast stores.
+
+The interpolation-position operation has distinct centroid and sample modes.
+Centroid consumes raster coverage; sample mode consumes an allocated sample
+index. Both return an allocated packed position for explicit-coordinate
+coefficient evaluation. A one-bit coverage mask in centroid mode does not
+substitute for sample mode on T8132. Minimum sample shading uses the state
+tracker's per-sample input variant and this same coefficient path.
+
+T8132 readback checks cover single-sample targets, two- and four-sample targets,
+per-sample builtins, discard, depth comparison, sample masks, repeated mask
+assignments, additive blending, minimum shading, and disabled multisampling.
+The official GL33 multisample fragment-coordinate case also passes. The host
+compiler test exercises sample inputs, color, depth, and coverage outputs.
+
+
+## Textures in compute and geometry stages
+
+Texture-using compute programs share the normal graphics texture lowering and
+an indirect buffer table. Their six argument roots are texture descriptors,
+sampler descriptors, compacted buffer addresses, group counts, shared memory,
+and a reserved zero pointer. This ABI supports 32 combined buffer resources;
+buffer-only programs with at most 18 retain the direct ABI. Loads, stores,
+atomics, preambles and shared accesses all use the selected resource map.
+The compute launch frame includes the compiler's publication requirement.
+
+The driver uploads the shader's normal sampler mapping and graphics sysvals
+for API vertex/geometry programs lowered to compute. T8132 readback tests cover
+vertex-only, geometry-only and combined texture fetches, variable emitted
+primitive counts, transform feedback, and primitive queries across partial and
+multiple workgroups. Compiler tests combine fetch/filtering with preambles,
+shared memory and group counts, and cover both resource ABIs at their limits.
+
+## Layered rendering
+
+The vertex export layout packs the layer in the low 16 bits of a dedicated
+layer/viewport word after user varyings and point size, before clip distances.
+PPP enables that system output and includes it in the export stride. Fragment
+`load_layer_id` reads the raster layer through GET_SR selector `0xc3`; workgroup
+Z is a separate value and does not identify the layer of an end-of-tile helper.
+Geometry copy shaders and internal layered clears use this ordinary path.
+
+Layered reloads add the resource's layer stride to their existing mip address.
+Native array PBE stores use the array coordinate and page-aligned layer layout.
+For mipmapped layered allocations, the generated end-of-tile shader reads each
+tile pixel and writes its explicit resource address. This GPU fallback avoids
+assuming a native bulk-store mip selector; it is slower than bulk export.
+Single-layer mip views continue using a rebased PBE descriptor.
+
+T8132 pixel oracles cover layered color and depth, geometry primitive IDs,
+per-layer clears, partial tiles, reloads, blending, RGBA8/RGBA16F, 2x/4x MSAA,
+and array/3D mip levels. Host tests check layer outputs together with point
+size and clip distances, plus sparse image bindings in every bulk-store mode.
+
+
+## Implicit fragment primitive IDs
+
+When a fragment shader reads `gl_PrimitiveID` without an API geometry shader,
+Apple9 inserts Mesa's common passthrough GS with primitive-ID forwarding. The
+Poly lowering normalizes its scalar primitive-ID input to the same intrinsic
+used by GLSL geometry shaders. The generated raster shader exports the ID as
+an ordinary flat integer varying. Its cache distinguishes shaders with and
+without primitive-ID forwarding. Native generated primitive coefficients remain
+unmodeled; this path uses the existing geometry implementation.
+
+The passthrough is inserted before transform feedback and primitive conversion,
+so it receives the original topology and captures only once. Queries on draws
+with primitive restart also use geometry assembly, excluding restart markers
+from generated-primitive counts. T8132 checks cover points, lines, triangles,
+strips, fans, adjacency rasterization, instancing, restart, repeated shader
+switches, captured point data, buffer tails, and both primitive query counts.
+The core transform-feedback validator now admits only the documented triangle
+modes without a GS, while preserving compatibility-profile quad/polygon modes.
+
+Native unary integer operations use the eight-byte conversion-family operand
+layout. Population count, unsigned find-MSB and bit reversal preserve ordinary
+GPR liveness and consume pending loads through the shared dependency mask.
+The T8132 hardware tests cover all 16-bit values, every bit position, random
+32-bit inputs, zero (find-MSB returns -1), retained sources and 96-register
+pressure. Signed find-MSB and find-LSB use the common NIR composition around
+the native unsigned operation. Narrow inputs are explicitly zero-extended;
+64-bit inputs use common pair lowering. Diagnostic GLSL tests enable
+`ARB_gpu_shader5` privately so the GLSL frontend preserves find-MSB instead
+of choosing its older float-exponent fallback; this does not advertise that
+extension in the driver.
+
+
+Binary16 arithmetic uses the native half add, subtract, multiply and FMA
+families. Values occupy the low half of word-allocated SSA registers; the high
+half is undefined until extended. Half min/max, comparisons and predicates,
+rounding, reciprocal, reciprocal square root, exp2 and log2 also have native
+forms. Square root uses a native half-input, float-output special factor and a
+mixed float/half multiply with a half result. Division uses the same mixed
+multiply with a float reciprocal of the half divisor, avoiding premature half
+reciprocal overflow. Sign changes remain exact bit operations.
+
+T8132 probes cover every half bit pattern, random and edge-case operand pairs,
+retained sources, comparison-controlled branches, and 80 simultaneously live
+values reaching all 96 word registers. Add/subtract/multiply/FMA, rounding,
+min/max, square root, reciprocal and division match the independent binary16
+CPU oracle. Native exp2 and log2 each differ by one half ULP on one tested
+finite input; they are hardware approximations, not correctly rounded
+functions. The public [FP16 encoding work](https://github.com/pac85/applegpu/commit/bb97333d6c914289bef9a7d5e73797627d804e6f)
+provides an independent source for register-half, lifetime and modifier fields.
+The opcode family selects the arithmetic datapath; source and destination
+precision fields in the float datapath also allow mixed-width operations.
+
+Fragment primitive IDs use a rasterizer-generated coefficient and the matching
+VDM/fragment state enables. User varyings, depth and point coordinates retain
+separate coefficient slots. A geometry shader supplying its own primitive ID
+continues to use its ordinary output varying.
+
+Explicit texture gradients now publish native parameter blocks for 2D arrays,
+3D textures and depth comparisons. The allocator reserves eight words for the
+2D forms and sixteen for 3D, even though the 3D operation publishes only nine
+coordinate/derivative words. Separate live gradient operations retain separate
+blocks. Hardware validation covers nonzero mip gradients in compute and
+fragment shaders, including two simultaneously live 3D samples.
+
+Layered mip attachments use native PBE block exports with the complete mip-tree
+base and independent selected-level fields. Color reload shaders use texture
+fetches, including per-sample fetches, then convert to the tile representation.
+The texture unit supplies addressing and format conversion. Texture descriptors
+are constructed from the current view for both graphics and compute uploads.
+
+Indirect draws consume GPU argument buffers through native VDM commands, with
+all three index widths, first-index offsets, signed base vertices, instance
+counts and primitive restart. Instanced vertex fetches read base instance from
+the draw-parameter UBO, which can point directly into an indirect descriptor.
+The original shader's draw-ID usage survives its conversion to compute for
+geometry processing. Multidraw count uses the existing GPU predication helper;
+transform feedback on indirect draws uses the geometry path without mapping
+arguments back to the CPU.
+
+CDM mode 1 reads three workgroup counts and takes local sizes from the command.
+Mode 2 reads six words containing thread counts followed by local sizes. The
+latter supports the partial groups used by indirect geometry processing. Its
+shader-visible workgroup counts are rounded separately on the GPU. This avoids
+interpreting a five-vertex input as five full workgroups.
+
+### Indexed private arrays
+
+Large function-local arrays use native indexed private loads and stores. As on
+Apple8, direct accesses are promoted to SSA first; small indirect arrays use
+NIR decision trees. Scratch legalization handles narrower values through
+32-bit words. The native index and displacement both count words. Stores
+consume their data operand and retain their index, so ordinary allocator
+constraints preserve later uses. Loads complete through slot 6, and the physical
+scheduler retires a pending private read before any private write.
+
+Register spills occupy the beginning of the scratch frame, with indexed arrays
+after the aligned spill region. The allocator fixes this displacement after
+spilling and checks the combined 32 KiB limit. SAVE/FILL retain their separately
+validated 4 KiB spill-region limit. Authored hardware probes validate distinct
+per-invocation contents, register operands through r63, dynamic and constant
+word offsets through 8191, and the shared frame layout with SAVE/FILL. Native
+GLSL vertex and fragment tests cover 2–32 KiB frames and repeated aliased access;
+the original giant-array and fragment-predication Piglit tests also pass.
