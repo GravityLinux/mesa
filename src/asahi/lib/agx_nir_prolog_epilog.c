@@ -26,7 +26,7 @@
  * passed in a sideband, rather than requiring a texture binding. This is
  * simpler for drivers to integrate and might be more efficient.
  */
-static bool
+bool
 agx_nir_lower_poly_stipple(nir_shader *s)
 {
    assert(s->info.stage == MESA_SHADER_FRAGMENT);

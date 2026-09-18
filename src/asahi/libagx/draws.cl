@@ -29,6 +29,17 @@ libagx_predicate_indirect(global uint32_t *out, constant uint32_t *in,
    }
 }
 
+/* CDM indirect-local buffers contain thread counts and local sizes. Shader
+ * system values still expose the rounded number of workgroups. */
+KERNEL(1)
+libagx_workgroups_from_threads(global uint32_t *out, constant uint32_t *grid)
+{
+   for (uint i = 0; i < 3; ++i) {
+      uint group_size = grid[i + 3];
+      out[i] = grid[i] / group_size + (grid[i] % group_size != 0);
+   }
+}
+
 /*
  * Indexing/offseting is in software if necessary so we strip all
  * indexing/offset information.

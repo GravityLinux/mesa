@@ -270,6 +270,7 @@ struct agx_fs_epilog_key {
 void agx_nir_vs_prolog(struct nir_builder *b, const void *key_);
 void agx_nir_fs_epilog(struct nir_builder *b, const void *key_);
 void agx_nir_fs_prolog(struct nir_builder *b, const void *key_);
+bool agx_nir_lower_poly_stipple(nir_shader *s);
 
 bool agx_nir_gather_vs_inputs(nir_shader *s,
                               BITSET_WORD *attrib_components_read);

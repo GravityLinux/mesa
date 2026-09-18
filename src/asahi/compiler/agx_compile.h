@@ -412,6 +412,7 @@ struct agx_shader_key {
 uint64_t agx_gather_texcoords(nir_shader *nir);
 
 void agx_preprocess_nir(nir_shader *nir);
+bool agx_nir_lower_printf_buffer(nir_shader *nir);
 bool agx_nir_lower_discard_zs_emit(nir_shader *s);
 bool agx_nir_lower_sample_mask(nir_shader *s);
 bool agx_nir_lower_interpolation(nir_shader *s);
@@ -503,3 +504,28 @@ static const nir_shader_compiler_options agx_nir_options = {
    .scalarize_ddx = true,
    .io_options = nir_io_always_interpolate_convergent_fs_inputs,
 };
+
+/*
+ * Return the standard sample positions, packed into a 32-bit word with fixed
+ * point nibbles for each x/y component of the (at most 4) samples. This is
+ * suitable for programming the PPP_MULTISAMPLECTL control register.
+ */
+static inline uint32_t
+agx_default_sample_positions(unsigned nr_samples)
+{
+   switch (nr_samples) {
+   case 1:
+      return 0x88;
+   case 2:
+      return 0x44cc;
+   case 4:
+      return 0xeaa26e26;
+   default:
+      UNREACHABLE("Invalid sample count");
+   }
+}
+
+bool agx_nir_lower_monolithic_msaa(nir_shader *shader, uint8_t nr_samples);
+bool agx_nir_lower_sample_intrinsics(nir_shader *shader,
+                                     bool ignore_sample_mask_without_msaa);
+bool agx_nir_lower_to_per_sample(nir_shader *shader);

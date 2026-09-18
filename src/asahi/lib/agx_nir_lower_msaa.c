@@ -5,7 +5,6 @@
  */
 
 #include "agx_compile.h"
-#include "agx_tilebuffer.h"
 #include "nir.h"
 #include "nir_builder.h"
 #include "nir_builder_opcodes.h"

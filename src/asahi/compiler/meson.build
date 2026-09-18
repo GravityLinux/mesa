@@ -19,6 +19,8 @@ libasahi_agx_files = files(
   'agx_nir_lower_fminmax.c',
   'agx_nir_lower_frag_sidefx.c',
   'agx_nir_lower_sample_mask.c',
+  '../lib/agx_nir_lower_msaa.c',
+  '../lib/agx_nir_lower_sample_intrinsics.c',
   'agx_nir_lower_discard_zs_emit.c',
   'agx_nir_lower_interpolation.c',
   'agx_nir_lower_shared_bitsize.c',

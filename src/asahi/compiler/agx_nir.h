@@ -11,6 +11,7 @@ struct nir_shader;
 struct nir_instr;
 
 bool agx_nir_lower_address(struct nir_shader *shader);
+bool agx_nir_lower_sink_address(struct nir_shader *shader);
 bool agx_nir_lower_algebraic_late(struct nir_shader *shader);
 bool agx_nir_cleanup_amul(struct nir_shader *shader);
 bool agx_nir_fuse_lea(struct nir_shader *shader);

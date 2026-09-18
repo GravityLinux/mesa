@@ -3227,6 +3227,13 @@ lower_sink_address(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
    return false;
 }
 
+bool
+agx_nir_lower_sink_address(nir_shader *nir)
+{
+   return nir_shader_intrinsics_pass(nir, lower_sink_address,
+                                     nir_metadata_control_flow, NULL);
+}
+
 static void
 agx_remove_unreachable_block(agx_block *block)
 {
@@ -3693,6 +3700,13 @@ lower_printf_buffer(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *_)
    return true;
 }
 
+bool
+agx_nir_lower_printf_buffer(nir_shader *nir)
+{
+   return nir_shader_intrinsics_pass(nir, lower_printf_buffer,
+                                     nir_metadata_control_flow, NULL);
+}
+
 void
 agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
                        struct agx_shader_part *out)
@@ -3723,8 +3737,7 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
       info->tag_write_disable = !nir->info.writes_memory;
 
-   NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_printf_buffer,
-            nir_metadata_control_flow, NULL);
+   NIR_PASS(_, nir, agx_nir_lower_printf_buffer);
 
    NIR_PASS(_, nir, nir_lower_frag_coord_to_pixel_coord);
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
@@ -3771,8 +3784,7 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
    NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_load_from_texture_handle,
             nir_metadata_control_flow, NULL);
 
-   NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_sink_address,
-            nir_metadata_control_flow, NULL);
+   NIR_PASS(_, nir, agx_nir_lower_sink_address);
 
    info->push_count = key->reserved_preamble;
    agx_optimize_nir(

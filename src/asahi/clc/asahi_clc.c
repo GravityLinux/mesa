@@ -14,6 +14,7 @@
 #include "nir_builder_opcodes.h"
 #include "nir_intrinsics.h"
 #include "nir_precompiled.h"
+#include "nir_serialize.h"
 #include "shader_enums.h"
 
 #include <fcntl.h>
@@ -314,6 +315,31 @@ main(int argc, char **argv)
          NIR_PASS(_, s, nir_lower_explicit_io, nir_var_mem_shared,
                   nir_address_format_62bit_generic);
 
+         /* Preserve a target-independent helper for ISAs with a separate
+          * backend. In particular Apple9 must never execute the Apple8 blob
+          * emitted below. The argument layout stays shared by both paths. */
+         nir_shader *portable = nir_shader_clone(NULL, s);
+         NIR_PASS(_, portable, nir_lower_array_deref_of_vec,
+                  nir_var_function_temp, NULL,
+                  nir_lower_indirect_array_deref_of_vec_load |
+                     nir_lower_indirect_array_deref_of_vec_store);
+         NIR_PASS(_, portable, nir_lower_indirect_derefs_to_if_else_trees,
+                  nir_var_function_temp, 32);
+         optimize(portable);
+         NIR_PASS(_, portable, nir_lower_explicit_io,
+                  nir_var_shader_temp | nir_var_function_temp |
+                     nir_var_mem_shared | nir_var_mem_global,
+                  nir_address_format_62bit_generic);
+         struct blob serialized;
+         blob_init(&serialized);
+         blob_write_uint32(&serialized, 0);
+         nir_serialize(&serialized, portable, true);
+         blob_overwrite_uint32(&serialized, 0, serialized.size - 4);
+         nir_precomp_print_blob(fp_c, libfunc->name, "nir", v,
+                               (uint32_t *)serialized.data, serialized.size, true);
+         blob_finish(&serialized);
+         ralloc_free(portable);
+
          agx_preprocess_nir(s);
 
          NIR_PASS(_, s, nir_opt_deref);
@@ -382,6 +408,9 @@ main(int argc, char **argv)
       nir_precomp_print_extern_binary_map(fp_h, "libagx", *target);
       nir_precomp_print_binary_map(fp_c, nir, "libagx", *target, remap_variant);
    }
+
+   nir_precomp_print_extern_binary_map(fp_h, "libagx", "nir");
+   nir_precomp_print_binary_map(fp_c, nir, "libagx", "nir", remap_variant);
 
    glsl_type_singleton_decref();
    fclose(fp_c);

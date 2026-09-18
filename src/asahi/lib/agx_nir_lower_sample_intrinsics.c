@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "agx_tilebuffer.h"
+#include "agx_compile.h"
 #include "nir.h"
 #include "nir_builder.h"
 #include "nir_builder_opcodes.h"
