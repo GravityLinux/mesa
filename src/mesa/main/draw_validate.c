@@ -365,13 +365,19 @@ _mesa_update_valid_to_render_state(struct gl_context *ctx)
                     (1 << GL_LINE_LOOP) |
                     (1 << GL_LINE_STRIP);
             break;
-         case GL_TRIANGLES:
-            /* TODO: This doesn't look right, but it matches the original code. */
-            mask &= ~((1 << GL_POINTS) |
-                      (1 << GL_LINES) |
-                      (1 << GL_LINE_LOOP) |
-                      (1 << GL_LINE_STRIP));
+         case GL_TRIANGLES: {
+            unsigned triangles = (1 << GL_TRIANGLES) |
+                                 (1 << GL_TRIANGLE_STRIP) |
+                                 (1 << GL_TRIANGLE_FAN);
+            if (_mesa_is_desktop_gl_compat(ctx)) {
+               triangles |= (1 << GL_QUADS) | (1 << GL_QUAD_STRIP) |
+                            (1 << GL_POLYGON);
+            }
+            /* Adjacency modes require a geometry shader to produce a
+             * primitive compatible with transform feedback. */
+            mask &= triangles;
             break;
+         }
          }
       }
 
