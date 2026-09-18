@@ -463,6 +463,11 @@ struct agx_batch {
     */
    bool incoherent_writes;
 
+   /* A tiling read depends on a GPU writer, or a tiling write may
+    * race a previous fragment read. Keep the render barrier before tiling.
+    */
+   bool tiling_dependency;
+
    struct agx_pool pool, pipeline_pool;
 
    /* We may enqueue both CDM and VDM work, possibly to the same batch for
@@ -1182,13 +1187,20 @@ void agx_memory_barrier(struct pipe_context *pctx, unsigned flags);
 
 /* Use these instead of batch_add_bo for proper resource tracking */
 void agx_batch_reads(struct agx_batch *batch, struct agx_resource *rsrc);
+/* These accesses happen exclusively during fragment execution. */
+void agx_batch_reads_fragment(struct agx_batch *batch, struct agx_resource *rsrc);
+void agx_batch_writes_fragment(struct agx_batch *batch,
+                               struct agx_resource *rsrc, unsigned level);
+void agx_batch_writes_fragment_range(struct agx_batch *batch,
+                                     struct agx_resource *rsrc,
+                                     unsigned offset, unsigned size);
 void agx_batch_writes_raw(struct agx_batch *batch, struct agx_resource *rsrc);
 void agx_batch_writes(struct agx_batch *batch, struct agx_resource *rsrc,
                       unsigned level);
 void agx_batch_writes_range(struct agx_batch *batch, struct agx_resource *rsrc,
                             unsigned offset, unsigned size);
 void agx_batch_track_image(struct agx_batch *batch,
-                           struct pipe_image_view *image);
+                           struct pipe_image_view *image, mesa_shader_stage stage);
 
 bool agx_any_batch_uses_resource(struct agx_context *ctx,
                                  struct agx_resource *rsrc);

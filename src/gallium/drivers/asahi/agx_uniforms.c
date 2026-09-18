@@ -11,11 +11,15 @@
 #include "pool.h"
 
 static uint64_t
-agx_const_buffer_ptr(struct agx_batch *batch, struct pipe_constant_buffer *cb)
+agx_const_buffer_ptr(struct agx_batch *batch, struct pipe_constant_buffer *cb,
+                     mesa_shader_stage stage)
 {
    if (cb->buffer) {
       struct agx_resource *rsrc = agx_resource(cb->buffer);
-      agx_batch_reads(batch, rsrc);
+      if (stage == MESA_SHADER_FRAGMENT)
+         agx_batch_reads_fragment(batch, rsrc);
+      else
+         agx_batch_reads(batch, rsrc);
       return agx_map_gpu(rsrc) + cb->buffer_offset;
    } else {
       return 0;
@@ -109,7 +113,7 @@ agx_set_cbuf_uniforms(struct agx_batch *batch, mesa_shader_stage stage)
    struct agx_stage_uniforms *unif = &batch->stage_uniforms[stage];
 
    u_foreach_bit(cb, st->cb_mask) {
-      unif->ubo_base[cb] = agx_const_buffer_ptr(batch, &st->cb[cb]);
+      unif->ubo_base[cb] = agx_const_buffer_ptr(batch, &st->cb[cb], stage);
       unif->ubo_size[cb] = st->cb[cb].buffer_size;
    }
 }
@@ -134,9 +138,15 @@ agx_set_ssbo_uniforms(struct agx_batch *batch, mesa_shader_stage stage)
          struct agx_resource *rsrc = agx_resource(sb->buffer);
 
          if (st->ssbo_writable_mask & BITFIELD_BIT(cb)) {
-            agx_batch_writes_range(batch, rsrc, sb->buffer_offset,
-                                   sb->buffer_size);
+            if (stage == MESA_SHADER_FRAGMENT)
+               agx_batch_writes_fragment_range(batch, rsrc, sb->buffer_offset,
+                                               sb->buffer_size);
+            else
+               agx_batch_writes_range(batch, rsrc, sb->buffer_offset,
+                                      sb->buffer_size);
             batch->incoherent_writes = true;
+         } else if (stage == MESA_SHADER_FRAGMENT) {
+            agx_batch_reads_fragment(batch, rsrc);
          } else {
             agx_batch_reads(batch, rsrc);
          }

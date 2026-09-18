@@ -157,6 +157,7 @@ agx_batch_init(struct agx_context *ctx,
    batch->initialized = false;
    batch->draws = 0;
    batch->incoherent_writes = false;
+   batch->tiling_dependency = false;
    agx_bo_unreference(dev, batch->sampler_heap.bo);
    batch->sampler_heap.bo = NULL;
    batch->sampler_heap.count = 0;
@@ -539,10 +540,25 @@ agx_sync_writer(struct agx_context *ctx, struct agx_resource *rsrc,
                 const char *reason)
 {
    agx_flush_writer_except(ctx, rsrc, NULL, reason, true);
+
+   /* GPU submissions already consume other contexts' writer fences. CPU
+    * transfers must wait for them too. Hold the same destruction lock so
+    * the producing context cannot destroy its batch syncobj during the wait.
+    */
+   struct agx_screen *screen = agx_screen(ctx->base.screen);
+   struct agx_device *dev = agx_device(ctx->base.screen);
+   u_rwlock_rdlock(&screen->destroy_lock);
+   uint64_t writer = p_atomic_read_relaxed(&rsrc->bo->writer);
+   if (writer && agx_bo_writer_queue(writer) != ctx->queue_id) {
+      uint32_t syncobj = agx_bo_writer_syncobj(writer);
+      int ret = drmSyncobjWait(dev->fd, &syncobj, 1, INT64_MAX, 0, NULL);
+      assert(!ret);
+   }
+   u_rwlock_rdunlock(&screen->destroy_lock);
 }
 
 void
-agx_batch_reads(struct agx_batch *batch, struct agx_resource *rsrc)
+agx_batch_reads_fragment(struct agx_batch *batch, struct agx_resource *rsrc)
 {
    agx_batch_add_bo(batch, rsrc->bo);
 
@@ -558,10 +574,24 @@ agx_batch_reads(struct agx_batch *batch, struct agx_resource *rsrc)
                            false);
 }
 
-/* Raw compute bindings carry no mip information. Track BO hazards here;
- * texture copy/resolve callers mark the subresources they actually write. */
 void
-agx_batch_writes_raw(struct agx_batch *batch, struct agx_resource *rsrc)
+agx_batch_reads(struct agx_batch *batch, struct agx_resource *rsrc)
+{
+   /* Unknown stages conservatively count as tiling reads. A writer equal to
+    * this batch may have replaced an older writer while binding attachments;
+    * it is not proof that the resource was ready before this render pass.
+    */
+   if (agx_writer_get(batch->ctx, rsrc->bo->handle) ||
+       (rsrc->separate_stencil &&
+        agx_writer_get(batch->ctx, rsrc->separate_stencil->bo->handle)))
+      batch->tiling_dependency = true;
+
+   agx_batch_reads_fragment(batch, rsrc);
+}
+
+/* Track BO hazards here; callers mark the subresources they actually write. */
+static void
+agx_batch_track_write(struct agx_batch *batch, struct agx_resource *rsrc)
 {
    struct agx_context *ctx = batch->ctx;
    struct agx_batch *writer = agx_writer_get(ctx, rsrc->bo->handle);
@@ -579,7 +609,7 @@ agx_batch_writes_raw(struct agx_batch *batch, struct agx_resource *rsrc)
       agx_flush_writer(ctx, rsrc, "Multiple writers");
 
    /* Write is strictly stronger than a read */
-   agx_batch_reads(batch, rsrc);
+   agx_batch_reads_fragment(batch, rsrc);
 
    writer = agx_writer_get(ctx, rsrc->bo->handle);
    assert(!writer || agx_batch_is_submitted(writer));
@@ -593,28 +623,53 @@ agx_batch_writes_raw(struct agx_batch *batch, struct agx_resource *rsrc)
 }
 
 void
-agx_batch_writes(struct agx_batch *batch, struct agx_resource *rsrc,
-                 unsigned level)
+agx_batch_writes_raw(struct agx_batch *batch, struct agx_resource *rsrc)
 {
-   agx_batch_writes_raw(batch, rsrc);
+   /* Includes transform feedback's implicit write-after-read hazards.
+    * Unknown stages conservatively count as tiling writes.
+    */
+   batch->tiling_dependency = true;
+   agx_batch_track_write(batch, rsrc);
+}
+
+void
+agx_batch_writes_fragment(struct agx_batch *batch, struct agx_resource *rsrc,
+                          unsigned level)
+{
+   agx_batch_track_write(batch, rsrc);
    BITSET_SET(rsrc->data_valid, level);
 
    if (rsrc->base.target == PIPE_BUFFER) {
-      /* Assume BOs written by the GPU are fully valid */
+      /* Assume BOs written by the GPU are fully valid. */
       rsrc->valid_buffer_range.start = 0;
       rsrc->valid_buffer_range.end = ~0;
    }
 }
 
 void
+agx_batch_writes_fragment_range(struct agx_batch *batch, struct agx_resource *rsrc,
+                                unsigned offset, unsigned size)
+{
+   assert(rsrc->base.target == PIPE_BUFFER);
+   agx_batch_track_write(batch, rsrc);
+   BITSET_SET(rsrc->data_valid, 0);
+   util_range_add(&rsrc->base, &rsrc->valid_buffer_range, offset, offset + size);
+}
+
+void
+agx_batch_writes(struct agx_batch *batch, struct agx_resource *rsrc,
+                 unsigned level)
+{
+   batch->tiling_dependency = true;
+   agx_batch_writes_fragment(batch, rsrc, level);
+}
+
+void
 agx_batch_writes_range(struct agx_batch *batch, struct agx_resource *rsrc,
                        unsigned offset, unsigned size)
 {
-   assert(rsrc->base.target == PIPE_BUFFER);
-   agx_batch_writes_raw(batch, rsrc);
-   BITSET_SET(rsrc->data_valid, 0);
-   util_range_add(&rsrc->base, &rsrc->valid_buffer_range, offset,
-                  offset + size);
+   batch->tiling_dependency = true;
+   agx_batch_writes_fragment_range(batch, rsrc, offset, size);
 }
 
 static int
@@ -897,7 +952,16 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
                                     att.list, att.count);
       }
 
-      /* Barrier on previous submission */
+      /* Attachment and fragment-input dependencies only need to delay the
+       * fragment stage. External fences and compute dependencies retain their
+       * existing scope. Older kernels and untracked render paths stay fully
+       * serialized.
+       */
+      if (!compute && !batch->tiling_dependency &&
+          agx_apple9_direct_render_enabled(dev) &&
+          (dev->params.features & DRM_ASAHI_FEATURE_FRAGMENT_BARRIER))
+         render->flags |= DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT;
+
       struct drm_asahi_cmd_header header = agx_cmd_header(
          false, compute ? DRM_ASAHI_BARRIER_NONE : 0, compute ? 1 : 0);
 

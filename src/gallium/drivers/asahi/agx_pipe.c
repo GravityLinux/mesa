@@ -690,7 +690,8 @@ agx_resource_destroy(struct pipe_screen *screen, struct pipe_resource *prsrc)
 }
 
 void
-agx_batch_track_image(struct agx_batch *batch, struct pipe_image_view *image)
+agx_batch_track_image(struct agx_batch *batch, struct pipe_image_view *image,
+                      mesa_shader_stage stage)
 {
    struct agx_resource *rsrc = agx_resource(image->resource);
 
@@ -698,11 +699,19 @@ agx_batch_track_image(struct agx_batch *batch, struct pipe_image_view *image)
       batch->incoherent_writes = true;
 
       if (rsrc->base.target == PIPE_BUFFER) {
-         agx_batch_writes_range(batch, rsrc, image->u.buf.offset,
-                                image->u.buf.size);
+         if (stage == MESA_SHADER_FRAGMENT)
+            agx_batch_writes_fragment_range(batch, rsrc, image->u.buf.offset,
+                                            image->u.buf.size);
+         else
+            agx_batch_writes_range(batch, rsrc, image->u.buf.offset,
+                                   image->u.buf.size);
+      } else if (stage == MESA_SHADER_FRAGMENT) {
+         agx_batch_writes_fragment(batch, rsrc, image->u.tex.level);
       } else {
          agx_batch_writes(batch, rsrc, image->u.tex.level);
       }
+   } else if (stage == MESA_SHADER_FRAGMENT) {
+      agx_batch_reads_fragment(batch, rsrc);
    } else {
       agx_batch_reads(batch, rsrc);
    }
@@ -1579,7 +1588,14 @@ agx_flush(struct pipe_context *pctx, struct pipe_fence_handle **fence,
    struct agx_context *ctx = agx_context(pctx);
    struct agx_screen *screen = agx_screen(ctx->base.screen);
 
-   agx_flush_all(ctx, "Gallium flush");
+   /* The state tracker finishes before retrying a failed allocation. Release
+    * completed batches' BO references before that retry, not just their GPU
+    * work: waiting on the exported fence alone does not clean up batches.
+    */
+   if (flags & PIPE_FLUSH_HINT_FINISH)
+      agx_sync_all(ctx, "Gallium finish");
+   else
+      agx_flush_all(ctx, "Gallium flush");
 
    if (!(flags & (PIPE_FLUSH_DEFERRED | PIPE_FLUSH_ASYNC)) &&
        ctx->flush_last_seqid) {

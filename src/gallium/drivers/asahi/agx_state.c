@@ -3549,7 +3549,10 @@ agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
       }
 
       struct agx_resource *rsrc = tex->rsrc;
-      agx_batch_reads(batch, tex->rsrc);
+      if (stage == MESA_SHADER_FRAGMENT)
+         agx_batch_reads_fragment(batch, tex->rsrc);
+      else
+         agx_batch_reads(batch, tex->rsrc);
 
       /* Re-emit state because the layout might have changed from under us.
        * TODO: optimize this somehow?
@@ -3576,7 +3579,7 @@ agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
       }
 
       struct pipe_image_view *view = &ctx->stage[stage].images[i];
-      agx_batch_track_image(batch, view);
+      agx_batch_track_image(batch, view, stage);
 
       struct pipe_sampler_view sampler_view = util_image_to_sampler_view(view);
 
@@ -4329,10 +4332,10 @@ agx_batch_init_state(struct agx_batch *batch)
       unsigned level = batch->key.zsbuf.level;
       struct agx_resource *rsrc = agx_resource(batch->key.zsbuf.texture);
 
-      agx_batch_writes(batch, rsrc, level);
+      agx_batch_writes_fragment(batch, rsrc, level);
 
       if (rsrc->separate_stencil)
-         agx_batch_writes(batch, rsrc->separate_stencil, level);
+         agx_batch_writes_fragment(batch, rsrc->separate_stencil, level);
    }
 
    for (unsigned i = 0; i < batch->key.nr_cbufs; ++i) {
@@ -4343,7 +4346,7 @@ agx_batch_init_state(struct agx_batch *batch)
          if (agx_resource_valid(rsrc, level))
             batch->load |= PIPE_CLEAR_COLOR0 << i;
 
-         agx_batch_writes(batch, rsrc, level);
+         agx_batch_writes_fragment(batch, rsrc, level);
          assert(agx_resource_valid(rsrc, level));
       }
    }
@@ -6085,7 +6088,7 @@ agx_apple9_upload_textures(struct agx_batch *batch, struct agx_stage *shader,
          abort();
       }
       if (fragment)
-         agx_batch_reads(batch, resource);
+         agx_batch_reads_fragment(batch, resource);
       else
          agx_batch_reads(batch, resource);
       if (view->base.target == PIPE_BUFFER) {
@@ -6220,7 +6223,7 @@ agx_apple9_upload_textures(struct agx_batch *batch, struct agx_stage *shader,
          }
       }
       if (fragment)
-         agx_batch_writes(batch, resource, level);
+         agx_batch_writes_fragment(batch, resource, level);
       else
          agx_batch_writes(batch, resource, level);
    }
@@ -6949,9 +6952,14 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
                const struct pipe_shader_buffer *ssbo =
                   &ctx->stage[shader].ssbo[binding];
                struct agx_resource *resource = agx_resource(ssbo->buffer);
-               if (rs->resource_write_mask & BITFIELD_BIT(slot))
+               if ((rs->resource_write_mask & BITFIELD_BIT(slot)) && stage)
+                  agx_batch_writes_fragment_range(batch, resource, ssbo->buffer_offset,
+                                                  ssbo->buffer_size);
+               else if (rs->resource_write_mask & BITFIELD_BIT(slot))
                   agx_batch_writes_range(batch, resource, ssbo->buffer_offset,
                                          ssbo->buffer_size);
+               else if (stage)
+                  agx_batch_reads_fragment(batch, resource);
                else
                   agx_batch_reads(batch, resource);
                address = agx_map_gpu(resource) + ssbo->buffer_offset;
@@ -6975,7 +6983,10 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
                   abort();
                }
                struct agx_resource *ubo = agx_resource(cb->buffer);
-               agx_batch_reads(batch, ubo);
+               if (stage)
+                  agx_batch_reads_fragment(batch, ubo);
+               else
+                  agx_batch_reads(batch, ubo);
                address = agx_map_gpu(ubo) + cb->buffer_offset;
             }
             record->buffers[stage][slot] = address;
