@@ -1448,9 +1448,9 @@ static const struct agx_apple9_encoding_info encodings[] = {
                           95, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                           AGX_APPLE9_EVIDENCE_HARDWARE)},
       },
-   [AGX_APPLE9_ENC_BLOCK_STORE_MS_PARAMS] =
+   [AGX_APPLE9_ENC_BLOCK_STORE_EXTENDED_PARAMS] =
       {
-         .name = "block_store_ms_params",
+         .name = "block_store_extended_params",
          .length = 40,
          .operand_count = 5,
          .allocator_safe = true,
@@ -1483,8 +1483,8 @@ static const struct agx_apple9_encoding_info encodings[] = {
          GPR(AGX_APPLE9_OPERAND_SRC2, AGX_APPLE9_WIDTH_32, 15, 2,
              AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE)},
    },
-   [AGX_APPLE9_ENC_BLOCK_IMAGE_STORE_MS] = {
-      .name = "block_image_store_ms", .length = 18,
+   [AGX_APPLE9_ENC_BLOCK_IMAGE_STORE_EXTENDED] = {
+      .name = "block_image_store_extended", .length = 18,
       .operand_count = 4, .allocator_safe = true,
       .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
       .operands = {
@@ -1595,6 +1595,62 @@ static const struct agx_apple9_encoding_info encodings[] = {
                    AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },
+   [AGX_APPLE9_ENC_TEXTURE_GRAD_ARRAY_PARAMS] = {
+      .name = "texture_grad_array_params",
+      .length = 80,
+      .operand_count = 9,
+      .allocator_safe = true,
+      .evidence = AGX_APPLE9_EVIDENCE_BYTE_DIFF,
+      .operands = {
+         GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 31, 8,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+         GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+         GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+         GPR(AGX_APPLE9_OPERAND_SRC2, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+         GPR(AGX_APPLE9_OPERAND_SRC3, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+         GPR(AGX_APPLE9_OPERAND_SRC4, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+         GPR(AGX_APPLE9_OPERAND_SRC5, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+         GPR(AGX_APPLE9_OPERAND_SRC6, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+         GPR(AGX_APPLE9_OPERAND_SRC7, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+      },
+   },
+   [AGX_APPLE9_ENC_TEXTURE_GRAD_VOLUME_PARAMS] = {
+      .name = "texture_grad_volume_params",
+      .length = 90,
+      .operand_count = 10,
+      .allocator_safe = true,
+      .evidence = AGX_APPLE9_EVIDENCE_BYTE_DIFF,
+      .operands = {
+         GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 31, 8,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+         GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+         GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+         GPR(AGX_APPLE9_OPERAND_SRC2, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+         GPR(AGX_APPLE9_OPERAND_SRC3, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+         GPR(AGX_APPLE9_OPERAND_SRC4, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+         GPR(AGX_APPLE9_OPERAND_SRC5, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+         GPR(AGX_APPLE9_OPERAND_SRC6, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+         GPR(AGX_APPLE9_OPERAND_SRC7, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+         GPR(AGX_APPLE9_OPERAND_SRC8, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+      },
+   },
    [AGX_APPLE9_ENC_TEXTURE_GRAD] =
       {
          .name = "texture_grad",
@@ -1643,9 +1699,9 @@ static const struct agx_apple9_encoding_info encodings[] = {
                           2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                           AGX_APPLE9_EVIDENCE_HARDWARE)},
       },
-   [AGX_APPLE9_ENC_CENTROID_POSITION] =
+   [AGX_APPLE9_ENC_INTERPOLATION_POSITION] =
       {
-         .name = "centroid_position",
+         .name = "interpolation_position",
          .length = 8,
          .operand_count = 2,
          .allocator_safe = true,

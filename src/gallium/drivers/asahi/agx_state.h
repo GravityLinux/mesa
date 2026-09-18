@@ -232,6 +232,7 @@ struct agx_compiled_shader {
     * static-plus-dynamic total to the exact capture-backed ABI size. */
    bool apple9_has_variable_shared_mem;
    struct agx_apple9_compute_profile apple9_compute_profile;
+   struct agx_apple9_texture_mapping apple9_compute_textures;
 
    /* Apple9 render compiler output consumed by the pipeline linker/VDM
     * encoder. Generated stage storage is owned by this compiled shader.
@@ -289,10 +290,12 @@ struct agx_uncompiled_shader {
    uint8_t nir_blake3[BLAKE3_KEY_LEN];
 
    struct {
+      uint64_t inputs_read;
       uint64_t inputs_flat_shaded;
       uint64_t inputs_linear_shaded;
       uint8_t cull_distance_size;
       bool has_edgeflags;
+      bool uses_draw_id;
       bool uses_fbfetch;
 
       /* Number of bindful textures, images used */
@@ -300,7 +303,7 @@ struct agx_uncompiled_shader {
    } info;
 
    struct hash_table *variants;
-   struct agx_uncompiled_shader *passthrough_progs[MESA_PRIM_COUNT][3][2];
+   struct agx_uncompiled_shader *passthrough_progs[MESA_PRIM_COUNT][3][2][2];
    struct agx_uncompiled_shader *passthrough_tcs[32];
 
    /* agx_fast_link_key -> agx_linked_shader */
@@ -517,10 +520,12 @@ struct agx_blend {
 };
 
 struct asahi_vs_shader_key {
+   uint64_t apple9_fragment_inputs;
    /* If true, this is running as a hardware vertex shader. If false, this is a
     * compute job used to feed a TCS or GS.
     */
    bool hw;
+   uint8_t apple9_index_size;
    struct agx_apple9_vertex_layout apple9_inputs;
    struct agx_apple9_sampler_key apple9_samplers[32];
 };
@@ -538,12 +543,15 @@ struct asahi_fs_shader_key {
    enum pipe_format rt_formats[PIPE_MAX_COLOR_BUFS];
    uint8_t nr_samples;
    uint8_t apple9_nr_targets;
-   bool padding[6];
+   uint8_t apple9_sprite_coord_enable;
+   bool apple9_polygon_stipple;
+   bool apple9_flatshade;
+   bool padding[3];
    struct agx_apple9_varying_layout apple9_varyings;
    struct agx_apple9_blend apple9_blend[PIPE_MAX_COLOR_BUFS];
    struct agx_apple9_sampler_key apple9_samplers[32];
 };
-static_assert(sizeof(struct asahi_fs_shader_key) == 1548, "no holes");
+static_assert(sizeof(struct asahi_fs_shader_key) == 1740, "no holes");
 
 union asahi_shader_key {
    struct asahi_vs_shader_key vs;
@@ -1080,7 +1088,12 @@ void agx_set_ssbo_uniforms(struct agx_batch *batch, mesa_shader_stage stage);
 bool agx_nir_lower_point_size(nir_shader *nir, bool insert_write);
 
 bool agx_nir_lower_sysvals(nir_shader *shader, mesa_shader_stage desc_stage,
-                           bool lower_draw_params);
+                          bool lower_draw_params);
+
+/* Private bindings for the same sysval tables used by the Gallium ABI. */
+#define AGX_APPLE9_SYSVAL_UBO_BASE 240
+bool agx_nir_lower_apple9_sysvals(nir_shader *shader,
+                                mesa_shader_stage desc_stage);
 
 bool agx_nir_layout_uniforms(nir_shader *shader,
                              struct agx_compiled_shader *compiled,

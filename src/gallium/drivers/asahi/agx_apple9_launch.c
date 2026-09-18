@@ -29,7 +29,7 @@ agx_apple9_launch_call_offset(enum agx_apple9_launch_stage stage,
    if (stage == AGX_APPLE9_LAUNCH_VERTEX || stage == AGX_APPLE9_LAUNCH_FRAGMENT)
       return 68;
    if (stage != AGX_APPLE9_LAUNCH_COMPUTE || !resource_count ||
-       resource_count > AGX_APPLE9_COMPUTE_MAX_RESOURCES)
+       resource_count > AGX_APPLE9_COMPUTE_DIRECT_MAX_RESOURCES)
       return 0;
    unsigned roots = resource_count + AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE;
    return 26 + 14 * ((roots + 1) / 2);

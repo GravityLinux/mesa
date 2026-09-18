@@ -2267,12 +2267,12 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
    caps->seamless_cube_map_per_texture = true;
    caps->texture_buffer_objects = true;
    caps->null_textures = true;
-   caps->texture_multisample = !apple9_render;
+   caps->texture_multisample = true;
    caps->image_load_formatted = true;
    caps->image_store_formatted = true;
    caps->compute = true;
    caps->int64 = true;
-   caps->sample_shading = !apple9_render;
+   caps->sample_shading = true;
    caps->start_instance = true;
    caps->draw_parameters = true;
    caps->multi_draw_indirect = true;
@@ -2376,7 +2376,7 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
    /* TODO: Probably should bump to 32? */
    caps->max_varyings = 16;
 
-   caps->flatshade = false;
+   caps->flatshade = apple9_render;
    caps->two_sided_color = false;
    caps->alpha_test = false;
    caps->clip_planes = 0;
@@ -2385,7 +2385,8 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
    caps->query_buffer_object = true;
 
    caps->texture_border_color_quirk =
-      PIPE_QUIRK_TEXTURE_BORDER_COLOR_SWIZZLE_FREEDRENO;
+      apple9_render ? PIPE_QUIRK_TEXTURE_BORDER_COLOR_SWIZZLE_NV50
+                    : PIPE_QUIRK_TEXTURE_BORDER_COLOR_SWIZZLE_FREEDRENO;
 
    caps->supported_prim_modes = caps->supported_prim_modes_with_restart =
       BITFIELD_BIT(MESA_PRIM_POINTS) | BITFIELD_BIT(MESA_PRIM_LINES) |
@@ -2432,16 +2433,17 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
        * harnesses, not in capabilities presented to applications. */
       /* Public contexts expose the current graphics frontend contract.
        * Internal NIR compute remains available for resource copies. */
-      caps->glsl_feature_level = caps->glsl_feature_level_compatibility = 110;
+      caps->glsl_feature_level = caps->glsl_feature_level_compatibility = 330;
       /* ES 3.0 shader support is independent of the desktop GLSL level. */
       caps->essl_feature_level = 300;
+      /* Point size is carried by the vertex output interface. */
+      caps->point_size_fixed = PIPE_POINT_SIZE_LOWER_ALWAYS;
       caps->robust_buffer_access_behavior = false;
       /* EGL robustness context creation requires a contract we cannot provide. */
       caps->device_reset_status_query = false;
       /* The Apple9 texture compiler does not lower external sampler dimensions. */
       caps->texture_external = false;
-      /* Clip/cull-distance outputs need rasterizer system-value lowering;
-       * the Apple9 varying ABI currently carries ordinary interpolants. */
+      /* Cull distances still need primitive rejection lowering. */
       caps->cull_distance = false;
       /* One RGBA8 tile-output slot per active color attachment. */
       caps->max_render_targets = 8;
@@ -2449,17 +2451,18 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
        * The separate shader framebuffer-fetch input ABI is not implemented. */
       caps->fbfetch = 0;
       caps->blend_equation_advanced = true;
-      caps->max_dual_source_render_targets = 0;
+      caps->max_dual_source_render_targets = 1;
       caps->shader_stencil_export = false;
       caps->framebuffer_no_attachment = false;
       caps->texture_mirror_clamp_to_edge = false;
-      caps->texture_buffer_objects = false;
-      caps->max_texel_buffer_elements = 0;
+      caps->texture_buffer_objects = true;
+      /* RGB32 views consume three physical scalar texels per logical texel. */
+      caps->max_texel_buffer_elements = AGX_TEXTURE_BUFFER_MAX_SIZE / 4;
       caps->max_texture_array_layers = 2048;
       caps->max_texture_cube_levels = 15;
       caps->max_texture_3d_levels = 12;
       caps->cube_map_array = false;
-      caps->seamless_cube_map = false;
+      caps->seamless_cube_map = true;
       caps->seamless_cube_map_per_texture = false;
       caps->image_load_formatted = false;
       caps->image_store_formatted = false;
@@ -2505,10 +2508,13 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
       if (usage & PIPE_BIND_SHADER_IMAGE)
          return false;
       if ((usage & PIPE_BIND_RENDER_TARGET) &&
-          ((target != PIPE_TEXTURE_2D && target != PIPE_TEXTURE_CUBE &&
+          ((target != PIPE_TEXTURE_1D && target != PIPE_TEXTURE_1D_ARRAY &&
+            target != PIPE_TEXTURE_RECT && target != PIPE_TEXTURE_2D &&
+            target != PIPE_TEXTURE_CUBE &&
             target != PIPE_TEXTURE_2D_ARRAY && target != PIPE_TEXTURE_3D) ||
            (!agx_apple9_color_is_wide(format) &&
             !agx_apple9_color_is_packed(format) &&
+            !agx_apple9_color_is_normalized(format) &&
             format != PIPE_FORMAT_R8_UNORM &&
             format != PIPE_FORMAT_R8G8_UNORM &&
             format != PIPE_FORMAT_R8G8B8A8_SRGB &&
@@ -2527,10 +2533,12 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
           agx_apple9_block_export_format(agx_apple9_color_tile_format(format)) > 15)
          return false;
       if ((usage & PIPE_BIND_SAMPLER_VIEW) &&
-          ((target != PIPE_TEXTURE_2D && target != PIPE_TEXTURE_1D &&
+          ((target != PIPE_BUFFER && target != PIPE_TEXTURE_2D && target != PIPE_TEXTURE_1D &&
+            target != PIPE_TEXTURE_1D_ARRAY && target != PIPE_TEXTURE_RECT &&
             target != PIPE_TEXTURE_3D && target != PIPE_TEXTURE_CUBE &&
             target != PIPE_TEXTURE_2D_ARRAY) ||
-           !agx_apple9_texture_format_supported(format)))
+           !(agx_apple9_texture_format_supported(format) ||
+             (target == PIPE_BUFFER && agx_apple9_texture_is_rgb32(format)))))
          return false;
    }
 
@@ -2813,6 +2821,10 @@ agx_screen_create(int fd, struct renderonly *ro,
        * Compute keeps its existing policy.
        */
       agx_screen->apple9_graphics_nir_options = *nir_options;
+      /* UVS and coefficient accesses have constant indices. Keep shader
+       * indexing in temporary arrays when the frontend lowers the interface. */
+      agx_screen->apple9_graphics_nir_options.support_indirect_inputs = 0;
+      agx_screen->apple9_graphics_nir_options.support_indirect_outputs = 0;
       agx_screen->apple9_graphics_nir_options.max_unroll_iterations = 0;
       screen->nir_options[MESA_SHADER_VERTEX] =
          &agx_screen->apple9_graphics_nir_options;

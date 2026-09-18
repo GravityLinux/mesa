@@ -77,7 +77,9 @@
     <value name="Line" value="1"/>
     <value name="Point sprite UV=10" value="2"/>
     <value name="Point sprite UV=01" value="4"/>
-    <!-- Line-filled tri. Point-filled tri. UV. Rect. Match RGX. -->
+    <value name="Line filled triangle" value="5"/>
+    <value name="Point filled triangle" value="6"/>
+    <!-- UV. Rect. Match RGX. -->
   </enum>
 
   <enum name="Layout">

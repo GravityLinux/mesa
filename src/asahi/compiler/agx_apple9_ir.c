@@ -679,17 +679,20 @@ agx_apple9_vir_emit_publication_pair(struct agx_apple9_vir_program *program,
  * memory operation before the next VIR instruction. */
 bool
 agx_apple9_vir_emit_block_image_store(
-   struct agx_apple9_vir_program *program, const uint32_t src[3],
-   unsigned image, unsigned format, bool multisampled)
+   struct agx_apple9_vir_program *program, const uint32_t src[4],
+   unsigned image, unsigned format, bool multisampled, bool array)
 {
    if (image >= 16 || format > 15)
       return false;
-   for (unsigned i = 0; i < 3; ++i)
+   for (unsigned i = 0; i < (array ? 4 : 3); ++i)
       if (src[i] >= program->value_count)
          return false;
    uint32_t fields[] = {src[0], src[1], src[2], src[2]};
-   unsigned count = multisampled ? 4 : 3;
-   if (multisampled) {
+   bool extended = multisampled || array;
+   unsigned count = extended ? 4 : 3;
+   if (array) {
+      fields[2] = src[3];
+   } else if (multisampled) {
       fields[2] = agx_apple9_vir_emit(program, AGX_APPLE9_VIR_IMM,
          AGX_APPLE9_ENC_MOV_IMM_COMPACT, NULL, 0, 0);
       if (fields[2] == AGX_APPLE9_VREG_INVALID)
@@ -703,7 +706,7 @@ agx_apple9_vir_emit_block_image_store(
       return false;
    *ins = (struct agx_apple9_vir_instr){
       .op = AGX_APPLE9_VIR_PUBLICATION_TUPLE,
-      .encoding = multisampled ? AGX_APPLE9_ENC_BLOCK_STORE_MS_PARAMS
+      .encoding = extended ? AGX_APPLE9_ENC_BLOCK_STORE_EXTENDED_PARAMS
                                : AGX_APPLE9_ENC_BLOCK_STORE_PARAMS,
       .dest = tuple, .dest_components = 4,
       .nr_srcs = count,
@@ -712,11 +715,13 @@ agx_apple9_vir_emit_block_image_store(
    uint32_t sources[] = {tuple, tuple + 1, tuple + 2, tuple + 3};
    if (!agx_apple9_vir_emit_side_effect(program,
           AGX_APPLE9_VIR_BLOCK_IMAGE_STORE,
-          multisampled ? AGX_APPLE9_ENC_BLOCK_IMAGE_STORE_MS
+          extended ? AGX_APPLE9_ENC_BLOCK_IMAGE_STORE_EXTENDED
                        : AGX_APPLE9_ENC_BLOCK_IMAGE_STORE,
           sources, count, format))
       return false;
    program->instructions[program->instruction_count - 1]->texture_index = image;
+   program->instructions[program->instruction_count - 1]->texture_dimension = array ? 2 : 0;
+   program->instructions[program->instruction_count - 1]->texture_multisampled = multisampled;
    return true;
 }
 
@@ -735,6 +740,28 @@ agx_apple9_vir_emit_texture_lod(struct agx_apple9_vir_program *program,
 {
    return apple9_vir_emit_texture(program, coords, packed_lod, texture, sampler,
                                   true, bias);
+}
+
+uint32_t
+agx_apple9_vir_emit_texture_ms(struct agx_apple9_vir_program *program,
+                              const uint32_t coords[4],
+                              unsigned texture, unsigned sampler, bool array)
+{
+   if (!program || !coords || coords[2] >= program->value_count)
+      return AGX_APPLE9_VREG_INVALID;
+   uint32_t result = apple9_vir_emit_texture(program, coords, coords[3],
+      texture, sampler, true, false);
+   if (result == AGX_APPLE9_VREG_INVALID)
+      return result;
+   struct agx_apple9_vir_instr *params = program->instructions[program->instruction_count - 2];
+   params->encoding = AGX_APPLE9_ENC_TEXTURE_VOLUME_PARAMS;
+   params->nr_srcs = 4;
+   params->src[2] = coords[2];
+   params->src[3] = coords[3];
+   struct agx_apple9_vir_instr *instruction = program->instructions[program->instruction_count - 1];
+   instruction->texture_multisampled = true;
+   instruction->texture_dimension = array ? 2 : 0;
+   return result;
 }
 
 uint32_t
@@ -762,26 +789,34 @@ agx_apple9_vir_emit_texture_volume(struct agx_apple9_vir_program *program,
 
 uint32_t
 agx_apple9_vir_emit_texture_grad(struct agx_apple9_vir_program *program,
-                                const uint32_t src[6],
-                                unsigned texture, unsigned sampler)
+                                const uint32_t *src, unsigned texture,
+                                unsigned sampler, unsigned dimension, bool shadow)
 {
+   unsigned count = dimension == 3 ? 9 : (dimension || shadow) ? 8 : 6;
+   /* The 3D gradient consumer reserves a full 16-word parameter block,
+    * although coordinates and derivatives publish only nine words. */
+   unsigned components = dimension == 3 ? 16 : 8;
+   if (dimension == 1 || dimension > 3 || (dimension == 3 && shadow))
+      return AGX_APPLE9_VREG_INVALID;
    if (!program || !src || texture >= 16 || sampler >= AGX_APPLE9_GRAPHICS_MAX_SAMPLERS)
       return AGX_APPLE9_VREG_INVALID;
-   for (unsigned i = 0; i < 6; ++i)
+   for (unsigned i = 0; i < count; ++i)
       if (src[i] >= program->value_count)
          return AGX_APPLE9_VREG_INVALID;
    uint32_t published = program->value_count;
-   if (!apple9_vir_append_values(program, 8))
+   if (!apple9_vir_append_values(program, components))
       return AGX_APPLE9_VREG_INVALID;
    struct agx_apple9_vir_instr *instruction = apple9_vir_append_instruction(program);
    if (!instruction)
       return AGX_APPLE9_VREG_INVALID;
    *instruction = (struct agx_apple9_vir_instr){
       .op = AGX_APPLE9_VIR_PUBLICATION_TUPLE,
-      .encoding = AGX_APPLE9_ENC_TEXTURE_GRAD_PARAMS,
-      .dest = published, .dest_components = 8, .nr_srcs = 6,
+      .encoding = dimension == 3 ? AGX_APPLE9_ENC_TEXTURE_GRAD_VOLUME_PARAMS
+         : (dimension || shadow) ? AGX_APPLE9_ENC_TEXTURE_GRAD_ARRAY_PARAMS
+                                 : AGX_APPLE9_ENC_TEXTURE_GRAD_PARAMS,
+      .dest = published, .dest_components = components, .nr_srcs = count,
    };
-   memcpy(instruction->src, src, 6 * sizeof(src[0]));
+   memcpy(instruction->src, src, count * sizeof(src[0]));
    uint32_t result = program->value_count;
    if (!apple9_vir_append_values(program, 4))
       return AGX_APPLE9_VREG_INVALID;
@@ -792,6 +827,7 @@ agx_apple9_vir_emit_texture_grad(struct agx_apple9_vir_program *program,
       .op = AGX_APPLE9_VIR_TEXTURE_SAMPLE,
       .encoding = AGX_APPLE9_ENC_TEXTURE_GRAD,
       .texture_index = texture, .sampler_index = sampler,
+      .texture_dimension = dimension, .texture_shadow = shadow,
       .dest = result, .dest_components = 4,
       .nr_srcs = 1, .src = {published},
       .producer_scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_1,
@@ -2108,7 +2144,7 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
       }
 
       const unsigned components = apple9_vir_dest_components(instruction);
-      if (components > (instruction->op == AGX_APPLE9_VIR_PUBLICATION_TUPLE ? 8 : 4) ||
+      if (components > (instruction->op == AGX_APPLE9_VIR_PUBLICATION_TUPLE ? 16 : 4) ||
           components > program->value_count ||
           instruction->dest > program->value_count - components ||
           (components > 1 && instruction->op != AGX_APPLE9_VIR_DEVICE_LOAD &&
@@ -2764,7 +2800,7 @@ agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
          }
          continue;
       }
-      if (components > (instruction->op == AGX_APPLE9_VIR_PUBLICATION_TUPLE ? 8 : 4) ||
+      if (components > (instruction->op == AGX_APPLE9_VIR_PUBLICATION_TUPLE ? 16 : 4) ||
           components > program->value_count ||
           dest > program->value_count - components) {
          free(last_use);
@@ -6117,14 +6153,14 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       packed_init(packed, bytes, sizeof(bytes));
       return true;
    }
-   case AGX_APPLE9_VIR_CENTROID_POSITION: {
-      if (instruction->encoding != AGX_APPLE9_ENC_CENTROID_POSITION ||
-          instruction->nr_srcs != 1 || instruction->immediate ||
+   case AGX_APPLE9_VIR_INTERPOLATION_POSITION: {
+      if (instruction->encoding != AGX_APPLE9_ENC_INTERPOLATION_POSITION ||
+          instruction->nr_srcs != 1 || instruction->immediate > 1 ||
           phys[instruction->dest] >= AGX_APPLE9_GPR_COUNT ||
           phys[instruction->src[0]] >= AGX_APPLE9_GPR_COUNT)
          return false;
-      /* Authored M4 centroid and mixed-interpolation shaders: coverage is an
-       * ordinary GPR input; the result is a packed interpolation position. */
+      /* Centroid consumes raster coverage; sample mode consumes a sample
+       * index. Both produce a packed position for coefficient evaluation. */
       const uint8_t bytes[] = {0xaf,
                                0x04,
                                0x54,
@@ -6132,7 +6168,7 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
                                0x03,
                                (phys[instruction->src[0]] & 63) << 2,
                                0x0a | (phys[instruction->src[0]] >> 6),
-                               0x01};
+                               instruction->immediate ? 0x03 : 0x01};
       packed_init(packed, bytes, sizeof(bytes));
       return true;
    }
@@ -6258,26 +6294,36 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       }
 
       if (instruction->encoding == AGX_APPLE9_ENC_BLOCK_STORE_PARAMS ||
-          instruction->encoding == AGX_APPLE9_ENC_BLOCK_STORE_MS_PARAMS ||
+          instruction->encoding == AGX_APPLE9_ENC_BLOCK_STORE_EXTENDED_PARAMS ||
           instruction->encoding == AGX_APPLE9_ENC_TEXTURE_LOD_PARAMS ||
           instruction->encoding == AGX_APPLE9_ENC_TEXTURE_VOLUME_PARAMS ||
-          instruction->encoding == AGX_APPLE9_ENC_TEXTURE_GRAD_PARAMS) {
-         bool block_ms = instruction->encoding == AGX_APPLE9_ENC_BLOCK_STORE_MS_PARAMS;
-         bool block = block_ms || instruction->encoding == AGX_APPLE9_ENC_BLOCK_STORE_PARAMS;
+          instruction->encoding == AGX_APPLE9_ENC_TEXTURE_GRAD_PARAMS ||
+          instruction->encoding == AGX_APPLE9_ENC_TEXTURE_GRAD_ARRAY_PARAMS ||
+          instruction->encoding == AGX_APPLE9_ENC_TEXTURE_GRAD_VOLUME_PARAMS) {
+         bool block_extended = instruction->encoding == AGX_APPLE9_ENC_BLOCK_STORE_EXTENDED_PARAMS;
+         bool block = block_extended || instruction->encoding == AGX_APPLE9_ENC_BLOCK_STORE_PARAMS;
          bool gradient = instruction->encoding == AGX_APPLE9_ENC_TEXTURE_GRAD_PARAMS;
+         bool grad_array = instruction->encoding == AGX_APPLE9_ENC_TEXTURE_GRAD_ARRAY_PARAMS;
+         bool grad_volume = instruction->encoding == AGX_APPLE9_ENC_TEXTURE_GRAD_VOLUME_PARAMS;
+         unsigned count = grad_volume ? 9 : grad_array ? 8 : gradient ? 6 :
+                          (instruction->encoding == AGX_APPLE9_ENC_TEXTURE_VOLUME_PARAMS || block_extended) ? 4 : 3;
+         unsigned components = grad_volume ? 16 : (gradient || grad_array) ? 8 : 4;
          bool volume = instruction->encoding == AGX_APPLE9_ENC_TEXTURE_VOLUME_PARAMS;
          unsigned base = phys[instruction->dest];
-         if (instruction->nr_srcs != (gradient ? 6 : (volume || block_ms) ? 4 : 3) ||
-             instruction->dest_components != (gradient ? 8 : 4) ||
-             base > (block ? 12 : gradient ? 24 : 28) || (base & 3))
+         if (instruction->nr_srcs != count ||
+             instruction->dest_components != components ||
+             base > (block ? 12 : 32 - components) || (base & 3))
             return false;
-         uint8_t bytes[64];
-         for (unsigned c = 0; c < (gradient ? 6 : (volume || block_ms) ? 4 : 3); ++c) {
+         uint8_t bytes[100];
+         for (unsigned c = 0; c < count; ++c) {
             unsigned source = instruction->src[c];
             bool keep = instruction->live_after_mask & (1u << c);
             for (unsigned j = c + 1; j < instruction->nr_srcs; ++j)
                keep |= instruction->src[j] == source;
-            uint8_t registers[] = {base + (block || volume ? c : gradient && c >= 2 ? c + 2 : c == 2 ? 3 : c), phys[source]};
+            unsigned component = grad_volume ? c + (c >= 3) :
+               (block || volume || grad_array) ? c :
+               gradient && c >= 2 ? c + 2 : c == 2 ? 3 : c;
+            uint8_t registers[] = {base + component, phys[source]};
             struct agx_apple9_vir_instr publish = {
                .op = AGX_APPLE9_VIR_IOR,
                .encoding = AGX_APPLE9_ENC_LOGIC_EXPORT,
@@ -6289,7 +6335,7 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
                return false;
             memcpy(bytes + 10 * c, part.bytes, 10);
          }
-         packed_init(packed, bytes, gradient ? 60 : (volume || block_ms) ? 40 : 30);
+         packed_init(packed, bytes, count * 10);
          return true;
       }
       if (instruction->encoding != AGX_APPLE9_ENC_TEXTURE_COORDS ||
@@ -6317,20 +6363,26 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
    }
    case AGX_APPLE9_VIR_BLOCK_IMAGE_STORE: {
       unsigned coord = phys[instruction->src[0]];
-      bool multisampled = instruction->encoding == AGX_APPLE9_ENC_BLOCK_IMAGE_STORE_MS;
-      if ((!multisampled && instruction->encoding != AGX_APPLE9_ENC_BLOCK_IMAGE_STORE) ||
-          instruction->nr_srcs != (multisampled ? 4 : 3) || coord > 12 || (coord & 3) ||
+      bool extended = instruction->encoding == AGX_APPLE9_ENC_BLOCK_IMAGE_STORE_EXTENDED;
+      if ((!extended && instruction->encoding != AGX_APPLE9_ENC_BLOCK_IMAGE_STORE) ||
+          instruction->nr_srcs != (extended ? 4 : 3) || coord > 12 || (coord & 3) ||
           phys[instruction->src[1]] != coord + 1 ||
           phys[instruction->src[2]] != coord + 2 ||
-          (multisampled && phys[instruction->src[3]] != coord + 3) ||
-          instruction->texture_index >= 16 || instruction->immediate > 15)
+          (extended && phys[instruction->src[3]] != coord + 3) ||
+          instruction->texture_index >= 16 || instruction->immediate > 15 ||
+          (instruction->texture_dimension != 0 && instruction->texture_dimension != 2) ||
+          extended != (instruction->texture_dimension == 2 ||
+                       instruction->texture_multisampled))
          return false;
       /* Publication: (X, Y, offset << 16) for 2D, and
-       * (X, Y, 0, offset << 16) for MSAA. The MSAA mode exports every
-       * sample from the implicit tile. The PBE descriptor supplies layout,
+       * (X, Y, layer, offset << 16) for arrays or MSAA (layer zero for
+       * non-array MSAA). Multisample modes export every sample from the
+       * implicit tile. The PBE descriptor supplies layout,
        * bounds, conversion and sample count. Release the complete tuple
        * and synchronously join export slot 1. */
-      unsigned mode = multisampled ? 0x228 : 0x5a8;
+      unsigned mode = instruction->texture_dimension == 2 ?
+         (instruction->texture_multisampled ? 0x028 : 0x528) :
+         instruction->texture_multisampled ? 0x228 : 0x5a8;
       const uint8_t bytes[] = {
          0x57, 0x10, 0x54, coord << 1, 0, instruction->texture_index << 4,
          0, 0x80, mode & 0xff,
@@ -6341,6 +6393,7 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
    }
    case AGX_APPLE9_VIR_TEXTURE_SAMPLE: {
       bool lod = instruction->encoding == AGX_APPLE9_ENC_TEXTURE_LOD;
+      bool multisampled = instruction->texture_multisampled;
       bool gradient = instruction->encoding == AGX_APPLE9_ENC_TEXTURE_GRAD;
       bool extended = lod || gradient;
       unsigned mask = instruction->texture_result_mask ?
@@ -6355,7 +6408,7 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
          return false;
       unsigned dst = phys[instruction->dest], coord = phys[instruction->src[0]];
       if (dst + instruction->dest_components > 64 ||
-          coord > (gradient   ? 24
+          coord > (gradient   ? (instruction->texture_dimension == 3 ? 16 : 24)
                    : extended ? 28
                               : 30) ||
           (coord & (extended ? 3 : 1)) ||
@@ -6397,14 +6450,14 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       /* Array samples share word 3: uint16 layer in the low half,
        * signed Q6 LOD in bits 16..27. The array mode must retain the
        * dynamic LOD selector; the immediate-LOD form ignores those bits. */
-      if (instruction->texture_dimension == 2) {
+      if (!gradient && instruction->texture_dimension == 2) {
          bytes[6] = instruction->immediate ? 0x0c : 0x08;
          bytes[7] = instruction->immediate ? 4 : 5;
       }
-      if (instruction->texture_dimension == 3) {
+      if (!gradient && instruction->texture_dimension == 3) {
          bytes[6] = instruction->immediate ? 0x90 : 0x88;
          bytes[7] = instruction->immediate ? 0x01 : 0x21;
-      } else if (instruction->texture_dimension == 1) {
+      } else if (!gradient && instruction->texture_dimension == 1) {
          bytes[6] = instruction->immediate ? 0x14 : 0x00;
          bytes[7] = instruction->immediate ? 0x00 : 0x03;
       }
@@ -6417,9 +6470,32 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
          bytes[7] = instruction->texture_dimension == 3 ? 1 : 0x24;
          bytes[10] = 0;
       }
+      if (gradient && instruction->texture_dimension == 2) {
+         bytes[6] = 0x0c;
+         bytes[7] = 5;
+      } else if (gradient && instruction->texture_dimension == 3) {
+         bytes[6] = 0x9c;
+         bytes[7] = 1;
+      }
       if (instruction->texture_shadow) {
          bytes[6] |= 0x20;
          bytes[10] = 0;
+      }
+      if (multisampled) {
+         if (!lod || instruction->immediate || instruction->texture_shadow ||
+             instruction->texture_fetch ||
+             (instruction->texture_dimension != 0 && instruction->texture_dimension != 2))
+            return false;
+         /* Integer X/Y, then a packed layer/sample word. */
+         bytes[6] = instruction->texture_dimension == 2 ? 0xa0 : 0x80;
+         bytes[7] = 0x14;
+         bytes[10] = 0;
+      }
+      if (instruction->texture_lod_query) {
+         if (gradient || multisampled || instruction->texture_shadow ||
+             instruction->texture_fetch || (mask & ~3u))
+            return false;
+         bytes[10] = 0x20;
       }
       /* T8132 authored read/sample probes cover all 15 nonempty masks.
        * This four-bit selector has a permuted encoding; it is independent

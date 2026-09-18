@@ -64,7 +64,10 @@ struct agx_apple9_render_stage {
    struct agx_apple9_varying_layout varyings;
    struct agx_apple9_interp_mask apple9_linear_mask, apple9_flat_mask;
    bool apple9_reads_z;
+   bool reads_primitive_id;
    bool writes_point_size;
+   bool writes_layer_viewport;
+   uint8_t clip_distance_count;
    bool reads_point_coord;
    uint8_t render_targets;
 };
@@ -142,6 +145,7 @@ bool agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
 #define AGX_APPLE9_COMPUTE_GEOMETRY_GROUPS_OFFSET 0xc0u
 #define AGX_APPLE9_COMPUTE_CDM_RECORD_SIZE 0x2cu
 #define AGX_APPLE9_COMPUTE_INDIRECT_CDM_RECORD_SIZE 0x28u
+#define AGX_APPLE9_COMPUTE_INDIRECT_LOCAL_CDM_RECORD_SIZE 0x1cu
 #define AGX_APPLE9_RENDER_CONTEXT_BASE UINT64_C(0x1000000000)
 
 bool agx_apple9_compute_enabled(const struct agx_device *dev);
@@ -215,7 +219,8 @@ bool agx_apple9_build_compute_geometry_fields(
 bool agx_apple9_prepare_compute_dispatch(
    struct agx_device *dev, struct agx_pool *usc_pool, struct agx_bo *body,
    const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
-   unsigned resource_count, const struct agx_apple9_compute_geometry *geometry,
+   unsigned resource_count, uint64_t textures, uint64_t samplers,
+   const struct agx_apple9_compute_geometry *geometry,
    uint64_t preamble_address, uint64_t *launch_address);
 
 bool agx_apple9_emit_direct_dispatch(
@@ -224,7 +229,7 @@ bool agx_apple9_emit_direct_dispatch(
 
 bool agx_apple9_emit_indirect_dispatch(
    void *out, uint64_t launch, uint64_t indirect, const uint32_t local[3],
-   const struct agx_apple9_compute_profile *profile);
+   bool indirect_local, const struct agx_apple9_compute_profile *profile);
 
 void agx_apple9_pack_r32f_texture(void *out, uint64_t address, uint32_t width,
                                   uint32_t height, uint32_t stride_B);
@@ -260,6 +265,10 @@ agx_apple9_direct_draw_size(const struct agx_apple9_render_pipeline *pipeline);
 uint8_t *agx_apple9_emit_direct_draw(
    uint8_t *out, const struct agx_apple9_render_pipeline *pipeline,
    unsigned vertex_count, unsigned instance_count, unsigned vertex_start);
+
+uint8_t *agx_apple9_emit_indirect_draw(
+   uint8_t *out, const struct agx_apple9_render_pipeline *pipeline,
+   uint64_t indirect);
 
 #ifdef __cplusplus
 }

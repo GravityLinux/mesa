@@ -115,18 +115,23 @@ agx_apple9_interp_mask_equal(struct agx_apple9_interp_mask a,
    return a.lo == b.lo && a.hi == b.hi;
 }
 
-/* Ordinary interpolants from both compatibility GL and programmable shaders.
- * Rasterizer-generated system values require their own lowering. */
+/* Interpolants from compatibility GL and programmable shaders. Clip distances
+ * also have a separate copy in the rasterizer system-value group. */
 static inline bool
 agx_apple9_varying_supported(unsigned location)
 {
    return (location >= VARYING_SLOT_COL0 && location <= VARYING_SLOT_TEX7) ||
           location == VARYING_SLOT_BFC0 || location == VARYING_SLOT_BFC1 ||
+          location == VARYING_SLOT_PRIMITIVE_ID ||
+          location == VARYING_SLOT_CLIP_DIST0 || location == VARYING_SLOT_CLIP_DIST1 ||
           (location >= VARYING_SLOT_VAR0 && location <= VARYING_SLOT_VAR31);
 }
 
 struct agx_apple9_varying_layout {
    uint8_t mask[64]; /* Per-component masks indexed by gl_varying_slot. */
+   /* Physical UVS order is smooth, flat, then linear, as required by the
+    * clipper's varying counts. Values within each group use semantic order. */
+   uint8_t group[64];
    uint8_t count;
    uint8_t reserved[3];
 };
@@ -148,8 +153,10 @@ struct agx_shader_info {
     * preshader configuration used by earlier generations. */
    uint32_t apple9_preamble_offset, apple9_preamble_size;
    bool apple9_reads_z;
+   bool apple9_reads_primitive_id;
    bool apple9_reads_tile;
    bool apple9_writes_point_size;
+   uint8_t apple9_clip_distance_count;
    bool apple9_reads_point_coord;
    /* Ordered graphics table entries: API UBOs 0..31, vertex bindings 32..63. */
    uint32_t apple9_resource_ssbo_mask, apple9_resource_write_mask;

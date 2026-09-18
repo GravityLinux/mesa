@@ -19,7 +19,7 @@ extern "C" {
 
 #define AGX_APPLE9_VREG_INVALID UINT32_MAX
 #define AGX_APPLE9_PHYS_INVALID UINT8_MAX
-#define AGX_APPLE9_MAX_VIR_SRCS 7
+#define AGX_APPLE9_MAX_VIR_SRCS 10
 /*
  * A deliberately small semantic IR for the first real Apple9 compiler.
  *
@@ -131,7 +131,7 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_JMP_EXEC_ANY,
    AGX_APPLE9_VIR_JMP_EXEC_NONE,
    AGX_APPLE9_VIR_BREAK_MASK_UNWIND,
-   AGX_APPLE9_VIR_CENTROID_POSITION,
+   AGX_APPLE9_VIR_INTERPOLATION_POSITION,
    AGX_APPLE9_VIR_ITER,
    AGX_APPLE9_VIR_ITER_FLAT,
    AGX_APPLE9_VIR_VARY_STORE,
@@ -330,6 +330,8 @@ struct agx_apple9_vir_instr {
    uint8_t texture_dimension;
    bool texture_shadow;
    bool texture_fetch;
+   bool texture_lod_query;
+   bool texture_multisampled;
    /* Logical RGBA channels returned in ascending channel order, packed at
     * dest. Zero retains the default RGBA selection for VIR callers. */
    uint8_t texture_result_mask;
@@ -381,7 +383,7 @@ struct agx_apple9_vir_instr {
    uint16_t device_load_raw_token;
 
    /* Bit s is set when src[s] has another consumer after this instruction. */
-   uint8_t live_after_mask;
+   uint16_t live_after_mask;
 
    /*
     * The one pending-result slot consumed by this instruction, or NONE.
@@ -557,12 +559,16 @@ agx_apple9_vir_emit_publication_pair(struct agx_apple9_vir_program *program,
                                      const uint32_t src[2]);
 
 bool agx_apple9_vir_emit_block_image_store(
-   struct agx_apple9_vir_program *program, const uint32_t src[3],
-   unsigned image, unsigned format, bool multisampled);
+   struct agx_apple9_vir_program *program, const uint32_t src[4],
+   unsigned image, unsigned format, bool multisampled, bool array);
 
 uint32_t agx_apple9_vir_emit_texture_sample(
    struct agx_apple9_vir_program *program, const uint32_t coords[2],
    uint32_t one, unsigned texture, unsigned sampler);
+
+uint32_t agx_apple9_vir_emit_texture_ms(
+   struct agx_apple9_vir_program *program, const uint32_t coords[4],
+   unsigned texture, unsigned sampler, bool array);
 
 /* Form an adjacent register tuple from independent scalar SSA values before
  * register allocation. The pseudo is coalesced when possible and otherwise
@@ -577,10 +583,13 @@ uint32_t agx_apple9_vir_emit_texture_volume(
    uint32_t packed_lod, unsigned texture, unsigned sampler, unsigned dimension,
    bool bias, bool shadow);
 
-/* Coordinates followed by ddx.xy and ddy.xy, all FP32. */
-uint32_t agx_apple9_vir_emit_texture_grad(
-   struct agx_apple9_vir_program *program, const uint32_t src[6],
-   unsigned texture, unsigned sampler);
+/* Coordinates followed by derivatives interleaved by texture axis. Extended
+ * forms publish four coordinate words, then four (array/shadow) or six (3D)
+ * derivatives. Array layers are unsigned integers in coordinate word 3. */
+uint32_t agx_apple9_vir_emit_texture_grad(struct agx_apple9_vir_program *program,
+                                          const uint32_t *src, unsigned texture,
+                                          unsigned sampler, unsigned dimension,
+                                          bool shadow);
 
 uint32_t agx_apple9_vir_emit_collect(struct agx_apple9_vir_program *program,
                                      const uint32_t *src, unsigned components);
@@ -659,7 +668,7 @@ agx_apple9_assign_vir_scoreboard_slots(struct agx_apple9_vir_program *program,
 /* One physical Apple9 instruction, used by the compiler and packer tests. */
 struct agx_apple9_packed_instruction {
    /* Includes bounded multi-instruction parameter-publication pseudos. */
-   uint8_t bytes[64];
+   uint8_t bytes[128];
    uint8_t length;
 };
 

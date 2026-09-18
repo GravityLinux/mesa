@@ -6,6 +6,7 @@
 #include "agx_compile_apple9.h"
 #include "agx_apple9_ir.h"
 #include "agx_nir.h"
+#include "agx_nir_texture.h"
 
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
@@ -137,6 +138,10 @@ apple9_system_source(nir_scalar scalar, struct apple9_system_source *source)
       base = 0xd8;
       components = 1;
       break;
+   case nir_intrinsic_load_layer_id:
+      base = 0xc3;
+      components = 1;
+      break;
    case nir_intrinsic_load_workgroup_id:
       base = 0x9c;
       break;
@@ -196,6 +201,9 @@ apple9_memory_format(nir_intrinsic_op op, uint8_t bytes, uint8_t bit_size,
                      bool offset_is_const, enum gl_access_qualifier access,
                      const void *data)
 {
+   if (op == nir_intrinsic_load_scratch || op == nir_intrinsic_store_scratch)
+      return (nir_mem_access_size_align){.num_components = 1, .bit_size = 32,
+         .align = 4, .shift = nir_mem_access_shift_method_scalar};
    unsigned alignment = nir_combined_align(align_mul, align_offset);
    if (bit_size == 32 && alignment >= 4 && bytes >= 12)
       return (nir_mem_access_size_align){.num_components = MIN2(bytes / 4, 4),
@@ -469,6 +477,7 @@ struct apple9_scalar_load {
    nir_intrinsic_instr *intr;
    nir_block *block;
    nir_scalar index;
+   nir_def *address;
    unsigned argument;
    unsigned component;
    uint8_t index_shift;
@@ -480,6 +489,7 @@ struct apple9_buffer_store {
    nir_intrinsic_instr *intr;
    nir_block *block;
    nir_scalar index;
+   nir_def *address;
    unsigned argument;
    unsigned components;
    uint8_t index_shift;
@@ -493,6 +503,7 @@ struct apple9_buffer_atomic {
    nir_intrinsic_instr *intr;
    nir_block *block;
    nir_scalar index;
+   nir_def *address;
    unsigned argument;
    unsigned index_scale;
    unsigned index_add;
@@ -570,21 +581,32 @@ apple9_texture_uses_fetch_sampler(const nir_tex_instr *tex)
 static bool
 apple9_texture_supported(const nir_tex_instr *tex)
 {
+   if (tex->sampler_dim == GLSL_SAMPLER_DIM_MS) {
+      return tex->op == nir_texop_txf_ms && tex->coord_components == 4 &&
+             !tex->is_shadow && tex->num_srcs == 1 &&
+             tex->src[0].src_type == nir_tex_src_coord &&
+             tex->src[0].src.ssa->bit_size == 32 &&
+             tex->src[0].src.ssa->num_components == 4 &&
+             tex->def.bit_size == 32 && tex->def.num_components == 4 &&
+             tex->texture_index < 32 && tex->sampler_index == APPLE9_FETCH_SAMPLER;
+   }
    /* Offset filtering is expanded with sampler state before selection. */
    if (nir_tex_instr_src_index(tex, nir_tex_src_offset) >= 0)
       return false;
    bool explicit_lod = tex->op == nir_texop_txl || tex->op == nir_texop_txb ||
                        tex->op == nir_texop_txf;
    bool gradient = tex->op == nir_texop_txd;
+   bool query = tex->backend_flags & AGX_APPLE9_TEXTURE_LOD_QUERY;
    bool array = tex->is_array && tex->sampler_dim == GLSL_SAMPLER_DIM_2D;
    bool volume = array || tex->sampler_dim == GLSL_SAMPLER_DIM_3D ||
                  tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE;
    if ((!explicit_lod && !gradient && tex->op != nir_texop_tex) ||
        (!volume && tex->sampler_dim != GLSL_SAMPLER_DIM_2D) || (tex->is_array && !array) ||
-       (tex->is_shadow && (tex->sampler_dim == GLSL_SAMPLER_DIM_3D || gradient)) ||
-       (volume && gradient) ||
+       (tex->is_shadow && tex->sampler_dim == GLSL_SAMPLER_DIM_3D) ||
+       (tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE && gradient) ||
        tex->coord_components != (volume ? 3 : 2) || tex->def.bit_size != 32 ||
-       (tex->def.num_components != 4 && !(tex->is_shadow && tex->def.num_components == 1)) ||
+       (tex->def.num_components != 4 && !(tex->is_shadow && tex->def.num_components == 1) &&
+        !(query && tex->def.num_components == 2)) ||
        (tex->dest_type != nir_type_float32 && tex->dest_type != nir_type_int32 &&
         tex->dest_type != nir_type_uint32) ||
        tex->num_srcs != (gradient ? 3 : explicit_lod ? 2 : 1) + tex->is_shadow || tex->texture_index >= 32 ||
@@ -604,7 +626,8 @@ apple9_texture_supported(const nir_tex_instr *tex)
            type <= nir_tex_src_ddy; ++type) {
          int source = nir_tex_instr_src_index(tex, type);
          if (source < 0 || tex->src[source].src.ssa->bit_size != 32 ||
-             tex->src[source].src.ssa->num_components != 2)
+             tex->src[source].src.ssa->num_components !=
+                (tex->sampler_dim == GLSL_SAMPLER_DIM_3D ? 3 : 2))
             return false;
       }
    }
@@ -621,7 +644,7 @@ apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
 {
    switch (instr->type) {
    case nir_instr_type_tex:
-      return graphics && apple9_texture_supported(nir_instr_as_tex(instr));
+      return apple9_texture_supported(nir_instr_as_tex(instr));
    case nir_instr_type_load_const:
       return true;
    case nir_instr_type_alu: {
@@ -733,6 +756,7 @@ apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
            op == nir_intrinsic_ddy_fine ||
            op == nir_intrinsic_load_barycentric_pixel ||
            op == nir_intrinsic_load_barycentric_centroid ||
+           op == nir_intrinsic_load_barycentric_at_sample ||
            op == nir_intrinsic_load_interpolated_input ||
            op == nir_intrinsic_load_input ||
            op == nir_intrinsic_load_tile_pixel_agx ||
@@ -741,12 +765,14 @@ apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
            op == nir_intrinsic_sample_mask_agx ||
            op == nir_intrinsic_store_zs_agx ||
            op == nir_intrinsic_store_output ||
+           op == nir_intrinsic_store_uvs_agx ||
            op == nir_intrinsic_image_store_block_agx ||
            op == nir_intrinsic_store_local_pixel_agx ||
            op == nir_intrinsic_demote || op == nir_intrinsic_demote_if))
          return true;
       return op == nir_intrinsic_load_global_invocation_id ||
              op == nir_intrinsic_load_workgroup_id ||
+             op == nir_intrinsic_load_layer_id ||
              op == nir_intrinsic_load_local_invocation_id ||
              op == nir_intrinsic_load_local_invocation_index ||
              op == nir_intrinsic_load_workgroup_size ||
@@ -754,10 +780,23 @@ apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
              op == nir_intrinsic_load_subgroup_invocation ||
              op == nir_intrinsic_load_subgroup_id ||
              op == nir_intrinsic_load_subgroup_size ||
+             op == nir_intrinsic_inclusive_scan ||
+             op == nir_intrinsic_exclusive_scan ||
+             op == nir_intrinsic_read_invocation ||
+             op == nir_intrinsic_ballot ||
+             op == nir_intrinsic_load_scratch ||
+             op == nir_intrinsic_store_scratch ||
+             op == nir_intrinsic_load_shared ||
+             op == nir_intrinsic_store_shared ||
+             op == nir_intrinsic_barrier ||
              op == nir_intrinsic_load_ssbo || op == nir_intrinsic_load_ubo ||
              op == nir_intrinsic_load_preamble ||
              op == nir_intrinsic_store_preamble ||
              op == nir_intrinsic_store_ssbo ||
+             op == nir_intrinsic_load_global_2x32 ||
+             op == nir_intrinsic_store_global_2x32 ||
+             op == nir_intrinsic_global_atomic_2x32 ||
+             op == nir_intrinsic_global_atomic_swap_2x32 ||
              op == nir_intrinsic_ssbo_atomic ||
              op == nir_intrinsic_ssbo_atomic_swap;
    }
@@ -765,7 +804,8 @@ apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
       return true;
    case nir_instr_type_jump: {
       nir_jump_type type = nir_instr_as_jump(instr)->type;
-      return type == nir_jump_break || type == nir_jump_continue;
+      return type == nir_jump_break || type == nir_jump_continue ||
+             type == nir_jump_halt;
    }
    default:
       return false;
@@ -796,6 +836,7 @@ struct apple9_dag_lower {
    bool reads_z;
    bool writes_z;
    bool reads_point_coord;
+   bool reads_primitive_id;
    const struct agx_apple9_varying_layout *varyings;
    unsigned position_mask;
    bool color_stores;
@@ -810,6 +851,9 @@ struct apple9_dag_lower {
    struct apple9_buffer_atomic *atomics;
    unsigned atomic_count;
    unsigned argument_base;
+   bool buffer_table;
+   unsigned groups_argument;
+   unsigned shared_argument;
    unsigned preamble_base;
    uint32_t texture_mask, sampler_mask, image_mask;
    unsigned load_instruction_count;
@@ -876,9 +920,9 @@ apple9_dag_zero(struct apple9_dag_lower *lower)
 }
 
 static uint32_t
-apple9_graphics_buffer_address(struct apple9_dag_lower *lower, unsigned argument)
+apple9_buffer_address(struct apple9_dag_lower *lower, unsigned argument)
 {
-   assert(lower->nir->info.stage != MESA_SHADER_COMPUTE);
+   assert(lower->buffer_table);
    assert(argument < ARRAY_SIZE(lower->binding_pointer));
    if (lower->binding_pointer_block != lower->program.current_block) {
       lower->binding_pointer_block = lower->program.current_block;
@@ -1001,6 +1045,19 @@ apple9_dag_binary_encoding(nir_op op)
 
 static uint32_t apple9_lower_dag_scalar(struct apple9_dag_lower *lower,
                                         nir_scalar scalar);
+
+static uint32_t
+apple9_lower_global_address(struct apple9_dag_lower *lower, nir_def *address)
+{
+   uint32_t pair[2];
+   for (unsigned c = 0; c < 2; ++c) {
+      pair[c] = apple9_lower_dag_scalar(lower, nir_get_scalar(address, c));
+      if (pair[c] == AGX_APPLE9_VREG_INVALID)
+         return pair[c];
+   }
+   return agx_apple9_vir_emit_collect(&lower->program, pair, 2);
+}
+
 static uint32_t apple9_lower_bool_scalar(struct apple9_dag_lower *lower,
                                          nir_scalar scalar);
 static uint32_t apple9_emit_dag_select_raw(struct apple9_dag_lower *lower,
@@ -1043,7 +1100,7 @@ apple9_dag_num_workgroups(struct apple9_dag_lower *lower, unsigned component)
       return AGX_APPLE9_VREG_INVALID;
    }
 
-   return apple9_dag_hidden_load(lower, 0, component);
+   return apple9_dag_hidden_load(lower, lower->groups_argument, component);
 }
 
 static uint32_t
@@ -1429,8 +1486,11 @@ apple9_varying_index(const struct agx_apple9_varying_layout *layout,
    if (!(layout->mask[semantic] & BITFIELD_BIT(component)))
       return -1;
    unsigned index = util_bitcount(layout->mask[semantic] & BITFIELD_MASK(component));
-   for (unsigned i = 0; i < semantic; ++i)
-      index += util_bitcount(layout->mask[i]);
+   for (unsigned i = 0; i < ARRAY_SIZE(layout->mask); ++i) {
+      if (layout->group[i] < layout->group[semantic] ||
+          (layout->group[i] == layout->group[semantic] && i < semantic))
+         index += util_bitcount(layout->mask[i]);
+   }
    return index;
 }
 
@@ -1442,7 +1502,9 @@ apple9_lower_interpolated_input(struct apple9_dag_lower *lower,
    bool flat = intr->intrinsic == nir_intrinsic_load_input;
    nir_intrinsic_instr *bary = flat ? NULL : nir_src_as_intrinsic(intr->src[0]);
    unsigned offset = flat ? 0 : 1;
-   bool centroid = bary && bary->intrinsic == nir_intrinsic_load_barycentric_centroid;
+   bool at_position = bary &&
+      (bary->intrinsic == nir_intrinsic_load_barycentric_centroid ||
+       bary->intrinsic == nir_intrinsic_load_barycentric_at_sample);
    bool linear =
       bary && nir_intrinsic_interp_mode(bary) == INTERP_MODE_NOPERSPECTIVE;
    /* Legacy color inputs retain NONE for glShadeModel. The state tracker
@@ -1453,16 +1515,19 @@ apple9_lower_interpolated_input(struct apple9_dag_lower *lower,
        scalar.def->bit_size != 32 || component >= 4 ||
        !nir_src_is_const(intr->src[offset]) ||
        (!flat &&
-        (!bary || (!centroid && bary->intrinsic != nir_intrinsic_load_barycentric_pixel) ||
+        (!bary || (!at_position && bary->intrinsic != nir_intrinsic_load_barycentric_pixel) ||
          (!linear && nir_intrinsic_interp_mode(bary) != INTERP_MODE_SMOOTH &&
           nir_intrinsic_interp_mode(bary) != INTERP_MODE_NONE)))) {
       lower->reason =
-         "Apple9 fragment input requires center/centroid smooth, linear, or flat 32-bit user varyings";
+         "Apple9 fragment input requires center/centroid/sample smooth, linear, or flat 32-bit user varyings";
       return AGX_APPLE9_VREG_INVALID;
    }
    unsigned location = nir_intrinsic_io_semantics(intr).location +
                        nir_src_as_uint(intr->src[offset]);
    int index = apple9_varying_index(lower->varyings, location, component);
+   if (index < 0 && flat && location == VARYING_SLOT_PRIMITIVE_ID &&
+       component == 0 && lower->reads_primitive_id)
+      return agx_apple9_vir_emit_iter_flat(&lower->program, lower->varyings->count + 1);
    if (index < 0) {
       lower->reason = "Apple9 fragment input is not written by the vertex stage";
       return AGX_APPLE9_VREG_INVALID;
@@ -1471,23 +1536,23 @@ apple9_lower_interpolated_input(struct apple9_dag_lower *lower,
       agx_apple9_interp_mask_set(&lower->flat_mask, index);
       return agx_apple9_vir_emit_iter_flat(&lower->program, index + 1);
    }
-   uint32_t position = centroid ? apple9_lower_dag_scalar(
+   uint32_t position = at_position ? apple9_lower_dag_scalar(
       lower, nir_get_scalar(&bary->def, 0)) : AGX_APPLE9_VREG_INVALID;
-   enum agx_apple9_encoding encoding = centroid ? AGX_APPLE9_ENC_ITER_COORD
+   enum agx_apple9_encoding encoding = at_position ? AGX_APPLE9_ENC_ITER_COORD
                                                : AGX_APPLE9_ENC_ITER;
    if (linear) {
       agx_apple9_interp_mask_set(&lower->linear_mask, index);
       return apple9_dag_emit(lower, AGX_APPLE9_VIR_ITER, encoding,
-                             centroid ? &position : NULL, centroid, index + 1);
+                             at_position ? &position : NULL, at_position, index + 1);
    }
    uint32_t reciprocal;
-   if (centroid || !lower->perspective_ready) {
+   if (at_position || !lower->perspective_ready) {
       uint32_t denominator = apple9_dag_emit(
          lower, AGX_APPLE9_VIR_ITER, encoding,
-         centroid ? &position : NULL, centroid, 0);
+         at_position ? &position : NULL, at_position, 0);
       reciprocal = apple9_dag_emit(lower, AGX_APPLE9_VIR_FRCP,
          AGX_APPLE9_ENC_FLOAT_SPECIAL, &denominator, 1, 3);
-      if (!centroid) {
+      if (!at_position) {
          lower->perspective_reciprocal = reciprocal;
          lower->perspective_ready = true;
       }
@@ -1496,7 +1561,7 @@ apple9_lower_interpolated_input(struct apple9_dag_lower *lower,
    }
    uint32_t coefficient = apple9_dag_emit(
       lower, AGX_APPLE9_VIR_ITER, encoding,
-      centroid ? &position : NULL, centroid, index + 1);
+      at_position ? &position : NULL, at_position, index + 1);
    /* Keep raw varyings available to homogeneous clipping. Native shade-7
     * coefficients pair with a coefficient-aware projective multiply, which
     * handles the rasterizer's primitive-constant representation. */
@@ -1545,7 +1610,7 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
          return AGX_APPLE9_VREG_INVALID;
       }
       int coord_source = nir_tex_instr_src_index(tex, nir_tex_src_coord);
-      uint32_t coords[3];
+      uint32_t coords[4];
       for (unsigned c = 0; c < tex->coord_components; ++c)
          coords[c] = apple9_lower_dag_scalar(
             lower, nir_get_scalar(tex->src[coord_source].src.ssa, c));
@@ -1585,18 +1650,34 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
       unsigned texture = util_bitcount(lower->texture_mask &
                                        BITFIELD_MASK(tex->texture_index));
       uint32_t result;
-      if (tex->op == nir_texop_txd) {
-         uint32_t sources[6] = {coords[0], coords[1]};
+      if (tex->op == nir_texop_txf_ms) {
+         result = agx_apple9_vir_emit_texture_ms(
+            &lower->program, coords, texture,
+            util_bitcount(lower->sampler_mask), tex->is_array);
+      } else if (tex->op == nir_texop_txd) {
+         unsigned dimension = tex->is_array ? 2 :
+            tex->sampler_dim == GLSL_SAMPLER_DIM_3D ? 3 : 0;
+         unsigned axes = dimension == 3 ? 3 : 2;
+         unsigned prefix = dimension == 3 ? 3 : dimension || tex->is_shadow ? 4 : 2;
+         uint32_t sources[10] = {coords[0], coords[1]};
+         if (dimension == 3)
+            sources[2] = coords[2];
+         if (prefix == 4) {
+            sources[2] = dimension == 3 || tex->is_shadow ? coords[2]
+                                                         : apple9_dag_zero(lower);
+            sources[3] = tex->is_array ? layer_or_face : apple9_dag_zero(lower);
+         }
          for (unsigned derivative = 0; derivative < 2; ++derivative) {
             int source = nir_tex_instr_src_index(
                tex, derivative ? nir_tex_src_ddy : nir_tex_src_ddx);
-            for (unsigned c = 0; c < 2; ++c)
-               sources[2 + 2 * derivative + c] = apple9_lower_dag_scalar(
+            for (unsigned c = 0; c < axes; ++c)
+               sources[prefix + 2 * c + derivative] = apple9_lower_dag_scalar(
                   lower, nir_get_scalar(tex->src[source].src.ssa, c));
          }
          result = agx_apple9_vir_emit_texture_grad(
             &lower->program, sources, texture,
-            util_bitcount(lower->sampler_mask & BITFIELD_MASK(tex->sampler_index)));
+            util_bitcount(lower->sampler_mask & BITFIELD_MASK(tex->sampler_index)),
+            dimension, tex->is_shadow);
       } else if (tex->op == nir_texop_txl || tex->op == nir_texop_txb ||
                  tex->op == nir_texop_txf) {
          bool bias = tex->op == nir_texop_txb;
@@ -1617,7 +1698,8 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
             result = agx_apple9_vir_emit_texture_volume(&lower->program, coords,
                packed_lod, texture,
                util_bitcount(lower->sampler_mask & BITFIELD_MASK(tex->sampler_index)),
-               tex->is_array ? 2 : tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE ? 1 :
+               (tex->is_array || (tex->backend_flags & AGX_APPLE9_TEXTURE_CUBE_AS_ARRAY)) ? 2 :
+                  tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE ? 1 :
                   tex->sampler_dim == GLSL_SAMPLER_DIM_3D ? 3 : 0,
                bias, tex->is_shadow);
          } else
@@ -1644,6 +1726,7 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
       assert(mask & BITFIELD_BIT(scalar.comp));
       struct agx_apple9_vir_instr *sample =
          lower->program.instructions[lower->program.instruction_count - 1];
+      sample->texture_lod_query = tex->backend_flags & AGX_APPLE9_TEXTURE_LOD_QUERY;
       sample->texture_result_mask = mask;
       sample->dest_components = util_bitcount(mask);
       unsigned packed = 0;
@@ -1660,7 +1743,75 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
             nir_intrinsic_load_subgroup_size;
       nir_intrinsic_instr *intr = nir_def_instr_type(scalar.def) == nir_instr_type_intrinsic
          ? nir_def_as_intrinsic(scalar.def) : NULL;
-      if (intr && (intr->intrinsic == nir_intrinsic_ddx ||
+      if (intr && intr->intrinsic == nir_intrinsic_ballot) {
+         if (scalar.def->bit_size != 32 || scalar.def->num_components != 1)
+            return AGX_APPLE9_VREG_INVALID;
+         uint32_t source = apple9_lower_dag_scalar(lower,
+            nir_get_scalar(intr->src[0].ssa, 0));
+         value = apple9_dag_emit(lower, AGX_APPLE9_VIR_SUBGROUP_BALLOT,
+                                 AGX_APPLE9_ENC_SUBGROUP_BALLOT, &source, 1, 0);
+      } else if (intr && intr->intrinsic == nir_intrinsic_load_scratch) {
+         if (scalar.def->bit_size != 32 || nir_intrinsic_align_mul(intr) < 4 ||
+             (nir_intrinsic_align_offset(intr) & 3))
+            return AGX_APPLE9_VREG_INVALID;
+         uint32_t address = apple9_lower_dag_scalar(lower,
+            nir_get_scalar(intr->src[0].ssa, 0));
+         address = apple9_dag_shift_imm(lower, nir_op_ushr, address, 2);
+         value = apple9_dag_emit(lower, AGX_APPLE9_VIR_PRIVATE_LOAD,
+            AGX_APPLE9_ENC_PRIVATE_LOAD, &address, 1, scalar.comp);
+         if (value != AGX_APPLE9_VREG_INVALID) {
+            lower->program.private_size = lower->nir->scratch_size;
+            lower->program.instructions[lower->program.instruction_count - 1]
+               ->producer_scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_6;
+         }
+      } else if (intr && intr->intrinsic == nir_intrinsic_load_shared) {
+         if (scalar.def->bit_size != 32 ||
+             nir_intrinsic_align_mul(intr) < 4 ||
+             (nir_intrinsic_align_offset(intr) & 3) ||
+             lower->shared_argument == UINT_MAX)
+            return AGX_APPLE9_VREG_INVALID;
+         uint32_t address = apple9_lower_dag_scalar(lower,
+            nir_get_scalar(intr->src[0].ssa, 0));
+         unsigned offset = nir_intrinsic_base(intr) + 4 * scalar.comp;
+         if (offset) {
+            uint32_t add[] = {address, apple9_dag_imm(lower, offset)};
+            address = apple9_dag_emit(lower, AGX_APPLE9_VIR_IADD,
+               AGX_APPLE9_ENC_INT_ADD_EXTENDED, add, 2, 0);
+         }
+         address = apple9_dag_shift_imm(lower, nir_op_ushr, address, 2);
+         value = apple9_dag_emit(lower, AGX_APPLE9_VIR_SHARED_LOAD,
+            AGX_APPLE9_ENC_SHARED_LOAD, &address, 1,
+            lower->argument_base + lower->shared_argument);
+         if (value != AGX_APPLE9_VREG_INVALID)
+            lower->program.instructions[lower->program.instruction_count - 1]
+               ->producer_scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_6;
+      } else if (intr && (intr->intrinsic == nir_intrinsic_inclusive_scan ||
+                   intr->intrinsic == nir_intrinsic_exclusive_scan)) {
+         if (scalar.def->bit_size != 32 ||
+             nir_intrinsic_reduction_op(intr) != nir_op_iadd) {
+            lower->reason = "Apple9 subgroup scans require 32-bit integer addition";
+            return AGX_APPLE9_VREG_INVALID;
+         }
+         uint32_t source = apple9_lower_dag_scalar(lower,
+            nir_get_scalar(intr->src[0].ssa, scalar.comp));
+         value = apple9_dag_emit(lower, AGX_APPLE9_VIR_SUBGROUP_SCAN_IADD,
+            AGX_APPLE9_ENC_SUBGROUP_SCAN_IADD, &source, 1, 0);
+         if (intr->intrinsic == nir_intrinsic_inclusive_scan) {
+            uint32_t add[] = {value, source};
+            value = apple9_dag_emit(lower, AGX_APPLE9_VIR_IADD,
+               AGX_APPLE9_ENC_INT_ADD_EXTENDED, add, 2, 0);
+         }
+      } else if (intr && intr->intrinsic == nir_intrinsic_read_invocation) {
+         if (scalar.def->bit_size != 32)
+            return AGX_APPLE9_VREG_INVALID;
+         uint32_t sources[] = {
+            apple9_lower_dag_scalar(lower,
+               nir_get_scalar(intr->src[0].ssa, scalar.comp)),
+            apple9_lower_dag_scalar(lower, nir_get_scalar(intr->src[1].ssa, 0)),
+         };
+         value = apple9_dag_emit(lower, AGX_APPLE9_VIR_SUBGROUP_BROADCAST,
+            AGX_APPLE9_ENC_SUBGROUP_BROADCAST, sources, 2, 0);
+      } else if (intr && (intr->intrinsic == nir_intrinsic_ddx ||
                    intr->intrinsic == nir_intrinsic_ddy ||
                    intr->intrinsic == nir_intrinsic_ddx_fine ||
                    intr->intrinsic == nir_intrinsic_ddy_fine)) {
@@ -1682,7 +1833,7 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
          lower->reads_z = true;
          value = apple9_dag_emit(lower, AGX_APPLE9_VIR_ITER,
                                  AGX_APPLE9_ENC_ITER, NULL, 0,
-                                 1 + (lower->varyings ? lower->varyings->count : 0));
+                                 1 + (lower->varyings ? lower->varyings->count : 0) + lower->reads_primitive_id);
       } else if (nir_def_instr_type(scalar.def) == nir_instr_type_intrinsic &&
                  nir_def_as_intrinsic(scalar.def)->intrinsic == nir_intrinsic_load_point_coord) {
          if (scalar.comp >= 2)
@@ -1690,7 +1841,7 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
          lower->reads_point_coord = true;
          value = apple9_dag_emit(lower, AGX_APPLE9_VIR_ITER,
                                  AGX_APPLE9_ENC_ITER, NULL, 0,
-                                 1 + lower->varyings->count + lower->reads_z + scalar.comp);
+                                 1 + lower->varyings->count + lower->reads_primitive_id + lower->reads_z + scalar.comp);
       } else if (nir_def_instr_type(scalar.def) == nir_instr_type_intrinsic &&
           (nir_def_as_intrinsic(scalar.def)->intrinsic ==
               nir_intrinsic_load_interpolated_input ||
@@ -1738,12 +1889,22 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                load->tile_sample_mask = nir_src_as_uint(intr->src[0]);
          }
       } else if (nir_def_instr_type(scalar.def) == nir_instr_type_intrinsic &&
-                 nir_def_as_intrinsic(scalar.def)->intrinsic ==
-                    nir_intrinsic_load_barycentric_centroid) {
-         uint32_t coverage = apple9_dag_emit(lower, AGX_APPLE9_VIR_GET_SR,
-            AGX_APPLE9_ENC_GET_COVERAGE, NULL, 0, 0x10c2);
-         value = apple9_dag_emit(lower, AGX_APPLE9_VIR_CENTROID_POSITION,
-            AGX_APPLE9_ENC_CENTROID_POSITION, &coverage, 1, 0);
+                 (nir_def_as_intrinsic(scalar.def)->intrinsic ==
+                     nir_intrinsic_load_barycentric_centroid ||
+                  nir_def_as_intrinsic(scalar.def)->intrinsic ==
+                     nir_intrinsic_load_barycentric_at_sample)) {
+         nir_intrinsic_instr *bary = nir_def_as_intrinsic(scalar.def);
+         uint32_t coverage;
+         if (bary->intrinsic == nir_intrinsic_load_barycentric_at_sample) {
+            coverage = apple9_lower_dag_scalar(
+               lower, nir_get_scalar(bary->src[0].ssa, 0));
+         } else {
+            coverage = apple9_dag_emit(lower, AGX_APPLE9_VIR_GET_SR,
+               AGX_APPLE9_ENC_GET_COVERAGE, NULL, 0, 0x10c2);
+         }
+         value = apple9_dag_emit(lower, AGX_APPLE9_VIR_INTERPOLATION_POSITION,
+            AGX_APPLE9_ENC_INTERPOLATION_POSITION, &coverage, 1,
+            bary->intrinsic == nir_intrinsic_load_barycentric_at_sample);
       } else if (nir_def_instr_type(scalar.def) == nir_instr_type_intrinsic &&
                  nir_def_as_intrinsic(scalar.def)->intrinsic ==
                     nir_intrinsic_load_sample_mask_in) {
@@ -1774,7 +1935,9 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                  (nir_def_as_intrinsic(scalar.def)->intrinsic ==
                      nir_intrinsic_load_ssbo ||
                   nir_def_as_intrinsic(scalar.def)->intrinsic ==
-                     nir_intrinsic_load_ubo)) {
+                     nir_intrinsic_load_ubo ||
+                  nir_def_as_intrinsic(scalar.def)->intrinsic ==
+                     nir_intrinsic_load_global_2x32)) {
          struct apple9_scalar_load *load = NULL;
          for (unsigned i = 0; i < lower->load_count; ++i) {
             if (&lower->loads[i].intr->def == scalar.def &&
@@ -1799,11 +1962,13 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
             return index;
 
          uint32_t address = AGX_APPLE9_VREG_INVALID;
-         if (lower->nir->info.stage != MESA_SHADER_COMPUTE) {
-            address = apple9_graphics_buffer_address(lower, load->argument);
-            if (address == AGX_APPLE9_VREG_INVALID)
-               return address;
-         }
+         if (load->address)
+            address = apple9_lower_global_address(lower, load->address);
+         else if (lower->buffer_table)
+            address = apple9_buffer_address(lower, load->argument);
+         if ((load->address || lower->buffer_table) &&
+             address == AGX_APPLE9_VREG_INVALID)
+            return address;
 
          unsigned read_count = 0;
          for (unsigned i = 0; i < lower->load_count; ++i)
@@ -2392,6 +2557,8 @@ struct apple9_buffer_map {
    unsigned count;
    uint32_t read_mask;
    uint32_t write_mask;
+   bool writes_global;
+   bool descriptor_tables;
    struct apple9_buffer_resource resource[AGX_APPLE9_MAX_GRAPHICS_BUFFERS];
 };
 
@@ -2429,6 +2596,19 @@ apple9_is_ssbo_atomic(nir_intrinsic_op op)
           op == nir_intrinsic_ssbo_atomic_swap;
 }
 
+static bool
+apple9_is_global_atomic(nir_intrinsic_op op)
+{
+   return op == nir_intrinsic_global_atomic_2x32 ||
+          op == nir_intrinsic_global_atomic_swap_2x32;
+}
+
+static bool
+apple9_is_buffer_atomic(nir_intrinsic_op op)
+{
+   return apple9_is_ssbo_atomic(op) || apple9_is_global_atomic(op);
+}
+
 /* Collect semantic API bindings before selecting a package.  The native
  * launch programs publish a compact pointer table; read/write ownership is
  * host-side scheduling state, not a distinct pointer encoding. */
@@ -2444,6 +2624,8 @@ apple9_collect_buffer_map(nir_shader *nir, struct apple9_buffer_map *map,
             continue;
 
          nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         map->writes_global |= intr->intrinsic == nir_intrinsic_store_global_2x32 ||
+                               apple9_is_global_atomic(intr->intrinsic);
          if (intr->intrinsic != nir_intrinsic_load_ssbo &&
              intr->intrinsic != nir_intrinsic_load_ubo &&
              intr->intrinsic != nir_intrinsic_store_ssbo &&
@@ -2467,9 +2649,7 @@ apple9_collect_buffer_map(nir_shader *nir, struct apple9_buffer_map *map,
          struct apple9_buffer_resource *resource =
             apple9_find_buffer_resource(map, kind, binding);
          if (resource == NULL) {
-            if (map->count == (nir->info.stage == MESA_SHADER_COMPUTE
-                                  ? AGX_APPLE9_COMPUTE_MAX_RESOURCES
-                                  : ARRAY_SIZE(map->resource))) {
+            if (map->count == ARRAY_SIZE(map->resource)) {
                *reason = "Apple9 buffer resource capacity exceeded";
                return false;
             }
@@ -2484,7 +2664,7 @@ apple9_collect_buffer_map(nir_shader *nir, struct apple9_buffer_map *map,
       }
    }
 
-   bool has_store = false;
+   bool has_store = map->writes_global;
    for (unsigned i = 0; i < map->count; ++i)
       has_store |= map->resource[i].write;
    if (!has_store && nir->info.stage == MESA_SHADER_COMPUTE) {
@@ -2494,6 +2674,25 @@ apple9_collect_buffer_map(nir_shader *nir, struct apple9_buffer_map *map,
 
    qsort(map->resource, map->count, sizeof(map->resource[0]),
          apple9_compare_buffer_resource);
+   if (nir->info.shared_size) {
+      if (nir->info.stage != MESA_SHADER_COMPUTE ||
+          nir->info.shared_size > 1024 ||
+          map->count == AGX_APPLE9_COMPUTE_MAX_RESOURCES) {
+         *reason = "Apple9 shared memory exceeds the supported compute allocation";
+         return false;
+      }
+      /* Shared storage is local to a workgroup. Its root participates in the
+       * argument ABI but carries no external-buffer hazard or API binding. */
+      map->resource[map->count++] = (struct apple9_buffer_resource){
+         .kind = AGX_APPLE9_COMPUTE_RESOURCE_SHARED,
+      };
+   }
+   map->descriptor_tables = nir->info.stage != MESA_SHADER_COMPUTE ||
+      map->count > AGX_APPLE9_COMPUTE_DIRECT_MAX_RESOURCES;
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block)
+         map->descriptor_tables |= instr->type == nir_instr_type_tex;
+   }
    for (unsigned i = 0; i < map->count; ++i) {
       if (map->resource[i].read)
          map->read_mask |= BITFIELD_BIT(i);
@@ -2584,7 +2783,7 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
          if (!apple9_instruction_is_in_subset(
                 instr, nir->info.stage != MESA_SHADER_COMPUTE)) {
             *reason = instr->type == nir_instr_type_tex
-                         ? "Apple9 texture sampling is not implemented"
+                         ? "Apple9 texture operation is unsupported"
                          : "Apple9 buffer compiler encountered unsupported NIR";
             return false;
          }
@@ -2596,18 +2795,29 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
          if (intr->intrinsic != nir_intrinsic_load_ssbo &&
              intr->intrinsic != nir_intrinsic_load_ubo &&
              intr->intrinsic != nir_intrinsic_store_ssbo &&
-             !apple9_is_ssbo_atomic(intr->intrinsic))
+             intr->intrinsic != nir_intrinsic_load_global_2x32 &&
+             intr->intrinsic != nir_intrinsic_store_global_2x32 &&
+             !apple9_is_buffer_atomic(intr->intrinsic))
             continue;
-         const bool atomic = apple9_is_ssbo_atomic(intr->intrinsic);
-         if (!atomic &&
-             (nir_intrinsic_access(intr) & (ACCESS_COHERENT | ACCESS_VOLATILE))) {
+         const bool atomic = apple9_is_buffer_atomic(intr->intrinsic);
+         if (!atomic && (nir_intrinsic_access(intr) & ACCESS_VOLATILE)) {
             *reason = "Apple9 SSBO compiler rejects volatile access";
             return false;
          }
 
+         const bool global = intr->intrinsic == nir_intrinsic_load_global_2x32 ||
+                             intr->intrinsic == nir_intrinsic_store_global_2x32 ||
+                             apple9_is_global_atomic(intr->intrinsic);
          const bool load = intr->intrinsic != nir_intrinsic_store_ssbo &&
-                           !atomic;
-         nir_def *offset = load || atomic ? intr->src[1].ssa : intr->src[2].ssa;
+                           intr->intrinsic != nir_intrinsic_store_global_2x32 && !atomic;
+         nir_def *address = global ? intr->src[load || atomic ? 0 : 1].ssa : NULL;
+         if (address && (address->bit_size != 32 || address->num_components != 2)) {
+            *reason = "Apple9 global access requires a 64-bit address pair";
+            return false;
+         }
+         nir_builder builder = nir_builder_at(nir_before_instr(&intr->instr));
+         nir_def *offset = global ? nir_imm_int(&builder, 0) :
+                           load || atomic ? intr->src[1].ssa : intr->src[2].ssa;
          nir_scalar index;
          unsigned index_scale = 0, index_add = 0;
          uint8_t index_shift = 0;
@@ -2626,22 +2836,25 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
             return false;
          }
 
-         nir_def *binding_def = load || atomic ? intr->src[0].ssa
-                                               : intr->src[1].ssa;
-         uint32_t binding;
-         if (!apple9_const_u32(nir_get_scalar(binding_def, 0), &binding)) {
+         nir_def *binding_def = global ? NULL : load || atomic ? intr->src[0].ssa
+                                                                 : intr->src[1].ssa;
+         uint32_t binding = 0;
+         if (!global && !apple9_const_u32(nir_get_scalar(binding_def, 0), &binding)) {
             *reason = "Apple9 buffer compiler requires constant bindings";
             return false;
          }
 
          if (atomic) {
+            unsigned data_src = global ? 1 : 2;
+            bool swap = intr->intrinsic == nir_intrinsic_ssbo_atomic_swap ||
+                        intr->intrinsic == nir_intrinsic_global_atomic_swap_2x32;
             if (bit_size != 32 || intr->def.num_components != 1 ||
-                intr->src[2].ssa->bit_size != 32 ||
-                intr->src[2].ssa->num_components != 1 ||
-                (intr->intrinsic == nir_intrinsic_ssbo_atomic_swap &&
+                intr->src[data_src].ssa->bit_size != 32 ||
+                intr->src[data_src].ssa->num_components != 1 ||
+                (swap &&
                  (nir_intrinsic_atomic_op(intr) != nir_atomic_op_cmpxchg ||
-                  intr->src[3].ssa->bit_size != 32 ||
-                  intr->src[3].ssa->num_components != 1))) {
+                  intr->src[data_src + 1].ssa->bit_size != 32 ||
+                  intr->src[data_src + 1].ssa->num_components != 1))) {
                *reason = "Apple9 supports scalar 32-bit SSBO atomics";
                return false;
             }
@@ -2652,7 +2865,7 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
                return false;
             }
 
-            unsigned argument = apple9_buffer_argument(
+            unsigned argument = global ? 0 : apple9_buffer_argument(
                map, AGX_APPLE9_COMPUTE_RESOURCE_SSBO, binding);
             if (argument == UINT_MAX) {
                *reason = "Apple9 atomic binding is absent from its resource map";
@@ -2663,6 +2876,7 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
                .intr = intr,
                .block = block,
                .index = index,
+               .address = address,
                .argument = argument,
                .index_scale = index_scale,
                .index_add = index_add,
@@ -2682,7 +2896,7 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
                intr->intrinsic == nir_intrinsic_load_ubo
                   ? AGX_APPLE9_COMPUTE_RESOURCE_UBO
                   : AGX_APPLE9_COMPUTE_RESOURCE_SSBO;
-            unsigned argument = apple9_buffer_argument(map, kind, binding);
+            unsigned argument = global ? 0 : apple9_buffer_argument(map, kind, binding);
             if (argument == UINT_MAX) {
                *reason = "Apple9 input binding is absent from its resource map";
                return false;
@@ -2698,6 +2912,7 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
                   .intr = intr,
                   .block = block,
                   .index = index,
+                  .address = address,
                   .argument = argument,
                   .component = component,
                   .index_shift = index_shift,
@@ -2718,7 +2933,7 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
                *reason = "Apple9 requires complete scalar or u32 tuple stores";
                return false;
             }
-            unsigned argument = apple9_buffer_argument(
+            unsigned argument = global ? 0 : apple9_buffer_argument(
                map, AGX_APPLE9_COMPUTE_RESOURCE_SSBO, binding);
             if (argument == UINT_MAX) {
                *reason =
@@ -2730,6 +2945,7 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
                .intr = intr,
                .block = block,
                .index = index,
+               .address = address,
                .argument = argument,
                .components = components,
                .index_shift = index_shift,
@@ -2789,11 +3005,13 @@ apple9_emit_buffer_store(struct apple9_dag_lower *lower,
       return false;
 
    uint32_t address = AGX_APPLE9_VREG_INVALID;
-   if (lower->nir->info.stage != MESA_SHADER_COMPUTE) {
-      address = apple9_graphics_buffer_address(lower, store->argument);
-      if (address == AGX_APPLE9_VREG_INVALID)
-         return false;
-   }
+   if (store->address)
+      address = apple9_lower_global_address(lower, store->address);
+   else if (lower->buffer_table)
+      address = apple9_buffer_address(lower, store->argument);
+   if ((store->address || lower->buffer_table) &&
+       address == AGX_APPLE9_VREG_INVALID)
+      return false;
    if (!agx_apple9_vir_emit_device_store(&lower->program,
                                          lower->argument_base + store->argument,
                                          store->lowered_index, store->output,
@@ -2840,16 +3058,17 @@ apple9_emit_buffer_atomic(struct apple9_dag_lower *lower,
       return false;
 
    const bool discard = nir_def_components_read(&atomic->intr->def) == 0;
+   unsigned data_src = atomic->address ? 1 : 2;
    uint32_t data[2];
    unsigned data_components = 1;
    if (atomic->op == AGX_APPLE9_ATOMIC_CMPXCHG) {
       /* Native tuple order is desired, compare. NIR spells the sources as
        * compare, desired. */
       data[0] = apple9_lower_dag_scalar(
-         lower, apple9_chase_trivial(nir_get_scalar(atomic->intr->src[3].ssa,
+         lower, apple9_chase_trivial(nir_get_scalar(atomic->intr->src[data_src + 1].ssa,
                                                      0)));
       data[1] = apple9_lower_dag_scalar(
-         lower, apple9_chase_trivial(nir_get_scalar(atomic->intr->src[2].ssa,
+         lower, apple9_chase_trivial(nir_get_scalar(atomic->intr->src[data_src].ssa,
                                                      0)));
       data_components = 2;
       for (unsigned c = 0; c < data_components; ++c) {
@@ -2858,7 +3077,7 @@ apple9_emit_buffer_atomic(struct apple9_dag_lower *lower,
       }
    } else {
       nir_scalar scalar = apple9_chase_trivial(
-         nir_get_scalar(atomic->intr->src[2].ssa, 0));
+         nir_get_scalar(atomic->intr->src[data_src].ssa, 0));
       data[0] = apple9_lower_dag_scalar(lower, scalar);
       if (data[0] == AGX_APPLE9_VREG_INVALID)
          return false;
@@ -2867,12 +3086,24 @@ apple9_emit_buffer_atomic(struct apple9_dag_lower *lower,
    }
 
    uint32_t result = AGX_APPLE9_VREG_INVALID;
+   uint32_t address = atomic->address
+                         ? apple9_lower_global_address(lower, atomic->address)
+                         : AGX_APPLE9_VREG_INVALID;
+   if (!atomic->address && lower->buffer_table)
+      address = apple9_buffer_address(lower, atomic->argument);
+   if ((atomic->address || lower->buffer_table) &&
+       address == AGX_APPLE9_VREG_INVALID)
+      return false;
    if (!agx_apple9_vir_emit_device_atomic(
           &lower->program, lower->argument_base + atomic->argument, index,
           data, data_components, atomic->op, discard, &result)) {
       lower->reason = "could not emit an Apple9 VIR device atomic";
       return false;
    }
+
+   if (address != AGX_APPLE9_VREG_INVALID &&
+       !agx_apple9_vir_set_device_atomic_address(&lower->program, address))
+      return false;
 
    if (!discard) {
       const unsigned key = atomic->intr->def.index * 4;
@@ -2949,6 +3180,9 @@ static bool
 apple9_emit_jump(struct apple9_dag_lower *lower, nir_block *block,
                  nir_jump_instr *jump)
 {
+   if (jump->type == nir_jump_halt)
+      return agx_apple9_vir_emit_side_effect(&lower->program,
+         AGX_APPLE9_VIR_HALT, AGX_APPLE9_ENC_HALT, NULL, 0, 0);
    if (jump->type == nir_jump_continue) {
       lower->reason =
          "Apple9 encountered a continue after continuation lowering";
@@ -3087,22 +3321,25 @@ apple9_emit_graphics_output(struct apple9_dag_lower *lower,
    }
    if (!nir_src_is_const(intr->src[1]) || intr->src[0].ssa->bit_size != 32)
       return false;
-   const unsigned location = nir_intrinsic_io_semantics(intr).location +
-                             nir_src_as_uint(intr->src[1]);
-   nir_alu_type type = nir_intrinsic_src_type(intr);
+   bool uvs = intr->intrinsic == nir_intrinsic_store_uvs_agx;
+   const unsigned location = uvs ? VARYING_SLOT_MAX
+      : nir_intrinsic_io_semantics(intr).location + nir_src_as_uint(intr->src[1]);
+   nir_alu_type type = uvs ? nir_type_float32 : nir_intrinsic_src_type(intr);
    bool integer = type == nir_type_int32 || type == nir_type_uint32;
    if (type != nir_type_float32 && !integer)
       return false;
    if (location == VARYING_SLOT_POS && integer)
       return false;
    for (unsigned c = 0; c < intr->num_components; ++c) {
-      if (!(nir_intrinsic_write_mask(intr) & BITFIELD_BIT(c)))
+      if (!uvs && !(nir_intrinsic_write_mask(intr) & BITFIELD_BIT(c)))
          continue;
-      unsigned component = nir_intrinsic_component(intr) + c;
+      unsigned component = (uvs ? 0 : nir_intrinsic_component(intr)) + c;
       if (component >= 4)
          return false;
       unsigned slot = component;
-      if (location == VARYING_SLOT_PSIZ) {
+      if (uvs) {
+         slot = nir_src_as_uint(intr->src[1]) + c;
+      } else if (location == VARYING_SLOT_PSIZ) {
          if (integer || component != 0)
             return false;
          slot = 4 + lower->varyings->count;
@@ -3177,9 +3414,82 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
          nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
          if (intr->intrinsic == nir_intrinsic_load_barycentric_pixel)
             continue; /* Interpolation mode is consumed by the input operation. */
+         if (intr->intrinsic == nir_intrinsic_barrier) {
+            unsigned scope = nir_intrinsic_execution_scope(intr);
+            unsigned modes = nir_intrinsic_memory_modes(intr);
+            if ((scope != SCOPE_NONE && scope != SCOPE_WORKGROUP) ||
+                (modes & ~(nir_var_mem_shared | nir_var_mem_global | nir_var_mem_ssbo)) ||
+                (scope == SCOPE_NONE && (modes & nir_var_mem_shared))) {
+               lower->reason = "Apple9 barrier scope or memory class is unsupported";
+               return false;
+            }
+            if ((modes & (nir_var_mem_global | nir_var_mem_ssbo)) &&
+                !agx_apple9_vir_emit_side_effect(&lower->program,
+                   AGX_APPLE9_VIR_DEVICE_FENCE,
+                   AGX_APPLE9_ENC_DEVICE_FENCE, NULL, 0, 0))
+               return false;
+            if (scope == SCOPE_WORKGROUP &&
+                !agx_apple9_vir_emit_side_effect(&lower->program,
+                   AGX_APPLE9_VIR_WORKGROUP_BARRIER,
+                   AGX_APPLE9_ENC_WORKGROUP_BARRIER, NULL, 0, 0))
+               return false;
+            continue;
+         }
+         if (intr->intrinsic == nir_intrinsic_store_scratch) {
+            if (intr->src[0].ssa->bit_size != 32 ||
+                nir_intrinsic_align_mul(intr) < 4 ||
+                (nir_intrinsic_align_offset(intr) & 3))
+               return false;
+            uint32_t address = apple9_lower_dag_scalar(lower,
+               nir_get_scalar(intr->src[1].ssa, 0));
+            address = apple9_dag_shift_imm(lower, nir_op_ushr, address, 2);
+            for (unsigned c = 0; c < intr->num_components; ++c) {
+               if (!(nir_intrinsic_write_mask(intr) & BITFIELD_BIT(c)))
+                  continue;
+               uint32_t sources[] = {
+                  apple9_lower_dag_scalar(lower, nir_get_scalar(intr->src[0].ssa, c)),
+                  address,
+               };
+               if (!agx_apple9_vir_emit_side_effect(&lower->program,
+                      AGX_APPLE9_VIR_PRIVATE_STORE, AGX_APPLE9_ENC_PRIVATE_STORE,
+                      sources, 2, c))
+                  return false;
+            }
+            lower->program.private_size = lower->nir->scratch_size;
+            continue;
+         }
+         if (intr->intrinsic == nir_intrinsic_store_shared) {
+            if (intr->src[0].ssa->bit_size != 32 ||
+                nir_intrinsic_align_mul(intr) < 4 ||
+                (nir_intrinsic_align_offset(intr) & 3) ||
+                lower->shared_argument == UINT_MAX)
+               return false;
+            uint32_t base = apple9_lower_dag_scalar(lower,
+               nir_get_scalar(intr->src[1].ssa, 0));
+            for (unsigned c = 0; c < intr->num_components; ++c) {
+               if (!(nir_intrinsic_write_mask(intr) & BITFIELD_BIT(c)))
+                  continue;
+               uint32_t address = base;
+               unsigned offset = nir_intrinsic_base(intr) + 4 * c;
+               if (offset) {
+                  uint32_t add[] = {address, apple9_dag_imm(lower, offset)};
+                  address = apple9_dag_emit(lower, AGX_APPLE9_VIR_IADD,
+                     AGX_APPLE9_ENC_INT_ADD_EXTENDED, add, 2, 0);
+               }
+               address = apple9_dag_shift_imm(lower, nir_op_ushr, address, 2);
+               uint32_t sources[] = {
+                  apple9_lower_dag_scalar(lower, nir_get_scalar(intr->src[0].ssa, c)),
+                  address,
+               };
+               if (!agx_apple9_vir_emit_side_effect(&lower->program,
+                      AGX_APPLE9_VIR_SHARED_STORE, AGX_APPLE9_ENC_SHARED_STORE,
+                      sources, 2, lower->argument_base + lower->shared_argument))
+                  return false;
+            }
+            continue;
+         }
          if (intr->intrinsic == nir_intrinsic_store_zs_agx) {
-            if (nir_intrinsic_base(intr) != 1 || !nir_src_is_const(intr->src[0]) ||
-                nir_src_as_uint(intr->src[0]) != 0xff)
+            if (nir_intrinsic_base(intr) != 1)
                return false;
             uint32_t value = apple9_lower_dag_scalar(lower, nir_get_scalar(intr->src[1].ssa, 0));
             uint32_t clamp[] = {value, apple9_dag_imm(lower, 0)};
@@ -3188,7 +3498,8 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
             clamp[0] = value; clamp[1] = apple9_dag_imm(lower, fui(1.0f));
             value = apple9_dag_emit(lower, AGX_APPLE9_VIR_FMIN,
                AGX_APPLE9_ENC_MINMAX_COMPACT, clamp, 2, 0);
-            uint32_t mask = apple9_dag_imm(lower, 0xff);
+            uint32_t mask = apple9_lower_dag_scalar(
+               lower, nir_get_scalar(intr->src[0].ssa, 0));
             uint32_t control = apple9_pack_coverage(lower, mask, mask);
             uint32_t fields[] = {control, value};
             value = agx_apple9_vir_emit_publication_pair(&lower->program, fields);
@@ -3217,6 +3528,7 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
             continue;
          }
          if (intr->intrinsic == nir_intrinsic_store_output ||
+             intr->intrinsic == nir_intrinsic_store_uvs_agx ||
              intr->intrinsic == nir_intrinsic_store_local_pixel_agx) {
             if (!apple9_emit_graphics_output(lower, intr)) {
                if (!lower->reason)
@@ -3228,7 +3540,7 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
          if (intr->intrinsic == nir_intrinsic_image_store_block_agx) {
             bool multisampled = nir_intrinsic_image_dim(intr) == GLSL_SAMPLER_DIM_MS;
             if ((!multisampled && nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_2D) ||
-                nir_intrinsic_image_array(intr) || nir_intrinsic_explicit_coord(intr))
+                nir_intrinsic_explicit_coord(intr))
                return false;
             enum pipe_format format = nir_intrinsic_format(intr);
             unsigned tile_format = agx_apple9_block_export_format(format);
@@ -3241,13 +3553,17 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
                apple9_lower_dag_scalar(lower, nir_get_scalar(intr->src[2].ssa, 0)),
                apple9_lower_dag_scalar(lower, nir_get_scalar(intr->src[2].ssa, 1)),
                apple9_lower_dag_scalar(lower, nir_get_scalar(intr->src[1].ssa, 0)),
+               nir_intrinsic_image_array(intr)
+                  ? apple9_lower_dag_scalar(lower, nir_get_scalar(intr->src[2].ssa, 2))
+                  : AGX_APPLE9_VREG_INVALID,
             };
-            /* The publication word combines a byte offset in its upper
-             * half with mip level zero below. Destination views supply their
-             * own level dimensions and base address. */
+            /* The last word combines the tile byte offset above the mip
+             * level. Layered views retain the whole mip allocation so the
+             * hardware derives the physical stride between array planes. */
             src[2] = apple9_dag_shift_imm(lower, nir_op_ishl, src[2], 16);
             if (!agx_apple9_vir_emit_block_image_store(&lower->program, src, image,
-                                                       tile_format, multisampled))
+                                                       tile_format, multisampled,
+                                                       nir_intrinsic_image_array(intr)))
                return false;
             continue;
          }
@@ -3268,7 +3584,8 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
             }
             continue;
          }
-         if (intr->intrinsic == nir_intrinsic_store_ssbo) {
+         if (intr->intrinsic == nir_intrinsic_store_ssbo ||
+             intr->intrinsic == nir_intrinsic_store_global_2x32) {
             struct apple9_buffer_store *store = apple9_find_store(stores, intr);
             if (store == NULL ||
                 !apple9_lower_buffer_store_operands(lower, store) ||
@@ -3279,7 +3596,7 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
             }
             continue;
          }
-         if (apple9_is_ssbo_atomic(intr->intrinsic)) {
+         if (apple9_is_buffer_atomic(intr->intrinsic)) {
             struct apple9_buffer_atomic *atomic =
                apple9_find_atomic(lower, intr);
             if (atomic == NULL || !apple9_emit_buffer_atomic(lower, atomic)) {
@@ -3791,6 +4108,41 @@ apple9_emit_cf_list(struct apple9_dag_lower *lower,
    return true;
 }
 
+static bool
+apple9_lower_global_address_pair(nir_builder *b, nir_intrinsic_instr *intr,
+                                UNUSED void *data)
+{
+   bool load = intr->intrinsic == nir_intrinsic_load_global ||
+               intr->intrinsic == nir_intrinsic_load_global_constant;
+   bool store = intr->intrinsic == nir_intrinsic_store_global;
+   bool atomic = intr->intrinsic == nir_intrinsic_global_atomic ||
+                 intr->intrinsic == nir_intrinsic_global_atomic_swap;
+   if (!load && !store && !atomic)
+      return false;
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_intrinsic_op op = load ? nir_intrinsic_load_global_2x32
+                             : nir_intrinsic_store_global_2x32;
+   if (atomic)
+      op = intr->intrinsic == nir_intrinsic_global_atomic
+              ? nir_intrinsic_global_atomic_2x32
+              : nir_intrinsic_global_atomic_swap_2x32;
+   nir_intrinsic_instr *repl = nir_intrinsic_instr_create(b->shader, op);
+   repl->num_components = intr->num_components;
+   nir_intrinsic_copy_const_indices(repl, intr);
+   for (unsigned s = 0; s < nir_intrinsic_infos[intr->intrinsic].num_srcs; ++s)
+      repl->src[s] = intr->src[s];
+   unsigned address_src = store ? 1 : 0;
+   repl->src[address_src] = nir_src_for_ssa(
+      nir_unpack_64_2x32(b, intr->src[address_src].ssa));
+   if (!store)
+      nir_def_init(&repl->instr, &repl->def, intr->def.num_components, intr->def.bit_size);
+   nir_builder_instr_insert(b, &repl->instr);
+   if (!store)
+      nir_def_rewrite_uses(&intr->def, &repl->def);
+   nir_instr_remove(&intr->instr);
+   return true;
+}
+
 /* Keep native binary16 arithmetic, comparisons and special functions.
  * Remaining composite math keeps the common FP32 expansion. */
 static unsigned
@@ -3849,14 +4201,17 @@ apple9_legalize_buffer_accesses(nir_shader *nir)
     * Resolve its pointer intrinsics before splitting 64-bit addresses. */
    agx_nir_lower_sink_address(nir);
    const nir_lower_mem_access_bit_sizes_options memory_options = {
-      .modes = nir_var_mem_ssbo | nir_var_mem_ubo,
+      .modes = nir_var_mem_ssbo | nir_var_mem_ubo | nir_var_mem_global |
+               nir_var_mem_constant | nir_var_mem_shared | nir_var_function_temp,
       .callback = apple9_memory_format,
    };
    nir_opt_load_store_update_alignments(nir);
    nir_lower_mem_access_bit_sizes(nir, &memory_options);
-   /* Memory legalization can create pack/unpack operations after the common
-    * preprocessing pipeline. Use Mesa's arithmetic lowering for Apple9's
-    * currently supported scalar bit operations. */
+   nir_shader_intrinsics_pass(nir, apple9_lower_global_address_pair,
+                             nir_metadata_control_flow, NULL);
+   /* Memory legalization can create ALU operations after preprocessing.
+    * Keep native unary bit operations and normalized conversions for
+    * selection while expanding the remaining composite operations. */
    const nir_shader_compiler_options *saved_options = nir->options;
    nir_shader_compiler_options memory_alu_options = *saved_options;
    memory_alu_options.lower_extract_byte = true;
@@ -4015,21 +4370,33 @@ apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
       .atomics = atomics.data,
       .atomic_count =
          util_dynarray_num_elements(&atomics, struct apple9_buffer_atomic),
-      .argument_base = nir->info.stage == MESA_SHADER_COMPUTE
-                          ? AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE
-                          : 2,
-      .preamble_base = nir->info.stage == MESA_SHADER_COMPUTE
-                         ? agx_apple9_compute_root_words(resources->count)
-                         : AGX_APPLE9_GRAPHICS_ROOT_WORDS,
+      .argument_base = resources->descriptor_tables
+                          ? 2 : AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE,
+      .buffer_table = resources->descriptor_tables,
+      .groups_argument = resources->descriptor_tables
+                            ? AGX_APPLE9_COMPUTE_GROUPS_ROOT : 0,
+      .shared_argument = resources->descriptor_tables
+         ? AGX_APPLE9_COMPUTE_SHARED_ARGUMENT - 2
+         : apple9_buffer_argument(resources, AGX_APPLE9_COMPUTE_RESOURCE_SHARED, 0),
+      .preamble_base = resources->descriptor_tables
+                         ? AGX_APPLE9_GRAPHICS_ROOT_WORDS
+                         : agx_apple9_compute_preamble_base(resources->count),
       .structured_cf = apple9_cf_list_has_control_flow(&impl->body),
    };
    /* Reserve depth before assigning point-coordinate coefficients, independent
     * of the order in which the DAG visits the two built-ins. */
    nir_foreach_block(block, impl) {
       nir_foreach_instr(instr, block) {
-         if (instr->type == nir_instr_type_intrinsic &&
-             nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_frag_coord_z)
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic == nir_intrinsic_load_frag_coord_z)
             lower.reads_z = true;
+         if (nir->info.stage == MESA_SHADER_FRAGMENT &&
+             intr->intrinsic == nir_intrinsic_load_input &&
+             nir_intrinsic_io_semantics(intr).location == VARYING_SLOT_PRIMITIVE_ID &&
+             !varyings->mask[VARYING_SLOT_PRIMITIVE_ID])
+            lower.reads_primitive_id = true;
       }
    }
    for (unsigned i = 0; i < ARRAY_SIZE(lower.system_vreg); ++i)
@@ -4392,11 +4759,16 @@ apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
    out->info.stage = nir->info.stage;
    out->info.apple9_linear_mask = lower.linear_mask;
    out->info.apple9_reads_z = lower.reads_z;
+   out->info.apple9_reads_primitive_id = lower.reads_primitive_id;
    out->info.depth_layout = lower.writes_z ? FRAG_DEPTH_LAYOUT_ANY
                                           : FRAG_DEPTH_LAYOUT_UNCHANGED;
    out->info.apple9_reads_point_coord = lower.reads_point_coord;
    out->info.apple9_writes_point_size = nir->info.stage == MESA_SHADER_VERTEX &&
       (nir->info.outputs_written & BITFIELD64_BIT(VARYING_SLOT_PSIZ));
+   out->info.writes_layer_viewport = nir->info.stage == MESA_SHADER_VERTEX &&
+      (nir->info.outputs_written & VARYING_BIT_LAYER);
+   out->info.apple9_clip_distance_count = nir->info.stage == MESA_SHADER_VERTEX
+      ? nir->info.clip_distance_array_size : 0;
    out->info.apple9_reads_tile = lower.tile_read;
    out->info.apple9_flat_mask = lower.flat_mask;
    out->info.apple9_texture_mask = texture_mask;
@@ -4424,7 +4796,7 @@ apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
       out->info.apple9_varyings = *varyings;
    if (!preamble && nir->info.stage == MESA_SHADER_FRAGMENT)
       out->info.varyings.fs.nr_cf = varyings->count + 1 + lower.reads_z +
-                                  2 * lower.reads_point_coord;
+                                  lower.reads_primitive_id + 2 * lower.reads_point_coord;
    out->info.main_size = emitter.bytes.size;
    out->info.binary_size = emitter.bytes.size;
    /* nr_gprs is the architectural GPR high-water mark for Apple9.  Keep the
@@ -4432,6 +4804,7 @@ apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
     * back to the old 16-register capture tier. */
    out->info.nr_gprs = MAX2(lower.program.max_phys_gpr + 1, 8);
    out->info.scratch_size = lower.program.scratch_size;
+   out->info.local_size = nir->info.shared_size;
    out->info.apple9_publication_count = lower.program.publication_count;
    out->info.stats.instrs = emitter.instructions;
    for (unsigned d = 0; d < 3; ++d)
@@ -4440,6 +4813,8 @@ apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
    if (profile != NULL) {
       const unsigned resource_count = resource_map.count;
       *profile = AGX_APPLE9_DIRECT_BUFFERS_COMPUTE_PROFILE;
+      if (resources->descriptor_tables)
+         profile->abi = AGX_APPLE9_COMPUTE_ABI_DESCRIPTOR_TABLES;
       for (unsigned i = 0; i < lower.program.instruction_count; ++i) {
          const struct agx_apple9_vir_instr *ins = lower.program.instructions[i];
          if (ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC && !ins->atomic_discard)
@@ -4448,11 +4823,15 @@ apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
       profile->resource_binding_count = resource_count;
       profile->resource_read_mask = resource_map.read_mask;
       profile->resource_write_mask = resource_map.write_mask;
+      profile->writes_global = resource_map.writes_global;
+      profile->required_threadgroup_memory_bytes = nir->info.shared_size
+         ? util_next_power_of_two(MAX2(nir->info.shared_size, 128)) : 0;
       for (unsigned i = 0; i < profile->resource_binding_count; ++i) {
          profile->resource_binding[i] = resource_map.resource[i].binding;
          profile->resource_kind[i] = resource_map.resource[i].kind;
       }
       profile->scratch_size = lower.program.scratch_size;
+      profile->publication_count = lower.program.publication_count;
       profile->variable_local_size = nir->info.workgroup_size_variable;
       for (unsigned d = 0; d < 3; ++d)
          profile->local_size[d] = nir->info.workgroup_size[d];
@@ -4590,9 +4969,9 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
       .def_size = apple9_preamble_def_size,
       .preamble_storage_size[nir_preamble_class_general] =
          AGX_APPLE9_UNIFORM_COUNT -
-         (nir->info.stage == MESA_SHADER_COMPUTE
-             ? agx_apple9_compute_root_words(resources.count)
-             : AGX_APPLE9_GRAPHICS_ROOT_WORDS),
+         (resources.descriptor_tables
+             ? AGX_APPLE9_GRAPHICS_ROOT_WORDS
+             : agx_apple9_compute_preamble_base(resources.count)),
       .instr_cost_cb = apple9_preamble_cost,
       .rewrite_cost_cb = apple9_preamble_rewrite_cost,
       .avoid_instr_cb = apple9_preamble_avoid,
@@ -4707,6 +5086,36 @@ apple9_lower_idiv(nir_shader *nir)
    }
 }
 
+static bool
+apple9_lower_compute_subgroups(nir_builder *b, nir_intrinsic_instr *intr,
+                               UNUSED void *data)
+{
+   if (intr->intrinsic == nir_intrinsic_load_workgroup_size &&
+       !b->shader->info.workgroup_size_variable) {
+      b->cursor = nir_before_instr(&intr->instr);
+      nir_def_replace(&intr->def, nir_imm_ivec3(b,
+         b->shader->info.workgroup_size[0], b->shader->info.workgroup_size[1],
+         b->shader->info.workgroup_size[2]));
+      return true;
+   }
+   if (intr->intrinsic != nir_intrinsic_load_num_subgroups)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *size = b->shader->info.workgroup_size_variable
+      ? nir_load_workgroup_size(b)
+      : nir_imm_ivec3(b, b->shader->info.workgroup_size[0],
+                        b->shader->info.workgroup_size[1],
+                        b->shader->info.workgroup_size[2]);
+   nir_def *threads = nir_imul(b, nir_channel(b, size, 0),
+                              nir_imul(b, nir_channel(b, size, 1),
+                                          nir_channel(b, size, 2)));
+   nir_def_replace(&intr->def, nir_ushr_imm(b, nir_iadd_imm(b, threads, 31), 5));
+   return true;
+}
+
+static void apple9_lower_textures(nir_shader *nir);
+
 bool
 agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
                         struct agx_apple9_compute_profile *profile,
@@ -4717,9 +5126,33 @@ agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
     * one backedge, matching the Apple9 loop machine directly. */
    nir_lower_continue_constructs(nir);
 
+   const nir_lower_subgroups_options subgroups = {
+      .subgroup_size = 32,
+      .ballot_bit_size = 32,
+      .ballot_components = 1,
+      .lower_to_scalar = true,
+   };
+   nir_lower_subgroups(nir, &subgroups);
+   nir_shader_intrinsics_pass(nir, apple9_lower_compute_subgroups,
+                              nir_metadata_control_flow, NULL);
+
    /* Internal compute shaders may use function temporaries just like API
     * frontends. Normalize them to the SSA form consumed by this backend. */
+   agx_nir_lower_printf_buffer(nir);
+   if (nir->scratch_size <= 128)
+      nir_lower_scratch_to_var(nir);
+   nir_lower_array_deref_of_vec(nir, nir_var_function_temp, NULL,
+                               nir_lower_indirect_array_deref_of_vec_load |
+                               nir_lower_indirect_array_deref_of_vec_store);
    nir_lower_vars_to_ssa(nir);
+   nir_lower_vars_to_scratch(nir, 128, glsl_get_natural_size_align_bytes,
+                              glsl_get_word_size_align_bytes);
+   nir_lower_indirect_derefs_to_if_else_trees(nir, nir_var_function_temp, ~0u);
+   nir_lower_vars_to_ssa(nir);
+   nir_remove_dead_variables(nir, nir_var_mem_shared, NULL);
+   nir_lower_vars_to_explicit_types(nir, nir_var_mem_shared,
+                                    glsl_get_natural_size_align_bytes);
+   nir_lower_explicit_io(nir, nir_var_mem_shared, nir_address_format_32bit_offset);
    bool progress;
    do {
       progress = nir_opt_constant_folding(nir);
@@ -4728,6 +5161,7 @@ agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
       progress |= nir_opt_dead_cf(nir);
       progress |= nir_opt_dce(nir);
    } while (progress);
+   apple9_lower_textures(nir);
    apple9_lower_idiv(nir);
    agx_nir_lower_apple9_math(nir);
    nir_lower_alu_to_scalar(nir, NULL, NULL);
@@ -4777,9 +5211,37 @@ apple9_io_size(const struct glsl_type *type, bool bindless)
 
 struct apple9_color_lower {
    const struct agx_apple9_blend *blend;
+   nir_def *src1;
    unsigned nr_targets;
    bool valid;
 };
+
+/* Specialize the common sample lowering to the raster state in this variant.
+ * The position word is shared with PPP programming, preserving sample order. */
+static bool
+apple9_lower_sample_state(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   const struct agx_apple9_blend *blend = data;
+   unsigned samples = blend ? MAX2(blend->samples, 1) : 1;
+   unsigned raster_samples = blend && blend->multisample_disabled ? 1 : samples;
+   uint32_t value;
+   switch (intr->intrinsic) {
+   case nir_intrinsic_load_sample_positions_agx:
+      value = agx_default_sample_positions(raster_samples);
+      break;
+   case nir_intrinsic_load_samples_log2_agx:
+      value = util_logbase2(raster_samples);
+      break;
+   case nir_intrinsic_load_api_sample_mask_agx:
+      value = BITFIELD_MASK(samples) & ~(blend ? blend->disabled_samples : 0);
+      break;
+   default:
+      return false;
+   }
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def_replace(&intr->def, nir_imm_intN_t(b, value, intr->def.bit_size));
+   return true;
+}
 
 /* This backend emits complete fragment programs, so the common coverage pass
  * always finalizes depth/stencil tests in this shader part. */
@@ -4795,16 +5257,86 @@ apple9_lower_coverage_sysval(nir_builder *b, nir_intrinsic_instr *intr, void *da
 }
 
 static bool
-apple9_lower_blend_constant(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+apple9_lower_fragment_uniform(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
-   if (intr->intrinsic != nir_intrinsic_load_blend_const_color_rgba)
+   if (intr->intrinsic != nir_intrinsic_load_blend_const_color_rgba &&
+       intr->intrinsic != nir_intrinsic_load_polygon_stipple_agx)
       return false;
    b->cursor = nir_before_instr(&intr->instr);
-   nir_def *value = nir_load_ubo(b, 4, 32,
-      nir_imm_int(b, AGX_APPLE9_GRAPHICS_SYSVAL_BINDING), nir_imm_int(b, 0),
-      .align_mul = 16, .range = 16);
+   bool stipple = intr->intrinsic == nir_intrinsic_load_polygon_stipple_agx;
+   nir_def *offset = stipple
+      ? nir_iadd_imm(b, nir_ishl_imm(b, intr->src[0].ssa, 2),
+                    AGX_APPLE9_POLYGON_STIPPLE_OFFSET)
+      : nir_imm_int(b, 0);
+   nir_def *value = nir_load_ubo(b, stipple ? 1 : 4, 32,
+      nir_imm_int(b, AGX_APPLE9_GRAPHICS_SYSVAL_BINDING), offset,
+      .align_mul = stipple ? 4 : 16,
+      .range_base = stipple ? AGX_APPLE9_POLYGON_STIPPLE_OFFSET : 0,
+      .range = stipple ? 128 : 16);
    nir_def_rewrite_uses(&intr->def, value);
    nir_instr_remove(&intr->instr);
+   return true;
+}
+
+/* Rectangle textures share the ordinary 2D descriptor. The common texture
+ * pass normalizes their coordinates; explicit gradients need the same scale.
+ * Integer fetches use level zero without any coordinate normalization. */
+static bool
+apple9_lower_rectangle(nir_builder *b, nir_instr *instr, UNUSED void *data)
+{
+   if (instr->type != nir_instr_type_tex)
+      return false;
+
+   nir_tex_instr *tex = nir_instr_as_tex(instr);
+   if (tex->sampler_dim != GLSL_SAMPLER_DIM_RECT)
+      return false;
+
+   b->cursor = nir_before_instr(instr);
+   if (tex->op == nir_texop_txf) {
+      tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+      if (nir_tex_instr_src_index(tex, nir_tex_src_lod) < 0 &&
+          nir_tex_instr_src_index(tex, nir_tex_src_backend1) < 0)
+         nir_tex_instr_add_src(tex, nir_tex_src_lod, nir_imm_int(b, 0));
+      return true;
+   }
+
+   if (tex->op != nir_texop_txd)
+      return false;
+
+   nir_def *scale = nir_frcp(b, nir_i2f32(b, nir_get_texture_size(b, tex)));
+   for (unsigned i = 0; i < tex->num_srcs; ++i) {
+      if (tex->src[i].src_type == nir_tex_src_ddx ||
+          tex->src[i].src_type == nir_tex_src_ddy)
+         nir_src_rewrite(&tex->src[i].src,
+                        nir_fmul(b, tex->src[i].src.ssa, scale));
+   }
+   return true;
+}
+
+/* LOD queries use the texture unit's derivative and clamp machinery. The
+ * hardware returns continuous LODs; GL additionally applies mip selection to
+ * the first component. Bias goes through the normal sample-bias operand. */
+static bool
+apple9_lower_texture_lod_query(nir_builder *b, nir_instr *instr, void *data)
+{
+   if (instr->type != nir_instr_type_tex)
+      return false;
+   nir_tex_instr *tex = nir_instr_as_tex(instr);
+   if (tex->op != nir_texop_lod)
+      return false;
+   tex->op = nir_texop_tex;
+   tex->backend_flags |= AGX_APPLE9_TEXTURE_LOD_QUERY;
+   if (data && tex->sampler_index < 32) {
+      const struct agx_apple9_sampler_key *key = data;
+      b->cursor = nir_after_instr(instr);
+      nir_def *level = nir_channel(b, &tex->def, 0);
+      if (key[tex->sampler_index].mip_filter == PIPE_TEX_MIPFILTER_NONE)
+         level = nir_imm_float(b, 0);
+      else if (key[tex->sampler_index].mip_filter == PIPE_TEX_MIPFILTER_NEAREST)
+         level = nir_fadd_imm(b, nir_fceil(b, nir_fadd_imm(b, level, 0.5)), -1.0);
+      nir_def *result = nir_vec2(b, level, nir_channel(b, &tex->def, 1));
+      nir_def_rewrite_uses_after(&tex->def, result);
+   }
    return true;
 }
 
@@ -4821,9 +5353,30 @@ agx_nir_lower_apple9_sampler_state(
    for (unsigned i = 0; i < 32; ++i) {
       mapping->samplers[i] = i;
    }
+   nir_lower_global_vars_to_local(nir);
+   nir_split_var_copies(nir);
+   nir_lower_var_copies(nir);
+   nir_lower_vars_to_ssa(nir);
+   bool optimized;
+   do {
+      optimized = nir_opt_constant_folding(nir);
+      optimized |= nir_opt_copy_prop(nir);
+      optimized |= nir_opt_remove_phis(nir);
+      optimized |= nir_opt_loop_unroll(nir);
+      optimized |= nir_opt_dead_cf(nir);
+      optimized |= nir_opt_dce(nir);
+   } while (optimized);
    nir_lower_samplers(nir);
-   const nir_lower_tex_options options = {.lower_txp = ~0u, .lower_1d = true};
+   nir_opt_constant_folding(nir);
+   nir_shader_instructions_pass(nir, apple9_lower_rectangle,
+                                nir_metadata_control_flow, NULL);
+   const nir_lower_tex_options options = {
+      .lower_txp = ~0u, .lower_1d = true,
+      .lower_rect = true, .lower_rect_offset = true,
+   };
    nir_lower_tex(nir, &options);
+   nir_shader_instructions_pass(nir, apple9_lower_texture_lod_query,
+                                nir_metadata_control_flow, (void *)key);
    if (!agx_nir_lower_apple9_texture_offsets(nir, key, reason))
       return false;
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
@@ -4850,13 +5403,37 @@ agx_nir_lower_apple9_sampler_state(
          if (tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
              tex->op != nir_texop_txl && tex->op != nir_texop_txd)
             continue;
+         if (tex->backend_flags & AGX_APPLE9_TEXTURE_LOD_QUERY)
+            continue;
+         /* Normalized depth formats clamp the comparison reference to [0,1].
+          * Z24 uses float storage through u_transfer_helper, so the texture
+          * descriptor cannot infer this API-format requirement. */
+         if (tex->is_shadow &&
+             (key[tex->texture_index].flags & AGX_APPLE9_CLAMP_SHADOW_REFERENCE)) {
+            int cmp = nir_tex_instr_src_index(tex, nir_tex_src_comparator);
+            if (cmp >= 0) {
+               b.cursor = nir_before_instr(instr);
+               nir_src_rewrite(&tex->src[cmp].src,
+                              nir_fsat(&b, tex->src[cmp].src.ssa));
+               progress = true;
+            }
+         }
          const struct agx_apple9_sampler_key *state = &key[tex->sampler_index];
-         if (!state->flags)
+         bool cube = tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE;
+         if (cube && !state->seamless_cube_map) {
+            /* Cube filtering always clamps the selected face on Apple9.
+             * Sampling that face as an array layer restores ordinary 2D
+             * wrapping when seamless cube filtering is disabled. */
+            tex->backend_flags |= AGX_APPLE9_TEXTURE_CUBE_AS_ARRAY;
+            mapping->seamful_cubes |= BITFIELD_BIT(tex->texture_index);
+            progress = true;
+         }
+         if (!(state->flags & AGX_APPLE9_CUSTOM_BORDER))
             continue;
          if ((tex->sampler_dim != GLSL_SAMPLER_DIM_2D &&
-              tex->sampler_dim != GLSL_SAMPLER_DIM_3D) || tex->is_array || tex->is_shadow ||
+              tex->sampler_dim != GLSL_SAMPLER_DIM_3D && !cube) || tex->is_shadow ||
              tex->def.num_components != 4 || tex->def.bit_size != 32) {
-            *reason = "Apple9 border lowering requires a float 2D sample";
+            *reason = "Apple9 border lowering requires a non-shadow 32-bit sample";
             return false;
          }
          int coord = nir_tex_instr_src_index(tex, nir_tex_src_coord);
@@ -4864,18 +5441,24 @@ agx_nir_lower_apple9_sampler_state(
             *reason = "Apple9 border sample has no coordinates";
             return false;
          }
-         b.cursor = nir_before_instr(instr);
-         nir_def *xy[3];
-         for (unsigned c = 0; c < tex->coord_components; ++c) {
-            xy[c] = nir_channel(&b, tex->src[coord].src.ssa, c);
-            if (state->flags & (AGX_APPLE9_CLAMP_S << c))
-               xy[c] = nir_fsat(&b, xy[c]);
-         }
-         nir_src_rewrite(&tex->src[coord].src, nir_vec(&b, xy, tex->coord_components));
          progress = true;
-         if (!(state->flags & AGX_APPLE9_CUSTOM_BORDER))
-            continue;
          unsigned s = tex->sampler_index;
+         if (sampler_alias[s] == 0xff) {
+            /* Border values live in the shader. Samplers with otherwise equal
+             * state can share the same all-white helper descriptor. */
+            struct agx_apple9_sampler_key white = *state;
+            memset(white.border, 0, sizeof(white.border));
+            for (unsigned j = 0; j < 32; ++j) {
+               if (sampler_alias[j] == 0xff)
+                  continue;
+               struct agx_apple9_sampler_key other = key[j];
+               memset(other.border, 0, sizeof(other.border));
+               if (!memcmp(&white, &other, sizeof(white))) {
+                  sampler_alias[s] = sampler_alias[j];
+                  break;
+               }
+            }
+         }
          if (sampler_alias[s] == 0xff) {
             if (samplers == UINT32_MAX) {
                *reason = "Apple9 custom border needs an additional sampler entry";
@@ -4891,12 +5474,21 @@ agx_nir_lower_apple9_sampler_state(
          nir_tex_instr *weight = nir_instr_as_tex(nir_instr_clone(nir, instr));
          weight->sampler_index = sampler_alias[s];
          nir_builder_instr_insert(&b, &weight->instr);
-         nir_def *border = nir_imm_vec4(&b, state->border[0], state->border[1],
-                                       state->border[2], state->border[3]);
-         /* Match hk_shader.c: filtering is linear, so interpolating samples
-          * with borders 0 and 1 gives the requested custom border. */
-         nir_def *result = nir_flrp(&b, &tex->def, &weight->def, border);
-         nir->info.flrp_lowered = false;
+         nir_def *border = nir_imm_ivec4(&b, fui(state->border[0]), fui(state->border[1]),
+                                        fui(state->border[2]), fui(state->border[3]));
+         nir_def *result;
+         if (nir_alu_type_get_base_type(tex->dest_type) == nir_type_float) {
+            /* Match hk_shader.c: filtering is linear, so interpolating samples
+             * with borders 0 and 1 gives the requested custom border. */
+            result = nir_flrp(&b, &tex->def, &weight->def, border);
+            nir->info.flrp_lowered = false;
+         } else {
+            /* Integer sampling is nearest-only. The two native samples differ
+             * exactly on border components; select their integer bits without
+             * interpreting either the texel or the border as floating point. */
+            result = nir_bcsel(&b, nir_ine(&b, &tex->def, &weight->def),
+                              border, &tex->def);
+         }
          nir_def_rewrite_uses_after(&tex->def, result);
       }
    }
@@ -4914,10 +5506,80 @@ apple9_texture_info(nir_builder *b, unsigned texture, unsigned field)
       .align_mul = 4, .range = 4);
 }
 
-/* Array shadow sampling uses the explicit LOD parameter contract. Derive
- * LOD from only the spatial coordinates; neither layer nor comparator is
- * a spatial derivative. The common texture pass turns these gradients into
- * LOD while preserving the ordinary sampler bias. */
+static nir_def *
+apple9_fetch_buffer(nir_builder *b, const nir_tex_instr *orig, nir_def *index)
+{
+   nir_tex_instr *tex = nir_tex_instr_create(b->shader, 2);
+   tex->op = nir_texop_txf;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->texture_index = orig->texture_index;
+   tex->sampler_index = APPLE9_FETCH_SAMPLER;
+   tex->dest_type = orig->dest_type;
+   tex->coord_components = 2;
+   tex->src[0].src_type = nir_tex_src_coord;
+   tex->src[0].src = nir_src_for_ssa(
+      nir_vec2(b, nir_umod_imm(b, index, AGX_TEXTURE_BUFFER_WIDTH),
+                  nir_udiv_imm(b, index, AGX_TEXTURE_BUFFER_WIDTH)));
+   tex->src[1].src_type = nir_tex_src_lod;
+   tex->src[1].src = nir_src_for_ssa(nir_imm_int(b, 0));
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_builder_instr_insert(b, &tex->instr);
+   return &tex->def;
+}
+
+/* Linear 2D descriptors cover buffer views independently of the underlying
+ * buffer allocation. RGB32 has no native format: fetch three scalar words and
+ * apply the logical view's swizzle after assembling the texel. */
+static bool
+apple9_lower_buffer_texture(nir_builder *b, nir_instr *instr, UNUSED void *data)
+{
+   if (instr->type != nir_instr_type_tex)
+      return false;
+   nir_tex_instr *tex = nir_instr_as_tex(instr);
+   if (tex->sampler_dim != GLSL_SAMPLER_DIM_BUF || tex->op != nir_texop_txf)
+      return false;
+
+   b->cursor = nir_before_instr(instr);
+   nir_def *index = nir_steal_tex_src(tex, nir_tex_src_coord);
+   nir_def *size = apple9_texture_info(b, tex->texture_index, 0);
+   nir_if *valid = nir_push_if(b, nir_ult(b, index, size));
+   nir_if *rgb32 = nir_push_if(b,
+      nir_ine_imm(b, apple9_texture_info(b, tex->texture_index, 5), 0));
+   nir_def *components[4];
+   nir_def *scalar_index = nir_imul_imm(b, index, 3);
+   for (unsigned c = 0; c < 3; ++c)
+      components[c] = nir_channel(b,
+         apple9_fetch_buffer(b, tex, nir_iadd_imm(b, scalar_index, c)), 0);
+   bool floating = nir_alu_type_get_base_type(tex->dest_type) == nir_type_float;
+   components[3] = floating ? nir_imm_float(b, 1) : nir_imm_int(b, 1);
+   nir_def *swizzle = apple9_texture_info(b, tex->texture_index, 6);
+   nir_def *rgba[4];
+   for (unsigned c = 0; c < 4; ++c) {
+      nir_def *channel = nir_iand_imm(b, nir_ushr_imm(b, swizzle, c * 3), 7);
+      rgba[c] = nir_imm_int(b, 0);
+      for (unsigned j = 0; j < 4; ++j)
+         rgba[c] = nir_bcsel(b, nir_ieq_imm(b, channel, j), components[j], rgba[c]);
+      rgba[c] = nir_bcsel(b, nir_ieq_imm(b, channel, PIPE_SWIZZLE_1),
+                         components[3], rgba[c]);
+   }
+   nir_def *assembled = nir_vec4(b, rgba[0], rgba[1], rgba[2], rgba[3]);
+   nir_push_else(b, rgb32);
+   nir_def *native = apple9_fetch_buffer(b, tex, index);
+   nir_pop_if(b, rgb32);
+   nir_def *result = nir_if_phi(b, assembled, native);
+   nir_push_else(b, valid);
+   nir_def *zero = nir_imm_ivec4(b, 0, 0, 0, 0);
+   nir_pop_if(b, valid);
+   result = nir_if_phi(b, result, zero);
+   nir_def_rewrite_uses(&tex->def, nir_trim_vector(b, result, tex->def.num_components));
+   nir_instr_remove(instr);
+   return true;
+}
+
+/* Route implicit array-shadow sampling through native explicit gradients.
+ * Only spatial coordinates contribute derivatives; neither the layer nor
+ * comparator does. An instruction bias scales those gradients, while the
+ * sampler's bias remains in the hardware descriptor. */
 static bool
 apple9_lower_array_shadow_gradients(nir_builder *b, nir_instr *instr, void *data)
 {
@@ -4952,6 +5614,23 @@ apple9_lower_texel_fetch(nir_builder *b, nir_instr *instr, void *data)
    if (instr->type != nir_instr_type_tex)
       return false;
    nir_tex_instr *tex = nir_instr_as_tex(instr);
+   if (tex->op == nir_texop_txf_ms && tex->sampler_dim == GLSL_SAMPLER_DIM_MS) {
+      b->cursor = nir_before_instr(instr);
+      int coord = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+      nir_def *xyz = tex->src[coord].src.ssa;
+      nir_def *sample = nir_steal_tex_src(tex, nir_tex_src_ms_index);
+      nir_def *layer = tex->is_array ? nir_channel(b, xyz, 2) : nir_imm_int(b, 0);
+      /* Full-width X/Y are followed by a 12-bit layer and sample index in
+       * bits 12..13 of the third publication word. The fourth word is unused. */
+      coord = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+      nir_src_rewrite(&tex->src[coord].src,
+         nir_vec4(b, nir_channel(b, xyz, 0), nir_channel(b, xyz, 1),
+                     nir_ior(b, layer, nir_ishl_imm(b, sample, 12)),
+                     nir_imm_int(b, 0)));
+      tex->coord_components = 4;
+      tex->sampler_index = APPLE9_FETCH_SAMPLER;
+      return true;
+   }
    if (tex->op != nir_texop_txf || tex->is_shadow ||
        (tex->sampler_dim != GLSL_SAMPLER_DIM_2D &&
         tex->sampler_dim != GLSL_SAMPLER_DIM_3D))
@@ -4986,7 +5665,7 @@ apple9_lower_texture_queries_and_layers(nir_builder *b, nir_instr *instr, void *
          for (unsigned c = 0; c < tex->def.num_components; ++c) {
             bool layer = tex->is_array && c + 1 == tex->def.num_components;
             size[c] = apple9_texture_info(b, tex->texture_index, layer ? 2 : c);
-            if (!layer)
+            if (!layer && tex->sampler_dim != GLSL_SAMPLER_DIM_BUF)
                size[c] = nir_umax(b, nir_ushr(b, size[c], lod), nir_imm_int(b, 1));
          }
          result = nir_vec(b, size, tex->def.num_components);
@@ -5070,6 +5749,10 @@ apple9_blend_factor_supported(unsigned factor)
    case PIPE_BLENDFACTOR_CONST_ALPHA:
    case PIPE_BLENDFACTOR_INV_CONST_ALPHA:
    case PIPE_BLENDFACTOR_SRC_ALPHA_SATURATE:
+   case PIPE_BLENDFACTOR_SRC1_COLOR:
+   case PIPE_BLENDFACTOR_INV_SRC1_COLOR:
+   case PIPE_BLENDFACTOR_SRC1_ALPHA:
+   case PIPE_BLENDFACTOR_INV_SRC1_ALPHA:
       return true;
    default:
       return false;
@@ -5088,13 +5771,22 @@ apple9_collect_color(nir_shader *nir)
    nir_lower_returns(nir);
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
    nir_builder b = nir_builder_create(impl);
-   nir_variable *color[8] = {0};
-   nir_variable *depth = NULL;
+   nir_variable *color[9] = {0};
+   nir_variable *depth = NULL, *sample_mask = NULL;
    nir_foreach_block(block, impl) {
       nir_foreach_instr_safe(instr, block) {
          if (instr->type != nir_instr_type_intrinsic)
             continue;
          nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic == nir_intrinsic_store_output &&
+             nir_intrinsic_io_semantics(intr).location == FRAG_RESULT_SAMPLE_MASK) {
+            if (!sample_mask)
+               sample_mask = nir_local_variable_create(impl, glsl_int_type(), "sample mask");
+            b.cursor = nir_before_instr(instr);
+            nir_store_var(&b, sample_mask, intr->src[0].ssa, 1);
+            nir_instr_remove(instr);
+            continue;
+         }
          if (intr->intrinsic == nir_intrinsic_store_output &&
              nir_intrinsic_io_semantics(intr).location == FRAG_RESULT_DEPTH) {
             if (!depth)
@@ -5115,6 +5807,11 @@ apple9_collect_color(nir_shader *nir)
                        nir_src_as_uint(intr->src[1]);
          if (rt >= 8)
             continue;
+         if (nir_intrinsic_io_semantics(intr).dual_source_blend_index) {
+            if (rt != 0)
+               continue;
+            rt = 8;
+         }
          if (!color[rt])
             color[rt] = nir_local_variable_create(impl, glsl_vec4_type(), "color");
          b.cursor = nir_before_instr(instr);
@@ -5129,19 +5826,27 @@ apple9_collect_color(nir_shader *nir)
          nir_instr_remove(instr);
       }
    }
+   if (sample_mask) {
+      b.cursor = nir_after_impl(impl);
+      nir_store_output(&b, nir_load_var(&b, sample_mask), nir_imm_int(&b, 0),
+         .write_mask = 1, .src_type = nir_type_int32,
+         .io_semantics = {.location = FRAG_RESULT_SAMPLE_MASK, .num_slots = 1});
+   }
    if (depth) {
       b.cursor = nir_after_impl(impl);
       nir_store_output(&b, nir_load_var(&b, depth), nir_imm_int(&b, 0),
          .write_mask = 1, .src_type = nir_type_float32,
          .io_semantics = {.location = FRAG_RESULT_DEPTH, .num_slots = 1});
    }
-   for (int rt = 7; rt >= 0; --rt) {
+   for (int rt = 8; rt >= 0; --rt) {
       if (!color[rt])
          continue;
       b.cursor = nir_after_impl(impl);
       nir_store_output(&b, nir_load_var(&b, color[rt]), nir_imm_int(&b, 0),
                        .write_mask = 15, .src_type = nir_type_float32,
-                       .io_semantics = {.location = FRAG_RESULT_DATA0 + rt, .num_slots = 1});
+                       .io_semantics = {.location = FRAG_RESULT_DATA0 + (rt == 8 ? 0 : rt),
+                                        .dual_source_blend_index = rt == 8,
+                                        .num_slots = 1});
       nir_progress(true, impl, nir_metadata_control_flow);
    }
 }
@@ -5197,6 +5902,9 @@ apple9_lower_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    unsigned bits = channel->size;
    bool raw = integer || bits == 32;
    bool packed_format = agx_apple9_color_is_packed(tile_format);
+   bool normalized = !raw && !fp16 && !packed_format;
+   bool snorm = normalized && channel->type == UTIL_FORMAT_TYPE_SIGNED;
+   assert(!normalized || bits == 8);
    unsigned components = agx_apple9_color_components(format);
    unsigned words = agx_apple9_color_words(format), offset = 0;
    for (unsigned i = 0; i < rt; ++i)
@@ -5217,18 +5925,23 @@ apple9_lower_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       }
       color = nir_vec(b, channels, 4);
    }
+   if (nir_intrinsic_io_semantics(intr).dual_source_blend_index) {
+      lower->src1 = color;
+      nir_instr_remove(&intr->instr);
+      return true;
+   }
    if (blend && !blend->colormask && !blend->alpha_to_coverage) {
       nir_instr_remove(&intr->instr);
       return true;
    }
    if (blend) {
-      if (blend->unsupported || (!blend->advanced_mode &&
+      if (!blend->logicop_enable && !blend->advanced_mode &&
           (blend->rgb_func > PIPE_BLEND_MAX ||
           blend->alpha_func > PIPE_BLEND_MAX ||
           !apple9_blend_factor_supported(blend->rgb_src) ||
           !apple9_blend_factor_supported(blend->rgb_dst) ||
           !apple9_blend_factor_supported(blend->alpha_src) ||
-          !apple9_blend_factor_supported(blend->alpha_dst)))) {
+          !apple9_blend_factor_supported(blend->alpha_dst))) {
          lower->valid = false;
          return false;
       }
@@ -5242,9 +5955,15 @@ apple9_lower_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
     * different destination for each sample. Otherwise the same packed result
     * can be written to every covered sample in one masked store. */
    unsigned component_mask = BITFIELD_MASK(components);
+   bool logicop_reads_destination = blend && blend->logicop_enable &&
+      !util_format_is_float(format) && !util_format_is_srgb(format) &&
+      blend->logicop_func != PIPE_LOGICOP_CLEAR &&
+      blend->logicop_func != PIPE_LOGICOP_COPY &&
+      blend->logicop_func != PIPE_LOGICOP_COPY_INVERTED &&
+      blend->logicop_func != PIPE_LOGICOP_SET;
    bool reads_destination = blend &&
       (((blend->colormask & component_mask) != component_mask) ||
-       (!integer &&
+       logicop_reads_destination || (!blend->logicop_enable && !integer &&
         (blend->advanced_mode ||
          apple9_blend_channel_reads_destination(blend->rgb_func,
                                                 blend->rgb_src, blend->rgb_dst) ||
@@ -5286,23 +6005,25 @@ apple9_lower_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
                  .base = 4 * offset, .format = raw_format)
             : nir_undef(b, words, 32);
          nir_def *channels[4];
-         nir_def *normalized_dst = !packed_format && !raw && !fp16 && bits == 8
-            ? nir_unpack_unorm_4x8(b, packed_dst) : NULL;
          for (unsigned c = 0; c < (packed_format ? 0 : 4); ++c) {
             if (c >= components) {
                channels[c] = integer ? nir_imm_int(b, c == 3) : nir_imm_float(b, c == 3);
                continue;
             }
             nir_def *value = nir_channel(b, packed_dst, (bits * c) / 32);
+            if (normalized) {
+               nir_def *unpacked = snorm ? nir_unpack_snorm_4x8(b, value)
+                                          : nir_unpack_unorm_4x8(b, value);
+               channels[c] = nir_channel(b, unpacked, c);
+               continue;
+            }
             if (bits < 32) {
                value = nir_ushr_imm(b, value, (bits * c) % 32);
                value = integer && channel->type == UTIL_FORMAT_TYPE_SIGNED
                   ? nir_ishr_imm(b, nir_ishl_imm(b, value, 32 - bits), 32 - bits)
                   : nir_iand_imm(b, value, BITFIELD_MASK(bits));
             }
-            channels[c] = normalized_dst ? nir_channel(b, normalized_dst, c)
-               : raw ? value : fp16 ? apple9_unpack_half(b, value)
-               : nir_fmul_imm(b, nir_u2f32(b, value), 1.0 / 255.0);
+            channels[c] = raw ? value : apple9_unpack_half(b, value);
          }
          nir_def *dst;
          if (format == PIPE_FORMAT_R11G11B10_FLOAT) {
@@ -5327,24 +6048,32 @@ apple9_lower_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
             .src_premultiplied = blend->src_premultiplied,
             .dst_premultiplied = blend->dst_premultiplied,
          };
-         if (!integer)
-            color = nir_color_blend(b, color, NULL, dst, &rt, false);
+         if (blend->logicop_enable)
+            color = nir_color_logicop(b, color, dst, blend->logicop_func, format);
+         else if (!integer)
+            color = nir_color_blend(b, color, lower->src1 ? lower->src1 : nir_undef(b, 4, 32),
+                                    dst, &rt, false);
          color = nir_color_mask(b, color, dst, blend->colormask);
       }
       if (util_format_is_srgb(format))
          color = nir_vector_insert_imm(b, nir_format_linear_to_srgb(b, color),
                                       nir_channel(b, color, 3), 3);
+      if (tile_format != format && util_format_is_unorm(format))
+         color = nir_fsat(b, color);
+      else if (tile_format != format && util_format_is_snorm(format))
+         color = nir_fclamp(b, color, nir_imm_float(b, -1), nir_imm_float(b, 1));
       nir_def *packed[4] = {nir_imm_int(b, 0), nir_imm_int(b, 0),
                             nir_imm_int(b, 0), nir_imm_int(b, 0)};
-      bool unorm8 = !raw && !fp16 && !packed_format;
-      if (unorm8) {
+      if (normalized) {
          nir_def *channels[4];
          for (unsigned c = 0; c < 4; ++c)
             channels[c] = c < components ? nir_channel(b, color, c)
                                           : nir_imm_float(b, 0);
-         packed[0] = nir_pack_unorm_4x8(b, nir_vec(b, channels, 4));
+         nir_def *rgba = nir_vec(b, channels, 4);
+         packed[0] = snorm ? nir_pack_snorm_4x8(b, rgba)
+                           : nir_pack_unorm_4x8(b, rgba);
       }
-      for (unsigned c = 0; c < (packed_format || unorm8 ? 0 : components); ++c) {
+      for (unsigned c = 0; c < (packed_format || normalized ? 0 : components); ++c) {
          nir_def *v = nir_channel(b, color, c);
          if (raw) {
             if (bits < 32) {
@@ -5522,11 +6251,14 @@ apple9_lower_xfb(nir_shader *nir, const struct agx_apple9_vertex_layout *layout)
       .src_type = nir_type_float32,
       .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
    nir->info.outputs_written = BITFIELD64_BIT(VARYING_SLOT_POS);
+   nir->info.clip_distance_array_size = 0;
+   nir->info.cull_distance_array_size = 0;
    nir->xfb_info = NULL;
 }
 
 struct apple9_vertex_lower {
    const struct agx_apple9_vertex_layout *layout;
+   bool software;
    bool valid;
 };
 
@@ -5567,8 +6299,15 @@ apple9_lower_vertex_input(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    unsigned divisor = lower->layout->divisor[attribute];
    nir_def *index = divisor ? nir_udiv_imm(b, nir_load_instance_id(b), divisor)
                             : nir_load_vertex_id(b);
-   if (divisor && lower->layout->capture_xfb)
-      index = nir_iadd(b, index, nir_load_base_instance(b));
+   if (divisor) {
+      nir_def *base_instance = lower->layout->capture_xfb || lower->software
+         ? nir_load_base_instance(b)
+         : nir_load_ubo(b, 1, 32,
+                       nir_imm_int(b, lower->layout->draw_params_ubo),
+                       nir_imm_int(b, 4), .align_mul = 4,
+                       .range_base = 4, .range = 4);
+      index = nir_iadd(b, index, base_instance);
+   }
    nir_def *offset = nir_iadd_imm(b,
       nir_imul_imm(b, index, lower->layout->stride[attribute]),
       lower->layout->offset[attribute]);
@@ -5626,6 +6365,18 @@ apple9_lower_vertex_input(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    nir_def_rewrite_uses(&intr->def, nir_vec(b, components, intr->num_components));
    nir_instr_remove(&intr->instr);
    return true;
+}
+
+bool
+agx_nir_lower_apple9_vertex_inputs(
+   nir_shader *nir, const struct agx_apple9_vertex_layout *layout, bool software)
+{
+   struct apple9_vertex_lower lower = {
+      .layout = layout, .software = software, .valid = true,
+   };
+   nir_shader_intrinsics_pass(nir, apple9_lower_vertex_input,
+                              nir_metadata_control_flow, &lower);
+   return lower.valid;
 }
 
 /* EXP-0111 FS-01: fragment SR 0xa0/0xa1 are integer pixel coordinates.
@@ -5707,6 +6458,43 @@ apple9_lower_point_coord(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 }
 
 static bool
+apple9_lower_unwritten_inputs(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   const struct agx_apple9_varying_layout *producer = data;
+   if (!producer ||
+       (intr->intrinsic != nir_intrinsic_load_input &&
+        intr->intrinsic != nir_intrinsic_load_interpolated_input))
+      return false;
+
+   nir_src *offset = nir_get_io_offset_src(intr);
+   if (!nir_src_is_const(*offset))
+      return false;
+
+   unsigned location = nir_intrinsic_io_semantics(intr).location +
+                       nir_src_as_uint(*offset);
+   unsigned component = nir_intrinsic_component(intr);
+   if (location >= ARRAY_SIZE(producer->mask) ||
+       location == VARYING_SLOT_PRIMITIVE_ID ||
+       component + intr->num_components > 4)
+      return false;
+
+   unsigned written = producer->mask[location] >> component;
+   if (!(nir_def_components_read(&intr->def) & ~written))
+      return false;
+
+   /* Unwritten outputs have undefined values. Preserve every produced
+    * component without requiring storage for the absent interface slots. */
+   b->cursor = nir_after_instr(&intr->instr);
+   nir_def *channels[4];
+   for (unsigned c = 0; c < intr->num_components; ++c)
+      channels[c] = written & BITFIELD_BIT(c)
+         ? nir_channel(b, &intr->def, c) : nir_undef(b, 1, intr->def.bit_size);
+   nir_def *replacement = nir_vec(b, channels, intr->num_components);
+   nir_def_rewrite_uses_after(&intr->def, replacement);
+   return true;
+}
+
+static bool
 apple9_collect_varyings(nir_shader *nir,
                         const struct agx_apple9_varying_layout *producer,
                         struct agx_apple9_varying_layout *layout,
@@ -5724,7 +6512,9 @@ apple9_collect_varyings(nir_shader *nir,
                 : intr->intrinsic != nir_intrinsic_store_output)
             continue;
          unsigned location = nir_intrinsic_io_semantics(intr).location;
-         if (!fragment && (location == VARYING_SLOT_POS || location == VARYING_SLOT_PSIZ))
+         if (!fragment && (location == VARYING_SLOT_POS ||
+                           location == VARYING_SLOT_PSIZ ||
+                           location == VARYING_SLOT_LAYER))
             continue;
          if (fragment && location == VARYING_SLOT_POS) {
             *reason = "Apple9 fragment window-position input is not implemented";
@@ -5736,6 +6526,11 @@ apple9_collect_varyings(nir_shader *nir,
             goto unsupported;
          location += nir_src_as_uint(intr->src[offset]);
          unsigned component = nir_intrinsic_component(intr);
+         /* Without a geometry output, the rasterizer generates this scalar. */
+         if (fragment && location == VARYING_SLOT_PRIMITIVE_ID &&
+             (!producer || !producer->mask[VARYING_SLOT_PRIMITIVE_ID]) && component == 0 &&
+             intr->intrinsic == nir_intrinsic_load_input && intr->num_components == 1)
+            continue;
          nir_alu_type type = fragment ? nir_intrinsic_dest_type(intr)
                                       : nir_intrinsic_src_type(intr);
          if (type != nir_type_float32 &&
@@ -5774,6 +6569,106 @@ apple9_collect_varyings(nir_shader *nir,
 unsupported:
    *reason = "Apple9 graphics requires constant-indexed 32-bit user varyings";
    return false;
+}
+
+struct apple9_clip_distance_state {
+   unsigned base, enable;
+};
+
+static bool
+apple9_lower_clip_distance(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_store_output)
+      return false;
+   unsigned location = nir_intrinsic_io_semantics(intr).location;
+   if (location != VARYING_SLOT_CLIP_DIST0 && location != VARYING_SLOT_CLIP_DIST1)
+      return false;
+
+   const struct apple9_clip_distance_state *state = data;
+   unsigned base = 4 * (location - VARYING_SLOT_CLIP_DIST0 +
+                        nir_src_as_uint(intr->src[1])) + nir_intrinsic_component(intr);
+   b->cursor = nir_after_instr(&intr->instr);
+   for (unsigned c = 0; c < intr->num_components; ++c) {
+      unsigned plane = base + c;
+      if (!(nir_intrinsic_write_mask(intr) & BITFIELD_BIT(c)) ||
+          plane >= b->shader->info.clip_distance_array_size)
+         continue;
+      /* Retain the ordinary varying for fragment inputs and transform
+       * feedback. Only the rasterizer copy is zeroed for disabled planes. */
+      nir_def *distance = state->enable & BITFIELD_BIT(plane)
+         ? nir_channel(b, intr->src[0].ssa, c) : nir_imm_float(b, 0);
+      nir_store_uvs_agx(b, distance, nir_imm_int(b, state->base + plane));
+   }
+   return true;
+}
+
+/* Raster routing shares a packed layer/viewport word, after point size and
+ * before clip distances. GL 3.3 has one viewport, so its high half is zero. */
+static bool
+apple9_lower_layer_output(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_store_output ||
+       nir_intrinsic_io_semantics(intr).location != VARYING_SLOT_LAYER)
+      return false;
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *layer = nir_iand_imm(b, intr->src[0].ssa, 0xffff);
+   nir_store_uvs_agx(b, layer, nir_imm_int(b, *(unsigned *)data));
+   nir_instr_remove(&intr->instr);
+   return true;
+}
+
+static nir_def *
+apple9_load_fixed_point_size(nir_builder *b)
+{
+   return nir_load_ubo(b, 1, 32,
+      nir_imm_int(b, AGX_APPLE9_GRAPHICS_SYSVAL_BINDING),
+      nir_imm_int(b, AGX_APPLE9_POINT_SIZE_OFFSET),
+      .align_mul = 4, .range = 4);
+}
+
+static bool
+apple9_lower_point_size(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_store_output ||
+       nir_intrinsic_io_semantics(intr).location != VARYING_SLOT_PSIZ)
+      return false;
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *fixed = apple9_load_fixed_point_size(b);
+   nir_def *size = nir_fmax(b, intr->src[0].ssa, nir_imm_float(b, 1));
+   nir_src_rewrite(&intr->src[0],
+      nir_bcsel(b, nir_fgt_imm(b, fixed, 0), fixed, size));
+   return true;
+}
+
+static void
+apple9_lower_textures(nir_shader *nir)
+{
+   nir_lower_samplers(nir);
+   /* Compatibility GL supplies projective texture coordinates. Reuse the
+    * common NIR quotient lowering before selecting ordinary 2D sampling. */
+   const nir_lower_tex_options tex_options = {
+      .lower_txp = ~0u, .lower_1d = true,
+      .lower_rect = true, .lower_rect_offset = true,
+      .lower_invalid_implicit_lod = true,
+      .lower_txf_offset = true,
+      .lower_txd_cube_map = true,
+   };
+   nir_shader_instructions_pass(nir, apple9_lower_array_shadow_gradients,
+                                nir_metadata_control_flow, NULL);
+   nir_shader_instructions_pass(nir, apple9_lower_rectangle,
+                                nir_metadata_control_flow, NULL);
+   nir_lower_tex(nir, &tex_options);
+   nir_shader_instructions_pass(nir, apple9_lower_buffer_texture,
+                                nir_metadata_none, NULL);
+   nir_shader_instructions_pass(nir, apple9_lower_texel_fetch,
+                                nir_metadata_control_flow, NULL);
+   nir_shader_instructions_pass(nir, apple9_lower_texture_queries_and_layers,
+                                nir_metadata_control_flow, NULL);
+   nir_shader_instructions_pass(nir, apple9_lower_texture_lod_query,
+                                nir_metadata_control_flow, NULL);
+   nir_shader_instructions_pass(nir, apple9_lower_sampler_bias,
+                                nir_metadata_control_flow, NULL);
+   agx_nir_lower_apple9_texture_lod(nir);
 }
 
 static bool
@@ -5835,28 +6730,40 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
       if (layout && layout->ignore_point_size)
          nir_remove_outputs(nir, MESA_SHADER_FRAGMENT, 0,
                             BITFIELD64_BIT(VARYING_SLOT_PSIZ));
-      struct apple9_vertex_lower lower = {.layout = layout, .valid = true};
-      nir_shader_intrinsics_pass(nir, apple9_lower_vertex_input,
-                                 nir_metadata_control_flow, &lower);
-      if (!lower.valid) {
+      if (!agx_nir_lower_apple9_vertex_inputs(nir, layout, false)) {
          *reason = "Apple9 vertex inputs require supported naturally aligned formats";
          return false;
       }
       if (layout && layout->capture_xfb)
          apple9_lower_xfb(nir, layout);
+      if (layout && layout->rasterize_points && !layout->capture_xfb) {
+         /* mesa/st cannot insert point size when the API varying interface
+          * is full. The hardware still needs the separate system output. */
+         if (!nir_shader_intrinsics_pass(nir, apple9_lower_point_size,
+                                           nir_metadata_control_flow, NULL)) {
+            nir_builder b = nir_builder_at(
+               nir_after_impl(nir_shader_get_entrypoint(nir)));
+            nir_store_output(&b, apple9_load_fixed_point_size(&b), nir_imm_int(&b, 0),
+               .io_semantics.location = VARYING_SLOT_PSIZ,
+               .io_semantics.num_slots = 1, .write_mask = 1,
+               .src_type = nir_type_float32);
+         }
+      }
    }
    /* Use the same structured mask/loop model as compute. Continuations become
     * masked regions with one backedge before instruction selection. */
    nir_lower_continue_constructs(nir);
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
       apple9_collect_color(nir);
-   /* Small local arrays can live in SSA registers. Expand variable indices
-    * through the standard NIR decision trees; larger arrays remain subject
-    * to the backend's resource checks until scratch support is available. */
+   /* As on Apple8, promote direct accesses to SSA, keep small arrays in
+    * registers, and lower larger dynamically indexed arrays to scratch. */
    nir_lower_array_deref_of_vec(nir, nir_var_function_temp, NULL,
                                nir_lower_indirect_array_deref_of_vec_load |
                                nir_lower_indirect_array_deref_of_vec_store);
-   nir_lower_indirect_derefs_to_if_else_trees(nir, nir_var_function_temp, 32);
+   nir_lower_vars_to_ssa(nir);
+   nir_lower_vars_to_scratch(nir, 128, glsl_get_natural_size_align_bytes,
+                              glsl_get_word_size_align_bytes);
+   nir_lower_indirect_derefs_to_if_else_trees(nir, nir_var_function_temp, ~0u);
    /* Frontends may supply vector NIR or pre-simplified scalar NIR. Expose
     * scalar constants to standard algebraic cleanup before expanding math
     * and output packing, rather than relying on a caller-specific pipeline.
@@ -5878,6 +6785,15 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
    } while (progress);
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+      unsigned samples = blend ? MAX2(blend[0].samples, 1) : 1;
+      if (samples == 1 || (blend && blend[0].multisample_disabled)) {
+         const nir_lower_single_sampled_options options = {0};
+         nir_lower_single_sampled(nir, &options);
+         nir->info.fs.uses_sample_shading = false;
+      }
+      agx_nir_lower_sample_intrinsics(nir, true);
+      nir_shader_intrinsics_pass(nir, apple9_lower_sample_state,
+                                 nir_metadata_control_flow, (void *)blend);
       struct apple9_color_lower color = {
          .blend = blend, .nr_targets = nr_targets, .valid = true};
       nir_shader_intrinsics_pass(nir, apple9_lower_color,
@@ -5890,7 +6806,9 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
       }
       nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
       agx_nir_lower_discard_zs_emit(nir);
-      agx_nir_lower_sample_mask(nir);
+      agx_nir_lower_monolithic_msaa(nir, samples);
+      nir_lower_vars_to_ssa(nir);
+      nir_lower_all_phis_to_scalar(nir);
       nir_shader_intrinsics_pass(nir, apple9_lower_coverage_sysval,
                                  nir_metadata_control_flow, NULL);
       if (!color.valid) {
@@ -5899,29 +6817,10 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
          return false;
       }
    }
-   nir_shader_intrinsics_pass(nir, apple9_lower_blend_constant,
+   nir_shader_intrinsics_pass(nir, apple9_lower_fragment_uniform,
                               nir_metadata_control_flow, NULL);
    nir_opt_dce(nir);
-   nir_lower_samplers(nir);
-   /* Compatibility GL supplies projective texture coordinates. Reuse the
-    * common NIR quotient lowering before selecting ordinary 2D sampling. */
-   const nir_lower_tex_options tex_options = {
-      .lower_txp = ~0u, .lower_1d = true,
-      .lower_invalid_implicit_lod = true,
-      .lower_txf_offset = true,
-      .lower_txd_array = true, .lower_txd_3d = true,
-      .lower_txd_cube_map = true, .lower_txd_shadow = true,
-   };
-   nir_shader_instructions_pass(nir, apple9_lower_array_shadow_gradients,
-                                nir_metadata_control_flow, NULL);
-   nir_lower_tex(nir, &tex_options);
-   nir_shader_instructions_pass(nir, apple9_lower_texel_fetch,
-                                nir_metadata_control_flow, NULL);
-   nir_shader_instructions_pass(nir, apple9_lower_texture_queries_and_layers,
-                                nir_metadata_control_flow, NULL);
-   nir_shader_instructions_pass(nir, apple9_lower_sampler_bias,
-                                nir_metadata_control_flow, NULL);
-   agx_nir_lower_apple9_texture_lod(nir);
+   apple9_lower_textures(nir);
    apple9_lower_idiv(nir);
    /* Format lowering can introduce powers and other high-level ALU ops. */
    apple9_opt_algebraic(nir);
@@ -5936,6 +6835,8 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
                                  nir_metadata_control_flow, &valid);
       nir_shader_intrinsics_pass(nir, apple9_lower_point_coord,
                                  nir_metadata_control_flow, &valid);
+      nir_shader_intrinsics_pass(nir, apple9_lower_unwritten_inputs,
+                                 nir_metadata_control_flow, (void *)producer);
       if (!valid) {
          *reason = "Apple9 fragment window position requires FP32 XYZW components";
          return false;
@@ -5983,10 +6884,7 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
       valid_buffers &=
          buffers.resource[i].kind == AGX_APPLE9_COMPUTE_RESOURCE_SSBO
             ? buffers.resource[i].binding < 32
-            : buffers.resource[i].kind == AGX_APPLE9_COMPUTE_RESOURCE_UBO &&
-                 (buffers.resource[i].binding < (layout ? 64 : 32) ||
-                  buffers.resource[i].binding ==
-                     AGX_APPLE9_GRAPHICS_SYSVAL_BINDING);
+            : buffers.resource[i].kind == AGX_APPLE9_COMPUTE_RESOURCE_UBO;
    if (!valid_buffers) {
       if (reason)
          *reason =
@@ -5998,6 +6896,32 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
    struct agx_apple9_varying_layout varyings = {0};
    if (!apple9_collect_varyings(nir, producer, &varyings, reason))
       return false;
+   if (layout) {
+      for (unsigned i = 0; i < ARRAY_SIZE(varyings.mask); ++i) {
+         if (varyings.mask[i])
+            varyings.group[i] = (layout->outputs_flat & BITFIELD64_BIT(i)) ? 1 :
+               (layout->outputs_linear & BITFIELD64_BIT(i)) ? 2 : 0;
+      }
+   }
+   bool writes_layer = nir->info.outputs_written & VARYING_BIT_LAYER;
+   if (nir->info.stage == MESA_SHADER_VERTEX && writes_layer) {
+      unsigned slot = 4 + varyings.count + !!(nir->info.outputs_written & VARYING_BIT_PSIZ);
+      nir_shader_intrinsics_pass(nir, apple9_lower_layer_output,
+                                 nir_metadata_control_flow, &slot);
+   }
+   if (nir->info.stage == MESA_SHADER_VERTEX && nir->info.clip_distance_array_size) {
+      if (nir->info.clip_distance_array_size > 8) {
+         *reason = "Apple9 supports eight clip distances";
+         return false;
+      }
+      const struct apple9_clip_distance_state state = {
+         .base = 4 + varyings.count + !!(nir->info.outputs_written & VARYING_BIT_PSIZ) +
+                 writes_layer,
+         .enable = layout ? layout->clip_distance_enable : 0xff,
+      };
+      nir_shader_intrinsics_pass(nir, apple9_lower_clip_distance,
+                                 nir_metadata_control_flow, (void *)&state);
+   }
    return apple9_compile_dag(nir, out, NULL, &varyings, reason);
 }
 

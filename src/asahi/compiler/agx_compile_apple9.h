@@ -43,9 +43,9 @@ bool agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
  * Vertex attributes and fragment varyings are packed by semantic location and
  * component; fragment variants use the producer's layout. Smooth inputs use
  * coefficient-aware perspective multiplication. Flat and noperspective inputs
- * have separate coefficient modes. Centroid inputs evaluate coefficients at
- * an allocated position selected from the fragment's sample coverage; callers
- * can lower single-sample inputs with the common NIR pass.
+ * have separate coefficient modes. Centroid and sample inputs evaluate at
+ * an allocated position selected from coverage or the requested sample index.
+ * The common sample loop lowers per-sample shading and output masks.
  *
  * Buffer resources use a shader-loaded address table. Texture and sampler
  * bindings are compacted independently. Cube projection and integer fetches
@@ -69,17 +69,31 @@ bool agx_compile_apple9_fragment(nir_shader *nir,
 #define AGX_APPLE9_SAMPLER_BIAS_COUNT 32
 #define AGX_APPLE9_TEXTURE_INFO_OFFSET (16 + AGX_APPLE9_SAMPLER_BIAS_COUNT * sizeof(float))
 #define AGX_APPLE9_TEXTURE_INFO_STRIDE 32
-#define AGX_APPLE9_GRAPHICS_SYSVAL_SIZE (AGX_APPLE9_TEXTURE_INFO_OFFSET + 32 * AGX_APPLE9_TEXTURE_INFO_STRIDE)
+#define AGX_APPLE9_POINT_SIZE_OFFSET (AGX_APPLE9_TEXTURE_INFO_OFFSET + 32 * AGX_APPLE9_TEXTURE_INFO_STRIDE)
+#define AGX_APPLE9_POLYGON_STIPPLE_OFFSET (AGX_APPLE9_POINT_SIZE_OFFSET + 16)
+#define AGX_APPLE9_GRAPHICS_SYSVAL_SIZE (AGX_APPLE9_POLYGON_STIPPLE_OFFSET + 32 * 4)
+
+/* RGB32 buffer views use three scalar texels in the physical descriptor. */
+static inline bool
+agx_apple9_texture_is_rgb32(enum pipe_format format)
+{
+   return format == PIPE_FORMAT_R32G32B32_FLOAT ||
+          format == PIPE_FORMAT_R32G32B32_UINT ||
+          format == PIPE_FORMAT_R32G32B32_SINT;
+}
 
 /* Standard independent RGB/alpha blending, plus the RGBA write mask. */
 struct agx_apple9_blend {
    uint8_t rgb_src, rgb_dst, alpha_src, alpha_dst;
-   uint8_t rgb_func, alpha_func, colormask, unsupported;
+   uint8_t rgb_func, alpha_func, colormask, logicop_func;
    /* NONE retains the RGBA8 layout used by standalone compiler callers. */
    enum pipe_format format;
    uint8_t samples; /* Zero retains single-sample compiler callers. */
    uint8_t disabled_samples;
-   uint8_t alpha_to_coverage, alpha_to_one;
+   uint8_t alpha_to_coverage : 1;
+   uint8_t alpha_to_one : 1;
+   uint8_t multisample_disabled : 1;
+   uint8_t logicop_enable : 1;
    uint8_t advanced_mode, advanced_overlap;
    uint8_t src_premultiplied, dst_premultiplied;
 };
@@ -100,7 +114,8 @@ agx_apple9_color_is_half(enum pipe_format format)
 }
 
 /* A render target's tile representation need not match its memory packing.
- * The PBE converts unpacked 16-bit components to packed destinations. */
+ * The PBE converts unpacked floating-point components to normalized memory
+ * formats. Use FP32 for normalized 16-bit colors to preserve their precision. */
 static inline enum pipe_format
 agx_apple9_color_tile_format(enum pipe_format format)
 {
@@ -114,6 +129,15 @@ agx_apple9_color_tile_format(enum pipe_format format)
       return PIPE_FORMAT_R16G16B16A16_FLOAT;
    case PIPE_FORMAT_R10G10B10A2_UINT:
       return PIPE_FORMAT_R16G16B16A16_UINT;
+   case PIPE_FORMAT_R16_UNORM:
+   case PIPE_FORMAT_R16_SNORM:
+      return PIPE_FORMAT_R32_FLOAT;
+   case PIPE_FORMAT_R16G16_UNORM:
+   case PIPE_FORMAT_R16G16_SNORM:
+      return PIPE_FORMAT_R32G32_FLOAT;
+   case PIPE_FORMAT_R16G16B16A16_UNORM:
+   case PIPE_FORMAT_R16G16B16A16_SNORM:
+      return PIPE_FORMAT_R32G32B32A32_FLOAT;
    default:
       return format;
    }
@@ -135,6 +159,28 @@ agx_apple9_color_raw_format(unsigned words)
    return words == 4 ? PIPE_FORMAT_R32G32B32A32_UINT :
           words == 3 ? PIPE_FORMAT_R32G32B32_UINT :
           words == 2 ? PIPE_FORMAT_R32G32_UINT : PIPE_FORMAT_R32_UINT;
+}
+
+static inline bool
+agx_apple9_color_is_normalized(enum pipe_format format)
+{
+   const struct util_format_description *desc = util_format_description(format);
+   if (desc->layout != UTIL_FORMAT_LAYOUT_PLAIN ||
+       desc->colorspace != UTIL_FORMAT_COLORSPACE_RGB ||
+       (desc->nr_channels != 1 && desc->nr_channels != 2 && desc->nr_channels != 4) ||
+       !desc->channel[0].normalized ||
+       (desc->channel[0].size != 8 && desc->channel[0].size != 16))
+      return false;
+
+   for (unsigned c = 1; c < desc->nr_channels; ++c) {
+      if (desc->channel[c].size != desc->channel[0].size ||
+          (desc->channel[c].type != UTIL_FORMAT_TYPE_VOID &&
+           (!desc->channel[c].normalized ||
+            desc->channel[c].type != desc->channel[0].type)))
+         return false;
+   }
+
+   return true;
 }
 
 static inline bool
@@ -191,18 +237,17 @@ agx_apple9_block_export_format(enum pipe_format format)
 }
 
 enum agx_apple9_sampler_flags {
-   AGX_APPLE9_CLAMP_S = 1 << 0,
-   AGX_APPLE9_CLAMP_T = 1 << 1,
-   AGX_APPLE9_CLAMP_R = 1 << 2,
-   AGX_APPLE9_CUSTOM_BORDER = 1 << 3,
+   AGX_APPLE9_CUSTOM_BORDER = 1 << 0,
+   AGX_APPLE9_CLAMP_SHADOW_REFERENCE = 1 << 1,
 };
 
 struct agx_apple9_sampler_key {
    uint32_t flags;
    float border[4];
    uint8_t wrap[3];
-   uint8_t min_filter, mag_filter, mip_filter, compare_func, reserved;
+   uint8_t min_filter, mag_filter, mip_filter, compare_func, seamless_cube_map;
    float min_lod, max_lod, lod_bias;
+   unsigned max_anisotropy;
 };
 
 bool agx_nir_lower_apple9_texture_offsets(
@@ -212,7 +257,11 @@ bool agx_nir_lower_apple9_texture_offsets(
 struct agx_apple9_texture_mapping {
    uint8_t samplers[32];
    uint32_t white_samplers;
+   uint32_t seamful_cubes;
 };
+
+#define AGX_APPLE9_TEXTURE_CUBE_AS_ARRAY (1 << 0)
+#define AGX_APPLE9_TEXTURE_LOD_QUERY (1 << 1)
 
 bool agx_nir_lower_apple9_sampler_state(
    nir_shader *nir, const struct agx_apple9_sampler_key key[32],
@@ -252,10 +301,16 @@ struct agx_apple9_xfb_params {
 };
 
 struct agx_apple9_vertex_layout {
+   uint64_t outputs_flat, outputs_linear;
    uint32_t stride[16];
    uint32_t divisor[16]; /* Zero selects the per-vertex stream. */
+   /* UBO containing first vertex/base vertex and base instance, respectively.
+    * It may point into an indirect descriptor written by the GPU. */
+   uint16_t draw_params_ubo;
    bool clip_halfz;      /* Convert GL [-w,w] depth to hardware [0,w]. */
+   uint8_t clip_distance_enable;
    bool capture_xfb;
+   bool rasterize_points;
    uint8_t xfb_mode;
    uint8_t xfb_index_size;
    bool xfb_flatshade_first;
@@ -270,6 +325,10 @@ struct agx_apple9_vertex_layout {
 bool agx_compile_apple9_vertex_inputs(
    nir_shader *nir, const struct agx_apple9_vertex_layout *layout,
    struct agx_shader_part *out, const char **reason);
+
+/* The same vertex fetch lowering is used by hardware VS and Poly compute VS. */
+bool agx_nir_lower_apple9_vertex_inputs(
+   nir_shader *nir, const struct agx_apple9_vertex_layout *layout, bool software);
 
 /* Compile the bounded procedural vertex stage described above. */
 bool agx_compile_apple9_vertex(nir_shader *nir, struct agx_shader_part *out,

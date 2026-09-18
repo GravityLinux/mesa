@@ -97,7 +97,7 @@ apple9_schedule_resources(const agx_instr *I, uint32_t *reads, uint32_t *writes)
       *reads |= APPLE9_SCHED_MEMORY | APPLE9_SCHED_PUBLICATION;
       *writes |= APPLE9_SCHED_PUBLICATION;
       return;
-   case AGX_APPLE9_VIR_CENTROID_POSITION:
+   case AGX_APPLE9_VIR_INTERPOLATION_POSITION:
    case AGX_APPLE9_VIR_ITER:
    case AGX_APPLE9_VIR_ITER_FLAT:
    case AGX_APPLE9_VIR_FMUL_PROJECT:

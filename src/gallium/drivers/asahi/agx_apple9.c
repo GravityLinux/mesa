@@ -61,6 +61,7 @@ apple9_compute_abi(const struct agx_apple9_compute_profile *profile)
 
    switch (profile->abi) {
    case AGX_APPLE9_COMPUTE_ABI_DIRECT_BUFFERS:
+   case AGX_APPLE9_COMPUTE_ABI_DESCRIPTOR_TABLES:
       util_call_once(&apple9_compute_helpers_once,
                      apple9_initialize_compute_helpers);
       return &ssbo8_superset;
@@ -76,11 +77,14 @@ apple9_compute_profile_valid(const struct agx_apple9_compute_profile *profile,
    if (!profile || !abi ||
        profile->resource_binding_count == 0 ||
        profile->resource_binding_count > abi->resource_count ||
+       (profile->abi == AGX_APPLE9_COMPUTE_ABI_DIRECT_BUFFERS &&
+        profile->resource_binding_count > AGX_APPLE9_COMPUTE_DIRECT_MAX_RESOURCES) ||
        !agx_apple9_launch_threadgroup_memory_supported(
           profile->required_threadgroup_memory_bytes) ||
        (profile->atomic_frame_size != 0 && profile->atomic_frame_size != 4) ||
        profile->preamble_size > AGX_APPLE9_MAX_PREAMBLE_BYTES ||
        profile->scratch_size > AGX_APPLE9_MAX_SCRATCH_BYTES ||
+       profile->publication_count > 1022 ||
        (profile->scratch_size & 15))
       return false;
 
@@ -88,7 +92,7 @@ apple9_compute_profile_valid(const struct agx_apple9_compute_profile *profile,
    const uint32_t resource_mask = BITFIELD_MASK(active);
    const uint32_t read_mask = profile->resource_read_mask;
    const uint32_t write_mask = profile->resource_write_mask;
-   if (!write_mask || ((read_mask | write_mask) & ~resource_mask))
+   if ((!write_mask && !profile->writes_global) || ((read_mask | write_mask) & ~resource_mask))
       return false;
 
    uint64_t local_threads = 1;
@@ -105,7 +109,10 @@ apple9_compute_profile_valid(const struct agx_apple9_compute_profile *profile,
    }
 
    for (unsigned i = 0; i < active; ++i) {
-      if (profile->resource_kind[i] > AGX_APPLE9_COMPUTE_RESOURCE_UBO ||
+      if (profile->resource_kind[i] > AGX_APPLE9_COMPUTE_RESOURCE_SHARED ||
+          (profile->resource_kind[i] == AGX_APPLE9_COMPUTE_RESOURCE_SHARED &&
+           (!profile->required_threadgroup_memory_bytes ||
+            ((read_mask | write_mask) & BITFIELD_BIT(i)))) ||
           ((write_mask & BITFIELD_BIT(i)) &&
            profile->resource_kind[i] != AGX_APPLE9_COMPUTE_RESOURCE_SSBO))
          return false;
@@ -210,12 +217,16 @@ apple9_build_compute_launch(uint8_t *out, uint64_t usc_exec_base,
 
    struct agx_apple9_launch_parameters params = {
       .entry_offset = main_offset,
+      .publication_count = profile->publication_count,
       .preamble_address = preamble_address,
       .launch_address = launch_address,
    };
    params.shader_base = usc_exec_base;
    params.resource_table = resource_address;
-   params.resource_count = profile->resource_binding_count;
+   params.resource_count =
+      profile->abi == AGX_APPLE9_COMPUTE_ABI_DESCRIPTOR_TABLES
+         ? AGX_APPLE9_GRAPHICS_ROOT_WORDS / 2 - 1
+         : profile->resource_binding_count;
    params.threadgroup_memory_bytes = profile->required_threadgroup_memory_bytes;
    if (profile->scratch_size) {
       params.frame_extent_a = profile->scratch_size;
@@ -403,7 +414,8 @@ bool
 agx_apple9_prepare_compute_dispatch(
    struct agx_device *dev, struct agx_pool *usc_pool, struct agx_bo *body,
    const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
-   unsigned resource_count, const struct agx_apple9_compute_geometry *geometry,
+   unsigned resource_count, uint64_t textures, uint64_t samplers,
+   const struct agx_apple9_compute_geometry *geometry,
    uint64_t preamble_address, uint64_t *launch_address)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
@@ -423,10 +435,20 @@ agx_apple9_prepare_compute_dispatch(
    if (!agx_apple9_build_compute_geometry_fields(record.cpu, record_size,
                                                 record.gpu, geometry))
       return false;
-   for (unsigned i = 0; i < resource_count; i++)
-      apple9_put_u64((uint8_t *)record.cpu +
-                       (AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE + i) * 8,
-                    resources[i]);
+   if (profile->abi == AGX_APPLE9_COMPUTE_ABI_DESCRIPTOR_TABLES) {
+      uint64_t roots[AGX_APPLE9_GRAPHICS_ROOT_WORDS / 2] = {
+         textures, samplers,
+         agx_pool_upload_aligned(usc_pool, resources,
+                                 resource_count * sizeof(uint64_t), 64),
+         apple9_get_u64(record.cpu), AGX_APPLE9_COMPUTE_SHARED_ROOT, 0,
+      };
+      memcpy(record.cpu, roots, sizeof(roots));
+   } else {
+      for (unsigned i = 0; i < resource_count; i++)
+         apple9_put_u64((uint8_t *)record.cpu +
+                          (AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE + i) * 8,
+                       resources[i]);
+   }
 
    struct agx_ptr launch = agx_pool_alloc_aligned(
       usc_pool, agx_apple9_compute_launch_size(profile), 64);
@@ -473,7 +495,7 @@ agx_apple9_emit_direct_dispatch(
 bool
 agx_apple9_emit_indirect_dispatch(
    void *out, uint64_t launch, uint64_t indirect, const uint32_t local[3],
-   const struct agx_apple9_compute_profile *profile)
+   bool indirect_local, const struct agx_apple9_compute_profile *profile)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
    if (!out || !abi || !abi->supports_indirect_dispatch || !indirect ||
@@ -494,15 +516,20 @@ agx_apple9_emit_indirect_dispatch(
    uint8_t *record = out;
    uint64_t shader = ((launch >> 6) & 0xffffffffull) |
                      ((0x40000000ull | (launch >> 40)) << 32);
-   apple9_put_u32(record + 0x00, abi->cdm_config | 0x08000000);
+   apple9_put_u32(record + 0x00, abi->cdm_config |
+                  (indirect_local ? 0x10000000 : 0x08000000));
    apple9_put_u32(record + 0x04, abi->cdm_constant);
    apple9_put_u64(record + 0x08, shader);
    /* Native Apple9 indirect CDM stores the pointer halves high then low. */
    apple9_put_u32(record + 0x10, indirect >> 32);
    apple9_put_u32(record + 0x14, indirect);
-   for (unsigned d = 0; d < 3; ++d)
-      apple9_put_u32(record + 0x18 + d * 4, local[d]);
-   apple9_put_u32(record + 0x24, abi->cdm_tail);
+   /* Mode 2 reads six words: thread counts followed by local sizes. Mode 1
+    * reads three workgroup counts and takes local sizes from this command. */
+   if (!indirect_local) {
+      for (unsigned d = 0; d < 3; ++d)
+         apple9_put_u32(record + 0x18 + d * 4, local[d]);
+   }
+   apple9_put_u32(record + (indirect_local ? 0x18 : 0x24), abi->cdm_tail);
    return true;
 }
 
@@ -528,7 +555,8 @@ agx_apple9_pack_r32f_texture(void *out, uint64_t address, uint32_t width,
 bool
 agx_apple9_texture_format_supported(enum pipe_format format)
 {
-   if (agx_apple9_color_is_wide(format) || agx_apple9_color_is_packed(format))
+   if (agx_apple9_color_is_wide(format) || agx_apple9_color_is_packed(format) ||
+       agx_apple9_color_is_normalized(format))
       return true;
    switch (format) {
    case PIPE_FORMAT_R8_SNORM:
@@ -586,8 +614,8 @@ apple9_sampler_address(unsigned wrap)
    case PIPE_TEX_WRAP_CLAMP_TO_EDGE: return 0;
    case PIPE_TEX_WRAP_REPEAT: return 1;
    case PIPE_TEX_WRAP_MIRROR_REPEAT: return 2;
-   case PIPE_TEX_WRAP_CLAMP:
    case PIPE_TEX_WRAP_CLAMP_TO_BORDER: return 3;
+   case PIPE_TEX_WRAP_CLAMP: return 4;
    default: UNREACHABLE("unsupported Apple9 sampler address mode");
    }
 }
@@ -624,7 +652,7 @@ agx_apple9_pack_nearest_sampler(void *out)
  * descriptor per scalar without overwriting the next draw's roots. */
 #define APPLE9_CF_BINDINGS 0x203d00u
 #define APPLE9_CF_BINDINGS_SIZE 0x220u
-static_assert(4 + 4 * (AGX_APPLE9_MAX_VARYING_COMPONENTS + 3) <=
+static_assert(4 + 4 * (AGX_APPLE9_MAX_VARYING_COMPONENTS + 4) <=
                  APPLE9_CF_BINDINGS_SIZE,
               "coefficient table must fit one binding per scalar plus 1/W and Z");
 
@@ -638,11 +666,12 @@ static unsigned
 apple9_build_cf_bindings(uint8_t *table, unsigned components,
                          struct agx_apple9_interp_mask linear_mask,
                          struct agx_apple9_interp_mask flat_mask,
-                         bool flatshade_first, bool reads_z, bool reads_point_coord)
+                         bool flatshade_first, bool reads_z, bool reads_point_coord,
+                         bool reads_primitive_id)
 {
    assert(components <= AGX_APPLE9_MAX_VARYING_COMPONENTS);
    memset(table, 0, APPLE9_CF_BINDINGS_SIZE);
-   unsigned slots = components + 1 + reads_z + 2 * reads_point_coord;
+   unsigned slots = components + 1 + reads_z + 2 * reads_point_coord + reads_primitive_id;
    apple9_put_u32(table, slots | (slots << 8));
    /* Coefficient zero is 1/W. Keep stable scalar indices across all modes. */
    apple9_put_u32(table + 4, 0x0c);
@@ -668,16 +697,21 @@ apple9_build_cf_bindings(uint8_t *table, unsigned components,
                      (count - 1) | (shade << 2) | ((base + reads_z) << 8) | (base << 16));
       start += count;
    }
+   if (reads_primitive_id) {
+      /* Rasterizer-generated scalar; independent of the provoking vertex. */
+      apple9_put_u32(table + 4 + binding++ * 4,
+                     0x60 | ((components + 1) << 16));
+   }
    if (reads_z) {
       /* Public CF source=FRAGCOORD_Z, linear, source slot one. Keep user
        * coefficient indices stable and append the depth coefficient. */
       apple9_put_u32(table + 4 + binding++ * 4,
-                     0x12c | ((components + 1) << 16));
+                     0x12c | ((components + 1 + reads_primitive_id) << 16));
    }
    if (reads_point_coord) {
       /* Two linear coefficients generated by the point rasterizer. */
       apple9_put_u32(table + 4 + binding++ * 4,
-                     0x4d | ((components + 1 + reads_z) << 16));
+                     0x4d | ((components + 1 + reads_primitive_id + reads_z) << 16));
    }
    return binding;
 }
@@ -866,23 +900,37 @@ agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
          pipeline->fragment.apple9_linear_mask,
          pipeline->fragment.apple9_flat_mask, draw->flatshade_first,
          pipeline->fragment.apple9_reads_z,
-         pipeline->fragment.reads_point_coord);
+         pipeline->fragment.reads_point_coord, pipeline->fragment.reads_primitive_id);
       draw->coefficients = agx_usc_addr(dev, cf.gpu);
    }
    draw->cf_count = cf_count;
    uint8_t *ppp = draw->ppp_record;
    memset(ppp, 0, sizeof(draw->ppp_record));
    apple9_put_u32(ppp, 0x10040000);
-   apple9_put_u32(ppp + 4, pipeline->vertex.varying_components);
+   unsigned counts[3] = {0};
+   const struct agx_apple9_varying_layout *varyings = &pipeline->vertex.varyings;
+   for (unsigned i = 0; i < ARRAY_SIZE(varyings->mask); ++i) {
+      assert(varyings->group[i] < ARRAY_SIZE(counts));
+      counts[varyings->group[i]] += util_bitcount(varyings->mask[i]);
+   }
+   apple9_put_u32(ppp + 4, counts[0] | (counts[1] << 8) | (counts[2] << 16));
    uint8_t *group = ppp + 0x40;
    apple9_build_direct_bind_group(group, pipeline->vertex.varying_components);
    apple9_put_u32(group + 8, draw->coefficients);
    if (pipeline->fragment.apple9_reads_z)
       apple9_put_u32(group + 0x20, apple9_get_u32(group + 0x20) | (1u << 21));
+   if (pipeline->fragment.reads_primitive_id)
+      apple9_put_u32(group + 0x68, apple9_get_u32(group + 0x68) | (1u << 12));
    if (pipeline->vertex.writes_point_size) {
       apple9_put_u32(group + 0x20, apple9_get_u32(group + 0x20) | (1u << 18));
-      apple9_put_u32(group + 0x2c, 5 + pipeline->vertex.varying_components);
    }
+   if (pipeline->vertex.writes_layer_viewport)
+      apple9_put_u32(group + 0x20, apple9_get_u32(group + 0x20) | (3u << 19));
+   apple9_put_u32(group + 0x20, apple9_get_u32(group + 0x20) |
+                  BITFIELD_MASK(pipeline->vertex.clip_distance_count));
+   apple9_put_u32(group + 0x2c, 4 + pipeline->vertex.varying_components +
+                  pipeline->vertex.writes_point_size + pipeline->vertex.clip_distance_count +
+                  pipeline->vertex.writes_layer_viewport);
    apple9_put_u32(group + 4,
                   (apple9_get_u32(group + 4) & 0xffff) | (cf_count << 16));
    /* Match the textured setup's native state, including with two user
@@ -902,28 +950,40 @@ agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
       apple9_put_u32(group + 0x50, apple9_get_u32(group + 0x50) | 0x44000000u);
    /* Keep derivative helper quads within one primitive. Merging fragments
     * with different interpolation planes corrupts implicit texture LOD. */
-   if (draw->disable_tri_merging ||
+   bool unfilled = draw->object_type == AGX_OBJECT_TYPE_TRIANGLE &&
+                   ((draw->depth_face[0] | draw->depth_face[1]) & (3u << 18));
+   if (draw->disable_tri_merging || unfilled ||
        draw->object_type != AGX_OBJECT_TYPE_TRIANGLE)
       apple9_put_u32(group + 0x50, apple9_get_u32(group + 0x50) | (1u << 26));
    /* Native raster packet: cull front/back bits 0/1, provoking vertex
-    * bits 7/8, front winding bit 16. Preserve the clipping fields. */
-   apple9_put_u32(group + 0x70, (apple9_get_u32(group + 0x70) & ~0x30183u) |
+    * bits 7/8, clipping/clamping bits 10/11, front winding bit 16. */
+   apple9_put_u32(group + 0x70, (apple9_get_u32(group + 0x70) & ~0x30d83u) |
                                    ((draw->flatshade_first ? 1u : 3u) << 7) |
                                    draw->raster_control);
    apple9_put_u32(group + 0x50, apple9_get_u32(group + 0x50) |
                                    (draw->visibility_mode << 14) |
                                    (draw->depth_control & (1u << 21)));
    apple9_put_u32(group + 0x48, (uint32_t)draw->occlusion_index << 17);
-   apple9_put_u32(group + 0x34, draw->depth_control);
+   apple9_put_u32(group + 0x34, draw->depth_control |
+                                   (unfilled ? 1u << 26 : 0));
    apple9_put_u32(group + 0x38, draw->depth_face[0]);
    apple9_put_u32(group + 0x3c, draw->stencil[0]);
    apple9_put_u32(group + 0x40, draw->depth_face[1]);
    apple9_put_u32(group + 0x44, draw->stencil[1]);
    for (unsigned face = 0; face < 2; ++face) {
       uint8_t *face2 = group + 0x54 + face * 4;
-      apple9_put_u32(face2, (apple9_get_u32(face2) & 0x0f3fffffu) |
+      unsigned polygon_mode = (draw->depth_face[face] >> 18) & 3;
+      unsigned object_type = draw->object_type;
+      if (object_type == AGX_OBJECT_TYPE_TRIANGLE) {
+         if (polygon_mode == AGX_POLYGON_MODE_LINE)
+            object_type = AGX_OBJECT_TYPE_LINE_FILLED_TRIANGLE;
+         else if (polygon_mode == AGX_POLYGON_MODE_POINT)
+            object_type = AGX_OBJECT_TYPE_POINT_FILLED_TRIANGLE;
+      }
+      apple9_put_u32(face2, (apple9_get_u32(face2) & 0x0f33ffffu) |
+                               (polygon_mode << 18) |
                                ((draw->writes_depth ? 0u : 3u) << 22) |
-                               ((uint32_t)draw->object_type << 28));
+                               (object_type << 28));
    }
    apple9_put_u32(ppp + 0xc0, 0xc00);
    /* Region clip is tile-granular. The scissor array supplies exact pixel
@@ -1002,13 +1062,16 @@ agx_apple9_link_render_pipeline_with_prolog(
     */
    if (vertex.position_components != 4 ||
        vertex.varying_components > AGX_APPLE9_MAX_VARYING_COMPONENTS ||
+       vertex.clip_distance_count > 8 ||
        fragment.position_components != 0 ||
        fragment.varying_components != vertex.varying_components ||
        memcmp(&vertex.varyings, &fragment.varyings, sizeof(vertex.varyings)) ||
        fragment.render_targets < 1 || fragment.render_targets > 8)
       return false;
 
-   const unsigned scalar_outputs = 4 + vertex.varying_components + vertex.writes_point_size;
+   const unsigned scalar_outputs = 4 + vertex.varying_components +
+                                   vertex.writes_point_size + vertex.clip_distance_count +
+                                   vertex.writes_layer_viewport;
    *pipeline = (struct agx_apple9_render_pipeline){
       .vertex = vertex,
       .fragment = fragment,
@@ -1028,14 +1091,11 @@ agx_apple9_direct_draw_size(const struct agx_apple9_render_pipeline *pipeline)
    return 0x78 + (pipeline->index_size ? 20 : 0);
 }
 
-uint8_t *
-agx_apple9_emit_direct_draw(uint8_t *out,
-                            const struct agx_apple9_render_pipeline *pipeline,
-                            unsigned vertex_count, unsigned instance_count,
-                            unsigned vertex_start)
+static uint8_t *
+agx_apple9_emit_draw_state(uint8_t *out,
+                           const struct agx_apple9_render_pipeline *pipeline)
 {
    assert(pipeline && pipeline->vertex.binary && pipeline->fragment.binary);
-   assert(vertex_count > 0 && instance_count > 0);
    assert(pipeline->ppp && !(pipeline->ppp & 0x3f));
 
    uint32_t header[] = {
@@ -1044,7 +1104,8 @@ agx_apple9_emit_direct_draw(uint8_t *out,
       pipeline->pipeline_word,
       pipeline->vertex_launch,
       pipeline->vertex_state_class,
-      pipeline->flatshade_first ? 0u : 2u, /* VDM provoking vertex */
+      (pipeline->flatshade_first ? 0u : 2u) |
+         (pipeline->fragment.reads_primitive_id ? (1u << 6) : 0),
       0x00000000, /* VDM padding */
       0x00000500, /* first PPP state update header */
    };
@@ -1060,7 +1121,17 @@ agx_apple9_emit_direct_draw(uint8_t *out,
    out += sizeof(ppp);
 
    apple9_put_u32(out, pipeline->ppp + 0xf0);
-   out += 4;
+   return out + 4;
+}
+
+uint8_t *
+agx_apple9_emit_direct_draw(uint8_t *out,
+                            const struct agx_apple9_render_pipeline *pipeline,
+                            unsigned vertex_count, unsigned instance_count,
+                            unsigned vertex_start)
+{
+   assert(vertex_count > 0 && instance_count > 0);
+   out = agx_apple9_emit_draw_state(out, pipeline);
    if (pipeline->index_size) {
       assert(pipeline->index_size == 1 || pipeline->index_size == 2 ||
              pipeline->index_size == 4);
@@ -1094,6 +1165,50 @@ agx_apple9_emit_direct_draw(uint8_t *out,
          vertex_count,
          instance_count,
          vertex_start,
+         0xc0000000,
+      };
+      memcpy(out, draw, sizeof(draw));
+      out += sizeof(draw);
+   }
+   return out;
+}
+
+uint8_t *
+agx_apple9_emit_indirect_draw(uint8_t *out,
+                              const struct agx_apple9_render_pipeline *pipeline,
+                              uint64_t indirect)
+{
+   assert(indirect && !(indirect & 3));
+   out = agx_apple9_emit_draw_state(out, pipeline);
+   if (pipeline->index_size) {
+      assert(pipeline->index_size == 1 || pipeline->index_size == 2 ||
+             pipeline->index_size == 4);
+      assert(pipeline->index_buffer >= (1ull << 40) &&
+             pipeline->index_buffer < (1ull << 40) + (1ull << 32));
+      assert(pipeline->index_extent);
+      uint32_t draw[] = {
+         0x40000001,
+         pipeline->restart_index,
+         0x64300000 | (util_logbase2(pipeline->index_size) << 17) |
+            (pipeline->primitive << 8) |
+            (pipeline->primitive_restart ? (1u << 16) : 0),
+         (uint32_t)pipeline->index_buffer,
+         indirect >> 32,
+         indirect,
+         DIV_ROUND_UP(pipeline->index_extent +
+                      (pipeline->index_buffer & 3), 4) - 1,
+         1,
+         0xc0000000,
+      };
+      memcpy(out, draw, sizeof(draw));
+      out += sizeof(draw);
+   } else {
+      /* As in CDM, the indirect pointer is high word then low word. The
+       * VDM consumes count, instances and first vertex at execution time. */
+      uint32_t draw[] = {
+         0x64040000 | (pipeline->primitive << 8),
+         indirect >> 32,
+         indirect,
          0xc0000000,
       };
       memcpy(out, draw, sizeof(draw));

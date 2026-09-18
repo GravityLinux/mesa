@@ -276,6 +276,54 @@ lower_sysvals(nir_builder *b, nir_instr *instr, void *data)
    }
 }
 
+static bool
+lower_apple9_sysval(nir_builder *b, nir_instr *instr, void *data)
+{
+   /* Apple9 retains API buffer bindings until its own resource lowering.
+    * In particular, vertex fetch uses private UBO bindings outside the
+    * Gallium constant-buffer table. */
+   if (instr->type == nir_instr_type_intrinsic &&
+       nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_ubo)
+      return false;
+
+   return lower_sysvals(b, instr, data);
+}
+
+static bool
+lower_apple9_sysval_table(nir_builder *b, nir_intrinsic_instr *intr,
+                         UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_sysval_agx)
+      return false;
+
+   assert(nir_intrinsic_flags(intr) == 0);
+   unsigned table = nir_intrinsic_desc_set(intr);
+   assert(table < AGX_NUM_SYSVAL_TABLES);
+   unsigned offset = nir_intrinsic_binding(intr);
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *value = nir_load_ubo(
+      b, intr->def.num_components, intr->def.bit_size,
+      nir_imm_int(b, AGX_APPLE9_SYSVAL_UBO_BASE + table), nir_imm_int(b, offset),
+      .align_mul = intr->def.bit_size / 8, .range_base = offset,
+      .range = intr->def.num_components * intr->def.bit_size / 8);
+   nir_def_replace(&intr->def, value);
+   return true;
+}
+
+bool
+agx_nir_lower_apple9_sysvals(nir_shader *shader, mesa_shader_stage desc_stage)
+{
+   mesa_shader_stage physical_stage = shader->info.stage;
+   shader->info.stage = desc_stage;
+   bool lower_draw_params = true;
+   bool progress = nir_shader_instructions_pass(
+      shader, lower_apple9_sysval, nir_metadata_control_flow, &lower_draw_params);
+   shader->info.stage = physical_stage;
+   progress |= nir_shader_intrinsics_pass(
+      shader, lower_apple9_sysval_table, nir_metadata_control_flow, NULL);
+   return progress;
+}
+
 /* Step 2: Record system value loads */
 static bool
 record_loads(nir_builder *b, nir_intrinsic_instr *intr, void *data)
