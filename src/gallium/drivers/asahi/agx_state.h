@@ -417,7 +417,8 @@ struct agx_batch {
    bool apple9_color_reloaded;
    uint32_t apple9_color_reload_launch;
    uint32_t apple9_color_store_launch;
-   bool apple9_preparing_tile_store;
+   /* Prepare background/EOT state without emitting a rasterized draw. */
+   bool apple9_preparing_tile_helper;
 
    uint64_t uploaded_clear_color[PIPE_MAX_COLOR_BUFS];
    double clear_depth;
@@ -616,7 +617,7 @@ struct asahi_blitter {
    bool active;
    struct hash_table *blit_cs;
    void *copy_cs[7][4];
-   void *resolve_cs[2][PIPE_FORMAT_COUNT];
+   void *resolve_cs[3][3][PIPE_FORMAT_COUNT];
 
    /* [filter] */
    void *sampler[2];
@@ -1224,7 +1225,6 @@ enum asahi_blitter_op /* bitmask */
    ASAHI_SAVE_FRAMEBUFFER = 2,
    ASAHI_SAVE_FRAGMENT_STATE = 4,
    ASAHI_SAVE_FRAGMENT_CONSTANT = 8,
-   ASAHI_DISABLE_RENDER_COND = 16,
 };
 
 enum {

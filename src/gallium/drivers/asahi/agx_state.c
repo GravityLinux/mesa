@@ -3353,10 +3353,11 @@ agx_destroy_compute_blitter(struct pipe_context *ctx, struct asahi_blitter *bl)
       for (unsigned tiling = 0; tiling < ARRAY_SIZE(bl->copy_cs[size]); ++tiling)
          if (bl->copy_cs[size][tiling])
             ctx->delete_compute_state(ctx, bl->copy_cs[size][tiling]);
-   for (unsigned n = 0; n < 2; ++n)
-      for (unsigned f = 0; f < ARRAY_SIZE(bl->resolve_cs[n]); ++f)
-         if (bl->resolve_cs[n][f])
-            ctx->delete_compute_state(ctx, bl->resolve_cs[n][f]);
+   for (unsigned src = 0; src < ARRAY_SIZE(bl->resolve_cs); ++src)
+      for (unsigned dst = 0; dst < ARRAY_SIZE(bl->resolve_cs[src]); ++dst)
+         for (unsigned f = 0; f < ARRAY_SIZE(bl->resolve_cs[src][dst]); ++f)
+            if (bl->resolve_cs[src][dst][f])
+               ctx->delete_compute_state(ctx, bl->resolve_cs[src][dst][f]);
    hash_table_foreach(bl->blit_cs, ent) {
       ctx->delete_compute_state(ctx, ent->data);
    }
@@ -7027,9 +7028,10 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       pipeline.vertex_launch = record->launch[0] / 0x40;
       /* Native vertex launch configuration. It is not a header address. */
       pipeline.pipeline_word = 0x01000000;
-      /* Tile export uses the prepared fragment entry and bindings directly.
-       * It must not execute as a rasterized fragment shader. */
-      if (batch->apple9_preparing_tile_store) {
+      /* Background and EOT dispatch use these fragment entries directly.
+       * A rasterized reload triangle would mark every tile as non-empty,
+       * forcing attachment traffic even where the application draws nothing. */
+      if (batch->apple9_preparing_tile_helper) {
          agx_batch_add_bo(batch, dev->apple9_entries);
          agx_dirty_reset_graphics(ctx);
          return;
@@ -7093,6 +7095,13 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
    assert(batch == agx_get_batch(ctx) && "batch should not change under us");
 
    batch->draws++;
+
+   /* The color load/store helpers recurse through draw_vbo before their
+    * launch records are installed. Only the outer draw may submit the batch.
+    */
+   if (agx_apple9_direct_render_enabled(dev) &&
+       (!batch->apple9_color_reload_launch || !batch->apple9_color_store_launch))
+      return;
 
    /* The scissor/zbias arrays are indexed with 16-bit integers, imposigin a
     * maximum of UINT16_MAX descriptors. Flush if the next draw would overflow
