@@ -3966,7 +3966,7 @@ apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
    if (!agx_apple9_allocate_shared(&lower.program, nir, reason))
       goto fail;
 
-   if (getenv("AGX_APPLE9_TRACE") != NULL) {
+   if (agx_apple9_trace_enabled()) {
       fprintf(stderr, "APPLE9_ALLOC_STATS stage=%u peak_live_gprs=%u publications=%u scratch_bytes=%u spill_slots=%u\n",
               nir->info.stage, lower.program.peak_live_gprs,
               lower.program.publication_count, lower.program.scratch_size,
@@ -4022,7 +4022,7 @@ apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
       if (!agx_apple9_pack_vir_instruction(instruction, lower.program.phys,
                                            &packed, reason) ||
           !apple9_emit_packed(&emitter, &packed)) {
-         if (getenv("AGX_APPLE9_TRACE") != NULL) {
+         if (agx_apple9_trace_enabled()) {
             fprintf(stderr, "APPLE9_PACK_FAIL i=%u op=%u enc=%u dst=", i,
                     instruction->op, instruction->encoding);
             if (instruction->dest == AGX_APPLE9_VREG_INVALID)
@@ -4044,7 +4044,7 @@ apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
          free(vir_offsets);
          goto fail;
       }
-      if (getenv("AGX_APPLE9_TRACE") != NULL) {
+      if (agx_apple9_trace_enabled()) {
          fprintf(stderr, "APPLE9_VIR i=%u op=%u enc=%u dst=", i,
                  instruction->op, instruction->encoding);
          if (instruction->dest == AGX_APPLE9_VREG_INVALID)
@@ -4135,7 +4135,7 @@ apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
       fputs("APPLE9_ASM_END\n", stderr);
    }
    free(vir_offsets);
-   if (getenv("AGX_APPLE9_TRACE") != NULL) {
+   if (agx_apple9_trace_enabled()) {
       fputs("APPLE9_BINARY ", stderr);
       const uint8_t *binary = emitter.bytes.data;
       for (unsigned i = 0; i < emitter.bytes.size; ++i)
@@ -4423,7 +4423,7 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
          }
       }
    }
-   if (getenv("AGX_APPLE9_TRACE") && candidate_reason)
+   if (agx_apple9_trace_enabled() && candidate_reason)
       fprintf(stderr, "APPLE9_PREAMBLE_FALLBACK %s\n", candidate_reason);
    free(setup.binary);
    free(candidate.binary);
@@ -5763,7 +5763,7 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
             "Apple9 graphics requires at most 32 supported buffer bindings";
       return false;
    }
-   if (getenv("AGX_APPLE9_TRACE"))
+   if (agx_apple9_trace_enabled())
       nir_print_shader(nir, stderr);
    struct agx_apple9_varying_layout varyings = {0};
    if (!apple9_collect_varyings(nir, producer, &varyings, reason))

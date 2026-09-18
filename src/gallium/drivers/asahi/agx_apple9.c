@@ -975,16 +975,6 @@ static const struct agx_apple9_ppp_update direct_ppp[] = {
 };
 
 bool
-agx_apple9_direct_render_enabled(const struct agx_device *dev)
-{
-   if (dev->chip != AGX_CHIP_G16G && dev->chip != AGX_CHIP_G17P)
-      return false;
-
-   const char *value = getenv("AGX_APPLE9_DIRECT_RENDER");
-   return value && !strcmp(value, "1");
-}
-
-bool
 agx_apple9_link_render_pipeline(struct agx_apple9_render_pipeline *pipeline,
                                 struct agx_apple9_render_stage vertex,
                                 struct agx_apple9_render_stage fragment)

@@ -243,8 +243,6 @@ void agx_apple9_pack_nearest_sampler(void *out);
  * handling.  This first encoder is deliberately narrow: it describes the
  * direct triangle lists, with optional 16- or 32-bit indices.
  */
-bool agx_apple9_direct_render_enabled(const struct agx_device *dev);
-
 bool
 agx_apple9_link_render_pipeline(struct agx_apple9_render_pipeline *pipeline,
                                 struct agx_apple9_render_stage vertex,

@@ -1772,7 +1772,7 @@ agx_flush_render(struct agx_context *ctx, struct agx_batch *batch,
       /* Both tile helpers use batch-owned compiled entries and bindings. */
       cmdbuf->bg.usc = load_usc;
       cmdbuf->bg.rsrc_spec = 0;
-      if (getenv("AGX_APPLE9_TRACE"))
+      if (dev->apple9_trace)
          fprintf(stderr, "APPLE9_TILE_STATE targets=%u sample_bytes=%u\n",
                  batch->key.nr_cbufs, cmdbuf->sample_size_B);
       cmdbuf->eot.usc = store_usc;

@@ -769,6 +769,15 @@ agx_open_device(void *memctx, struct agx_device *dev)
       UNREACHABLE("Unsupported AGX generation");
    }
 
+   /* Draw and texture setup query these frequently. Preserve the opt-in and
+    * trace-presence semantics without searching the environment per draw.
+    */
+   const char *direct_render = getenv("AGX_APPLE9_DIRECT_RENDER");
+   dev->apple9_direct_render =
+      (dev->chip == AGX_CHIP_G16G || dev->chip == AGX_CHIP_G17P) &&
+      direct_render && !strcmp(direct_render, "1");
+   dev->apple9_trace = agx_apple9_trace_enabled();
+
    if (dev->chip == AGX_CHIP_G16G || dev->chip == AGX_CHIP_G17P) {
       simple_mtx_init(&dev->apple9_entry_lock, mtx_plain);
       util_vma_heap_init(&dev->apple9_entry_heap, AGX_APPLE9_ENTRY_HEADER_SIZE,

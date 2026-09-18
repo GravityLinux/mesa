@@ -11,6 +11,9 @@
 #include "util/u_tristate.h"
 #include "shader_enums.h"
 
+/* Shared by the standalone compiler and the driver's device initialization. */
+bool agx_apple9_trace_enabled(void);
+
 struct agx_cf_binding {
    /* Base coefficient register */
    uint8_t cf_base;

@@ -2114,7 +2114,7 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
       if (!encoding_tuple(instruction, program->phys, tuple, &tuple_count) ||
           !agx_apple9_encoding_accepts_gpr_tuple(instruction->encoding, tuple,
                                                  tuple_count, 32)) {
-         if (getenv("AGX_APPLE9_TRACE") != NULL) {
+         if (agx_apple9_trace_enabled()) {
             fprintf(stderr,
                     "APPLE9_VALIDATE_FAIL i=%u op=%u enc=%u dst=r%u src=", i,
                     instruction->op, instruction->encoding,
@@ -3102,7 +3102,7 @@ agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
       }
 
       if (selected == AGX_APPLE9_PHYS_INVALID) {
-         if (getenv("AGX_APPLE9_TRACE") != NULL) {
+         if (agx_apple9_trace_enabled()) {
             fprintf(
                stderr,
                "APPLE9_ALLOC_FAIL i=%u op=%u dest=v%u width=%u fixed=%u live=%u peak=%u owners=",

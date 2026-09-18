@@ -1713,7 +1713,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
 
    NIR_PASS(_, nir, agx_nir_lower_multisampled_image_store);
 
-   if (apple9_render && getenv("AGX_APPLE9_TRACE")) {
+   if (apple9_render && dev->apple9_trace) {
       fprintf(stderr, "APPLE9_RENDER_NIR stage=%s before bounded compiler\n",
               _mesa_shader_stage_to_abbrev(so->type));
       nir_print_shader(nir, stderr);
@@ -3061,13 +3061,13 @@ agx_build_meta_shader_internal(struct agx_context *ctx,
 
    builder(&b, data);
 
-   if (agx_apple9_direct_render_enabled(agx_device(ctx->base.screen)) &&
-       getenv("AGX_APPLE9_TRACE") && builder == agx_nir_vs_prolog) {
+   struct agx_device *dev = agx_device(ctx->base.screen);
+   if (agx_apple9_direct_render_enabled(dev) && dev->apple9_trace &&
+       builder == agx_nir_vs_prolog) {
       fprintf(stderr, "APPLE9_RENDER_NIR stage=VS_PROLOG before compiler\n");
       nir_print_shader(b.shader, stderr);
    }
 
-   struct agx_device *dev = agx_device(ctx->base.screen);
    if (!prolog) {
       agx_preprocess_nir(b.shader);
       NIR_PASS(_, b.shader, agx_nir_lower_texture);

@@ -100,6 +100,10 @@ int agx_bind_timestamps(struct agx_device *dev, struct agx_bo *bo,
 struct agx_device {
    uint32_t debug;
 
+   /* Environment options captured at device creation, immutable while in use. */
+   bool apple9_direct_render;
+   bool apple9_trace;
+
    /* Precompiled libagx binary table */
    const uint32_t **libagx_programs;
 
@@ -194,6 +198,12 @@ struct agx_device {
 
    struct u_printf_ctx printf;
 };
+
+static inline bool
+agx_apple9_direct_render_enabled(const struct agx_device *dev)
+{
+   return dev->apple9_direct_render;
+}
 
 /*
  * Determine if an address is in the read-only section. See the documentation
