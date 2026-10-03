@@ -261,6 +261,12 @@ agx_resource_from_handle(struct pipe_screen *pscreen,
    }
 
    ail_make_miptree(&rsc->layout);
+   /* A compressed import must include the complete metadata allocation. */
+   if (rsc->layout.compressed && rsc->layout.size_B > rsc->bo->size) {
+      agx_bo_unreference(dev, rsc->bo);
+      FREE(rsc);
+      return NULL;
+   }
    if (!agx_resource_layout_valid(dev, rsc)) {
       agx_bo_unreference(dev, rsc->bo);
       FREE(rsc);
