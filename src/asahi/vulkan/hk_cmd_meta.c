@@ -1343,6 +1343,18 @@ hk_meta_copy_get_image_properties(struct hk_image *img)
 
    if (!vk_format_is_depth_or_stencil(img->vk.format)) {
       props.color.view_format = img->vk.format;
+      if (hk_meta_apple9(img->vk.base.device)) {
+         props.color.view_format = canonical_format(img->vk.format);
+         if (!img->planes[0].layout.compressed) {
+            switch (vk_format_get_blocksize(img->vk.format)) {
+            case 1: props.color.view_format = VK_FORMAT_R8_UINT; break;
+            case 2: props.color.view_format = VK_FORMAT_R16_UINT; break;
+            case 4: props.color.view_format = VK_FORMAT_R32_UINT; break;
+            case 8: props.color.view_format = VK_FORMAT_R32G32_UINT; break;
+            case 16: props.color.view_format = VK_FORMAT_R32G32B32A32_UINT; break;
+            }
+         }
+      }
    } else {
       switch (img->vk.format) {
       case VK_FORMAT_S8_UINT:
@@ -1453,7 +1465,9 @@ hk_CmdCopyBuffer2(VkCommandBuffer commandBuffer, const VkCopyBufferInfo2 *info)
 static bool
 hk_copy_requires_gfx(struct hk_image *img)
 {
-   return img->vk.samples > 1 && img->planes[0].layout.compressed;
+   struct hk_device *dev = container_of(img->vk.base.device, struct hk_device, vk);
+   return (img->vk.samples > 1 || dev->dev.chip == AGX_CHIP_G16G) &&
+          img->planes[0].layout.compressed;
 }
 
 static bool
@@ -1497,10 +1511,18 @@ hk_CmdCopyImageToBuffer2(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   VK_FROM_HANDLE(hk_image, src_image, pCopyImageToBufferInfo->srcImage);
 
    struct hk_meta_save save;
    hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
-   hk_meta_copy_image_to_buffer2(&cmd->vk, &dev->meta, pCopyImageToBufferInfo);
+   if (dev->dev.chip == AGX_CHIP_G16G && src_image->planes[0].layout.compressed) {
+      struct vk_meta_copy_image_properties props =
+         hk_meta_copy_get_image_properties(src_image);
+      vk_meta_copy_image_to_buffer(&cmd->vk, &dev->meta,
+                                   pCopyImageToBufferInfo, &props);
+   } else {
+      hk_meta_copy_image_to_buffer2(&cmd->vk, &dev->meta, pCopyImageToBufferInfo);
+   }
    hk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
 }
 
@@ -1513,12 +1535,14 @@ hk_CmdCopyImage2(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(hk_image, dst_image, pCopyImageInfo->dstImage);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    bool gfx = hk_copy_requires_gfx(dst_image);
+   bool sampled_copy = dev->dev.chip == AGX_CHIP_G16G &&
+                       src_image->planes[0].layout.compressed;
    VkPipelineBindPoint bind_point = hk_bind_point(gfx);
 
    struct hk_meta_save save;
    hk_meta_begin(cmd, &save, bind_point);
 
-   if (gfx) {
+   if (gfx || sampled_copy) {
       struct vk_meta_copy_image_properties src_props =
          hk_meta_copy_get_image_properties(src_image);
       struct vk_meta_copy_image_properties dst_props =

@@ -1073,6 +1073,7 @@ struct agx_transfer {
    struct {
       struct pipe_resource *rsrc;
       struct pipe_box box;
+      struct pipe_transfer *transfer;
    } staging;
 };
 

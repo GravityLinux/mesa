@@ -586,7 +586,11 @@ agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
          return;
       }
    }
-   if (apple9 && util_try_blit_via_copy_region(pipe, info, false))
+   /* Raw copies cannot access lossless-compressed pixels. Keep them on the
+    * texture/PBE path, including staging transfers used for CPU mapping. */
+   if (apple9 && !agx_resource(info->src.resource)->layout.compressed &&
+       !agx_resource(info->dst.resource)->layout.compressed &&
+       util_try_blit_via_copy_region(pipe, info, false))
       return;
 
    if (!apple9 && asahi_compute_blit_supported(info)) {
@@ -620,7 +624,8 @@ try_copy_via_blit(struct pipe_context *pctx, struct pipe_resource *dst,
       return false;
 
    /* TODO: Handle these for rusticl copies */
-   if (dst->target != src->target)
+   if (dst->target != src->target &&
+       !agx_apple9_direct_render_enabled(agx_device(pctx->screen)))
       return false;
 
    struct pipe_blit_info info = {
@@ -786,9 +791,6 @@ agx_apple9_reload_color(struct agx_batch *batch)
                           ? PIPE_FORMAT_R8G8B8A8_UNORM : surf->format;
       if (!(mask & BITFIELD_BIT(rt)))
          continue;
-      const struct ail_layout *layout = &agx_resource(surf->texture)->layout;
-      if (ail_is_level_logically_compressed(layout, surf->level))
-         return false;
       if (surf->texture->target == PIPE_TEXTURE_1D_ARRAY ||
           surf->texture->target == PIPE_TEXTURE_2D_ARRAY ||
           surf->texture->target == PIPE_TEXTURE_3D ||
@@ -1455,6 +1457,11 @@ agx_resource_copy_region(struct pipe_context *pctx, struct pipe_resource *dst,
                                       src_box->width) :
                     asahi_copy_texture(pctx, dst, dst_level, dstx, dsty, dstz,
                                        src, src_level, src_box))
+         return;
+      if ((agx_resource(src)->layout.compressed ||
+           agx_resource(dst)->layout.compressed) &&
+          try_copy_via_blit(pctx, dst, dst_level, dstx, dsty, dstz, src,
+                            src_level, src_box))
          return;
       util_resource_copy_region(pctx, dst, dst_level, dstx, dsty, dstz, src,
                                  src_level, src_box);

@@ -241,11 +241,6 @@ hk_can_compress(const struct agx_device *dev, VkFormat format, unsigned plane,
    if (dev->debug & AGX_DBG_NOCOMPRESS)
       return false;
 
-   /* Apple9 tile loads, stores and sampling do not yet decode compressed
-    * layouts. */
-   if (dev->chip == AGX_CHIP_G16G)
-      return false;
-
    /* TODO: Handle compression with sparse. This should be doable but it's a bit
     * subtle. Correctness first.
     */
@@ -280,6 +275,11 @@ hk_can_compress(const struct agx_device *dev, VkFormat format, unsigned plane,
    }
 
    enum pipe_format p_format = hk_format_to_pipe_format(format);
+
+   /* Shared-exponent encodings do not round-trip through texture reads.
+    * Apple9's raw transfer path preserves their bits without compression. */
+   if (dev->chip == AGX_CHIP_G16G && p_format == PIPE_FORMAT_R9G9B9E5_FLOAT)
+      return false;
 
    /* Check for format compatibility if mutability is enabled. */
    if (flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) {

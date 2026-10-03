@@ -952,7 +952,20 @@ agx_alloc_staging(struct pipe_screen *screen, struct agx_resource *rsc,
    tmpl.bind =
       PIPE_BIND_LINEAR | PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW;
 
-   struct pipe_resource *pstaging = screen->resource_create(screen, &tmpl);
+   struct pipe_resource *pstaging;
+   if (agx_apple9_direct_render_enabled(agx_device(screen)) &&
+       tmpl.target == PIPE_TEXTURE_2D_ARRAY) {
+      /* Apple9's native descriptors do not support linear array strides.
+       * Use an uncompressed tiled staging image and the ordinary CPU tiling
+       * transfer for these uploads and readbacks. */
+      const uint64_t modifier = DRM_FORMAT_MOD_APPLE_GPU_TILED;
+      tmpl.usage = PIPE_USAGE_DEFAULT;
+      tmpl.bind &= ~PIPE_BIND_LINEAR;
+      pstaging = screen->resource_create_with_modifiers(screen, &tmpl,
+                                                         &modifier, 1);
+   } else {
+      pstaging = screen->resource_create(screen, &tmpl);
+   }
    if (!pstaging)
       return NULL;
 
@@ -1064,7 +1077,8 @@ agx_transfer_map(struct pipe_context *pctx, struct pipe_resource *resource,
       /* Staging resources have one LOD: level 0. Query the strides
        * on this LOD.
        */
-      transfer->base.stride = ail_get_linear_stride_B(&staging->layout, 0);
+      if (staging->layout.tiling == AIL_TILING_LINEAR)
+         transfer->base.stride = ail_get_linear_stride_B(&staging->layout, 0);
       transfer->base.layer_stride = staging->layout.layer_stride_B;
       transfer->staging.rsrc = &staging->base;
 
@@ -1080,6 +1094,16 @@ agx_transfer_map(struct pipe_context *pctx, struct pipe_resource *resource,
          agx_sync_writer(ctx, staging, "GPU read staging blit");
       }
 
+      if (staging->layout.tiling != AIL_TILING_LINEAR) {
+         void *map = pctx->texture_map(pctx, &staging->base, 0, usage,
+                                       &transfer->staging.box,
+                                       &transfer->staging.transfer);
+         if (map) {
+            transfer->base.stride = transfer->staging.transfer->stride;
+            transfer->base.layer_stride = transfer->staging.transfer->layer_stride;
+         }
+         return map;
+      }
       return agx_bo_map(staging->bo);
    }
 
@@ -1137,6 +1161,9 @@ agx_transfer_unmap(struct pipe_context *pctx, struct pipe_transfer *transfer)
    struct agx_transfer *trans = agx_transfer(transfer);
    struct pipe_resource *prsrc = transfer->resource;
    struct agx_resource *rsrc = (struct agx_resource *)prsrc;
+
+   if (trans->staging.transfer)
+      pctx->texture_unmap(pctx, trans->staging.transfer);
 
    if (trans->staging.rsrc && (transfer->usage & PIPE_MAP_WRITE)) {
       assert(prsrc->target != PIPE_BUFFER);

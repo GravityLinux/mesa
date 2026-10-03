@@ -5811,7 +5811,8 @@ static void
 agx_legalize_feedback_loops(struct agx_context *ctx)
 {
    /* Trust that u_blitter knows what it's doing */
-   if (ctx->blitter->running)
+   if (ctx->blitter->running ||
+       (ctx->batch && ctx->batch->apple9_preparing_tile_helper))
       return;
 
    for (unsigned stage = 0; stage < ARRAY_SIZE(ctx->stage); ++stage) {
@@ -5892,8 +5893,6 @@ agx_apple9_texture_view_supported(const struct agx_sampler_view *view)
       return false;
    const struct pipe_sampler_view *state = &view->base;
    struct agx_resource *resource = view->rsrc;
-   if (resource->layout.compressed)
-      return false;
 
    if (state->target == PIPE_BUFFER) {
       return resource->base.target == PIPE_BUFFER &&
@@ -6182,7 +6181,7 @@ agx_apple9_upload_textures(struct agx_batch *batch, struct agx_stage *shader,
    u_foreach_bit(binding, rs->image_mask) {
       struct pipe_image_view *view = &shader->images[binding];
       struct agx_resource *resource = agx_resource(view->resource);
-      assert(resource && !resource->layout.compressed);
+      assert(resource);
       uint8_t *descriptor = (uint8_t *)textures.cpu +
                             slot++ * AGX_APPLE9_TEXTURE_TABLE_STRIDE;
       struct agx_pbe_packed legacy;

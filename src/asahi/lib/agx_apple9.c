@@ -29,14 +29,14 @@ agx_apple9_translate_pbe(void *out, const struct agx_pbe_packed *state,
                         uint64_t layer_base, unsigned level,
                         unsigned layer_count, bool layered)
 {
-   if (layout->compressed || !layout->levels || layout->levels > 16 ||
+   if (!layout->levels || layout->levels > 16 ||
        level >= layout->levels || !layout->width_px || !layout->height_px ||
        layout->width_px > 16384 || layout->height_px > 16384 ||
        !layer_count || layer_count > 65536)
       return false;
 
    bool linear = layout->tiling == AIL_TILING_LINEAR;
-   if (linear && (level || layer_count > 1))
+   if (linear && (level || layer_count > 1 || layout->compressed))
       return false;
    unsigned descriptor_level = linear ? level : 0;
    uint64_t base = layer_base + layout->level_offsets_B[descriptor_level] -
@@ -50,20 +50,31 @@ agx_apple9_translate_pbe(void *out, const struct agx_pbe_packed *state,
       return false;
 
    uint8_t descriptor[AGX_APPLE9_TEXTURE_TABLE_STRIDE] = {0};
+   if (layout->compressed) {
+      agx_unpack(stderr, state, PBE, pbe);
+      if (!pbe.compressed || !pbe.extended ||
+          !pbe.acceleration_buffer || (pbe.acceleration_buffer & 15) ||
+          (pbe.acceleration_buffer >> 48))
+         return false;
+      uint64_t metadata = pbe.acceleration_buffer >> 4;
+      memcpy(descriptor + 16, &metadata, sizeof(metadata));
+      address |= UINT64_C(1) << 63;
+   }
    uint32_t header[2];
    memcpy(header, state, sizeof(header));
    unsigned width = u_minify(layout->width_px, descriptor_level);
    unsigned height = u_minify(layout->height_px, descriptor_level);
    header[0] = (header[0] & 0x00ffffff) | ((width - 1) << 24);
    header[1] = ((width - 1) >> 8) | ((height - 1) << 6) |
-               (header[1] & 0x01000000);
+               (header[1] & 0x01000000) |
+               ((uint32_t)layout->compressed << 27);
    /* Packed tile words already have memory channel order. */
    if (agx_apple9_color_is_packed(agx_apple9_color_tile_format(format)))
       header[0] = (header[0] & ~0x00ff0000u) | 0x00e40000;
    if (!linear && layout->levels > 1) {
       header[1] |= 1u << 26;
       address |= UINT64_C(1) << 63;
-      descriptor[21] = level << 4;
+      descriptor[21] |= level << 4;
       descriptor[22] = layout->levels - 1;
    }
    if (linear) {
@@ -737,7 +748,11 @@ agx_apple9_translate_texture(void *out, const struct agx_texture_packed *state)
        tex.dimension == AGX_TEXTURE_DIMENSION_2D ||
        tex.dimension == AGX_TEXTURE_DIMENSION_1D_ARRAY ||
        tex.dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY) && tex.depth_linear == 1;
-   if (tex.compressed || (tex.extended && !single_layer_linear) ||
+   if ((tex.extended && !tex.compressed && !single_layer_linear) ||
+       (tex.compressed &&
+        (!tex.extended || tex.layout == AGX_LAYOUT_LINEAR ||
+         !tex.acceleration_buffer || (tex.acceleration_buffer & 15) ||
+         (tex.acceleration_buffer >> 48))) ||
        tex.mode != AGX_IMAGE_MODE_NORMAL ||
        (tex.layout != AGX_LAYOUT_LINEAR && tex.layout != AGX_LAYOUT_TWIDDLED &&
         tex.layout != AGX_LAYOUT_GPU))
@@ -772,7 +787,7 @@ agx_apple9_translate_texture(void *out, const struct agx_texture_packed *state)
    memcpy(&dimensions, descriptor + 4, 4);
    dimensions = (dimensions & 0x00ffffff) |
                 ((ms && tex.samples == AGX_SAMPLE_COUNT_4) << 24) |
-                (tex.unk_mipmapped << 26);
+                (tex.unk_mipmapped << 26) | (tex.compressed << 27);
    memcpy(descriptor + 4, &dimensions, 4);
 
    /* The address starts two bits earlier than Apple8. Depth/linear stride,
@@ -785,11 +800,15 @@ agx_apple9_translate_texture(void *out, const struct agx_texture_packed *state)
          address |= (uint64_t)(tex.depth - 1) << 46;
       address |= (uint64_t)tex.page_aligned_layers << 62;
    }
-   address |= (uint64_t)tex.unk_mipmapped << 63;
+   address |= (uint64_t)(tex.unk_mipmapped || tex.compressed) << 63;
    address |= (uint64_t)tex.srgb << 44;
    address |= (uint64_t)tex.srgb_2_channel << 45;
    memcpy(descriptor + 8, &address, sizeof(address));
-   descriptor[21] = tex.first_level << 4;
+   if (tex.compressed) {
+      uint64_t metadata = tex.acceleration_buffer >> 4;
+      memcpy(descriptor + 16, &metadata, sizeof(metadata));
+   }
+   descriptor[21] |= tex.first_level << 4;
    descriptor[22] = tex.last_level;
    return true;
 }
