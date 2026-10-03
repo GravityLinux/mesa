@@ -114,8 +114,10 @@ result recording. It requires a `/deqp-vk` runtime mapping, the flattened Vulkan
 mustpass list at `mustpass/vk-main.txt`, and a separate candidate prefix containing
 `lib/libvulkan_asahi.so` and `share/vulkan/icd.d/*asahi*.json`. The manifest must
 name the candidate library by absolute path. Configure `HK_EXPERIMENTAL_APPLE9=1`
-and `ASAHI_MESA_DEBUG=nocompress` in `environment`; inherited Vulkan and Mesa
-selection variables are cleared before that configuration is applied.
+in `environment`; inherited Vulkan and Mesa selection variables are cleared
+before that configuration is applied. Apple9 compression is enabled by default
+in both drivers. Leave `ASAHI_MESA_DEBUG` unset for normal regression tests;
+use `nocompress` only for an explicit uncompressed comparison.
 
 The September 27 native development deployment uses
 `/root/honeykrisp-apple9/ci/config.json` on the Fedora target. Earlier `/g16`
@@ -131,3 +133,12 @@ This profile is development coverage, not a certification configuration. See
 [`README.apple9.md`](../../vulkan/README.apple9.md) for current capabilities and
 known failures. Preserve the raw failures rather than turning them into local
 expected failures.
+
+For desktop clear coverage, retain the existing
+`^dEQP-GLES3[.]functional[.]color_clear[.]` group in focused runs (19 cases).
+On October 3 these passed with compression enabled, including with KWin itself
+using the candidate. Check the compositor's loaded libraries: a file capability
+on `kwin_wayland` makes the loader ignore `LD_LIBRARY_PATH`, so setting that
+variable alone does not select the candidate. The installed system driver is
+available to the prefix-based runner through `/opt/mesa-apple9-system`, whose
+`lib` and `share` directories link to `/usr/lib64` and `/usr/share`.
