@@ -12,7 +12,7 @@ adds refreshed tiled staging for linear 2D color sampler views. Direct
 rendering into imported linear attachments remains a separate unsupported
 path. Desktop validation and remaining browser/compositor issues are recorded
 in the parent workspace's
-`linux-m4-integration/tools/gpu/asahi/plasma-es3/README.md`.
+`linux/tools/gpu/asahi/plasma-es3/README.md`.
 
 ## Implemented paths
 
@@ -84,10 +84,10 @@ intermittent result; those reruns do not replace the failure in the full-run
 totals. The warning results concern multisample wide lines and mixed-sample
 framebuffer quality.
 
-Evidence lives in the parent workspace under `tmp/es3-237/llvmpipe/`
-(reference), `tmp/es3-288/` (advanced blend and samplers), `tmp/es3-291/`
-(centroid probes), `tmp/es3-292/` (multisample linkage), `tmp/es3-293/`
-(focused regression and unit tests), and `tmp/es3-294/` (full comparison).
+Evidence lives in the parent workspace under `results/es3-237/llvmpipe/`
+(reference), `results/es3-288/` (advanced blend and samplers), `results/es3-291/`
+(centroid probes), `results/es3-292/` (multisample linkage), `results/es3-293/`
+(focused regression and unit tests), and `results/es3-294/` (full comparison).
 Native per-batch artifacts are under `/g16/results/es3-204/full294/`.
 
 ## Remaining scope
@@ -109,7 +109,7 @@ Single-sample linear color targets now use byte row strides in the generated
 GPU background/export shaders, including mixed linear/tiled MRTs and nonzero
 dma-buf offsets. The tiled render-target/export-copy workaround was removed.
 The native regression probe is
-`linux-m4-integration/tools/gpu/asahi/plasma-es3/linear-render.c`; see that
+`linux/tools/gpu/asahi/plasma-es3/linear-render.c`; see that
 directory's README for the validation matrix and remaining mapping-lifetime
 limitation. Linear sampling still uses staging; this change does not claim a
 validated fixed-function PBE linear export encoding.

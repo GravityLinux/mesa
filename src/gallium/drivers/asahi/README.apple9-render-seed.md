@@ -35,7 +35,7 @@ Sampling linear textures still uses the separate tiled staging path.
 This validates native GPU rendering into linear memory through the generated
 tile helpers. It does not establish the encoding of a fixed-function linear
 PBE export path. A reproduction probe and results are documented in
-`linux-m4-integration/tools/gpu/asahi/plasma-es3/README.md` in the workspace.
+`linux/tools/gpu/asahi/plasma-es3/README.md` in the workspace.
 
 
 Tile export prepares a compiled fragment entry and resource bindings without
@@ -90,8 +90,8 @@ space reservation were not tested. The compute constant block was not zeroed.
 The render builder now leaves these reservations zeroed and no longer emits
 vertex constant-program literals or fragment stop/padding contents. Reservation
 sizes and entry offsets are unchanged; compute retains its existing constant
-helper. See the parent workspace's `tmp/helpers185/RESULTS.md` for the
-investigation and `tmp/render-constants186/RESULTS.md` for cleanup validation.
+helper. See the parent workspace's `results/helpers185/RESULTS.md` for the
+investigation and `results/render-constants186/RESULTS.md` for cleanup validation.
 
 ## Entry and state layout
 
@@ -118,7 +118,7 @@ entire render address space. The fixed USC base, separate context/encoder
 addresses, later resource/launcher regions and selected package self-pointer
 relocations remain. The context encoder's +0x18000 offset belongs to a distinct
 address space and is intentionally unchanged. See the parent workspace's
-`tmp/archive189/RESULTS.md` for validation and remaining constraints.
+`results/archive189/RESULTS.md` for validation and remaining constraints.
 
 ## Validation
 
@@ -141,7 +141,7 @@ pressure, while small-draw controls pass. The normal driver preserves RGBA8
 colour and 24-bit depth ordering at 1x, 2x and 4x sampling. The proof uses
 controlled shader-entry effects, not an inferred partial count from archive
 rollover. MRT, stencil, half-float and compressed partial renders remain
-outside this validation. See `tmp/partial187/RESULTS.md` in the parent workspace.
+outside this validation. See `results/partial187/RESULTS.md` in the parent workspace.
 
 EXP-188 validates graphics register spilling through normal GLSL compilation:
 vertex-only and fragment-only shaders pass with 80, 128 and 256 live uint32
@@ -152,13 +152,13 @@ use no scratch. The 36-configuration matrix passes 144 frames. Both stages at
 256 exceed the current 96 KiB archive capacity before submission. Checksums
 cross the varying path as two numerically converted 16-bit halves; raw integer
 varying bit preservation is outside this result. Individual graphics frame
-extent A/B semantics remain unisolated. See `tmp/graphics-spill188/RESULTS.md`
+extent A/B semantics remain unisolated. See `results/graphics-spill188/RESULTS.md`
 in the parent workspace for sizes, reproduction and limitations.
 
 Exact builds and final integration results are recorded in the parent
-workspace under `tmp/render-integrated183/RESULTS.md`, with the preceding
-experiments in `tmp/render-store179/`, `tmp/render-store180/`,
-`tmp/render-state181/`, and `tmp/render-seed182/`.
+workspace under `results/render-integrated183/RESULTS.md`, with the preceding
+experiments in `results/render-store179/`, `results/render-store180/`,
+`results/render-state181/`, and `results/render-seed182/`.
 
 ## Batch-owned graphics state
 

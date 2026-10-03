@@ -16,18 +16,18 @@ The persistent target has the launcher installed as `g16-mesa-ci`:
 
 ```sh
 # Complete GL 3.3 / GLES 3.0 / EGL CI profile.
-ssh root@192.168.50.2 g16-mesa-ci gl
+ssh root@m4-target g16-mesa-ci gl
 
 # Focused CTS run, retaining the same profile and upstream exclusions.
-ssh root@192.168.50.2 \
+ssh root@m4-target \
   "g16-mesa-ci gl --include-tests '^KHR-GL33[.]nearest_edge[.]'"
 
 # Run against a particular installed candidate without changing the desktop.
-ssh root@192.168.50.2 \
+ssh root@m4-target \
   g16-mesa-ci gl --driver /path/to/candidate-prefix
 
 # Supplemental Piglit GPU profile, also through Mesa's runner.
-ssh root@192.168.50.2 \
+ssh root@m4-target \
   "g16-mesa-ci piglit --include-tests '^spec@!opengl 1[.]1@draw-pixels$'"
 ```
 

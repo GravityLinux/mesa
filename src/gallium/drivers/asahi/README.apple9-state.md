@@ -76,7 +76,7 @@ separate costs and must be profiled independently of the removed package work.
 
 ## Regression coverage
 
-`linux-m4-integration/tools/gpu/asahi/plasma-es3/state-churn.c` in the workspace
+`linux/tools/gpu/asahi/plasma-es3/state-churn.c` in the workspace
 keeps 24 framebuffer/program combinations in each of three contexts, uses
 changing dimensions and scissor/color-mask state, switches between two and one
 active render targets, and deletes programs before draining the last pending

@@ -123,7 +123,7 @@ Hardware: M4 Mac mini, Mac16,10 / J773g, T8132, standalone m1n1 DRM shim.
   validation is recorded separately below.
 
 The corresponding graphics result record is retained as
-`tests-graphics/validation-2026-09-09.json`.
+`validation-2026-09-09.json`, outside this tree.
 
 ## Completed MRT validation on 2026-09-09
 
@@ -147,7 +147,7 @@ suite and seven API cases passed again after that cleanup. No diagnostic
 shader override remains in the compiler.
 
 Machine-readable results are in
-[`tests-graphics/validation-mrt-2026-09-09.json`](tests-graphics/validation-mrt-2026-09-09.json).
+`validation-mrt-2026-09-09.json`, outside this tree.
 
 ## Dense vertex varying commits
 

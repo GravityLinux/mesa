@@ -237,8 +237,8 @@ The Asahi driver needs Mesa's generated internal CLC programs. On Arch-based
 hosts the additional package is `spirv-llvm-translator`.
 
 ```sh
-meson setup /home/nsheth/Projects/asahi/mesa-m1n1-build \
-  --prefix /home/nsheth/Projects/asahi/mesa-m1n1-install/usr/local \
+meson setup $MESA_BUILD \
+  --prefix $MESA_INSTALL/usr/local \
   -Dgallium-drivers=asahi \
   -Degl=enabled \
   -Dplatforms=[] \
@@ -252,17 +252,17 @@ meson setup /home/nsheth/Projects/asahi/mesa-m1n1-build \
   -Dbuild-tests=true \
   -Dtools=drm-shim
 
-ninja -C /home/nsheth/Projects/asahi/mesa-m1n1-build
+ninja -C $MESA_BUILD
 ```
 
 Useful host-only gates are:
 
 ```sh
-meson test -C /home/nsheth/Projects/asahi/mesa-m1n1-build \
+meson test -C $MESA_BUILD \
   agx_tests \
   --print-errorlogs
 
-/home/nsheth/Projects/asahi/mesa-m1n1-build/src/asahi/drm-shim/\
+$MESA_BUILD/src/asahi/drm-shim/\
 t8132_apple9_compute_runner --list
 ```
 
@@ -417,10 +417,10 @@ through glUniform. Its `blocks` mode tests separate std140 UBOs at API bindings
 frames with distinct transforms and colors; their output bytes match.
 
 The additional opaque preload/data artifact remains outside Mesa:
-`/home/nsheth/Projects/asahi/tmp/agx-apple9/render_uniform_launch.bin`
+`$WORKSPACE/agx-apple9/render_uniform_launch.bin`
 (SHA-256 `3840a61cb6cbaf17aae247766001a90663f493e2fa1e72791ca14c6e9d1ecafe`).
 Its source, captures, and reproduction tool are under
-`tmp/agx-re/experiments/EXP-M4-57-graphics-uniforms/` in the Asahi workspace.
+`agx-re/experiments/EXP-M4-57-graphics-uniforms/` in the Asahi workspace.
 It contains no Metal-generated API shader main.
 
 ### Vertex buffers, indices and depth (EXP-M4-58)
@@ -476,7 +476,7 @@ The runtime preload is `render_buffers_varyings32_launch.bin`: a complete opaque
 256-byte VS launcher from the authored larger-interface probe, followed by the
 existing 192-byte FS launcher. Earlier launchers remain historical artifacts.
 Linkage, shader keys, and per-draw coefficient/state tables are generated from
-the shader interface. See `tmp/apple9-exports/RESULTS.md` in the Asahi workspace
+the shader interface. See `results/apple9-exports/RESULTS.md` in the Asahi workspace
 for clean-room provenance, before/after failures, and hardware reports.
 
 ### Multiple graphics pipelines in one batch

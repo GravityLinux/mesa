@@ -469,7 +469,7 @@ it is not a universal promise of one execution per API draw.
 
 The complete optimization changes and numerical/code-generation evidence are
 recorded in the parent workspace's
-`linux-m4-integration/tools/gpu/asahi/codegen-quality-fixes/REPORT.md`.
+`linux/tools/gpu/asahi/codegen-quality-fixes/REPORT.md`.
 
 ## Normalized unpacking
 
@@ -485,7 +485,7 @@ the CPU division reference. Host checks cover tuple allocation, high registers,
 input-half selection, source retention and ordinary NIR reachability.
 
 Detailed hardware probes and the Tokyo comparison are recorded in the parent
-workspace's `linux-m4-integration/tools/gpu/asahi/m3-compiler-20260914/REPORT.md`.
+workspace's `linux/tools/gpu/asahi/m3-compiler-20260914/REPORT.md`.
 
 ## Subgroup scans and shared memory
 
