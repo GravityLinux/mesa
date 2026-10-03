@@ -6,6 +6,7 @@ libagx_shader_files = files(
   'copy.cl',
   'draws.cl',
   'geometry.cl',
+  'mesh.cl',
   'query.cl',
   'tessellation.cl',
   'tessellator.cl',

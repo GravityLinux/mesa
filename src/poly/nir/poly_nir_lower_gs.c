@@ -355,18 +355,41 @@ poly_load_per_vertex_input(nir_builder *b, nir_intrinsic_instr *intr,
                                    intr->def.bit_size, addr, .align_mul = 4);
 }
 
+/*
+ * gl_PrimitiveIDIn counts input primitives, except after tessellation, where
+ * it is the patch ID the tessellation evaluation shader saw. Every vertex of a
+ * tessellated primitive comes from one patch, so recover it from the first
+ * vertex exactly as poly_nir_lower_tes does for the evaluation shader that
+ * produced it: its tessellator index, then that index's patch. Later lowering
+ * uses load_primitive_id for the invocation's primitive index, so this runs
+ * before anything else creates one. The common passthrough GS represents
+ * gl_PrimitiveIDIn as a scalar shader input.
+ */
+static bool
+lower_primitive_id_in(nir_builder *b, nir_intrinsic_instr *intr, void *_)
+{
+   if (intr->intrinsic != nir_intrinsic_load_primitive_id &&
+       !(intr->intrinsic == nir_intrinsic_load_input &&
+         nir_intrinsic_io_semantics(intr).location == VARYING_SLOT_PRIMITIVE_ID))
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *tess = load_geometry_param(b, tess_params);
+   nir_push_if(b, nir_ine_imm(b, tess, 0));
+   nir_def *vertex = vertex_id_for_topology_class(
+      b, nir_imm_int(b, 0), b->shader->info.gs.input_primitive);
+   nir_def *patch =
+      poly_tes_patch_id(b, tess, poly_load_tes_index(b, tess, vertex));
+   nir_push_else(b, NULL);
+   nir_def *prim = nir_load_primitive_id(b);
+   nir_pop_if(b, NULL);
+   nir_def_replace(&intr->def, nir_if_phi(b, patch, prim));
+   return true;
+}
+
 static bool
 lower_gs_inputs(nir_builder *b, nir_intrinsic_instr *intr, void *_)
 {
-   /* The common passthrough GS represents gl_PrimitiveIDIn as a scalar
-    * shader input. Normalize it before cloning the compute/raster variants. */
-   if (intr->intrinsic == nir_intrinsic_load_input &&
-       nir_intrinsic_io_semantics(intr).location == VARYING_SLOT_PRIMITIVE_ID) {
-      b->cursor = nir_before_instr(&intr->instr);
-      nir_def_replace(&intr->def, nir_load_primitive_id(b));
-      return true;
-   }
-
    if (intr->intrinsic != nir_intrinsic_load_per_vertex_input)
       return false;
 
@@ -1259,6 +1282,9 @@ poly_nir_lower_gs(nir_shader *gs, nir_shader **gs_count, nir_shader **gs_copy,
    uint8_t component_counts[NUM_TOTAL_VARYING_SLOTS] = {0};
    nir_shader_intrinsics_pass(gs, collect_components, nir_metadata_all,
                               component_counts);
+
+   NIR_PASS(_, gs, nir_shader_intrinsics_pass, lower_primitive_id_in,
+            nir_metadata_none, NULL);
 
    /* If geometry shader instancing is used, lower it away before linking
     * anything. Otherwise, smash the invocation ID to zero.

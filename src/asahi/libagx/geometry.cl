@@ -101,6 +101,24 @@ libagx_unroll_restart(global struct poly_heap *heap, uint64_t index_buffer,
                        flatshade_first, mode, scratch);
 }
 
+/* Unroll a draw into a 32-bit index list for its decomposed primitive type,
+ * ordered for the given provoking vertex. Non-indexed draws (index size zero)
+ * read vertex IDs; the draw's first vertex becomes the index bias. */
+KERNEL(1024)
+libagx_unroll_geometry(global struct poly_heap *heap, uint64_t index_buffer,
+                       constant uint *in_draw, global uint32_t *out_draw,
+                       uint32_t restart_index, uint32_t index_buffer_size_el,
+                       uint32_t in_index_size_B, uint32_t flatshade_first,
+                       uint mode__11)
+{
+   enum mesa_prim mode = poly_uncompact_prim(mode__11);
+
+   POLY_DECL_UNROLL_RESTART_SCRATCH(scratch, 1024);
+   poly_unroll_geometry(out_draw, heap, in_draw, index_buffer,
+                        index_buffer_size_el, in_index_size_B, 4,
+                        restart_index, flatshade_first, false, mode, scratch);
+}
+
 KERNEL(1)
 libagx_gs_setup_indirect(
    uint64_t index_buffer, constant uint *draw,

@@ -165,12 +165,20 @@ libagx_image_texel_address(constant const struct agx_pbe_packed *ptr,
 {
    agx_unpack(NULL, ptr, PBE, d);
 
-   /* We do not allow atomics on linear 2D or linear 2D arrays, as there are no
-    * known use cases. So we're twiddled in this path, unless we're handling a
-    * 1D image which will be always linear, even if it uses a twiddled layout
-    * degrading to linear-equivalent 1x1 tiles. (1D uses this path, not the
-    * buffer path, for 1D arrays.)
+   /* Linear images use an explicit byte stride instead of Morton tiles.
+    * Multisampled storage views also have a linear descriptor, but retain
+    * the original tiled geometry in the software sideband below.
     */
+   if (!is_msaa && d.layout == AGX_LAYOUT_LINEAR) {
+      uint64_t offset_B = (uint64_t)coord.x * bytes_per_sample_B;
+      if (!is_1d)
+         offset_B += (uint64_t)coord.y * (d.stride + 4);
+      if (is_layered)
+         offset_B += (uint64_t)coord[is_1d ? 1 : 2] *
+                     (d.layer_stride_linear + 0x80);
+      return return_index ? offset_B / bytes_per_sample_B : d.buffer + offset_B;
+   }
+
    uint total_px;
    if (is_1d) {
       total_px = coord.x;

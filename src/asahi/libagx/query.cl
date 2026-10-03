@@ -137,6 +137,15 @@ libagx_write_u32s(constant struct libagx_imm_write *p)
    *(p[id].address) = p[id].value;
 }
 
+/* Counter increments, applied in order by one thread since several may name
+ * the same counter. */
+KERNEL(1)
+libagx_add_u32s(constant struct libagx_imm_write *p, uint32_t count)
+{
+   for (uint i = 0; i < count; ++i)
+      *(p[i].address) += p[i].value;
+}
+
 /*
  * We set the source as volatile since the caching situation around timestamps
  * is a bit unclear. It might not be necessary but - absent hardware/firmware

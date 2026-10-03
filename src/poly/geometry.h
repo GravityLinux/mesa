@@ -255,6 +255,10 @@ struct poly_geometry_params {
    /* Address of the primitives generated counters */
    DEVICE(uint) prims_generated_counter[POLY_MAX_VERTEX_STREAMS];
    DEVICE(uint) xfb_prims_generated_counter[POLY_MAX_VERTEX_STREAMS];
+
+   /* Optional counters of primitives generated queries, incremented with
+    * prims_generated_counter when non-null. */
+   DEVICE(uint) pg_query_counter[POLY_MAX_VERTEX_STREAMS];
    DEVICE(uint) xfb_overflow[POLY_MAX_VERTEX_STREAMS];
    DEVICE(uint) xfb_any_overflow;
 
@@ -274,6 +278,11 @@ struct poly_geometry_params {
 
    /* Location-indexed mask of flat outputs, used for lowering GL edge flags. */
    uint64_t flat_outputs;
+
+   /* Tessellation parameters (struct poly_tess_params) when the geometry
+    * shader's input primitives come from the tessellator, otherwise zero.
+    */
+   uint64_t tess_params;
 
    uint32_t xfb_size[POLY_MAX_SO_BUFFERS];
 
@@ -315,8 +324,8 @@ struct poly_geometry_params {
     */
    uint32_t input_topology;
 } PACKED;
-static_assert(sizeof(struct poly_geometry_params) == 79 * 4,
-              "struct poly_geometry_params must be 79 words");
+static_assert(sizeof(struct poly_geometry_params) == 89 * 4,
+              "struct poly_geometry_params must be 89 words");
 
 static inline void
 poly_geometry_params_init(struct poly_geometry_params *p,

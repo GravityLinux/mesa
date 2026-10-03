@@ -68,6 +68,117 @@ libagx_draw_without_adj(global VkDrawIndirectCommand *out,
    }
 }
 
+/*
+ * Map the index of a vertex in a primitive list without adjacency to its
+ * index in the adjacency topology, as in the VS prolog lowering.
+ */
+static uint
+libagx_map_from_adj(uint id, enum mesa_prim prim)
+{
+   if (prim == MESA_PRIM_LINES_ADJACENCY) {
+      /* (1, 2), (5, 6), (9, 10), ... */
+      return ((id & ~1) * 2) + (id & 1) + 1;
+   } else if (prim == MESA_PRIM_LINE_STRIP_ADJACENCY) {
+      /* (1, 2), (2, 3), (3, 4), ... */
+      return (id / 2) + (id & 1) + 1;
+   } else if (prim == MESA_PRIM_TRIANGLE_STRIP_ADJACENCY) {
+      /* (0, 2, 4), (2, 6, 4), (4, 6, 8), (6, 10, 8), ... */
+      uint tri = id / 3;
+      uint vtx = id % 3;
+      if ((tri % 2) == 1 && vtx != 0)
+         vtx = 3 - vtx;
+      return 2 * (tri + vtx);
+   } else {
+      /* (0, 2, 4), (6, 8, 10), ... */
+      return id * 2;
+   }
+}
+
+/*
+ * Draw adjacency primitives without a geometry shader: only a geometry
+ * shader observes the adjacent vertices. Write an index buffer of the
+ * remaining vertices into the heap and an indexed indirect draw of it,
+ * preserving the vertex offset and instances.
+ */
+KERNEL(1)
+libagx_unroll_adjacency(global uint32_t *out_draw, global struct poly_heap *heap,
+                        constant uint32_t *in_draw, uint64_t index_buffer,
+                        uint32_t index_buffer_range_el, uint32_t index_size_B,
+                        uint32_t prim)
+{
+   bool indexed = index_size_B != 0;
+   uint count = libagx_remap_adj_count(in_draw[0], prim);
+   uint offs_B = poly_heap_alloc_offs(heap, count * 4);
+   global uint32_t *out = (global uint32_t *)(heap->base + offs_B);
+
+   uint64_t in_indices = 0;
+   uint in_range_el = 0;
+   if (indexed) {
+      in_indices = poly_index_buffer(index_buffer, index_buffer_range_el,
+                                     in_draw[2], index_size_B);
+      in_range_el = poly_index_buffer_range_el(index_buffer_range_el,
+                                               in_draw[2]);
+   }
+
+   for (uint i = 0; i < count; ++i) {
+      uint raw = libagx_map_from_adj(i, prim);
+      out[i] = indexed ? poly_load_index(in_indices, in_range_el, raw,
+                                         index_size_B)
+                       : in_draw[2] + raw;
+   }
+
+   out_draw[0] = count;
+   out_draw[1] = in_draw[1];
+   out_draw[2] = offs_B / 4;
+   out_draw[3] = indexed ? in_draw[3] : 0;
+   out_draw[4] = indexed ? in_draw[4] : in_draw[3];
+}
+
+/* Apple9 bounds the hardware index fetch in whole words. Copy the indices of a
+ * draw whose binding ends inside a word, reading zero past the binding.
+ */
+KERNEL(1)
+libagx_robust_index_apple9(global uint32_t *out_draw,
+                           global struct poly_heap *heap,
+                           constant uint32_t *in_draw, uint64_t index_buffer,
+                           uint32_t index_buffer_range_el,
+                           uint32_t index_size_B)
+{
+   uint first = in_draw[2];
+   uint range_el = poly_index_buffer_range_el(index_buffer_range_el, first);
+   uint64_t in = poly_index_buffer(index_buffer, index_buffer_range_el, first,
+                                   index_size_B);
+
+   /* Zeroes past a few primitives only repeat the same degenerate one. */
+   uint count = min(in_draw[0], range_el + 32);
+   uint offs_B = poly_heap_alloc_offs(heap, (count * index_size_B + 3) & ~3);
+   uintptr_t out = (uintptr_t)heap->base + offs_B;
+
+   for (uint i = 0; i < count; ++i) {
+      poly_store_index(out, index_size_B, i,
+                       poly_load_index(in, range_el, i, index_size_B));
+   }
+
+   out_draw[0] = count;
+   out_draw[1] = in_draw[1];
+   out_draw[2] = offs_B / index_size_B;
+   out_draw[3] = in_draw[3];
+   out_draw[4] = in_draw[4];
+}
+
+/* Conditional rendering: copy indirect draw or dispatch arguments, or zero
+ * them when the predicate fails, so the command does no work.
+ */
+KERNEL(1)
+libagx_predicate_indirect_apple9(global uint32_t *out, constant uint32_t *in,
+                                 constant uint32_t *predicate,
+                                 uint32_t inverted, uint32_t words)
+{
+   bool pass = (*predicate != 0) != (inverted != 0);
+   for (uint i = 0; i < words; ++i)
+      out[i] = pass ? in[i] : 0;
+}
+
 /* Precondition: len must be < the group size */
 static void
 libagx_memcpy_small(global uchar *dst, constant uchar *src, uint len, uint tid)

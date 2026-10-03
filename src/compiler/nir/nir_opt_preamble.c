@@ -250,6 +250,7 @@ can_move_intrinsic(nir_intrinsic_instr *instr, opt_preamble_ctx *ctx)
    case nir_intrinsic_load_ssbo_intel:
    case nir_intrinsic_load_ssbo_ir3:
    case nir_intrinsic_load_global_offset:
+   case nir_intrinsic_load_global_2x32:
    case nir_intrinsic_load_agx:
       return (nir_intrinsic_access(instr) & ACCESS_CAN_REORDER) &&
              can_move_srcs(&instr->instr, ctx);
