@@ -151,9 +151,34 @@ math_filter(const nir_instr *instr, UNUSED const void *data)
    if (instr->type != nir_instr_type_alu)
       return false;
    const nir_alu_instr *alu = nir_instr_as_alu(instr);
+   if (alu->op == nir_op_f2u8 || alu->op == nir_op_f2u16 ||
+       alu->op == nir_op_f2i8 || alu->op == nir_op_f2i16)
+      return true;
+   if (alu->op == nir_op_b2f16 || alu->op == nir_op_f2f16_rtz ||
+       (alu->op == nir_op_ldexp && alu->def.bit_size == 16))
+      return true;
+   if ((alu->op == nir_op_fsin || alu->op == nir_op_fcos) &&
+       alu->def.bit_size == 16)
+      return true;
    return alu->def.bit_size == 32 &&
           (alu->op == nir_op_iabs || alu->op == nir_op_fsin || alu->op == nir_op_fcos ||
            alu->op == nir_op_fcanonicalize);
+}
+
+/* Round to nearest, then step one ulp toward zero if that rounded away. */
+static nir_def *
+lower_f2f16_rtz(nir_builder *b, nir_def *x)
+{
+   /* Keep algebraic optimization from folding the round trip. */
+   uint32_t ctrl = b->fp_math_ctrl;
+   b->fp_math_ctrl = nir_fp_no_fast_math;
+   x = nir_f2f32(b, x);
+   nir_def *h = nir_f2f16(b, x);
+   nir_def *away = nir_flt(b, nir_fabs(b, x), nir_fabs(b, nir_f2f32(b, h)));
+   nir_def *bits = nir_u2u16(b, nir_iadd_imm(b, nir_u2u32(b, h), -1));
+   nir_def *result = nir_bcsel(b, away, bits, h);
+   b->fp_math_ctrl = ctrl;
+   return result;
 }
 
 static nir_def *
@@ -164,7 +189,32 @@ lower_math(nir_builder *b, nir_instr *instr, UNUSED void *data)
    nir_def *components[NIR_MAX_VEC_COMPONENTS];
    for (unsigned i = 0; i < alu->def.num_components; ++i) {
       nir_def *x = nir_channel(b, source, i);
-      if (alu->op == nir_op_iabs) {
+      if (alu->op == nir_op_f2u8 || alu->op == nir_op_f2u16) {
+         /* Narrow integer results come from the FP32 conversion. */
+         components[i] = nir_u2uN(b, nir_f2u32(b, nir_f2fN(b, x, 32)),
+                                  alu->def.bit_size);
+      } else if (alu->op == nir_op_f2i8 || alu->op == nir_op_f2i16) {
+         components[i] = nir_i2iN(b, nir_f2i32(b, nir_f2fN(b, x, 32)),
+                                  alu->def.bit_size);
+      } else if (alu->op == nir_op_b2f16) {
+         components[i] = nir_bcsel(b, x, nir_imm_float16(b, 1.0f),
+                                   nir_imm_float16(b, 0.0f));
+      } else if (alu->op == nir_op_ldexp) {
+         /* The generic binary16 expansion builds narrow exponent fields. */
+         nir_def *exp = nir_channel(b, nir_mov_alu(b, alu->src[1],
+                                                   alu->def.num_components), i);
+         components[i] = nir_f2f16(b, nir_ldexp(b, nir_f2f32(b, x), exp));
+      } else if (alu->op == nir_op_f2f16_rtz) {
+         components[i] = lower_f2f16_rtz(b, x);
+      } else if (alu->def.bit_size == 16) {
+         /* Binary16 sine and cosine use the FP32 reduction. */
+         nir_def *wide = nir_f2f32(b, x);
+         wide = b->shader->info.stage == MESA_SHADER_VERTEX ||
+                      b->shader->info.stage == MESA_SHADER_FRAGMENT
+                   ? lower_graphics_sincos(b, wide, alu->op == nir_op_fcos)
+                   : lower_sincos(b, wide, alu->op == nir_op_fcos);
+         components[i] = nir_f2f16(b, wide);
+      } else if (alu->op == nir_op_iabs) {
          components[i] = nir_imax(b, x, nir_ineg(b, x));
       } else if (alu->op == nir_op_fcanonicalize) {
          components[i] = nir_fmul_imm(b, x, 1.0f);
@@ -185,7 +235,7 @@ agx_nir_lower_apple9_math(nir_shader *shader)
       nir_shader_lower_instructions(shader, math_filter, lower_math, NULL);
    /* Apple9 has ordinary multiply/add/FMA, but no modeled interpolation
     * instruction. Use NIR's precision-aware lowering for FP32 mix. */
-   progress |= nir_lower_flrp(shader, 32, false);
+   progress |= nir_lower_flrp(shader, 16 | 32, false);
    if (progress) {
       nir_opt_constant_folding(shader);
       nir_opt_copy_prop(shader);

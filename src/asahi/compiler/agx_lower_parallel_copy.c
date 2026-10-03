@@ -139,6 +139,7 @@ split_32bit_copy(struct copy_ctx *ctx, struct agx_copy *entry)
    assert(agx_size_align_16(entry->src.size) == 2);
    struct agx_copy *new_entry = &ctx->entries[ctx->entry_count++];
 
+   memset(new_entry, 0, sizeof(*new_entry));
    new_entry->dest = entry->dest + 1;
    new_entry->dest_mem = entry->dest_mem;
    new_entry->src = entry->src;
@@ -192,12 +193,26 @@ agx_emit_parallel_copies_for_class(agx_builder *b, struct agx_copy *copies,
    copies = copies2;
    num_copies = num_copies2;
 
-   /* Set up the bookkeeping */
-   struct copy_ctx _ctx = {.entry_count = num_copies};
+   /* Set up the bookkeeping. The register tables cover the whole modeled
+    * register file, so clear only the slots of the copies' registers
+    * (including the register after each, used when pairing 16-bit halves)
+    * instead of the full tables for every parallel copy.
+    */
+   struct copy_ctx _ctx;
    struct copy_ctx *ctx = &_ctx;
+   ctx->entry_count = num_copies;
 
-   memset(ctx->physreg_dest, 0, sizeof(ctx->physreg_dest));
-   memset(ctx->physreg_use_count, 0, sizeof(ctx->physreg_use_count));
+   for (unsigned i = 0; i < ctx->entry_count; i++) {
+      struct agx_copy *entry = &copies[i];
+      for (unsigned j = 0; j < 2; j++) {
+         ctx->physreg_dest[entry->dest + j] = NULL;
+         ctx->physreg_use_count[entry->dest + j] = 0;
+         if (is_real(entry)) {
+            ctx->physreg_dest[entry->src.value + j] = NULL;
+            ctx->physreg_use_count[entry->src.value + j] = 0;
+         }
+      }
+   }
 
    for (unsigned i = 0; i < ctx->entry_count; i++) {
       struct agx_copy *entry = &copies[i];

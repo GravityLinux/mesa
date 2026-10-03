@@ -26,8 +26,9 @@ extern "C" {
 /* u0-u255 inclusive, as pairs of 16-bits */
 #define AGX_NUM_UNIFORMS (512)
 
-/* Semi-arbitrary limit for spill slot allocation */
-#define AGX_NUM_MODELED_REGS_LOG2 (11)
+/* Model up to 32 KiB of spills, in 16-bit slots. This also covers the full
+ * Apple9 private frame rather than imposing a smaller allocator-only limit. */
+#define AGX_NUM_MODELED_REGS_LOG2 (14)
 #define AGX_NUM_MODELED_REGS      (1 << AGX_NUM_MODELED_REGS_LOG2)
 
 /* Limit on number of sources for non-phi instructions */
@@ -93,7 +94,7 @@ typedef struct {
     */
    unsigned reg : AGX_NUM_MODELED_REGS_LOG2;
    bool has_reg     : 1;
-   unsigned padding : 6;
+   unsigned padding : 17 - AGX_NUM_MODELED_REGS_LOG2;
 } agx_index;
 static_assert(sizeof(agx_index) == 8, "packed");
 
@@ -349,6 +350,10 @@ struct agx_block;
 struct agx_reg_constraint {
    uint16_t min, max, align;
    bool clobber;
+
+   /* Destination only: the instruction reads its sources before writing, so
+    * the destination may occupy registers of sources that die here. */
+   bool reuse_killed;
 };
 
 /* Keep synced with hash_instr */

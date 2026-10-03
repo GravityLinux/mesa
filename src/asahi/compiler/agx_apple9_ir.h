@@ -151,11 +151,14 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_DEVICE_FENCE,
    AGX_APPLE9_VIR_HALT,
    AGX_APPLE9_VIR_SHARED_LOAD,
+   AGX_APPLE9_VIR_SHARED_ATOMIC,
    AGX_APPLE9_VIR_SHARED_STORE,
    AGX_APPLE9_VIR_PRIVATE_LOAD,
    AGX_APPLE9_VIR_PRIVATE_STORE,
    AGX_APPLE9_VIR_SPILL_STORE,
    AGX_APPLE9_VIR_SPILL_LOAD,
+   /* Standalone scoreboard wait; immediate is the slot mask. */
+   AGX_APPLE9_VIR_WAIT,
 };
 
 enum agx_apple9_unpack_norm_mode {
@@ -325,13 +328,29 @@ struct agx_apple9_vir_instr {
    uint8_t tile_sample_mask;
    enum agx_apple9_atomic_op atomic_op;
    bool atomic_discard;
+   /* Preserve required memory reads even when their SSA results are dead. */
+   bool memory_volatile;
+   /* The access uses a global address rather than a binding, through a GPR
+    * pair or a uniform pair, and may alias any other global access. */
+   bool memory_global;
    uint8_t texture_index, sampler_index;
    uint32_t src[AGX_APPLE9_MAX_VIR_SRCS];
    uint8_t texture_dimension;
    bool texture_shadow;
+   /* Gradient samples clamp the selected LOD from below by the signed Q6
+    * value in bits 16..27 of coordinate word 3. */
+   bool texture_min_lod;
    bool texture_fetch;
    bool texture_lod_query;
    bool texture_multisampled;
+   /* Gather one channel (texture_gather_component) of the 2x2 footprint at
+    * the view's base level, returned as a dense RGBA tuple. */
+   bool texture_gather;
+   /* Register-supplied table indices, appended as the last sources in this
+    * order, replace the immediate texture and sampler indices. */
+   bool texture_bindless;
+   bool sampler_bindless;
+   uint8_t texture_gather_component;
    /* Logical RGBA channels returned in ascending channel order, packed at
     * dest. Zero retains the default RGBA selection for VIR callers. */
    uint8_t texture_result_mask;
@@ -384,6 +403,9 @@ struct agx_apple9_vir_instr {
 
    /* Bit s is set when src[s] has another consumer after this instruction. */
    uint16_t live_after_mask;
+   /* Sources whose registers other live values share (a reused tuple's
+    * components); allocation never releases them at this use. */
+   uint16_t retain_mask;
 
    /*
     * The one pending-result slot consumed by this instruction, or NONE.
@@ -534,6 +556,8 @@ uint32_t agx_apple9_vir_input(struct agx_apple9_vir_program *program,
                               unsigned phys);
 bool agx_apple9_vir_set_load_address(struct agx_apple9_vir_program *program,
                                      uint32_t value, uint32_t address);
+uint32_t agx_apple9_vir_emit_coefficients(struct agx_apple9_vir_program *program,
+                                         unsigned coefficient);
 uint32_t agx_apple9_vir_emit_iter_flat(struct agx_apple9_vir_program *program,
                                        unsigned coefficient);
 
@@ -552,11 +576,12 @@ uint32_t agx_apple9_vir_emit_mul_wide(struct agx_apple9_vir_program *program,
 uint32_t agx_apple9_vir_emit_device_load_vector(
    struct agx_apple9_vir_program *program, unsigned binding, uint32_t index,
    unsigned components, const struct agx_apple9_device_load_contract *contract);
-/* Publish an allocated FP32 coordinate pair and sample one bound 2D texture.
- * Texture coordinate selectors address the first 32 publications. */
+/* Publish two words to an even-aligned publication pair. Publications are
+ * normally lane-major. A split pair instead publishes one word (src[0] ==
+ * src[1]), with lanes 0-15 in the first publication and 16-31 in the second. */
 uint32_t
 agx_apple9_vir_emit_publication_pair(struct agx_apple9_vir_program *program,
-                                     const uint32_t src[2]);
+                                     const uint32_t src[2], bool split);
 
 bool agx_apple9_vir_emit_block_image_store(
    struct agx_apple9_vir_program *program, const uint32_t src[4],
@@ -584,12 +609,13 @@ uint32_t agx_apple9_vir_emit_texture_volume(
    bool bias, bool shadow);
 
 /* Coordinates followed by derivatives interleaved by texture axis. Extended
- * forms publish four coordinate words, then four (array/shadow) or six (3D)
- * derivatives. Array layers are unsigned integers in coordinate word 3. */
+ * forms publish four coordinate words, then four (array/shadow/min LOD) or
+ * six (3D) derivatives. Array layers are unsigned integers in the low half
+ * of coordinate word 3, and a minimum LOD occupies its high half. */
 uint32_t agx_apple9_vir_emit_texture_grad(struct agx_apple9_vir_program *program,
                                           const uint32_t *src, unsigned texture,
                                           unsigned sampler, unsigned dimension,
-                                          bool shadow);
+                                          bool shadow, bool min_lod);
 
 uint32_t agx_apple9_vir_emit_collect(struct agx_apple9_vir_program *program,
                                      const uint32_t *src, unsigned components);

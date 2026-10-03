@@ -16,6 +16,8 @@
 static inline bool
 agx_apple9_encode_literal32(uint8_t out[8], unsigned dst, uint32_t value)
 {
+   /* Six destination bits. Setting bit 60 as a seventh hung the GPU, and
+    * native Metal never materializes a long immediate above r63. */
    if (dst >= 64)
       return false;
    const uint8_t bytes[8] = {

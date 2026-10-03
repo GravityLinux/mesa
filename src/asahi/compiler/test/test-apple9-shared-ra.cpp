@@ -309,8 +309,9 @@ TEST(Apple9SharedRa, ShiftRetainsLiveInputWithoutCopies)
       const char *reason = nullptr;
       ASSERT_TRUE(agx_apple9_allocate_shared(&p, nir.shader, &reason)) << reason;
       EXPECT_EQ(p.scratch_size, 0u);
-      EXPECT_TRUE(p.reserved_gprs[1]);
-      EXPECT_FALSE(p.reserved_gprs[2]);
+      /* Without spills no register is reserved. */
+      for (unsigned r = 0; r < 5; ++r)
+         EXPECT_FALSE(p.reserved_gprs[r]);
       uint32_t regs[96] = {}, output = 0;
       unsigned copies = 0;
       for (unsigned i = 0; i < p.instruction_count; ++i) {
@@ -480,7 +481,9 @@ check_loop_register_pressure()
          auto I = p.instructions[i];
          ASSERT_EQ(agx_apple9_instr_block(I), block);
          for (auto it = pending.begin(); it != pending.end();) {
-            if (it->slot == I->scoreboard_slot) {
+            if (it->slot == I->scoreboard_slot ||
+                (I->op == AGX_APPLE9_VIR_WAIT &&
+                 (I->immediate & BITFIELD_BIT(it->slot - 1)))) {
                (it->memory ? memory : regs)[it->index] = it->value;
                it = pending.erase(it);
             } else
@@ -505,6 +508,9 @@ check_loop_register_pressure()
          case AGX_APPLE9_VIR_IOR:
             regs[I->dest] = a | b;
             break;
+         case AGX_APPLE9_VIR_IXOR:
+            regs[I->dest] = a ^ b;
+            break;
          case AGX_APPLE9_VIR_SPILL_LOAD:
             ASSERT_LT(I->immediate, 1024u);
             pending.push_back({false, I->dest, memory[I->immediate],
@@ -520,6 +526,8 @@ check_loop_register_pressure()
             break;
          case AGX_APPLE9_VIR_DEVICE_STORE:
             result = a;
+            break;
+         case AGX_APPLE9_VIR_WAIT:
             break;
          default:
             FAIL() << "Unexpected physical opcode " << I->op;

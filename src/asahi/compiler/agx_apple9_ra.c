@@ -83,10 +83,13 @@ apple9_schedule_resources(const agx_instr *I, uint32_t *reads, uint32_t *writes)
    case AGX_APPLE9_VIR_PRIVATE_LOAD:
    case AGX_APPLE9_VIR_SHARED_LOAD:
       *reads |= APPLE9_SCHED_MEMORY;
+      if (ins->memory_volatile)
+         *writes |= APPLE9_SCHED_MEMORY;
       return;
    case AGX_APPLE9_VIR_DEVICE_STORE:
    case AGX_APPLE9_VIR_PRIVATE_STORE:
    case AGX_APPLE9_VIR_SHARED_STORE:
+   case AGX_APPLE9_VIR_SHARED_ATOMIC:
    case AGX_APPLE9_VIR_DEVICE_ATOMIC:
    case AGX_APPLE9_VIR_DEVICE_ATOMIC_RESULT:
    case AGX_APPLE9_VIR_BLOCK_IMAGE_STORE:
@@ -166,7 +169,8 @@ static unsigned
 apple9_source_width(const struct agx_apple9_vir_instr *ins, unsigned source)
 {
    if ((ins->op == AGX_APPLE9_VIR_DEVICE_STORE ||
-        ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC) && source == 0)
+        ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC ||
+        ins->op == AGX_APPLE9_VIR_SHARED_ATOMIC) && source == 0)
       return MAX2(ins->memory_components, 1);
    if ((ins->encoding == AGX_APPLE9_ENC_DEVICE_STORE_INDIRECT ||
         ins->encoding == AGX_APPLE9_ENC_DEVICE_ATOMIC_INDIRECT) &&
@@ -177,11 +181,39 @@ apple9_source_width(const struct agx_apple9_vir_instr *ins, unsigned source)
    return 1;
 }
 
+/* Texture table indices are named by a four-bit half-register field,
+ * reaching r0-r7; sampler indices by a three-bit field, reaching r0-r3. */
+static const struct agx_apple9_operand_constraint apple9_table_index[2] = {
+   {
+      .role = AGX_APPLE9_OPERAND_SRC4,
+      .files = AGX_APPLE9_FILE_GPR,
+      .widths = AGX_APPLE9_WIDTH_32,
+      .min_index = 0,
+      .max_index = 7,
+      .alignment_halves = 2,
+      .flags = AGX_APPLE9_OPERAND_ALLOCATABLE,
+   },
+   {
+      .role = AGX_APPLE9_OPERAND_SRC5,
+      .files = AGX_APPLE9_FILE_GPR,
+      .widths = AGX_APPLE9_WIDTH_32,
+      .min_index = 0,
+      .max_index = 3,
+      .alignment_halves = 2,
+      .flags = AGX_APPLE9_OPERAND_ALLOCATABLE,
+   },
+};
+
 static const struct agx_apple9_operand_constraint *
 apple9_source_constraint(const struct agx_apple9_vir_instr *ins, unsigned source)
 {
+   if (ins->op == AGX_APPLE9_VIR_TEXTURE_SAMPLE &&
+       source + ins->texture_bindless + ins->sampler_bindless >= ins->nr_srcs)
+      return &apple9_table_index[ins->sampler_bindless &&
+                                 source + 1 == ins->nr_srcs];
    if (ins->op == AGX_APPLE9_VIR_DEVICE_STORE ||
-       ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC) {
+       ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC ||
+       ins->op == AGX_APPLE9_VIR_SHARED_ATOMIC) {
       if ((ins->encoding == AGX_APPLE9_ENC_DEVICE_STORE_INDIRECT ||
            ins->encoding == AGX_APPLE9_ENC_DEVICE_ATOMIC_INDIRECT) &&
           source > ins->memory_components)
@@ -266,6 +298,9 @@ apple9_shared_block(struct apple9_shared_ra *ra, struct agx_apple9_block *block)
    return block ? ra->blocks[block->index] : NULL;
 }
 
+static bool apple9_async(const struct agx_apple9_vir_instr *ins);
+static bool apple9_reads_sources_at_issue(const struct agx_apple9_vir_instr *ins);
+
 static bool
 apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
                        const char **reason)
@@ -279,10 +314,12 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
    ra->key.has_scratch = true;
    ctx->ra_target = (struct agx_ra_target){
       .max_registers = AGX_APPLE9_HALF_REGISTER_COUNT,
-      .reserved_registers = 4,
-      .spill_reserved_registers = 8,
+      /* No permanent reservation: spilling reserves r0..r4 for its copy,
+       * index and memory-swap temporaries. */
+      .reserved_registers = 0,
+      .spill_reserved_registers = 10,
       .spill_copy_register = 2,
-      .spill_swap_registers = {4, 6},
+      .spill_swap_registers = {6, 8},
       .late_kill_sources = true,
       .preserve_source_kills = true,
       .defer_spill_lowering = true,
@@ -355,6 +392,33 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
       }
    }
 
+   /* Blocks after infinite loops are unreachable yet still feed their
+    * successors. Drop those edges, as the common compiler deletes such blocks:
+    * RA requires live-in values to be live-out of every predecessor.
+    */
+   bool pruned;
+   do {
+      pruned = false;
+      agx_foreach_block(ctx, block) {
+         if (block == agx_start_block(ctx) || agx_num_predecessors(block))
+            continue;
+         for (unsigned s = 0; s < ARRAY_SIZE(block->successors); ++s) {
+            agx_block *succ = block->successors[s];
+            if (!succ)
+               continue;
+            struct util_dynarray *preds = &succ->predecessors;
+            unsigned index = agx_predecessor_index(succ, block);
+            unsigned remaining = agx_num_predecessors(succ) - (index + 1);
+            memmove(util_dynarray_element(preds, agx_block *, index),
+                    util_dynarray_element(preds, agx_block *, index + 1),
+                    remaining * sizeof(agx_block *));
+            preds->size -= sizeof(agx_block *);
+            block->successors[s] = NULL;
+            pruned = true;
+         }
+      }
+   } while (pruned);
+
    /* Declare phis before selecting instructions, since incoming backedges
     * can refer to values whose definitions occur later in source order. */
    for (unsigned i = 0; i < p->instruction_count; ++i) {
@@ -393,7 +457,11 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
             *reason = "Apple9 phi edge has no shared destination";
             return false;
          }
-         phi->src[agx_predecessor_index(succ, block)] = ra->values[ins->src[0]];
+         bool edge = false;
+         agx_foreach_predecessor(succ, pred)
+            edge |= *pred == block;
+         if (edge)
+            phi->src[agx_predecessor_index(succ, block)] = ra->values[ins->src[0]];
          continue;
       }
       if (ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC_RESULT ||
@@ -420,8 +488,18 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
          if (width == 1) {
             sources[nr_srcs] = ra->values[ins->src[s]];
          } else {
+            /* A destroyed operand needs a private tuple. A load's base pair
+             * may be a longer tuple's leading components, such as a loaded
+             * descriptor's address; its split components share those
+             * registers and may outlive the tuple, so the load retains them
+             * (EXP-M4-63 validates retained pointer pairs). */
+            const struct agx_apple9_operand_constraint *operand =
+               apple9_source_constraint(ins, s);
+            const bool load = ins->encoding == AGX_APPLE9_ENC_DEVICE_LOAD_INDIRECT;
             agx_index vector = ra->vectors[ins->src[s]];
-            bool tuple = agx_channels(vector) == width;
+            bool tuple = !(operand && (operand->flags & AGX_APPLE9_OPERAND_CLOBBER)) &&
+                         (load ? agx_channels(vector) >= width
+                               : agx_channels(vector) == width);
             for (unsigned c = 1; c < width; ++c)
                tuple &= ins->src[s + c] == ins->src[s] + c;
             if (!tuple) {
@@ -429,6 +507,8 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
                agx_instr *collect = agx_collect_to(&b, vector, width);
                for (unsigned c = 0; c < width; ++c)
                   collect->src[c] = ra->values[ins->src[s + c]];
+            } else if (load) {
+               ins->retain_mask |= BITFIELD_RANGE(s, width);
             }
             sources[nr_srcs] = vector;
          }
@@ -436,7 +516,9 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
          s += width;
       }
       bool pure = components && !pub && !ins->publication_handoff &&
-                  ins->op != AGX_APPLE9_VIR_DEVICE_ATOMIC;
+                  !ins->memory_volatile &&
+                  ins->op != AGX_APPLE9_VIR_DEVICE_ATOMIC &&
+                  ins->op != AGX_APPLE9_VIR_SHARED_ATOMIC;
       agx_instr *common =
          agx_alloc_instr(&b,
                          ins->op == AGX_APPLE9_VIR_COLLECT ? AGX_OPCODE_COLLECT
@@ -459,6 +541,19 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
                                             AGX_APPLE9_OPERAND_SRC0)
                   : agx_apple9_find_operand(ins->encoding,
                                             AGX_APPLE9_OPERAND_DEST));
+         /* A synchronous instruction reads its sources before publishing its
+          * result, also when it releases them, and a memory load reads them
+          * at issue, so a scalar result may be written over a source that
+          * dies here. */
+         if (common->nr_dests)
+            common->reg_constraints[0].reuse_killed =
+               components == 1 &&
+               (!apple9_async(ins) ||
+                (apple9_reads_sources_at_issue(ins) &&
+                 ins->op != AGX_APPLE9_VIR_DEVICE_ATOMIC)) &&
+               common->op != AGX_OPCODE_APPLE9_CF &&
+               ins->op != AGX_APPLE9_VIR_DEVICE_ATOMIC &&
+               !agx_apple9_encoding_info(ins->encoding)->split_result;
          for (unsigned s = 0; s < nr_srcs; ++s) {
             unsigned source = first_source[s];
             struct agx_reg_constraint c =
@@ -481,9 +576,9 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
 }
 
 /* Canonical physical operands occupy separate GPR and publication ranges. */
+#define SPILL_INDEX_REG 2
 #define PUB_BASE  AGX_APPLE9_GPR_COUNT
 #define COPY_REG  1
-#define WAIT_REG  1
 #define SPILL_TAG 6
 
 static bool
@@ -535,18 +630,32 @@ apple9_physical_copy(struct agx_apple9_vir_program *out, unsigned dst,
 }
 
 static bool
+apple9_physical_xor(struct agx_apple9_vir_program *out, unsigned dst,
+                    unsigned a, unsigned b)
+{
+   struct agx_apple9_vir_instr ins = apple9_physical_instruction(
+      AGX_APPLE9_VIR_IXOR, AGX_APPLE9_ENC_LOGIC_EXTENDED, dst);
+   ins.src[0] = a;
+   ins.src[1] = b;
+   ins.nr_srcs = 2;
+   ins.live_after_mask = 3;
+   return apple9_emit_physical(out, &ins);
+}
+
+static bool
 apple9_physical_immediate(struct agx_apple9_vir_program *out, unsigned dst,
                           uint32_t value)
 {
    /* Rematerialization and PHI copies happen after constrained allocation.
-    * The immediate form only has six destination bits; use the reserved
-    * parallel-copy temporary when the final destination is in the high bank.
-    */
-   if (dst >= 64)
+    * The long immediate form has six destination bits; a constant for a
+    * higher register goes through the copy register, reserved only for
+    * allocations that need it (apple9_needs_copy_register). */
+   if (dst >= 64) {
+      assert(out->reserved_gprs[COPY_REG]);
       return apple9_physical_immediate(out, COPY_REG, value) &&
              apple9_physical_copy(out, dst, COPY_REG,
                                   AGX_APPLE9_SCOREBOARD_SLOT_NONE);
-
+   }
    struct agx_apple9_vir_instr ins = apple9_physical_instruction(
       AGX_APPLE9_VIR_IMM,
       dst < 16 && value < 0x80 ? AGX_APPLE9_ENC_MOV_IMM_COMPACT
@@ -555,24 +664,73 @@ apple9_physical_immediate(struct agx_apple9_vir_program *out, unsigned dst,
    return apple9_emit_physical(out, &ins);
 }
 
+/* Spill slots start frame_base words into the invocation frame. */
 static bool
 apple9_physical_move(struct agx_apple9_vir_program *out, agx_index dst,
-                     agx_index src)
+                     agx_index src, unsigned frame_base)
 {
    assert(dst.type == AGX_INDEX_REGISTER && dst.size == AGX_SIZE_32);
    if (src.type == AGX_INDEX_IMMEDIATE)
       return apple9_physical_immediate(out, dst.value / 2, src.value);
    assert(src.type == AGX_INDEX_REGISTER && src.size == AGX_SIZE_32);
+   assert(agx_channels(dst) == agx_channels(src));
+   if ((dst.memory || src.memory) && agx_channels(dst) > 1) {
+      /* The shared spiller moves whole tuples. SAVE/FILL transfer one word,
+       * so lower every component of the allocated memory/register range. */
+      unsigned channels = agx_channels(dst);
+      dst.channels_m1 = src.channels_m1 = 0;
+      for (unsigned c = 0; c < channels; ++c) {
+         if (!apple9_physical_move(out, dst, src, frame_base))
+            return false;
+         dst.value += 2;
+         src.value += 2;
+      }
+      return true;
+   }
    if (!dst.memory && !src.memory)
       return apple9_physical_copy(out, dst.value / 2, src.value / 2,
                                   AGX_APPLE9_SCOREBOARD_SLOT_NONE);
    assert(!dst.memory || !src.memory);
+   const unsigned word = frame_base + (src.memory ? src : dst).value / 2;
+   if (src.memory && word >= AGX_APPLE9_FILL_WORD_COUNT) {
+      /* The compact FILL encoding aliases offsets above 4 KiB. Indexed
+       * private loads cover the full frame but only address low-bank GPRs.
+       * Use the reserved copy register for both the zero index and result,
+       * then move the completed word to its allocated destination. */
+      struct agx_apple9_vir_instr load = apple9_physical_instruction(
+         AGX_APPLE9_VIR_PRIVATE_LOAD, AGX_APPLE9_ENC_PRIVATE_LOAD, COPY_REG);
+      load.src[0] = COPY_REG;
+      load.nr_srcs = 1;
+      load.immediate = word;
+      load.producer_scoreboard_slot = SPILL_TAG;
+      return apple9_physical_immediate(out, COPY_REG, 0) &&
+             apple9_emit_physical(out, &load) &&
+             apple9_physical_copy(out, dst.value / 2, COPY_REG,
+                                  AGX_APPLE9_SCOREBOARD_SLOT_NONE);
+   }
    if (src.memory) {
       struct agx_apple9_vir_instr load = apple9_physical_instruction(
          AGX_APPLE9_VIR_SPILL_LOAD, AGX_APPLE9_ENC_SPILL_LOAD, dst.value / 2);
-      load.immediate = src.value / 2;
+      load.immediate = word;
       load.producer_scoreboard_slot = SPILL_TAG;
       return apple9_emit_physical(out, &load);
+   }
+   if (word >= AGX_APPLE9_SAVE_WORD_COUNT) {
+      /* Compact SAVE aliases above 8 KiB. Preserve its source through the
+       * copy temporary and use a separate reserved zero index for the full
+       * frame's indexed store. Parallel-copy cycle registers exclude both. */
+      struct agx_apple9_vir_instr store = apple9_physical_instruction(
+         AGX_APPLE9_VIR_PRIVATE_STORE, AGX_APPLE9_ENC_PRIVATE_STORE,
+         AGX_APPLE9_VREG_INVALID);
+      store.src[0] = COPY_REG;
+      store.src[1] = SPILL_INDEX_REG;
+      store.nr_srcs = 2;
+      store.live_after_mask = 2;
+      store.immediate = word;
+      return apple9_physical_copy(out, COPY_REG, src.value / 2,
+                                  AGX_APPLE9_SCOREBOARD_SLOT_NONE) &&
+             apple9_physical_immediate(out, SPILL_INDEX_REG, 0) &&
+             apple9_emit_physical(out, &store);
    }
    /* SAVE releases its input. Use the target's parallel-copy temporary so
     * a spilled SSA definition can remain live in its allocated GPR. */
@@ -581,7 +739,7 @@ apple9_physical_move(struct agx_apple9_vir_program *out, agx_index dst,
       AGX_APPLE9_VREG_INVALID);
    save.src[0] = COPY_REG;
    save.nr_srcs = 1;
-   save.immediate = dst.value / 2;
+   save.immediate = word;
    save.producer_scoreboard_slot = SPILL_TAG;
    return apple9_physical_copy(out, COPY_REG, src.value / 2,
                                AGX_APPLE9_SCOREBOARD_SLOT_NONE) &&
@@ -601,18 +759,19 @@ apple9_physical_selected(struct apple9_shared_ra *ra,
                        : common->dest[0].value / 2
                  : AGX_APPLE9_VREG_INVALID;
    bool dead_dest = ins.dest_components && !pub && agx_is_null(common->dest[0]);
-   if (dead_dest && ins.publication_handoff) {
-      /* Unused texture channels still need the read that releases their
-       * borrowed publication. Consume them into the reserved copy temporary. */
-      ins.dest = COPY_REG;
-   } else if (dead_dest) {
+   /* Unused texture channels keep an allocated destination (see
+    * apple9_allocate_candidate) for the read that releases their publication. */
+   assert(!(dead_dest && ins.publication_handoff));
+   if (dead_dest && ins.op != AGX_APPLE9_VIR_SHARED_ATOMIC) {
       assert(ins.op == AGX_APPLE9_VIR_DEVICE_ATOMIC);
       ins.atomic_discard = true;
       ins.dest_components = 0;
       ins.dest = AGX_APPLE9_VREG_INVALID;
    }
    ins.live_after_mask = 0;
-   for (unsigned s = 0, source = 0; s < common->nr_srcs; ++s) {
+   /* Operands beyond the encoded sources only extend register lifetimes. */
+   for (unsigned s = 0, source = 0;
+        s < common->nr_srcs && source < original->nr_srcs; ++s) {
       unsigned width = apple9_source_width(original, source);
       for (unsigned c = 0; c < width; ++c, ++source) {
          ins.src[source] = ra->publication[original->src[source]]
@@ -622,6 +781,19 @@ apple9_physical_selected(struct apple9_shared_ra *ra,
             ins.live_after_mask |= BITFIELD_BIT(source);
       }
    }
+   ins.live_after_mask |= original->retain_mask;
+   if (dead_dest && ins.op == AGX_APPLE9_VIR_SHARED_ATOMIC) {
+      /* Shared atomics always return a value. The allocator gives their
+       * consumed data a private dead copy, so reuse that register as the
+       * unused result destination and retire it through normal completion.
+       */
+      ins.dest = ins.src[0];
+   }
+   /* Indexed shader-local arrays follow the allocator's spill region.
+    * Spill reloads emitted by physical_move already address that region. */
+   if (ins.op == AGX_APPLE9_VIR_PRIVATE_LOAD ||
+       ins.op == AGX_APPLE9_VIR_PRIVATE_STORE)
+      ins.immediate += ALIGN_POT(ra->ctx->scratch_size_B, 16) / 4;
    if (ins.branch_target)
       ins.branch_target = blocks[ins.branch_target->index];
    ins.phi_block = NULL;
@@ -671,9 +843,16 @@ apple9_init_physical(struct agx_apple9_vir_program *out)
    return true;
 }
 
+/* A slot may be pending on more than one producer when control-flow paths
+ * merge. Each path contributes its own producer; waiting covers all of them.
+ * A merge beyond the tracked capacity forgets the producers and waits on
+ * entry to the block. */
+#define APPLE9_PENDING_MERGE 4
+
 struct apple9_pending {
-   bool active;
-   struct agx_apple9_vir_instr producer;
+   unsigned count;
+   bool unknown;
+   struct agx_apple9_vir_instr producer[APPLE9_PENDING_MERGE];
 };
 
 /* Scalar export producers complete asynchronously in the publication namespace.
@@ -701,6 +880,7 @@ apple9_async(const struct agx_apple9_vir_instr *ins)
    case AGX_APPLE9_VIR_DEVICE_LOAD:
    case AGX_APPLE9_VIR_PRIVATE_LOAD:
    case AGX_APPLE9_VIR_SHARED_LOAD:
+   case AGX_APPLE9_VIR_SHARED_ATOMIC:
    case AGX_APPLE9_VIR_TEXTURE_SAMPLE:
    case AGX_APPLE9_VIR_TILE_LOAD:
    case AGX_APPLE9_VIR_ITER_FLAT:
@@ -715,31 +895,47 @@ apple9_async(const struct agx_apple9_vir_instr *ins)
 }
 
 static bool
-apple9_pending_result(const struct apple9_pending *p, unsigned reg)
+apple9_pending_active(const struct apple9_pending *p)
 {
-   return p->active && reg >= p->producer.dest &&
-          reg - p->producer.dest < p->producer.dest_components;
+   return p->count || p->unknown;
 }
 
 static bool
-apple9_retire(struct agx_apple9_vir_program *out,
-              struct apple9_pending *pending, unsigned slot)
+apple9_producer_result(const struct agx_apple9_vir_instr *producer, unsigned reg)
 {
-   if (!pending[slot].active)
-      return true;
-   const struct agx_apple9_vir_instr *producer = &pending[slot].producer;
-   unsigned reg = producer->dest;
-   if (producer->op == AGX_APPLE9_VIR_SPILL_STORE ||
-       apple9_scalar_publication(producer)) {
-      /* Publications have no GPR result to materialize. Wait using the
-       * reserved scratch operand while retaining the publication itself. */
-      reg = WAIT_REG;
-      if (!apple9_physical_immediate(out, reg, 0))
-         return false;
+   return reg >= producer->dest && reg - producer->dest < producer->dest_components;
+}
+
+static bool
+apple9_pending_result(const struct apple9_pending *p, unsigned reg)
+{
+   for (unsigned i = 0; i < p->count; ++i) {
+      if (apple9_producer_result(&p->producer[i], reg))
+         return true;
    }
-   if (!apple9_physical_copy(out, reg, reg, slot))
+   return false;
+}
+
+/* Wait for every slot in the mask with one standalone WAIT. Its operand is
+ * the slot mask itself; it reads and writes no register. */
+static bool
+apple9_retire(struct agx_apple9_vir_program *out,
+              struct apple9_pending *pending, unsigned mask)
+{
+   unsigned active = 0;
+   u_foreach_bit(bit, mask) {
+      if (apple9_pending_active(&pending[bit + 1]))
+         active |= BITFIELD_BIT(bit);
+   }
+   if (!active)
+      return true;
+   struct agx_apple9_vir_instr wait = apple9_physical_instruction(
+      AGX_APPLE9_VIR_WAIT, AGX_APPLE9_ENC_WAIT, AGX_APPLE9_VREG_INVALID);
+   wait.immediate = active;
+   if (!apple9_emit_physical(out, &wait))
       return false;
-   pending[slot].active = false;
+   u_foreach_bit(bit, active)
+      pending[bit + 1] = (struct apple9_pending){0};
    return true;
 }
 
@@ -762,62 +958,127 @@ apple9_float_consumer(enum agx_apple9_encoding encoding)
    }
 }
 
+/* Encodings that carry an explicit release flag for each register source, so
+ * a consumer can take a pending result and keep it live. */
 static bool
-apple9_can_fold_wait(const struct agx_apple9_vir_instr *ins,
-                     const struct apple9_pending *p)
+apple9_retaining_consumer(enum agx_apple9_encoding encoding)
 {
-   if (agx_apple9_encoding_info(ins->encoding)->dependency_layout ==
-       AGX_APPLE9_DEPENDENCY_NONE)
-      return false;
-   if (p->producer.op == AGX_APPLE9_VIR_SPILL_STORE)
+   if (apple9_float_consumer(encoding))
       return true;
-   if (apple9_scalar_publication(&p->producer))
-      return ins->op == AGX_APPLE9_VIR_VARY_STORE &&
-             ins->src[0] == p->producer.dest;
-   if (ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC &&
-       (ins->atomic_discard || ins->atomic_op == AGX_APPLE9_ATOMIC_CMPXCHG ||
-        p->producer.op != AGX_APPLE9_VIR_DEVICE_LOAD ||
-        p->producer.dest_components != 1 || ins->src[0] != p->producer.dest))
-      return false;
-   /* An identity copy explicitly requests materialization, independently of
-    * which tuple components or later uses need the completed value. */
-   if (apple9_identity(ins) && ins->src[0] == p->producer.dest)
+   switch (encoding) {
+   case AGX_APPLE9_ENC_FLOAT_SPECIAL:
+   case AGX_APPLE9_ENC_FLOAT2_EXPORT:
+   case AGX_APPLE9_ENC_LOGIC_EXTENDED:
+   case AGX_APPLE9_ENC_LOGIC_EXPORT:
+   case AGX_APPLE9_ENC_DEVICE_LOAD:
+   case AGX_APPLE9_ENC_DEVICE_LOAD_INDIRECT:
+   case AGX_APPLE9_ENC_INT_ADD_EXTENDED:
+   case AGX_APPLE9_ENC_INT_MAD_EXTENDED:
+   case AGX_APPLE9_ENC_INT_MUL_WIDE:
+   case AGX_APPLE9_ENC_SHIFT_LOGICAL_IMMEDIATE:
+   case AGX_APPLE9_ENC_SHIFT_LOGICAL_REGISTER:
+   case AGX_APPLE9_ENC_SHIFT_EXTENDED:
+   case AGX_APPLE9_ENC_SHIFT_ARITH_REGISTER:
+   case AGX_APPLE9_ENC_SELECT_GPR_WIDE:
+   case AGX_APPLE9_ENC_STORE_UNIFORM:
+   case AGX_APPLE9_ENC_PREDICATE_COMPARE_SHORT:
+   case AGX_APPLE9_ENC_PREDICATE_COMPARE_EXTENDED:
       return true;
-   /* A float consumer can perform the tuple handoff directly. This includes
-    * FMA and inline operands; liveness still names only actual GPR inputs. */
-   bool texture = p->producer.op == AGX_APPLE9_VIR_TEXTURE_SAMPLE;
-   if (texture && !apple9_float_consumer(ins->encoding))
+   default:
       return false;
-   /* Completion makes the producer tuple available. Keeping operands live
-    * is independent of releasing its slot. These ALU and address forms encode
-    * source retention explicitly (EXP-M4-34/35/63). */
-   bool tuple = p->producer.op == AGX_APPLE9_VIR_DEVICE_LOAD ||
-                apple9_async_sr(&p->producer) || texture;
-   bool can_retain = tuple &&
-      (apple9_float_consumer(ins->encoding) ||
-       ins->encoding == AGX_APPLE9_ENC_FLOAT_SPECIAL ||
-       ins->encoding == AGX_APPLE9_ENC_FLOAT2_EXPORT ||
-       ins->encoding == AGX_APPLE9_ENC_LOGIC_EXTENDED ||
-       ins->encoding == AGX_APPLE9_ENC_LOGIC_EXPORT ||
-       ins->encoding == AGX_APPLE9_ENC_DEVICE_LOAD ||
-       ins->encoding == AGX_APPLE9_ENC_DEVICE_LOAD_INDIRECT);
-   unsigned consumed = 0;
-   for (unsigned s = 0; s < ins->nr_srcs; ++s) {
-      if (!apple9_pending_result(p, ins->src[s]))
-         continue;
-      if ((ins->live_after_mask & BITFIELD_BIT(s)) && !can_retain)
-         return false;
-      consumed |= BITFIELD_BIT(ins->src[s] - p->producer.dest);
    }
-   return consumed == BITFIELD_MASK(p->producer.dest_components) ||
-          (tuple && consumed != 0);
 }
 
 static bool
-apple9_completion_barrier(const struct agx_apple9_vir_instr *ins)
+apple9_can_fold_wait(const struct agx_apple9_vir_instr *ins,
+                     const struct agx_apple9_vir_instr *producer)
 {
-   return apple9_after_logical_end(ins) ||
-          ins->op == AGX_APPLE9_VIR_WORKGROUP_BARRIER ||
+   if (ins->op == AGX_APPLE9_VIR_SHARED_ATOMIC)
+      return false;
+   if (agx_apple9_encoding_info(ins->encoding)->dependency_layout ==
+       AGX_APPLE9_DEPENDENCY_NONE)
+      return false;
+   if (producer->op == AGX_APPLE9_VIR_SPILL_STORE)
+      return true;
+   bool reads = false;
+   for (unsigned s = 0; s < ins->nr_srcs; ++s)
+      reads |= apple9_producer_result(producer, ins->src[s]);
+   /* An instruction that only orders against the producer (it overwrites
+    * the result or a borrowed source, or accesses the same memory) waits in
+    * its own dependency field before it executes, as a standalone WAIT
+    * would. Atomics' dependency field gates their inputs (EXP-M4-50). */
+   if (!reads)
+      return ins->op != AGX_APPLE9_VIR_DEVICE_ATOMIC;
+   if (apple9_scalar_publication(producer))
+      return ins->op == AGX_APPLE9_VIR_VARY_STORE &&
+             ins->src[0] == producer->dest;
+   if (ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC &&
+       (ins->atomic_discard || ins->atomic_op == AGX_APPLE9_ATOMIC_CMPXCHG ||
+        producer->op != AGX_APPLE9_VIR_DEVICE_LOAD ||
+        producer->dest_components != 1 || ins->src[0] != producer->dest))
+      return false;
+   /* An identity copy explicitly requests materialization, independently of
+    * which tuple components or later uses need the completed value. */
+   if (apple9_identity(ins) && ins->src[0] == producer->dest)
+      return true;
+   /* Completion makes the whole producer tuple available. Keeping operands
+    * live is independent of releasing its slot, but needs a source release
+    * flag the consumer can clear: EXP-M4-34/35/63 for device loads, system
+    * values and textures; CTS probes for atomic, private, shared and
+    * interpolation results, including texture results in integer consumers.
+    * Scratch fills keep their materialized form. */
+   bool tuple = producer->op != AGX_APPLE9_VIR_SPILL_LOAD;
+   bool can_retain = tuple && apple9_retaining_consumer(ins->encoding);
+   unsigned consumed = 0;
+   for (unsigned s = 0; s < ins->nr_srcs; ++s) {
+      if (!apple9_producer_result(producer, ins->src[s]))
+         continue;
+      if ((ins->live_after_mask & BITFIELD_BIT(s)) && !can_retain)
+         return false;
+      consumed |= BITFIELD_BIT(ins->src[s] - producer->dest);
+   }
+   return consumed == BITFIELD_MASK(producer->dest_components) ||
+          (tuple && consumed != 0);
+}
+
+/* Producers merged from several paths share the slot, so one folded wait
+ * retires whichever of them is outstanding. It must be valid for each. */
+static bool
+apple9_can_fold_pending(const struct agx_apple9_vir_instr *ins,
+                        const struct apple9_pending *p)
+{
+   if (p->unknown || !p->count)
+      return false;
+   for (unsigned i = 0; i < p->count; ++i) {
+      if (!apple9_can_fold_wait(ins, &p->producer[i]))
+         return false;
+   }
+   return true;
+}
+
+/* Loop control repeats or leaves the body; results stay pending only across
+ * forward execution-mask changes and jumps. */
+static bool
+apple9_loop_control(const struct agx_apple9_vir_instr *ins)
+{
+   switch (ins->op) {
+   case AGX_APPLE9_VIR_LOOP_MASK_PUSH:
+   case AGX_APPLE9_VIR_LOOP_MASK_UPDATE:
+   case AGX_APPLE9_VIR_LOOP_MASK_POP:
+   case AGX_APPLE9_VIR_JMP_EXEC_ANY:
+   case AGX_APPLE9_VIR_BREAK_MASK_UNWIND:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool
+apple9_completion_barrier(const struct agx_apple9_vir_instr *ins, bool drain)
+{
+   if (apple9_after_logical_end(ins))
+      return drain || apple9_loop_control(ins);
+   return ins->op == AGX_APPLE9_VIR_WORKGROUP_BARRIER ||
           ins->op == AGX_APPLE9_VIR_DEVICE_FENCE ||
           ins->op == AGX_APPLE9_VIR_HALT ||
           ins->op == AGX_APPLE9_VIR_TILE_ACCESS ||
@@ -826,22 +1087,38 @@ apple9_completion_barrier(const struct agx_apple9_vir_instr *ins)
           ins->op == AGX_APPLE9_VIR_DEPTH_STORE;
 }
 
+/* Memory operations read their address, index and data registers at issue.
+ * Native Metal overwrites a pending device load's address or index 3,744
+ * times in 4,000 public pipelines without waiting. Overwriting atomic,
+ * private-load and shared-load inputs right after issue passed the CTS
+ * atomic, indexing and shared-memory groups. */
 static bool
-apple9_pending_hazard(const struct agx_apple9_vir_instr *ins,
-                      const struct apple9_pending *p)
+apple9_reads_sources_at_issue(const struct agx_apple9_vir_instr *ins)
 {
-   if (!p->active)
-      return false;
-   if (apple9_completion_barrier(ins))
+   switch (ins->op) {
+   case AGX_APPLE9_VIR_DEVICE_LOAD:
+   case AGX_APPLE9_VIR_DEVICE_ATOMIC:
+   case AGX_APPLE9_VIR_PRIVATE_LOAD:
+   case AGX_APPLE9_VIR_SHARED_LOAD:
       return true;
-   const struct agx_apple9_vir_instr *producer = &p->producer;
+   default:
+      return false;
+   }
+}
+
+static bool
+apple9_producer_hazard(const struct agx_apple9_vir_instr *ins,
+                       const struct agx_apple9_vir_instr *producer)
+{
    for (unsigned c = 0; c < ins->dest_components; ++c) {
       unsigned reg = ins->dest + c;
-      if (apple9_pending_result(p, reg))
+      if (apple9_producer_result(producer, reg))
          return true;
       /* Includes texture parameter publications, which remain borrowed
        * until the result handoff, and scratch SAVE's destructive input. */
-      for (unsigned s = 0; s < producer->nr_srcs; ++s) {
+      for (unsigned s = 0;
+           !apple9_reads_sources_at_issue(producer) && s < producer->nr_srcs;
+           ++s) {
          if (producer->src[s] == reg)
             return true;
       }
@@ -854,26 +1131,85 @@ apple9_pending_hazard(const struct agx_apple9_vir_instr *ins,
        (ins->op == AGX_APPLE9_VIR_SPILL_STORE ||
         producer->op == AGX_APPLE9_VIR_SPILL_STORE))
       return true;
+   /* Bindings name distinct buffers; global addresses may alias each other. */
    if ((ins->op == AGX_APPLE9_VIR_DEVICE_STORE ||
         ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC) &&
        (producer->op == AGX_APPLE9_VIR_DEVICE_LOAD ||
         producer->op == AGX_APPLE9_VIR_DEVICE_ATOMIC) &&
-       ins->immediate == producer->immediate)
+       ins->memory_global == producer->memory_global &&
+       (ins->memory_global || ins->immediate == producer->immediate))
       return true;
    if (ins->op == AGX_APPLE9_VIR_PRIVATE_STORE &&
        producer->op == AGX_APPLE9_VIR_PRIVATE_LOAD)
       return true;
-   if (ins->op == AGX_APPLE9_VIR_SHARED_STORE &&
-       producer->op == AGX_APPLE9_VIR_SHARED_LOAD)
+   if ((ins->op == AGX_APPLE9_VIR_SHARED_STORE ||
+        ins->op == AGX_APPLE9_VIR_SHARED_ATOMIC) &&
+       (producer->op == AGX_APPLE9_VIR_SHARED_LOAD ||
+        producer->op == AGX_APPLE9_VIR_SHARED_ATOMIC))
+      return true;
+   if (ins->op == AGX_APPLE9_VIR_SHARED_LOAD &&
+       producer->op == AGX_APPLE9_VIR_SHARED_ATOMIC)
       return true;
    /* This compound encoding contains a fixed slot-1 publication and wait. */
    return ins->encoding == AGX_APPLE9_ENC_BLOCK_IMAGE_STORE &&
           producer->producer_scoreboard_slot == AGX_APPLE9_SCOREBOARD_SLOT_1;
 }
 
-/* Schedule the final physical stream: allocation can introduce earlier uses,
- * register reuse and scratch traffic that do not exist in the original SSA.
- * Never carry pending work across a logical block or execution-mask change. */
+static bool
+apple9_pending_hazard(const struct agx_apple9_vir_instr *ins,
+                      const struct apple9_pending *p, bool barrier)
+{
+   if (!apple9_pending_active(p))
+      return false;
+   if (p->unknown || barrier)
+      return true;
+   for (unsigned i = 0; i < p->count; ++i) {
+      if (apple9_producer_hazard(ins, &p->producer[i]))
+         return true;
+   }
+   return false;
+}
+
+static bool
+apple9_same_producer(const struct agx_apple9_vir_instr *a,
+                     const struct agx_apple9_vir_instr *b)
+{
+   if (a->op != b->op || a->encoding != b->encoding || a->dest != b->dest ||
+       a->dest_components != b->dest_components || a->nr_srcs != b->nr_srcs ||
+       a->immediate != b->immediate ||
+       a->producer_scoreboard_slot != b->producer_scoreboard_slot)
+      return false;
+   for (unsigned s = 0; s < a->nr_srcs; ++s) {
+      if (a->src[s] != b->src[s])
+         return false;
+   }
+   return true;
+}
+
+/* Add one path's pending producers to a successor's entry state. */
+static void
+apple9_merge_pending(struct apple9_pending *to, const struct apple9_pending *from)
+{
+   for (unsigned slot = 1; slot <= 6; ++slot) {
+      struct apple9_pending *t = &to[slot];
+      const struct apple9_pending *f = &from[slot];
+      t->unknown |= f->unknown;
+      for (unsigned i = 0; i < f->count; ++i) {
+         bool present = false;
+         for (unsigned j = 0; j < t->count; ++j)
+            present |= apple9_same_producer(&t->producer[j], &f->producer[i]);
+         if (present)
+            continue;
+         if (t->count == APPLE9_PENDING_MERGE)
+            t->unknown = true;
+         else
+            t->producer[t->count++] = f->producer[i];
+      }
+      if (t->unknown)
+         t->count = 0;
+   }
+}
+
 static void
 apple9_select_compact_alu(struct agx_apple9_vir_instr *I)
 {
@@ -896,6 +1232,12 @@ apple9_select_compact_alu(struct agx_apple9_vir_instr *I)
    }
 }
 
+/* Schedule the final physical stream: allocation can introduce earlier uses,
+ * register reuse and scratch traffic that do not exist in the original SSA.
+ * Pending results flow forward across execution-mask changes and forward
+ * jumps, as native Metal code keeps them; each successor starts from the
+ * union of its predecessors' pending producers. Loop control, back edges and
+ * entry to a loop header wait for everything outstanding. */
 static bool
 apple9_schedule_physical(struct agx_apple9_vir_program *program,
                           const char **reason)
@@ -905,19 +1247,68 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
       agx_apple9_vir_finish(&out);
       return false;
    }
+   memcpy(out.reserved_gprs, program->reserved_gprs, sizeof(out.reserved_gprs));
    unsigned count = program->last_block->index + 1;
    struct agx_apple9_block **blocks = calloc(count, sizeof(*blocks));
+   /* Machine successors (fall-through and jump target), then logical CFG
+    * successors, which also name loop back edges. */
+   struct agx_apple9_block **successors = calloc(4 * count, sizeof(*successors));
+   unsigned *position = calloc(count, sizeof(*position));
+   bool *header = calloc(count, sizeof(*header));
+   struct apple9_pending (*entry)[7] = calloc(count, sizeof(*entry));
    bool success = false;
-   if (!blocks)
+   if (!blocks || !successors || !position || !header || !entry)
       goto cleanup;
    for (unsigned b = 0; b < count; ++b) {
       blocks[b] = agx_apple9_block_create(&out);
       if (!blocks[b])
          goto cleanup;
    }
+   unsigned layout = 0;
+   for (struct agx_apple9_block *block = program->blocks; block; block = block->next) {
+      blocks[block->index]->nir = block->nir;
+      position[block->index] = layout++;
+      unsigned end = block->next ? block->next->start_index : program->instruction_count;
+      struct agx_apple9_block **succ = &successors[4 * block->index];
+      succ[0] = block->next;
+      if (end > block->start_index) {
+         const struct agx_apple9_vir_instr *last = program->instructions[end - 1];
+         if (last->op == AGX_APPLE9_VIR_JMP_EXEC_ANY ||
+             last->op == AGX_APPLE9_VIR_JMP_EXEC_NONE)
+            succ[1] = last->branch_target;
+      }
+      for (unsigned s = 0; block->nir && s < 2; ++s) {
+         for (struct agx_apple9_block *b = program->blocks; b; b = b->next) {
+            if (block->nir->successors[s] && b->nir == block->nir->successors[s])
+               succ[2 + s] = b;
+         }
+      }
+   }
+   for (struct agx_apple9_block *block = program->blocks; block; block = block->next) {
+      for (unsigned i = 0; i < 4; ++i) {
+         struct agx_apple9_block *succ = successors[4 * block->index + i];
+         if (succ && position[succ->index] <= position[block->index])
+            header[succ->index] = true;
+      }
+   }
    for (struct agx_apple9_block *block = program->blocks; block; block = block->next) {
       agx_apple9_block_begin(&out, blocks[block->index]);
       struct apple9_pending pending[7] = {0};
+      if (!header[block->index])
+         memcpy(pending, entry[block->index], sizeof(pending));
+      unsigned unknown = 0;
+      for (unsigned slot = 1; slot <= 6; ++slot) {
+         if (pending[slot].unknown)
+            unknown |= BITFIELD_BIT(slot - 1);
+      }
+      if (!apple9_retire(&out, pending, unknown))
+         goto cleanup;
+      struct agx_apple9_block *const *succ = &successors[4 * block->index];
+      bool drain = !succ[0] && !succ[1] && !succ[2] && !succ[3];
+      for (unsigned i = 0; i < 4; ++i) {
+         drain |= succ[i] && (header[succ[i]->index] ||
+                              position[succ[i]->index] <= position[block->index]);
+      }
       unsigned end = block->next ? block->next->start_index : program->instruction_count;
       for (unsigned i = block->start_index; i < end; ++i) {
          struct agx_apple9_vir_instr ins = *program->instructions[i];
@@ -934,21 +1325,24 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
          }
 
          ins.scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_NONE;
-         unsigned fold = 0;
+         const bool barrier = apple9_completion_barrier(&ins, drain);
+         unsigned fold = 0, retire = 0;
          for (unsigned slot = 1; slot <= 6; ++slot) {
-            if (!pending[slot].active)
+            const struct apple9_pending *p = &pending[slot];
+            if (!apple9_pending_active(p))
                continue;
-            bool needed = apple9_pending_hazard(&ins, &pending[slot]);
+            bool needed = apple9_pending_hazard(&ins, p, barrier);
             for (unsigned s = 0; s < ins.nr_srcs; ++s)
-               needed |= apple9_pending_result(&pending[slot], ins.src[s]);
+               needed |= apple9_pending_result(p, ins.src[s]);
             if (!needed)
                continue;
-            if (!fold && apple9_can_fold_wait(&ins, &pending[slot])) {
+            if (!fold && apple9_can_fold_pending(&ins, p))
                fold = slot;
-            } else if (!apple9_retire(&out, pending, slot)) {
-               goto cleanup;
-            }
+            else
+               retire |= BITFIELD_BIT(slot - 1);
          }
+         if (!apple9_retire(&out, pending, retire))
+            goto cleanup;
          if (fold) {
             /* Logic's pending-result source is A. Its operators commute. */
             if ((ins.encoding == AGX_APPLE9_ENC_LOGIC_EXTENDED ||
@@ -962,12 +1356,12 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
                                      ((ins.live_after_mask & 2) >> 1);
             }
             ins.scoreboard_slot = fold;
-            pending[fold].active = false;
+            pending[fold] = (struct apple9_pending){0};
          }
 
          if (apple9_async(&ins)) {
             unsigned slot = 0;
-            if (apple9_async_sr(&ins)) {
+            if (apple9_async_sr(&ins) || ins.op == AGX_APPLE9_VIR_SHARED_ATOMIC) {
                slot = AGX_APPLE9_SCOREBOARD_SLOT_1;
             } else if (ins.op == AGX_APPLE9_VIR_SHARED_LOAD ||
                        ins.op == AGX_APPLE9_VIR_PRIVATE_LOAD) {
@@ -979,7 +1373,7 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
                unsigned first = ins.op == AGX_APPLE9_VIR_TEXTURE_SAMPLE ? 1 : 6;
                for (unsigned p = 0; p < 6; ++p) {
                   unsigned candidate = (first - 1 + p) % 6 + 1;
-                  if (!pending[candidate].active) {
+                  if (!apple9_pending_active(&pending[candidate])) {
                      slot = candidate;
                      break;
                   }
@@ -987,7 +1381,7 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
                if (!slot)
                   slot = first;
             }
-            if (!apple9_retire(&out, pending, slot))
+            if (!apple9_retire(&out, pending, BITFIELD_BIT(slot - 1)))
                goto cleanup;
             ins.producer_scoreboard_slot = slot;
             if (ins.op == AGX_APPLE9_VIR_DEVICE_LOAD) {
@@ -998,15 +1392,23 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
                };
                ins.device_load_raw_token = tokens[slot - 1];
             }
-            pending[slot] = (struct apple9_pending){.active = true, .producer = ins};
+            pending[slot] = (struct apple9_pending){.count = 1, .producer = {ins}};
          }
          apple9_select_compact_alu(&ins);
          if (!apple9_emit_physical(&out, &ins))
             goto cleanup;
       }
-      for (unsigned slot = 1; slot <= 6; ++slot) {
-         if (!apple9_retire(&out, pending, slot))
+      if (drain) {
+         if (!apple9_retire(&out, pending, BITFIELD_MASK(6)))
             goto cleanup;
+      } else {
+         for (unsigned i = 0; i < 4; ++i) {
+            bool repeated = false;
+            for (unsigned j = 0; j < i; ++j)
+               repeated |= succ[j] == succ[i];
+            if (succ[i] && !repeated)
+               apple9_merge_pending(entry[succ[i]->index], pending);
+         }
       }
    }
    agx_apple9_vir_reindex(&out);
@@ -1021,13 +1423,62 @@ cleanup:
    if (!success && reason)
       *reason = "Could not schedule Apple9 physical completions";
    free(blocks);
+   free(successors);
+   free(position);
+   free(header);
+   free(entry);
    agx_apple9_vir_finish(&out);
    return success;
+}
+
+static const char apple9_copy_register_reason[] =
+   "Apple9 allocation needs the copy register for a high-bank constant";
+
+/* Whether any immediate move after allocation targets r64 or above. */
+static bool
+apple9_needs_copy_register(agx_context *ctx)
+{
+   agx_foreach_instr_global(ctx, I) {
+      if ((I->op == AGX_OPCODE_MOV_IMM ||
+           (I->op == AGX_OPCODE_MOV && I->src[0].type == AGX_INDEX_IMMEDIATE)) &&
+          I->dest[0].type == AGX_INDEX_REGISTER && !I->dest[0].memory &&
+          I->dest[0].value / 2 >= 64)
+         return true;
+   }
+   return false;
+}
+
+/* The pop restores the mask that its push saved, so an else immediately
+ * followed by its pop has no effect; native one-armed ifs are a push and a
+ * pop. Only once allocation is complete is an empty arm known to stay empty,
+ * since allocation can place edge copies there. */
+static void
+apple9_remove_empty_else(struct agx_apple9_vir_program *p)
+{
+   for (unsigned i = 0; i + 1 < p->instruction_count;) {
+      if (p->instructions[i]->op == AGX_APPLE9_VIR_EXEC_MASK_ELSE &&
+          p->instructions[i + 1]->op == AGX_APPLE9_VIR_EXEC_MASK_POP)
+         agx_apple9_vir_remove(p, p->instructions[i]);
+      else
+         ++i;
+   }
+}
+
+static bool
+apple9_returns_device_atomic(const struct agx_apple9_vir_program *program)
+{
+   for (unsigned i = 0; i < program->instruction_count; ++i) {
+      const struct agx_apple9_vir_instr *ins = program->instructions[i];
+      if (ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC && !ins->atomic_discard)
+         return true;
+   }
+   return false;
 }
 
 static bool
 apple9_allocate_candidate(struct agx_apple9_vir_program *program,
                           nir_shader *nir, bool cost_constraints, bool latency,
+                          bool copy_register,
                           struct agx_apple9_vir_program *result,
                           const char **reason)
 {
@@ -1039,20 +1490,52 @@ apple9_allocate_candidate(struct agx_apple9_vir_program *program,
    if (!ra.ctx || !apple9_shared_dataflow(&ra, nir, reason))
       goto cleanup;
    ra.ctx->ra_target.cost_register_constraints = cost_constraints;
+   /* A returning device atomic stores its old value in invocation-frame word
+    * 0, which its result record then loads (agx_apple9_pack_device_atomic);
+    * that store overwrote spill slot 0. Spills and private arrays start one
+    * 16-byte frame granule above it. */
+   if (apple9_returns_device_atomic(program))
+      ra.ctx->scratch_size_B = 16;
+   if (copy_register)
+      ra.ctx->ra_target.reserved_registers = 4;
    if (latency) {
       ra.ctx->schedule_resources = apple9_schedule_resources;
       ra.ctx->schedule_delay = apple9_schedule_delay;
    }
    agx_dce(ra.ctx, true);
+   /* Unused texture channels still need the read that releases their
+    * borrowed publication; give that read a register of its own. */
+   agx_foreach_instr_global(ra.ctx, I) {
+      if ((I->op == AGX_OPCODE_APPLE9 || I->op == AGX_OPCODE_APPLE9_PURE) &&
+          I->nr_dests == 1 && agx_is_null(I->dest[0]) &&
+          I->apple9->publication_handoff)
+         I->dest[0] = agx_temp(ra.ctx, AGX_SIZE_32);
+   }
    agx_pressure_schedule(ra.ctx);
+   if (getenv("AGX_APPLE9_TRACE_SHARED_RA") != NULL)
+      agx_print_shader(ra.ctx, stderr);
    agx_ra(ra.ctx);
-   if (ra.ctx->scratch_size_B > 4096) {
+   if (ra.ctx->scratch_size_B > AGX_APPLE9_MAX_SCRATCH_BYTES) {
       *reason =
          "Apple9 scratch frame exceeds the supported per-invocation size";
       goto cleanup;
    }
+   if (!copy_register && !ra.ctx->has_spill_pcopy_reserved &&
+       apple9_needs_copy_register(ra.ctx)) {
+      *reason = apple9_copy_register_reason;
+      goto cleanup;
+   }
    if (!apple9_init_physical(&out))
       goto cleanup;
+   /* Spills reserve r0..r4 (copy, index and memory-swap temporaries); the
+    * high-bank constant bridge reserves r0..r1. */
+   {
+      unsigned reserved = ra.ctx->has_spill_pcopy_reserved ? 5
+                          : copy_register                ? 2
+                                                         : 0;
+      for (unsigned r = 0; r < reserved; ++r)
+         out.reserved_gprs[r] = true;
+   }
    unsigned count = program->last_block->index + 1;
    struct agx_apple9_block **blocks =
       rzalloc_array(ra.ctx, struct agx_apple9_block *, count);
@@ -1061,6 +1544,8 @@ apple9_allocate_candidate(struct agx_apple9_vir_program *program,
       blocks[block->index] = agx_apple9_block_create(&out);
       if (!blocks[block->index])
          goto cleanup;
+      /* Physical scheduling follows the logical CFG's loop edges too. */
+      blocks[block->index]->nir = block->nir;
    }
    for (struct agx_apple9_block *block = program->blocks; block;
         block = block->next) {
@@ -1081,7 +1566,8 @@ apple9_allocate_candidate(struct agx_apple9_vir_program *program,
       agx_foreach_instr_in_block(common, I) {
          switch (I->op) {
          case AGX_OPCODE_MOV:
-            if (!apple9_physical_move(&out, I->dest[0], I->src[0]))
+            if (!apple9_physical_move(&out, I->dest[0], I->src[0],
+                                      ra.ctx->spill_base_B / 4))
                goto cleanup;
             break;
          case AGX_OPCODE_MOV_IMM:
@@ -1089,13 +1575,11 @@ apple9_allocate_candidate(struct agx_apple9_vir_program *program,
                goto cleanup;
             break;
          case AGX_OPCODE_SWAP: {
+            /* XOR swap needs no temporary register. */
             unsigned a = I->src[0].value / 2, b = I->src[1].value / 2;
-            if (!apple9_physical_copy(&out, WAIT_REG, a,
-                                      AGX_APPLE9_SCOREBOARD_SLOT_NONE) ||
-                !apple9_physical_copy(&out, a, b,
-                                      AGX_APPLE9_SCOREBOARD_SLOT_NONE) ||
-                !apple9_physical_copy(&out, b, WAIT_REG,
-                                      AGX_APPLE9_SCOREBOARD_SLOT_NONE))
+            if (!apple9_physical_xor(&out, a, a, b) ||
+                !apple9_physical_xor(&out, b, b, a) ||
+                !apple9_physical_xor(&out, a, a, b))
                goto cleanup;
             break;
          }
@@ -1113,27 +1597,20 @@ apple9_allocate_candidate(struct agx_apple9_vir_program *program,
       }
    }
    agx_apple9_vir_reindex(&out);
+   apple9_remove_empty_else(&out);
    if (!apple9_schedule_physical(&out, reason))
       goto cleanup;
    unsigned spill_bytes = ALIGN_POT(ra.ctx->scratch_size_B, 16);
    out.private_size = program->private_size;
+   out.spill_slots = (spill_bytes - ra.ctx->spill_base_B) / 4;
+   /* The atomic reservation only protects spills or private arrays. */
+   if (!out.spill_slots && !out.private_size)
+      spill_bytes = 0;
    out.scratch_size = spill_bytes + ALIGN_POT(out.private_size, 16);
-   out.spill_slots = spill_bytes / 4;
    if (out.scratch_size > AGX_APPLE9_MAX_SCRATCH_BYTES) {
       *reason = "Apple9 private arrays and spills exceed the scratch frame";
       goto cleanup;
    }
-   /* SAVE/FILL use the initial spill region. Indexed private instructions
-    * address a separate region in the same frame, fixed after allocation. */
-   for (unsigned i = 0; i < out.instruction_count; ++i) {
-      struct agx_apple9_vir_instr *ins = out.instructions[i];
-      if (ins->op == AGX_APPLE9_VIR_PRIVATE_LOAD ||
-          ins->op == AGX_APPLE9_VIR_PRIVATE_STORE)
-         ins->immediate += spill_bytes / 4;
-   }
-   unsigned reserved = ra.ctx->has_spill_pcopy_reserved ? 4 : 2;
-   for (unsigned r = 0; r < reserved; ++r)
-      out.reserved_gprs[r] = true;
    out.peak_live_gprs = ra.ctx->max_reg / 2 + 1;
    out.publication_count = program->publication_count;
    out.fragment_shader = program->fragment_shader;
@@ -1211,8 +1688,20 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
    struct agx_apple9_vir_program best, alternative;
    agx_apple9_vir_init(&best);
    agx_apple9_vir_init(&alternative);
-   if (!apple9_allocate_candidate(program, nir, false, false, &best, reason))
-      return false;
+   /* Prefer an allocation without reserved registers; constants placed above
+    * r63 need the copy register, so retry with it reserved. */
+   bool copy_register = false;
+   if (!apple9_allocate_candidate(program, nir, false, false, false, &best,
+                                  reason)) {
+      if (*reason != apple9_copy_register_reason)
+         return false;
+      agx_apple9_vir_finish(&best);
+      agx_apple9_vir_init(&best);
+      copy_register = true;
+      if (!apple9_allocate_candidate(program, nir, false, false, true, &best,
+                                     reason))
+         return false;
+   }
 
    struct apple9_allocation_cost cost = apple9_allocation_cost(&best);
    if (cost.has_copies || cost.spills) {
@@ -1220,8 +1709,8 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
        * Compare completed allocations so those costs are paid by the policy
        * which caused them, including rematerialization and spill lowering. */
       const char *unused_reason = NULL;
-      if (apple9_allocate_candidate(program, nir, true, false, &alternative,
-                                     &unused_reason) &&
+      if (apple9_allocate_candidate(program, nir, true, false, copy_register,
+                                     &alternative, &unused_reason) &&
           apple9_allocation_cheaper(apple9_allocation_cost(&alternative), cost))
          SWAP(best, alternative);
    }
@@ -1234,7 +1723,8 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
       for (unsigned banks = 0; banks < 2; ++banks) {
          agx_apple9_vir_init(&alternative);
          const char *unused_reason = NULL;
-         if (apple9_allocate_candidate(program, nir, banks, true, &alternative,
+         if (apple9_allocate_candidate(program, nir, banks, true,
+                                        copy_register, &alternative,
                                         &unused_reason) &&
              apple9_allocation_cheaper(apple9_allocation_cost(&alternative), cost)) {
             SWAP(best, alternative);

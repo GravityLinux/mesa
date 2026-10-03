@@ -123,8 +123,11 @@ agx_apple9_varying_supported(unsigned location)
    return (location >= VARYING_SLOT_COL0 && location <= VARYING_SLOT_TEX7) ||
           location == VARYING_SLOT_BFC0 || location == VARYING_SLOT_BFC1 ||
           location == VARYING_SLOT_PRIMITIVE_ID ||
+          location == VARYING_SLOT_VIEWPORT ||
           location == VARYING_SLOT_CLIP_VERTEX ||
           location == VARYING_SLOT_CLIP_DIST0 || location == VARYING_SLOT_CLIP_DIST1 ||
+          location == VARYING_SLOT_CULL_PRIMITIVE ||
+          location == VARYING_SLOT_CULL_PRIMITIVE + 1 ||
           (location >= VARYING_SLOT_VAR0 && location <= VARYING_SLOT_VAR31);
 }
 
@@ -150,6 +153,8 @@ struct agx_shader_info {
    struct agx_apple9_varying_layout apple9_varyings;
    struct agx_apple9_interp_mask apple9_linear_mask, apple9_flat_mask;
    uint16_t apple9_publication_count;
+   /* Per-thread frame bytes for Apple9 atomics that return a value. */
+   uint8_t apple9_atomic_frame_size;
    /* Apple9 setup code is entered by the launcher, independently of USC
     * preshader configuration used by earlier generations. */
    uint32_t apple9_preamble_offset, apple9_preamble_size;

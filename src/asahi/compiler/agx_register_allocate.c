@@ -116,6 +116,14 @@ struct ra_ctx {
    /* Operand placements committed for the current constrained instruction. */
    BITSET_WORD *pinned;
 
+   /* Registers of the current instruction's dying sources that its
+    * destination may take over, and the sources it took over. */
+   BITSET_WORD *reusable;
+   uint64_t reused_sources;
+
+   /* constrained_affinity() result for the value being placed. */
+   unsigned affinity_ssa, affinity_reg;
+
    /* Soft placement hints. Instruction constraints remain the only hard
     * restrictions, since different uses can need incompatible banks. */
    const struct agx_reg_constraint *preferred;
@@ -132,7 +140,8 @@ struct ra_ctx {
 static unsigned
 reserved_size(agx_context *ctx)
 {
-   if (ctx->ra_target.reserved_registers)
+   if (ctx->ra_target.reserved_registers ||
+       ctx->ra_target.spill_reserved_registers)
       return MAX2(ctx->ra_target.reserved_registers,
                   ctx->has_spill_pcopy_reserved ? ctx->ra_target.spill_reserved_registers : 0);
    if (ctx->has_spill_pcopy_reserved)
@@ -359,13 +368,58 @@ agx_calc_register_demand(agx_context *ctx, bool remat)
 }
 
 struct placement_cost {
-   unsigned moves, preference, growth, scarcity, reg;
+   unsigned moves, affinity, preference, growth, scarcity, reg;
 };
+
+/* The register a constrained definition should take so that no copy is
+ * needed, as pick_regs chooses for unconstrained ones: its phi web's register,
+ * else its slot in the collect it feeds, beside an already placed source or in
+ * a free range holding the complete collect. */
+static unsigned
+constrained_affinity(struct ra_ctx *rctx, unsigned ssa)
+{
+   if (rctx->affinity_ssa == ssa)
+      return rctx->affinity_reg;
+   unsigned want = ~0u;
+   struct phi_web_node *web = &rctx->phi_web[phi_web_find(rctx->phi_web, ssa)];
+   agx_instr *collect = rctx->src_to_collect_phi[ssa];
+   if (web->assigned) {
+      want = web->reg;
+   } else if (collect && collect->op == AGX_OPCODE_COLLECT) {
+      unsigned ours = ~0u;
+      agx_foreach_ssa_src(collect, s) {
+         if (collect->src[s].value == ssa) {
+            ours = s;
+            break;
+         }
+      }
+      unsigned width = agx_size_align_16(collect->src[ours].size);
+      agx_foreach_ssa_src(collect, s) {
+         unsigned other = collect->src[s].value;
+         if (other == ssa || !BITSET_TEST(rctx->visited, other) ||
+             rctx->ssa_to_reg[other] < s * width)
+            continue;
+         want = rctx->ssa_to_reg[other] - s * width + ours * width;
+         break;
+      }
+      unsigned size = rctx->ncomps[collect->dest[0].value];
+      for (unsigned base = ALIGN_POT(reserved_size(rctx->shader), size);
+           want == ~0u && base + size <= rctx->bound[RA_GPR]; base += size) {
+         if (!BITSET_TEST_COUNT(rctx->used_regs[RA_GPR], base, size))
+            want = base + ours * width;
+      }
+   }
+   rctx->affinity_ssa = ssa;
+   rctx->affinity_reg = want;
+   return want;
+}
 
 static struct placement_cost
 placement_cost(struct ra_ctx *rctx, unsigned ssa, unsigned reg, unsigned count)
 {
    struct placement_cost cost = {.reg = reg};
+   unsigned want = constrained_affinity(rctx, ssa);
+   cost.affinity = want != ~0u && want != reg;
    if (!rctx->preferred)
       return cost;
    struct agx_reg_constraint c = rctx->preferred[ssa];
@@ -386,6 +440,7 @@ static bool
 placement_cheaper(struct placement_cost a, struct placement_cost b)
 {
    if (a.moves != b.moves) return a.moves < b.moves;
+   if (a.affinity != b.affinity) return a.affinity < b.affinity;
    if (a.preference != b.preference) return a.preference < b.preference;
    if (a.growth != b.growth) return a.growth < b.growth;
    if (a.scarcity != b.scarcity) return a.scarcity < b.scarcity;
@@ -398,6 +453,7 @@ find_regs_simple(struct ra_ctx *rctx, enum ra_class cls, unsigned count,
 {
    bool found = false;
    struct placement_cost best = {.moves = ~0u};
+   rctx->affinity_ssa = ~0u;
    for (unsigned reg = 0; reg + count <= rctx->bound[cls]; reg += align) {
       if (!BITSET_TEST_COUNT(rctx->used_regs[cls], reg, count)) {
          if (!rctx->preferred || cls != RA_GPR) {
@@ -875,6 +931,18 @@ place_constrained_value(struct ra_ctx *rctx, agx_index value,
    unsigned first = ALIGN_POT(MAX2(c.min, reserved_size(rctx->shader)), align);
    unsigned last = MIN2(c.max, rctx->bound[RA_GPR] - count);
 
+   rctx->affinity_ssa = ~0u;
+
+   /* Each reusable tuple lies inside one candidate window, so a destination
+    * there replaces it without moves. Elsewhere it stays occupied. */
+   BITSET_WORD *reusable = defined ? NULL : rctx->reusable;
+   if (reusable) {
+      for (unsigned i = 0; i < BITSET_WORDS(AGX_NUM_REGS); ++i) {
+         rctx->used_regs[RA_GPR][i] &= ~reusable[i];
+         rctx->pinned[i] &= ~reusable[i];
+      }
+   }
+
    if (defined) {
       unsigned reg = rctx->ssa_to_reg[ssa];
       if (reg >= first && reg <= last && !(reg % align)) {
@@ -886,6 +954,22 @@ place_constrained_value(struct ra_ctx *rctx, agx_index value,
    /* Unlike unconstrained splitting, the legal bank may be completely full.
     * Choose a legal region, then move its occupants to the rest of the file.
     * Only this instruction's already-placed operands are pinned. */
+   /* Record the base of the tuple occupying each register once, so each
+    * candidate inspects only its own registers. */
+   unsigned tuple_base[AGX_NUM_REGS];
+   if (rctx->preferred) {
+      for (unsigned h = reserved_size(rctx->shader); h < rctx->bound[RA_GPR];) {
+         if (!BITSET_TEST(rctx->used_regs[RA_GPR], h)) {
+            ++h;
+            continue;
+         }
+         unsigned width = rctx->ncomps[rctx->reg_to_ssa[h]];
+         for (unsigned k = 0; k < width; ++k)
+            tuple_base[h + k] = h;
+         h += width;
+      }
+   }
+
    unsigned chosen = ~0;
    struct placement_cost best = {.moves = ~0u};
    for (unsigned reg = first; reg <= last; reg += align) {
@@ -895,15 +979,13 @@ place_constrained_value(struct ra_ctx *rctx, agx_index value,
       if (rctx->preferred) {
          /* Even a one-half overlap evicts the complete tuple. Counting only
           * the overlapping halves can prefer a much more expensive move. */
-         for (unsigned h = reserved_size(rctx->shader); h < rctx->bound[RA_GPR];) {
-            if (!BITSET_TEST(rctx->used_regs[RA_GPR], h)) {
-               ++h;
+         unsigned previous = ~0u;
+         for (unsigned h = reg; h < reg + count; ++h) {
+            if (!BITSET_TEST(rctx->used_regs[RA_GPR], h) ||
+                tuple_base[h] == previous)
                continue;
-            }
-            unsigned owner = rctx->reg_to_ssa[h], width = rctx->ncomps[owner];
-            if (h < reg + count && reg < h + width)
-               cost.moves += width;
-            h += width;
+            previous = tuple_base[h];
+            cost.moves += rctx->ncomps[rctx->reg_to_ssa[previous]];
          }
       } else {
          for (unsigned h = reg; h < reg + count; ++h)
@@ -946,6 +1028,12 @@ place_constrained_value(struct ra_ctx *rctx, agx_index value,
       set_ssa_to_reg(rctx, ssa, chosen);
    } else {
       assign_regs(rctx, value, chosen);
+   }
+   if (reusable) {
+      for (unsigned i = 0; i < BITSET_WORDS(AGX_NUM_REGS); ++i) {
+         rctx->used_regs[RA_GPR][i] |= reusable[i];
+         rctx->pinned[i] |= reusable[i];
+      }
    }
 
    /* Largest first, matching the power-of-two live-range splitter. */
@@ -1008,9 +1096,37 @@ assign_constrained_operands(struct ra_ctx *rctx, agx_instr *I)
          continue;
       place_constrained_value(rctx, I->src[s], c, true);
    }
-   agx_foreach_ssa_dest(I, d) {
-      place_constrained_value(rctx, I->dest[d], I->reg_constraints[d], false);
+   /* Sources dying here, other than destroyed or fixed-register copies,
+    * whose tuple fits the destination's aligned window. */
+   BITSET_DECLARE(reusable, AGX_NUM_REGS) = {0};
+   bool reuse = I->nr_dests == 1 && I->reg_constraints[0].reuse_killed;
+   unsigned dest_count = reuse ? rctx->ncomps[I->dest[0].value] : 0;
+   unsigned dest_align = MAX2(dest_count, reuse ? I->reg_constraints[0].align : 1);
+   rctx->reused_sources = 0;
+   agx_foreach_ssa_src(I, s) {
+      struct agx_reg_constraint c = I->reg_constraints[I->nr_dests + s];
+      if (!reuse || !I->src[s].kill || I->src[s].memory || c.clobber ||
+          (c.min == c.max && c.max < reserved_size(rctx->shader)))
+         continue;
+      unsigned base = rctx->ssa_to_reg[I->src[s].value];
+      unsigned width = rctx->ncomps[I->src[s].value];
+      if (base + width <= base - (base % dest_align) + dest_count)
+         BITSET_SET_COUNT(reusable, base, width);
    }
+   rctx->reusable = reuse ? reusable : NULL;
+   agx_foreach_ssa_dest(I, d) {
+      unsigned reg =
+         place_constrained_value(rctx, I->dest[d], I->reg_constraints[d], false);
+      agx_foreach_ssa_src(I, s) {
+         unsigned base = rctx->ssa_to_reg[I->src[s].value];
+         if (reuse && I->src[s].kill && BITSET_TEST(reusable, base) &&
+             base >= reg && base < reg + dest_count) {
+            assert(s < 64);
+            rctx->reused_sources |= BITFIELD64_BIT(s);
+         }
+      }
+   }
+   rctx->reusable = NULL;
 
    struct util_dynarray copies = UTIL_DYNARRAY_INIT;
    for (unsigned reg = 0; reg < rctx->bound[RA_GPR]; ++reg) {
@@ -1342,7 +1458,8 @@ agx_ra_assign_local(struct ra_ctx *rctx)
 
    reserve_live_in(rctx);
 
-   if (rctx->shader->ra_target.reserved_registers)
+   if (rctx->shader->ra_target.reserved_registers ||
+       rctx->shader->ra_target.spill_reserved_registers)
       BITSET_SET_COUNT(used_regs_gpr, 0, reserved_size(rctx->shader));
 
    /* Force the nesting counter r0l live throughout shaders using control flow.
@@ -1451,9 +1568,10 @@ agx_ra_assign_local(struct ra_ctx *rctx)
          }
       }
 
-      /* Free late-killed sources */
+      /* Free late-killed sources, except those the destination replaced. */
       agx_foreach_ssa_src(I, s) {
-         if (I->src[s].kill) {
+         if (I->src[s].kill &&
+             !(I->reg_constraints && (rctx->reused_sources & BITFIELD64_BIT(s)))) {
             kill_source(rctx, I, s);
          }
       }
@@ -1883,6 +2001,7 @@ agx_ra(agx_context *ctx)
          .preferred = preferred,
          .scarcity = scarcity,
          .demand = demand,
+         .affinity_ssa = ~0u,
       });
    }
 

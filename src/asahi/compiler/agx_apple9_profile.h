@@ -23,7 +23,7 @@ enum agx_apple9_compute_abi {
 };
 
 /* Validated direct descriptor selection capacity, independent of API slots. */
-#define AGX_APPLE9_GRAPHICS_MAX_TEXTURES 16
+#define AGX_APPLE9_GRAPHICS_MAX_TEXTURES 32
 /* Sixteen API samplers plus the private nearest texel-fetch sampler. */
 #define AGX_APPLE9_GRAPHICS_MAX_SAMPLERS 17
 
@@ -42,6 +42,8 @@ enum agx_apple9_compute_abi {
 #define AGX_APPLE9_COMPUTE_SHARED_ARGUMENT 4
 /* Conservative per-invocation limit exercised on T8132 in all three stages. */
 #define AGX_APPLE9_MAX_SCRATCH_BYTES 32768
+/* Workgroup memory, as Metal's threadgroup memory limit on M4. */
+#define AGX_APPLE9_MAX_SHARED_BYTES 32768
 #define AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE 1
 /* The threadgroup address space is selected by a tagged argument root. */
 #define AGX_APPLE9_COMPUTE_SHARED_ROOT UINT64_C(0x80000000)

@@ -37,7 +37,21 @@ The allocation CFG comes from the original NIR blocks and logical edges, not
 from linear execution-mask layout. Both arms stay represented so edge copies
 have the correct lane population. Synthetic loop-mask restoration blocks retain
 their machine placement without becoming SSA predecessors. Branch byte offsets
-are assigned after expansion. The physical program must be reindexed before
+are assigned after expansion.
+
+An if/else arm whose estimated cost exceeds 19 (texture operations 50, other
+intrinsics 10, ALU 1, the common backend's weights) is preceded by
+`JMP_EXEC_NONE` to a synthetic block beginning with the following else or pop.
+Without it every invocation issues both arms, such as each fragment shader's
+pipeline-statistics block. An arm executed with no active lanes writes no lane,
+so skipping it leaves the logical allocation CFG exact; the physical scheduler
+follows the jump edge when merging pending results.
+
+After allocation, an else immediately followed by its pop is removed: the pop
+restores the mask its push saved, and native one-armed ifs are likewise a push
+and a pop (2,000 pops but only 288 elses in 400 public pipelines). Earlier, an
+empty arm may still receive allocation edge copies, which need the else mask.
+On a 300-case Vulkan selection 57% of elses are removed. The physical program must be reindexed before
 these fixups; stale block positions can turn a backedge into a shader-entry jump.
 
 ## Shared SSA allocation and spilling
@@ -57,7 +71,7 @@ for standalone encoding/IR fixtures; production NIR compilation does not call it
 
 `agx_ra_target` supplies target limits in 16-bit units without changing Apple7/8
 zero-default behavior. Apple9 reserves two full registers (r0-r1), increasing to
-four (r0-r3) when spill/parallel-copy scratch temporaries are required. Ordinary
+five (r0-r4) when spill/parallel-copy scratch temporaries are required. Ordinary
 values can occupy the remaining registers through r95. Instruction-local
 constraints describe each operand's legal range, alignment, fixed register,
 and destructive-input behavior. Register-demand calculation includes the
@@ -70,9 +84,22 @@ there is no post-allocation bank-repair sequence.
 Destructive inputs receive private SSA lifetimes. Move coalescing removes the
 copy when the original value dies at that instruction; otherwise the copy
 preserves the original. The currently encoded extended shift releases its
-source, as do the modeled atomic inputs. General sources are late-killed so an
-instruction's destination cannot unexpectedly overwrite its inputs. Shared
-SSA kill information supplies Apple9 source-release bits. Pure opaque operations
+source, as do the modeled atomic inputs. Sources are otherwise killed after
+their instruction, except that a scalar result may take the registers of a
+source dying there (`agx_reg_constraint.reuse_killed`), as in `a = a * 3 + b`.
+Synchronous instructions read their sources before publishing the result, and
+device, private and shared loads read theirs at issue. The source keeps its
+release bit: register-state probes on the same family show that when a
+released source is also the destination, the new result wins. Encodings that
+write a result in parts from several native instructions (`split_result`: the
+paired half conversion and `pack_unorm_4x8`) keep their destination off their
+sources. Shared SSA kill information supplies Apple9 source-release bits.
+
+Constrained placement prefers a value's phi-web register, or else its slot in
+the collect it feeds, beside an already placed source or in a free range that
+holds the complete collect. That is the coalescing `pick_regs` applies to
+unconstrained values; without it, every phi and every assembled register pair
+needs copies. Pure opaque operations
 can be removed when dead, and redundant identity copies are eliminated.
 
 Most arithmetic, conversion, special-function, comparison, device-memory,
@@ -90,26 +117,103 @@ own namespaces and retain their separate limits. Perspective-coefficient
 multiply still has a six-bit GPR model: its coefficient index occupies the
 ordinary compact ALU high-register fields.
 
-After allocation, Apple9 lowers physical MOV/SWAP and memory moves. A SAVE
-releases its data register, so a live allocated value is copied to the reserved
-copy temporary first. A rematerialized literal destined above r63 also uses
-that temporary followed by a full-register copy, since the long immediate
-form has only six destination bits. FILL retains the scratch word for later uses and loop
+After allocation, Apple9 lowers physical MOV/SWAP and memory moves. No
+register is reserved by default. Swaps use three XORs. A shader that spills
+reserves r0..r4: a SAVE releases its data register, so a live allocated value
+is copied to the r1 copy temporary first, large frames use r2 as a zero index,
+and memory-to-memory swaps hold their values in r3/r4. The long immediate form
+has six destination bits, so a literal rematerialized above r63 goes through
+r1; allocation first runs without reservations and is retried with r0..r1
+reserved only when such a literal appears. Setting bit 60 as a seventh
+destination bit, as one M3 disassembler suggests, hung the GPU, and native
+Metal never materializes a long immediate above r63. Unused texture channels
+read into an allocated register to release their publication. FILL retains the scratch word for later uses and loop
 iterations. The physical completion scheduler tracks pending operations and
 places waits at consumers or hazards, folding a wait into a suitable consumer
 when its operand lifetime permits. It also accounts for register overwrites,
 scratch aliases, device-memory ordering, and borrowed publication inputs.
-Execution-mask changes, block boundaries, and operations with implicit hardware
-dependencies retain conservative completion boundaries. Atomic publication
-records stay adjacent to their producer. Tags are retired before reuse.
-The register-spill region is rounded to 16 bytes and bounded at 4 KiB per
-invocation. Indexed private arrays follow this region in the same frame; their
-combined allocation is bounded at 32 KiB, as described below.
+An instruction that only orders against a producer (it overwrites the result
+or a borrowed source, or touches the same memory) waits in its own dependency
+field. Pending producers flow forward across execution-mask changes and
+forward jumps, as native Metal code keeps them; a block starts from the union
+of its predecessors' producers. One wait in a consumer retires a slot whose
+producers come from several paths when that fold is valid for each of them. A
+wait inside a conditional region does not retire the slot for code after the
+merge: native Metal waits again there (all 15 such loads in 4,000 public
+pipelines). Loop control, back edges (machine or logical)
+and entry to a loop header wait for everything outstanding.
 
-Device-load completion applies to the full result tuple, so its first consumer
-need not read every component. Compact float and extended logic consumers,
-including their scalar export forms, can retain a load operand while retiring
-its completion slot; later reads use the ordinary GPR path. Float exports expose
+Anything that cannot fold uses the standalone wait: byte 0 is 0x06 and bits
+10..15 are a slot mask, bit i naming slot i + 1; the empty mask is a nop. It
+reads and writes no register. A probe build replaced every standalone
+completion with it and passed a 1,167-case CTS selection, while no wait, the
+empty mask, and a mask of every slot but the pending one each failed and hung
+the GPU. Native Metal emits it rarely (405 in 9.7 million instructions of a
+public compute corpus), before spill drains, a few address overwrites and
+execution-mask changes; ordinary instructions there name one slot.
+
+Predicate compares carry a dependency slot index at bits 45..47 (six-byte
+form) or 61..63 (ten-byte forms). The 0xc0 byte formerly treated as a constant
+tail in native captures is slot 6. Coverage publications and dynamic-mask tile
+stores carry the bits 12..17 mask: native captures show their byte 1 both with
+and without the slot-1 bit (0x14/0x04 and 0x16/0x06), which waited for the
+coverage read supplying their operand. Depth publications always show the
+slot-1 bit and keep it.
+
+Memory operations read their address, index and data registers at issue, so
+those registers are free once the operation issues. In the public compute
+corpus, Metal overwrites the address or index of a pending device load 3,744
+times without waiting (for example, incrementing a loop index right after the
+load). Probe builds that overwrote device-atomic, private-load and shared-load
+inputs immediately after issue passed the CTS atomic, indexing, shared-memory,
+scheduler-stress and stratified selections. A device atomic releases its inputs
+(EXP-M4-47); that is a register-cache release, not a late write. Texture
+parameter publications and scratch SAVE's destructive input remain borrowed
+until completion. Atomic publication records stay adjacent to their producer.
+Tags are retired before reuse.
+
+A returning device atomic stores its old value in an invocation-frame word
+named by its byte 3. The adjacent eight-byte result record is effectively a
+scratch fill of that word into the destination register: bytes 1 and 4 carry
+the frame word and bits 29..31 the completion slot minus one. Native Metal
+captures of our own kernels with up to seven simultaneously pending atomics
+put every result on exactly the slot those bits name. The record's bits
+45..47/61..63 hold a one-hot tag rather than a slot, and that tag also appears
+in the atomic's byte 9 bits 1..3 and in its input dependency. Metal gives each
+simultaneously pending atomic its own tag while sharing one frame word. It
+places that word past its spills and private arrays, also naming it in the
+atomic, and reads word 0 when the frame is otherwise empty.
+
+The earlier model wrote 0xa7 into byte 3 and so published every result to
+slot 6, while varying the tag as if it were the slot. Waits on any other slot
+then read stale registers. A spilling reproducer hit this when a pending
+scratch store pushed the atomic to slot 1, and EXP-M4-49's six-slot test passed
+only because its first consumer waited on slot 6. Encoding the scheduled slot
+passed with slots 1, 5 and 6, so returning atomics again take the first free
+slot. Every atomic uses tag 1. The scheduler already orders device atomics
+against each other, so two returning atomics are never pending at once.
+
+The atomic's store also explains the corrupted spill slot 0 in that
+reproducer: Mesa names frame word 0. When a shader has a returning device
+atomic, spills start 16 bytes into the frame, with private arrays after them,
+and a frame holding neither stays empty. Pointing the atomic and its record
+at a word past the spills, with frame extent A covering it, also passed. That
+layout needs larger words than the atomic's known seven-bit field, so Mesa
+keeps word 0. Changing the word in only one of the two lost every result. This
+store was the latent problem behind wrong results in heavily spilling
+tessellation kernels, which contain four returning atomics. Capping their
+allocation at 52 or fewer GPRs failed before; it now passes down to 32.
+The register-spill region is rounded to 16 bytes. Indexed private arrays follow
+this region in the same frame; their combined allocation is bounded at 32 KiB,
+as described below.
+
+Completion applies to the full result tuple, so its first consumer need not
+read every component. Compact float and extended logic consumers, including
+their scalar export forms, can retain an operand while retiring its completion
+slot; later reads use the ordinary GPR path. This holds for every asynchronous
+producer except scratch fills: device loads, system values and textures were
+validated natively (EXP-M4-34/35/63), and atomic, private-load, shared-load and
+interpolation results by CTS probe builds. Float exports expose
 a split six-bit input mask independently of their output completion tag. These
 paths fold waits into useful instructions instead of forcing identity copies.
 EXP-M4-62 records the initial native evidence and shared-RA regression tests.
@@ -123,9 +227,10 @@ select output slot 1, which the scheduler retires before reuse and folds into
 a capable consumer. Synchronous SR forms keep their ordinary behavior.
 
 Compact float consumers can complete texture tuples through any used component,
-retaining that component and its siblings for later GPR reads. Other texture
-consumer forms still materialize, and borrowed texture-parameter inputs remain
-live until completion. EXP-M4-63 validates these address, SR and texture paths
+retaining that component and its siblings for later GPR reads. Integer and
+other consumers with a dependency field complete them the same way (CTS texture
+and image probes); borrowed texture-parameter inputs remain live until
+completion. EXP-M4-63 validates these address, SR and texture paths
 with authored Metal kernels, matched producer/consumer retags across all six
 load slots, source-retention controls, and native Linux shader regressions.
 
@@ -171,6 +276,54 @@ algebraic optimization may fold that operation into the conversion, including
 during legalization before preamble extraction. The narrow vertex conversion
 graphics regression covers packed signed and unsigned byte/short attributes
 with a uniform transform.
+
+Right-shift selection likewise extends 8- and 16-bit operands before shifting,
+and all shifts mask their counts to the NIR operand width. Without that
+extension, format unpacking such as `(u16(x) << 6) >> 11` can shift truncated
+high bits back into a packed color channel. Native Vulkan packed-image copies
+exercise this path; narrowing every producer is unnecessary.
+
+Device loads, stores and atomics name their 64-bit base either as a GPR pair
+or as a uniform pair: the seven-bit base field at bit 32 holds the GPR, or
+half the first uniform when the file bit (bit 101 for loads, 99 for stores)
+is clear. Native T8132 Metal kernels address every buffer argument through
+uniform pairs (`device_load ..., u0_u1, r1`, `device_store ..., u4_u5, r1`)
+and switch to GPR pairs only for loaded pointers. The non-indirect VIR
+memory forms are this uniform-base form: their binding is the pair index. A
+global address held by an even-aligned pair of preamble uniforms therefore
+selects it directly, without copying the pair into GPRs. Global accesses in
+either form may alias each other, so a device store or atomic orders against
+any pending global load or atomic; native Metal does not issue device stores
+with loads pending (8,461 of 8,464 stores in 2,500 public pipelines).
+
+Vulkan reaches selection with 64-bit global addresses that int64 lowering has
+split into a low add and a high add with carry. Selection recognizes
+`lo = base_lo + offset`, `hi = base_hi + b2i32(ult(lo, base_lo))`, which is
+exactly the pair `(base_lo, base_hi)` plus the zero-extended 32-bit offset,
+and passes that offset through the index, shift and displacement folding
+above. Successive constant offsets compare each low word with the previous
+one, while reassociation folds the constants into one low add from the base:
+`lo = base_lo + k2`, `hi = hi1 + b2i32(ult(lo, lo1))` with `(lo1, hi1)` equal to
+base + k1. Each step adds a zero-extended value, so this is base + k2 exactly
+when k2 >= k1, and it splits the same way. Loads and stores then address a stable base, typically a descriptor's
+buffer address, instead of computing and assembling a new pair per access.
+Atomics keep the complete address: their element-index conversion is exact
+only for an aligned base. A load whose base is a longer tuple's leading
+components, such as a loaded descriptor, uses that tuple directly and
+retains its registers, since the tuple's split components share them.
+Destroyed operands, such as an atomic's base, always receive a private pair.
+
+`load_global_constant` keeps its constant-memory meaning as
+`ACCESS_CAN_REORDER` on the pair form, and the preamble admits such loads.
+Honeykrisp descriptor reads with uniform addresses therefore move to the
+preamble, and buffer addresses reach the main shader in uniforms, as native
+Metal arguments do. Multi-word preamble values start at even uniforms so a
+stored pointer is a valid uniform base pair. Load/store vectorization covers
+global and constant memory while their 64-bit addresses are still whole, and
+legalization moves 64-bit data as dword tuples, so a descriptor's pointer
+arrives in one load and one register pair instead of two scalar loads. On a
+300-case Vulkan selection these steps reduce main-shader instructions by 21%,
+device loads by a third and 32-bit adds by more than half.
 
 T8132 hardware validates native index shifts from zero through four. Larger
 values in the public M3 descriptor failed the requested-stride probe and are
@@ -231,8 +384,6 @@ for that field. Physical expansion and byte packing follow this stage.
 `agx_tests` covers all 256 four-source assignments, CFG liveness through a loop
 with an early exit, phi ownership in a successor, stable targets across COLLECT
 and handoff insertion, and empty targets after deletion and storage growth.
-The fixtures in `../drm-shim/scenes/phi-copies/` exercise divergent rotations and
-vertex swaps on hardware.
 
 Addressing regressions cover unary, quadratic, selected, shifted, and wrapping
 offsets, plus partial vector stores and unaligned access legalization. Analysis
@@ -418,7 +569,14 @@ transferred results are 32-bit words. The full resource map is fixed before
 extraction and shared by setup and main, including resources used only in the
 preamble. Unused vector components are trimmed before assigning uniform words.
 Unsupported dependencies, masked setup, scratch, and setup bodies exceeding
-8192 bytes retain the original main shader.
+8192 bytes retain the original main shader. Only work in the shader's
+top-level blocks is eligible: `nir_opt_preamble` keeps the control flow around
+what it hoists, so one eligible expression under an `if` used to discard the
+whole preamble. Every application fragment shader begins with such an `if`,
+the uniform test guarding the pipeline-statistics invocation counter. With
+that rule, 247 more programs of a 300-case Vulkan selection get setup code and
+main-shader device loads fall by 16%. At 3840x2160, vkmark's effect2d edge and
+blur scenes run 17% and 11% faster, and its desktop scene 28% faster.
 
 Preamble results occupy every word after the shader's root publication blocks
 in the 256-word argument window. Graphics roots occupy words 0 through 11,
@@ -583,6 +741,18 @@ an ordinary flat integer varying. Its cache distinguishes shaders with and
 without primitive-ID forwarding. Native generated primitive coefficients remain
 unmodeled; this path uses the existing geometry implementation.
 
+After tessellation, a geometry shader's `gl_PrimitiveIDIn` is the patch ID the
+tessellation evaluation shader saw, shared by every primitive generated from
+that patch, not the index of the tessellated primitive. The tessellator's
+indices encode their patch. When the geometry parameters name the draw's
+tessellation parameters, the Poly GS lowering loads its first input vertex's
+tessellator index and derives the patch ID with the same helpers the
+evaluation shader uses. Otherwise it uses the input primitive's index. Drivers
+set the field only for tessellated draws. The evaluation shader writes nothing
+extra, and only geometry shaders that read the ID pay for it. This also covers
+the passthrough GS, which uses the same lowering
+(`dEQP-VK.geometry.builtin_variable.primitive_id.matching`).
+
 The passthrough is inserted before transform feedback and primitive conversion,
 so it receives the original topology and captures only once. Queries on draws
 with primitive restart also use geometry assembly, excluding restart markers
@@ -670,9 +840,87 @@ scheduler retires a pending private read before any private write.
 
 Register spills occupy the beginning of the scratch frame, with indexed arrays
 after the aligned spill region. The allocator fixes this displacement after
-spilling and checks the combined 32 KiB limit. SAVE/FILL retain their separately
-validated 4 KiB spill-region limit. Authored hardware probes validate distinct
+spilling and checks the combined 32 KiB limit. Vector spill moves lower every
+component to a scalar save or reload. Compact FILL addresses only the first
+1024 words: higher offsets alias lower words on T8132. Reloads beyond that range
+use indexed private loads through the reserved copy register, which also bridges
+the indexed encoding's low-register constraint. Compact SAVE addresses the first
+2048 words; larger stores use indexed private stores with a separate reserved
+zero-index register. Native SSBO and authored spill probes cover frames through
+31,680 bytes, including 8,001 distinct outputs across three submissions. Authored hardware probes validate distinct
 per-invocation contents, register operands through r63, dynamic and constant
 word offsets through 8191, and the shared frame layout with SAVE/FILL. Native
 GLSL vertex and fragment tests cover 2–32 KiB frames and repeated aliased access;
 the original giant-array and fragment-predication Piglit tests also pass.
+
+## Flat interpolation and triangle fans
+
+Flat user inputs lower to `load_coefficients_agx` and select a word from the
+allocated three-word coefficient tuple. The first-provoking triangle-fan mode
+uses shade selector 6 and word B; ordinary first/last flat modes use word C.
+This matches the common AGX interpolation contract. A per-draw system value
+selects B/C without recompiling the fragment shader when topology changes.
+Rasterizer-generated primitive IDs retain their independent coefficient source.
+The coefficient-table reuse key includes the effective provoking vertex.
+
+Native T8132 CTS validation covers Vulkan fan flat shading, provoking vertices,
+indexed/indirect/instanced fans, and GL/GLES flat-shading and fan controls. The
+allocator regression exercises both B and C with overlapping asynchronous
+coefficient loads. Gallium no longer needs primitive conversion for first-flat
+Apple9 fans.
+
+## Texture operands and register-indexed access
+
+The texture operand is an 8-bit texture-state index split across bit 71
+(bit 0), bits 11-14 (bits 1-4) and bits 68-70 (bits 5-7); the sampler operand
+is bits 32-35 (bits 1-4) and bit 72 (bit 0). Both index the tables named by the
+launch header's first two pointers, with a 32-byte stride.
+
+The 20-byte form (bit 73) can instead read either index from a GPR, as Metal
+does for Tier-2 argument buffers. Metal's resource IDs are small dense
+integers indexing a device-wide descriptor table, which it installs as the
+header's texture (or sampler) table pointer; its entries are byte-identical to
+the per-draw copies. Decoded from our own compiled kernels and validated on
+T8132 by per-lane selection probes:
+
+- texture index register: bits 11-14 name its half-register, reaching r0-r7;
+  bits 68-71 are clear, bit 87 is set, byte 15 bit 5 enables the
+  register and byte 15 bit 3 discards it at its last use;
+- sampler index register: bits 32-34 name its half-register, reaching r0-r3;
+  bit 72 is clear, bit 88 is set, byte 14 bit 7 enables the register and
+  byte 14 bit 5 discards it at its last use;
+- byte 18 is 0x40 in every observed register-indexed operation.
+
+Bits 39-41 are a completion-group wait, independent of the descriptor source.
+Our packed coordinate publishers use group 0, so both texture forms retain
+the encoded wait value 1 (bit 39). Clearing it in the register-indexed form
+raced coordinate publication: occasional waves sampled the right image at
+`(x, 0)` or `(0, 0)`. A standalone wait before the sample also resolves this,
+but the texture instruction's own dependency field avoids an extra instruction.
+The native bindless test with several distinct source images reproduces the
+failure; the constant-index control stays correct. The Heaven replay's replaced
+tone-map shader likewise returns to its 12 legitimate isolated black blocks.
+In an unmodified replay, frame 2 went from 87 isolated black 8x4 blocks to zero.
+
+Only the low 32 bits of the index are read. A discard bit set while the
+register remains live corrupts a later reader of the same value.
+Honeykrisp points both table pointers at the USC aperture base, where G16
+descriptor memory lives, so a descriptor's native entries are addressed as
+(descriptor VA - base) / 32.
+
+## Cube arrays
+
+Our own Metal kernels, compiled once per texture type and operation, give the
+cube-array mode for bytes 6/7: `08 03` for a register LOD, the cube mode
+`00 03` with the array flag. Honeykrisp uses `1c 00` for its biased form.
+The face-selection sequence is shared with plain cubes. The packed LOD word
+carries the cube index in bits 0-11 and the face in bits 12-14. The Q6 LOD
+remains in bits 16-27. The descriptor keeps the cube-array dimension, and its
+layer-count field holds the number of cubes. The hardware clamps the cube
+index to that count. Per-texel probes of layer, face and level matched the
+2D-array emulation, including gathers and non-seamless samplers.
+
+With native cube arrays, hardware derivatives give implicit LODs, as for
+plain cubes. Implicit-LOD depth comparisons are the exception: their biased
+form is not yet decoded. They still take direction derivatives and use an
+explicit LOD. LOD queries supply layer 0 as the array operand.

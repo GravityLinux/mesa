@@ -707,18 +707,16 @@ agx_nir_lower_texture_early(nir_shader *s, bool support_lod_bias)
 }
 
 bool
-agx_nir_lower_texture(nir_shader *s)
+agx_nir_lower_texture_queries(nir_shader *s)
+{
+   return nir_shader_instructions_pass(s, lower_tex_crawl,
+                                       nir_metadata_control_flow, NULL);
+}
+
+bool
+agx_nir_lower_images(nir_shader *s)
 {
    bool progress = false;
-
-   nir_tex_src_type_constraints tex_constraints = {
-      [nir_tex_src_lod] = {true, 16},
-      [nir_tex_src_bias] = {true, 16},
-      [nir_tex_src_ms_index] = {true, 16},
-      [nir_tex_src_min_lod] = {true, 16},
-      [nir_tex_src_texture_offset] = {true, 16},
-      [nir_tex_src_sampler_offset] = {true, 16},
-   };
 
    /* Insert fences before lowering image atomics, since image atomics need
     * different fencing than other image operations.
@@ -732,6 +730,24 @@ agx_nir_lower_texture(nir_shader *s)
             nir_metadata_control_flow, NULL);
    NIR_PASS(progress, s, nir_shader_intrinsics_pass, lower_images,
             nir_metadata_control_flow, NULL);
+   return progress;
+}
+
+bool
+agx_nir_lower_texture(nir_shader *s)
+{
+   bool progress = false;
+
+   nir_tex_src_type_constraints tex_constraints = {
+      [nir_tex_src_lod] = {true, 16},
+      [nir_tex_src_bias] = {true, 16},
+      [nir_tex_src_ms_index] = {true, 16},
+      [nir_tex_src_min_lod] = {true, 16},
+      [nir_tex_src_texture_offset] = {true, 16},
+      [nir_tex_src_sampler_offset] = {true, 16},
+   };
+
+   NIR_PASS(progress, s, agx_nir_lower_images);
    NIR_PASS(progress, s, nir_legalize_16bit_sampler_srcs, tex_constraints);
 
    /* Fold constants after nir_legalize_16bit_sampler_srcs so we can detect 0 in
@@ -745,8 +761,7 @@ agx_nir_lower_texture(nir_shader *s)
     */
    NIR_PASS(progress, s, nir_shader_instructions_pass, lower_regular_texture,
             nir_metadata_none, NULL);
-   NIR_PASS(progress, s, nir_shader_instructions_pass, lower_tex_crawl,
-            nir_metadata_control_flow, NULL);
+   NIR_PASS(progress, s, agx_nir_lower_texture_queries);
 
    return progress;
 }

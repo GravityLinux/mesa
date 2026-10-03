@@ -19,6 +19,10 @@ extern "C" {
 #define AGX_APPLE9_UNIFORM_COUNT       256
 #define AGX_APPLE9_HALF_REGISTER_COUNT (2 * AGX_APPLE9_GPR_COUNT)
 
+/* Compact scratch encodings have different address ranges. */
+#define AGX_APPLE9_FILL_WORD_COUNT 1024
+#define AGX_APPLE9_SAVE_WORD_COUNT 2048
+
 enum agx_apple9_evidence {
    AGX_APPLE9_EVIDENCE_UNRESOLVED = 0,
    AGX_APPLE9_EVIDENCE_BYTE_DIFF,
@@ -214,6 +218,7 @@ enum agx_apple9_encoding {
    AGX_APPLE9_ENC_DEVICE_FENCE,
    AGX_APPLE9_ENC_HALT,
    AGX_APPLE9_ENC_SHARED_LOAD,
+   AGX_APPLE9_ENC_SHARED_ATOMIC,
    AGX_APPLE9_ENC_SHARED_STORE,
    AGX_APPLE9_ENC_PRIVATE_LOAD,
    AGX_APPLE9_ENC_PRIVATE_STORE,
@@ -222,6 +227,7 @@ enum agx_apple9_encoding {
    AGX_APPLE9_ENC_SPILL_LOAD,
    AGX_APPLE9_ENC_DEVICE_STORE_INDIRECT,
    AGX_APPLE9_ENC_TILE_LOAD_COORDS,
+   AGX_APPLE9_ENC_WAIT,
    AGX_APPLE9_ENC_COUNT,
 
    /* Semantic IR pseudos have no machine encoding.  Keep them out of the
@@ -254,6 +260,10 @@ struct agx_apple9_encoding_info {
    bool allocator_safe;
    enum agx_apple9_evidence evidence;
    enum agx_apple9_dependency_layout dependency_layout;
+
+   /* Several native instructions each write part of the destination, so it
+    * cannot share a register with a source. */
+   bool split_result;
 
    struct agx_apple9_operand_constraint
       operands[AGX_APPLE9_MAX_ENCODING_OPERANDS];
