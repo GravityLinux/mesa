@@ -194,6 +194,10 @@ increasing B does not rescue undersized A. Returned 32-bit atomics without
 spills fail at A = 0..3 and pass at A = 4. These are independent requirements
 covered by the maximum, not evidence that atomic storage must be appended to
 the spill range. The mixed shader can itself cause a different spill layout.
+The atomic writes its old value to the frame word named in its byte 3, and the
+result record loads it; Mesa uses word 0 and starts spills after it. Native
+Metal names a word past its spills and private arrays instead (see
+`src/asahi/compiler/README.apple9-ir.md`).
 The driver retains conservative aligned scratch sizes and the existing B
 setup until graphics stages and other call patterns are independently tested.
 Detailed controls and generated-code slot traces are in
@@ -212,20 +216,23 @@ and resource count; callers supply an entry offset and live stage parameters.
 | Publication count P | `ceil(P / 2) << 7` in the 16-bit word at C+11 |
 | Frame extents A/B | Independent 16-bit words at C+13 and C+15 |
 | Fragment tile bytes and samples | Generated 1×/2×/4× allocation before C |
-| Compute threadgroup memory | Allocation word at C-6, `(bytes << 2) | 0x80` |
+| Compute threadgroup memory | Allocation operand at C-6, `(bytes << 2) | 0x80` |
 
 P is the compiler's actual 32-bit publication high-water mark, including
 holes and temporary texture operands. It is not the number of user varyings.
 Unused low bits of the publication word are zero. Graphics requires compiler
 publication metadata; there is no external prolog or library-default fallback.
 
-The allocation interface currently accepts zero or the four threadgroup-memory
-sizes with execution evidence: 128, 256, 512, and 1024 bytes. Zero emits the
+The allocation interface accepts zero or power-of-two threadgroup-memory
+sizes from 128 through 16384 bytes. The allocation operand spans three bytes;
+the 16384-byte size sets bit 0 of the third byte. Zero emits the
 source-generated zero-size allocation form. The compiler lowers aligned 32-bit
 shared accesses and workgroup barriers, rounding the shader's allocation to
 one of those sizes. A shared resource occupies its own argument root with value
 `0x80000000`; it has no external-buffer read/write hazard. Native probes cover
 multiple arrays, one through three buffer bindings, and partial workgroups.
+Vulkan full-range neighbor exchange also covers 2, 4, 8, and 16 KiB allocations
+across 1025 workgroups, with direct and indirect dispatch and changing inputs.
 
 Internal libagx helpers also retain portable NIR before Apple8 preprocessing.
 Apple9 compiles this NIR through its ordinary compute backend and binds the

@@ -9,13 +9,13 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+struct agx_ptr;
 #include "util/format/u_formats.h"
 
 #include "asahi/lib/agx_apple9_layout.h"
 #include "asahi/compiler/agx_apple9_profile.h"
 #include "asahi/compiler/agx_compile.h"
 #include "asahi/compiler/agx_compile_apple9.h"
-#include "asahi/lib/agx_apple9_layout.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -45,6 +45,7 @@ struct agx_apple9_render_stage {
    uint32_t preamble_offset, preamble_size;
    uint32_t ubo_mask;
    uint32_t scratch_size;
+   uint8_t atomic_frame_size;
    uint16_t publication_count;
    bool publication_count_valid;
    uint32_t resource_ssbo_mask, resource_write_mask;
@@ -84,6 +85,11 @@ struct agx_apple9_render_pipeline {
 
    /* Batch-owned PPP record, relative to the render-context aperture. */
    uint32_t ppp;
+   /* Viewport block within the PPP record and its length in words. Zero
+    * selects the single-viewport block at 0xc0.
+    */
+   uint16_t ppp_viewport_offset;
+   uint16_t ppp_viewport_words;
 
    /* Apple9 VDM linkage words produced by the bounded pipeline linker. */
    uint32_t pipeline_word;
@@ -100,6 +106,10 @@ struct agx_apple9_render_pipeline {
 
 };
 
+#define AGX_APPLE9_MAX_VIEWPORTS 16
+/* Fixed state, then a viewport block of 8n + 2 words at 0x100. */
+#define AGX_APPLE9_PPP_RECORD_MAX 0x340
+
 /* CPU snapshot used while encoding a draw and for adjacent state reuse.
  * Encoded allocations belong to the batch's growing pools. */
 struct agx_apple9_uniform_draw {
@@ -108,8 +118,12 @@ struct agx_apple9_uniform_draw {
    uint64_t program_id[2];
    uint16_t tile_bytes, cf_count;
    uint8_t samples;
-   /* CPU copy for bounded record reuse; never read back write-combined BOs. */
-   uint8_t ppp_record[0x100];
+   /* CPU copy for bounded record reuse; never read back write-combined BOs.
+    * Records with several viewports append the viewport block after the
+    * fixed 256-byte state.
+    */
+   uint8_t ppp_record[AGX_APPLE9_PPP_RECORD_MAX];
+   uint16_t ppp_size, ppp_viewport_offset, ppp_viewport_words;
    uint64_t buffers[2][AGX_APPLE9_MAX_GRAPHICS_BUFFERS];
    uint8_t buffer_count[2];
    uint64_t vertex_table;
@@ -120,6 +134,12 @@ struct agx_apple9_uniform_draw {
    uint32_t raster_control;
    uint8_t object_type;
    float viewport_translate[3], viewport_scale[3];
+   /* Viewports after the first, as {tx, sx, ty, sy, tz, sz}; zero or one
+    * viewport_count selects the single viewport above. Scissors for the
+    * additional viewports follow scissor_index consecutively.
+    */
+   uint8_t viewport_count;
+   float viewports[AGX_APPLE9_MAX_VIEWPORTS - 1][6];
    uint32_t scissor_index;
    uint16_t depth_bias_index;
    uint16_t occlusion_index;
@@ -130,9 +150,32 @@ struct agx_apple9_uniform_draw {
    bool writes_depth;
    bool disable_tri_merging;
    bool flatshade_first;
+   uint8_t provoking_vertex;
 };
 
 void agx_apple9_initialize_entries(struct agx_device *dev);
+
+/* Prepare one native stage independently, including background/EOT helpers.
+ * The caller retains the shader BO and immutable allocation until completion.
+ */
+bool agx_apple9_prepare_graphics_stage(
+   struct agx_device *dev, void *allocator,
+   struct agx_ptr (*alloc)(void *, size_t, size_t),
+   const struct agx_apple9_render_stage *shader, bool fragment,
+   uint64_t table, uint64_t textures, uint64_t samplers,
+   unsigned tile_bytes, unsigned samples, uint32_t *launch);
+
+/* The caller owns both immutable arenas. Context allocations must lie wholly
+ * within the render-context aperture; USC allocations use the shader aperture.
+ * A false return leaves the draw unpublished, including on allocation failure.
+ */
+bool agx_apple9_prepare_draw_alloc(
+   struct agx_device *dev, void *usc_allocator,
+   struct agx_ptr (*usc_alloc)(void *, size_t, size_t), void *context_allocator,
+   struct agx_ptr (*context_alloc)(void *, size_t, size_t),
+   const struct agx_apple9_render_pipeline *pipeline,
+   struct agx_apple9_uniform_draw *draw,
+   const struct agx_apple9_uniform_draw *previous);
 
 bool agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
                              struct agx_pool *context_pool,
@@ -167,7 +210,7 @@ size_t agx_apple9_compute_resource_record_size(
 uint32_t agx_apple9_compute_required_threadgroup_memory_bytes(
    const struct agx_apple9_compute_profile *profile);
 
-/* Map a package argument record to the caller's Gallium buffer namespace and
+/* Map a package argument record to the caller's logical buffer namespace and
  * binding.  Compiler-generated profiles may mix UBO inputs with SSBO inputs
  * and outputs without changing native package argument order. */
 enum agx_apple9_compute_resource_kind agx_apple9_compute_resource_kind(
@@ -216,6 +259,14 @@ bool agx_apple9_build_compute_geometry_fields(
    const struct agx_apple9_compute_geometry *geometry);
 
 /* Build immutable resource and launch records in the batch's USC pool. */
+bool agx_apple9_prepare_compute_dispatch_alloc(
+   struct agx_device *dev, void *allocator,
+   struct agx_ptr (*alloc)(void *, size_t, size_t), struct agx_bo *body,
+   const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
+   unsigned resource_count, uint64_t textures, uint64_t samplers,
+   const struct agx_apple9_compute_geometry *geometry,
+   uint64_t preamble_address, uint64_t *launch_address);
+
 bool agx_apple9_prepare_compute_dispatch(
    struct agx_device *dev, struct agx_pool *usc_pool, struct agx_bo *body,
    const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
@@ -231,6 +282,26 @@ bool agx_apple9_emit_indirect_dispatch(
    void *out, uint64_t launch, uint64_t indirect, const uint32_t local[3],
    bool indirect_local, const struct agx_apple9_compute_profile *profile);
 
+/* Translate common image/sampler state to native Apple9 table records. */
+struct agx_texture_packed;
+struct agx_sampler_packed;
+struct AGX_SAMPLER;
+bool agx_apple9_pack_sampler_state(void *out, const struct AGX_SAMPLER *state);
+bool agx_apple9_translate_texture(void *out,
+                                  const struct agx_texture_packed *state);
+struct agx_pbe_packed;
+struct ail_layout;
+/* layer_base is the selected first layer's level-zero address. The native
+ * descriptor retains the allocation's mip tree and selects level separately.
+ */
+bool agx_apple9_translate_pbe(void *out, const struct agx_pbe_packed *state,
+                            enum pipe_format format, const struct ail_layout *layout,
+                            uint64_t layer_base, unsigned level,
+                            unsigned layer_count, bool layered);
+
+bool agx_apple9_translate_sampler(void *out,
+                                  const struct agx_sampler_packed *state);
+
 void agx_apple9_pack_r32f_texture(void *out, uint64_t address, uint32_t width,
                                   uint32_t height, uint32_t stride_B);
 
@@ -238,6 +309,7 @@ bool agx_apple9_sampler_wrap_supported(unsigned wrap);
 void agx_apple9_pack_sampler(void *out, bool min_linear, bool mag_linear,
                               unsigned mip_filter, float min_lod, float max_lod,
                          unsigned wrap_s, unsigned wrap_t, unsigned max_anisotropy);
+void agx_apple9_pack_fetch_sampler(void *out);
 void agx_apple9_pack_nearest_sampler(void *out);
 
 /*

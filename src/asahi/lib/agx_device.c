@@ -242,10 +242,11 @@ agx_bo_alloc(struct agx_device *dev, size_t size, size_t align,
    return bo;
 }
 
-static void
-agx_bo_mmap(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr)
+static void *
+agx_bo_mmap(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr,
+            size_t size)
 {
-   assert(bo->_map == NULL && "not double mapped");
+   assert(size <= bo->size);
 
    struct drm_asahi_gem_mmap_offset gem_mmap_offset = {.handle =
                                                           bo->uapi_handle};
@@ -258,15 +259,15 @@ agx_bo_mmap(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr)
    }
 
    flags = MAP_SHARED | (fixed_addr ? MAP_FIXED : 0);
-   bo->_map = os_mmap(fixed_addr, bo->size, PROT_READ | PROT_WRITE, flags,
-                      dev->fd, gem_mmap_offset.offset);
-   if (bo->_map == MAP_FAILED) {
-      bo->_map = NULL;
-      fprintf(stderr,
-              "mmap failed: result=%p size=0x%llx fd=%i offset=0x%llx %m\n",
-              bo->_map, (long long)bo->size, dev->fd,
-              (long long)gem_mmap_offset.offset);
+   void *map = os_mmap(fixed_addr, size, PROT_READ | PROT_WRITE, flags,
+                       dev->fd, gem_mmap_offset.offset);
+   if (map == MAP_FAILED) {
+      fprintf(stderr, "mmap failed: size=0x%llx fd=%i offset=0x%llx %m\n",
+              (long long)size, dev->fd, (long long)gem_mmap_offset.offset);
+      return NULL;
    }
+
+   return map;
 }
 
 struct agx_bo *

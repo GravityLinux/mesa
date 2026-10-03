@@ -52,6 +52,10 @@ enum agx_va_flags {
 
    /* Within the Apple9 render-context aperture, outside kernel storage. */
    AGX_VA_CONTEXT = (1 << 2),
+
+   /* Allocated from the bottom of the heap, away from ordinary BOs, so a
+    * replayed address stays free while the driver keeps allocating. */
+   AGX_VA_LOW = (1 << 3),
 };
 
 struct agx_va {

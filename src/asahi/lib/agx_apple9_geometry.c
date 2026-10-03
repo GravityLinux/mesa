@@ -48,8 +48,6 @@ agx_apple9_build_compute_geometry_fields(
           * numerator when rounding up on the CPU. */
          groups[d] = geometry->threads[d] / geometry->local[d] +
                      (geometry->threads[d] % geometry->local[d] != 0);
-         if (groups[d] > 65535)
-            return false;
       }
       pointer = record_address + offset;
       break;

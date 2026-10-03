@@ -569,9 +569,13 @@ agx_batch_reads_fragment(struct agx_batch *batch, struct agx_resource *rsrc)
    if (!rsrc->base.screen)
       return;
 
-   /* Hazard: read-after-write */
+   /* Hazard: read-after-write, including a separate stencil written as
+    * another batch's depth/stencil attachment. */
    agx_flush_writer_except(batch->ctx, rsrc, batch, "Read from another batch",
                            false);
+   if (rsrc->separate_stencil)
+      agx_flush_writer_except(batch->ctx, rsrc->separate_stencil, batch,
+                              "Read from another batch", false);
 }
 
 void

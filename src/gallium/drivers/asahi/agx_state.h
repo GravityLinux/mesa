@@ -557,7 +557,7 @@ struct asahi_fs_shader_key {
    struct agx_apple9_blend apple9_blend[PIPE_MAX_COLOR_BUFS];
    struct agx_apple9_sampler_key apple9_samplers[32];
 };
-static_assert(sizeof(struct asahi_fs_shader_key) == 1740, "no holes");
+static_assert(sizeof(struct asahi_fs_shader_key) == 1804, "no holes");
 
 union asahi_shader_key {
    struct asahi_vs_shader_key vs;
@@ -1042,7 +1042,7 @@ agx_map_texture_cpu(struct agx_resource *rsrc, unsigned level, unsigned z)
    if (bo->shim_cpu_epoch && *bo->shim_cpu_epoch)
       ++*bo->shim_cpu_epoch;
    if (!bo->_map)
-      bo->dev->ops.bo_mmap(bo->dev, bo, NULL);
+      bo->_map = bo->dev->ops.bo_mmap(bo->dev, bo, NULL, bo->size);
    return ((uint8_t *)bo->_map) +
           ail_get_layer_level_B(&rsrc->layout, z, level);
 }

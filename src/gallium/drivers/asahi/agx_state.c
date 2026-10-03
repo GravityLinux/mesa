@@ -1578,6 +1578,7 @@ agx_apple9_install_vertex_stage(struct agx_device *dev,
       .preamble_offset = part->info.apple9_preamble_offset,
       .preamble_size = part->info.apple9_preamble_size,
       .scratch_size = part->info.scratch_size,
+      .atomic_frame_size = part->info.apple9_atomic_frame_size,
       .publication_count = part->info.apple9_publication_count,
       .publication_count_valid = true,
       .ubo_mask = part->info.apple9_ubo_mask,
@@ -1968,9 +1969,8 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
    struct agx_apple9_texture_mapping apple9_texture_mapping = {0};
    if (apple9_render) {
       const char *reason = NULL;
-      /* Compile the API body through Apple9's semantic pipeline. The older
-       * backend below still supplies Gallium metadata during bring-up; its
-       * executable is not installed as either Apple9 stage main. */
+      /* Compile the API body and its metadata through Apple9's semantic
+       * pipeline. */
       struct blob_reader apple9_reader;
       blob_reader_init(&apple9_reader, so->early_serialized_nir.data,
                        so->early_serialized_nir.size);
@@ -2035,9 +2035,20 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       ralloc_free(apple9_nir);
    }
 
-   struct agx_compiled_shader *compiled = agx_compile_nir(
-      dev, nir, &pctx->debug, so->type, false, so->type != MESA_SHADER_FRAGMENT,
-      false, 0, attrib_components_read);
+   struct agx_compiled_shader *compiled;
+   if (apple9_render) {
+      /* Native graphics already supplies code and shader metadata. Compiling
+       * an unused Apple8 program also misinterprets tile-helper intrinsics,
+       * whose execution model belongs to the Apple9 backend. */
+      compiled = CALLOC_STRUCT(agx_compiled_shader);
+      compiled->stage = so->type;
+      compiled->b.info = apple9_stage.info;
+      BITSET_COPY(compiled->attrib_components_read, attrib_components_read);
+   } else {
+      compiled = agx_compile_nir(
+         dev, nir, &pctx->debug, so->type, false, so->type != MESA_SHADER_FRAGMENT,
+         false, 0, attrib_components_read);
+   }
 
    if (so->type == MESA_SHADER_FRAGMENT) {
       /* XXX: don't replicate this all over the driver */
@@ -2100,6 +2111,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
             .preamble_offset = apple9_stage.info.apple9_preamble_offset,
             .preamble_size = apple9_stage.info.apple9_preamble_size,
             .scratch_size = apple9_stage.info.scratch_size,
+            .atomic_frame_size = apple9_stage.info.apple9_atomic_frame_size,
             .publication_count = apple9_stage.info.apple9_publication_count,
             .publication_count_valid = true,
             .ubo_mask = apple9_stage.info.apple9_ubo_mask,
@@ -2131,6 +2143,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
             .preamble_offset = apple9_stage.info.apple9_preamble_offset,
             .preamble_size = apple9_stage.info.apple9_preamble_size,
             .scratch_size = apple9_stage.info.scratch_size,
+            .atomic_frame_size = apple9_stage.info.apple9_atomic_frame_size,
             .publication_count = apple9_stage.info.apple9_publication_count,
             .publication_count_valid = true,
             .ubo_mask = apple9_stage.info.apple9_ubo_mask,
@@ -4904,6 +4917,9 @@ agx_batch_geometry_params(struct agx_batch *batch, uint64_t input_index_buffer,
 
    params.flat_outputs =
       batch->ctx->stage[MESA_SHADER_FRAGMENT].shader->info.inputs_flat_shaded;
+   /* The geometry shader recovers patch IDs from the tessellated draw. */
+   if (batch->ctx->in_tess)
+      params.tess_params = batch->uniforms.tess_params;
 
    params.xfb_offs_ptrs[0] = AGX_ZERO_PAGE_ADDRESS;
    params.xfb_offs_ptrs[1] = AGX_ZERO_PAGE_ADDRESS;
@@ -5260,8 +5276,9 @@ agx_needs_passthrough_gs(struct agx_context *ctx,
       return true;
    }
 
-   /* TODO: Handle fans properly, we need to plumb a sysval. */
-   if (info->mode == MESA_PRIM_TRIANGLE_FAN &&
+   /* Apple9 carries the first-fan selector in its per-draw sysvals. */
+   if (!agx_apple9_direct_render_enabled(agx_device(ctx->base.screen)) &&
+       info->mode == MESA_PRIM_TRIANGLE_FAN &&
        ctx->rast->base.flatshade_first &&
        ctx->stage[MESA_SHADER_FRAGMENT].shader->info.inputs_flat_shaded) {
 
@@ -6015,12 +6032,14 @@ agx_apple9_collect_color_targets(const struct agx_batch *batch,
 static uint64_t
 agx_apple9_upload_graphics_sysvals(
    struct agx_batch *batch, struct agx_stage *stage,
-   const struct agx_apple9_texture_mapping *mapping)
+   const struct agx_apple9_texture_mapping *mapping, bool first_fan)
 {
    struct agx_context *ctx = batch->ctx;
    struct agx_ptr sysvals = agx_pool_alloc_aligned(
       &batch->pool, AGX_APPLE9_GRAPHICS_SYSVAL_SIZE, 16);
    memcpy(sysvals.cpu, ctx->blend_color.color, 16);
+   uint32_t fan = first_fan;
+   memcpy((uint8_t *)sysvals.cpu + AGX_APPLE9_FIRST_FAN_OFFSET, &fan, sizeof(fan));
    /* Compute texture operations share this table without raster state. */
    float point_size = !ctx->rast || ctx->rast->base.point_size_per_vertex
                          ? 0.0f : ctx->rast->base.point_size;
@@ -6058,6 +6077,14 @@ agx_apple9_upload_graphics_sysvals(
          : view->base.u.tex.last_layer - view->base.u.tex.first_layer + 1;
       info[3] = view->base.u.tex.last_level - level + 1;
       info[4] = MAX2(texture->nr_samples, 1);
+      agx_unpack(stderr, &view->desc, TEXTURE, descriptor);
+      const unsigned channels[] = {descriptor.swizzle_r, descriptor.swizzle_g,
+                                   descriptor.swizzle_b, descriptor.swizzle_a};
+      for (unsigned c = 0; c < 4; ++c) {
+         unsigned swizzle = channels[c] == AGX_CHANNEL_0 ? PIPE_SWIZZLE_0 :
+                            channels[c] == AGX_CHANNEL_1 ? PIPE_SWIZZLE_1 : channels[c];
+         info[7] |= swizzle << (3 * c);
+      }
    }
    return sysvals.gpu;
 }
@@ -6136,39 +6163,10 @@ agx_apple9_upload_textures(struct agx_batch *batch, struct agx_stage *shader,
        * upload. Build from the live view instead of its optional cache. */
       struct agx_texture_packed legacy;
       agx_pack_texture(&legacy, resource, view->format, &physical);
-      memcpy(descriptor, &legacy, 8);
-      /* First/last-level nibbles in the Apple8 header become Apple9
-       * sample/mipmap flags. Apple9's mip count lives separately at +22. */
-      uint32_t dimensions;
-      memcpy(&dimensions, descriptor + 4, 4);
-      dimensions &= 0x00ffffff;
-      if (resource->base.nr_samples == 4)
-         dimensions |= 1u << 24;
-      if (resource->base.last_level)
-         dimensions |= 1u << 26;
-      memcpy(descriptor + 4, &dimensions, 4);
-      uint64_t address = agx_map_texture_gpu(resource, 0) >> 4;
-      if (view->base.target == PIPE_TEXTURE_3D)
-         address |= (uint64_t)(resource->base.depth0 - 1) << 46;
-      if (view->base.target == PIPE_TEXTURE_2D_ARRAY ||
-          view->base.target == PIPE_TEXTURE_1D_ARRAY || seamful_cube)
-         address |= (uint64_t)(MAX2(resource->base.array_size, resource->base.depth0) - 1) << 46;
-      /* Linear rows use bits 110..125, sharing the tiled depth field.
-       * Do not apply the tiled page-alignment flag to this descriptor. */
-      if (resource->layout.tiling == AIL_TILING_LINEAR)
-         address |= ((uint64_t)(resource->layout.linear_stride_B >> 4) - 1) << 46;
-      else if (resource->layout.page_aligned_layers)
-         address |= UINT64_C(1) << 62;
-      if (resource->base.last_level)
-         address |= UINT64_C(1) << 63;
-      /* sRGB remains at bit 108 even though the address moved. */
-      if (util_format_is_srgb(view->format))
-         address |= UINT64_C(1) << 44;
-      memcpy(descriptor + 8, &address, sizeof(address));
-      /* Native level views retain the full allocation's dimensions and
-       * base address; the first/last levels are separate fields. */
-      descriptor[21] = view->base.u.tex.first_level << 4;
-      descriptor[22] = view->base.u.tex.last_level;
+      if (!agx_apple9_translate_texture(descriptor, &legacy)) {
+         fprintf(stderr, "Apple9 texture descriptor translation failed\n");
+         abort();
+      }
       if (dev->apple9_trace) {
          fprintf(stderr, "APPLE9_DESCRIPTOR binding=%u ", binding);
          for (unsigned i = 0; i < 32; ++i) fprintf(stderr, "%02x", descriptor[i]);
@@ -6189,44 +6187,15 @@ agx_apple9_upload_textures(struct agx_batch *batch, struct agx_stage *shader,
                             slot++ * AGX_APPLE9_TEXTURE_TABLE_STRIDE;
       struct agx_pbe_packed legacy;
       agx_batch_upload_pbe(batch, &legacy, view, true, false, false, false);
-      memset(descriptor, 0, AGX_APPLE9_TEXTURE_TABLE_STRIDE);
-      memcpy(descriptor, &legacy, 8);
       unsigned level = view->u.tex.level;
-      /* Tiled PBE views retain the complete mip tree, like texture views.
-       * The extended descriptor selects the rendered level separately. */
-      unsigned descriptor_level = resource->layout.tiling == AIL_TILING_LINEAR ? level : 0;
-      uint64_t address = (agx_map_texture_gpu(resource, view->u.tex.first_layer) +
-                         resource->layout.level_offsets_B[descriptor_level] -
-                         resource->layout.level_offsets_B[0]) >> 4;
-      uint32_t header[2];
-      memcpy(header, descriptor, 8);
-      header[0] = (header[0] & 0x00ffffff) |
-                  ((u_minify(resource->base.width0, descriptor_level) - 1) << 24);
-      header[1] = ((u_minify(resource->base.width0, descriptor_level) - 1) >> 8) |
-                  ((u_minify(resource->base.height0, descriptor_level) - 1) << 6) |
-                  (header[1] & 0x01000000);
-      /* Packed tile words already follow the format's memory channel
-       * order. Unlike RGBA8 tile words, they need no PBE swizzle. */
-      enum pipe_format physical = agx_apple9_color_tile_format(view->format);
-      if (agx_apple9_color_is_packed(physical))
-         header[0] = (header[0] & ~0x00ff0000u) | 0x00e40000;
-      if (resource->layout.tiling != AIL_TILING_LINEAR && resource->base.last_level) {
-         header[1] |= 1u << 26;
-         address |= UINT64_C(1) << 63;
-         descriptor[21] = level << 4;
-         descriptor[22] = resource->base.last_level;
+      if (!agx_apple9_translate_pbe(
+             descriptor, &legacy, view->format, &resource->layout,
+             agx_map_texture_gpu(resource, view->u.tex.first_layer), level,
+             view->u.tex.last_layer - view->u.tex.first_layer + 1,
+             !view->u.tex.single_layer_view)) {
+         fprintf(stderr, "Apple9 unsupported block image descriptor\n");
+         abort();
       }
-      memcpy(descriptor, header, 8);
-      /* Apple9 PBE addresses use 40 bits in 16-byte units. Linear
-       * row stride occupies bits 108.., also in 16-byte units. */
-      if (resource->layout.tiling == AIL_TILING_LINEAR) {
-         address |= ((uint64_t)(ail_get_linear_stride_B(&resource->layout, level) >> 4) - 1) << 44;
-      } else if (!view->u.tex.single_layer_view) {
-         address |= (uint64_t)(view->u.tex.last_layer - view->u.tex.first_layer) << 44;
-         if (resource->layout.page_aligned_layers)
-            address |= UINT64_C(1) << 60;
-      }
-      memcpy(descriptor + 8, &address, 8);
       if (dev->apple9_trace) {
          fprintf(stderr, "APPLE9_BLOCK_IMAGE_DRAW draw=%u binding=%u desc=",
                  batch->apple9_draw_count, binding);
@@ -6266,41 +6235,30 @@ agx_apple9_upload_textures(struct agx_batch *batch, struct agx_stage *shader,
        * use normalized coordinates here. Tables use 32-byte slots. */
       uint8_t *descriptor = (uint8_t *)samplers.cpu +
                             slot++ * AGX_APPLE9_SAMPLER_TABLE_STRIDE;
-      memset(descriptor, 0, 32);
-      agx_apple9_pack_sampler(
-         descriptor, state->min_img_filter == PIPE_TEX_FILTER_LINEAR,
-         state->mag_img_filter == PIPE_TEX_FILTER_LINEAR,
-         state->min_mip_filter == PIPE_TEX_MIPFILTER_NONE      ? 0
-         : state->min_mip_filter == PIPE_TEX_MIPFILTER_NEAREST ? 1
-                                                               : 2,
-         state->min_lod, state->max_lod, state->wrap_s, state->wrap_t,
-         state->max_anisotropy);
       unsigned preset = apple9_border_preset(state);
       if (preset == 3)
          preset = 0;
       if (rs->texture_mapping.white_samplers & BITFIELD_BIT(binding))
          preset = 2;
-      uint32_t modes;
-      memcpy(&modes, descriptor + 4, 4);
-      modes |= preset << 29;
-      /* Apple9 moves the cube seam mode above the border preset. */
-      modes |= !state->seamless_cube_map ? (1u << 31) : 0;
-      if (state->compare_mode == PIPE_TEX_COMPARE_R_TO_TEXTURE) {
-         /* M4 comparator: predicate group in bits40..42, sense in bit39. */
-         static const uint16_t comparisons[] = {
-            [PIPE_FUNC_NEVER] = 0x780,
-            [PIPE_FUNC_LESS] = 0x500,
-            [PIPE_FUNC_EQUAL] = 0x600,
-            [PIPE_FUNC_LEQUAL] = 0x400,
-            [PIPE_FUNC_GREATER] = 0x580,
-            [PIPE_FUNC_NOTEQUAL] = 0x680,
-            [PIPE_FUNC_GEQUAL] = 0x480,
-            [PIPE_FUNC_ALWAYS] = 0x700,
-         };
-         modes = (modes & ~0x780u) | comparisons[state->compare_func];
+      const struct AGX_SAMPLER native = {
+         .minimum_lod = state->min_lod,
+         .maximum_lod = state->max_lod,
+         .maximum_anisotropy = MAX2(state->max_anisotropy, 1),
+         .magnify = agx_filters[state->mag_img_filter],
+         .minify = agx_filters[state->min_img_filter],
+         .mip_filter = agx_mip_filter_from_pipe(state->min_mip_filter),
+         .wrap_s = agx_wrap_from_pipe(state->wrap_s),
+         .wrap_t = agx_wrap_from_pipe(state->wrap_t),
+         .wrap_r = agx_wrap_from_pipe(state->wrap_r),
+         .compare_func = agx_compare_funcs[state->compare_func],
+         .compare_enable = state->compare_mode == PIPE_TEX_COMPARE_R_TO_TEXTURE,
+         .border_colour = preset,
+         .seamful_cube_maps = !state->seamless_cube_map,
+      };
+      if (!agx_apple9_pack_sampler_state(descriptor, &native)) {
+         fprintf(stderr, "Apple9 sampler descriptor translation failed\n");
+         abort();
       }
-      modes |= agx_wrap_from_pipe(state->wrap_r) << 3;
-      memcpy(descriptor + 4, &modes, 4);
       if (dev->apple9_trace) {
          fprintf(stderr, "APPLE9_SAMPLER ");
          for (unsigned i = 0; i < 8; ++i) fprintf(stderr, "%02x", descriptor[i]);
@@ -6345,7 +6303,6 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
 {
    struct agx_context *ctx = agx_context(pctx);
    struct agx_device *dev = agx_device(pctx->screen);
-   struct agx_screen *screen = agx_screen(pctx->screen);
 
    if (unlikely(!agx_render_condition_check(ctx)))
       return;
@@ -6456,16 +6413,10 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
     * including a passthrough GS when the application has no GS. Primconvert
     * preserves adjacency, so sending those modes there would recurse. Only
     * convert primitives which will be rasterized directly. */
-   const struct agx_uncompiled_shader *fs =
-      ctx->stage[MESA_SHADER_FRAGMENT].shader;
-   bool apple9_fan_first = info->mode == MESA_PRIM_TRIANGLE_FAN &&
-      ctx->rast->base.flatshade_first &&
-      (fs->info.inputs_flat_shaded ||
-       (ctx->rast->base.flatshade && (fs->info.inputs_read & VARYING_BITS_COLOR)));
    if (agx_apple9_direct_render_enabled(dev) &&
        !ctx->stage[MESA_SHADER_GEOMETRY].shader &&
        !mesa_prim_has_adjacency(info->mode) && info->mode != MESA_PRIM_PATCHES &&
-       (!(apple9_native_prims & BITFIELD_BIT(info->mode)) || apple9_fan_first)) {
+       !(apple9_native_prims & BITFIELD_BIT(info->mode))) {
       if (!ctx->apple9_primconvert) {
          struct primconvert_config config = {
             /* Restart segments are concatenated by primconvert, so its
@@ -6979,7 +6930,8 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
                address = agx_map_gpu(resource) + ssbo->buffer_offset;
             } else if (binding == AGX_APPLE9_GRAPHICS_SYSVAL_BINDING) {
                address = agx_apple9_upload_graphics_sysvals(
-                  batch, &ctx->stage[shader], &rs->texture_mapping);
+                  batch, &ctx->stage[shader], &rs->texture_mapping,
+                  info->mode == MESA_PRIM_TRIANGLE_FAN && ctx->rast->base.flatshade_first);
             } else if (binding >= AGX_APPLE9_SYSVAL_UBO_BASE &&
                        binding < AGX_APPLE9_SYSVAL_UBO_BASE + AGX_NUM_SYSVAL_TABLES) {
                address = batch->uniforms.tables[binding - AGX_APPLE9_SYSVAL_UBO_BASE];
@@ -7050,6 +7002,8 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       batch->apple9_previous_draw = *record;
       ++batch->apple9_draw_count;
       pipeline.ppp = record->ppp;
+      pipeline.ppp_viewport_offset = record->ppp_viewport_offset;
+      pipeline.ppp_viewport_words = record->ppp_viewport_words;
       pipeline.vertex_launch = record->launch[0] / 0x40;
       /* Native vertex launch configuration. It is not a header address. */
       pipeline.pipeline_word = 0x01000000;
@@ -7162,7 +7116,6 @@ agx_apple9_launch_prerast(struct agx_batch *batch, struct agx_grid grid,
                           struct agx_workgroup wg, struct agx_compiled_shader *cs)
 {
    struct agx_context *ctx = batch->ctx;
-   struct agx_device *dev = agx_device(ctx->base.screen);
    const struct agx_apple9_compute_profile *profile = &cs->apple9_compute_profile;
    struct agx_stage *stage = &ctx->stage[cs->stage];
    unsigned count = agx_apple9_compute_resource_count(profile);
@@ -7183,7 +7136,7 @@ agx_apple9_launch_prerast(struct agx_batch *batch, struct agx_grid grid,
          size = stage->ssbo[binding].buffer_size;
       } else if (binding == AGX_APPLE9_GRAPHICS_SYSVAL_BINDING) {
          addresses[i] = agx_apple9_upload_graphics_sysvals(
-            batch, stage, &cs->apple9_compute_textures);
+            batch, stage, &cs->apple9_compute_textures, false);
          continue;
       } else if (binding >= AGX_APPLE9_SYSVAL_UBO_BASE &&
                  binding < AGX_APPLE9_SYSVAL_UBO_BASE + AGX_NUM_SYSVAL_TABLES) {
@@ -7535,7 +7488,7 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
          } else if (kind == AGX_APPLE9_COMPUTE_RESOURCE_UBO) {
             if (binding == AGX_APPLE9_GRAPHICS_SYSVAL_BINDING) {
                resource_addresses[i] = agx_apple9_upload_graphics_sysvals(
-                  batch, stage, &cs->apple9_compute_textures);
+                  batch, stage, &cs->apple9_compute_textures, false);
                continue;
             }
             if (binding >= PIPE_MAX_CONSTANT_BUFFERS ||

@@ -4,6 +4,9 @@
 # SPDX-License-Identifier: MIT
 
 libasahi_lib_files = files(
+  'agx_apple9.c',
+  'agx_apple9_geometry.c',
+  'agx_apple9_launch.c',
   'agx_bo.c',
   'agx_border.c',
   'agx_device.c',
@@ -12,6 +15,7 @@ libasahi_lib_files = files(
   'agx_bg_eot.c',
   'agx_tilebuffer.c',
   'agx_nir_lower_tilebuffer.c',
+  'agx_nir_apple9_tilebuffer.c',
   'agx_nir_lower_uvs.c',
   'agx_nir_lower_vbo.c',
   'agx_nir_prolog_epilog.c',
@@ -58,7 +62,7 @@ idep_libagx_shaders_h = declare_dependency(
 libasahi_lib = static_library(
   'asahi_lib',
   [libasahi_lib_files, libagx_shaders, agx_pack, sha1_h],
-  include_directories : [inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+  include_directories : [inc_gallium, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
   c_args : [no_override_init_args, '-Wno-c2x-extensions'],
   gnu_symbol_visibility : 'hidden',
   link_with: [libasahi_decode, libvdrm, libpoly_nir],

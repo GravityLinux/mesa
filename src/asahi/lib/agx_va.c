@@ -35,6 +35,11 @@ agx_va_alloc(struct agx_device *dev, uint64_t size_B, uint64_t align_B,
    if (flags & AGX_VA_FIXED) {
       if (util_vma_heap_alloc_addr(heap, fixed_va, size_B))
          addr = fixed_va;
+   } else if (flags & AGX_VA_LOW) {
+      bool high = heap->alloc_high;
+      heap->alloc_high = false;
+      addr = util_vma_heap_alloc(heap, size_B, align_B);
+      heap->alloc_high = high;
    } else {
       addr = util_vma_heap_alloc(heap, size_B, align_B);
    }

@@ -4,12 +4,9 @@
 files_asahi = files(
   'driinfo_asahi.h',
   'agx_batch.c',
-  'agx_apple9.c',
-  'agx_apple9_launch.c',
   'agx_blit.c',
   'agx_disk_cache.c',
   'agx_fence.c',
-  'agx_apple9_geometry.c',
   'agx_pipe.c',
   'agx_nir_lower_sysvals.c',
   'agx_nir_lower_bindings.c',
@@ -39,7 +36,7 @@ if with_tests
     'agx_apple9_launcher_tests',
     executable(
       'agx_apple9_launcher_tests',
-      files('test/test-apple9-launch.cpp', 'agx_apple9_launch.c'),
+      files('test/test-apple9-launch.cpp', '../../../asahi/lib/agx_apple9_launch.c'),
       include_directories : [inc_src],
       dependencies : [idep_gtest],
     ),
@@ -50,7 +47,7 @@ if with_tests
     'agx_apple9_geometry_tests',
     executable(
       'agx_apple9_geometry_tests',
-      files('test/test-apple9-geometry.cpp', 'agx_apple9_geometry.c'),
+      files('test/test-apple9-geometry.cpp', '../../../asahi/lib/agx_apple9_geometry.c'),
       include_directories : [inc_include, inc_src],
       dependencies : [idep_gtest, idep_nir],
     ),

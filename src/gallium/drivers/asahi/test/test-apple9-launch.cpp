@@ -6,7 +6,7 @@
 #include "gtest/gtest.h"
 
 extern "C" {
-#include "agx_apple9_launch.h"
+#include "asahi/lib/agx_apple9_launch.h"
 #include "asahi/compiler/agx_apple9_profile.h"
 }
 
@@ -160,7 +160,7 @@ TEST(Apple9Launcher, InvalidParametersCannotPublishPartialCode)
       reject(bad);
    }
    bad = p;
-   for (unsigned bytes : {1u, 64u, 129u, 384u, 2048u, UINT32_MAX}) {
+   for (unsigned bytes : {1u, 64u, 129u, 384u, 32768u, UINT32_MAX}) {
       bad.threadgroup_memory_bytes = bytes;
       reject(bad);
    }
@@ -201,16 +201,17 @@ TEST(Apple9Launcher, ThreadgroupAllocationDoesNotChangeEntryOrFrame)
                                        AGX_APPLE9_LAUNCH_COMPUTE, &p));
    unsigned call = agx_apple9_launch_call_offset(AGX_APPLE9_LAUNCH_COMPUTE,
                                                  p.resource_count);
-   for (unsigned bytes : {128, 256, 512, 1024}) {
+   for (unsigned bytes : {128, 256, 512, 1024, 2048, 4096, 8192, 16384}) {
       p.threadgroup_memory_bytes = bytes;
       ASSERT_TRUE(agx_apple9_launch_build(out.data(), out.size(),
                                           AGX_APPLE9_LAUNCH_COMPUTE, &p));
-      EXPECT_EQ(read16(out.data() + call - 6), (bytes << 2) | 0x80);
-      EXPECT_EQ(out[call - 4], 0);
+      EXPECT_EQ(read16(out.data() + call - 6), ((bytes << 2) | 0x80) & 0xffff);
+      EXPECT_EQ(out[call - 4], bytes >> 14);
       EXPECT_EQ(out[call - 3], 0);
       /* Only the allocation operand changes. */
       out[call - 6] = initial[call - 6];
       out[call - 5] = initial[call - 5];
+      out[call - 4] = initial[call - 4];
       EXPECT_EQ(out, initial);
    }
 }

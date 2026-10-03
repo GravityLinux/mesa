@@ -192,15 +192,18 @@ agx_virtio_bo_unbind_object(struct agx_device *dev, uint32_t object_handle)
    return 0;
 }
 
-static void
-agx_virtio_bo_mmap(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr)
+static void *
+agx_virtio_bo_mmap(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr,
+                   size_t size)
 {
-   bo->_map = vdrm_bo_map(dev->vdrm, bo->handle, bo->size, fixed_addr);
-   if (bo->_map == MAP_FAILED) {
-      bo->_map = NULL;
-      fprintf(stderr, "mmap failed: result=%p size=0x%llx fd=%i\n", bo->_map,
-              (long long)bo->size, dev->fd);
+   void *map = vdrm_bo_map(dev->vdrm, bo->handle, size, fixed_addr);
+   if (map == MAP_FAILED) {
+      fprintf(stderr, "mmap failed: size=0x%llx fd=%i\n", (long long)size,
+              dev->fd);
+      return NULL;
    }
+
+   return map;
 }
 
 static ssize_t

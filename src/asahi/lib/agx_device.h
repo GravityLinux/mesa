@@ -78,7 +78,10 @@ typedef struct {
                               enum agx_bo_flags flags);
    int (*bo_bind)(struct agx_device *dev, struct drm_asahi_gem_bind_op *ops,
                   uint32_t count);
-   void (*bo_mmap)(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr);
+   /* Map the first size bytes of a BO, at fixed_addr unless NULL. Returns
+    * NULL on failure. */
+   void *(*bo_mmap)(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr,
+                    size_t size);
    ssize_t (*get_params)(struct agx_device *dev, void *buf, size_t size);
    int (*submit)(struct agx_device *dev, struct drm_asahi_submit *submit,
                  struct agx_submit_virt *virt);
@@ -229,22 +232,31 @@ agx_rw_addr_to_ro(struct agx_device *dev, uint64_t addr)
 void agx_bo_note_cpu_write(struct agx_bo *bo, uint64_t offset, uint64_t size);
 bool agx_bo_sync_cpu_read(struct agx_bo *bo);
 
+/* A separate mapping of the first size bytes of a BO, at fixed_addr unless
+ * NULL, owned and unmapped by the caller. API memory maps use this so that
+ * their size and lifetime are independent of the driver's mapping below, which
+ * covers the whole BO, possibly larger than requested when it came from the BO
+ * cache, and survives the BO's return to the cache.
+ */
 static inline void *
-agx_bo_map_placed(struct agx_bo *bo, void *fixed_addr)
+agx_bo_map_range(struct agx_bo *bo, void *fixed_addr, size_t size)
 {
    /* An ordinary map can escape and be written after any submission. */
    if (bo->shim_cpu_epoch)
       *bo->shim_cpu_epoch = 0;
-   if (!bo->_map)
-      bo->dev->ops.bo_mmap(bo->dev, bo, fixed_addr);
 
-   return bo->_map;
+   return bo->dev->ops.bo_mmap(bo->dev, bo, fixed_addr, size);
 }
 
 static inline void *
 agx_bo_map(struct agx_bo *bo)
 {
-   return agx_bo_map_placed(bo, NULL);
+   if (bo->shim_cpu_epoch)
+      *bo->shim_cpu_epoch = 0;
+   if (!bo->_map)
+      bo->_map = bo->dev->ops.bo_mmap(bo->dev, bo, NULL, bo->size);
+
+   return bo->_map;
 }
 
 static inline bool
