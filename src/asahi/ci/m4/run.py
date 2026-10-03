@@ -25,7 +25,7 @@ def digest(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("suite", choices=["gl", "piglit"], nargs="?", default="gl")
+    parser.add_argument("suite", choices=["gl", "vk", "piglit"], nargs="?", default="gl")
     parser.add_argument("--config", type=Path, default=Path("/g16/tools/mesa-ci/config.json"))
     parser.add_argument("--driver", type=Path, help="Mesa installation prefix; defaults to /opt/mesa-g16")
     parser.add_argument("--output", type=Path)
@@ -40,7 +40,9 @@ def main():
 
     config = json.loads(args.config.read_text())
     ci = Path(config["ci_dir"]).resolve(strict=True)
-    template = ci / ("deqp-asahi-m4-gl33-gles30.toml" if args.suite == "gl" else "m4/piglit.toml")
+    template = ci / {"gl": "deqp-asahi-m4-gl33-gles30.toml",
+                     "vk": "deqp-asahi-m4-vk.toml",
+                     "piglit": "m4/piglit.toml"}[args.suite]
     suite = template.read_text()
     for prefix, path in config["path_map"].items():
         # Replace TOML string prefixes, preserving escaping for local paths.
@@ -55,11 +57,14 @@ def main():
         raise RuntimeError(f"Unexpected runner version: {version}")
     driver = (args.driver or Path(config["driver"])).resolve(strict=True)
     # Accept future Mesa library versions without silently selecting two builds.
-    libraries = list((driver / "lib").glob("libgallium-*.so"))
+    library_glob = "libvulkan_asahi.so" if args.suite == "vk" else "libgallium-*.so"
+    libraries = list((driver / "lib").glob(library_glob))
     if len(libraries) != 1:
-        raise RuntimeError(f"Expected one libgallium in {driver / 'lib'}")
+        raise RuntimeError(f"Expected one {library_glob} in {driver / 'lib'}")
     library = libraries[0].resolve(strict=True)
-    inputs = {str(template): digest(template), str(runner): digest(runner), str(library): digest(library)}
+    launcher = Path(__file__).resolve()
+    inputs = {str(launcher): digest(launcher), str(template): digest(template),
+              str(runner): digest(runner), str(library): digest(library)}
     for section in parsed.get("deqp", []):
         for name in [section["deqp"], *section["caselists"]]:
             inputs[name] = digest(name)
@@ -84,13 +89,23 @@ def main():
 
     env = dict(os.environ)
     for key in list(env):
-        if key.startswith(("MESA_", "ASAHI_", "AGX_", "GALLIUM_", "LIBGL_", "GBM_")) or key in ["LD_PRELOAD", "LD_LIBRARY_PATH", "EGL_PLATFORM"]:
+        if key.startswith(("MESA_", "ASAHI_", "AGX_", "GALLIUM_", "LIBGL_", "GBM_", "HK_", "VK_")) or key in ["LD_PRELOAD", "LD_LIBRARY_PATH", "EGL_PLATFORM"]:
             del env[key]
     env.update(config["environment"])
-    env.update(LD_LIBRARY_PATH=str(driver / "lib") + ":" + config["piglit_library_dir"],
+    env.update(LD_LIBRARY_PATH=str(driver / "lib") + ":" + config.get("piglit_library_dir", "/usr/lib64"),
                LIBGL_DRIVERS_PATH=str(driver / "lib/dri"),
                GBM_BACKENDS_PATH=str(driver / "lib/gbm"),
                MESA_SHADER_CACHE_DIR=str(output / "shader-cache"))
+    if args.suite == "vk":
+        icds = list((driver / "share/vulkan/icd.d").glob("*asahi*.json"))
+        if len(icds) != 1:
+            raise RuntimeError("Expected one Asahi Vulkan ICD in candidate prefix")
+        env["VK_DRIVER_FILES"] = str(icds[0].resolve(strict=True))
+        manifest = json.loads(icds[0].read_text())
+        icd_library = Path(manifest["ICD"]["library_path"])
+        if not icd_library.is_absolute() or icd_library.resolve(strict=True) != library:
+            raise RuntimeError("Asahi ICD must name the selected candidate library by absolute path")
+        inputs[env["VK_DRIVER_FILES"]] = digest(env["VK_DRIVER_FILES"])
     user = pwd.getpwnam(config["user"])
     if os.geteuid() == 0:
         # Plasma receives the live Xwayland DISPLAY and authentication path.
@@ -118,7 +133,7 @@ def main():
                     driver=str(driver), profile=str(template),
                     environment={key: env[key] for key in set(config["environment"]) | {
                         "LD_LIBRARY_PATH", "LIBGL_DRIVERS_PATH", "GBM_BACKENDS_PATH",
-                        "MESA_SHADER_CACHE_DIR", "DISPLAY", "XAUTHORITY"} if key in env},
+                        "MESA_SHADER_CACHE_DIR", "DISPLAY", "XAUTHORITY", "VK_DRIVER_FILES"} if key in env},
                     filtered=bool(args.include_tests), prepared_only=args.prepare_only,
                     prepared_at=time.time())
     provenance = ci / "provenance.json"

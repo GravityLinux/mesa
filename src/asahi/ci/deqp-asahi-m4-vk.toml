@@ -1,0 +1,7 @@
+# Development profile based on upstream deqp-asahi-agx2-vk.toml.
+# Focus with --include-tests while Apple9 functionality is incomplete.
+[[deqp]]
+deqp = "/deqp-vk/external/vulkancts/modules/vulkan/deqp-vk"
+caselists = ["/deqp-vk/mustpass/vk-main.txt"]
+tests_per_group = 100
+renderer_check = "Apple M4"

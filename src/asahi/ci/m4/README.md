@@ -106,3 +106,28 @@ configuration and provenance together, then repeat a filtered native smoke run.
 
 Native evidence: `/g16/results/mesa-ci/setup-smoke2/` and
 `/g16/results/mesa-ci/setup-piglit-smoke/`.
+
+## Experimental Apple9 Vulkan
+
+`run.py vk` uses `deqp-asahi-m4-vk.toml` with the same upstream expectations and
+result recording. It requires a `/deqp-vk` runtime mapping, the flattened Vulkan
+mustpass list at `mustpass/vk-main.txt`, and a separate candidate prefix containing
+`lib/libvulkan_asahi.so` and `share/vulkan/icd.d/*asahi*.json`. The manifest must
+name the candidate library by absolute path. Configure `HK_EXPERIMENTAL_APPLE9=1`
+and `ASAHI_MESA_DEBUG=nocompress` in `environment`; inherited Vulkan and Mesa
+selection variables are cleared before that configuration is applied.
+
+The September 27 native development deployment uses
+`/root/honeykrisp-apple9/ci/config.json` on the Fedora target. Earlier `/g16`
+examples describe the older desktop image. Run the new deployment explicitly:
+
+```sh
+ssh root@m4-target 'python3 /root/honeykrisp-apple9/ci/m4/run.py vk \
+  --config /root/honeykrisp-apple9/ci/config.json \
+  --include-tests "^dEQP-VK[.]compute[.]pipeline[.]basic[.]" --jobs 1'
+```
+
+This profile is development coverage, not a certification configuration. See
+[`README.apple9.md`](../../vulkan/README.apple9.md) for current capabilities and
+known failures. Preserve the raw failures rather than turning them into local
+expected failures.
