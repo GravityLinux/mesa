@@ -33,7 +33,7 @@ struct hk_descriptor_set_binding_layout {
    uint32_t offset;
 
    /* Stride between array elements in the descriptor buffer */
-   uint8_t stride;
+   uint16_t stride;
 
    /* Index into the dynamic buffer binding array */
    uint8_t dynamic_buffer_index;

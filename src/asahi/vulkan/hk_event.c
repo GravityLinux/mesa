@@ -11,8 +11,67 @@
 #include "hk_cmd_buffer.h"
 #include "hk_device.h"
 #include "hk_entrypoints.h"
+#include "vk_alloc.h"
+#include "util/bitset.h"
 
-#define HK_EVENT_MEM_SIZE sizeof(VkResult)
+#define HK_EVENT_PAGE_SIZE 16384
+#define HK_EVENTS_PER_PAGE (HK_EVENT_PAGE_SIZE / sizeof(VkResult))
+
+struct hk_event_page {
+   struct list_head link;
+   struct agx_bo *bo;
+   VkResult *map;
+   unsigned used;
+   BITSET_DECLARE(free, HK_EVENTS_PER_PAGE);
+};
+
+static VkResult
+hk_event_alloc(struct hk_device *dev, struct hk_event *event)
+{
+   simple_mtx_lock(&dev->events.lock);
+   struct hk_event_page *page;
+   VkResult result = VK_SUCCESS;
+   if (list_is_empty(&dev->events.available)) {
+      page = vk_zalloc(&dev->vk.alloc, sizeof(*page), 8,
+                       VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+      if (!page) {
+         result = VK_ERROR_OUT_OF_HOST_MEMORY;
+         goto out;
+      }
+      page->bo = agx_bo_create(&dev->dev, HK_EVENT_PAGE_SIZE, 0,
+                               AGX_BO_WRITEBACK, "Events");
+      if (!page->bo) {
+         vk_free(&dev->vk.alloc, page);
+         result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+         goto out;
+      }
+      page->map = agx_bo_map(page->bo);
+      if (!page->map) {
+         agx_bo_unreference(&dev->dev, page->bo);
+         vk_free(&dev->vk.alloc, page);
+         result = VK_ERROR_OUT_OF_HOST_MEMORY;
+         goto out;
+      }
+      BITSET_ONES(page->free);
+      list_addtail(&page->link, &dev->events.available);
+   } else {
+      page = list_first_entry(&dev->events.available, struct hk_event_page, link);
+   }
+
+   unsigned slot = BITSET_FFS(page->free) - 1;
+   assert(slot < HK_EVENTS_PER_PAGE);
+   BITSET_CLEAR(page->free, slot);
+   if (++page->used == HK_EVENTS_PER_PAGE)
+      list_del(&page->link);
+   event->page = page;
+   event->slot = slot;
+   event->status = &page->map[slot];
+   event->addr = page->bo->va->addr + slot * sizeof(VkResult);
+
+out:
+   simple_mtx_unlock(&dev->events.lock);
+   return result;
+}
 
 VKAPI_ATTR VkResult VKAPI_CALL
 hk_CreateEvent(VkDevice device, const VkEventCreateInfo *pCreateInfo,
@@ -26,14 +85,11 @@ hk_CreateEvent(VkDevice device, const VkEventCreateInfo *pCreateInfo,
    if (!event)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   /* TODO: this is really wasteful, bring back the NVK heap!
-    *
-    * XXX
-    */
-   event->bo =
-      agx_bo_create(&dev->dev, HK_EVENT_MEM_SIZE, 0, AGX_BO_WRITEBACK, "Event");
-   event->status = agx_bo_map(event->bo);
-   event->addr = event->bo->va->addr;
+   VkResult result = hk_event_alloc(dev, event);
+   if (result != VK_SUCCESS) {
+      vk_object_free(&dev->vk, pAllocator, event);
+      return vk_error(dev, result);
+   }
 
    *event->status = VK_EVENT_RESET;
 
@@ -52,7 +108,22 @@ hk_DestroyEvent(VkDevice device, VkEvent _event,
    if (!event)
       return;
 
-   agx_bo_unreference(&dev->dev, event->bo);
+   struct hk_event_page *page = event->page;
+   simple_mtx_lock(&dev->events.lock);
+   assert(!BITSET_TEST(page->free, event->slot));
+   BITSET_SET(page->free, event->slot);
+   if (page->used-- == HK_EVENTS_PER_PAGE)
+      list_addtail(&page->link, &dev->events.available);
+   bool empty = page->used == 0;
+   if (empty)
+      list_del(&page->link);
+   simple_mtx_unlock(&dev->events.lock);
+
+   /* Pages never move. Release only after every event using them is gone. */
+   if (empty) {
+      agx_bo_unreference(&dev->dev, page->bo);
+      vk_free(&dev->vk.alloc, page);
+   }
    vk_object_free(&dev->vk, pAllocator, event);
 }
 
@@ -94,7 +165,7 @@ hk_CmdSetEvent2(VkCommandBuffer commandBuffer, VkEvent _event,
    perf_debug(cmd, "Set event");
    hk_cmd_buffer_end_compute(cmd);
    hk_cmd_buffer_end_graphics(cmd);
-   hk_queue_write(cmd, event->bo->va->addr, VK_EVENT_SET, false);
+   hk_queue_write(cmd, event->addr, VK_EVENT_SET, false);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -107,7 +178,7 @@ hk_CmdResetEvent2(VkCommandBuffer commandBuffer, VkEvent _event,
    perf_debug(cmd, "Reset event");
    hk_cmd_buffer_end_compute(cmd);
    hk_cmd_buffer_end_graphics(cmd);
-   hk_queue_write(cmd, event->bo->va->addr, VK_EVENT_RESET, false);
+   hk_queue_write(cmd, event->addr, VK_EVENT_RESET, false);
 }
 
 VKAPI_ATTR void VKAPI_CALL

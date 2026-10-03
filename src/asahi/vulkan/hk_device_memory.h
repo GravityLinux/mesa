@@ -21,7 +21,9 @@ struct hk_device_memory {
 
    struct agx_bo *bo;
 
+   /* The API mapping, which the memory object owns. */
    void *map;
+   size_t map_size;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(hk_device_memory, vk.base, VkDeviceMemory,

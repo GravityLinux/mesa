@@ -11,8 +11,26 @@
 #include "hk_entrypoints.h"
 #include "hk_physical_device.h"
 
+enum agx_bo_flags
+hk_cmd_pool_bo_flags(const struct hk_device *dev, enum hk_cmd_pool_kind kind)
+{
+   switch (kind) {
+   case HK_CMD_POOL_MAIN:
+      return 0;
+   case HK_CMD_POOL_USC:
+      return AGX_BO_LOW_VA |
+             (dev->dev.chip == AGX_CHIP_G16G ? AGX_BO_WRITEBACK : 0);
+   case HK_CMD_POOL_CONTEXT:
+      assert(dev->dev.chip == AGX_CHIP_G16G);
+      return AGX_BO_CONTEXT | AGX_BO_WRITEBACK;
+   default:
+      UNREACHABLE("Invalid command pool kind");
+   }
+}
+
 static VkResult
-hk_cmd_bo_create(struct hk_cmd_pool *pool, bool usc, struct hk_cmd_bo **bo_out)
+hk_cmd_bo_create(struct hk_cmd_pool *pool, enum hk_cmd_pool_kind kind,
+                 struct hk_cmd_bo **bo_out)
 {
    struct hk_device *dev = hk_cmd_pool_device(pool);
    struct hk_cmd_bo *bo;
@@ -22,8 +40,13 @@ hk_cmd_bo_create(struct hk_cmd_pool *pool, bool usc, struct hk_cmd_bo **bo_out)
    if (bo == NULL)
       return vk_error(pool, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   bo->bo = agx_bo_create(&dev->dev, HK_CMD_BO_SIZE, 0, usc ? AGX_BO_LOW_VA : 0,
-                          usc ? "USC command pool" : "Main command pool");
+   static const char *const labels[HK_CMD_POOL_COUNT] = {
+      "Main command pool",
+      "USC command pool",
+      "Render context command pool",
+   };
+   bo->bo = agx_bo_create(&dev->dev, HK_CMD_BO_SIZE, 0,
+                          hk_cmd_pool_bo_flags(dev, kind), labels[kind]);
    if (bo->bo == NULL) {
       vk_free(&pool->vk.alloc, bo);
       return vk_error(pool, VK_ERROR_OUT_OF_DEVICE_MEMORY);
@@ -64,8 +87,8 @@ hk_CreateCommandPool(VkDevice _device,
       return result;
    }
 
-   list_inithead(&pool->free_bos);
-   list_inithead(&pool->free_usc_bos);
+   for (unsigned i = 0; i < HK_CMD_POOL_COUNT; ++i)
+      list_inithead(&pool->free_bos[i]);
 
    *pCmdPool = hk_cmd_pool_to_handle(pool);
 
@@ -75,66 +98,41 @@ hk_CreateCommandPool(VkDevice _device,
 static void
 hk_cmd_pool_destroy_bos(struct hk_cmd_pool *pool)
 {
-   list_for_each_entry_safe(struct hk_cmd_bo, bo, &pool->free_bos, link)
-      hk_cmd_bo_destroy(pool, bo);
-
-   list_inithead(&pool->free_bos);
-
-   list_for_each_entry_safe(struct hk_cmd_bo, bo, &pool->free_usc_bos, link)
-      hk_cmd_bo_destroy(pool, bo);
-
-   list_inithead(&pool->free_usc_bos);
+   for (unsigned i = 0; i < HK_CMD_POOL_COUNT; ++i) {
+      list_for_each_entry_safe(struct hk_cmd_bo, bo, &pool->free_bos[i], link)
+         hk_cmd_bo_destroy(pool, bo);
+      list_inithead(&pool->free_bos[i]);
+      pool->num_free_bos[i] = 0;
+   }
 }
 
 VkResult
-hk_cmd_pool_alloc_bo(struct hk_cmd_pool *pool, bool usc,
+hk_cmd_pool_alloc_bo(struct hk_cmd_pool *pool, enum hk_cmd_pool_kind kind,
                      struct hk_cmd_bo **bo_out)
 {
-   struct hk_cmd_bo *bo = NULL;
-   if (usc) {
-      if (!list_is_empty(&pool->free_usc_bos)) {
-         bo = list_first_entry(&pool->free_usc_bos, struct hk_cmd_bo, link);
-         pool->num_free_usc_bos--;
-      }
-   } else {
-      if (!list_is_empty(&pool->free_bos)) {
-         bo = list_first_entry(&pool->free_bos, struct hk_cmd_bo, link);
-         pool->num_free_bos--;
-      }
-   }
-   if (bo) {
+   if (!list_is_empty(&pool->free_bos[kind])) {
+      struct hk_cmd_bo *bo =
+         list_first_entry(&pool->free_bos[kind], struct hk_cmd_bo, link);
       list_del(&bo->link);
+      pool->num_free_bos[kind]--;
       *bo_out = bo;
       return VK_SUCCESS;
    }
 
-   return hk_cmd_bo_create(pool, usc, bo_out);
+   return hk_cmd_bo_create(pool, kind, bo_out);
 }
 
 void
-hk_cmd_pool_free_bo_list(struct hk_cmd_pool *pool, struct list_head *bos)
+hk_cmd_pool_free_bo_list(struct hk_cmd_pool *pool, enum hk_cmd_pool_kind kind,
+                         struct list_head *bos)
 {
    list_for_each_entry_safe(struct hk_cmd_bo, bo, bos, link) {
       list_del(&bo->link);
-      if (pool->num_free_bos > HK_CMD_POOL_BO_MAX) {
+      if (pool->num_free_bos[kind] >= HK_CMD_POOL_BO_MAX) {
          hk_cmd_bo_destroy(pool, bo);
       } else {
-         list_addtail(&bo->link, &pool->free_bos);
-         pool->num_free_bos++;
-      }
-   }
-}
-
-void
-hk_cmd_pool_free_usc_bo_list(struct hk_cmd_pool *pool, struct list_head *bos)
-{
-   list_for_each_entry_safe(struct hk_cmd_bo, bo, bos, link) {
-      list_del(&bo->link);
-      if (pool->num_free_usc_bos > HK_CMD_POOL_BO_MAX) {
-         hk_cmd_bo_destroy(pool, bo);
-      } else {
-         list_addtail(&bo->link, &pool->free_usc_bos);
-         pool->num_free_usc_bos++;
+         list_addtail(&bo->link, &pool->free_bos[kind]);
+         pool->num_free_bos[kind]++;
       }
    }
 }

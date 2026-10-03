@@ -37,6 +37,7 @@
 struct hk_buffer;
 struct hk_cmd_bo;
 struct hk_cmd_pool;
+struct agx_apple9_compute_profile;
 struct hk_image_view;
 struct hk_push_descriptor_set;
 struct hk_shader;
@@ -58,6 +59,8 @@ struct hk_root_descriptor_table {
       struct {
          uint32_t view_index;
          uint32_t ppp_multisamplectl;
+         uint32_t draw_id;
+         uint32_t _pad0;
 
          /* Vertex input state */
          uint64_t attrib_base[AGX_MAX_VBUFS];
@@ -75,6 +78,9 @@ struct hk_root_descriptor_table {
 
          /* Address of geometry param buffer if GS is used, else 0 */
          uint64_t geometry_params;
+
+         /* struct libagx_mesh_params of a mesh shader draw */
+         uint64_t mesh_params;
 
          /* Pipeline statistics queries. This is a base address with flags. */
          uint64_t pipeline_stats;
@@ -99,6 +105,11 @@ struct hk_root_descriptor_table {
 
          uint16_t rasterization_stream;
          uint16_t _pad6;
+
+         /* Fragment depth exports clamp to this range: viewport 0's depth
+          * range, or the user range, with depth clamping; [0, 1] without.
+          */
+         float depth_clamp[2];
 
          /* Mapping from varying slots written by the last vertex stage to UVS
           * indices. This mapping must be compatible with the fragment shader.
@@ -143,6 +154,7 @@ struct hk_attachment {
 
    VkResolveModeFlagBits resolve_mode;
    struct hk_image_view *resolve_iview;
+   VkRenderingAttachmentFlagsKHR flags;
 
    bool clear;
    uint32_t clear_colour[4];
@@ -199,6 +211,12 @@ struct hk_rendering_state {
 
    struct agx_tilebuffer_layout tilebuffer;
    struct hk_render_registers cr;
+
+   /* Control streams other than the last store depth/stencil for the next
+    * one to load. The last control stream honours the store operations:
+    * zls_last if it is also the first, zls_partial_last otherwise. */
+   struct hk_cs *first_cs;
+   struct agx_zls_control_packed zls_last, zls_partial_last;
 };
 
 struct hk_index_buffer_state {
@@ -230,6 +248,24 @@ struct hk_graphics_state {
    uint32_t shaders_dirty;
    struct hk_api_shader *shaders[MESA_SHADER_MESH + 1];
 
+   /* Graphics shaders bound through the API. On Apple9, deferred shaders are
+    * resolved from these into concrete variants in shaders[] at draw time.
+    */
+   struct hk_api_shader *apple9_api[HK_APPLE9_GFX_STAGES];
+
+   /* Last resolution of apple9_api, reused while none of the graphics key's
+    * inputs change. render_gen counts render pass instances. */
+   struct {
+      bool valid;
+      uint32_t render_gen;
+      struct hk_api_shader *api[HK_APPLE9_GFX_STAGES];
+      struct hk_api_shader *out[HK_APPLE9_GFX_STAGES];
+   } apple9_resolved;
+   uint32_t render_gen;
+
+   /* The current draw is a last-provoking fan unrolled to triangles. */
+   bool apple9_fan_unrolled;
+
    /* Vertex buffers */
    struct hk_addr_range vb[AGX_MAX_VBUFS];
 
@@ -249,6 +285,26 @@ struct hk_graphics_state {
     * per-stream. Zero if no query is bound.
     */
    uint64_t xfb_query[4];
+
+   /* GPU counters of active primitives generated queries, per stream. They
+    * count the primitives of the passthrough or API geometry stage. */
+   uint64_t pg_query[4];
+
+   /* Mesh primitives generated query */
+   uint64_t mesh_pg_query;
+
+   /* Input assembly statistics of direct draws not yet added to the
+    * counters at addr: vertices (IA vertices and VS invocations), primitives
+    * (IA primitives) and clipper primitives (clipping invocations and
+    * primitives, which geometry and tessellation count themselves). See
+    * hk_flush_ia_stats. */
+   struct hk_ia_stats {
+      uint64_t addr[5];
+      uint32_t vertices, prims, clipped;
+   } ia_stats;
+
+   /* Apple9 packed sample positions of the current draw. */
+   uint32_t apple9_sample_positions;
 
    struct hk_index_buffer_state index;
    enum agx_primitive topology;
@@ -466,11 +522,18 @@ struct hk_cmd_buffer {
    struct {
       struct hk_graphics_state gfx;
       struct hk_compute_state cs;
+
+      /* VK_EXT_conditional_rendering: draws, dispatches and attachment
+       * clears run only when the 32-bit predicate is non-zero (zero if
+       * inverted). Meta operations other than clears are unpredicated.
+       */
+      struct {
+         uint64_t predicate;
+         bool active, inverted, meta;
+      } cond_render;
    } state;
 
-   struct {
-      struct hk_uploader main, usc;
-   } uploader;
+   struct hk_uploader uploader[HK_CMD_POOL_COUNT];
 
    /* List of all recorded control streams */
    struct list_head control_streams;
@@ -509,6 +572,14 @@ struct hk_cmd_buffer {
 
    /* Does the command buffer use the geometry heap? */
    bool uses_heap;
+   bool uses_mesh_heap;
+
+   /* Query counter increments and availability writes (struct
+    * libagx_imm_write) that are due once earlier rendering completes. They
+    * are applied together before the queries can next be observed, rather
+    * than splitting rendering with a compute dispatch after every render
+    * pass. See hk_flush_query_writes. */
+   struct util_dynarray query_adds, query_writes;
 
    /* Owned large BOs */
    struct util_dynarray large_bos;
@@ -536,7 +607,11 @@ hk_bound_hw_vs(struct hk_graphics_state *gfx)
    struct hk_api_shader *tes = gfx->shaders[MESA_SHADER_TESS_EVAL];
    struct hk_api_shader *gs = gfx->shaders[MESA_SHADER_GEOMETRY];
 
-   if (gs)
+   struct hk_api_shader *mesh = gfx->shaders[MESA_SHADER_MESH];
+
+   if (mesh)
+      return &mesh->variants[HK_MESH_VARIANT_RAST];
+   else if (gs)
       return &gs->variants[HK_GS_VARIANT_RAST];
    else if (tes)
       return &tes->variants[HK_VS_VARIANT_HW];
@@ -567,7 +642,7 @@ hk_bound_sw_vs_before_gs(struct hk_graphics_state *gfx)
 }
 
 struct agx_ptr hk_pool_alloc_internal(struct hk_cmd_buffer *cmd, uint32_t size,
-                                      uint32_t alignment, bool usc);
+                                      uint32_t alignment, enum hk_cmd_pool_kind kind);
 
 uint64_t hk_pool_upload(struct hk_cmd_buffer *cmd, const void *data,
                         uint32_t size, uint32_t alignment);
@@ -575,17 +650,34 @@ uint64_t hk_pool_upload(struct hk_cmd_buffer *cmd, const void *data,
 static inline struct agx_ptr
 hk_pool_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment)
 {
-   return hk_pool_alloc_internal(cmd, size, alignment, false);
+   return hk_pool_alloc_internal(cmd, size, alignment, HK_CMD_POOL_MAIN);
 }
 
 static inline struct agx_ptr
 hk_pool_usc_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment)
 {
-   return hk_pool_alloc_internal(cmd, size, alignment, true);
+   return hk_pool_alloc_internal(cmd, size, alignment, HK_CMD_POOL_USC);
+}
+
+static inline struct agx_ptr
+hk_pool_context_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment)
+{
+   return hk_pool_alloc_internal(cmd, size, alignment, HK_CMD_POOL_CONTEXT);
+}
+
+static inline struct agx_ptr
+hk_pool_cs_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment,
+                 bool compute)
+{
+   return !compute && hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G
+             ? hk_pool_context_alloc(cmd, size, alignment)
+             : hk_pool_alloc(cmd, size, alignment);
 }
 
 void hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
 uint32_t hk_default_sample_positions(unsigned nr_samples);
+struct vk_sample_locations_state;
+uint32_t hk_pack_ppp_multisamplectrl(const struct vk_sample_locations_state *sl);
 
 static inline struct hk_cs *
 hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
@@ -594,7 +686,7 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
    if ((*ptr) == NULL) {
       /* Allocate root control stream */
       size_t initial_size = 65536;
-      struct agx_ptr root = hk_pool_alloc(cmd, initial_size, 1024);
+      struct agx_ptr root = hk_pool_cs_alloc(cmd, initial_size, 1024, compute);
       if (!root.cpu)
          return NULL;
 
@@ -710,6 +802,10 @@ hk_cmd_buffer_end_compute(struct hk_cmd_buffer *cmd)
 
 void hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd);
 
+bool hk_cond_render_applies(struct hk_cmd_buffer *cmd);
+uint64_t hk_predicate_indirect(struct hk_cmd_buffer *cmd, uint64_t in,
+                               unsigned words, bool graphics);
+
 static void
 hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
 {
@@ -744,6 +840,7 @@ hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
     * to queue a free for it again.
     */
    cmd->uses_heap = false;
+   cmd->uses_mesh_heap = false;
 }
 
 static inline uint64_t
@@ -809,6 +906,9 @@ hk_get_descriptors_state(struct hk_cmd_buffer *cmd,
    }
 };
 
+void hk_flush_ia_stats(struct hk_cmd_buffer *cmd);
+void hk_flush_query_writes(struct hk_cmd_buffer *cmd);
+
 void hk_cmd_buffer_flush_push_descriptors(struct hk_cmd_buffer *cmd,
                                           struct hk_descriptor_state *desc);
 
@@ -854,6 +954,22 @@ hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    hk_dispatch_with_usc(dev, cs, &s->b.info, usc, grid, local_size);
 }
 
+/* Buffers bound for software pre-rasterization kernels, which read the
+ * graphics descriptors and the draw's vertex input tables.
+ */
+struct hk_apple9_prerast_bindings {
+   uint64_t draw_params;
+   uint64_t vertex_buffers;
+};
+
+/* Native grid counts are threads; indirect grids point to group counts. */
+void hk_apple9_dispatch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+                       struct agx_bo *body,
+                       const struct agx_apple9_compute_profile *profile,
+                       struct agx_grid grid, uint64_t root,
+                       const struct hk_shader *shader,
+                       const struct hk_apple9_prerast_bindings *prerast);
+
 void hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
                          enum agx_barrier barrier, enum libagx_program idx,
                          void *data, size_t data_size);
@@ -867,3 +983,16 @@ void agx_fill_velem_keys(const struct vk_vertex_input_state *vi,
                          uint64_t attribs_read, struct agx_velem_key *keys);
 
 struct agx_robustness hk_prolog_robustness(struct hk_device *dev);
+
+void hk_apple9_tile_helpers_finish(struct hk_device *dev);
+struct hk_bg_eot hk_apple9_build_bg_eot(
+   struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
+   bool store, bool partial, bool incomplete);
+
+void hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
+                    struct agx_draw draw);
+struct hk_apple9_prerast_bindings
+hk_apple9_draw_bindings(struct hk_cmd_buffer *cmd, struct agx_draw draw);
+bool hk_apple9_upload_textures(struct hk_cmd_buffer *cmd,
+   const struct hk_descriptor_state *desc, const struct hk_shader *shader,
+   const float *blend, bool first_fan, uint64_t *textures, uint64_t *samplers, uint64_t *sysvals);

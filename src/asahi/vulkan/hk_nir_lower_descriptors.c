@@ -584,6 +584,11 @@ try_lower_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
       return lower_image_intrin(b, intrin, ctx);
 
    case nir_intrinsic_load_num_workgroups: {
+      /* Task and mesh workgroup counts are lowered with their stages. */
+      if (b->shader->info.stage == MESA_SHADER_TASK ||
+          b->shader->info.stage == MESA_SHADER_MESH)
+         return false;
+
       b->cursor = nir_instr_remove(&intrin->instr);
 
       unsigned offset = hk_root_descriptor_offset(cs.group_count_addr);
@@ -615,8 +620,17 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
    nir_def *plane_ssa = nir_steal_tex_src(tex, nir_tex_src_plane);
    const uint32_t plane =
       plane_ssa ? nir_src_as_uint(nir_src_for_ssa(plane_ssa)) : 0;
+   uint32_t tex_set, tex_binding;
+   nir_def *tex_index;
+   get_resource_deref_binding(b, nir_src_as_deref(nir_src_for_ssa(texture)),
+                              &tex_set, &tex_binding, &tex_index);
+   const struct hk_device *dev =
+      (const struct hk_device *)ctx->set_layouts[tex_set]->vk.base.device;
+   /* Planes are consecutive image descriptors. */
    const uint64_t plane_offset_B =
-      plane * sizeof(struct hk_sampled_image_descriptor);
+      plane * (dev->dev.chip == AGX_CHIP_G16G
+                  ? sizeof(struct hk_apple9_image_descriptor)
+                  : sizeof(struct hk_sampled_image_descriptor));
 
    /* LOD bias is passed in the descriptor set, rather than embedded into
     * the sampler descriptor. There's no spot in the hardware descriptor,
@@ -685,6 +699,16 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
          load_image_handle(b, ctx, nir_src_for_ssa(texture), offset_B);
 
       nir_tex_instr_add_src(tex, nir_tex_src_texture_handle, handle);
+
+      const unsigned set = tex_set, binding = tex_binding;
+      const VkDescriptorBindingFlags late =
+         VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
+         VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT |
+         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
+         VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;
+      if (dev->dev.chip == AGX_CHIP_G16G &&
+          (get_binding_layout(set, binding, ctx)->flags & late))
+         tex->backend_flags |= HK_APPLE9_TEX_DESCRIPTOR_HANDLE;
    }
 
    if (sampler != NULL) {

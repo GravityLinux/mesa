@@ -10,6 +10,8 @@
 #include "hk_private.h"
 
 #include "hk_device.h"
+#include "asahi/compiler/agx_compile_apple9.h"
+#include "asahi/lib/agx_apple9.h"
 #include "vk_descriptor_update_template.h"
 #include "vk_object.h"
 
@@ -38,8 +40,19 @@ struct hk_sampled_image_descriptor {
    /* This is only used for txf, it can be separate from the other stuff */
    uint16_t min_lod_uint16;
    uint16_t pad;
-   /* TODO: This should probably be a heap! */
-   uint32_t border[4];
+   union {
+      /* TODO: This should probably be a heap! */
+      uint32_t border[4];
+
+      /* Apple9 has no custom border colors. Instead, the view records the
+       * residency table of its image and its base subresource.
+       */
+      struct {
+         uint32_t residency_lo, residency_hi;
+         uint16_t base_level, base_layer;
+         uint32_t pad;
+      } apple9;
+   };
    uint8_t pad2[4];
 };
 static_assert(sizeof(struct hk_sampled_image_descriptor) == 64,
@@ -51,6 +64,84 @@ struct hk_storage_image_descriptor {
 };
 static_assert(sizeof(struct hk_storage_image_descriptor) == 48,
               "hk_storage_image_descriptor has no holes");
+
+/* GPU-readable format metadata for Apple9 uniform texel-buffer loads. The
+ * ordinary texture prefix remains available for descriptor queries.
+ * A component word contains byte offset [7:0], bit shift [12:8], width minus
+ * one [17:13], and conversion kind [21:18]. Swizzles are resolved per component.
+ */
+enum hk_apple9_texel_kind {
+   HK_TEXEL_ZERO, HK_TEXEL_ONE, HK_TEXEL_UINT, HK_TEXEL_SINT,
+   HK_TEXEL_UNORM, HK_TEXEL_SNORM, HK_TEXEL_FLOAT16, HK_TEXEL_FLOAT32,
+   HK_TEXEL_FLOAT11, HK_TEXEL_RGB9E5, HK_TEXEL_SRGB,
+};
+
+/* Storage images have no base or element count. They instead record the
+ * residency table of their image and the base level | base layer << 16.
+ */
+struct hk_apple9_texel_metadata {
+   uint64_t base;
+   uint32_t elements;
+   uint32_t size_B;
+   uint32_t component[4];
+   /* Sparse residency buffers: the residency byte of the page holding
+    * address A is at residency + A / AIL_PAGESIZE, see
+    * hk_buffer::apple9_residency. Zero for other resources. */
+   uint64_t residency;
+};
+
+/* Uniform texel buffers read every format but RGB32 through the texture
+ * unit. Like hk_apple9_image_descriptor, the descriptor holds the native
+ * texture entry for shaders that address it directly. */
+struct hk_apple9_texel_descriptor {
+   struct agx_texture_packed tex;
+   struct hk_apple9_texel_metadata metadata;
+   uint8_t texture[AGX_APPLE9_TEXTURE_TABLE_STRIDE];
+};
+static_assert(sizeof(struct hk_apple9_texel_descriptor) == 96,
+              "Apple9 texel descriptor has no holes");
+static_assert(offsetof(struct hk_apple9_texel_descriptor, texture) ==
+                 AGX_APPLE9_DESCRIPTOR_TEXTURE_ENTRY *
+                    AGX_APPLE9_TEXTURE_TABLE_STRIDE,
+              "native texture entry is where register indices expect it");
+
+/* Apple9 storage images and texel buffers append their texel layout, so
+ * shaders can access them without a declared format. */
+struct hk_apple9_storage_descriptor {
+   struct hk_storage_image_descriptor common;
+   struct hk_apple9_texel_metadata metadata;
+};
+static_assert(sizeof(struct hk_apple9_storage_descriptor) == 88,
+              "Apple9 storage descriptor has no holes");
+
+void hk_apple9_texel_layout(enum pipe_format format,
+                            struct hk_apple9_texel_metadata *metadata);
+
+/* G16 image and sampler descriptors extend the common layout with native
+ * state that shaders can address directly. Descriptor memory lives in the
+ * USC aperture, so a 32-byte-aligned record at VA v is native table entry
+ * (v - shader_base) / 32 when a stage's table pointer is shader_base.
+ */
+struct hk_apple9_image_descriptor {
+   struct hk_sampled_image_descriptor common;
+   uint8_t texture[AGX_APPLE9_TEXTURE_TABLE_STRIDE];
+   uint8_t sampler[AGX_APPLE9_SAMPLER_TABLE_STRIDE];
+   /* Same layouts as the per-draw texture info and runtime sampler records. */
+   uint32_t texture_info[AGX_APPLE9_TEXTURE_INFO_STRIDE / 4];
+   uint32_t runtime_sampler[AGX_APPLE9_RUNTIME_SAMPLER_STRIDE / 4];
+};
+static_assert(sizeof(struct hk_apple9_image_descriptor) == 224,
+              "Apple9 image descriptor has no holes");
+static_assert(offsetof(struct hk_apple9_image_descriptor, texture) % 32 == 0,
+              "native texture entry is table aligned");
+static_assert(offsetof(struct hk_apple9_image_descriptor, sampler) % 32 == 0,
+              "native sampler entry is table aligned");
+
+void hk_apple9_texture_info(uint32_t *data, const struct agx_texture_packed *state);
+bool hk_apple9_runtime_sampler(uint32_t *data, const struct agx_sampler_packed *state,
+                               bool clamp_to_edge);
+bool hk_apple9_native_sampler(void *out, const struct agx_sampler_packed *state,
+                              bool clamp_to_edge);
 
 /* This has to match nir_address_format_64bit_bounded_global */
 struct hk_buffer_address {

@@ -8,6 +8,7 @@
 
 #include "agx_pack.h"
 #include "hk_private.h"
+#include "hk_descriptor_set.h"
 
 #include "vk_buffer_view.h"
 
@@ -21,6 +22,7 @@ struct hk_buffer_view {
    struct vk_buffer_view vk;
    struct agx_texture_packed tex;
    struct agx_pbe_packed pbe;
+   struct hk_apple9_texel_metadata apple9;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(hk_buffer_view, vk.base, VkBufferView,

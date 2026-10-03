@@ -114,6 +114,8 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_shader_draw_parameters = true,
       .KHR_shader_expect_assume = true,
       .KHR_shader_float_controls = true,
+      .KHR_shader_subgroup_extended_types = true,
+      .EXT_shader_viewport_index_layer = false,
       .KHR_shader_float_controls2 = true,
       .KHR_shader_float16_int8 = true,
       .KHR_shader_integer_dot_product = true,
@@ -662,7 +664,9 @@ hk_get_device_properties(const struct agx_device *dev,
 {
    /* Note: update nir_shader_compiler_options.max_samples when changing this. */
    const VkSampleCountFlagBits sample_counts =
-      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
+      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT |
+      /* Native Apple9 texture/tilebuffer paths currently implement 1x/4x. */
+      (dev->params.gpu_generation >= 16 ? 0 : VK_SAMPLE_COUNT_2_BIT);
 
    uint64_t os_page_size = 16384;
    os_get_page_size(&os_page_size);
@@ -1192,6 +1196,524 @@ hk_get_sysmem_heap_available(struct hk_physical_device *pdev)
    return pdev->sysmem - total_used;
 }
 
+/* The native Apple9 path implements a subset of Honeykrisp's Apple8 feature
+ * set. Everything Apple9 advertises is listed here explicitly, so enabling a
+ * new Apple8 capability never silently exposes it on Apple9.
+ */
+static void
+hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
+                        struct vk_features *feat, struct vk_properties *props)
+{
+   const struct vk_device_extension_table all = *ext;
+   const struct vk_features all_feat = *feat;
+
+   *ext = (struct vk_device_extension_table){
+      /* Vulkan 1.1 */
+      .KHR_16bit_storage = true,
+      .KHR_bind_memory2 = true,
+      .KHR_dedicated_allocation = true,
+      .KHR_descriptor_update_template = true,
+      .KHR_device_group = true,
+      .KHR_external_fence = true,
+      .KHR_external_fence_fd = true,
+      .KHR_external_memory = true,
+      .KHR_external_memory_fd = true,
+      .KHR_external_semaphore = true,
+      .KHR_external_semaphore_fd = true,
+      .KHR_get_memory_requirements2 = true,
+      .KHR_maintenance1 = true,
+      .KHR_maintenance2 = true,
+      .KHR_maintenance3 = true,
+      .KHR_multiview = true,
+      .KHR_relaxed_block_layout = true,
+      .KHR_sampler_ycbcr_conversion = true,
+      .KHR_shader_draw_parameters = true,
+      .KHR_storage_buffer_storage_class = true,
+      .KHR_variable_pointers = true,
+
+      /* Vulkan 1.2 */
+      .KHR_8bit_storage = true,
+      .EXT_descriptor_indexing = true,
+      .KHR_draw_indirect_count = true,
+      .KHR_shader_float16_int8 = true,
+      .KHR_buffer_device_address = true,
+      .KHR_create_renderpass2 = true,
+      .KHR_depth_stencil_resolve = true,
+      .KHR_driver_properties = true,
+      .KHR_image_format_list = true,
+      .KHR_imageless_framebuffer = true,
+      .KHR_sampler_mirror_clamp_to_edge = true,
+      .KHR_separate_depth_stencil_layouts = true,
+      .KHR_shader_float_controls = true,
+      .KHR_spirv_1_4 = true,
+      .KHR_timeline_semaphore = true,
+      .KHR_uniform_buffer_standard_layout = true,
+      .KHR_vulkan_memory_model = true,
+      .EXT_host_query_reset = true,
+      .EXT_scalar_block_layout = true,
+      .EXT_separate_stencil_usage = true,
+      .EXT_shader_viewport_index_layer = true,
+
+      /* Vulkan 1.3 */
+      .KHR_copy_commands2 = true,
+      .KHR_dynamic_rendering = true,
+      .KHR_format_feature_flags2 = true,
+      .KHR_maintenance4 = true,
+      .KHR_shader_integer_dot_product = true,
+      .KHR_shader_non_semantic_info = true,
+      .KHR_shader_terminate_invocation = true,
+      .KHR_synchronization2 = true,
+      .KHR_zero_initialize_workgroup_memory = true,
+      .EXT_4444_formats = true,
+      .EXT_extended_dynamic_state = true,
+      .EXT_extended_dynamic_state2 = true,
+      .EXT_image_robustness = true,
+      .EXT_inline_uniform_block = true,
+      .EXT_pipeline_creation_cache_control = true,
+      .EXT_pipeline_creation_feedback = true,
+      .EXT_private_data = true,
+      .EXT_shader_demote_to_helper_invocation = true,
+      .EXT_subgroup_size_control = true,
+      .EXT_texel_buffer_alignment = true,
+      .EXT_tooling_info = true,
+
+      /* Vulkan 1.4 */
+      .KHR_dynamic_rendering_local_read = true,
+      .KHR_global_priority = true,
+      .KHR_index_type_uint8 = true,
+      .KHR_line_rasterization = true,
+      .KHR_maintenance5 = true,
+      .KHR_maintenance6 = true,
+      .KHR_push_descriptor = true,
+      .KHR_shader_float_controls2 = true,
+      .KHR_shader_subgroup_rotate = true,
+      .KHR_vertex_attribute_divisor = true,
+      .EXT_global_priority = true,
+      .EXT_global_priority_query = true,
+      .EXT_index_type_uint8 = true,
+      .EXT_line_rasterization = true,
+      .EXT_pipeline_robustness = true,
+      .EXT_robustness2 = true,
+      .KHR_robustness2 = true,
+      .EXT_transform_feedback = true,
+      .EXT_vertex_attribute_divisor = true,
+
+      /* Other extensions implemented by the common runtime or CPU paths */
+      .KHR_calibrated_timestamps = true,
+      .KHR_maintenance7 = true,
+      .KHR_shader_maximal_reconvergence = true,
+      .KHR_shader_quad_control = true,
+      .KHR_workgroup_memory_explicit_layout = true,
+      .KHR_maintenance8 = true,
+      .KHR_maintenance9 = true,
+      .KHR_pipeline_executable_properties = true,
+      .KHR_shader_subgroup_extended_types = true,
+      .EXT_color_write_enable = true,
+      .EXT_debug_marker = true,
+      .EXT_hdr_metadata = true,
+      .EXT_map_memory_placed = true,
+      .EXT_shader_replicated_composites = true,
+      .EXT_depth_bias_control = true,
+      .EXT_depth_clip_control = true,
+      .EXT_image_2d_view_of_3d = true,
+      .EXT_primitive_topology_list_restart = true,
+      .EXT_provoking_vertex = true,
+      .EXT_mutable_descriptor_type = true,
+      .EXT_shader_subgroup_ballot = true,
+      .EXT_shader_subgroup_vote = true,
+      .VALVE_mutable_descriptor_type = true,
+      .KHR_shader_relaxed_extended_instruction = true,
+      .KHR_shader_subgroup_uniform_control_flow = true,
+      .EXT_attachment_feedback_loop_layout = true,
+      .EXT_calibrated_timestamps = true,
+      .EXT_dynamic_rendering_unused_attachments = true,
+      .EXT_multi_draw = true,
+      .EXT_non_seamless_cube_map = true,
+      .EXT_shader_module_identifier = true,
+      .EXT_shader_stencil_export = true,
+      .KHR_load_store_op_none = true,
+      .KHR_map_memory2 = true,
+      .KHR_shader_expect_assume = true,
+      .EXT_buffer_device_address = true,
+      .EXT_depth_clip_enable = true,
+      .EXT_external_memory_dma_buf = true,
+      .EXT_image_drm_format_modifier = true,
+      .EXT_load_store_op_none = true,
+      .EXT_physical_device_drm = true,
+      .EXT_queue_family_foreign = true,
+      .GOOGLE_decorate_string = true,
+      .GOOGLE_hlsl_functionality1 = true,
+      .GOOGLE_user_type = true,
+      .EXT_pipeline_protected_access = true,
+      .EXT_image_view_min_lod = true,
+      .EXT_blend_operation_advanced = true,
+      /* Deferred shaders compile vertex fetch for the bound input state. */
+      .EXT_vertex_input_dynamic_state = true,
+      .EXT_extended_dynamic_state3 = true,
+      .EXT_graphics_pipeline_library = true,
+      .KHR_pipeline_library = true,
+      .EXT_shader_object = true,
+      .EXT_sample_locations = true,
+      .EXT_shader_uniform_buffer_unsized_array = true,
+      .KHR_pipeline_binary = true,
+      /* Host copies use the same ail tiling as GPU sampling; host transfer
+       * images are never compressed. */
+      .EXT_host_image_copy = true,
+      .EXT_shader_atomic_float = true,
+      /* EXT_mesh_shader stays hidden: its workgroups still run as compute
+       * rather than on the native mesh pipeline. */
+      .EXT_attachment_feedback_loop_dynamic_state = true,
+      .EXT_depth_clamp_zero_one = true,
+      .EXT_depth_clamp_control = true,
+      /* Resolves are vk_meta blits, which honor the transfer function
+       * flags. */
+      .KHR_maintenance10 = true,
+
+      /* WSI */
+      .KHR_incremental_present = all.KHR_incremental_present,
+      .KHR_present_id = all.KHR_present_id,
+      .KHR_present_id2 = all.KHR_present_id2,
+      .KHR_present_wait = all.KHR_present_wait,
+      .KHR_present_wait2 = all.KHR_present_wait2,
+      .KHR_swapchain = all.KHR_swapchain,
+      .KHR_swapchain_mutable_format = all.KHR_swapchain_mutable_format,
+      .KHR_swapchain_maintenance1 = all.KHR_swapchain_maintenance1,
+      .EXT_swapchain_maintenance1 = all.EXT_swapchain_maintenance1,
+      .EXT_present_timing = all.EXT_present_timing,
+      .GOOGLE_display_timing = all.GOOGLE_display_timing,
+   };
+
+#define KEEP(x) .x = all_feat.x
+   *feat = (struct vk_features){
+      /* Vulkan 1.0 */
+      KEEP(robustBufferAccess),
+      KEEP(fullDrawIndexUint32),
+      KEEP(independentBlend),
+      KEEP(sampleRateShading),
+      KEEP(logicOp),
+      KEEP(multiDrawIndirect),
+      KEEP(drawIndirectFirstInstance),
+      KEEP(depthClamp),
+      KEEP(depthBiasClamp),
+      KEEP(alphaToOne),
+      KEEP(samplerAnisotropy),
+      KEEP(textureCompressionETC2),
+      KEEP(textureCompressionBC),
+      KEEP(textureCompressionASTC_LDR),
+      KEEP(occlusionQueryPrecise),
+      KEEP(fragmentStoresAndAtomics),
+      KEEP(shaderStorageImageExtendedFormats),
+      KEEP(shaderImageGatherExtended),
+      KEEP(shaderUniformBufferArrayDynamicIndexing),
+      KEEP(shaderSampledImageArrayDynamicIndexing),
+      KEEP(shaderStorageBufferArrayDynamicIndexing),
+      KEEP(shaderStorageImageArrayDynamicIndexing),
+      KEEP(shaderClipDistance),
+      KEEP(inheritedQueries),
+      KEEP(imageCubeArray),
+      KEEP(dualSrcBlend),
+      KEEP(fillModeNonSolid),
+      KEEP(geometryShader),
+      KEEP(pipelineStatisticsQuery),
+      KEEP(tessellationShader),
+      KEEP(multiViewport),
+      KEEP(shaderTessellationAndGeometryPointSize),
+      KEEP(wideLines),
+      KEEP(largePoints),
+      KEEP(vertexPipelineStoresAndAtomics),
+      KEEP(shaderStorageImageReadWithoutFormat),
+      KEEP(shaderStorageImageWriteWithoutFormat),
+      KEEP(shaderCullDistance),
+      KEEP(shaderInt64),
+      KEEP(shaderInt16),
+      KEEP(shaderResourceMinLod),
+
+      /* Vulkan 1.1 */
+      KEEP(multiview),
+      KEEP(storageBuffer16BitAccess),
+      KEEP(uniformAndStorageBuffer16BitAccess),
+      KEEP(storagePushConstant16),
+      KEEP(variablePointersStorageBuffer),
+      KEEP(variablePointers),
+      KEEP(shaderDrawParameters),
+
+      /* Vulkan 1.2 */
+      KEEP(samplerMirrorClampToEdge),
+      /* Only the hk_fake_minmax driconf for vkd3d enables it, as upstream */
+      KEEP(samplerFilterMinmax),
+      KEEP(drawIndirectCount),
+      KEEP(storageBuffer8BitAccess),
+      KEEP(uniformAndStorageBuffer8BitAccess),
+      KEEP(storagePushConstant8),
+      KEEP(shaderFloat16),
+      KEEP(shaderInt8),
+      KEEP(uniformBufferStandardLayout),
+      KEEP(scalarBlockLayout),
+      KEEP(imagelessFramebuffer),
+      KEEP(separateDepthStencilLayouts),
+      KEEP(hostQueryReset),
+      KEEP(timelineSemaphore),
+      KEEP(bufferDeviceAddress),
+      KEEP(vulkanMemoryModel),
+      KEEP(vulkanMemoryModelDeviceScope),
+      KEEP(shaderUniformTexelBufferArrayDynamicIndexing),
+      KEEP(shaderStorageTexelBufferArrayDynamicIndexing),
+      /* Sampled images beyond the per-draw tables, dynamically indexed or
+       * late bound are read through descriptor memory; other descriptor
+       * types always are. */
+      KEEP(descriptorIndexing),
+      KEEP(shaderInputAttachmentArrayDynamicIndexing),
+      KEEP(shaderUniformBufferArrayNonUniformIndexing),
+      KEEP(shaderSampledImageArrayNonUniformIndexing),
+      KEEP(shaderStorageBufferArrayNonUniformIndexing),
+      KEEP(shaderStorageImageArrayNonUniformIndexing),
+      KEEP(shaderInputAttachmentArrayNonUniformIndexing),
+      KEEP(shaderUniformTexelBufferArrayNonUniformIndexing),
+      KEEP(shaderStorageTexelBufferArrayNonUniformIndexing),
+      KEEP(descriptorBindingUniformBufferUpdateAfterBind),
+      KEEP(descriptorBindingSampledImageUpdateAfterBind),
+      KEEP(descriptorBindingStorageImageUpdateAfterBind),
+      KEEP(descriptorBindingStorageBufferUpdateAfterBind),
+      KEEP(descriptorBindingUniformTexelBufferUpdateAfterBind),
+      KEEP(descriptorBindingStorageTexelBufferUpdateAfterBind),
+      KEEP(descriptorBindingUpdateUnusedWhilePending),
+      KEEP(descriptorBindingPartiallyBound),
+      KEEP(descriptorBindingVariableDescriptorCount),
+      KEEP(runtimeDescriptorArray),
+      /* Inline uniform data is read from descriptor memory. */
+      KEEP(descriptorBindingInlineUniformBlockUpdateAfterBind),
+      KEEP(shaderOutputLayer),
+      KEEP(shaderOutputViewportIndex),
+      KEEP(subgroupBroadcastDynamicId),
+      /* No 8/16/64-bit shader types are exposed, so this holds trivially. */
+      KEEP(shaderSubgroupExtendedTypes),
+
+      /* Vulkan 1.3 */
+      KEEP(robustImageAccess),
+      KEEP(inlineUniformBlock),
+      KEEP(pipelineCreationCacheControl),
+      KEEP(privateData),
+      KEEP(shaderDemoteToHelperInvocation),
+      KEEP(shaderTerminateInvocation),
+      KEEP(subgroupSizeControl),
+      KEEP(computeFullSubgroups),
+      KEEP(synchronization2),
+      KEEP(shaderZeroInitializeWorkgroupMemory),
+      KEEP(dynamicRendering),
+      KEEP(shaderIntegerDotProduct),
+      KEEP(maintenance4),
+
+      /* Vulkan 1.4 */
+      KEEP(globalPriorityQuery),
+      KEEP(shaderFloatControls2),
+      KEEP(bresenhamLines),
+      KEEP(dynamicRenderingLocalRead),
+      KEEP(samplerYcbcrConversion),
+      KEEP(indexTypeUint8),
+      KEEP(maintenance5),
+      KEEP(maintenance6),
+      KEEP(pushDescriptor),
+      KEEP(pipelineRobustness),
+      KEEP(robustBufferAccess2),
+      KEEP(robustImageAccess2),
+      KEEP(nullDescriptor),
+      KEEP(transformFeedback),
+      KEEP(geometryStreams),
+      KEEP(shaderSubgroupRotate),
+      KEEP(shaderSubgroupRotateClustered),
+      KEEP(vertexAttributeInstanceRateDivisor),
+      KEEP(vertexAttributeInstanceRateZeroDivisor),
+      KEEP(extendedDynamicState2LogicOp),
+      /* Tessellation reads the patch size from dynamic state at draw. */
+      KEEP(extendedDynamicState2PatchControlPoints),
+      KEEP(hostImageCopy),
+      /* Device memory has native FP32 atomic addition, which image atomics
+       * also use. Shared memory has exchange but no addition. */
+      .shaderBufferFloat32Atomics = true,
+      .shaderBufferFloat32AtomicAdd = true,
+      .shaderSharedFloat32Atomics = true,
+      .shaderImageFloat32Atomics = true,
+      .shaderImageFloat32AtomicAdd = true,
+
+      /* Extensions */
+      KEEP(mutableDescriptorType),
+      KEEP(pipelineExecutableInfo),
+      KEEP(maintenance8),
+      KEEP(maintenance9),
+      KEEP(shaderReplicatedComposites),
+      KEEP(memoryMapPlaced),
+      KEEP(memoryUnmapReserve),
+      KEEP(colorWriteEnable),
+      /* Lowered in the last pre-rasterization stage. */
+      .depthClipControl = true,
+      KEEP(depthBiasControl),
+      KEEP(leastRepresentableValueForceUnormRepresentation),
+      KEEP(depthBiasExact),
+      KEEP(image2DViewOf3D),
+      KEEP(sampler2DViewOf3D),
+      KEEP(primitiveTopologyListRestart),
+      KEEP(provokingVertexLast),
+      KEEP(transformFeedbackPreservesProvokingVertex),
+      KEEP(maintenance7),
+      KEEP(shaderMaximalReconvergence),
+      KEEP(shaderQuadControl),
+      KEEP(workgroupMemoryExplicitLayout),
+      KEEP(workgroupMemoryExplicitLayoutScalarBlockLayout),
+      KEEP(workgroupMemoryExplicitLayout8BitAccess),
+      KEEP(workgroupMemoryExplicitLayout16BitAccess),
+      KEEP(attachmentFeedbackLoopLayout),
+      KEEP(dynamicRenderingUnusedAttachments),
+      KEEP(multiDraw),
+      KEEP(nonSeamlessCubeMap),
+      KEEP(shaderModuleIdentifier),
+      KEEP(shaderRelaxedExtendedInstruction),
+      KEEP(shaderSubgroupUniformControlFlow),
+      KEEP(formatA4R4G4B4),
+      KEEP(formatA4B4G4R4),
+      KEEP(depthClipEnable),
+      KEEP(extendedDynamicState),
+      KEEP(extendedDynamicState2),
+      KEEP(texelBufferAlignment),
+      KEEP(swapchainMaintenance1),
+      KEEP(presentId),
+      KEEP(presentId2),
+      KEEP(presentWait),
+      KEEP(presentWait2),
+      KEEP(shaderExpectAssume),
+      KEEP(pipelineProtectedAccess),
+      /* Advanced blending reads the tile in the shader. */
+      KEEP(advancedBlendCoherentOperations),
+      KEEP(vertexInputDynamicState),
+      KEEP(graphicsPipelineLibrary),
+      KEEP(shaderObject),
+      /* Blend, sample and vertex state specialise deferred shaders at draw
+       * time; rasterizer state is emitted per draw. */
+      KEEP(extendedDynamicState3TessellationDomainOrigin),
+      KEEP(extendedDynamicState3DepthClampEnable),
+      KEEP(extendedDynamicState3PolygonMode),
+      KEEP(extendedDynamicState3RasterizationSamples),
+      KEEP(extendedDynamicState3SampleMask),
+      KEEP(extendedDynamicState3AlphaToCoverageEnable),
+      KEEP(extendedDynamicState3AlphaToOneEnable),
+      KEEP(extendedDynamicState3LogicOpEnable),
+      KEEP(extendedDynamicState3ColorBlendEnable),
+      KEEP(extendedDynamicState3ColorBlendEquation),
+      KEEP(extendedDynamicState3ColorWriteMask),
+      KEEP(extendedDynamicState3RasterizationStream),
+      KEEP(extendedDynamicState3DepthClipEnable),
+      KEEP(extendedDynamicState3SampleLocationsEnable),
+      KEEP(extendedDynamicState3ProvokingVertexMode),
+      KEEP(extendedDynamicState3LineRasterizationMode),
+      .extendedDynamicState3DepthClipNegativeOneToOne = true,
+      /* 2D views clamp gradient samples in hardware; other implicit samples
+       * select the clamped LOD explicitly, without anisotropy. */
+      .minLod = true,
+      KEEP(shaderUniformBufferUnsizedArray),
+      KEEP(pipelineBinaries),
+      KEEP(presentTiming),
+      KEEP(presentAtAbsoluteTime),
+      KEEP(presentAtRelativeTime),
+      /* Capture replay and sparse binding rebind memory into reserved
+       * addresses. Shaders look up image residency in a table per image. */
+      KEEP(bufferDeviceAddressCaptureReplay),
+      KEEP(bufferDeviceAddressCaptureReplayEXT),
+      KEEP(sparseBinding),
+      KEEP(sparseResidencyBuffer),
+      KEEP(sparseResidencyAliased),
+      KEEP(sparseResidencyImage2D),
+      KEEP(shaderResourceResidency),
+      .attachmentFeedbackLoopDynamicState = true,
+      .depthClampZeroOne = true,
+      .depthClampControl = true,
+      .maintenance10 = true,
+   };
+#undef KEEP
+
+   props->apiVersion = VK_MAKE_API_VERSION(0, 1, 4, VK_HEADER_VERSION);
+   props->conformanceVersion = (VkConformanceVersion){0};
+
+   /* Subgroup operations are lowered to native ballot and simd_shuffle. */
+   props->subgroupSupportedStages = VK_SHADER_STAGE_COMPUTE_BIT |
+                                    VK_SHADER_STAGE_ALL_GRAPHICS;
+   props->subgroupSupportedOperations =
+      VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_VOTE_BIT |
+      VK_SUBGROUP_FEATURE_BALLOT_BIT | VK_SUBGROUP_FEATURE_SHUFFLE_BIT |
+      VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT |
+      VK_SUBGROUP_FEATURE_ARITHMETIC_BIT | VK_SUBGROUP_FEATURE_CLUSTERED_BIT |
+      VK_SUBGROUP_FEATURE_QUAD_BIT | VK_SUBGROUP_FEATURE_ROTATE_BIT |
+      VK_SUBGROUP_FEATURE_ROTATE_CLUSTERED_BIT;
+   props->subgroupQuadOperationsInAllStages = true;
+   props->requiredSubgroupSizeStages = 0;
+
+   props->maxComputeSharedMemorySize = AGX_APPLE9_MAX_SHARED_BYTES;
+
+   /* VK_KHR_maintenance10: the opaque black border of RGBA4 formats is
+    * not established. */
+   props->rgba4OpaqueBlackSwizzled = false;
+   props->resolveSrgbFormatAppliesTransferFunction = true;
+   props->resolveSrgbFormatSupportsTransferFunctionControl = true;
+
+   /* VK_EXT_mesh_shader */
+   props->maxTaskWorkGroupTotalCount = 1 << 22;
+   for (unsigned i = 0; i < 3; ++i) {
+      props->maxTaskWorkGroupCount[i] = 65535;
+      props->maxTaskWorkGroupSize[i] = 128;
+      props->maxMeshWorkGroupCount[i] = 65535;
+      props->maxMeshWorkGroupSize[i] = 128;
+   }
+   props->maxTaskWorkGroupInvocations = 128;
+   props->maxTaskPayloadSize = 16384;
+   props->maxTaskSharedMemorySize = AGX_APPLE9_MAX_SHARED_BYTES;
+   props->maxTaskPayloadAndSharedMemorySize = AGX_APPLE9_MAX_SHARED_BYTES;
+   props->maxMeshWorkGroupTotalCount = 1 << 22;
+   props->maxMeshWorkGroupInvocations = 128;
+   props->maxMeshSharedMemorySize = AGX_APPLE9_MAX_SHARED_BYTES;
+   props->maxMeshPayloadAndSharedMemorySize = AGX_APPLE9_MAX_SHARED_BYTES;
+   props->maxMeshOutputMemorySize = 32768;
+   props->maxMeshPayloadAndOutputMemorySize = 48128;
+   props->maxMeshOutputComponents = 128;
+   props->maxMeshOutputVertices = 256;
+   props->maxMeshOutputPrimitives = 256;
+   props->maxMeshOutputLayers = 8;
+   props->maxMeshMultiviewViewCount = props->maxMultiviewViewCount;
+   props->meshOutputPerVertexGranularity = 1;
+   props->meshOutputPerPrimitiveGranularity = 1;
+   props->maxPreferredTaskWorkGroupInvocations = 32;
+   props->maxPreferredMeshWorkGroupInvocations = 32;
+   props->prefersLocalInvocationVertexOutput = false;
+   props->prefersLocalInvocationPrimitiveOutput = false;
+   props->prefersCompactVertexOutput = true;
+   props->prefersCompactPrimitiveOutput = true;
+   /* Unbound sparse ranges map scratch pages, which reads observe. */
+   props->sparseResidencyNonResidentStrict = false;
+   /* With early fragment tests, occlusion counting precedes the sample
+    * mask test. */
+   props->earlyFragmentSampleMaskTestBeforeSampleCounting = false;
+   /* FP32 arithmetic flushes denormal inputs and results, but minimum,
+    * maximum and sign operations pass them through, so a shader's
+    * flush-to-zero mode cannot be honoured without per-operation fixups. */
+   props->shaderDenormFlushToZeroFloat32 = false;
+   /* The rasterized interface carries at most this many user scalars. */
+   props->maxVertexOutputComponents = AGX_APPLE9_MAX_VARYING_COMPONENTS;
+   props->maxTessellationEvaluationOutputComponents =
+      AGX_APPLE9_MAX_VARYING_COMPONENTS;
+   props->maxGeometryOutputComponents = AGX_APPLE9_MAX_VARYING_COMPONENTS;
+   props->maxFragmentInputComponents = AGX_APPLE9_MAX_VARYING_COMPONENTS;
+   props->maxComputeWorkGroupCount[0] = 65535;
+
+   /* The native 4x tile layout supports 64 bytes per pixel. Four RGBA32
+    * targets fill it; eight targets require tile spilling or a smaller tile
+    * layout that this path does not yet implement.
+    */
+   props->maxColorAttachments = 8;
+   props->maxFragmentOutputAttachments = 8;
+
+
+   fprintf(stderr, "WARNING: experimental Apple9 Honeykrisp; not conformant\n");
+}
+
+uint64_t hk_process_heap_used[VK_MAX_MEMORY_HEAPS];
+
 VkResult
 hk_create_drm_physical_device(struct vk_instance *_instance,
                               drmDevicePtr drm_device,
@@ -1258,6 +1780,12 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
       goto fail_pdev_alloc;
    }
 
+   if (pdev->dev.chip == AGX_CHIP_G16G &&
+       !debug_get_bool_option("HK_EXPERIMENTAL_APPLE9", false)) {
+      result = VK_ERROR_INCOMPATIBLE_DRIVER;
+      goto fail_agx_device;
+   }
+
    struct vk_physical_device_dispatch_table dispatch_table;
    vk_physical_device_dispatch_table_from_entrypoints(
       &dispatch_table, &hk_physical_device_entrypoints, true);
@@ -1273,6 +1801,11 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
 
    struct vk_properties properties;
    hk_get_device_properties(&pdev->dev, instance, &properties);
+
+   if (pdev->dev.chip == AGX_CHIP_G16G)
+      hk_apple9_restrict_caps(&supported_extensions, &supported_features,
+                              &properties);
+
 
    properties.drmHasRender = true;
    properties.drmRenderMajor = major(render_dev);
@@ -1326,11 +1859,22 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
    assert(pdev->mem_type_count <= ARRAY_SIZE(pdev->mem_types));
 
    pdev->queue_families[pdev->queue_family_count++] = (struct hk_queue_family){
-      .queue_flags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT |
+      .queue_flags = pdev->dev.chip == AGX_CHIP_G16G
+                        ? VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT |
+                             VK_QUEUE_TRANSFER_BIT | VK_QUEUE_SPARSE_BINDING_BIT :
+                     VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT |
                      VK_QUEUE_TRANSFER_BIT | VK_QUEUE_SPARSE_BINDING_BIT,
 
       .queue_count = 1,
    };
+   /* Vulkan 1.4 requires a second transfer-capable family without host image
+    * copies. Its queues submit through their own kernel command queues. */
+   if (pdev->dev.chip == AGX_CHIP_G16G) {
+      pdev->queue_families[pdev->queue_family_count++] = (struct hk_queue_family){
+         .queue_flags = VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT,
+         .queue_count = 1,
+      };
+   }
    assert(pdev->queue_family_count <= ARRAY_SIZE(pdev->queue_families));
 
    unsigned st_idx = 0;
@@ -1413,7 +1957,7 @@ hk_GetPhysicalDeviceMemoryProperties2(
 
          for (unsigned i = 0; i < pdev->mem_heap_count; i++) {
             const struct hk_memory_heap *heap = &pdev->mem_heaps[i];
-            uint64_t used = p_atomic_read(&heap->used);
+            uint64_t used = p_atomic_read(&hk_process_heap_used[i]);
 
             /* From the Vulkan 1.3.278 spec:
              *

@@ -134,6 +134,40 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
                 sizeof(sampler->custom_border));
       }
    }
+   /* Push descriptor writes use a transient set without an object base. */
+   struct hk_device *dev = (struct hk_device *)set->layout->vk.base.device;
+   if (dev->dev.chip == AGX_CHIP_G16G) {
+      /* Native state for shaders that address the descriptor directly, one
+       * descriptor per plane. */
+      struct hk_apple9_image_descriptor ext[3];
+      memset(ext, 0, sizeof(ext));
+      for (uint8_t plane = 0; plane < plane_count; plane++) {
+         ext[plane].common = desc[plane];
+         if (descriptor_type != VK_DESCRIPTOR_TYPE_SAMPLER) {
+            uint64_t residency = dev->apple9_resident->va->addr;
+            if (info && info->imageView != VK_NULL_HANDLE) {
+               VK_FROM_HANDLE(hk_image_view, view, info->imageView);
+               residency = hk_apple9_view_residency(dev, view, plane);
+               ext[plane].common.apple9.base_level = view->vk.base_mip_level;
+               ext[plane].common.apple9.base_layer = view->vk.base_array_layer;
+            }
+            ext[plane].common.apple9.residency_lo = residency;
+            ext[plane].common.apple9.residency_hi = residency >> 32;
+            agx_apple9_translate_texture(ext[plane].texture, &desc[plane].tex);
+            hk_apple9_texture_info(ext[plane].texture_info, &desc[plane].tex);
+         }
+         if (descriptor_type == VK_DESCRIPTOR_TYPE_SAMPLER ||
+             descriptor_type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+            hk_apple9_native_sampler(ext[plane].sampler, &desc[plane].sampler,
+                                     false);
+            hk_apple9_runtime_sampler(ext[plane].runtime_sampler,
+                                      &desc[plane].sampler, false);
+         }
+      }
+      write_desc(set, binding, elem, ext, sizeof(ext[0]) * plane_count);
+      return;
+   }
+
    write_desc(set, binding, elem, desc, sizeof(desc[0]) * plane_count);
 }
 
@@ -156,6 +190,22 @@ write_storage_image_view_desc(struct hk_descriptor_set *set,
    } else {
       agx_set_null_texture(&desc.tex);
       agx_set_null_pbe(&desc.pbe);
+   }
+
+   struct hk_device *dev = (struct hk_device *)set->layout->vk.base.device;
+   if (dev->dev.chip == AGX_CHIP_G16G) {
+      struct hk_apple9_storage_descriptor ext = {.common = desc};
+      ext.metadata.base = dev->apple9_resident->va->addr;
+      if (info && info->imageView != VK_NULL_HANDLE) {
+         VK_FROM_HANDLE(hk_image_view, view, info->imageView);
+         hk_apple9_texel_layout(vk_format_to_pipe_format(view->vk.format),
+                                &ext.metadata);
+         ext.metadata.base = hk_apple9_view_residency(dev, view, 0);
+         ext.metadata.elements =
+            view->vk.base_mip_level | (view->vk.base_array_layer << 16);
+      }
+      write_desc(set, binding, elem, &ext, sizeof(ext));
+      return;
    }
 
    write_desc(set, binding, elem, &desc, sizeof(desc));
@@ -202,20 +252,45 @@ write_dynamic_buffer_desc(struct hk_descriptor_set *set,
 static void
 write_buffer_view_desc(struct hk_descriptor_set *set,
                        const VkBufferView bufferView, uint32_t binding,
-                       uint32_t elem)
+                       uint32_t elem, VkDescriptorType type)
 {
-   struct hk_storage_image_descriptor desc = {};
-   if (bufferView != VK_NULL_HANDLE) {
-      VK_FROM_HANDLE(hk_buffer_view, view, bufferView);
-
-      desc.tex = view->tex;
-      desc.pbe = view->pbe;
+   VK_FROM_HANDLE(hk_buffer_view, view, bufferView);
+   /* G16 uniform texel buffers carry load metadata, also in mutable bindings. */
+   const struct hk_device *dev =
+      (const struct hk_device *)set->layout->vk.base.device;
+   if (dev->dev.chip == AGX_CHIP_G16G &&
+       type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER) {
+      struct hk_apple9_texel_descriptor desc = {};
+      if (view) {
+         desc.tex = view->tex;
+         desc.metadata = view->apple9;
+      } else {
+         agx_set_null_texture(&desc.tex);
+      }
+      agx_apple9_translate_texture(desc.texture, &desc.tex);
+      write_desc(set, binding, elem, &desc, sizeof(desc));
+   } else if (dev->dev.chip == AGX_CHIP_G16G) {
+      struct hk_apple9_storage_descriptor desc = {};
+      if (view) {
+         desc.common.tex = view->tex;
+         desc.common.pbe = view->pbe;
+         desc.metadata = view->apple9;
+      } else {
+         agx_set_null_texture(&desc.common.tex);
+         agx_set_null_pbe(&desc.common.pbe);
+      }
+      write_desc(set, binding, elem, &desc, sizeof(desc));
    } else {
-      agx_set_null_texture(&desc.tex);
-      agx_set_null_pbe(&desc.pbe);
+      struct hk_storage_image_descriptor desc = {};
+      if (view) {
+         desc.tex = view->tex;
+         desc.pbe = view->pbe;
+      } else {
+         agx_set_null_texture(&desc.tex);
+         agx_set_null_pbe(&desc.pbe);
+      }
+      write_desc(set, binding, elem, &desc, sizeof(desc));
    }
-
-   write_desc(set, binding, elem, &desc, sizeof(desc));
 }
 
 static void
@@ -262,7 +337,8 @@ hk_UpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount,
          for (uint32_t j = 0; j < write->descriptorCount; j++) {
             write_buffer_view_desc(set, write->pTexelBufferView[j],
                                    write->dstBinding,
-                                   write->dstArrayElement + j);
+                                   write->dstArrayElement + j,
+                                   write->descriptorType);
          }
          break;
 
@@ -380,7 +456,8 @@ hk_push_descriptor_set_update(struct hk_push_descriptor_set *push_set,
          for (uint32_t j = 0; j < write->descriptorCount; j++) {
             write_buffer_view_desc(&set, write->pTexelBufferView[j],
                                    write->dstBinding,
-                                   write->dstArrayElement + j);
+                                   write->dstArrayElement + j,
+                                   write->descriptorType);
          }
          break;
 
@@ -489,7 +566,11 @@ hk_CreateDescriptorPool(VkDevice _device,
    bo_size += HK_MIN_UBO_ALIGNMENT * pCreateInfo->maxSets;
 
    if (bo_size) {
-      pool->bo = agx_bo_create(&dev->dev, bo_size, 0, 0, "Descriptor pool");
+      /* G16 shaders address image descriptors as native table entries
+       * relative to the USC aperture. */
+      pool->bo = agx_bo_create(&dev->dev, bo_size, 0,
+                               dev->dev.chip == AGX_CHIP_G16G ? AGX_BO_LOW_VA : 0,
+                               "Descriptor pool");
       if (!pool->bo) {
          hk_destroy_descriptor_pool(dev, pAllocator, pool);
          return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
@@ -740,7 +821,7 @@ hk_descriptor_set_write_template(
                data + entry->offset + j * entry->stride;
 
             write_buffer_view_desc(set, *bview, entry->binding,
-                                   entry->array_element + j);
+                                   entry->array_element + j, entry->type);
          }
          break;
 

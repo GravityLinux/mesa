@@ -141,7 +141,11 @@ pack_sampler(const struct hk_physical_device *pdev,
    agx_pack(out, SAMPLER, cfg) {
       cfg.minimum_lod = info->minLod;
       cfg.maximum_lod = info->maxLod;
-      cfg.magnify = translate_filter(info->magFilter);
+      /* A positive minimum LOD always minifies, but the 4.6 fixed-point
+       * field truncates small minimums to zero, where the hardware would
+       * magnify. Selecting the minification filter keeps the API result. */
+      cfg.magnify = translate_filter(info->minLod > 0.0f ? info->minFilter
+                                                         : info->magFilter);
       cfg.minify = translate_filter(info->minFilter);
       cfg.mip_filter = translate_mipfilter(info->mipmapMode);
       cfg.wrap_s = translate_address_mode(info->addressModeU);

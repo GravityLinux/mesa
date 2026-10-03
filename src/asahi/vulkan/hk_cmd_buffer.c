@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_cmd_buffer.h"
+#include "asahi/lib/agx_apple9.h"
 
 #include "agx_abi.h"
 #include "agx_bo.h"
@@ -56,8 +57,8 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd)
    hk_descriptor_state_fini(cmd, &cmd->state.gfx.descriptors);
    hk_descriptor_state_fini(cmd, &cmd->state.cs.descriptors);
 
-   hk_cmd_pool_free_bo_list(pool, &cmd->uploader.main.bos);
-   hk_cmd_pool_free_usc_bo_list(pool, &cmd->uploader.usc.bos);
+   for (unsigned i = 0; i < HK_CMD_POOL_COUNT; ++i)
+      hk_cmd_pool_free_bo_list(pool, i, &cmd->uploader[i].bos);
 
    list_for_each_entry_safe(struct hk_cs, it, &cmd->control_streams, node) {
       list_del(&it->node);
@@ -69,6 +70,8 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd)
    }
 
    util_dynarray_clear(&cmd->large_bos);
+   util_dynarray_clear(&cmd->query_adds);
+   util_dynarray_clear(&cmd->query_writes);
 }
 
 static void
@@ -78,8 +81,10 @@ hk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
       container_of(vk_cmd_buffer, struct hk_cmd_buffer, vk);
    struct hk_cmd_pool *pool = hk_cmd_buffer_pool(cmd);
 
-   util_dynarray_fini(&cmd->large_bos);
    hk_free_resettable_cmd_buffer(cmd);
+   util_dynarray_fini(&cmd->large_bos);
+   util_dynarray_fini(&cmd->query_adds);
+   util_dynarray_fini(&cmd->query_writes);
    vk_command_buffer_finish(&cmd->vk);
    vk_free(&pool->vk.alloc, cmd);
 }
@@ -112,13 +117,15 @@ hk_create_cmd_buffer(struct vk_command_pool *vk_pool,
    }
 
    cmd->large_bos = UTIL_DYNARRAY_INIT;
+   cmd->query_adds = UTIL_DYNARRAY_INIT;
+   cmd->query_writes = UTIL_DYNARRAY_INIT;
 
    cmd->vk.dynamic_graphics_state.vi = &cmd->state.gfx._dynamic_vi;
    cmd->vk.dynamic_graphics_state.ms.sample_locations =
       &cmd->state.gfx._dynamic_sl;
 
-   list_inithead(&cmd->uploader.main.bos);
-   list_inithead(&cmd->uploader.usc.bos);
+   for (unsigned i = 0; i < HK_CMD_POOL_COUNT; ++i)
+      list_inithead(&cmd->uploader[i].bos);
    list_inithead(&cmd->control_streams);
 
    *cmd_buffer_out = &cmd->vk;
@@ -136,12 +143,11 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    vk_command_buffer_reset(&cmd->vk);
    hk_free_resettable_cmd_buffer(cmd);
 
-   cmd->uploader.main.map = NULL;
-   cmd->uploader.main.base = 0;
-   cmd->uploader.main.offset = 0;
-   cmd->uploader.usc.map = NULL;
-   cmd->uploader.usc.base = 0;
-   cmd->uploader.usc.offset = 0;
+   for (unsigned i = 0; i < HK_CMD_POOL_COUNT; ++i) {
+      cmd->uploader[i].map = NULL;
+      cmd->uploader[i].base = 0;
+      cmd->uploader[i].offset = 0;
+   }
 
    cmd->current_cs.gfx = NULL;
    cmd->current_cs.cs = NULL;
@@ -153,6 +159,7 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    cmd->geom_index_count = 0;
    cmd->geom_instance_count = 0;
    cmd->uses_heap = false;
+   cmd->uses_mesh_heap = false;
 
    memset(&cmd->state, 0, sizeof(cmd->state));
 }
@@ -164,36 +171,36 @@ const struct vk_command_buffer_ops hk_cmd_buffer_ops = {
 };
 
 static VkResult
-hk_cmd_buffer_alloc_bo(struct hk_cmd_buffer *cmd, bool usc,
+hk_cmd_buffer_alloc_bo(struct hk_cmd_buffer *cmd, enum hk_cmd_pool_kind kind,
                        struct hk_cmd_bo **bo_out)
 {
-   VkResult result = hk_cmd_pool_alloc_bo(hk_cmd_buffer_pool(cmd), usc, bo_out);
+   VkResult result = hk_cmd_pool_alloc_bo(hk_cmd_buffer_pool(cmd), kind, bo_out);
    if (result != VK_SUCCESS)
       return result;
 
-   if (usc)
-      list_addtail(&(*bo_out)->link, &cmd->uploader.usc.bos);
-   else
-      list_addtail(&(*bo_out)->link, &cmd->uploader.main.bos);
+   list_addtail(&(*bo_out)->link, &cmd->uploader[kind].bos);
 
    return VK_SUCCESS;
 }
 
 struct agx_ptr
 hk_pool_alloc_internal(struct hk_cmd_buffer *cmd, uint32_t size,
-                       uint32_t alignment, bool usc)
+                       uint32_t alignment, enum hk_cmd_pool_kind kind)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   struct hk_uploader *uploader =
-      usc ? &cmd->uploader.usc : &cmd->uploader.main;
+   struct hk_uploader *uploader = &cmd->uploader[kind];
 
    /* Specially handle large allocations owned by the command buffer, e.g. used
     * for statically allocated vertex output buffers with geometry shaders.
     */
    if (size > HK_CMD_BO_SIZE) {
-      uint32_t flags = usc ? AGX_BO_LOW_VA : 0;
       struct agx_bo *bo =
-         agx_bo_create(&dev->dev, size, flags, 0, "Large pool allocation");
+         agx_bo_create(&dev->dev, size, alignment,
+                       hk_cmd_pool_bo_flags(dev, kind), "Large pool allocation");
+      if (!bo) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+         return (struct agx_ptr){0};
+      }
 
       util_dynarray_append(&cmd->large_bos, bo);
       return (struct agx_ptr){
@@ -218,7 +225,7 @@ hk_pool_alloc_internal(struct hk_cmd_buffer *cmd, uint32_t size,
    }
 
    struct hk_cmd_bo *bo;
-   VkResult result = hk_cmd_buffer_alloc_bo(cmd, usc, &bo);
+   VkResult result = hk_cmd_buffer_alloc_bo(cmd, kind, &bo);
    if (unlikely(result != VK_SUCCESS)) {
       vk_command_buffer_set_error(&cmd->vk, result);
       return (struct agx_ptr){0};
@@ -303,6 +310,7 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
           "must end rendering before ending the command buffer");
 
    perf_debug(cmd, "End command buffer");
+   hk_flush_query_writes(cmd);
    hk_cmd_buffer_end_compute(cmd);
    hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.post_gfx);
 
@@ -355,12 +363,20 @@ hk_cmd_bind_shaders(struct vk_command_buffer *vk_cmd, uint32_t stage_count,
       struct hk_api_shader *shader =
          container_of(shaders[i], struct hk_api_shader, vk);
 
-      if (stages[i] == MESA_SHADER_COMPUTE || stages[i] == MESA_SHADER_KERNEL)
+      if (stages[i] == MESA_SHADER_COMPUTE || stages[i] == MESA_SHADER_KERNEL) {
          hk_cmd_bind_compute_shader(cmd, shader);
-      else
-         hk_cmd_bind_graphics_shader(cmd, stages[i], shader);
+      } else {
+         if (stages[i] < HK_APPLE9_GFX_STAGES)
+            cmd->state.gfx.apple9_api[stages[i]] = shaders[i] ? shader : NULL;
+         hk_cmd_bind_graphics_shader(cmd, stages[i], shaders[i] ? shader : NULL);
+      }
    }
 }
+
+/* Graphics bind points, including mesh pipelines */
+#define HK_GRAPHICS_STAGES                                                     \
+   (VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_TASK_BIT_EXT |              \
+    VK_SHADER_STAGE_MESH_BIT_EXT)
 
 static void
 hk_bind_descriptor_sets(UNUSED struct hk_cmd_buffer *cmd,
@@ -439,7 +455,7 @@ hk_CmdBindDescriptorSets2KHR(
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
 
-   if (pBindDescriptorSetsInfo->stageFlags & VK_SHADER_STAGE_ALL_GRAPHICS) {
+   if (pBindDescriptorSetsInfo->stageFlags & HK_GRAPHICS_STAGES) {
       hk_bind_descriptor_sets(cmd, &cmd->state.gfx.descriptors,
                               pBindDescriptorSetsInfo);
    }
@@ -465,7 +481,7 @@ hk_CmdPushConstants2KHR(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
 
-   if (pPushConstantsInfo->stageFlags & VK_SHADER_STAGE_ALL_GRAPHICS)
+   if (pPushConstantsInfo->stageFlags & HK_GRAPHICS_STAGES)
       hk_push_constants(cmd, &cmd->state.gfx.descriptors, pPushConstantsInfo);
 
    if (pPushConstantsInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT)
@@ -521,7 +537,7 @@ hk_CmdPushDescriptorSet2KHR(
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
 
-   if (pPushDescriptorSetInfo->stageFlags & VK_SHADER_STAGE_ALL_GRAPHICS) {
+   if (pPushDescriptorSetInfo->stageFlags & HK_GRAPHICS_STAGES) {
       hk_push_descriptor_set(cmd, &cmd->state.gfx.descriptors,
                              pPushDescriptorSetInfo);
    }
@@ -538,8 +554,18 @@ hk_cmd_buffer_flush_push_descriptors(struct hk_cmd_buffer *cmd,
 {
    u_foreach_bit(set_idx, desc->push_dirty) {
       struct hk_push_descriptor_set *push_set = desc->push[set_idx];
-      uint64_t push_set_addr = hk_pool_upload(
-         cmd, push_set->data, sizeof(push_set->data), HK_MIN_UBO_ALIGNMENT);
+      /* G16 shaders address image descriptors within the USC aperture. */
+      uint64_t push_set_addr;
+      if (hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G) {
+         struct agx_ptr t =
+            hk_pool_usc_alloc(cmd, sizeof(push_set->data), HK_MIN_UBO_ALIGNMENT);
+         if (t.cpu)
+            memcpy(t.cpu, push_set->data, sizeof(push_set->data));
+         push_set_addr = t.gpu;
+      } else {
+         push_set_addr = hk_pool_upload(
+            cmd, push_set->data, sizeof(push_set->data), HK_MIN_UBO_ALIGNMENT);
+      }
 
       desc->root.sets[set_idx] = push_set_addr;
       desc->set_sizes[set_idx] = sizeof(push_set->data);
@@ -635,7 +661,9 @@ hk_reserve_scratch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    /* Not scratch but this is the most convenient place for this... */
    cs->uses_sampler_heap |= s->b.info.uses_sampler_heap;
 
-   if (max_scratch_size == 0)
+   /* Apple9 private memory is described by the native launch frame extents.
+    * It does not use the older helper shader and scratch-buffer protocol. */
+   if (max_scratch_size == 0 || dev->dev.chip == AGX_CHIP_G16G)
       return;
 
    unsigned preamble_size = (s->b.info.preamble_scratch_size > 0) ? 1 : 0;
@@ -768,6 +796,13 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
    if (!cs)
       return;
 
+   if (prog->apple9) {
+      uint64_t args = hk_pool_upload(cmd, data, data_size, 8);
+      hk_apple9_dispatch(cmd, cs, prog->bo, &prog->apple9_profile, grid, args, NULL,
+                         NULL);
+      return;
+   }
+
    struct agx_ptr t = hk_pool_usc_alloc(cmd, agx_usc_size(15), 64);
    uint64_t uploaded_data = hk_pool_upload(cmd, data, data_size, 4);
 
@@ -794,6 +829,14 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    cs->cr.bg.main = render->cr.bg.partial;
    cs->cr.eot.main = render->cr.eot.partial;
    cs->cr.zls_control = render->cr.zls_control_partial;
+
+   if (hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G) {
+      cs->scissor = UTIL_DYNARRAY_INIT;
+      cs->depth_bias = UTIL_DYNARRAY_INIT;
+      cs->ppp_multisamplectl = hk_default_sample_positions(cs->tib.nr_samples);
+      hk_cmd_buffer_dirty_all(cmd);
+      return;
+   }
 
    /* Barrier to enforce GPU-CPU coherency, in case this batch is back to back
     * with another that caused stale data to be cached and the CPU wrote to it
@@ -862,10 +905,18 @@ hk_ensure_cs_has_space(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     * by the batch to simplify lifetime management for the BO.
     */
    size_t size = 65536;
-   struct agx_ptr T = hk_pool_alloc(cmd, size, 256);
+   struct agx_ptr T = hk_pool_cs_alloc(cmd, size, 256, !vdm);
+   if (!T.cpu)
+      return;
 
-   /* Jump from the old control stream to the new control stream */
-   agx_cs_jump(cs->current, T.gpu, vdm);
+   /* Native VDM continuation pointers are relative to the render context. */
+   uint64_t target = T.gpu;
+   if (vdm && hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G) {
+      assert(target >= AGX_APPLE9_RENDER_CONTEXT_BASE &&
+             target - AGX_APPLE9_RENDER_CONTEXT_BASE <= UINT32_MAX);
+      target -= AGX_APPLE9_RENDER_CONTEXT_BASE;
+   }
+   agx_cs_jump(cs->current, target, vdm);
 
    /* Swap out the control stream */
    cs->current = T.cpu;

@@ -48,7 +48,61 @@ hk_get_buffer_format_features(struct hk_physical_device *pdev,
          features |= VK_FORMAT_FEATURE_2_STORAGE_TEXEL_BUFFER_ATOMIC_BIT;
    }
 
+   if (pdev->dev.chip == AGX_CHIP_G16G) {
+      /* Storage descriptors carry the texel layout for access without a
+       * shader format. */
+      if (features & VK_FORMAT_FEATURE_2_STORAGE_TEXEL_BUFFER_BIT)
+         features |= VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT;
+      /* Texel buffer atomics address device memory, which has FP32
+       * addition. */
+      if (p_format == PIPE_FORMAT_R32_FLOAT)
+         features |= VK_FORMAT_FEATURE_2_STORAGE_TEXEL_BUFFER_ATOMIC_BIT;
+      if (!hk_apple9_storage_format_supported(vk_format))
+         features &= ~(VK_FORMAT_FEATURE_2_STORAGE_TEXEL_BUFFER_BIT |
+                       VK_FORMAT_FEATURE_2_STORAGE_TEXEL_BUFFER_ATOMIC_BIT |
+                       VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
+                       VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
+   }
+
    return features;
+}
+
+/* Byte offset [7:0], bit shift [12:8], width minus one [17:13] and
+ * conversion kind [21:18] of each component of a texel of this format.
+ */
+void
+hk_apple9_texel_layout(enum pipe_format format,
+                       struct hk_apple9_texel_metadata *m)
+{
+   const struct util_format_description *desc = util_format_description(format);
+   m->size_B = util_format_get_blocksize(format);
+   for (unsigned c = 0; c < 4; ++c) {
+      unsigned swizzle = desc->swizzle[c];
+      unsigned kind, offset = 0, shift = 0, bits = 1;
+      if (swizzle >= 4) {
+         kind = swizzle == PIPE_SWIZZLE_1 ? HK_TEXEL_ONE : HK_TEXEL_ZERO;
+      } else {
+         const struct util_format_channel_description *chan =
+            &desc->channel[swizzle];
+         offset = (chan->shift / 32) * 4;
+         shift = chan->shift % 32;
+         bits = chan->size;
+         if (format == PIPE_FORMAT_R9G9B9E5_FLOAT)
+            kind = HK_TEXEL_RGB9E5;
+         else if (format == PIPE_FORMAT_R11G11B10_FLOAT)
+            kind = HK_TEXEL_FLOAT11;
+         else if (chan->type == UTIL_FORMAT_TYPE_FLOAT)
+            kind = bits == 16 ? HK_TEXEL_FLOAT16 : HK_TEXEL_FLOAT32;
+         else if (chan->type == UTIL_FORMAT_TYPE_SIGNED)
+            kind = chan->normalized ? HK_TEXEL_SNORM : HK_TEXEL_SINT;
+         else
+            kind = chan->normalized ? HK_TEXEL_UNORM : HK_TEXEL_UINT;
+         if (desc->colorspace == UTIL_FORMAT_COLORSPACE_SRGB && c < 3)
+            kind = HK_TEXEL_SRGB;
+      }
+      m->component[c] = offset | (shift << 8) | ((bits - 1) << 13) |
+                        (kind << 18);
+   }
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -111,7 +165,7 @@ hk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
       cfg.swizzle_a = agx_channel_from_pipe(format_swizzle[3]);
 
       cfg.width = AGX_TEXTURE_BUFFER_WIDTH;
-      cfg.height = DIV_ROUND_UP(view->vk.elements, cfg.width);
+      cfg.height = DIV_ROUND_UP(view->vk.elements + tail_offset_el, cfg.width);
       cfg.first_level = cfg.last_level = 0;
 
       cfg.address = ro_base;
@@ -155,6 +209,13 @@ hk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
       cfg.layers = 1;
       cfg.levels = 1;
    };
+
+   if (device->dev.chip == AGX_CHIP_G16G) {
+      view->apple9.base = hk_buffer_address_rw(buffer, view->vk.offset);
+      view->apple9.elements = view->vk.elements;
+      hk_apple9_texel_layout(format, &view->apple9);
+      view->apple9.residency = hk_buffer_apple9_residency(buffer);
+   }
 
    *pBufferView = hk_buffer_view_to_handle(view);
 

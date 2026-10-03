@@ -20,6 +20,12 @@ hk_get_buffer_alignment(const struct hk_physical_device *pdev,
 {
    uint32_t alignment = 16;
 
+   /* Native VDM index pointers are relative to the USC aperture. Mapping a
+    * buffer there requires page-aligned memory bindings, not a CPU copy. */
+   if (pdev->dev.chip == AGX_CHIP_G16G &&
+       (usage_flags & VK_BUFFER_USAGE_2_INDEX_BUFFER_BIT))
+      alignment = 16384;
+
    if (usage_flags & VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT_KHR)
       alignment = MAX2(alignment, HK_MIN_UBO_ALIGNMENT);
 
@@ -114,10 +120,12 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
    if (!buffer)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
+   buffer->apple9_index_va = dev->dev.chip == AGX_CHIP_G16G &&
+      (buffer->vk.usage & VK_BUFFER_USAGE_2_INDEX_BUFFER_BIT);
    if (buffer->vk.size > 0 &&
-       (buffer->vk.create_flags &
+       (buffer->apple9_index_va || (buffer->vk.create_flags &
         (VK_BUFFER_CREATE_SPARSE_BINDING_BIT |
-         VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT))) {
+         VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT)))) {
 
       const uint32_t alignment = hk_get_buffer_alignment(
          hk_device_physical(dev), buffer->vk.usage, buffer->vk.create_flags);
@@ -128,12 +136,11 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
          buffer->vk.create_flags &
          VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT;
 
-      enum agx_va_flags flags = 0;
+      enum agx_va_flags flags = buffer->apple9_index_va ? AGX_VA_USC : 0;
       uint64_t bda_fixed_addr = 0;
       if (bda_capture_replay) {
          bda_fixed_addr = hk_get_bda_replay_addr(pCreateInfo);
-         if (bda_fixed_addr != 0)
-            flags |= AGX_VA_FIXED;
+         flags |= bda_fixed_addr != 0 ? AGX_VA_FIXED : AGX_VA_LOW;
       }
 
       buffer->va =
@@ -147,7 +154,24 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
       buffer->vk.device_address = buffer->va->addr;
 
       /* Bind scratch pages to make read/write across the VA valid */
-      hk_bind_scratch(dev, buffer->va, 0, vma_size_B);
+      if (!buffer->apple9_index_va)
+         hk_bind_scratch(dev, buffer->va, 0, vma_size_B);
+
+      /* Apple9 texel fetches report no residency, so shaders read it from
+       * a table of the buffer's pages, all unbound initially.
+       */
+      if (dev->dev.chip == AGX_CHIP_G16G &&
+          (buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT)) {
+         size_t pages = DIV_ROUND_UP(vma_size_B, AIL_PAGESIZE);
+         buffer->apple9_residency =
+            agx_bo_create(&dev->dev, pages, 0, 0, "Apple9 buffer residency");
+         if (!buffer->apple9_residency) {
+            agx_va_free(&dev->dev, buffer->va, true);
+            vk_buffer_destroy(&dev->vk, pAllocator, &buffer->vk);
+            return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+         }
+         memset(agx_bo_map(buffer->apple9_residency), 0, pages);
+      }
    }
 
    *pBuffer = hk_buffer_to_handle(buffer);
@@ -168,6 +192,9 @@ hk_DestroyBuffer(VkDevice device, VkBuffer _buffer,
    if (buffer->va) {
       agx_va_free(&dev->dev, buffer->va, true);
    }
+
+   if (buffer->apple9_residency)
+      agx_bo_unreference(&dev->dev, buffer->apple9_residency);
 
    vk_buffer_destroy(&dev->vk, pAllocator, &buffer->vk);
 }
@@ -211,6 +238,7 @@ hk_GetPhysicalDeviceExternalBufferProperties(
    const VkPhysicalDeviceExternalBufferInfo *pExternalBufferInfo,
    VkExternalBufferProperties *pExternalBufferProperties)
 {
+   VK_FROM_HANDLE(hk_physical_device, pdev, physicalDevice);
    /* The Vulkan 1.3.256 spec says:
     *
     *    VUID-VkPhysicalDeviceExternalBufferInfo-handleType-parameter
@@ -227,6 +255,13 @@ hk_GetPhysicalDeviceExternalBufferProperties(
     * sketchy.  Also, just disallowing flags is the safe option.
     */
    if (pExternalBufferInfo->flags)
+      goto unsupported;
+
+   /* Capability queries must agree with the device's external-memory API. */
+   if (!pdev->vk.supported_extensions.KHR_external_memory_fd ||
+       (pExternalBufferInfo->handleType ==
+           VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT &&
+        !pdev->vk.supported_extensions.EXT_external_memory_dma_buf))
       goto unsupported;
 
    switch (pExternalBufferInfo->handleType) {
@@ -260,7 +295,8 @@ hk_BindBufferMemory2(VkDevice device, uint32_t bindInfoCount,
 
       if (buffer->va) {
          VK_FROM_HANDLE(hk_device, dev, device);
-         size_t size = MIN2(mem->bo->size, buffer->va->size_B);
+         size_t size = MIN2(mem->bo->size - pBindInfos[i].memoryOffset,
+                            buffer->va->size_B);
 
          /* Lower mapping: read-write */
          int ret = agx_bo_bind(&dev->dev, mem->bo, buffer->vk.device_address,
@@ -269,13 +305,16 @@ hk_BindBufferMemory2(VkDevice device, uint32_t bindInfoCount,
          if (ret)
             return VK_ERROR_UNKNOWN;
 
-         /* Upper mapping: read-only */
-         ret =
-            agx_bo_bind(&dev->dev, mem->bo,
-                        buffer->vk.device_address + dev->dev.sparse_ro_offset,
-                        size, pBindInfos[i].memoryOffset, DRM_ASAHI_BIND_READ);
-         if (ret)
-            return VK_ERROR_UNKNOWN;
+         /* Apple9 index aliases need only one read-write mapping. */
+         if (!buffer->apple9_index_va) {
+            /* Upper mapping: read-only */
+            ret =
+               agx_bo_bind(&dev->dev, mem->bo,
+                           buffer->vk.device_address + dev->dev.sparse_ro_offset,
+                           size, pBindInfos[i].memoryOffset, DRM_ASAHI_BIND_READ);
+            if (ret)
+               return VK_ERROR_UNKNOWN;
+         }
       } else {
          assert(buffer->vk.device_address == 0);
          buffer->vk.device_address =
@@ -312,7 +351,7 @@ hk_buffer_address(const struct hk_buffer *buffer, uint64_t offset,
     * is NULL, the buffer is not sparse resident, so we don't need the fix up...
     * and indeed, there may not be a shadow map available.
     */
-   if (read_only && buffer->va) {
+   if (read_only && buffer->va && !buffer->apple9_index_va) {
       addr = agx_rw_addr_to_ro(&dev->dev, addr);
    }
 

@@ -188,8 +188,20 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
    memcpy(&c->partial_eot.rsrc_spec, &cs->cr.eot.partial.counts,
           sizeof(struct agx_counts_packed));
 
+   if (dev->dev.chip == AGX_CHIP_G16G) {
+      c->bg.usc = cs->cr.bg.main.usc;
+      c->eot.usc = cs->cr.eot.main.usc;
+      c->partial_bg.usc = cs->cr.bg.partial.usc;
+      c->partial_eot.usc = cs->cr.eot.partial.usc;
+      c->bg.rsrc_spec = c->eot.rsrc_spec = 0;
+      c->partial_bg.rsrc_spec = c->partial_eot.rsrc_spec = 0;
+   }
+
    c->isp_scissor_base = cs->uploaded_scissor;
-   c->isp_dbias_base = cs->uploaded_zbias;
+   /* An empty upload may point one past the command pool allocation. There is
+    * no table for the kernel to validate or the GPU to read in that case.
+    */
+   c->isp_dbias_base = cs->depth_bias.size ? cs->uploaded_zbias : 0;
 
    if (cs->uses_sampler_heap) {
       c->sampler_heap = dev->samplers.table.bo->va->addr;
@@ -381,6 +393,7 @@ struct hk_bind_builder {
    struct vk_object_base *obj_base;
    struct agx_va *va;
    struct hk_image *image;
+   struct hk_buffer *buffer;
 
    /* State */
    struct hk_device_memory *mem;
@@ -424,6 +437,29 @@ hk_flush_bind(struct hk_bind_builder *b)
     * kernel-managed page table.  This ensures textures get strict residency
     * semantics, using the hardware sparse support.
     */
+   /* Apple9 shaders instead look up residency by page in the resource. */
+   if (b->buffer && b->buffer->apple9_residency != NULL) {
+      uint8_t *r = agx_bo_map(b->buffer->apple9_residency);
+      uint64_t first_page = b->resourceOffset / AIL_PAGESIZE;
+      uint64_t end_page =
+         MIN2(DIV_ROUND_UP(b->resourceOffset + b->size, AIL_PAGESIZE),
+              DIV_ROUND_UP(b->buffer->va->size_B, AIL_PAGESIZE));
+
+      for (uint64_t page = first_page; page < end_page; ++page)
+         r[page] = b->mem != NULL;
+   }
+
+   if (b->image && b->image->planes[0].apple9_residency != NULL) {
+      struct hk_apple9_residency *r =
+         agx_bo_map(b->image->planes[0].apple9_residency);
+      uint64_t first_page = ail_bytes_to_pages(b->resourceOffset);
+      uint64_t end_page =
+         MIN2(first_page + ail_bytes_to_pages(b->size), r->pages);
+
+      for (uint64_t page = first_page; page < end_page; ++page)
+         r->resident[page] = b->mem != NULL;
+   }
+
    if (b->image && b->image->planes[0].sparse_map != NULL) {
       assert(b->image->plane_count == 1 && "multiplane sparse not supported");
 
@@ -552,6 +588,7 @@ hk_sparse_buffer_bind_memory(struct hk_device *device,
 
    struct hk_bind_builder b =
       hk_bind_builder(device, &buffer->vk.base, buffer->va, NULL);
+   b.buffer = buffer;
 
    for (uint32_t i = 0; i < bind->bindCount; ++i) {
       struct hk_device_memory *cur_mem = NULL;

@@ -4,6 +4,7 @@
  * Copyright 2022-2023 Collabora Ltd. and Red Hat Inc.
  * SPDX-License-Identifier: MIT
  */
+#include "asahi/lib/agx_apple9.h"
 #include "hk_image_view.h"
 #include "util/format/u_format.h"
 #include "vulkan/vulkan_core.h"
@@ -180,7 +181,7 @@ view_denominator(struct hk_image_view *view)
 }
 
 static enum pipe_format
-format_for_plane(struct hk_image_view *view, unsigned view_plane)
+format_for_plane(const struct hk_image_view *view, unsigned view_plane)
 {
    const struct vk_format_ycbcr_info *ycbcr_info =
       vk_format_get_ycbcr_info(view->vk.format);
@@ -606,4 +607,37 @@ hk_CreateImageView(VkDevice _device, const VkImageViewCreateInfo *pCreateInfo,
    *pView = hk_image_view_to_handle(view);
 
    return VK_SUCCESS;
+}
+
+bool
+hk_apple9_image_view_eot(const struct hk_image_view *view, bool layered, void *out)
+{
+   if (view->plane_count != 1)
+      return false;
+   const struct hk_image *image =
+      container_of(view->vk.image, struct hk_image, vk);
+   unsigned plane = view->planes[0].image_plane;
+   const struct ail_layout *layout = &image->planes[plane].layout;
+   uint64_t base = hk_image_base_address(image, plane) +
+                   ail_get_layer_level_B(layout, view->vk.base_array_layer, 0);
+   /* A 3D view has one array layer but spans all depth slices. The native
+    * descriptor, like the legacy PBE above, stores the base-level depth. */
+   unsigned layers = view->vk.view_type == VK_IMAGE_VIEW_TYPE_3D
+                        ? image->vk.extent.depth : view->vk.layer_count;
+   return agx_apple9_translate_pbe(
+      out, layered ? &view->planes[0].layered_eot : &view->planes[0].eot,
+      format_for_plane(view, 0), layout, base, view->vk.base_mip_level,
+      layered ? layers : 1, layered);
+}
+
+uint64_t
+hk_apple9_view_residency(const struct hk_device *dev,
+                         const struct hk_image_view *view, unsigned plane)
+{
+   const struct hk_image *image =
+      container_of(view->vk.image, struct hk_image, vk);
+   struct agx_bo *table =
+      image->planes[view->planes[plane].image_plane].apple9_residency;
+
+   return (table ? table : dev->apple9_resident)->va->addr;
 }

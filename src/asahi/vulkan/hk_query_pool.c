@@ -52,6 +52,7 @@ hk_reports_per_query(struct hk_query_pool *pool)
    case VK_QUERY_TYPE_OCCLUSION:
    case VK_QUERY_TYPE_TIMESTAMP:
    case VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT:
+   case VK_QUERY_TYPE_MESH_PRIMITIVES_GENERATED_EXT:
       return 1;
    case VK_QUERY_TYPE_PIPELINE_STATISTICS:
       return util_bitcount(pool->vk.pipeline_statistics);
@@ -188,6 +189,41 @@ hk_queue_write(struct hk_cmd_buffer *cmd, uint64_t address, uint32_t value,
    libagx_write_u32(cmd, agx_1d(1), AGX_BARRIER_ALL, address, value);
 }
 
+/* Apply queued query counter increments, then mark their queries available.
+ * Called outside rendering wherever queries can next be observed: resets,
+ * copies and the end of the command buffer.
+ */
+void
+hk_flush_query_writes(struct hk_cmd_buffer *cmd)
+{
+   unsigned adds =
+      util_dynarray_num_elements(&cmd->query_adds, struct libagx_imm_write);
+   unsigned writes =
+      util_dynarray_num_elements(&cmd->query_writes, struct libagx_imm_write);
+
+   if (adds) {
+      uint64_t params = hk_pool_upload(cmd, cmd->query_adds.data,
+                                       cmd->query_adds.size, 16);
+      libagx_add_u32s(cmd, agx_1d(1), AGX_BARRIER_ALL, params, adds);
+   }
+
+   if (writes) {
+      struct hk_cs *cs =
+         hk_cmd_buffer_get_cs_general(cmd, &cmd->current_cs.cs, true);
+      if (cs) {
+         /* Results must be visible system-wide once marked available, as in
+          * hk_dispatch_imm_writes. */
+         hk_cdm_cache_flush(hk_cmd_buffer_device(cmd), cs);
+         uint64_t params = hk_pool_upload(cmd, cmd->query_writes.data,
+                                          cmd->query_writes.size, 16);
+         libagx_write_u32s(cmd, agx_1d(writes), AGX_BARRIER_ALL, params);
+      }
+   }
+
+   util_dynarray_clear(&cmd->query_adds);
+   util_dynarray_clear(&cmd->query_writes);
+}
+
 static void
 emit_zero_queries(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
                   uint32_t first_index, uint32_t num_queries,
@@ -273,6 +309,13 @@ hk_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
       enum agx_bo_flags flags = AGX_BO_WRITEBACK;
       if (timestamp)
          flags |= AGX_BO_SHARED;
+
+      /* G16 firmware writes timestamps through an uncached mapping, which
+       * does not snoop CPU caches. Keep the CPU view uncached too, so reset
+       * values cannot linger in a cache line over the firmware's write.
+       */
+      if (timestamp && dev->dev.chip == AGX_CHIP_G16G)
+         flags &= ~AGX_BO_WRITEBACK;
 
       pool->bo = agx_bo_create(&dev->dev, bo_size, 0, flags, "Query pool");
       if (!pool->bo) {
@@ -363,6 +406,7 @@ hk_CmdResetQueryPool(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
    VK_FROM_HANDLE(hk_query_pool, pool, queryPool);
 
    hk_flush_if_timestamp(cmd, pool);
+   hk_flush_query_writes(cmd);
 
    perf_debug(cmd, "Reset query pool");
    emit_zero_queries(cmd, pool, firstQuery, queryCount, false);
@@ -471,12 +515,31 @@ hk_cmd_begin_end_query(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
       break;
    }
 
+   case VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT: {
+      uint64_t addr = hk_query_report_addr(dev, pool, query);
+      cmd->state.gfx.pg_query[index] = end ? 0 : addr;
+      /* Counting needs a geometry stage; reconsider the passthrough. */
+      cmd->state.gfx.shaders_dirty |= BITFIELD_BIT(MESA_SHADER_VERTEX);
+      graphics = true;
+      break;
+   }
+
+   case VK_QUERY_TYPE_MESH_PRIMITIVES_GENERATED_EXT:
+      cmd->state.gfx.mesh_pg_query = end ? 0 : hk_query_report_addr(dev, pool, query);
+      graphics = true;
+      break;
+
    case VK_QUERY_TYPE_PIPELINE_STATISTICS: {
+      /* Direct draws' input assembly counts belong to the ending query. */
+      hk_flush_ia_stats(cmd);
       struct hk_root_descriptor_table *root = &cmd->state.gfx.descriptors.root;
       cmd->state.gfx.descriptors.root_dirty = true;
 
-      root->draw.pipeline_stats = hk_query_report_addr(dev, pool, query);
-      root->draw.pipeline_stats_flags = pool->vk.pipeline_statistics;
+      /* Later draws must neither change the ended query nor pay for its
+       * counters: every enabled statistic costs work per draw or fragment. */
+      root->draw.pipeline_stats =
+         end ? AGX_SCRATCH_PAGE_ADDRESS : hk_query_report_addr(dev, pool, query);
+      root->draw.pipeline_stats_flags = end ? 0 : pool->vk.pipeline_statistics;
 
       /* XXX: I don't think is correct... when does the query become available
        * exactly?
@@ -490,10 +553,18 @@ hk_cmd_begin_end_query(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
       UNREACHABLE("Unsupported query type");
    }
 
-   /* We need to set available=1 after the graphics work finishes. */
+   /* We need to set available=1 after the graphics work finishes. Defer that
+    * until the query can be observed, so that a query ending in each render
+    * pass does not add a compute dispatch between render passes. */
    if (end) {
       perf_debug(cmd, "Query ending, type %u", pool->vk.query_type);
-      hk_queue_write(cmd, hk_query_available_addr(pool, query), 1, graphics);
+      uint64_t available = hk_query_available_addr(pool, query);
+      if (graphics) {
+         struct libagx_imm_write write = {.address = available, .value = 1};
+         util_dynarray_append(&cmd->query_writes, write);
+      } else {
+         hk_queue_write(cmd, available, 1, false);
+      }
    }
 }
 
@@ -648,6 +719,7 @@ hk_CmdCopyQueryPoolResults(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
 
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    hk_flush_if_timestamp(cmd, pool);
+   hk_flush_query_writes(cmd);
 
    perf_debug(cmd, "Query pool copy");
 

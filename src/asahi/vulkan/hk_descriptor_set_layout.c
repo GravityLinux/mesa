@@ -39,12 +39,29 @@ hk_descriptor_stride_align_for_type(
       /* TODO: How do samplers work? */
    case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
    case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+      if (pdev->dev.chip == AGX_CHIP_G16G) {
+         *stride = sizeof(struct hk_apple9_image_descriptor);
+         *alignment = AGX_APPLE9_TEXTURE_TABLE_STRIDE;
+         break;
+      }
       *stride = *alignment = sizeof(struct hk_sampled_image_descriptor);
       break;
 
-   case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
    case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+      if (pdev->dev.chip == AGX_CHIP_G16G) {
+         *stride = sizeof(struct hk_apple9_texel_descriptor);
+         *alignment = AGX_APPLE9_TEXTURE_TABLE_STRIDE;
+         break;
+      }
+      FALLTHROUGH;
+   case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
    case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+      if (pdev->dev.chip == AGX_CHIP_G16G &&
+          type != VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER) {
+         *stride = sizeof(struct hk_apple9_storage_descriptor);
+         *alignment = 8;
+         break;
+      }
       *stride = sizeof(struct hk_storage_image_descriptor);
       *alignment = 8;
       break;
@@ -225,7 +242,7 @@ hk_CreateDescriptorSetLayout(VkDevice device,
       stride *= max_plane_count;
 
       if (stride > 0) {
-         assert(stride <= UINT8_MAX);
+         assert(stride <= UINT16_MAX);
          assert(util_is_power_of_two_nonzero(alignment));
 
          buffer_size = align64(buffer_size, alignment);
@@ -351,7 +368,7 @@ hk_GetDescriptorSetLayoutSupport(
                                           type_list, &stride, &alignment);
 
       if (stride > 0) {
-         assert(stride <= UINT8_MAX);
+         assert(stride <= UINT16_MAX);
          assert(util_is_power_of_two_nonzero(alignment));
 
          if (flags & VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT) {

@@ -13,7 +13,8 @@
 
 struct hk_event {
    struct vk_object_base base;
-   struct agx_bo *bo;
+   struct hk_event_page *page;
+   unsigned slot;
 
    uint64_t addr;
    VkResult *status;

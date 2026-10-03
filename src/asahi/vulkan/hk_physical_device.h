@@ -28,6 +28,9 @@ struct hk_memory_heap {
    VkMemoryHeapFlags flags;
 };
 
+/* Heap usage of the whole process, across instances, for memory budgets. */
+extern uint64_t hk_process_heap_used[VK_MAX_MEMORY_HEAPS];
+
 struct hk_physical_device {
    struct vk_physical_device vk;
    dev_t render_dev;

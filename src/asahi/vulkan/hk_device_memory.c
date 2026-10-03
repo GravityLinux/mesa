@@ -220,12 +220,20 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
       }
    }
 
-   /* Shadow map in case this is used for a sparse resident buffer */
-   int ret = agx_bo_bind(&dev->dev, mem->bo,
+   /* Sparse buffers use a read-only shadow of their backing memory. Devices
+    * without sparse residency never access it; in particular, rebinding a
+    * cached BO's shadow is rejected by the experimental Apple9 kernel.
+    */
+   if (pdev->vk.supported_features.sparseResidencyBuffer) {
+      int ret = agx_bo_bind(&dev->dev, mem->bo,
                          agx_rw_addr_to_ro(&dev->dev, mem->bo->va->addr),
                          mem->bo->size, 0, DRM_ASAHI_BIND_READ);
-   if (ret)
-      return VK_ERROR_UNKNOWN;
+      if (ret) {
+         agx_bo_unreference(&dev->dev, mem->bo);
+         result = vk_error(dev, VK_ERROR_UNKNOWN);
+         goto fail_alloc;
+      }
+   }
 
    if (mem->bo->flags & (AGX_BO_SHAREABLE | AGX_BO_SHARED))
       hk_add_ext_bo(dev, mem->bo);
@@ -244,6 +252,7 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
    }
 
    uint64_t heap_used = p_atomic_add_return(&heap->used, mem->bo->size);
+   p_atomic_add(&hk_process_heap_used[type->heapIndex], mem->bo->size);
    if (heap_used > heap->size) {
       hk_FreeMemory(device, hk_device_memory_to_handle(mem), pAllocator);
       return vk_errorf(device, VK_ERROR_OUT_OF_DEVICE_MEMORY,
@@ -273,9 +282,15 @@ hk_FreeMemory(VkDevice device, VkDeviceMemory _mem,
    const VkMemoryType *type = &pdev->mem_types[mem->vk.memory_type_index];
    struct hk_memory_heap *heap = &pdev->mem_heaps[type->heapIndex];
    p_atomic_add(&heap->used, -((int64_t)mem->bo->size));
+   p_atomic_add(&hk_process_heap_used[type->heapIndex],
+                -((int64_t)mem->bo->size));
 
    if (mem->bo->flags & (AGX_BO_SHAREABLE | AGX_BO_SHARED))
       hk_remove_ext_bo(dev, mem->bo);
+
+   /* Freeing mapped memory implicitly unmaps it. */
+   if (mem->map)
+      munmap(mem->map, mem->map_size);
 
    agx_bo_unreference(&dev->dev, mem->bo);
 
@@ -330,8 +345,20 @@ hk_MapMemory2KHR(VkDevice device, const VkMemoryMapInfoKHR *pMemoryMapInfo,
                        "Memory object already mapped.");
    }
 
-   mem->map = agx_bo_map_placed(mem->bo, fixed_addr);
+   /* Map the allocation, not the BO, which is larger when it came from the BO
+    * cache: a placed mapping must leave the pages after the allocation alone.
+    */
+   struct hk_physical_device *pdev = hk_device_physical(dev);
+   size_t map_size =
+      align64(mem->vk.size, pdev->vk.properties.minMemoryMapAlignment);
+   assert(map_size <= mem->bo->size);
+
+   mem->map = agx_bo_map_range(mem->bo, fixed_addr, map_size);
+   if (mem->map == NULL)
+      return vk_error(dev, VK_ERROR_MEMORY_MAP_FAILED);
+
    assert(!fixed_addr || mem->map == fixed_addr);
+   mem->map_size = map_size;
    *ppData = mem->map + offset;
 
    return VK_SUCCESS;
@@ -346,21 +373,20 @@ hk_UnmapMemory2KHR(VkDevice device,
    if (mem == NULL)
       return VK_SUCCESS;
 
+   if (mem->map == NULL)
+      return VK_SUCCESS;
+
    if (pMemoryUnmapInfo->flags & VK_MEMORY_UNMAP_RESERVE_BIT_EXT) {
       VK_FROM_HANDLE(hk_device, dev, device);
 
-      void *err = mmap(mem->bo->_map, mem->bo->size, PROT_NONE,
+      void *err = mmap(mem->map, mem->map_size, PROT_NONE,
                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
       if (err == MAP_FAILED) {
          return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,
                           "Failed to map over original mapping");
       }
-      mem->bo->_map = NULL;
    } else {
-      if (mem->bo->_map) {
-         munmap(mem->bo->_map, mem->bo->size);
-         mem->bo->_map = NULL;
-      }
+      munmap(mem->map, mem->map_size);
    }
 
    mem->map = NULL;
@@ -416,4 +442,11 @@ hk_GetDeviceMemoryOpaqueCaptureAddress(
 {
    /* Addresses are replayed at buffer and image creation, not memory. */
    return 0;
+}
+
+/* Device memory is never paged out, so priorities have no effect. */
+VKAPI_ATTR void VKAPI_CALL
+hk_SetDeviceMemoryPriorityEXT(VkDevice device, VkDeviceMemory memory,
+                              float priority)
+{
 }

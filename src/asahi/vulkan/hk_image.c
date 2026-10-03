@@ -103,6 +103,26 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
       features |= VK_FORMAT_FEATURE_2_STORAGE_IMAGE_ATOMIC_BIT;
    }
 
+   if (pdev->dev.chip == AGX_CHIP_G16G) {
+      /* Image atomics address device memory, which has FP32 addition. */
+      if (p_format == PIPE_FORMAT_R32_FLOAT && tiling == VK_IMAGE_TILING_OPTIMAL)
+         features |= VK_FORMAT_FEATURE_2_STORAGE_IMAGE_ATOMIC_BIT;
+      /* As in the native GL path, shared-exponent color export is not yet
+       * implemented. Sampling, storage and transfer access remain available.
+       */
+      if (p_format == PIPE_FORMAT_R9G9B9E5_FLOAT)
+         features &= ~(VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT |
+                       VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BLEND_BIT |
+                       VK_FORMAT_FEATURE_2_BLIT_DST_BIT);
+      /* Storage descriptors carry the format for loads and stores, so
+       * access without a shader format needs no extra support. */
+      if (!hk_apple9_storage_format_supported(vk_format))
+         features &= ~(VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT |
+                       VK_FORMAT_FEATURE_2_STORAGE_IMAGE_ATOMIC_BIT |
+                       VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
+                       VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
+   }
+
    if (features != 0) {
       features |= VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT;
       features |= VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT;
@@ -219,6 +239,11 @@ hk_can_compress(const struct agx_device *dev, VkFormat format, unsigned plane,
 
    /* Allow disabling compression for debugging */
    if (dev->debug & AGX_DBG_NOCOMPRESS)
+      return false;
+
+   /* Apple9 tile loads, stores and sampling do not yet decode compressed
+    * layouts. */
+   if (dev->chip == AGX_CHIP_G16G)
       return false;
 
    /* TODO: Handle compression with sparse. This should be doable but it's a bit
@@ -340,6 +365,9 @@ hk_GetPhysicalDeviceImageFormatProperties2(
    if (pImageFormatInfo->flags & (VK_IMAGE_CREATE_SPARSE_ALIASED_BIT |
                                   VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
                                   VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT)) {
+      if (!pdev->vk.supported_features.sparseBinding)
+         return VK_ERROR_FORMAT_NOT_SUPPORTED;
+
       features &= ~VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT;
 
       /* We also do not support sparse RGB32 uniform texel buffers, as we do not
@@ -385,6 +413,10 @@ hk_GetPhysicalDeviceImageFormatProperties2(
     *    "If imageType is VK_IMAGE_TYPE_1D, flags must not contain
     *    VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT"
     */
+   if (pImageFormatInfo->flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT &&
+       !pdev->vk.supported_features.sparseResidencyImage2D)
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+
    if (pImageFormatInfo->flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT &&
        (pImageFormatInfo->type == VK_IMAGE_TYPE_1D ||
         pImageFormatInfo->tiling == VK_IMAGE_TILING_LINEAR))
@@ -454,7 +486,8 @@ hk_GetPhysicalDeviceImageFormatProperties2(
        !(pImageFormatInfo->flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT)) {
 
       sampleCounts =
-         VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
+         VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT |
+         (pdev->dev.params.gpu_generation >= 16 ? 0 : VK_SAMPLE_COUNT_2_BIT);
    }
 
    /* From the Vulkan 1.2.199 spec:
@@ -489,6 +522,12 @@ hk_GetPhysicalDeviceImageFormatProperties2(
 
    const VkExternalMemoryProperties *ext_mem_props = NULL;
    if (external_info != NULL && external_info->handleType != 0) {
+      if (!pdev->vk.supported_extensions.KHR_external_memory_fd ||
+          (external_info->handleType ==
+              VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT &&
+           !pdev->vk.supported_extensions.EXT_external_memory_dma_buf))
+         return VK_ERROR_FORMAT_NOT_SUPPORTED;
+
       bool tiling_has_explicit_layout;
       switch (pImageFormatInfo->tiling) {
       case VK_IMAGE_TILING_LINEAR:
@@ -908,6 +947,38 @@ hk_image_init(struct hk_device *dev, struct hk_image *image,
    return VK_SUCCESS;
 }
 
+void
+hk_apple9_residency_init(struct hk_apple9_residency *r,
+                         const struct ail_layout *layout)
+{
+   const unsigned block_w = util_format_get_blockwidth(layout->format);
+   const unsigned block_h = util_format_get_blockheight(layout->format);
+
+   r->layer_pages = ail_bytes_to_pages(layout->layer_stride_B);
+   r->pages = r->layer_pages * layout->depth_px;
+
+   for (unsigned l = 0; l < AIL_MAX_MIP_LEVELS; ++l) {
+      unsigned level = MIN2(l, layout->levels - 1);
+      struct ail_tile tile = layout->tilesize_el[level];
+      unsigned tile_w = tile.width_el * block_w;
+      unsigned tile_h = tile.height_el * block_h;
+      struct hk_apple9_residency_level *out = &r->level[l];
+
+      /* Outside the mip tail, a hardware tile is exactly one page. */
+      out->page = layout->level_offsets_B[level] / AIL_PAGESIZE;
+      if (level < layout->mip_tail_first_lod &&
+          util_is_power_of_two_nonzero(tile_w) &&
+          util_is_power_of_two_nonzero(tile_h)) {
+         out->tiles_per_row =
+            DIV_ROUND_UP(layout->stride_el[level], tile.width_el);
+         out->shift_x = util_logbase2(tile_w);
+         out->shift_y = util_logbase2(tile_h);
+      } else {
+         out->shift_x = out->shift_y = 31;
+      }
+   }
+}
+
 static VkResult
 hk_image_plane_alloc_vma(struct hk_device *dev, struct hk_image_plane *plane,
                          VkImageCreateFlags create_flags)
@@ -936,7 +1007,23 @@ hk_image_plane_alloc_vma(struct hk_device *dev, struct hk_image_plane *plane,
       hk_bind_scratch(dev, plane->va, 0, size);
    }
 
-   if (sparse_resident) {
+   if (sparse_resident && dev->dev.chip == AGX_CHIP_G16G) {
+      /* Unbound pages read the scratch page. Every page starts unbound. */
+      const struct ail_layout *layout = &plane->layout;
+      size_t size_B = sizeof(struct hk_apple9_residency) +
+                      align(ail_bytes_to_pages(layout->layer_stride_B) *
+                               layout->depth_px, 4);
+      plane->apple9_residency =
+         agx_bo_create(&dev->dev, size_B, 0, 0, "Apple9 residency");
+      if (!plane->apple9_residency) {
+         return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                          "Residency table allocation failed");
+      }
+
+      struct hk_apple9_residency *r = agx_bo_map(plane->apple9_residency);
+      memset(r, 0, size_B);
+      hk_apple9_residency_init(r, layout);
+   } else if (sparse_resident) {
       plane->sparse_map =
          agx_bo_create(&dev->dev, plane->layout.sparse_table_size_B,
                        AIL_PAGESIZE, 0, "Sparse map");
@@ -961,6 +1048,7 @@ hk_image_plane_finish(struct hk_device *dev, struct hk_image_plane *plane,
    }
 
    agx_bo_unreference(&dev->dev, plane->sparse_map);
+   agx_bo_unreference(&dev->dev, plane->apple9_residency);
 }
 
 static void

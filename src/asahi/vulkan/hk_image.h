@@ -41,6 +41,8 @@
 struct hk_device_memory;
 struct hk_physical_device;
 
+bool hk_apple9_storage_format_supported(VkFormat format);
+
 static VkFormatFeatureFlags2
 hk_get_image_plane_format_features(struct hk_physical_device *pdev,
                                    VkFormat vk_format, VkImageTiling tiling);
@@ -62,7 +64,36 @@ struct hk_image_plane {
     * secondary page table. Otherwise, this map is NULL.
     */
    struct agx_bo *sparse_map;
+
+   /* Apple9 has no texture residency mode. Its sparse-resident planes instead
+    * have a struct hk_apple9_residency table, which shaders consult.
+    */
+   struct agx_bo *apple9_residency;
 };
+
+/* Pages of level L of a layer begin at level[L].page, in raster order of
+ * (1 << shift_x) x (1 << shift_y) texel tiles, tiles_per_row to a row. Mip
+ * tail levels have no tiles_per_row; any page of the tail stands for it.
+ */
+struct hk_apple9_residency_level {
+   uint32_t page;
+   uint16_t tiles_per_row;
+   uint8_t shift_x, shift_y;
+};
+
+struct hk_apple9_residency {
+   uint32_t layer_pages;
+   uint32_t pages;
+   uint32_t pad[2];
+   struct hk_apple9_residency_level level[AIL_MAX_MIP_LEVELS];
+   /* One byte per page of each layer in turn, nonzero if bound. */
+   uint8_t resident[];
+};
+static_assert(sizeof(struct hk_apple9_residency) == 144,
+              "Apple9 residency header is packed");
+
+void hk_apple9_residency_init(struct hk_apple9_residency *r,
+                              const struct ail_layout *layout);
 
 struct hk_image {
    struct vk_image vk;

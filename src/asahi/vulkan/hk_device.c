@@ -7,11 +7,13 @@
 #include "hk_device.h"
 
 #include "agx_bg_eot.h"
+#include "agx_apple9.h"
 #include "agx_helpers.h"
 #include "agx_scratch.h"
 #include "hk_cmd_buffer.h"
 #include "hk_descriptor_table.h"
 #include "hk_entrypoints.h"
+#include "hk_image.h"
 #include "hk_instance.h"
 #include "hk_physical_device.h"
 #include "hk_shader.h"
@@ -86,6 +88,8 @@ hk_upload_rodata(struct hk_device *dev)
     */
    offs = align(offs, sizeof(uint64_t));
    dev->rodata.heap = dev->rodata.bo->va->addr + offs;
+   offs += sizeof(struct poly_heap);
+   dev->rodata.mesh_heap = dev->rodata.bo->va->addr + offs;
    offs += sizeof(struct poly_heap);
 
    return VK_SUCCESS;
@@ -326,7 +330,9 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    dev->perftest = debug_get_flags_option("HK_PERFTEST", hk_perf_options, 0);
 
-   if (instance->drirc.misc.disable_border_emulation) {
+   /* Apple9 does not advertise custom border colours. */
+   if (instance->drirc.misc.disable_border_emulation ||
+       dev->dev.chip == AGX_CHIP_G16G) {
       dev->perftest |= HK_PERF_NOBORDER;
    }
 
@@ -346,6 +352,9 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       goto fail_fd;
    }
 
+   if (dev->dev.chip == AGX_CHIP_G16G)
+      agx_apple9_initialize_entries(&dev->dev);
+
    vk_device_set_drm_fd(&dev->vk, dev->dev.fd);
    dev->vk.command_buffer_ops = &hk_cmd_buffer_ops;
    dev->vk.check_status = hk_check_status;
@@ -362,6 +371,33 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    result = hk_init_sampler_heap(dev, &dev->samplers);
    if (result != VK_SUCCESS)
       goto fail_dev;
+
+   if (dev->dev.chip == AGX_CHIP_G16G) {
+      dev->apple9_fetch_sampler =
+         agx_bo_create(&dev->dev, AGX_APPLE9_SAMPLER_TABLE_STRIDE, 0,
+                       AGX_BO_LOW_VA, "Apple9 fetch sampler");
+      if (!dev->apple9_fetch_sampler) {
+         result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+         goto fail_samplers;
+      }
+      memset(agx_bo_map(dev->apple9_fetch_sampler), 0,
+             AGX_APPLE9_SAMPLER_TABLE_STRIDE);
+      agx_apple9_pack_fetch_sampler(agx_bo_map(dev->apple9_fetch_sampler));
+
+      dev->apple9_resident =
+         agx_bo_create(&dev->dev, sizeof(struct hk_apple9_residency) + 4, 0, 0,
+                       "Apple9 resident table");
+      if (!dev->apple9_resident) {
+         result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+         goto fail_samplers;
+      }
+      struct hk_apple9_residency *resident = agx_bo_map(dev->apple9_resident);
+      memset(resident, 0, sizeof(*resident) + 4);
+      resident->pages = 1;
+      for (unsigned l = 0; l < AIL_MAX_MIP_LEVELS; ++l)
+         resident->level[l].shift_x = resident->level[l].shift_y = 31;
+      resident->resident[0] = 1;
+   }
 
    result = hk_descriptor_table_init(
       dev, &dev->occlusion_queries, sizeof(uint64_t), AGX_MAX_OCCLUSION_QUERIES,
@@ -406,6 +442,8 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       goto fail_queues;
    }
 
+   simple_mtx_init(&dev->apple9_variants.lock, mtx_plain);
+   simple_mtx_init(&dev->apple9_tile_helpers.lock, mtx_plain);
    result = hk_device_init_meta(dev);
    if (result != VK_SUCCESS)
       goto fail_mem_cache;
@@ -414,17 +452,23 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
     * null fragment shaders. We do this at device-time to make binds cheap.
     * Regardless, compiling this shader should be fast.
     */
-   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT,
-                                                  &agx_nir_options, "empty FS");
-   struct vk_shader_compile_info info = {
-      .nir = b.shader,
-      .robustness = &vk_robustness_disabled,
-      .stage = MESA_SHADER_FRAGMENT,
-   };
-   hk_compile_shader(dev, &info, NULL, NULL, pAllocator, &dev->null_fs);
-   if (!dev->null_fs) {
-      result = VK_ERROR_OUT_OF_HOST_MEMORY;
-      goto fail_meta;
+   if (dev->dev.chip == AGX_CHIP_G16G) {
+      result = hk_apple9_create_null_fs(dev, pAllocator, &dev->null_fs);
+      if (result != VK_SUCCESS)
+         goto fail_meta;
+   } else {
+      nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT,
+                                                     &agx_nir_options, "empty FS");
+      struct vk_shader_compile_info info = {
+         .nir = b.shader,
+         .robustness = &vk_robustness_disabled,
+         .stage = MESA_SHADER_FRAGMENT,
+      };
+      hk_compile_shader(dev, &info, NULL, NULL, pAllocator, &dev->null_fs);
+      if (!dev->null_fs) {
+         result = VK_ERROR_OUT_OF_HOST_MEMORY;
+         goto fail_meta;
+      }
    }
 
    *pDevice = hk_device_to_handle(dev);
@@ -437,6 +481,9 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    u_rwlock_init(&dev->external_bos.lock);
    dev->external_bos.counts = UTIL_DYNARRAY_INIT;
    dev->external_bos.list = UTIL_DYNARRAY_INIT;
+
+   simple_mtx_init(&dev->events.lock, mtx_plain);
+   list_inithead(&dev->events.available);
 
    return VK_SUCCESS;
 
@@ -459,6 +506,10 @@ fail_rodata:
 fail_queries:
    hk_descriptor_table_finish(dev, &dev->occlusion_queries);
 fail_samplers:
+   if (dev->apple9_fetch_sampler)
+      agx_bo_unreference(&dev->dev, dev->apple9_fetch_sampler);
+   if (dev->apple9_resident)
+      agx_bo_unreference(&dev->dev, dev->apple9_resident);
    hk_destroy_sampler_heap(dev, &dev->samplers);
 fail_dev:
    agx_close_device(&dev->dev);
@@ -484,6 +535,8 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    u_rwlock_destroy(&dev->external_bos.lock);
 
    hk_device_finish_meta(dev);
+   hk_apple9_variants_finish(dev);
+   hk_apple9_tile_helpers_finish(dev);
    hk_destroy_internal_shaders(dev, &dev->kernels, false);
    hk_destroy_internal_shaders(dev, &dev->prolog_epilog, true);
 
@@ -500,15 +553,24 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    agx_scratch_fini(&dev->scratch.fs);
    agx_scratch_fini(&dev->scratch.cs);
    simple_mtx_destroy(&dev->scratch.lock);
+   assert(list_is_empty(&dev->events.available));
+   simple_mtx_destroy(&dev->events.lock);
 
    if (dev->null_fs) {
       hk_api_shader_destroy(&dev->vk, &dev->null_fs->vk, pAllocator);
    }
+   simple_mtx_destroy(&dev->apple9_variants.lock);
+   simple_mtx_destroy(&dev->apple9_tile_helpers.lock);
 
+   if (dev->apple9_fetch_sampler)
+      agx_bo_unreference(&dev->dev, dev->apple9_fetch_sampler);
+   if (dev->apple9_resident)
+      agx_bo_unreference(&dev->dev, dev->apple9_resident);
    hk_destroy_sampler_heap(dev, &dev->samplers);
    hk_descriptor_table_finish(dev, &dev->occlusion_queries);
    agx_bo_unreference(&dev->dev, dev->rodata.bo);
    agx_bo_unreference(&dev->dev, dev->heap);
+   agx_bo_unreference(&dev->dev, dev->mesh_heap);
    agx_bg_eot_cleanup(&dev->bg_eot);
    agx_close_device(&dev->dev);
    vk_free(&dev->vk.alloc, dev);

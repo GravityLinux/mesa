@@ -69,17 +69,45 @@ struct hk_device {
    struct hk_descriptor_table occlusion_queries;
    struct hk_sampler_heap samplers;
 
+   /* G16 private texel-fetch sampler, addressable as a native table entry
+    * relative to the USC aperture. */
+   struct agx_bo *apple9_fetch_sampler;
+
+   /* G16 residency table of every image without sparse residency: all of
+    * its levels and layers resolve to a single resident page. */
+   struct agx_bo *apple9_resident;
+
+   struct {
+      simple_mtx_t lock;
+      struct list_head available;
+   } events;
+
    struct vk_meta_device meta;
    struct agx_bg_eot_cache bg_eot;
 
    struct {
       struct agx_bo *bo;
       uint64_t heap;
+      /* struct poly_heap of mesh shader records sized on the GPU */
+      uint64_t mesh_heap;
    } rodata;
 
    struct hk_internal_shaders prolog_epilog;
    struct hk_internal_shaders kernels;
    struct hk_api_shader *null_fs;
+
+   /* Apple9 draw-time variants of deferred graphics shaders, keyed by the
+    * bound shader objects and the resolved graphics key. */
+   struct {
+      simple_mtx_t lock;
+      struct hash_table *ht;
+   } apple9_variants;
+
+   /* Apple9 tile load and store programs, keyed by their tile buffer key. */
+   struct {
+      simple_mtx_t lock;
+      struct hash_table *ht;
+   } apple9_tile_helpers;
 
    /* Indirected for common secondary emulation */
    struct vk_device_dispatch_table cmd_dispatch;
@@ -91,6 +119,8 @@ struct hk_device {
     */
    struct agx_bo *heap;
    util_once_flag heap_init_once;
+   struct agx_bo *mesh_heap;
+   util_once_flag mesh_heap_init_once;
 
    struct {
       struct agx_scratch vs, fs, cs;
