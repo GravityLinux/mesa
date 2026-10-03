@@ -1,0 +1,23 @@
+#version 450
+#ifndef SHARED_WORDS
+#define SHARED_WORDS 2048
+#endif
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) readonly buffer Input { uint src[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer Output { uint dst[]; };
+layout(push_constant) uniform Params { uint count; uint salt; } p;
+shared uint values[SHARED_WORDS];
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    uint lane = gl_LocalInvocationID.x;
+    for (uint j = lane; j < SHARED_WORDS; j += 64u)
+        values[j] = src[i] ^ (j * 2654435761u) ^ p.salt;
+    barrier();
+    uint neighbor = src[i ^ 1u];
+    uint errors = 0u;
+    for (uint j = lane ^ 1u; j < SHARED_WORDS; j += 64u)
+        errors |= values[j] ^ neighbor ^ (j * 2654435761u) ^ p.salt;
+    if (i < p.count)
+        dst[i] = ((neighbor ^ errors) * 1664525u + 1013904223u) ^ p.salt;
+}

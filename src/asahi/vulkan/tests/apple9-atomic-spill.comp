@@ -1,0 +1,215 @@
+#version 450
+/* A returning atomic with enough live values to spill around it. Its result
+ * read stale through a mismatched completion slot, and it overwrote the spill
+ * slot at the head of the frame. The checksum difference is zero only when the
+ * returned value (the harness fill) and every spilled value survive. */
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) readonly buffer Input { uint src[]; };
+layout(set = 0, binding = 1, std430) buffer Output { uint dst[]; };
+layout(push_constant) uniform Params { uint count; uint salt; } p;
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i < p.count) {
+        uint v0 = src[(i + 0u) % p.count] * 3u;
+        uint v1 = src[(i + 1u) % p.count] * 5u;
+        uint v2 = src[(i + 2u) % p.count] * 7u;
+        uint v3 = src[(i + 3u) % p.count] * 9u;
+        uint v4 = src[(i + 4u) % p.count] * 11u;
+        uint v5 = src[(i + 5u) % p.count] * 13u;
+        uint v6 = src[(i + 6u) % p.count] * 15u;
+        uint v7 = src[(i + 7u) % p.count] * 17u;
+        uint v8 = src[(i + 8u) % p.count] * 19u;
+        uint v9 = src[(i + 9u) % p.count] * 21u;
+        uint v10 = src[(i + 10u) % p.count] * 23u;
+        uint v11 = src[(i + 11u) % p.count] * 25u;
+        uint v12 = src[(i + 12u) % p.count] * 27u;
+        uint v13 = src[(i + 13u) % p.count] * 29u;
+        uint v14 = src[(i + 14u) % p.count] * 31u;
+        uint v15 = src[(i + 15u) % p.count] * 33u;
+        uint v16 = src[(i + 16u) % p.count] * 35u;
+        uint v17 = src[(i + 17u) % p.count] * 37u;
+        uint v18 = src[(i + 18u) % p.count] * 39u;
+        uint v19 = src[(i + 19u) % p.count] * 41u;
+        uint v20 = src[(i + 20u) % p.count] * 43u;
+        uint v21 = src[(i + 21u) % p.count] * 45u;
+        uint v22 = src[(i + 22u) % p.count] * 47u;
+        uint v23 = src[(i + 23u) % p.count] * 49u;
+        uint v24 = src[(i + 24u) % p.count] * 51u;
+        uint v25 = src[(i + 25u) % p.count] * 53u;
+        uint v26 = src[(i + 26u) % p.count] * 55u;
+        uint v27 = src[(i + 27u) % p.count] * 57u;
+        uint v28 = src[(i + 28u) % p.count] * 59u;
+        uint v29 = src[(i + 29u) % p.count] * 61u;
+        uint v30 = src[(i + 30u) % p.count] * 63u;
+        uint v31 = src[(i + 31u) % p.count] * 65u;
+        uint v32 = src[(i + 32u) % p.count] * 67u;
+        uint v33 = src[(i + 33u) % p.count] * 69u;
+        uint v34 = src[(i + 34u) % p.count] * 71u;
+        uint v35 = src[(i + 35u) % p.count] * 73u;
+        uint v36 = src[(i + 36u) % p.count] * 75u;
+        uint v37 = src[(i + 37u) % p.count] * 77u;
+        uint v38 = src[(i + 38u) % p.count] * 79u;
+        uint v39 = src[(i + 39u) % p.count] * 81u;
+        uint v40 = src[(i + 40u) % p.count] * 83u;
+        uint v41 = src[(i + 41u) % p.count] * 85u;
+        uint v42 = src[(i + 42u) % p.count] * 87u;
+        uint v43 = src[(i + 43u) % p.count] * 89u;
+        uint v44 = src[(i + 44u) % p.count] * 91u;
+        uint v45 = src[(i + 45u) % p.count] * 93u;
+        uint v46 = src[(i + 46u) % p.count] * 95u;
+        uint v47 = src[(i + 47u) % p.count] * 97u;
+        uint v48 = src[(i + 48u) % p.count] * 99u;
+        uint v49 = src[(i + 49u) % p.count] * 101u;
+        uint v50 = src[(i + 50u) % p.count] * 103u;
+        uint v51 = src[(i + 51u) % p.count] * 105u;
+        uint v52 = src[(i + 52u) % p.count] * 107u;
+        uint v53 = src[(i + 53u) % p.count] * 109u;
+        uint v54 = src[(i + 54u) % p.count] * 111u;
+        uint v55 = src[(i + 55u) % p.count] * 113u;
+        uint v56 = src[(i + 56u) % p.count] * 115u;
+        uint v57 = src[(i + 57u) % p.count] * 117u;
+        uint v58 = src[(i + 58u) % p.count] * 119u;
+        uint v59 = src[(i + 59u) % p.count] * 121u;
+        uint v60 = src[(i + 60u) % p.count] * 123u;
+        uint v61 = src[(i + 61u) % p.count] * 125u;
+        uint v62 = src[(i + 62u) % p.count] * 127u;
+        uint v63 = src[(i + 63u) % p.count] * 129u;
+        uint v64 = src[(i + 64u) % p.count] * 131u;
+        uint v65 = src[(i + 65u) % p.count] * 133u;
+        uint v66 = src[(i + 66u) % p.count] * 135u;
+        uint v67 = src[(i + 67u) % p.count] * 137u;
+        uint v68 = src[(i + 68u) % p.count] * 139u;
+        uint v69 = src[(i + 69u) % p.count] * 141u;
+        uint v70 = src[(i + 70u) % p.count] * 143u;
+        uint v71 = src[(i + 71u) % p.count] * 145u;
+        uint v72 = src[(i + 72u) % p.count] * 147u;
+        uint v73 = src[(i + 73u) % p.count] * 149u;
+        uint v74 = src[(i + 74u) % p.count] * 151u;
+        uint v75 = src[(i + 75u) % p.count] * 153u;
+        uint v76 = src[(i + 76u) % p.count] * 155u;
+        uint v77 = src[(i + 77u) % p.count] * 157u;
+        uint v78 = src[(i + 78u) % p.count] * 159u;
+        uint v79 = src[(i + 79u) % p.count] * 161u;
+        uint v80 = src[(i + 80u) % p.count] * 163u;
+        uint v81 = src[(i + 81u) % p.count] * 165u;
+        uint v82 = src[(i + 82u) % p.count] * 167u;
+        uint v83 = src[(i + 83u) % p.count] * 169u;
+        uint v84 = src[(i + 84u) % p.count] * 171u;
+        uint v85 = src[(i + 85u) % p.count] * 173u;
+        uint v86 = src[(i + 86u) % p.count] * 175u;
+        uint v87 = src[(i + 87u) % p.count] * 177u;
+        uint v88 = src[(i + 88u) % p.count] * 179u;
+        uint v89 = src[(i + 89u) % p.count] * 181u;
+        uint v90 = src[(i + 90u) % p.count] * 183u;
+        uint v91 = src[(i + 91u) % p.count] * 185u;
+        uint v92 = src[(i + 92u) % p.count] * 187u;
+        uint v93 = src[(i + 93u) % p.count] * 189u;
+        uint v94 = src[(i + 94u) % p.count] * 191u;
+        uint v95 = src[(i + 95u) % p.count] * 193u;
+        uint v96 = src[(i + 96u) % p.count] * 195u;
+        uint v97 = src[(i + 97u) % p.count] * 197u;
+        uint v98 = src[(i + 98u) % p.count] * 199u;
+        uint v99 = src[(i + 99u) % p.count] * 201u;
+        uint v100 = src[(i + 100u) % p.count] * 203u;
+        uint v101 = src[(i + 101u) % p.count] * 205u;
+        uint v102 = src[(i + 102u) % p.count] * 207u;
+        uint v103 = src[(i + 103u) % p.count] * 209u;
+        uint v104 = src[(i + 104u) % p.count] * 211u;
+        uint v105 = src[(i + 105u) % p.count] * 213u;
+        uint v106 = src[(i + 106u) % p.count] * 215u;
+        uint v107 = src[(i + 107u) % p.count] * 217u;
+        uint v108 = src[(i + 108u) % p.count] * 219u;
+        uint v109 = src[(i + 109u) % p.count] * 221u;
+        uint v110 = src[(i + 110u) % p.count] * 223u;
+        uint v111 = src[(i + 111u) % p.count] * 225u;
+        uint v112 = src[(i + 112u) % p.count] * 227u;
+        uint v113 = src[(i + 113u) % p.count] * 229u;
+        uint v114 = src[(i + 114u) % p.count] * 231u;
+        uint v115 = src[(i + 115u) % p.count] * 233u;
+        uint v116 = src[(i + 116u) % p.count] * 235u;
+        uint v117 = src[(i + 117u) % p.count] * 237u;
+        uint v118 = src[(i + 118u) % p.count] * 239u;
+        uint v119 = src[(i + 119u) % p.count] * 241u;
+        uint v120 = src[(i + 120u) % p.count] * 243u;
+        uint v121 = src[(i + 121u) % p.count] * 245u;
+        uint v122 = src[(i + 122u) % p.count] * 247u;
+        uint v123 = src[(i + 123u) % p.count] * 249u;
+        uint v124 = src[(i + 124u) % p.count] * 251u;
+        uint v125 = src[(i + 125u) % p.count] * 253u;
+        uint v126 = src[(i + 126u) % p.count] * 255u;
+        uint v127 = src[(i + 127u) % p.count] * 257u;
+        uint before = v0 * 1u + v1 * 2u + v2 * 3u + v3 * 4u + v4 * 5u +
+            v5 * 6u + v6 * 7u + v7 * 8u + v8 * 9u + v9 * 10u + v10 * 11u +
+            v11 * 12u + v12 * 13u + v13 * 14u + v14 * 15u + v15 * 16u +
+            v16 * 17u + v17 * 18u + v18 * 19u + v19 * 20u + v20 * 21u +
+            v21 * 22u + v22 * 23u + v23 * 24u + v24 * 25u + v25 * 26u +
+            v26 * 27u + v27 * 28u + v28 * 29u + v29 * 30u + v30 * 31u +
+            v31 * 32u + v32 * 33u + v33 * 34u + v34 * 35u + v35 * 36u +
+            v36 * 37u + v37 * 38u + v38 * 39u + v39 * 40u + v40 * 41u +
+            v41 * 42u + v42 * 43u + v43 * 44u + v44 * 45u + v45 * 46u +
+            v46 * 47u + v47 * 48u + v48 * 49u + v49 * 50u + v50 * 51u +
+            v51 * 52u + v52 * 53u + v53 * 54u + v54 * 55u + v55 * 56u +
+            v56 * 57u + v57 * 58u + v58 * 59u + v59 * 60u + v60 * 61u +
+            v61 * 62u + v62 * 63u + v63 * 64u + v64 * 65u + v65 * 66u +
+            v66 * 67u + v67 * 68u + v68 * 69u + v69 * 70u + v70 * 71u +
+            v71 * 72u + v72 * 73u + v73 * 74u + v74 * 75u + v75 * 76u +
+            v76 * 77u + v77 * 78u + v78 * 79u + v79 * 80u + v80 * 81u +
+            v81 * 82u + v82 * 83u + v83 * 84u + v84 * 85u + v85 * 86u +
+            v86 * 87u + v87 * 88u + v88 * 89u + v89 * 90u + v90 * 91u +
+            v91 * 92u + v92 * 93u + v93 * 94u + v94 * 95u + v95 * 96u +
+            v96 * 97u + v97 * 98u + v98 * 99u + v99 * 100u + v100 * 101u +
+            v101 * 102u + v102 * 103u + v103 * 104u + v104 * 105u +
+            v105 * 106u + v106 * 107u + v107 * 108u + v108 * 109u +
+            v109 * 110u + v110 * 111u + v111 * 112u + v112 * 113u +
+            v113 * 114u + v114 * 115u + v115 * 116u + v116 * 117u +
+            v117 * 118u + v118 * 119u + v119 * 120u + v120 * 121u +
+            v121 * 122u + v122 * 123u + v123 * 124u + v124 * 125u +
+            v125 * 126u + v126 * 127u + v127 * 128u;
+        uint r = atomicAdd(dst[i], 0u) ^ 0xdeadbeefu;
+        uint after = (v0 ^ r) * 1u + (v1 ^ r) * 2u + (v2 ^ r) * 3u +
+            (v3 ^ r) * 4u + (v4 ^ r) * 5u + (v5 ^ r) * 6u + (v6 ^ r) * 7u +
+            (v7 ^ r) * 8u + (v8 ^ r) * 9u + (v9 ^ r) * 10u + (v10 ^ r) * 11u +
+            (v11 ^ r) * 12u + (v12 ^ r) * 13u + (v13 ^ r) * 14u +
+            (v14 ^ r) * 15u + (v15 ^ r) * 16u + (v16 ^ r) * 17u +
+            (v17 ^ r) * 18u + (v18 ^ r) * 19u + (v19 ^ r) * 20u +
+            (v20 ^ r) * 21u + (v21 ^ r) * 22u + (v22 ^ r) * 23u +
+            (v23 ^ r) * 24u + (v24 ^ r) * 25u + (v25 ^ r) * 26u +
+            (v26 ^ r) * 27u + (v27 ^ r) * 28u + (v28 ^ r) * 29u +
+            (v29 ^ r) * 30u + (v30 ^ r) * 31u + (v31 ^ r) * 32u +
+            (v32 ^ r) * 33u + (v33 ^ r) * 34u + (v34 ^ r) * 35u +
+            (v35 ^ r) * 36u + (v36 ^ r) * 37u + (v37 ^ r) * 38u +
+            (v38 ^ r) * 39u + (v39 ^ r) * 40u + (v40 ^ r) * 41u +
+            (v41 ^ r) * 42u + (v42 ^ r) * 43u + (v43 ^ r) * 44u +
+            (v44 ^ r) * 45u + (v45 ^ r) * 46u + (v46 ^ r) * 47u +
+            (v47 ^ r) * 48u + (v48 ^ r) * 49u + (v49 ^ r) * 50u +
+            (v50 ^ r) * 51u + (v51 ^ r) * 52u + (v52 ^ r) * 53u +
+            (v53 ^ r) * 54u + (v54 ^ r) * 55u + (v55 ^ r) * 56u +
+            (v56 ^ r) * 57u + (v57 ^ r) * 58u + (v58 ^ r) * 59u +
+            (v59 ^ r) * 60u + (v60 ^ r) * 61u + (v61 ^ r) * 62u +
+            (v62 ^ r) * 63u + (v63 ^ r) * 64u + (v64 ^ r) * 65u +
+            (v65 ^ r) * 66u + (v66 ^ r) * 67u + (v67 ^ r) * 68u +
+            (v68 ^ r) * 69u + (v69 ^ r) * 70u + (v70 ^ r) * 71u +
+            (v71 ^ r) * 72u + (v72 ^ r) * 73u + (v73 ^ r) * 74u +
+            (v74 ^ r) * 75u + (v75 ^ r) * 76u + (v76 ^ r) * 77u +
+            (v77 ^ r) * 78u + (v78 ^ r) * 79u + (v79 ^ r) * 80u +
+            (v80 ^ r) * 81u + (v81 ^ r) * 82u + (v82 ^ r) * 83u +
+            (v83 ^ r) * 84u + (v84 ^ r) * 85u + (v85 ^ r) * 86u +
+            (v86 ^ r) * 87u + (v87 ^ r) * 88u + (v88 ^ r) * 89u +
+            (v89 ^ r) * 90u + (v90 ^ r) * 91u + (v91 ^ r) * 92u +
+            (v92 ^ r) * 93u + (v93 ^ r) * 94u + (v94 ^ r) * 95u +
+            (v95 ^ r) * 96u + (v96 ^ r) * 97u + (v97 ^ r) * 98u +
+            (v98 ^ r) * 99u + (v99 ^ r) * 100u + (v100 ^ r) * 101u +
+            (v101 ^ r) * 102u + (v102 ^ r) * 103u + (v103 ^ r) * 104u +
+            (v104 ^ r) * 105u + (v105 ^ r) * 106u + (v106 ^ r) * 107u +
+            (v107 ^ r) * 108u + (v108 ^ r) * 109u + (v109 ^ r) * 110u +
+            (v110 ^ r) * 111u + (v111 ^ r) * 112u + (v112 ^ r) * 113u +
+            (v113 ^ r) * 114u + (v114 ^ r) * 115u + (v115 ^ r) * 116u +
+            (v116 ^ r) * 117u + (v117 ^ r) * 118u + (v118 ^ r) * 119u +
+            (v119 ^ r) * 120u + (v120 ^ r) * 121u + (v121 ^ r) * 122u +
+            (v122 ^ r) * 123u + (v123 ^ r) * 124u + (v124 ^ r) * 125u +
+            (v125 ^ r) * 126u + (v126 ^ r) * 127u + (v127 ^ r) * 128u;
+        uint want = (src[i] * 1664525u + 1013904223u) ^ p.salt;
+        dst[i] = want + (after - before);
+    }
+}

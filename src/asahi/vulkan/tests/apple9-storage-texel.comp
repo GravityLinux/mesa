@@ -1,0 +1,32 @@
+#version 450
+layout(local_size_x = 32) in;
+#if defined(TEXEL_UINT)
+layout(set = 0, binding = 0, rgba8ui) uniform uimageBuffer source;
+#elif defined(TEXEL_SINT)
+layout(set = 0, binding = 0, rgba8i) uniform iimageBuffer source;
+#elif defined(TEXEL_SNORM)
+layout(set = 0, binding = 0, rgba8_snorm) uniform imageBuffer source;
+#else
+layout(set = 0, binding = 0, rgba8) uniform imageBuffer source;
+#endif
+layout(set = 0, binding = 1, std430) writeonly buffer Output { uvec4 result[]; };
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    int index = int(i) - 1;
+#if defined(TEXEL_UINT)
+    uvec4 value = imageLoad(source, index);
+#elif defined(TEXEL_SINT)
+    ivec4 value = imageLoad(source, index);
+#else
+    vec4 value = imageLoad(source, index);
+#endif
+#if defined(TEXEL_UINT) || defined(TEXEL_SINT)
+    result[i] = uvec4(value);
+#else
+    result[i] = floatBitsToUint(value);
+#endif
+    imageStore(source, index, value.wzyx);
+    if (i == 0)
+        result[32] = uvec4(imageSize(source), 0, 0, 0);
+}

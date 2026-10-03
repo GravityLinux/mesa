@@ -1,0 +1,21 @@
+#version 450
+layout(local_size_x = 32) in;
+#if defined(TEXEL_UINT)
+layout(set = 0, binding = 0) uniform usamplerBuffer source;
+#elif defined(TEXEL_SINT)
+layout(set = 0, binding = 0) uniform isamplerBuffer source;
+#else
+layout(set = 0, binding = 0) uniform samplerBuffer source;
+#endif
+layout(set = 0, binding = 1, std430) writeonly buffer Output { uvec4 result[]; };
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+#if defined(TEXEL_UINT) || defined(TEXEL_SINT)
+    result[i] = uvec4(texelFetch(source, int(i) - 1));
+#else
+    result[i] = floatBitsToUint(texelFetch(source, int(i) - 1));
+#endif
+    if (i == 0)
+        result[32] = uvec4(textureSize(source), 0, 0, 0);
+}

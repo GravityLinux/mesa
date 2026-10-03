@@ -1,0 +1,44 @@
+#version 450
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) readonly buffer Input { uint src[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer Output { uint dst[]; };
+layout(push_constant) uniform Params { uint count; uint salt; } p;
+shared uint u[64];
+shared int s[64];
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    uint lane = gl_LocalInvocationID.x;
+    uint x = src[i];
+    u[lane] = x;
+    s[lane] = int(x);
+    barrier();
+    uint errors = 0;
+    if (atomicAdd(u[lane], 7u) != x) errors |= 1u;
+    if (u[lane] != x + 7u) errors |= 2u;
+    if (atomicExchange(u[lane], x) != x + 7u) errors |= 4u;
+    if (atomicAnd(u[lane], 0x55aa55aau) != x) errors |= 8u;
+    uint v = x & 0x55aa55aau;
+    if (atomicOr(u[lane], 0x12345678u) != v) errors |= 16u;
+    v |= 0x12345678u;
+    if (atomicXor(u[lane], 0xa5a5a5a5u) != v) errors |= 32u;
+    v ^= 0xa5a5a5a5u;
+    if (atomicMin(u[lane], 0x80000000u) != v) errors |= 64u;
+    v = min(v, 0x80000000u);
+    if (atomicMax(u[lane], 0x12345678u) != v) errors |= 128u;
+    v = max(v, 0x12345678u);
+    if (u[lane] != v) errors |= 256u;
+    if (atomicMin(s[lane], -17) != int(x)) errors |= 512u;
+    int z = min(int(x), -17);
+    if (atomicMax(s[lane], 13) != z) errors |= 1024u;
+    if (s[lane] != 13) errors |= 2048u;
+    if (atomicCompSwap(u[lane], v, x) != v) errors |= 4096u;
+    if (u[lane] != x) errors |= 8192u;
+    if (atomicCompSwap(u[lane], ~x, 123u) != x) errors |= 16384u;
+    if (u[lane] != x) errors |= 32768u;
+    barrier();
+    /* The CPU harness independently checks the full transformed input and
+     * guards on changing inputs over direct and indirect submissions. */
+    if (i < p.count)
+        dst[i] = ((x ^ errors) * 1664525u + 1013904223u) ^ p.salt;
+}
