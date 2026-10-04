@@ -453,6 +453,16 @@ agx_compression_allowed(const struct agx_resource *pres)
       return false;
    }
 
+   /* Apple9 direct render cannot sample a compressed layout, so buffers that
+    * may be read back as textures must stay uncompressed. Otherwise a producer
+    * such as GBM hands the compositor a compressed buffer it cannot draw.
+    */
+   if (agx_apple9_direct_render_enabled(agx_device(pres->base.screen)) &&
+       (pres->base.bind & PIPE_BIND_SAMPLER_VIEW)) {
+      rsrc_debug(pres, "No compression: Apple9 cannot sample compressed\n");
+      return false;
+   }
+
    /* Limited to renderable */
    if (pres->base.bind &
        ~(PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_RENDER_TARGET |
@@ -2616,23 +2626,46 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
    return true;
 }
 
+/* The compressed modifier is only usable where the driver can also sample the
+ * compressed layout. Apple9 direct render cannot, so buffer producers must be
+ * steered away from it to avoid allocating attachments the driver then refuses
+ * to sample.
+ */
+static unsigned
+agx_query_modifiers(struct pipe_screen *screen, uint64_t *out)
+{
+   struct agx_device *dev = agx_device(screen);
+   unsigned n = 0;
+
+   for (unsigned i = 0; i < ARRAY_SIZE(agx_best_modifiers); ++i) {
+      if (agx_apple9_direct_render_enabled(dev) &&
+          agx_best_modifiers[i] == DRM_FORMAT_MOD_APPLE_GPU_TILED_COMPRESSED)
+         continue;
+      out[n++] = agx_best_modifiers[i];
+   }
+
+   return n;
+}
+
 static void
 agx_query_dmabuf_modifiers(struct pipe_screen *screen, enum pipe_format format,
                            int max, uint64_t *modifiers,
                            unsigned int *external_only, int *out_count)
 {
+   uint64_t supported[ARRAY_SIZE(agx_best_modifiers)];
+   unsigned count = agx_query_modifiers(screen, supported);
    int i;
 
    if (max == 0) {
-      *out_count = ARRAY_SIZE(agx_best_modifiers);
+      *out_count = count;
       return;
    }
 
-   for (i = 0; i < ARRAY_SIZE(agx_best_modifiers) && i < max; i++) {
+   for (i = 0; i < count && i < max; i++) {
       if (external_only)
          external_only[i] = 0;
 
-      modifiers[i] = agx_best_modifiers[i];
+      modifiers[i] = supported[i];
    }
 
    /* Return the number of modifiers copied */
@@ -2643,11 +2676,14 @@ static bool
 agx_is_dmabuf_modifier_supported(struct pipe_screen *screen, uint64_t modifier,
                                  enum pipe_format format, bool *external_only)
 {
+   uint64_t supported[ARRAY_SIZE(agx_best_modifiers)];
+   unsigned count = agx_query_modifiers(screen, supported);
+
    if (external_only)
       *external_only = false;
 
-   for (unsigned i = 0; i < ARRAY_SIZE(agx_best_modifiers); ++i) {
-      if (agx_best_modifiers[i] == modifier)
+   for (unsigned i = 0; i < count; ++i) {
+      if (supported[i] == modifier)
          return true;
    }
 
