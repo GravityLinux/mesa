@@ -187,7 +187,8 @@ hk_apple9_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
    const struct agx_shader_info *part_info = &helper->info;
    error = VK_ERROR_OUT_OF_DEVICE_MEMORY;
    uint64_t arguments = hk_pool_upload(cmd, params, sizeof(params), 16);
-   uint64_t sysvals = hk_pool_upload(cmd, metadata, sizeof(metadata), 64);
+   uint64_t sysvals = hk_pool_upload_cached(cmd, metadata, sizeof(metadata), 64,
+                                            HK_UPLOAD_RUNTIME);
    struct agx_ptr textures =
       hk_pool_alloc(cmd, 8 * AGX_APPLE9_TEXTURE_TABLE_STRIDE, 64);
    struct agx_ptr sampler =
