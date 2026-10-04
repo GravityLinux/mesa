@@ -39,6 +39,15 @@ class LowerParallelCopy : public testing::Test {
    void *mem_ctx;
 };
 
+TEST_F(LowerParallelCopy, Empty)
+{
+   agx_builder *A = agx_test_builder(mem_ctx);
+   agx_builder *B = agx_test_builder(mem_ctx);
+
+   agx_emit_parallel_copies(A, NULL, 0);
+   ASSERT_SHADER_EQUAL(A->shader, B->shader);
+}
+
 TEST_F(LowerParallelCopy, UnrelatedCopies)
 {
    struct agx_copy test_1[] = {

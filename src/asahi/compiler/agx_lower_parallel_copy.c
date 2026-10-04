@@ -198,8 +198,8 @@ agx_emit_parallel_copies_for_class(agx_builder *b, struct agx_copy *copies,
     * (including the register after each, used when pairing 16-bit halves)
     * instead of the full tables for every parallel copy.
     */
-   struct copy_ctx _ctx;
-   struct copy_ctx *ctx = &_ctx;
+   /* The modeled register tables are too large for application worker stacks. */
+   struct copy_ctx *ctx = malloc(sizeof(*ctx));
    ctx->entry_count = num_copies;
 
    for (unsigned i = 0; i < ctx->entry_count; i++) {
@@ -405,6 +405,7 @@ agx_emit_parallel_copies_for_class(agx_builder *b, struct agx_copy *copies,
       entry->done = true;
    }
 
+   free(ctx);
    free(copies2);
 }
 
@@ -412,7 +413,10 @@ void
 agx_emit_parallel_copies(agx_builder *b, struct agx_copy *copies,
                          unsigned num_copies)
 {
-   /* Emit copies fo reach register class separately because we don't have
+   if (!num_copies)
+      return;
+
+   /* Emit copies for each register class separately because we don't have
     * register class awareness in the parallel copy lowering data structure.
     */
    agx_emit_parallel_copies_for_class(b, copies, num_copies, false);
