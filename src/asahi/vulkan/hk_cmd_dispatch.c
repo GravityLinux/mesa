@@ -202,36 +202,27 @@ hk_apple9_upload_textures(struct hk_cmd_buffer *cmd, const struct hk_descriptor_
 
    /* Queries can eliminate all hardware texture instructions while retaining
     * the descriptor's dimensions. Keep metadata for every logical binding. */
-   struct agx_ptr info = hk_pool_alloc(cmd, AGX_APPLE9_RUNTIME_SYSVAL_SIZE, 64);
-   struct agx_ptr tex = hk_pool_alloc(cmd,
-      AGX_APPLE9_GRAPHICS_MAX_TEXTURES * AGX_APPLE9_TEXTURE_TABLE_STRIDE, 64);
-   struct agx_ptr samp = hk_pool_alloc(cmd,
-      AGX_APPLE9_GRAPHICS_MAX_SAMPLERS * AGX_APPLE9_SAMPLER_TABLE_STRIDE, 64);
-   if (!info.cpu || !tex.cpu || !samp.cpu)
-      return false;
-   memset(info.cpu, 0, AGX_APPLE9_RUNTIME_SYSVAL_SIZE);
+   _Alignas(64) uint8_t info[AGX_APPLE9_RUNTIME_SYSVAL_SIZE] = {0};
+   _Alignas(64) uint8_t tex[AGX_APPLE9_GRAPHICS_MAX_TEXTURES *
+                           AGX_APPLE9_TEXTURE_TABLE_STRIDE] = {0};
+   _Alignas(64) uint8_t samp[AGX_APPLE9_GRAPHICS_MAX_SAMPLERS *
+                            AGX_APPLE9_SAMPLER_TABLE_STRIDE] = {0};
    if (blend) {
-      memcpy(info.cpu, blend, 4 * sizeof(float));
+      memcpy(info, blend, 4 * sizeof(float));
       uint32_t enables = cmd->vk.dynamic_graphics_state.cb.color_write_enables;
-      memcpy((uint8_t *)info.cpu + AGX_APPLE9_COLOR_WRITE_ENABLE_OFFSET,
+      memcpy((uint8_t *)info + AGX_APPLE9_COLOR_WRITE_ENABLE_OFFSET,
              &enables, sizeof(enables));
-      memcpy((uint8_t *)info.cpu + AGX_APPLE9_SAMPLE_POSITIONS_OFFSET,
+      memcpy((uint8_t *)info + AGX_APPLE9_SAMPLE_POSITIONS_OFFSET,
              &cmd->state.gfx.apple9_sample_positions, sizeof(uint32_t));
    }
    uint32_t fan = first_fan;
-   memcpy((uint8_t *)info.cpu + AGX_APPLE9_FIRST_FAN_OFFSET, &fan, sizeof(fan));
-   *textures = tex.gpu;
-   *samplers = samp.gpu;
-   *sysvals = info.gpu;
+   memcpy((uint8_t *)info + AGX_APPLE9_FIRST_FAN_OFFSET, &fan, sizeof(fan));
    /* Descriptor-addressed stages index native entries from the aperture. */
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   if (bindings->bindless_textures)
-      *textures = dev->dev.shader_base;
    if (bindings->bindless_samplers) {
-      *samplers = dev->dev.shader_base;
       uint32_t fetch = (dev->apple9_fetch_sampler->va->addr -
                         dev->dev.shader_base) / AGX_APPLE9_SAMPLER_TABLE_STRIDE;
-      memcpy((uint8_t *)info.cpu + AGX_APPLE9_FETCH_SAMPLER_INDEX_OFFSET,
+      memcpy((uint8_t *)info + AGX_APPLE9_FETCH_SAMPLER_INDEX_OFFSET,
              &fetch, sizeof(fetch));
    }
    unsigned slot = 0;
@@ -240,10 +231,10 @@ hk_apple9_upload_textures(struct hk_cmd_buffer *cmd, const struct hk_descriptor_
          desc, bindings->textures[i], sizeof(*state));
       if (!state)
          return false;
-      hk_apple9_texture_info((uint32_t *)((uint8_t *)info.cpu +
+      hk_apple9_texture_info((uint32_t *)((uint8_t *)info +
          AGX_APPLE9_TEXTURE_INFO_OFFSET + i * AGX_APPLE9_TEXTURE_INFO_STRIDE), state);
       if ((shader->b.info.apple9_texture_mask & BITFIELD_BIT(i)) &&
-          !agx_apple9_translate_texture((uint8_t *)tex.cpu +
+          !agx_apple9_translate_texture((uint8_t *)tex +
              slot++ * AGX_APPLE9_TEXTURE_TABLE_STRIDE, state))
          return false;
    }
@@ -254,7 +245,7 @@ hk_apple9_upload_textures(struct hk_cmd_buffer *cmd, const struct hk_descriptor_
          desc, bindings->samplers[i], sizeof(*state));
       if (!state)
          return false;
-      if (!hk_apple9_runtime_sampler((uint32_t *)((uint8_t *)info.cpu +
+      if (!hk_apple9_runtime_sampler((uint32_t *)((uint8_t *)info +
              AGX_APPLE9_RUNTIME_SAMPLER_OFFSET + i * AGX_APPLE9_RUNTIME_SAMPLER_STRIDE),
              state, bindings->samplers[i].clamp_to_edge))
          return false;
@@ -267,17 +258,32 @@ hk_apple9_upload_textures(struct hk_cmd_buffer *cmd, const struct hk_descriptor_
          desc, bindings->samplers[i], sizeof(*state));
       if (!state)
          return false;
-      if (!hk_apple9_native_sampler((uint8_t *)samp.cpu +
+      if (!hk_apple9_native_sampler((uint8_t *)samp +
             slot++ * AGX_APPLE9_SAMPLER_TABLE_STRIDE, state,
             bindings->samplers[i].clamp_to_edge))
          return false;
    }
    if (shader->b.info.apple9_uses_texel_fetch) {
-      void *fetch = (uint8_t *)samp.cpu + slot * AGX_APPLE9_SAMPLER_TABLE_STRIDE;
+      void *fetch = (uint8_t *)samp + slot * AGX_APPLE9_SAMPLER_TABLE_STRIDE;
       memset(fetch, 0, AGX_APPLE9_SAMPLER_TABLE_STRIDE);
       agx_apple9_pack_fetch_sampler(fetch);
    }
-   return true;
+   unsigned texture_size = util_bitcount(shader->b.info.apple9_texture_mask) *
+                           AGX_APPLE9_TEXTURE_TABLE_STRIDE;
+   unsigned sampler_size = (util_bitcount(shader->b.info.apple9_sampler_mask) +
+                            shader->b.info.apple9_uses_texel_fetch) *
+                           AGX_APPLE9_SAMPLER_TABLE_STRIDE;
+   *sysvals = hk_pool_upload_cached(cmd, info, sizeof(info), 64, HK_UPLOAD_RUNTIME);
+   *textures = bindings->bindless_textures
+                  ? dev->dev.shader_base
+                  : hk_pool_upload_cached(cmd, tex, texture_size, 64,
+                                          HK_UPLOAD_RUNTIME);
+   *samplers = bindings->bindless_samplers
+                  ? dev->dev.shader_base
+                  : hk_pool_upload_cached(cmd, samp, sampler_size, 64,
+                                          HK_UPLOAD_RUNTIME);
+   return *sysvals && (!texture_size || *textures) &&
+          (!sampler_size || *samplers);
 }
 
 void

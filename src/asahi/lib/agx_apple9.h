@@ -155,6 +155,22 @@ struct agx_apple9_uniform_draw {
 
 void agx_apple9_initialize_entries(struct agx_device *dev);
 
+/* Immutable state caches compare the complete canonical contents. Launch keys
+ * encode self-relative addresses at the shader aperture base; on a miss the
+ * caller writes the actual address-dependent encoding before publishing it.
+ * The cache and all allocations have the caller's command-buffer lifetime.
+ */
+enum agx_apple9_state_type {
+   AGX_APPLE9_STATE_LAUNCH,
+   AGX_APPLE9_STATE_COEFFICIENTS,
+   AGX_APPLE9_STATE_PPP,
+   AGX_APPLE9_STATE_COUNT,
+};
+
+typedef struct agx_ptr (*agx_apple9_cached_alloc)(
+   void *allocator, enum agx_apple9_state_type type, const void *contents,
+   size_t size, size_t alignment, bool *is_new);
+
 /* Prepare one native stage independently, including background/EOT helpers.
  * The caller retains the shader BO and immutable allocation until completion.
  */
@@ -163,7 +179,8 @@ bool agx_apple9_prepare_graphics_stage(
    struct agx_ptr (*alloc)(void *, size_t, size_t),
    const struct agx_apple9_render_stage *shader, bool fragment,
    uint64_t table, uint64_t textures, uint64_t samplers,
-   unsigned tile_bytes, unsigned samples, uint32_t *launch);
+   unsigned tile_bytes, unsigned samples, uint32_t *launch,
+   agx_apple9_cached_alloc cached_alloc);
 
 /* The caller owns both immutable arenas. Context allocations must lie wholly
  * within the render-context aperture; USC allocations use the shader aperture.
@@ -175,7 +192,8 @@ bool agx_apple9_prepare_draw_alloc(
    struct agx_ptr (*context_alloc)(void *, size_t, size_t),
    const struct agx_apple9_render_pipeline *pipeline,
    struct agx_apple9_uniform_draw *draw,
-   const struct agx_apple9_uniform_draw *previous);
+   const struct agx_apple9_uniform_draw *previous,
+   agx_apple9_cached_alloc cached_alloc);
 
 bool agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
                              struct agx_pool *context_pool,

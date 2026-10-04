@@ -8,6 +8,7 @@
 #pragma once
 
 #include "asahi/lib/agx_primitive_count.h"
+#include "asahi/lib/agx_apple9.h"
 
 #include "util/macros.h"
 
@@ -408,11 +409,11 @@ struct hk_cs {
    /* Start pointer of the root control stream */
    void *start;
 
-   /* Visibility result window for this graphics control stream. */
-   uint64_t occlusion_base;
-
    /* Size of the root allocation, retained when continuation blocks are added. */
    size_t root_size;
+
+   /* Visibility result window for this graphics control stream. */
+   uint64_t occlusion_base;
 
    /* Current pointer within the control stream */
    void *current;
@@ -545,6 +546,9 @@ struct hk_cmd_buffer {
 
    struct hk_uploader uploader[HK_CMD_POOL_COUNT];
 
+   /* Full-content immutable upload cache, discarded on reset. */
+   struct hash_table *upload_cache;
+
    /* List of all recorded control streams */
    struct list_head control_streams;
 
@@ -656,6 +660,19 @@ struct agx_ptr hk_pool_alloc_internal(struct hk_cmd_buffer *cmd, uint32_t size,
 
 uint64_t hk_pool_upload(struct hk_cmd_buffer *cmd, const void *data,
                         uint32_t size, uint32_t alignment);
+
+enum hk_upload_type {
+   HK_UPLOAD_RUNTIME = AGX_APPLE9_STATE_COUNT,
+   HK_UPLOAD_ROOT,
+   HK_UPLOAD_TABLE,
+};
+
+uint64_t hk_pool_upload_cached(struct hk_cmd_buffer *cmd, const void *data,
+                               uint32_t size, uint32_t alignment,
+                               enum hk_upload_type type);
+struct agx_ptr hk_apple9_state_cache_alloc(
+   void *allocator, enum agx_apple9_state_type type, const void *contents,
+   size_t size, size_t alignment, bool *is_new);
 
 static inline struct agx_ptr
 hk_pool_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment)

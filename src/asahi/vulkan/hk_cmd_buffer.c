@@ -32,6 +32,9 @@
 #include "vk_synchronization.h"
 
 #include "util/list.h"
+#include "util/hash_table.h"
+#include "util/u_debug.h"
+#include "util/ralloc.h"
 #include "util/macros.h"
 #include "util/u_dynarray.h"
 #include "vulkan/vulkan_core.h"
@@ -54,6 +57,8 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd)
    struct hk_cmd_pool *pool = hk_cmd_buffer_pool(cmd);
    struct hk_device *dev = hk_cmd_pool_device(pool);
 
+   ralloc_free(cmd->upload_cache);
+   cmd->upload_cache = NULL;
    hk_descriptor_state_fini(cmd, &cmd->state.gfx.descriptors);
    hk_descriptor_state_fini(cmd, &cmd->state.cs.descriptors);
 
@@ -249,6 +254,116 @@ hk_pool_alloc_internal(struct hk_cmd_buffer *cmd, uint32_t size,
    };
 }
 
+/* The key owns an ordinary CPU copy, avoiding reads from uncached uploads.
+ * Type and pool are part of the key: canonical roots and launches have address
+ * fixups, whereas raw uploads preserve the key bytes verbatim.
+ */
+struct hk_upload_key {
+   uint32_t size, alignment, kind, type;
+   const void *data;
+};
+
+struct hk_upload_entry {
+   struct hk_upload_key key;
+   struct agx_ptr ptr;
+};
+
+/* HK_STATE_CACHE=0 disables reuse. Comma-separated names enable individual
+ * kinds for correctness diagnosis; all kinds are enabled by default.
+ */
+static const struct debug_named_value hk_state_cache_options[] = {
+   {"all", ~0u, "All immutable state kinds"},
+   {"launch", BITFIELD_BIT(AGX_APPLE9_STATE_LAUNCH), "Graphics launch state"},
+   {"cf", BITFIELD_BIT(AGX_APPLE9_STATE_COEFFICIENTS), "Coefficient bindings"},
+   {"ppp", BITFIELD_BIT(AGX_APPLE9_STATE_PPP), "PPP context state"},
+   {"uploads", BITFIELD_BIT(HK_UPLOAD_RUNTIME), "Runtime, texture and sampler tables"},
+   {"root", BITFIELD_BIT(HK_UPLOAD_ROOT), "Root descriptor tables"},
+   {"tables", BITFIELD_BIT(HK_UPLOAD_TABLE), "Draw, vertex and resource tables"},
+   DEBUG_NAMED_VALUE_END
+};
+DEBUG_GET_ONCE_FLAGS_OPTION(hk_state_cache, "HK_STATE_CACHE",
+                           hk_state_cache_options, ~0u)
+
+static bool
+hk_upload_equal(const void *a_, const void *b_)
+{
+   const struct hk_upload_key *a = a_, *b = b_;
+   return a->size == b->size && a->alignment == b->alignment &&
+          a->kind == b->kind && a->type == b->type &&
+          !memcmp(a->data, b->data, a->size);
+}
+
+static struct agx_ptr
+hk_pool_alloc_cached(struct hk_cmd_buffer *cmd, enum hk_cmd_pool_kind kind,
+                      uint32_t type, const void *contents, uint32_t size,
+                      uint32_t alignment, bool *is_new)
+{
+   *is_new = true;
+   if (!size)
+      return (struct agx_ptr){0};
+
+   if (!(debug_get_option_hk_state_cache() & BITFIELD_BIT(type)))
+      return hk_pool_alloc_internal(cmd, size, alignment, kind);
+
+   const struct hk_upload_key key = {size, alignment, kind, type, contents};
+   uint32_t meta[] = {size, alignment, kind, type};
+   uint32_t hash = _mesa_hash_data_with_seed(
+      contents, size, _mesa_hash_data(meta, sizeof(meta)));
+   if (!cmd->upload_cache)
+      cmd->upload_cache = _mesa_hash_table_create(NULL, NULL, hk_upload_equal);
+   if (cmd->upload_cache) {
+      struct hash_entry *entry =
+         _mesa_hash_table_search_pre_hashed(cmd->upload_cache, hash, &key);
+      if (entry) {
+         *is_new = false;
+         return ((struct hk_upload_entry *)entry->data)->ptr;
+      }
+   }
+
+   struct agx_ptr ptr = hk_pool_alloc_internal(cmd, size, alignment, kind);
+   if (!ptr.cpu || !cmd->upload_cache)
+      return ptr;
+
+   struct hk_upload_entry *entry =
+      ralloc_size(cmd->upload_cache, sizeof(*entry) + size);
+   if (entry) {
+      entry->key = key;
+      entry->key.data = entry + 1;
+      memcpy(entry + 1, contents, size);
+      entry->ptr = ptr;
+      if (!_mesa_hash_table_insert_pre_hashed(cmd->upload_cache, hash,
+                                             &entry->key, entry))
+         ralloc_free(entry);
+   }
+   return ptr;
+}
+
+uint64_t
+hk_pool_upload_cached(struct hk_cmd_buffer *cmd, const void *data,
+                       uint32_t size, uint32_t alignment,
+                       enum hk_upload_type type)
+{
+   bool is_new;
+   struct agx_ptr ptr = hk_pool_alloc_cached(
+      cmd, HK_CMD_POOL_MAIN, type, data, size, alignment, &is_new);
+   if (!ptr.cpu)
+      return 0;
+   if (is_new)
+      memcpy(ptr.cpu, data, size);
+   return ptr.gpu;
+}
+
+struct agx_ptr
+hk_apple9_state_cache_alloc(void *allocator, enum agx_apple9_state_type type,
+                             const void *contents, size_t size,
+                             size_t alignment, bool *is_new)
+{
+   enum hk_cmd_pool_kind kind = type == AGX_APPLE9_STATE_PPP
+                                  ? HK_CMD_POOL_CONTEXT : HK_CMD_POOL_USC;
+   return hk_pool_alloc_cached(allocator, kind, type, contents, size,
+                               alignment, is_new);
+}
+
 uint64_t
 hk_pool_upload(struct hk_cmd_buffer *cmd, const void *data, uint32_t size,
                uint32_t alignment)
@@ -328,6 +443,13 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
          cs->current = agx_cdm_terminate(cs->current);
       }
    }
+
+   /* Lookup keys are only needed while recording. Keep the immutable GPU
+    * uploads until reset, but do not retain duplicate CPU copies in executable
+    * command buffers.
+    */
+   ralloc_free(cmd->upload_cache);
+   cmd->upload_cache = NULL;
 
    return vk_command_buffer_get_record_result(&cmd->vk);
 }
@@ -608,13 +730,24 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
    struct hk_descriptor_state *desc = hk_get_descriptors_state(cmd, bind_point);
    struct hk_root_descriptor_table *root = &desc->root;
 
-   struct agx_ptr root_ptr = hk_pool_alloc(cmd, sizeof(*root), 8);
+   bool is_new = true;
+   struct agx_ptr root_ptr;
+   if (hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G) {
+      /* Normalize only the self-address; all descriptor and draw bytes remain
+       * in the key. A hit already has its own correct self-reference.
+       */
+      root->root_desc_addr = 0;
+      root_ptr = hk_pool_alloc_cached(cmd, HK_CMD_POOL_MAIN, HK_UPLOAD_ROOT,
+                                     root, sizeof(*root), 8, &is_new);
+   } else {
+      root_ptr = hk_pool_alloc(cmd, sizeof(*root), 8);
+   }
    if (!root_ptr.gpu)
       return 0;
 
    root->root_desc_addr = root_ptr.gpu;
-
-   memcpy(root_ptr.cpu, root, sizeof(*root));
+   if (is_new)
+      memcpy(root_ptr.cpu, root, sizeof(*root));
    return root_ptr.gpu;
 }
 

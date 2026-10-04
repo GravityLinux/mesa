@@ -242,7 +242,8 @@ hk_apple9_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
    uint32_t launch;
    if (!agx_apple9_prepare_graphics_stage(
           &dev->dev, cmd, hk_apple9_usc_alloc, &shader, true, table,
-          textures.gpu, sampler.gpu, tile_bytes, key.samples, &launch))
+          textures.gpu, sampler.gpu, tile_bytes, key.samples, &launch,
+          hk_apple9_state_cache_alloc))
       goto fail;
    return (struct hk_bg_eot){.usc = launch};
 
@@ -320,7 +321,7 @@ hk_apple9_draw_bindings(struct hk_cmd_buffer *cmd, struct agx_draw draw)
               (draw.indexed
                   ? offsetof(VkDrawIndexedIndirectCommand, vertexOffset)
                   : offsetof(VkDrawIndirectCommand, firstVertex))
-         : hk_pool_upload(cmd, params, sizeof(params), 4);
+         : hk_pool_upload_cached(cmd, params, sizeof(params), 4, HK_UPLOAD_TABLE);
    uint64_t vertex_buffers[ARRAY_SIZE(gfx->vb)][4] = {0};
    for (unsigned i = 0; i < ARRAY_SIZE(gfx->vb); ++i) {
       vertex_buffers[i][0] = gfx->vb[i].addr;
@@ -330,7 +331,8 @@ hk_apple9_draw_bindings(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    return (struct hk_apple9_prerast_bindings){
       .draw_params = draw_params,
       .vertex_buffers =
-         hk_pool_upload(cmd, vertex_buffers, sizeof(vertex_buffers), 16),
+         hk_pool_upload_cached(cmd, vertex_buffers, sizeof(vertex_buffers), 16,
+                               HK_UPLOAD_TABLE),
    };
 }
 
@@ -799,8 +801,9 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
             UNSUPPORTED();
          record.buffers[stage][slot] = address;
       }
-      uint64_t table = hk_pool_upload(cmd, record.buffers[stage],
-                                      s->resource_count * sizeof(uint64_t), 64);
+      uint64_t table = hk_pool_upload_cached(cmd, record.buffers[stage],
+                                      s->resource_count * sizeof(uint64_t), 64,
+                                      HK_UPLOAD_TABLE);
       if (stage)
          record.fragment_table = table;
       else
@@ -808,7 +811,7 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    }
    if (!agx_apple9_prepare_draw_alloc(&dev->dev, cmd, hk_apple9_usc_alloc, cmd,
                                       hk_apple9_context_alloc, &pipeline,
-                                      &record, NULL))
+                                      &record, NULL, hk_apple9_state_cache_alloc))
       UNSUPPORTED();
    pipeline.ppp = record.ppp;
    pipeline.ppp_viewport_offset = record.ppp_viewport_offset;
