@@ -388,6 +388,12 @@ struct agx_shader_key {
     */
    bool is_helper;
 
+   /* Set for driver-internal helpers that read tile/workgroup system registers
+    * from a non-workgroup stage. NIR's divergence analysis only permits
+    * workgroup intrinsics in workgroup stages, so such helpers must skip it.
+    */
+   bool allow_workgroup_intrinsics;
+
    /* Whether the driver supports uploading constants for this shader. If
     * false, constants will not be promoted to uniforms.
     */

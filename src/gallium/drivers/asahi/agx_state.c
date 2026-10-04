@@ -1450,6 +1450,28 @@ agx_nir_lower_point_sprite_zw(nir_builder *b, nir_intrinsic_instr *intr,
  * shader key should have already been applied. agx_compile_variant may call
  * this multiple times if there are auxiliary shaders.
  */
+static bool
+agx_nir_uses_workgroup_intrinsics(nir_shader *nir)
+{
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            switch (nir_instr_as_intrinsic(instr)->intrinsic) {
+            case nir_intrinsic_load_workgroup_id:
+            case nir_intrinsic_load_workgroup_index:
+            case nir_intrinsic_load_shared_base_ptr:
+               return true;
+            default:
+               break;
+            }
+         }
+      }
+   }
+   return false;
+}
+
 static struct agx_compiled_shader *
 agx_compile_nir(struct agx_device *dev, nir_shader *nir,
                 struct util_debug_callback *debug, mesa_shader_stage stage,
@@ -1477,6 +1499,16 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
    if (nir->info.stage == MESA_SHADER_FRAGMENT &&
        nir->info.fs.uses_sample_shading)
       key.fs.inside_sample_loop = true;
+
+   /* The Apple9 color tile helpers are fragment programs that read the tile
+    * coordinate through a workgroup system register. NIR's divergence analysis
+    * rejects workgroup intrinsics outside workgroup stages, so flag these to
+    * bypass it.
+    */
+   if (!mesa_shader_stage_uses_workgroup(nir->info.stage) &&
+       nir->info.stage != MESA_SHADER_TESS_CTRL &&
+       agx_nir_uses_workgroup_intrinsics(nir))
+      key.allow_workgroup_intrinsics = true;
 
    if (internal_kernel) {
       key.reserved_preamble = 8;
