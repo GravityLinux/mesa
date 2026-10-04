@@ -27,6 +27,7 @@
 #include "hk_shader.h"
 
 #include "hk_cmd_pool.h"
+#include "hk_upload.h"
 #include "hk_descriptor_set.h"
 
 #include "asahi/lib/agx_nir_lower_vbo.h"
@@ -521,10 +522,7 @@ struct hk_uploader {
    /** List of hk_cmd_bo */
    struct list_head bos;
 
-   /* Current addresses */
-   uint8_t *map;
-   uint64_t base;
-   uint32_t offset;
+   struct hk_upload_chunk chunks[HK_UPLOAD_CHUNKS];
 };
 
 struct hk_cmd_buffer {

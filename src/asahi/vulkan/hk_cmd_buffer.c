@@ -149,9 +149,7 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    hk_free_resettable_cmd_buffer(cmd);
 
    for (unsigned i = 0; i < HK_CMD_POOL_COUNT; ++i) {
-      cmd->uploader[i].map = NULL;
-      cmd->uploader[i].base = 0;
-      cmd->uploader[i].offset = 0;
+      memset(cmd->uploader[i].chunks, 0, sizeof(cmd->uploader[i].chunks));
    }
 
    cmd->current_cs.gfx = NULL;
@@ -217,15 +215,15 @@ hk_pool_alloc_internal(struct hk_cmd_buffer *cmd, uint32_t size,
    assert(size <= HK_CMD_BO_SIZE);
    assert(alignment > 0);
 
-   uint32_t offset = align(uploader->offset, alignment);
-
-   assert(offset <= HK_CMD_BO_SIZE);
-   if (uploader->map != NULL && size <= HK_CMD_BO_SIZE - offset) {
-      uploader->offset = offset + size;
+   struct hk_upload_chunk *chunk =
+      hk_upload_find_chunk(uploader->chunks, HK_CMD_BO_SIZE, size, alignment);
+   if (chunk) {
+      uint32_t offset = align(chunk->offset, alignment);
+      chunk->offset = offset + size;
 
       return (struct agx_ptr){
-         .gpu = uploader->base + offset,
-         .cpu = uploader->map + offset,
+         .gpu = chunk->base + offset,
+         .cpu = chunk->map + offset,
       };
    }
 
@@ -236,17 +234,11 @@ hk_pool_alloc_internal(struct hk_cmd_buffer *cmd, uint32_t size,
       return (struct agx_ptr){0};
    }
 
-   /* Pick whichever of the current upload BO and the new BO will have more
-    * room left to be the BO for the next upload.  If our upload size is
-    * bigger than the old offset, we're better off burning the whole new
-    * upload BO on this one allocation and continuing on the current upload
-    * BO.
-    */
-   if (uploader->map == NULL || size < uploader->offset) {
-      uploader->map = agx_bo_map(bo->bo);
-      uploader->base = bo->bo->va->addr;
-      uploader->offset = size;
-   }
+   hk_upload_keep_chunk(uploader->chunks, (struct hk_upload_chunk){
+      .map = bo->map,
+      .base = bo->bo->va->addr,
+      .offset = size,
+   });
 
    return (struct agx_ptr){
       .gpu = bo->bo->va->addr,

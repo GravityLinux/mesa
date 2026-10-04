@@ -152,3 +152,17 @@ _dev_icd = custom_target(
 )
 
 devenv.append('VK_DRIVER_FILES', _dev_icd.full_path())
+
+if with_tests
+  test(
+    'hk_upload',
+    executable(
+      'hk_upload_test',
+      'tests/hk-upload.cpp',
+      include_directories : [inc_src, include_directories('.')],
+      dependencies : [idep_gtest, idep_mesautil],
+    ),
+    suite : ['asahi'],
+    protocol : 'gtest',
+  )
+endif
