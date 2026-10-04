@@ -1,6 +1,9 @@
 # Copyright © 2022 Collabora Ltd. and Red Hat Inc.
 # SPDX-License-Identifier: MIT
 hk_files = files(
+  'hk_gpu_busy.c',
+  'hk_gpu_busy.h',
+  'hk_gpu_busy_intervals.h',
   'hk_buffer.c',
   'hk_buffer.h',
   'hk_buffer_view.c',
@@ -86,6 +89,14 @@ hk_deps = [
   idep_libagx_shaders_h,
 ]
 
+hk_diagnostic_c_args = []
+if get_option('hk-gpu-busy-counters')
+  if host_machine.system() != 'linux'
+    error('HK GPU busy diagnostics currently require Linux')
+  endif
+  hk_diagnostic_c_args += '-DHK_GPU_BUSY_COUNTERS=1'
+endif
+
 libhk = static_library(
   'hk',
   [
@@ -104,7 +115,7 @@ libhk = static_library(
     inc_virtio_vdrm,
   ],
   link_with : [libasahi_lib, libasahi_layout, libasahi_compiler],
-  c_args : ['-Wno-c2x-extensions'],
+  c_args : ['-Wno-c2x-extensions'] + hk_diagnostic_c_args,
   dependencies : [hk_deps],
   gnu_symbol_visibility : 'hidden',
 )
@@ -165,4 +176,21 @@ if with_tests
     suite : ['asahi'],
     protocol : 'gtest',
   )
+endif
+
+if with_tests
+  test(
+    'hk_gpu_busy',
+    executable(
+      'hk_gpu_busy_test', 'tests/hk-gpu-busy.cpp',
+      include_directories : include_directories('.'),
+      dependencies : idep_gtest,
+    ),
+    protocol : 'gtest',
+  )
+endif
+
+if with_tests
+  test('hk_gpu_busy_decode', prog_python,
+       args : files('tests/hk-gpu-busy-decode.py'))
 endif

@@ -365,6 +365,10 @@ u_watchdog_submit(int fd, uint64_t queue, struct u_watchdog_objects waits,
                                        signals.count - 1, signals.object32);
       s->completion_point = read_item(signals.points, signals.point_stride,
                                       signals.count - 1, false);
+      /* HK initially signals this private object to 1. A query of that value
+       * cannot establish completion of the first submission using point 1. */
+      if (s->completion_point <= 1)
+         s->completion_handle = 0;
    }
    uint64_t id = s->id;
    pthread_mutex_unlock(&lock);

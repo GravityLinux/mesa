@@ -12,6 +12,7 @@
  * Copyright © 2015 Intel Corporation
  * SPDX-License-Identifier: MIT
  */
+#include "hk_gpu_busy.h"
 #include "util/u_wait_watchdog.h"
 #include "hk_queue.h"
 #include "hk_buffer.h"
@@ -950,6 +951,7 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
 
             struct drm_asahi_cmd_compute cmd;
             asahi_fill_cdm_command(dev, cs, &cmd);
+            hk_gpu_busy_compute(queue, &cmd);
             util_dynarray_append(&payload, cmd);
             nr_cdm++;
          } else {
@@ -961,6 +963,7 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
 
             struct drm_asahi_cmd_render cmd;
             asahi_fill_vdm_command(dev, cs, &cmd);
+            hk_gpu_busy_render(queue, &cmd);
             util_dynarray_append(&payload, cmd);
             nr_vdm++;
          }
@@ -1006,6 +1009,7 @@ hk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
    if (vk_queue_is_lost(&queue->vk))
       return VK_ERROR_DEVICE_LOST;
 
+   hk_gpu_busy_sample(queue);
    VkResult result = queue_submit(dev, queue, submit);
    if (result != VK_SUCCESS)
       result = vk_queue_set_lost(&queue->vk, "Submit failed");
@@ -1110,12 +1114,14 @@ hk_queue_init(struct hk_device *dev, const VkDeviceQueueCreateInfo *pCreateInfo,
                        "DRM_IOCTL_TIMELINE_SYNCOBJ_SIGNAL failed: %m");
    }
 
+   hk_gpu_busy_init(queue);
    return VK_SUCCESS;
 }
 
 void
 hk_queue_finish(struct hk_device *dev, struct hk_queue *queue)
 {
+   hk_gpu_busy_finish(queue);
    u_watchdog_forget_queue(dev->dev.fd, queue->drm.id);
    drmSyncobjDestroy(dev->dev.fd, queue->drm.syncobj);
    agx_destroy_command_queue(&dev->dev, queue->drm.id);
