@@ -541,16 +541,16 @@ agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
                             info->src.format);
 
    bool apple9 = agx_apple9_direct_render_enabled(agx_device(pipe->screen));
-   if (apple9 && asahi_raw_resolve(pipe, info))
-      return;
-   /* Depth and stencil planes have ordinary tiled storage. Reinterpret
-    * matching single-sample planes as integer colour for nearest blits,
-    * including scaling. This preserves their bits and avoids requiring
-    * fragment shader stencil/depth export for an attachment copy. */
+   /* Copy matching depth/stencil planes through integer colour views. These
+    * views preserve both the pixel bits and the compression channel class.
+    * In particular, compressed MSAA planes cannot use the raw resolve, and
+    * u_blitter cannot export stencil on Apple9. Its integer colour path can
+    * sample compressed planes and resolves by selecting one sample rather
+    * than averaging the reinterpreted depth bits.
+    */
    if (apple9 && util_format_is_depth_or_stencil(info->src.format) &&
        util_format_is_depth_or_stencil(info->dst.format) &&
-       !(info->mask & ~PIPE_MASK_ZS) && info->filter == PIPE_TEX_FILTER_NEAREST &&
-       info->src.resource->nr_samples <= 1 && info->dst.resource->nr_samples <= 1) {
+       !(info->mask & ~PIPE_MASK_ZS) && info->filter == PIPE_TEX_FILTER_NEAREST) {
       struct agx_resource *source = agx_resource(info->src.resource);
       struct agx_resource *target = agx_resource(info->dst.resource);
       bool compatible = true;
@@ -586,6 +586,9 @@ agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
          return;
       }
    }
+   if (apple9 && asahi_raw_resolve(pipe, info))
+      return;
+
    /* Raw copies cannot access lossless-compressed pixels. Keep them on the
     * texture/PBE path, including staging transfers used for CPU mapping. */
    if (apple9 && !agx_resource(info->src.resource)->layout.compressed &&
@@ -1036,40 +1039,6 @@ asahi_raw_resolve(struct pipe_context *pctx, const struct pipe_blit_info *info)
        (src_samples == 1 && dst_samples == 1) ||
        (src_samples > 1 && dst_samples > 1 && src_samples != dst_samples))
       return false;
-   if (util_format_is_depth_or_stencil(info->src.format) &&
-       util_format_is_depth_or_stencil(info->dst.format) &&
-       !(info->mask & ~PIPE_MASK_ZS)) {
-      /* u_transfer_helper stores both Z24 and Z32F API formats as Z32F.
-       * Compare physical planes before rejecting an API format conversion. */
-      for (unsigned plane = 0; plane < 2; ++plane) {
-         if (!(info->mask & (plane ? PIPE_MASK_S : PIPE_MASK_Z)))
-            continue;
-         struct agx_resource *sp = plane && s->separate_stencil ? s->separate_stencil : s;
-         struct agx_resource *dp = plane && d->separate_stencil ? d->separate_stencil : d;
-         if (sp->layout.format != dp->layout.format)
-            return false;
-      }
-      bool ok = true;
-      for (unsigned plane = 0; plane < 2; ++plane) {
-         if (!(info->mask & (plane ? PIPE_MASK_S : PIPE_MASK_Z)))
-            continue;
-         struct agx_resource *sp = plane && s->separate_stencil ? s->separate_stencil : s;
-         struct agx_resource *dp = plane && d->separate_stencil ? d->separate_stencil : d;
-         struct pipe_blit_info raw = *info;
-         raw.src.resource = &sp->base;
-         raw.dst.resource = &dp->base;
-         unsigned bytes = util_format_get_blocksize(sp->layout.format);
-         if (bytes != util_format_get_blocksize(dp->layout.format) ||
-             (bytes != 1 && bytes != 2 && bytes != 4))
-            return false;
-         raw.src.format = raw.dst.format = bytes == 1 ? PIPE_FORMAT_R8_UINT :
-            bytes == 2 ? PIPE_FORMAT_R16_UINT : PIPE_FORMAT_R32_UINT;
-         raw.mask = util_format_get_mask(raw.src.format);
-         raw.sample0_only = false;
-         ok &= asahi_raw_resolve(pctx, &raw);
-      }
-      return ok;
-   }
    if ((info->src.format != info->dst.format && !swap_rb) ||
        (!agx_apple9_color_is_wide(info->src.format) &&
         !agx_apple9_color_is_packed(info->src.format) &&
