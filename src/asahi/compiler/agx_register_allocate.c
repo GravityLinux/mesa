@@ -922,14 +922,63 @@ relocate_unconstrained(struct ra_ctx *rctx, unsigned ssa)
    }
 }
 
+/* Validate before rounding or subtracting unsigned register bounds. Fixed
+ * source copies into the reserved prefix are checked separately by the caller. */
+static bool
+constraint_window(struct agx_reg_constraint c, unsigned count,
+                  unsigned reserved, unsigned bound,
+                  unsigned *first, unsigned *last)
+{
+   if (!util_is_power_of_two_nonzero(count) ||
+       !util_is_power_of_two_nonzero(c.align) || c.min > c.max || count > bound)
+      return false;
+
+   unsigned align = MAX2(count, c.align);
+   *first = ALIGN_POT(MAX2(c.min, reserved), align);
+   *last = MIN2(c.max, bound - count);
+   return *first <= *last;
+}
+
+static bool
+validate_constraint_windows(agx_context *ctx, unsigned bound)
+{
+   agx_foreach_instr_global(ctx, I) {
+      if (!I->reg_constraints)
+         continue;
+      for (unsigned o = 0; o < I->nr_dests + I->nr_srcs; ++o) {
+         agx_index value = o < I->nr_dests ? I->dest[o] : I->src[o - I->nr_dests];
+         if (value.type != AGX_INDEX_NORMAL || value.memory)
+            continue;
+         struct agx_reg_constraint c = I->reg_constraints[o];
+         unsigned count = util_next_power_of_two(agx_index_size_16(value));
+         unsigned reserved = reserved_size(ctx), first, last;
+         if (o >= I->nr_dests && c.min == c.max && c.max < reserved) {
+            /* A fixed copy must fit entirely inside the reserved prefix. */
+            if (c.align && util_is_power_of_two_nonzero(c.align) &&
+                !(c.min % MAX2(count, c.align)) && count <= reserved - c.min)
+               continue;
+         } else if (constraint_window(c, count, reserved, bound, &first, &last)) {
+            continue;
+         }
+         ctx->ra_error = "Register operand has no aligned allocatable window";
+         return false;
+      }
+   }
+   return true;
+}
+
 static unsigned
 place_constrained_value(struct ra_ctx *rctx, agx_index value,
                         struct agx_reg_constraint c, bool defined)
 {
    unsigned ssa = value.value, count = rctx->ncomps[ssa];
    unsigned align = MAX2(count, c.align);
-   unsigned first = ALIGN_POT(MAX2(c.min, reserved_size(rctx->shader)), align);
-   unsigned last = MIN2(c.max, rctx->bound[RA_GPR] - count);
+   unsigned first, last;
+   if (!constraint_window(c, count, reserved_size(rctx->shader),
+                          rctx->bound[RA_GPR], &first, &last)) {
+      rctx->shader->ra_error = "Register operand has no aligned allocatable window";
+      return ~0u;
+   }
 
    rctx->affinity_ssa = ~0u;
 
@@ -996,7 +1045,10 @@ place_constrained_value(struct ra_ctx *rctx, agx_index value,
          chosen = reg;
       }
    }
-   assert(chosen != ~0 && "instruction operand constraints are unsatisfiable");
+   if (chosen == ~0u) {
+      rctx->shader->ra_error = "Instruction register constraints are unsatisfiable";
+      return ~0u;
+   }
 
    unsigned victims[16], nr_victims = 0;
    for (unsigned reg = reserved_size(rctx->shader);
@@ -1050,7 +1102,7 @@ place_constrained_value(struct ra_ctx *rctx, agx_index value,
    return chosen;
 }
 
-static void
+static bool
 assign_constrained_operands(struct ra_ctx *rctx, agx_instr *I)
 {
    BITSET_DECLARE(pinned, AGX_NUM_REGS) = {0};
@@ -1094,7 +1146,8 @@ assign_constrained_operands(struct ra_ctx *rctx, agx_instr *I)
           c.max >= rctx->bound[RA_GPR] - rctx->ncomps[I->src[s].value] &&
           c.align <= rctx->ncomps[I->src[s].value])
          continue;
-      place_constrained_value(rctx, I->src[s], c, true);
+      if (place_constrained_value(rctx, I->src[s], c, true) == ~0u)
+         return false;
    }
    /* Sources dying here, other than destroyed or fixed-register copies,
     * whose tuple fits the destination's aligned window. */
@@ -1117,6 +1170,8 @@ assign_constrained_operands(struct ra_ctx *rctx, agx_instr *I)
    agx_foreach_ssa_dest(I, d) {
       unsigned reg =
          place_constrained_value(rctx, I->dest[d], I->reg_constraints[d], false);
+      if (reg == ~0u)
+         return false;
       agx_foreach_ssa_src(I, s) {
          unsigned base = rctx->ssa_to_reg[I->src[s].value];
          if (reuse && I->src[s].kill && BITSET_TEST(reusable, base) &&
@@ -1161,6 +1216,7 @@ assign_constrained_operands(struct ra_ctx *rctx, agx_instr *I)
                             util_dynarray_num_elements(&copies, struct agx_copy));
    util_dynarray_fini(&copies);
    rctx->pinned = NULL;
+   return true;
 }
 
 static void
@@ -1444,7 +1500,7 @@ try_kill_early_sources(struct ra_ctx *rctx, const agx_instr *I,
 
 /** Assign registers to SSA values in a block. */
 
-static void
+static bool
 agx_ra_assign_local(struct ra_ctx *rctx)
 {
    BITSET_DECLARE(used_regs_gpr, AGX_NUM_REGS) = {0};
@@ -1558,7 +1614,10 @@ agx_ra_assign_local(struct ra_ctx *rctx)
        * because of the SSA form.
        */
       if (I->reg_constraints) {
-         assign_constrained_operands(rctx, I);
+         if (!assign_constrained_operands(rctx, I)) {
+            free(ssa_to_reg);
+            return false;
+         }
       } else {
          agx_foreach_ssa_dest(I, d) {
             if (I->op == AGX_OPCODE_PHI && I->dest[d].has_reg)
@@ -1614,6 +1673,7 @@ agx_ra_assign_local(struct ra_ctx *rctx)
    }
 
    free(rctx->ssa_to_reg);
+   return true;
 }
 
 /*
@@ -1765,9 +1825,10 @@ constraint_preferences(agx_context *ctx, struct agx_reg_constraint *preferred,
    }
 }
 
-void
+bool
 agx_ra(agx_context *ctx)
 {
+   ctx->ra_error = NULL;
    /* Destructive input operands get a private SSA lifetime. Ordinary move
     * coalescing removes the copy when the original value dies here. */
    agx_foreach_instr_global_safe(ctx, I) {
@@ -1845,6 +1906,9 @@ agx_ra(agx_context *ctx)
       max_possible_regs = 32;
    }
 
+   if (!validate_constraint_windows(ctx, max_possible_regs))
+      return false;
+
    /* Calculate the demand. We'll use it to determine if we need to spill and to
     * bound register assignment.
     */
@@ -1881,6 +1945,9 @@ agx_ra(agx_context *ctx)
              "internal shaders are unspillable");
 
       agx_spill(ctx, max_possible_regs, remat);
+
+      if (!validate_constraint_windows(ctx, max_possible_regs))
+         return false;
 
       /* After spilling, recalculate liveness and demand */
       agx_compute_liveness(ctx);
@@ -1978,13 +2045,17 @@ agx_ra(agx_context *ctx)
          constraint_preferences(ctx, preferred, scarcity, max_regs);
    }
 
+   bool success = false;
+   if (!validate_constraint_windows(ctx, max_regs))
+      goto cleanup;
+
    unsigned reg_count = 0, mem_slot_count = 0;
 
    /* Assign registers in dominance-order. This coincides with source-order due
     * to a NIR invariant, so we do not need special handling for this.
     */
    agx_foreach_block(ctx, block) {
-      agx_ra_assign_local(&(struct ra_ctx){
+      if (!agx_ra_assign_local(&(struct ra_ctx){
          .shader = ctx,
          .block = block,
          .src_to_collect_phi = src_to_collect_phi,
@@ -2002,7 +2073,8 @@ agx_ra(agx_context *ctx)
          .scarcity = scarcity,
          .demand = demand,
          .affinity_ssa = ~0u,
-      });
+      }))
+         goto cleanup;
    }
 
    ctx->max_reg = reg_count ? (reg_count - 1) : 0;
@@ -2149,6 +2221,9 @@ agx_ra(agx_context *ctx)
    if (spilling && !ctx->ra_target.defer_spill_lowering)
       agx_lower_spill(ctx);
 
+   success = true;
+
+cleanup:
    agx_foreach_block(ctx, block) {
       for (unsigned i = 0; i < ARRAY_SIZE(block->reg_to_ssa_out); ++i) {
          free(block->reg_to_ssa_out[i]);
@@ -2164,4 +2239,5 @@ agx_ra(agx_context *ctx)
    free(classes);
    free(visited);
    free(preferred);
+   return success;
 }

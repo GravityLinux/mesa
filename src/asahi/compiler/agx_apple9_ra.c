@@ -181,15 +181,16 @@ apple9_source_width(const struct agx_apple9_vir_instr *ins, unsigned source)
    return 1;
 }
 
-/* Texture table indices are named by a four-bit half-register field,
- * reaching r0-r7; sampler indices by a three-bit field, reaching r0-r3. */
+/* T8132 register-table probes validate both operands through r95. The full
+ * half-register number is scattered across the sample bundle: texture bits
+ * 11..14, 68..70, 122; sampler bits 32..35, 65..67, 116. */
 static const struct agx_apple9_operand_constraint apple9_table_index[2] = {
    {
       .role = AGX_APPLE9_OPERAND_SRC4,
       .files = AGX_APPLE9_FILE_GPR,
       .widths = AGX_APPLE9_WIDTH_32,
       .min_index = 0,
-      .max_index = 7,
+      .max_index = AGX_APPLE9_GPR_COUNT - 1,
       .alignment_halves = 2,
       .flags = AGX_APPLE9_OPERAND_ALLOCATABLE,
    },
@@ -198,7 +199,7 @@ static const struct agx_apple9_operand_constraint apple9_table_index[2] = {
       .files = AGX_APPLE9_FILE_GPR,
       .widths = AGX_APPLE9_WIDTH_32,
       .min_index = 0,
-      .max_index = 3,
+      .max_index = AGX_APPLE9_GPR_COUNT - 1,
       .alignment_halves = 2,
       .flags = AGX_APPLE9_OPERAND_ALLOCATABLE,
    },
@@ -541,6 +542,12 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
                                             AGX_APPLE9_OPERAND_SRC0)
                   : agx_apple9_find_operand(ins->encoding,
                                             AGX_APPLE9_OPERAND_DEST));
+         /* The register-table form extends the destination at bit 153.
+          * The 14-byte immediate form has only six measured GPR bits. */
+         if (common->nr_dests && ins->op == AGX_APPLE9_VIR_TEXTURE_SAMPLE &&
+             (ins->texture_bindless || ins->sampler_bindless))
+            common->reg_constraints[0].max =
+               AGX_APPLE9_HALF_REGISTER_COUNT - 2;
          /* A synchronous instruction reads its sources before publishing its
           * result, also when it releases them, and a memory load reads them
           * at issue, so a scalar result may be written over a source that
@@ -1514,7 +1521,10 @@ apple9_allocate_candidate(struct agx_apple9_vir_program *program,
    agx_pressure_schedule(ra.ctx);
    if (getenv("AGX_APPLE9_TRACE_SHARED_RA") != NULL)
       agx_print_shader(ra.ctx, stderr);
-   agx_ra(ra.ctx);
+   if (!agx_ra(ra.ctx)) {
+      *reason = ra.ctx->ra_error;
+      goto cleanup;
+   }
    if (ra.ctx->scratch_size_B > AGX_APPLE9_MAX_SCRATCH_BYTES) {
       *reason =
          "Apple9 scratch frame exceeds the supported per-invocation size";

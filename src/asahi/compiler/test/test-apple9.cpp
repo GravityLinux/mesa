@@ -11951,3 +11951,49 @@ TEST(Apple9Compiler, CustomBordersPreserveIntegerBitsAndArrayCoordinates)
       }
    }
 }
+
+TEST(Apple9Packer, RegisterTextureOperandsReachEntireGprFile)
+{
+   for (unsigned r = 0; r < 96; ++r) {
+      for (unsigned live : {0u, 12u}) {
+         agx_apple9_vir_instr ins = {};
+         ins.op = AGX_APPLE9_VIR_TEXTURE_SAMPLE;
+         ins.encoding = AGX_APPLE9_ENC_TEXTURE_SAMPLE;
+         ins.nr_srcs = 4;
+         for (unsigned s = 0; s < 4; ++s)
+            ins.src[s] = s;
+         ins.texture_bindless = ins.sampler_bindless = true;
+         ins.dest = 4;
+         ins.dest_components = 1;
+         ins.texture_result_mask = 1;
+         ins.live_after_mask = live;
+         ins.producer_scoreboard_slot = 1;
+         /* Deliberately nonzero immediate fields must not leak into the
+          * register form; use unrelated registers for the two indices. */
+         ins.texture_index = 31;
+         ins.sampler_index = 15;
+         uint8_t phys[] = {0, 1, (uint8_t)r, (uint8_t)(95 - r), (uint8_t)r};
+         agx_apple9_packed_instruction packed = {};
+         const char *reason = nullptr;
+         ASSERT_TRUE(agx_apple9_pack_vir_instruction(&ins, phys, &packed, &reason));
+         ASSERT_EQ(packed.length, 20u);
+         auto p = packed.bytes;
+         /* Decode the fields measured independently on T8132. */
+         unsigned texture = ((p[1] >> 3) & 15) | ((p[8] & 0x70)) |
+                            ((p[15] & 4) << 5);
+         unsigned sampler = (p[4] & 15) | ((p[8] & 14) << 3) |
+                            ((p[14] & 16) << 3);
+         EXPECT_EQ(texture, 2 * r);
+         EXPECT_EQ(sampler, 2 * (95 - r));
+         EXPECT_EQ((p[0] >> 3) | ((p[2] & 64) >> 1) | ((p[19] & 2) << 5), r);
+         EXPECT_EQ(p[2] & 128, 0);
+         EXPECT_EQ(p[8] & 128, 0);
+         EXPECT_EQ(bool(p[15] & 8), !live);
+         EXPECT_EQ(bool(p[14] & 32), !live);
+         EXPECT_EQ(p[4] >> 7, 1);
+         ins.texture_bindless = ins.sampler_bindless = false;
+         ins.nr_srcs = 2;
+         EXPECT_EQ(agx_apple9_pack_vir_instruction(&ins, phys, &packed, &reason), r < 64);
+      }
+   }
+}

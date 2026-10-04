@@ -522,6 +522,8 @@ struct agx_ra_target {
 
 typedef struct {
    struct agx_ra_target ra_target;
+   /* Static diagnostic set when constrained register allocation fails. */
+   const char *ra_error;
    /* Opaque target instructions may refine the shared scheduling classes. */
    enum agx_schedule_class (*schedule_class)(const agx_instr *instruction);
    /* Optional target implicit-resource graph, replacing scheduling classes.
@@ -1084,7 +1086,7 @@ void agx_pressure_schedule(agx_context *ctx);
 void agx_spill(agx_context *ctx, unsigned k, bool remat_only);
 void agx_repair_ssa(agx_context *ctx);
 void agx_reindex_ssa(agx_context *ctx);
-void agx_ra(agx_context *ctx);
+bool agx_ra(agx_context *ctx);
 void agx_lower_64bit_postra(agx_context *ctx);
 void agx_insert_waits(agx_context *ctx);
 void agx_opt_empty_else(agx_context *ctx);

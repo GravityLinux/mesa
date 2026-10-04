@@ -711,3 +711,37 @@ TEST(Apple9SharedRa, RematerializationPreservesHighOperandConstraints)
    ralloc_free(nir.shader);
    ralloc_free(memctx);
 }
+
+TEST(Apple9SharedRa, RejectsImpossibleConstraintWindows)
+{
+   /* Includes the spill-prefix conflict formerly encountered in CS2, empty
+    * aligned windows, inverted bounds, bad alignment and simultaneous pins. */
+   const agx_reg_constraint cases[] = {
+      {0, 6, 2}, {11, 11, 2}, {20, 18, 2}, {10, 30, 3}, {32, 40, 2}, {10, 10, 2},
+   };
+   for (const auto &constraint : cases) {
+      void *memctx = ralloc_context(nullptr);
+      auto ctx = rzalloc(memctx, agx_context);
+      list_inithead(&ctx->blocks);
+      nir_builder nir = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "invalid_constraint");
+      agx_shader_key key = {};
+      key.has_scratch = true;
+      ctx->nir = nir.shader; ctx->stage = MESA_SHADER_COMPUTE; ctx->key = &key;
+      ctx->ra_target.max_registers = 32;
+      ctx->ra_target.reserved_registers = 10;
+      ctx->ra_target.disable_occupancy_rematerialization = true;
+      auto block = agx_test_block(ctx);
+      auto b = agx_init_builder(ctx, agx_after_block(block));
+      auto a = agx_mov_imm(&b, 32, 1);
+      auto c = agx_mov_imm(&b, 32, 2);
+      auto I = agx_iadd_to(&b, agx_temp(ctx, AGX_SIZE_32), a, c, 0);
+      I->reg_constraints = rzalloc_array(ctx, agx_reg_constraint, 3);
+      I->reg_constraints[0] = {10, 30, 2};
+      I->reg_constraints[1] = I->reg_constraints[2] = constraint;
+      agx_export(&b, I->dest[0], 0);
+      EXPECT_FALSE(agx_ra(ctx));
+      EXPECT_NE(ctx->ra_error, nullptr);
+      ralloc_free(nir.shader); ralloc_free(memctx);
+   }
+}
