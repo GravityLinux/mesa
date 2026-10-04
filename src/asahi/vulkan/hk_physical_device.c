@@ -905,7 +905,10 @@ hk_get_device_properties(const struct agx_device *dev,
       .minSubgroupSize = 32,
       .maxSubgroupSize = 32,
       .maxComputeWorkgroupSubgroups = 1024 / 32,
-      .requiredSubgroupSizeStages = 0,
+      /* Apple9 executes fixed 32-lane subgroups, including explicitly
+       * required size 32 in compute pipelines. */
+      .requiredSubgroupSizeStages = dev->params.gpu_generation >= 16
+                                      ? VK_SHADER_STAGE_COMPUTE_BIT : 0,
       .maxInlineUniformBlockSize = HK_MAX_INLINE_UNIFORM_BLOCK_SIZE,
       .maxPerStageDescriptorInlineUniformBlocks = 32,
       .maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks = 32,
@@ -1643,7 +1646,7 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
       VK_SUBGROUP_FEATURE_QUAD_BIT | VK_SUBGROUP_FEATURE_ROTATE_BIT |
       VK_SUBGROUP_FEATURE_ROTATE_CLUSTERED_BIT;
    props->subgroupQuadOperationsInAllStages = true;
-   props->requiredSubgroupSizeStages = 0;
+   props->requiredSubgroupSizeStages = VK_SHADER_STAGE_COMPUTE_BIT;
 
    props->maxComputeSharedMemorySize = AGX_APPLE9_MAX_SHARED_BYTES;
 
