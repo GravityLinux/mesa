@@ -1367,8 +1367,10 @@ hk_meta_copy_get_image_properties(struct hk_image *img)
           * view also selects the wrong compression class for either plane.
           */
          props.depth.view_format = VK_FORMAT_R32_UINT;
+         props.depth.view_aspects = VK_IMAGE_ASPECT_DEPTH_BIT;
          props.depth.component_mask = BITFIELD_BIT(0);
          props.stencil.view_format = VK_FORMAT_R8_UINT;
+         props.stencil.view_aspects = VK_IMAGE_ASPECT_STENCIL_BIT;
          props.stencil.component_mask = BITFIELD_BIT(0);
          break;
       case VK_FORMAT_D16_UNORM:

@@ -69,6 +69,12 @@ struct vk_meta_copy_image_properties {
              */
             VkFormat view_format;
 
+            /* Explicit image aspect(s) for this copy view. Zero uses the
+             * aspects of view_format. Split depth/stencil drivers can keep
+             * the image plane selection while reinterpreting its format.
+             */
+            VkImageAspectFlags view_aspects;
+
             /* Describe the depth/stencil componant layout. Bits in the mask
              * must be consecutive and match the original depth bit size.
              */
@@ -80,6 +86,12 @@ struct vk_meta_copy_image_properties {
              * Format must not be compressed and be in the RGB/sRGB colorspace.
              */
             VkFormat view_format;
+
+            /* Explicit image aspect(s) for this copy view. Zero uses the
+             * aspects of view_format. Split depth/stencil drivers can keep
+             * the image plane selection while reinterpreting its format.
+             */
+            VkImageAspectFlags view_aspects;
 
             /* Describe the depth/stencil componant layout. Bits in the mask
              * must be consecutive and match the original depth bit size.

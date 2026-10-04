@@ -60,6 +60,7 @@ struct vk_meta_copy_image_view {
       struct {
          struct {
             VkFormat format;
+            VkImageAspectFlags aspects;
             nir_component_mask_t component_mask;
          } depth, stencil;
       };
@@ -299,12 +300,26 @@ copy_img_view_format_for_aspect(const struct vk_meta_copy_image_view *info,
    }
 }
 
+static VkImageAspectFlags
+copy_img_view_aspects(const struct vk_meta_copy_image_view *info,
+                     VkImageAspectFlagBits aspect)
+{
+   if (aspect == VK_IMAGE_ASPECT_DEPTH_BIT)
+      return info->depth.aspects ?: vk_format_aspects(info->depth.format);
+
+   if (aspect == VK_IMAGE_ASPECT_STENCIL_BIT)
+      return info->stencil.aspects ?: vk_format_aspects(info->stencil.format);
+
+   return aspect;
+}
+
 static bool
 depth_stencil_interleaved(const struct vk_meta_copy_image_view *view)
 {
    return view->stencil.format != VK_FORMAT_UNDEFINED &&
           view->depth.format != VK_FORMAT_UNDEFINED &&
           view->stencil.format == view->depth.format &&
+          view->stencil.aspects == view->depth.aspects &&
           view->stencil.component_mask != 0 &&
           view->depth.component_mask != 0 &&
           (view->stencil.component_mask & view->depth.component_mask) == 0;
@@ -459,9 +474,7 @@ copy_create_src_image_view(struct vk_command_buffer *cmd,
    /* For multiplane, we only want the aspect for the plane rather than the
     * set of aspects for the full image.
     */
-   VkImageAspectFlags view_aspects =
-      aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT) ?
-      vk_format_aspects(format) : aspect;
+   VkImageAspectFlags view_aspects = copy_img_view_aspects(view_info, aspect);
 
    VkImageViewCreateInfo info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -514,9 +527,7 @@ copy_create_dst_image_view(struct vk_command_buffer *cmd,
    /* For multiplane, we only want the aspect for the plane rather than the
     * set of aspects for the full image.
     */
-   VkImageAspectFlags view_aspects =
-      aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT) ?
-      vk_format_aspects(format) : aspect;
+   VkImageAspectFlags view_aspects = copy_img_view_aspects(view_info, aspect);
    const VkImageViewUsageCreateInfo usage = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
       .usage = bind_point == VK_PIPELINE_BIND_POINT_COMPUTE
@@ -1336,8 +1347,10 @@ img_copy_view_info(VkImageViewType view_type, VkImageAspectFlags aspects,
    }
 
    view.depth.format = img_props->depth.view_format;
+   view.depth.aspects = img_props->depth.view_aspects;
    view.depth.component_mask = img_props->depth.component_mask;
    view.stencil.format = img_props->stencil.view_format;
+   view.stencil.aspects = img_props->stencil.view_aspects;
    view.stencil.component_mask = img_props->stencil.component_mask;
 
    assert(view.depth.format == VK_FORMAT_UNDEFINED ||
