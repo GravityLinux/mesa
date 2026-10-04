@@ -1200,6 +1200,12 @@ agx_clear(struct pipe_context *pctx, unsigned buffers,
        * when no draw has created one yet. */
       if (!batch->apple9_render_initialized)
          slowclear |= fastclear;
+      /* Color clears now execute as ordinary draws that write the color
+       * attachments, so record them as drawn. Otherwise the batch never
+       * accounts for the write and the consistency check at the end of this
+       * function fails on the next clear.
+       */
+      batch->draw |= color_fast;
    }
 
    assert(scissor_state == NULL &&
