@@ -351,6 +351,54 @@ hk_apple9_rast_primitive(enum mesa_prim prim)
    }
 }
 
+/* Split before recording any of a draw's pre-rasterization work. Ending a
+ * graphics stream also closes its pre/post compute streams and heap lifetime.
+ * Reserve for every emulated multiview draw so these stay together.
+ */
+bool
+hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd)
+{
+   if (vk_command_buffer_has_error(&cmd->vk))
+      return false;
+
+   struct hk_cs *cs = hk_cmd_buffer_get_cs(cmd, false);
+   if (!cs)
+      return false;
+
+   const struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
+   const struct hk_rendering_state *render = &cmd->state.gfx.render;
+   unsigned views = util_bitcount(render->view_mask ?: 1);
+   unsigned viewports = dyn->rs.rasterizer_discard_enable
+                           ? 1 : MAX2(dyn->vp.viewport_count, 1);
+   bool bias = dyn->rs.depth_bias.enable;
+   bool dbias_is_int = render->depth_att.vk_format == VK_FORMAT_D16_UNORM ||
+      dyn->rs.depth_bias.representation ==
+         VK_DEPTH_BIAS_REPRESENTATION_LEAST_REPRESENTABLE_VALUE_FORCE_UNORM_EXT;
+
+   bool overflow =
+      cs->scissor.size / AGX_SCISSOR_LENGTH + viewports * views > UINT16_MAX ||
+      (bias && cs->depth_bias.size / AGX_DEPTH_BIAS_LENGTH + views > UINT16_MAX);
+   bool change_bias = bias && !u_tristate_set(&cs->cr.dbias_is_int, dbias_is_int);
+   if (unlikely(overflow || change_bias)) {
+      perf_debug(cmd, "Splitting Apple9 render: %s",
+                 overflow ? "scissor/depth bias overflow" : "depth bias representation");
+      /* The existing partial-render background, EOT and ZLS state stores and
+       * reloads attachments. Only the final stream uses the API store ops.
+       */
+      hk_cmd_buffer_end_graphics(cmd);
+      cs = hk_cmd_buffer_get_cs(cmd, false);
+      if (!cs)
+         return false;
+      if (bias) {
+         bool success = u_tristate_set(&cs->cr.dbias_is_int, dbias_is_int);
+         assert(success);
+         (void)success;
+      }
+   }
+
+   return true;
+}
+
 void
 hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
                struct agx_draw draw)
@@ -604,14 +652,13 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    record.scissor_max[0] = bbox[2];
    record.scissor_max[1] = bbox[3];
    unsigned scissor_count = cs->scissor.size / AGX_SCISSOR_LENGTH;
-   if (viewports == 1 && scissor_count &&
+   if (scissor_count >= viewports &&
        !memcmp((uint8_t *)cs->scissor.data +
-                  (scissor_count - 1) * AGX_SCISSOR_LENGTH,
-               &scissors[0], sizeof(scissors[0]))) {
-      record.scissor_index = scissor_count - 1;
+                  (scissor_count - viewports) * AGX_SCISSOR_LENGTH,
+               scissors, viewports * sizeof(scissors[0]))) {
+      record.scissor_index = scissor_count - viewports;
    } else {
-      if (scissor_count + viewports > UINT16_MAX)
-         UNSUPPORTED();
+      assert(scissor_count + viewports <= UINT16_MAX);
       record.scissor_index = scissor_count;
       util_dynarray_append_array(&cs->scissor, struct agx_scissor_packed,
                                  scissors, viewports);
@@ -632,14 +679,22 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       float scale = d16         ? 1.0f / (exact ? (1 << 16) : (1 << 15))
                     : force_unorm ? 1.0f / (exact ? (1 << 24) : (1 << 23))
                                   : 1.0f;
-      cs->cr.dbias_is_int = unorm ? U_TRISTATE_YES : U_TRISTATE_NO;
-      record.depth_bias_index = cs->depth_bias.size / AGX_DEPTH_BIAS_LENGTH;
-      void *ptr =
-         util_dynarray_grow_bytes(&cs->depth_bias, 1, AGX_DEPTH_BIAS_LENGTH);
-      agx_pack(ptr, DEPTH_BIAS, cfg) {
+      assert(cs->cr.dbias_is_int == (unorm ? U_TRISTATE_YES : U_TRISTATE_NO));
+      struct agx_depth_bias_packed depth_bias;
+      agx_pack(&depth_bias, DEPTH_BIAS, cfg) {
          cfg.depth_bias = dyn->rs.depth_bias.constant_factor * scale;
          cfg.slope_scale = dyn->rs.depth_bias.slope_factor;
          cfg.clamp = dyn->rs.depth_bias.clamp;
+      }
+      unsigned count = cs->depth_bias.size / AGX_DEPTH_BIAS_LENGTH;
+      if (count && !memcmp((uint8_t *)cs->depth_bias.data +
+                              (count - 1) * AGX_DEPTH_BIAS_LENGTH,
+                           &depth_bias, sizeof(depth_bias))) {
+         record.depth_bias_index = count - 1;
+      } else {
+         assert(count < UINT16_MAX);
+         record.depth_bias_index = count;
+         util_dynarray_append(&cs->depth_bias, depth_bias);
       }
    }
    bool stencil = dyn->ds.stencil.test_enable && gfx->render.stencil_att.iview;
