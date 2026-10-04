@@ -6,6 +6,8 @@
 #include "asahi/compiler/agx_compile_apple9.h"
 #include "compiler/glsl_types.h"
 #include "agx_apple9_libagx.h"
+#include "agx_apple9.h"
+#include <array>
 
 #include <gtest/gtest.h>
 
@@ -43,3 +45,37 @@ TEST_P(LibagxApple9, Compiles)
 
 INSTANTIATE_TEST_SUITE_P(All, LibagxApple9,
                          testing::Range(0u, test_libagx_num_programs()));
+
+/* Guard both ends: these sizes are also the command allocator reservation. */
+TEST(Apple9Dispatch, PacketFootprints)
+{
+   agx_apple9_compute_profile profile = {};
+   profile.abi = AGX_APPLE9_COMPUTE_ABI_DIRECT_BUFFERS;
+   profile.local_size[0] = profile.local_size[1] = profile.local_size[2] = 1;
+   profile.resource_binding_count = 1;
+   profile.resource_kind[0] = AGX_APPLE9_COMPUTE_RESOURCE_SSBO;
+   profile.resource_write_mask = 1;
+   const uint32_t global[] = {3, 5, 7};
+   const uint32_t local[] = {1, 1, 1};
+   const unsigned sizes[] = {AGX_APPLE9_COMPUTE_CDM_RECORD_SIZE,
+      AGX_APPLE9_COMPUTE_INDIRECT_CDM_RECORD_SIZE,
+      AGX_APPLE9_COMPUTE_INDIRECT_LOCAL_CDM_RECORD_SIZE};
+   for (unsigned mode = 0; mode < 3; ++mode) {
+      std::array<uint8_t, 76> out;
+      out.fill(0xa5);
+      bool ok = mode == 0
+         ? agx_apple9_emit_direct_dispatch(out.data() + 16, 0x10000010000ull,
+                                          global, local, &profile)
+         : agx_apple9_emit_indirect_dispatch(out.data() + 16, 0x10000010000ull,
+                                            0x200000000ull, local, mode == 2,
+                                            &profile);
+      ASSERT_TRUE(ok);
+      for (unsigned i = 0; i < 16; ++i)
+         EXPECT_EQ(out[i], 0xa5);
+      for (unsigned i = 16 + sizes[mode]; i < out.size(); ++i)
+         EXPECT_EQ(out[i], 0xa5);
+      uint32_t tail;
+      memcpy(&tail, out.data() + 16 + sizes[mode] - 4, sizeof(tail));
+      EXPECT_EQ(tail, 0x600fffffu);
+   }
+}

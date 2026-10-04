@@ -369,11 +369,18 @@ hk_apple9_dispatch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       return;
    }
 
-   hk_ensure_cs_has_space(cmd, cs, 0x2000);
    /* Indirect-local grids hold thread counts and local sizes, and launch
     * partial workgroups like a direct dispatch.
     */
    bool indirect_local = grid.mode == AGX_CDM_MODE_INDIRECT_LOCAL;
+   unsigned record_size =
+      indirect_local ? AGX_APPLE9_COMPUTE_INDIRECT_LOCAL_CDM_RECORD_SIZE
+      : agx_is_indirect(grid) ? AGX_APPLE9_COMPUTE_INDIRECT_CDM_RECORD_SIZE
+                             : AGX_APPLE9_COMPUTE_CDM_RECORD_SIZE;
+   /* The emitter writes one fixed-size record. The space check adds the
+    * stream-link and overread padding, and chains a block when needed.
+    */
+   hk_ensure_cs_has_space(cmd, cs, record_size);
    bool ok = agx_is_indirect(grid)
       ? agx_apple9_emit_indirect_dispatch(cs->current, launch, grid.ptr,
                                          geometry.local, indirect_local, p)
@@ -384,9 +391,7 @@ hk_apple9_dispatch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
    }
-   cs->current += indirect_local ? AGX_APPLE9_COMPUTE_INDIRECT_LOCAL_CDM_RECORD_SIZE
-                  : agx_is_indirect(grid) ? AGX_APPLE9_COMPUTE_INDIRECT_CDM_RECORD_SIZE
-                                          : AGX_APPLE9_COMPUTE_CDM_RECORD_SIZE;
+   cs->current += record_size;
    cs->stats.cmds++;
    cs->stats.calls++;
 }
