@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "util/u_wait_watchdog.h"
 #include "agx_device.h"
 #include "agx_apple9_layout.h"
 #include <inttypes.h>
@@ -49,7 +50,8 @@ asahi_simple_ioctl(struct agx_device *dev, unsigned cmd, void *req)
    if (dev->is_virtio) {
       return agx_virtio_simple_ioctl(dev, cmd, req);
    } else {
-      return drmIoctl(dev->fd, cmd, req);
+      return U_WATCHDOG_IOCTL("asahi_simple_ioctl", dev->fd,
+                              drmIoctl(dev->fd, cmd, req));
    }
 }
 
@@ -480,7 +482,8 @@ static int
 agx_submit(struct agx_device *dev, struct drm_asahi_submit *submit,
            struct agx_submit_virt *virt)
 {
-   return drmIoctl(dev->fd, DRM_IOCTL_ASAHI_SUBMIT, submit);
+   return U_WATCHDOG_IOCTL("DRM_IOCTL_ASAHI_SUBMIT", dev->fd,
+                           drmIoctl(dev->fd, DRM_IOCTL_ASAHI_SUBMIT, submit));
 }
 
 const agx_device_ops_t agx_device_drm_ops = {

@@ -21,6 +21,7 @@
  * IN THE SOFTWARE.
  */
 
+#include "util/u_wait_watchdog.h"
 #include "vk_sync.h"
 
 #include <assert.h>
@@ -349,6 +350,10 @@ vk_sync_wait(struct vk_device *device,
              enum vk_sync_wait_flags wait_flags,
              uint64_t abs_timeout_ns)
 {
+   U_WATCHDOG_SCOPE(wd, "vk_sync_wait", -1, (uintptr_t)sync, wait_value,
+                    wait_flags, abs_timeout_ns,
+                    ((struct u_watchdog_objects){0}));
+
    uint64_t max_abs_timeout_ns = get_max_abs_timeout_ns();
    if (abs_timeout_ns > max_abs_timeout_ns) {
       VkResult result =
@@ -444,6 +449,16 @@ vk_sync_wait_many(struct vk_device *device,
                   enum vk_sync_wait_flags wait_flags,
                   uint64_t abs_timeout_ns)
 {
+   U_WATCHDOG_SCOPE(wd, "vk_sync_wait_many", -1, (uintptr_t)device, 0,
+                    wait_flags, abs_timeout_ns,
+                    ((struct u_watchdog_objects){
+                       .objects = wait_count ? &waits[0].sync : NULL,
+                       .points = wait_count ? &waits[0].wait_value : NULL,
+                       .object_stride = sizeof(*waits),
+                       .point_stride = sizeof(*waits), .count = wait_count,
+                       .object32 = sizeof(waits[0].sync) == 4,
+                    }));
+
    uint64_t max_abs_timeout_ns = get_max_abs_timeout_ns();
    if (abs_timeout_ns > max_abs_timeout_ns) {
       VkResult result =

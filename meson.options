@@ -915,3 +915,6 @@ option(
   value : false,
   description : 'Build panfrost Rust components.'
 )
+
+option('hk-long-wait-watchdog', type : 'boolean', value : false,
+       description : 'Enable five-second driver wait diagnostics in HK test builds')

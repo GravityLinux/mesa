@@ -12,6 +12,7 @@
  * Copyright © 2015 Intel Corporation
  * SPDX-License-Identifier: MIT
  */
+#include "util/u_wait_watchdog.h"
 #include "hk_queue.h"
 #include "hk_buffer.h"
 
@@ -47,6 +48,42 @@ queue_submit_empty(struct hk_device *dev, struct hk_queue *queue,
                    struct vk_queue_submit *submit)
 {
    int fd = dev->dev.fd;
+#ifdef HK_WAIT_WATCHDOG
+   unsigned wd_count = submit->wait_count + submit->signal_count + 1;
+   STACK_ARRAY(struct drm_asahi_sync, wd_syncs, wd_count);
+   for (unsigned i = 0; i < submit->wait_count; ++i) {
+      wd_syncs[i] = (struct drm_asahi_sync){
+         .handle = vk_sync_as_drm_syncobj(submit->waits[i].sync)->syncobj,
+         .timeline_value = submit->waits[i].wait_value,
+      };
+   }
+   struct drm_asahi_sync *wd_signals = wd_syncs + submit->wait_count;
+   for (unsigned i = 0; i < submit->signal_count; ++i) {
+      wd_signals[i] = (struct drm_asahi_sync){
+         .handle = vk_sync_as_drm_syncobj(submit->signals[i].sync)->syncobj,
+         .timeline_value = submit->signals[i].signal_value,
+      };
+   }
+   wd_signals[submit->signal_count] = (struct drm_asahi_sync){
+      .handle = queue->drm.syncobj,
+      .timeline_value = queue->drm.timeline_value + submit->wait_count,
+   };
+   struct u_watchdog_objects wd_waits = {
+      .objects = &wd_syncs[0].handle, .points = &wd_syncs[0].timeline_value,
+      .object_stride = sizeof(*wd_syncs), .point_stride = sizeof(*wd_syncs),
+      .count = submit->wait_count, .object32 = true,
+   };
+   struct u_watchdog_objects wd_out = {
+      .objects = &wd_signals[0].handle, .points = &wd_signals[0].timeline_value,
+      .object_stride = sizeof(*wd_syncs), .point_stride = sizeof(*wd_syncs),
+      .count = submit->signal_count + 1, .object32 = true,
+   };
+   uint64_t wd_id = u_watchdog_submit(fd, queue->drm.id, wd_waits, wd_out);
+   U_WATCHDOG_SCOPE(wd, "HK empty submit transfers", fd, queue->drm.id,
+                    wd_id, 0, UINT64_MAX, wd_waits);
+#endif
+   int wd_result = 0, wd_error = 0;
+
 
    /* Transfer the waits into the queue timeline. */
    for (unsigned i = 0; i < submit->wait_count; ++i) {
@@ -55,8 +92,13 @@ queue_submit_empty(struct hk_device *dev, struct hk_queue *queue,
       assert(vk_sync_type_is_drm_syncobj(wait->sync->type));
       const struct vk_drm_syncobj *syncobj = vk_sync_as_drm_syncobj(wait->sync);
 
-      drmSyncobjTransfer(fd, queue->drm.syncobj, ++queue->drm.timeline_value,
-                         syncobj->syncobj, wait->wait_value, 0);
+      int ret = drmSyncobjTransfer(fd, queue->drm.syncobj, ++queue->drm.timeline_value,
+                                  syncobj->syncobj, wait->wait_value, 0);
+      u_watchdog_ioctl("HK empty submit wait transfer", fd, ret, errno);
+      if (ret) {
+         wd_result = ret;
+         wd_error = errno;
+      }
    }
 
    /* Transfer the queue timeline into each out fence. They will all be
@@ -69,10 +111,21 @@ queue_submit_empty(struct hk_device *dev, struct hk_queue *queue,
       const struct vk_drm_syncobj *syncobj =
          vk_sync_as_drm_syncobj(signal->sync);
 
-      drmSyncobjTransfer(fd, syncobj->syncobj, signal->signal_value,
-                         queue->drm.syncobj, queue->drm.timeline_value, 0);
+      int ret = drmSyncobjTransfer(fd, syncobj->syncobj, signal->signal_value,
+                                  queue->drm.syncobj, queue->drm.timeline_value, 0);
+      u_watchdog_ioctl("HK empty submit signal transfer", fd, ret, errno);
+      if (ret) {
+         wd_result = ret;
+         wd_error = errno;
+      }
    }
 
+   u_watchdog_submit_result(wd_id, wd_result, wd_error);
+#ifdef HK_WAIT_WATCHDOG
+   /* End the borrowed-array scope before releasing a heap-backed STACK_ARRAY. */
+   u_watchdog_end(&wd);
+   STACK_ARRAY_FINISH(wd_syncs);
+#endif
    return VK_SUCCESS;
 }
 
@@ -284,7 +337,28 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
       virt.extres = util_dynarray_begin(&dev->external_bos.list);
    }
 
+#ifdef HK_WAIT_WATCHDOG
+   const struct drm_asahi_sync *wd_syncs = (const void *)(uintptr_t)submit->syncs;
+   const struct drm_asahi_sync *wd_signals = wd_syncs + submit->in_sync_count;
+   struct u_watchdog_objects wd_waits = {
+      .objects = submit->in_sync_count ? &wd_syncs[0].handle : NULL,
+      .points = submit->in_sync_count ? &wd_syncs[0].timeline_value : NULL,
+      .object_stride = sizeof(*wd_syncs), .point_stride = sizeof(*wd_syncs),
+      .count = submit->in_sync_count, .object32 = true,
+   };
+   struct u_watchdog_objects wd_out = {
+      .objects = submit->out_sync_count ? &wd_signals[0].handle : NULL,
+      .points = submit->out_sync_count ? &wd_signals[0].timeline_value : NULL,
+      .object_stride = sizeof(*wd_syncs), .point_stride = sizeof(*wd_syncs),
+      .count = submit->out_sync_count, .object32 = true,
+   };
+   uint64_t wd_id = u_watchdog_submit(dev->dev.fd, submit->queue_id, wd_waits, wd_out);
+   U_WATCHDOG_SCOPE(wd, "HK submit ioctl", dev->dev.fd, submit->queue_id, wd_id,
+                    0, UINT64_MAX, wd_waits);
+#endif
    int ret = dev->dev.ops.submit(&dev->dev, submit, &virt);
+   u_watchdog_submit_result(wd_id, ret, errno);
+   u_watchdog_ioctl("HK submit", dev->dev.fd, ret, errno);
 
    if (dev->dev.is_virtio)
       u_rwlock_rdunlock(&dev->external_bos.lock);
@@ -938,9 +1012,15 @@ hk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
 
    if (dev->dev.debug & AGX_DBG_SYNC) {
       /* Wait for completion */
+      U_WATCHDOG_SCOPE(wd, "HK debug queue wait", dev->dev.fd,
+                       queue->drm.syncobj, queue->drm.timeline_value, 0,
+                       UINT64_MAX, ((struct u_watchdog_objects){0}));
       int err = drmSyncobjTimelineWait(
          dev->dev.fd, &queue->drm.syncobj, &queue->drm.timeline_value, 1,
          INT64_MAX, DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT, NULL);
+      u_watchdog_ioctl("drmSyncobjTimelineWait", dev->dev.fd, err, errno);
+      if (!err)
+         u_watchdog_complete(dev->dev.fd, queue->drm.syncobj, queue->drm.timeline_value);
 
       if (err) {
          result = vk_queue_set_lost(&queue->vk, "Wait failed");
@@ -1036,6 +1116,7 @@ hk_queue_init(struct hk_device *dev, const VkDeviceQueueCreateInfo *pCreateInfo,
 void
 hk_queue_finish(struct hk_device *dev, struct hk_queue *queue)
 {
+   u_watchdog_forget_queue(dev->dev.fd, queue->drm.id);
    drmSyncobjDestroy(dev->dev.fd, queue->drm.syncobj);
    agx_destroy_command_queue(&dev->dev, queue->drm.id);
    vk_queue_finish(&queue->vk);

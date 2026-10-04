@@ -21,6 +21,7 @@
  * IN THE SOFTWARE.
  */
 
+#include "util/u_wait_watchdog.h"
 #include "wsi_common_private.h"
 #include "wsi_common_entrypoints.h"
 #include "util/u_debug.h"
@@ -2272,6 +2273,10 @@ wsi_common_acquire_next_image2(const struct wsi_device *wsi,
                                const VkAcquireNextImageInfoKHR *pAcquireInfo,
                                uint32_t *pImageIndex)
 {
+   U_WATCHDOG_SCOPE(wd, "WSI acquire", -1, pAcquireInfo->swapchain,
+                    pAcquireInfo->timeout, 0, UINT64_MAX,
+                    ((struct u_watchdog_objects){0}));
+
    VK_FROM_HANDLE(wsi_swapchain, swapchain, pAcquireInfo->swapchain);
    VK_FROM_HANDLE(vk_device, device, _device);
 
@@ -2434,6 +2439,13 @@ wsi_common_queue_present(const struct wsi_device *wsi,
                          struct vk_queue *queue,
                          const VkPresentInfoKHR *pPresentInfo)
 {
+   U_WATCHDOG_SCOPE(wd, "WSI queue present", -1, (uintptr_t)queue, 0, 0,
+                    UINT64_MAX, ((struct u_watchdog_objects){
+                       .objects = pPresentInfo->pWaitSemaphores,
+                       .object_stride = sizeof(VkSemaphore),
+                       .count = pPresentInfo->waitSemaphoreCount,
+                    }));
+
    struct vk_device *dev = queue->base.device;
    uint32_t current_frame = p_atomic_fetch_add(&dev->current_frame, 1);
    VkResult final_result = handle_trace(queue, dev, current_frame);
@@ -3644,6 +3656,9 @@ VKAPI_ATTR VkResult VKAPI_CALL
 wsi_WaitForPresentKHR(VkDevice device, VkSwapchainKHR _swapchain,
                       uint64_t presentId, uint64_t timeout)
 {
+   U_WATCHDOG_SCOPE(wd, "WSI wait present", -1, _swapchain, presentId, timeout,
+                    UINT64_MAX, ((struct u_watchdog_objects){0}));
+
    VK_FROM_HANDLE(wsi_swapchain, swapchain, _swapchain);
    assert(swapchain->wait_for_present);
    return swapchain->wait_for_present(swapchain, presentId, timeout);
@@ -3653,6 +3668,9 @@ VKAPI_ATTR VkResult VKAPI_CALL
 wsi_WaitForPresent2KHR(VkDevice device, VkSwapchainKHR _swapchain,
                        const VkPresentWait2InfoKHR *info)
 {
+   U_WATCHDOG_SCOPE(wd, "WSI wait present", -1, _swapchain, info->presentId, info->timeout,
+                    UINT64_MAX, ((struct u_watchdog_objects){0}));
+
    VK_FROM_HANDLE(wsi_swapchain, swapchain, _swapchain);
    assert(swapchain->wait_for_present2);
    return swapchain->wait_for_present2(swapchain, info->presentId, info->timeout);

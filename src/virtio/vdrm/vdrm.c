@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "util/u_wait_watchdog.h"
 #include "util/u_math.h"
 #include "util/perf/cpu_trace.h"
 
@@ -194,6 +195,13 @@ fence_before(uint32_t a, uint32_t b)
 void
 vdrm_host_sync(struct vdrm_device *vdev, const struct vdrm_ccmd_req *req)
 {
+   U_WATCHDOG_SCOPE(wd, "vdrm host request (object list=current host seqno)",
+                    -1, (uintptr_t)vdev, req->seqno, 0, UINT64_MAX,
+                    ((struct u_watchdog_objects){
+                       .objects = &vdev->shmem->seqno, .object_stride = 4,
+                       .count = 1, .object32 = true,
+                    }));
+
    while (fence_before(vdev->shmem->seqno, req->seqno))
       sched_yield();
 }

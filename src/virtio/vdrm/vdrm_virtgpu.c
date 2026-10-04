@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "util/u_wait_watchdog.h"
 #include <fcntl.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -20,7 +21,8 @@
 
 #define virtgpu_ioctl(fd, name, args...) ({                          \
       MESA_TRACE_SCOPE(#name);                                       \
-      int ret = drmIoctl((fd), DRM_IOCTL_ ## name, (args));          \
+      int ret = U_WATCHDOG_IOCTL(#name, (fd),                       \
+         drmIoctl((fd), DRM_IOCTL_ ## name, (args)));                 \
       ret;                                                           \
    })
 
@@ -102,7 +104,10 @@ virtgpu_wait_fence(struct vdrm_device *vdev, uintptr_t fence)
 {
    int fence_fd = fence;
 
-   sync_wait(fence_fd, -1);
+   U_WATCHDOG_SCOPE(wd, "virtgpu sync-file fence wait", fence_fd, fence, 0,
+                    0, UINT64_MAX, ((struct u_watchdog_objects){0}));
+   int ret = sync_wait(fence_fd, -1);
+   u_watchdog_ioctl("virtgpu sync_wait", fence_fd, ret, errno);
    close(fence_fd);
 }
 

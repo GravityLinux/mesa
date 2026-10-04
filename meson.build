@@ -92,6 +92,13 @@ pre_args = [
   '-D__STDC_LIMIT_MACROS',
   '-DPACKAGE_VERSION="@0@"'.format(project_version),
 ]
+if get_option('hk-long-wait-watchdog')
+  if host_machine.system() != 'linux'
+    error('HK wait diagnostics currently require Linux')
+  endif
+  pre_args += '-DHK_WAIT_WATCHDOG=1'
+endif
+
 # Arguments for c or cpp compiler, can be compiler options
 c_cpp_args = []
 

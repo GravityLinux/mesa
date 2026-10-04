@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "util/u_wait_watchdog.h"
 #include "agx_device_virtio.h"
 
 #include <inttypes.h>
@@ -47,6 +48,7 @@ agx_virtio_simple_ioctl(struct agx_device *dev, unsigned cmd, void *_req)
    if (cmd & IOC_OUT)
       memcpy(_req, rsp->payload, _IOC_SIZE(cmd));
 
+   u_watchdog_ioctl("asahi virtio host IOCTL_SIMPLE", dev->fd, rsp->ret, 0);
    return rsp->ret;
 }
 

@@ -13,6 +13,8 @@ endif
 subdir('blake3')
 
 files_mesa_util = files(
+  'u_wait_watchdog.c',
+  'u_wait_watchdog.h',
   'anon_file.h',
   'anon_file.c',
   'bigmath.h',
@@ -568,4 +570,15 @@ if with_tests
   subdir('tests/hash_table')
   subdir('tests/vma')
   subdir('tests/format')
+endif
+
+if with_tests and get_option('hk-long-wait-watchdog')
+  wait_watchdog_test = executable(
+    'wait_watchdog_test', ['tests/wait_watchdog_test.c', 'u_wait_watchdog.c'],
+    include_directories : inc_util, dependencies : dep_thread,
+    c_args : ['-UNDEBUG'],
+  )
+  test('wait watchdog', prog_python,
+       args : [files('tests/wait_watchdog_test.py'), wait_watchdog_test],
+       timeout : 20, suite : ['util'])
 endif
