@@ -80,7 +80,7 @@ static void
 asahi_fill_cdm_command(struct hk_device *dev, struct hk_cs *cs,
                        struct drm_asahi_cmd_compute *cmd)
 {
-   size_t len = cs->stream_linked ? 65536 /* XXX */ : (cs->current - cs->start);
+   size_t len = cs->stream_linked ? cs->root_size : (cs->current - cs->start);
 
    *cmd = (struct drm_asahi_cmd_compute){
       .cdm_ctrl_stream_base = cs->addr,

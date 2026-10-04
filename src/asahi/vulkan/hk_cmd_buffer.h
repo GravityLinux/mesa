@@ -411,6 +411,9 @@ struct hk_cs {
    /* Visibility result window for this graphics control stream. */
    uint64_t occlusion_base;
 
+   /* Size of the root allocation, retained when continuation blocks are added. */
+   size_t root_size;
+
    /* Current pointer within the control stream */
    void *current;
 
@@ -691,8 +694,10 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
                              bool compute)
 {
    if ((*ptr) == NULL) {
-      /* Allocate root control stream */
-      size_t initial_size = 65536;
+      /* Most control streams are short. Reserve only a small root block;
+       * hk_ensure_cs_has_space() chains larger blocks for long streams.
+       */
+      size_t initial_size = 4096;
       struct agx_ptr root = hk_pool_cs_alloc(cmd, initial_size, 1024, compute);
       if (!root.cpu)
          return NULL;
@@ -704,6 +709,7 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
          .type = compute ? HK_CS_CDM : HK_CS_VDM,
          .addr = root.gpu,
          .start = root.cpu,
+         .root_size = initial_size,
          .chunk = root,
          .current = root.cpu,
          .end = root.cpu + initial_size,
