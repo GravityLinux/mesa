@@ -7,6 +7,7 @@ libasahi_lib_files = files(
   'agx_apple9.c',
   'agx_apple9_geometry.c',
   'agx_apple9_launch.c',
+  'agx_apple9_libagx.c',
   'agx_bo.c',
   'agx_border.c',
   'agx_device.c',
@@ -84,6 +85,22 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
       dependencies: [idep_gtest, idep_agx_pack, idep_mesautil],
       link_with : [libasahi_lib, libasahi_layout],
+    ),
+    suite : ['asahi'],
+    protocol : 'gtest',
+  )
+
+  test(
+    'libagx_apple9',
+    executable(
+      'libagx_apple9_test',
+      files('tests/test-libagx-apple9.cpp',
+            'tests/libagx-apple9-programs.c'),
+      c_args : [c_msvc_compat_args, no_override_init_args],
+      gnu_symbol_visibility : 'hidden',
+      include_directories : [inc_asahi],
+      dependencies: [idep_gtest, idep_nir, idep_mesautil, idep_libagx_shaders_h],
+      link_with : [libasahi_lib, libasahi_compiler],
     ),
     suite : ['asahi'],
     protocol : 'gtest',
