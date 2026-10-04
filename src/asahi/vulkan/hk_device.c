@@ -399,15 +399,9 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       resident->resident[0] = 1;
    }
 
-   result = hk_descriptor_table_init(
-      dev, &dev->occlusion_queries, sizeof(uint64_t), AGX_MAX_OCCLUSION_QUERIES,
-      AGX_MAX_OCCLUSION_QUERIES);
-   if (result != VK_SUCCESS)
-      goto fail_samplers;
-
    result = hk_upload_rodata(dev);
    if (result != VK_SUCCESS)
-      goto fail_queries;
+      goto fail_samplers;
 
    /* XXX: error handling, and should this even go on the device? */
    agx_bg_eot_init(&dev->bg_eot, &dev->dev);
@@ -503,8 +497,6 @@ fail_bg_eot:
    agx_bg_eot_cleanup(&dev->bg_eot);
 fail_rodata:
    agx_bo_unreference(&dev->dev, dev->rodata.bo);
-fail_queries:
-   hk_descriptor_table_finish(dev, &dev->occlusion_queries);
 fail_samplers:
    if (dev->apple9_fetch_sampler)
       agx_bo_unreference(&dev->dev, dev->apple9_fetch_sampler);
@@ -567,7 +559,6 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    if (dev->apple9_resident)
       agx_bo_unreference(&dev->dev, dev->apple9_resident);
    hk_destroy_sampler_heap(dev, &dev->samplers);
-   hk_descriptor_table_finish(dev, &dev->occlusion_queries);
    agx_bo_unreference(&dev->dev, dev->rodata.bo);
    agx_bo_unreference(&dev->dev, dev->heap);
    agx_bo_unreference(&dev->dev, dev->mesh_heap);

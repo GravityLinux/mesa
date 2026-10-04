@@ -820,6 +820,7 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    uint8_t *map = cs->current;
 
    cs->tib = render->tilebuffer;
+   cs->occlusion_base = cmd->state.gfx.occlusion.base;
 
    /* Assume this is not the first control stream of the render pass, so
     * initially use the partial background/EOT program and ZLS control.

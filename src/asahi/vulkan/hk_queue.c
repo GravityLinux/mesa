@@ -211,7 +211,7 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
       c->sampler_count = dev->samplers.table.alloc;
    }
 
-   c->isp_oclqry_base = dev->occlusion_queries.bo->va->addr;
+   c->isp_oclqry_base = cs->occlusion_base;
 
    if (cs->cr.process_empty_tiles)
       c->flags |= DRM_ASAHI_RENDER_PROCESS_EMPTY_TILES;

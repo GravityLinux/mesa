@@ -15,7 +15,7 @@ struct agx_bo;
 struct hk_query_pool {
    struct vk_query_pool vk;
 
-   uint32_t query_start;
+   uint64_t query_start;
    uint32_t query_stride;
 
    struct agx_bo *bo;
@@ -25,8 +25,6 @@ struct hk_query_pool {
     * for all other query types
     */
    uint32_t handle;
-
-   unsigned oq_queries;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(hk_query_pool, vk.base, VkQueryPool,

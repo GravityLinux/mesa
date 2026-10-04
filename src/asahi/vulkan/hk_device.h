@@ -66,7 +66,6 @@ struct hk_device {
    struct agx_device dev;
    struct agxdecode_ctx *decode_ctx;
 
-   struct hk_descriptor_table occlusion_queries;
    struct hk_sampler_heap samplers;
 
    /* G16 private texel-fetch sampler, addressable as a native table entry

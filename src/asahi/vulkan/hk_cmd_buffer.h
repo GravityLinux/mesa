@@ -320,9 +320,10 @@ struct hk_graphics_state {
    struct {
       enum agx_visibility_mode mode;
 
-      /* If enabled, index of the current occlusion query in the occlusion heap.
-       * There can only be one active at a time (hardware contraint).
+      /* Visibility result window and the active query's hardware index.
+       * There can only be one active occlusion query at a time.
        */
+      uint64_t base;
       uint16_t index;
    } occlusion;
 
@@ -406,6 +407,9 @@ struct hk_cs {
 
    /* Start pointer of the root control stream */
    void *start;
+
+   /* Visibility result window for this graphics control stream. */
+   uint64_t occlusion_base;
 
    /* Current pointer within the control stream */
    void *current;
