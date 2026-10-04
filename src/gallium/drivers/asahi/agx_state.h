@@ -740,6 +740,14 @@ struct agx_context {
    struct agx_color_reload *color_reload;
    struct asahi_blitter compute_blitter;
 
+   /* Non-zero while an Apple9 copy_region is in flight. That path may map and
+    * unmap tiled resources, and the unmap blits staging contents through
+    * agx_blit(). agx_blit() must not take the
+    * util_try_blit_via_copy_region() shortcut while this is set, otherwise it
+    * re-enters resource_copy_region and recurses without bound.
+    */
+   unsigned apple9_copy_region_depth;
+
    /* Map of GEM handle to (batch index + 1) that (conservatively) writes that
     * BO, or 0 if no writer.
     */

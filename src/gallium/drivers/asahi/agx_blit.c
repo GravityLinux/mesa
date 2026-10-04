@@ -585,7 +585,8 @@ agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
          return;
       }
    }
-   if (apple9 && util_try_blit_via_copy_region(pipe, info, false))
+   if (apple9 && !ctx->apple9_copy_region_depth &&
+       util_try_blit_via_copy_region(pipe, info, false))
       return;
 
    if (!apple9 && asahi_compute_blit_supported(info)) {
@@ -1543,8 +1544,16 @@ agx_resource_copy_region(struct pipe_context *pctx, struct pipe_resource *dst,
                     asahi_copy_texture(pctx, dst, dst_level, dstx, dsty, dstz,
                                        src, src_level, src_box))
          return;
+      /* The CPU fallback maps the tiled resources, and any writeback on unmap
+       * blits through agx_blit(). Guard against the blit path re-entering this
+       * function via util_try_blit_via_copy_region(), which would recurse
+       * without bound.
+       */
+      struct agx_context *ctx = agx_context(pctx);
+      ctx->apple9_copy_region_depth++;
       util_resource_copy_region(pctx, dst, dst_level, dstx, dsty, dstz, src,
                                  src_level, src_box);
+      ctx->apple9_copy_region_depth--;
       return;
    }
 
