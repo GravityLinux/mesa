@@ -2789,6 +2789,9 @@ agx_screen_create(int fd, struct renderonly *ro,
    driParseConfigFiles(config->options, config->options_info,
                        &(driConfigFileParseParams) { .driverName = "asahi" });
 
+   agx_screen->dual_color_blend_by_location =
+      driQueryOptionb(config->options, "dual_color_blend_by_location");
+
    agx_screen->dev.fd = fd;
    agx_screen->dev.ro = ro;
    u_rwlock_init(&agx_screen->destroy_lock);

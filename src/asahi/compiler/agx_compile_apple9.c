@@ -17,6 +17,7 @@
 #include "compiler/nir/nir_format_convert.h"
 #include "util/format/u_format.h"
 #include "util/u_dynarray.h"
+#include "util/log.h"
 #include "gallium/include/pipe/p_defines.h"
 
 #include <stdio.h>
@@ -6923,7 +6924,7 @@ apple9_blend_factor_supported(unsigned factor)
  * so register allocation and numerical behavior do not depend on a captured
  * native color-pack sequence. */
 static void
-apple9_collect_color(nir_shader *nir)
+apple9_collect_color(nir_shader *nir, bool dual_source_by_location)
 {
    /* Output assignments are ordinary mutable shader state. Collect them
     * before packing or blending so component writes and branch-local writes
@@ -6970,6 +6971,10 @@ apple9_collect_color(nir_shader *nir)
          if (nir_intrinsic_io_semantics(intr).dual_source_blend_index) {
             if (rt != 0)
                continue;
+            rt = 8;
+         } else if (dual_source_by_location && rt == 1) {
+            /* Unlike the epilog ABI, monolithic blending keeps MRT1 and
+             * SRC1 separate. Remap before unused render targets are removed. */
             rt = 8;
          }
          if (!color[rt])
@@ -7231,9 +7236,14 @@ apple9_lower_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          };
          if (blend->logicop_enable)
             color = nir_color_logicop(b, color, dst, blend->logicop_func, format);
-         else if (!integer)
+         else if (!integer) {
+#ifndef NDEBUG
+            if (!lower->src1 && agx_apple9_blend_uses_src1(blend))
+               mesa_logw_once("Apple9 dual-source blend has no SRC1 output");
+#endif
             color = nir_color_blend(b, color, lower->src1 ? lower->src1 : nir_undef(b, 4, 32),
                                     dst, &rt, false);
+         }
          color = nir_color_mask(b, color, dst, blend->colormask);
       }
       if (util_format_is_srgb(format))
@@ -8362,7 +8372,7 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
     * masked regions with one backedge before instruction selection. */
    nir_lower_continue_constructs(nir);
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      apple9_collect_color(nir);
+      apple9_collect_color(nir, blend && blend[0].dual_source_by_location);
       nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
       /* Opaque visibility can discard earlier fragments for the whole pixel.
        * An omitted or masked target still needs their values, even when this

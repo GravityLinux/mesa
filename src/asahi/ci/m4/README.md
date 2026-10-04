@@ -46,6 +46,24 @@ a run. Mesa's runner can return success when a failure is expected or flaky.
 This CI profile is distinct from a full Khronos certification configuration
 matrix; use the official conformance procedure when that is explicitly needed.
 
+## Focused dual-source regression
+
+`dual-source.c` checks explicit GLSL output indices, indexed output bindings,
+and the `dual_color_blend_by_location` workaround. It reads all pixels of a
+floating-point target and checks RGBA `(0.16, 0.27, 0.38, 0.49)`. The same
+by-location program also checks disabled blending and ordinary MRT output
+routing, to catch a remap applied outside dual-source blending.
+
+```sh
+cc dual-source.c -o dual-source -lEGL -lGL -lm
+HK_EXPERIMENTAL_APPLE9=1 ASAHI_MESA_DEBUG=nocompress \
+  dual_color_blend_by_location=true ./dual-source
+```
+
+Select a candidate prefix using `LD_LIBRARY_PATH` and `LIBGL_DRIVERS_PATH` as
+usual. This standalone own-source reproducer complements the routine CTS
+blend profile; it does not replace the suite runner.
+
 ## Upstream expectations and Piglit
 
 The launcher supplies the existing `all`, `asahi`, and `asahi-agx2` skip, flake,

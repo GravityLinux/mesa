@@ -10,6 +10,7 @@
 #include <stdint.h>
 
 #include "agx_compile.h"
+#include "util/blend.h"
 #include "util/format/u_formats.h"
 #include "util/format/u_format.h"
 #include "agx_apple9_profile.h"
@@ -138,8 +139,30 @@ struct agx_apple9_blend {
    /* Optional per-draw depth range for shader-triggered early tests. */
    bool clamp_early_depth;
    uint8_t early_depth_clamp_ubo;
+   /* GL's by-location dual-source workaround, only set on RT0 when SRC1
+    * blending is active. This is part of the fragment variant key. */
+   bool dual_source_by_location;
    uint32_t early_depth_clamp_offset_B;
 };
+
+static inline bool
+agx_apple9_blend_uses_src1(const struct agx_apple9_blend *blend)
+{
+   if (blend->logicop_enable || blend->advanced_mode)
+      return false;
+
+   const uint8_t factors[] = {
+      blend->rgb_src, blend->rgb_dst, blend->alpha_src, blend->alpha_dst,
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(factors); ++i) {
+      enum pipe_blendfactor factor =
+         util_blendfactor_without_invert((enum pipe_blendfactor)factors[i]);
+      if (factor == PIPE_BLENDFACTOR_SRC1_COLOR ||
+          factor == PIPE_BLENDFACTOR_SRC1_ALPHA)
+         return true;
+   }
+   return false;
+}
 
 static inline unsigned
 agx_apple9_color_components(enum pipe_format format)

@@ -962,6 +962,7 @@ struct agx_screen {
    struct u_rwlock destroy_lock;
 
    float heap_memory_percent;
+   bool dual_color_blend_by_location;
 };
 
 static inline struct agx_screen *

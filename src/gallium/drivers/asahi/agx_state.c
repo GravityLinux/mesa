@@ -3108,6 +3108,11 @@ agx_update_fs(struct agx_batch *batch)
       }
       agx_apple9_sampler_key(&ctx->stage[MESA_SHADER_FRAGMENT],
                              key.apple9_samplers);
+      /* Disabled blending is canonicalized to ONE/ZERO in the blend state,
+       * so this cannot reinterpret an ordinary MRT output when disabled. */
+      key.apple9_blend[0].dual_source_by_location =
+         agx_screen(ctx->base.screen)->dual_color_blend_by_location &&
+         agx_apple9_blend_uses_src1(&key.apple9_blend[0]);
    }
 
    if (ctx->stage[MESA_SHADER_FRAGMENT].shader->info.uses_fbfetch) {
