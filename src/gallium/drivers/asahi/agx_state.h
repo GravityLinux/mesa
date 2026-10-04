@@ -16,6 +16,7 @@
 #include "asahi/lib/agx_linker.h"
 #include "asahi/lib/agx_nir_lower_vbo.h"
 #include "asahi/lib/agx_scratch.h"
+#include "asahi/lib/agx_primitive_count.h"
 #include "asahi/lib/agx_tilebuffer.h"
 #include "asahi/lib/agx_uvs.h"
 #include "asahi/lib/pool.h"
@@ -408,6 +409,7 @@ struct agx_batch {
    uint64_t seqnum;
    uint32_t syncobj;
    uint32_t draws;
+   uint8_t primitive_count; /* Saturated at AGX_PRIMITIVE_COUNT_UNKNOWN. */
 
    struct agx_tilebuffer_layout tilebuffer_layout;
 
@@ -684,6 +686,8 @@ struct agx_context {
    uint32_t queue_id, virt_ring_idx;
 
    struct agx_batch *batch;
+   /* Preserve uncertainty across recursive software draw lowering. */
+   bool unknown_primitive_count;
    struct agx_bo *timestamps;
    uint32_t timestamp_handle;
 

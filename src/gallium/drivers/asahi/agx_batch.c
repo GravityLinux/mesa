@@ -127,6 +127,7 @@ agx_batch_init(struct agx_context *ctx,
 
    batch->apple9_render_initialized = false;
    batch->apple9_draw_count = 0;
+   batch->primitive_count = 0;
 
    if (agx_batch_is_compute(batch)) {
       batch->cdm = agx_encoder_allocate(dev, false);
@@ -927,6 +928,10 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
    }
 
    if (render) {
+      if ((dev->params.features & DRM_ASAHI_FEATURE_FEW_PRIMITIVES) &&
+          agx_has_few_primitives(batch->primitive_count))
+         render->flags |= DRM_ASAHI_RENDER_FEW_PRIMITIVES;
+
       struct attachments att = {.count = 0};
       struct pipe_framebuffer_state *fb = &batch->key;
 

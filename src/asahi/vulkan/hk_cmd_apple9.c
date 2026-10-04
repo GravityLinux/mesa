@@ -769,6 +769,14 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
                        cs->current, &pipeline, draw.b.count[0], draw.b.count[1],
                        draw.indexed ? draw.index_bias : draw.start) -
                     4;
+   if (cs->primitive_count < AGX_PRIMITIVE_COUNT_UNKNOWN) {
+      agx_add_primitive_count(
+         &cs->primitive_count,
+         agx_is_indirect(draw.b) || pipeline.primitive_restart || gs || tes || mesh
+            ? AGX_PRIMITIVE_COUNT_UNKNOWN
+            : agx_count_primitives(pipeline.primitive, draw.b.count[0],
+                                   draw.b.count[1]));
+   }
    cs->stats.cmds++;
    return;
 unsupported:

@@ -6295,7 +6295,7 @@ agx_apple9_upload_compute_textures(struct agx_batch *batch,
 }
 
 static void
-agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
+agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
              unsigned drawid_offset,
              const struct pipe_draw_indirect_info *indirect,
              const struct pipe_draw_start_count_bias *draws, unsigned num_draws)
@@ -7072,6 +7072,14 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
 
    assert(batch == agx_get_batch(ctx) && "batch should not change under us");
 
+   if (batch->primitive_count < AGX_PRIMITIVE_COUNT_UNKNOWN) {
+      agx_add_primitive_count(
+         &batch->primitive_count,
+         ctx->unknown_primitive_count || indirect || ctx->gs || ctx->in_tess
+            ? AGX_PRIMITIVE_COUNT_UNKNOWN
+            : agx_count_primitives(agx_primitive_for_pipe(info->mode), draws->count,
+                                   info->instance_count));
+   }
    batch->draws++;
 
    /* The color load/store helpers recurse through draw_vbo before their
@@ -7096,6 +7104,23 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
                        (AGX_SAMPLER_HEAP_SIZE - (PIPE_MAX_SAMPLERS * 6)))) {
       agx_flush_batch_for_reason(ctx, batch, "Sampler heap overflow");
    }
+}
+
+static void
+agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
+             unsigned drawid_offset,
+             const struct pipe_draw_indirect_info *indirect,
+             const struct pipe_draw_start_count_bias *draws, unsigned num_draws)
+{
+   struct agx_context *ctx = agx_context(pctx);
+   bool saved = ctx->unknown_primitive_count;
+   ctx->unknown_primitive_count |=
+      indirect || (info->index_size && info->primitive_restart) ||
+      info->mode == MESA_PRIM_PATCHES ||
+      ctx->stage[MESA_SHADER_TESS_EVAL].shader ||
+      ctx->stage[MESA_SHADER_GEOMETRY].shader;
+   agx_draw_vbo_inner(pctx, info, drawid_offset, indirect, draws, num_draws);
+   ctx->unknown_primitive_count = saved;
 }
 
 static void

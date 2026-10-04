@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include "asahi/lib/agx_primitive_count.h"
+
 #include "util/macros.h"
 
 #include "util/list.h"
@@ -449,6 +451,7 @@ struct hk_cs {
    } timestamp;
 
    /* Remaining state is for graphics only, ignored for compute */
+   uint8_t primitive_count; /* Saturated at AGX_PRIMITIVE_COUNT_UNKNOWN. */
    struct agx_tilebuffer_layout tib;
 
    struct util_dynarray scissor, depth_bias;

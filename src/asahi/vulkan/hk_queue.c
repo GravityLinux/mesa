@@ -109,6 +109,9 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
    memset(c, 0, sizeof(*c));
 
    c->vdm_ctrl_stream_base = cs->addr;
+   if ((dev->dev.params.features & DRM_ASAHI_FEATURE_FEW_PRIMITIVES) &&
+       agx_has_few_primitives(cs->primitive_count))
+      c->flags |= DRM_ASAHI_RENDER_FEW_PRIMITIVES;
 
    agx_pack(&c->ppp_ctrl, CR_PPP_CONTROL, cfg) {
       cfg.enable_w_clamp = true;

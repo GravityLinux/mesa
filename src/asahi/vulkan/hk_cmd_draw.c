@@ -4389,6 +4389,13 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                                             draw, topology);
       }
 
+      if (cs->primitive_count < AGX_PRIMITIVE_COUNT_UNKNOWN) {
+         agx_add_primitive_count(
+            &cs->primitive_count,
+            agx_is_indirect(draw.b) || draw.restart || geom || tess || needs_idx_robust
+               ? AGX_PRIMITIVE_COUNT_UNKNOWN
+               : agx_count_primitives(topology, draw.b.count[0], draw.b.count[1]));
+      }
       cs->stats.cmds++;
    }
 }
