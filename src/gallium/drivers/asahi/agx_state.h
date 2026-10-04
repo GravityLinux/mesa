@@ -713,6 +713,11 @@ struct agx_context {
    bool apple9_xfb_flatshade_first;
    struct pipe_resource *apple9_xfb_target;
    struct primconvert_context *apple9_primconvert;
+
+   /* Apple9 in-place decompression: driver-internal stores to this resource
+    * use an uncompressed descriptor while the decompress pass is recorded.
+    */
+   struct agx_resource *apple9_uncompressed_store;
    void *apple9_xfb_fs;
    void *apple9_xfb_rasterizer;
    void *apple9_xfb_unroll[MESA_PRIM_COUNT][3][2];
@@ -1307,5 +1312,9 @@ agx_texture_buffer_size_el(enum pipe_format format, uint32_t size)
    return MIN2(AGX_TEXTURE_BUFFER_MAX_SIZE, size / blocksize);
 }
 
+void agx_apple9_decompress_inplace(struct agx_context *ctx,
+                                   struct agx_resource *rsrc,
+                                   struct pipe_surface *surf,
+                                   const char *reason);
 void agx_decompress_inplace(struct agx_batch *batch, struct pipe_surface *surf,
                             const char *reason);

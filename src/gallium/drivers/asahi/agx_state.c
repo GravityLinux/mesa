@@ -5787,7 +5787,26 @@ agx_legalize_feedback_loop_surf(struct agx_context *ctx,
       return;
 
    /* Decompress if we can and shadow if we can't. */
-   if (rsrc->base.bind & PIPE_BIND_SHARED) {
+   if ((rsrc->base.bind & PIPE_BIND_SHARED) &&
+       agx_apple9_direct_render_enabled(agx_device(ctx->base.screen))) {
+      /* Shared depth/stencil is never compressed in practice. */
+      if (bit == PIPE_CLEAR_DEPTH) {
+         mesa_logw_once("asahi: Apple9 feedback loop on shared compressed "
+                        "depth is not decompressed");
+         agx_flush_writer(ctx, rsrc, "Feedback loop (Apple9 shared depth)");
+         return;
+      }
+
+      if (agx_get_batch(ctx)->feedback & bit)
+         return;
+
+      agx_apple9_decompress_inplace(ctx, rsrc, surf, "Texture feedback loop");
+
+      /* The decompress pass replaced the batch. Write this attachment
+       * uncompressed for the rest of the feedback loop.
+       */
+      agx_get_batch(ctx)->feedback |= bit;
+   } else if (rsrc->base.bind & PIPE_BIND_SHARED) {
       struct agx_batch *batch = agx_get_batch(ctx);
 
       /* If we already did in-place decompression for this one */
@@ -5832,7 +5851,7 @@ agx_legalize_feedback_loops(struct agx_context *ctx)
 
          for (unsigned cb = 0; cb < ctx->framebuffer.nr_cbufs; ++cb) {
             agx_legalize_feedback_loop_surf(
-               ctx, rsrc, &ctx->framebuffer.cbufs[cb], PIPE_CLEAR_COLOR0 << i);
+               ctx, rsrc, &ctx->framebuffer.cbufs[cb], PIPE_CLEAR_COLOR0 << cb);
          }
 
          /* TODO: Separate stencil? */
@@ -6093,6 +6112,31 @@ agx_apple9_upload_graphics_sysvals(
    return sysvals.gpu;
 }
 
+/* The Apple9 end-of-tile store is a driver-internal image store to each
+ * attachment. Write it uncompressed for attachments in a feedback loop (G13
+ * does the same in its end-of-tile PBE) and during in-place decompression.
+ */
+static bool
+agx_apple9_store_uncompressed(const struct agx_batch *batch,
+                              const struct pipe_image_view *view,
+                              const struct agx_resource *rsrc)
+{
+   if (!rsrc->layout.compressed ||
+       !(view->access & PIPE_IMAGE_ACCESS_DRIVER_INTERNAL))
+      return false;
+
+   if (batch->ctx->apple9_uncompressed_store == rsrc)
+      return true;
+
+   for (unsigned rt = 0; rt < batch->key.nr_cbufs; ++rt) {
+      if ((batch->feedback & (PIPE_CLEAR_COLOR0 << rt)) &&
+          batch->key.cbufs[rt].texture == &rsrc->base)
+         return true;
+   }
+
+   return false;
+}
+
 static void
 agx_apple9_upload_textures(struct agx_batch *batch, struct agx_stage *shader,
                           const struct agx_apple9_render_stage *rs,
@@ -6190,10 +6234,14 @@ agx_apple9_upload_textures(struct agx_batch *batch, struct agx_stage *shader,
       uint8_t *descriptor = (uint8_t *)textures.cpu +
                             slot++ * AGX_APPLE9_TEXTURE_TABLE_STRIDE;
       struct agx_pbe_packed legacy;
-      agx_batch_upload_pbe(batch, &legacy, view, true, false, false, false);
+      bool uncompressed = agx_apple9_store_uncompressed(batch, view, resource);
+      struct ail_layout layout = resource->layout;
+      layout.compressed &= !uncompressed;
+      agx_batch_upload_pbe(batch, &legacy, view, true, false, false,
+                           uncompressed);
       unsigned level = view->u.tex.level;
       if (!agx_apple9_translate_pbe(
-             descriptor, &legacy, view->format, &resource->layout,
+             descriptor, &legacy, view->format, &layout,
              agx_map_texture_gpu(resource, view->u.tex.first_layer), level,
              view->u.tex.last_layer - view->u.tex.first_layer + 1,
              !view->u.tex.single_layer_view)) {
@@ -7660,6 +7708,89 @@ agx_set_global_binding(struct pipe_context *pipe, unsigned first,
 }
 
 void agx_init_state_functions(struct pipe_context *ctx);
+
+/*
+ * Apple9 in-place decompression, for shared resources whose BO cannot be
+ * replaced. libagx_decompress cannot run on Apple9, so use a render pass over
+ * the surface instead: blit the surface onto itself with an uncompressed
+ * end-of-tile store, then mark every compression tile of the surface
+ * uncompressed.
+ *
+ * The self-blit is race-free: each tile is stored only after its own pixels
+ * were reloaded and sampled, other tiles never read it, and render tiles are
+ * multiples of the 16x16 compression tiles. Metadata is filled only after the
+ * pass, so the compressed reads in it still see the original modes.
+ */
+void
+agx_apple9_decompress_inplace(struct agx_context *ctx,
+                              struct agx_resource *rsrc,
+                              struct pipe_surface *surf, const char *reason)
+{
+   struct agx_device *dev = agx_device(ctx->base.screen);
+   struct ail_layout *layout = &rsrc->layout;
+   unsigned level = surf->level;
+   unsigned layers = surf->last_layer - surf->first_layer + 1;
+
+   /* Levels too small to be compressed are written uncompressed anyway. */
+   if (!ail_is_level_logically_compressed(layout, level))
+      return;
+
+   perf_debug(dev, "Decompressing in-place due to: %s", reason);
+
+   /* Pending writes must land before the pass reads them. */
+   agx_flush_writer(ctx, rsrc, "Apple9 in-place decompress");
+
+   /* Copy bits exactly: no sRGB coding, and snorm through sint. */
+   enum pipe_format format = util_format_linear(surf->format);
+   if (util_format_is_snorm(format))
+      format = util_format_snorm_to_sint(format);
+
+   struct pipe_blit_info blit = {
+      .dst =
+         {
+            .resource = &rsrc->base,
+            .level = level,
+            .box =
+               {
+                  .width = u_minify(rsrc->base.width0, level),
+                  .height = u_minify(rsrc->base.height0, level),
+                  .z = surf->first_layer,
+                  .depth = layers,
+               },
+            .format = format,
+         },
+      .mask = util_format_get_mask(format),
+      .filter = PIPE_TEX_FILTER_NEAREST,
+   };
+   blit.src = blit.dst;
+
+   ctx->apple9_uncompressed_store = rsrc;
+   ctx->base.blit(&ctx->base, &blit);
+   agx_flush_writer(ctx, rsrc, "Apple9 in-place decompress");
+   ctx->apple9_uncompressed_store = NULL;
+
+   /* Metadata is 8 bytes per 16x16 tile, padded to cachelines per level. */
+   uint64_t start = layout->level_offsets_compressed_B[level];
+   uint64_t end = level + 1 < layout->levels &&
+                        ail_is_level_allocated_compressed(layout, level + 1)
+                     ? layout->level_offsets_compressed_B[level + 1]
+                     : layout->compression_layer_stride_B;
+   uint64_t mode = ail_tile_mode_uncompressed(layout->format);
+   assert(((end - start) % 16) == 0);
+
+   uint64_t first = layout->metadata_offset_B + start +
+                    (surf->first_layer * layout->compression_layer_stride_B);
+   assert((layout->compression_layer_stride_B % 16) == 0);
+
+   struct agx_batch *batch = agx_get_compute_batch(ctx);
+   agx_batch_init_state(batch);
+   agx_batch_writes(batch, rsrc, level);
+   libagx_fill_uint4(batch, agx_2d((end - start) / 16, layers),
+                     AGX_BARRIER_ALL, agx_map_gpu(rsrc) + first,
+                     layout->compression_layer_stride_B / 16, (uint32_t)mode,
+                     (uint32_t)(mode >> 32), (uint32_t)mode,
+                     (uint32_t)(mode >> 32));
+}
 
 void
 agx_decompress_inplace(struct agx_batch *batch, struct pipe_surface *surf,
