@@ -142,3 +142,18 @@ on `kwin_wayland` makes the loader ignore `LD_LIBRARY_PATH`, so setting that
 variable alone does not select the candidate. The installed system driver is
 available to the prefix-based runner through `/opt/mesa-apple9-system`, whose
 `lib` and `share` directories link to `/usr/lib64` and `/usr/share`.
+
+## Apple9 D32S8 compression regression
+
+`apple9-d32s8-regressions.txt` retains the 18 render-pass cases that exposed
+interleaved meta-copy views of Honeykrisp's split depth/stencil planes. Run these
+with compression enabled (leave `ASAHI_MESA_DEBUG` unset) against a candidate:
+
+```sh
+filter=$(python3 -c 'import pathlib,re; cases=pathlib.Path("src/asahi/ci/m4/apple9-d32s8-regressions.txt").read_text().splitlines(); print("^(?:"+"|".join(map(re.escape,cases))+")$")')
+python3 src/asahi/ci/m4/run.py vk --config /path/to/native-config.json \
+  --driver /path/to/candidate --include-tests "$filter" --jobs 1
+```
+
+The native config must also omit `ASAHI_MESA_DEBUG=nocompress`: the launcher
+sets its recorded environment from that config, not from the invoking shell.

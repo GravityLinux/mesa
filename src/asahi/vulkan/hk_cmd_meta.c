@@ -1362,10 +1362,14 @@ hk_meta_copy_get_image_properties(struct hk_image *img)
          props.stencil.component_mask = BITFIELD_MASK(1);
          break;
       case VK_FORMAT_D32_SFLOAT_S8_UINT:
-         props.depth.view_format = VK_FORMAT_R32G32_UINT;
+         /* Depth and stencil live in separate R32 and R8 planes, each
+          * exposing its data through component zero.  An interleaved RG32
+          * view also selects the wrong compression class for either plane.
+          */
+         props.depth.view_format = VK_FORMAT_R32_UINT;
          props.depth.component_mask = BITFIELD_BIT(0);
-         props.stencil.view_format = VK_FORMAT_R32G32_UINT;
-         props.stencil.component_mask = BITFIELD_BIT(1);
+         props.stencil.view_format = VK_FORMAT_R8_UINT;
+         props.stencil.component_mask = BITFIELD_BIT(0);
          break;
       case VK_FORMAT_D16_UNORM:
          props.depth.view_format = VK_FORMAT_R16_UINT;

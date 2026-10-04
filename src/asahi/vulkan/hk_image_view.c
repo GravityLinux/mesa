@@ -537,6 +537,15 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
       view->plane_count = 1;
       view->planes[0].image_plane =
          hk_image_aspects_to_plane(image, view->vk.aspects);
+
+      /* Meta copies reinterpret each depth/stencil plane as a color image.
+       * For split D32S8, the R8 view addresses the separate stencil plane.
+       */
+      if ((pCreateInfo->flags & VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA) &&
+          image->vk.format == VK_FORMAT_D32_SFLOAT_S8_UINT &&
+          view->vk.aspects == VK_IMAGE_ASPECT_COLOR_BIT &&
+          view->vk.format == VK_FORMAT_R8_UINT)
+         view->planes[0].image_plane = 1;
    } else {
       /* For other formats, retrieve the plane count from the aspect mask
        * and then walk through the aspect mask to map each image plane
