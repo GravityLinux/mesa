@@ -99,3 +99,20 @@ TEST(HKGpuBusy, NanosecondScaleSecondBoundary)
    EXPECT_TRUE(hk_busy_union_add(&second, 0, ns));
    EXPECT_EQ(hk_busy_union_size(&second), ns);
 }
+
+TEST(HKGpuBusy, CS2CardinalityAndThunkHeadroom)
+{
+   /* The 60 s baseline had 78,295 command interval pairs for 289 presents
+    * (~271/frame), with a 2,141-pair GPU-clock second. Every pair may be
+    * disjoint, so test cardinality rather than assuming engine overlap.
+    * 8,192 ranges also covers ~30 frames at the observed mean pairs/frame. */
+   Ranges r;
+   for (unsigned i = 0; i < 8192; ++i) {
+      ASSERT_TRUE(hk_busy_union_add(&r, 2 * i, 2 * i + 1));
+      if (i + 1 == 2141 || i + 1 == 4096 || i + 1 == 8192) {
+         EXPECT_EQ(hk_busy_union_size(&r), uint64_t(i + 1));
+         EXPECT_EQ(r.count, i + 1);
+         EXPECT_FALSE(r.overflow);
+      }
+   }
+}

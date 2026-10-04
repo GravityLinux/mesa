@@ -47,7 +47,7 @@ A timestamp pair occupied by an application query, an exhausted slot pool,
 invalid timestamps, intervals arriving outside the 64-second retained-bin
 window, or interval-storage overflow makes the result a **lower bound**.
 Check `app_owned`, `pool_full`, `invalid`, `too_late`, `query_errors`, and each
-row's `overflow`. Each bin stores at most 2048 disjoint ranges per union and
+row's `overflow`. Each bin stores at most 8192 disjoint ranges per union and
 reports overflow instead of silently claiming full coverage. No slot is
 recycled merely because an end timestamp happens to be nonzero; completion of
 its submitted private queue timeline point is required first.
@@ -73,3 +73,20 @@ clock drift; its call uncertainty does not bound NTP clock steps after startup.
 Take the file after at least one collection past the measurement window (or
 normal queue teardown), and require `window_drained=true` for complete eligible
 work. An unobserved/undrained second is not evidence that the GPU was idle.
+
+The interval bound is sized from the CS2 baseline: 78,295 requested pairs over
+289 presents (~271 pairs/frame), and a peak GPU-clock second containing 2,141
+pairs. The former 2,048-range limit overflowed in two of the 59 measured full
+seconds. An 8,192-range bound covers ~30 frames at that observed average
+cardinality and 3.8 times the observed peak second, even if every interval is
+disjoint. This is headroom, not a promise about all future workloads; overflow
+remains explicit. Ranges are allocated lazily, so normal bins retain their
+previous allocations. The hard maximum for all 64 retained bins and four unions
+rises from 8 MiB to 32 MiB per VkDevice, with no change to timestamp BO size,
+query cadence or firmware timestamp requests.
+
+`GPU_BUSY_CONFIG` records `ranges_per_union`. Each aggregate row reports the
+four current range counts and `overflow_mask` (bits 0/1/2/3 are overall,
+vertex, fragment and compute). Preserve `overflow=0`, all coverage checks and
+`window_drained=true` when describing a rerun as exact. The old overflowing
+logs cannot be repaired into exact interval unions without rerunning.

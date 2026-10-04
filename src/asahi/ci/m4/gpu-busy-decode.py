@@ -97,6 +97,7 @@ def summarize(session, start, end, clock="cpu"):
         "input_clock": clock, "window_ns": [start, end],
         "anchor_call_uncertainty_ns": after - before,
         "anchor_clock_drift_assumed_negligible": True,
+        "configured_ranges_per_union": config.get("ranges_per_union"),
         "full_gpu_seconds": [first, stop], "full_second_count": count,
         "window_drained": drained, "lower_bound": bool(lower_bound),
         "seconds_without_rows": missing, "interval_overflow": overflow,

@@ -7,7 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define HK_BUSY_MAX_RANGES 2048
+/* Storage grows only when needed. Leave bounded headroom for hundreds of
+ * command pairs per frame and multiple frames in one GPU-clock second. */
+#define HK_BUSY_MAX_RANGES 8192
 
 struct hk_busy_interval {
    uint64_t start, end;

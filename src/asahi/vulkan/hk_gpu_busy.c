@@ -142,19 +142,24 @@ flush_log(struct busy_device *d, uint64_t now)
       struct busy_bin *b = &d->bins[i];
       if (!b->valid || !b->dirty)
          continue;
-      bool overflow = false;
-      for (unsigned e = 0; e < 4; ++e)
-         overflow |= b->ranges[e].overflow;
-      fprintf(d->file,
-              "GPU_BUSY pid=%d device=%p cpu_ns=%" PRIu64 " gpu_second=%" PRIu64
-              " revision=%" PRIu64 " union_ns=%" PRIu64 " vertex_ns=%" PRIu64
-              " fragment_ns=%" PRIu64 " compute_ns=%" PRIu64 " pairs=%" PRIu64
-              " overflow=%u\n",
-              getpid(), (void *)d->dev, now, b->second, ++b->revision,
-              hk_busy_union_size(&b->ranges[0]),
-              hk_busy_union_size(&b->ranges[VTX]),
-              hk_busy_union_size(&b->ranges[FRAG]),
-              hk_busy_union_size(&b->ranges[COMPUTE]), b->pairs, overflow);
+      unsigned overflow_mask = 0;
+      for (unsigned e = 0; e < 4; ++e) {
+         if (b->ranges[e].overflow)
+            overflow_mask |= 1u << e;
+      }
+      fprintf(
+         d->file,
+         "GPU_BUSY pid=%d device=%p cpu_ns=%" PRIu64 " gpu_second=%" PRIu64
+         " revision=%" PRIu64 " union_ns=%" PRIu64 " vertex_ns=%" PRIu64
+         " fragment_ns=%" PRIu64 " compute_ns=%" PRIu64 " pairs=%" PRIu64
+         " overflow=%u overflow_mask=%u"
+         " union_ranges=%u vertex_ranges=%u fragment_ranges=%u compute_ranges=%u\n",
+         getpid(), (void *)d->dev, now, b->second, ++b->revision,
+         hk_busy_union_size(&b->ranges[0]), hk_busy_union_size(&b->ranges[VTX]),
+         hk_busy_union_size(&b->ranges[FRAG]),
+         hk_busy_union_size(&b->ranges[COMPUTE]), b->pairs, overflow_mask != 0,
+         overflow_mask, b->ranges[0].count, b->ranges[VTX].count,
+         b->ranges[FRAG].count, b->ranges[COMPUTE].count);
       b->dirty = false;
    }
    uint64_t pending = 0, oldest_pending = UINT64_MAX;
@@ -362,13 +367,14 @@ hk_gpu_busy_init(struct hk_queue *queue)
               "GPU_BUSY_CONFIG pid=%d device=%p gpu_anchor_ns=%" PRIu64
               " cpu_before_ns=%" PRIu64 " cpu_after_ns=%" PRIu64
               " unix_before_ns=%" PRIu64 " unix_after_ns=%" PRIu64
-              " frequency_hz=%" PRIu64 " slots_per_queue=%u bins=%u"
+              " frequency_hz=%" PRIu64
+              " slots_per_queue=%u bins=%u ranges_per_union=%u"
               " source=firmware-command-timestamps scope=VkDevice"
               " interval_union=exact revision_policy=replace\n",
               getpid(), (void *)dev, gpu, before, after, unix_before,
               unix_after,
               (uint64_t)dev->dev.params.command_timestamp_frequency_hz,
-              BUSY_SLOTS, BUSY_SECONDS);
+              BUSY_SLOTS, BUSY_SECONDS, HK_BUSY_MAX_RANGES);
       fflush(d->file);
    }
    q->device = d;
