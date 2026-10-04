@@ -2365,6 +2365,17 @@ vk_meta_copy_image(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
       region.dstOffset = vk_image_offset_to_elements(dst_img, region.dstOffset);
 
       if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) {
+         /* Converting the source extent to elements sanitizes depth to one
+          * for a 2D array. Restore the slice count when rendering into a 3D
+          * image, whose destination subresource has only one array layer.
+          * The compute path similarly derives its Z range from source layers.
+          */
+         if (src_img->image_type == VK_IMAGE_TYPE_2D &&
+             dst_img->image_type == VK_IMAGE_TYPE_3D) {
+            region.extent.depth = vk_image_subresource_layer_count(
+               src_img, &region.srcSubresource);
+         }
+
          copy_image_region_gfx(cmd, meta, src_img, info->srcImageLayout,
                                src_props, dst_img, info->dstImageLayout,
                                dst_props, &region);
