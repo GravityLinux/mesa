@@ -1336,25 +1336,45 @@ hk_meta_copy_image2(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
    }
 }
 
+/* Reinterpret one physical plane, never a multi-planar container format.
+ * Compressed planes must retain their channel partition; raw planes may use
+ * integer views of the same byte size for bit-preserving copies.
+ */
+static VkFormat
+hk_meta_copy_plane_format(struct hk_image *img, unsigned plane, VkFormat format)
+{
+   if (!hk_meta_apple9(img->vk.base.device))
+      return format;
+
+   const struct ail_layout *layout = &img->planes[plane].layout;
+   if (!layout->compressed) {
+      switch (util_format_get_blocksize(layout->format)) {
+      case 1: return VK_FORMAT_R8_UINT;
+      case 2: return VK_FORMAT_R16_UINT;
+      case 4: return VK_FORMAT_R32_UINT;
+      case 8: return VK_FORMAT_R32G32_UINT;
+      case 16: return VK_FORMAT_R32G32B32A32_UINT;
+      default: UNREACHABLE("Invalid copy plane size");
+      }
+   }
+
+   return vk_format_from_pipe_format(canonical_format_pipe(layout->format));
+}
+
 static inline struct vk_meta_copy_image_properties
 hk_meta_copy_get_image_properties(struct hk_image *img)
 {
    struct vk_meta_copy_image_properties props = {.tile_size = {16, 16, 1}};
 
-   if (!vk_format_is_depth_or_stencil(img->vk.format)) {
-      props.color.view_format = img->vk.format;
-      if (hk_meta_apple9(img->vk.base.device)) {
-         props.color.view_format = canonical_format(img->vk.format);
-         if (!img->planes[0].layout.compressed) {
-            switch (vk_format_get_blocksize(img->vk.format)) {
-            case 1: props.color.view_format = VK_FORMAT_R8_UINT; break;
-            case 2: props.color.view_format = VK_FORMAT_R16_UINT; break;
-            case 4: props.color.view_format = VK_FORMAT_R32_UINT; break;
-            case 8: props.color.view_format = VK_FORMAT_R32G32_UINT; break;
-            case 16: props.color.view_format = VK_FORMAT_R32G32B32A32_UINT; break;
-            }
-         }
+   const struct vk_format_ycbcr_info *ycbcr_info =
+      vk_format_get_ycbcr_info(img->vk.format);
+   if (ycbcr_info) {
+      for (unsigned p = 0; p < img->plane_count; ++p) {
+         props.plane[p].view_format =
+            hk_meta_copy_plane_format(img, p, ycbcr_info->planes[p].format);
       }
+   } else if (!vk_format_is_depth_or_stencil(img->vk.format)) {
+      props.color.view_format = hk_meta_copy_plane_format(img, 0, img->vk.format);
    } else {
       switch (img->vk.format) {
       case VK_FORMAT_S8_UINT:
