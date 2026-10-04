@@ -2473,8 +2473,12 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
       caps->robust_buffer_access_behavior = false;
       /* EGL robustness context creation requires a contract we cannot provide. */
       caps->device_reset_status_query = false;
-      /* The Apple9 texture compiler does not lower external sampler dimensions. */
-      caps->texture_external = false;
+      /* Advertise external EGL images so compositors load
+       * glEGLImageTargetTexture2DOES and can import client DMA-BUF buffers as
+       * ordinary 2D textures. Sampling through an external-only sampler is
+       * still unsupported, and the importer keeps such buffers on the 2D path.
+       */
+      caps->texture_external = true;
       /* Cull distances still need primitive rejection lowering. */
       caps->cull_distance = false;
       /* One RGBA8 tile-output slot per active color attachment. */
