@@ -5045,12 +5045,31 @@ apple9_hoist_limit(void)
    return env ? atoi(env) : 8;
 }
 
-/* Samples that fetch from memory; queries return without waiting. */
+/* Long-latency operations to issue early: samples that fetch from memory
+ * (queries return without waiting) and reorderable buffer loads.
+ * AGX_APPLE9_HOIST_LOADS=0 limits hoisting to samples. */
 static bool
 apple9_hoist_sample(nir_instr *instr)
 {
-   return instr->type == nir_instr_type_tex &&
-          !nir_tex_instr_is_query(nir_instr_as_tex(instr));
+   if (instr->type == nir_instr_type_tex)
+      return !nir_tex_instr_is_query(nir_instr_as_tex(instr));
+   if (instr->type != nir_instr_type_intrinsic)
+      return false;
+   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+   switch (intr->intrinsic) {
+   case nir_intrinsic_load_ubo:
+   case nir_intrinsic_load_ssbo:
+   case nir_intrinsic_load_global_2x32: {
+      static int loads = -1;
+      if (loads < 0) {
+         const char *env = getenv("AGX_APPLE9_HOIST_LOADS");
+         loads = !env || atoi(env);
+      }
+      return loads && nir_intrinsic_can_reorder(intr);
+   }
+   default:
+      return false;
+   }
 }
 
 /* Instructions a sample can be hoisted across: pure ALU and reorderable
