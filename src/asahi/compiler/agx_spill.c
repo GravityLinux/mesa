@@ -42,6 +42,73 @@ dist_sum(dist_t A, dist_t B)
    return (A + B < A) ? DIST_INFINITY : (A + B);
 }
 
+/*
+ * Braun and Hack weight next-use distances that are only reached by leaving a
+ * loop with a large constant, so inside a loop a value used only after it
+ * looks far away. Without this, values the loop never touches compete with
+ * its working set, and the loop spills and reloads its own values on every
+ * iteration, often in a single branch arm, which makes the register state
+ * differ at the join and forces parallel copies there.
+ */
+#define LOOP_EXIT_DIST 100000
+
+/* Structured control flow places a loop's blocks contiguously in source
+ * order, from the header to its last back-edge predecessor. loop_end[h] is
+ * that predecessor's index for each loop header h, and 0 otherwise.
+ */
+static unsigned *
+compute_loop_ends(agx_context *ctx, void *memctx)
+{
+   unsigned *loop_end = rzalloc_array(memctx, unsigned, ctx->num_blocks);
+   agx_foreach_block(ctx, block) {
+      if (!block->loop_header)
+         continue;
+      agx_foreach_predecessor(block, pred) {
+         if ((*pred)->index >= block->index)
+            loop_end[block->index] = MAX2(loop_end[block->index], (*pred)->index);
+      }
+   }
+   return loop_end;
+}
+
+static bool
+loop_contains(const unsigned *loop_end, unsigned header, unsigned block)
+{
+   return header <= block && block <= loop_end[header];
+}
+
+/* Number of loops the edge pred -> succ leaves. */
+static unsigned
+loops_exited(agx_context *ctx, const unsigned *loop_end, agx_block *pred,
+             agx_block *succ)
+{
+   unsigned exits = 0;
+   for (unsigned h = 0; h <= pred->index && h < ctx->num_blocks; ++h) {
+      if (loop_end[h] && loop_contains(loop_end, h, pred->index) &&
+          !loop_contains(loop_end, h, succ->index))
+         ++exits;
+   }
+   return exits;
+}
+
+static bool
+spill_trace_loops(void)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = getenv("AGX_SPILL_TRACE_LOOPS") != NULL;
+   return enabled;
+}
+
+static bool
+spill_loop_handling(void)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = getenv("AGX_SPILL_NO_LOOP_HANDLING") == NULL;
+   return enabled;
+}
+
 struct next_uses {
    struct hash_table_u64 *ht;
 };
@@ -200,6 +267,9 @@ struct spill_ctx {
 
    /* If true, we cannot use scratch and must only rematerialize. */
    bool remat_only;
+
+   /* Loop spans (see compute_loop_ends), or NULL without loop handling. */
+   const unsigned *loop_end;
 };
 
 static inline struct spill_block *
@@ -838,11 +908,91 @@ min_algorithm(struct spill_ctx *ctx)
    util_dynarray_fini(&local_next_ip);
 }
 
+/* Highest register demand at any instruction of a block not yet processed by
+ * the spiller, in node_size units. Rematerializable values are evicted and
+ * recreated for free, so they only count at the instructions using them.
+ * Sources are late-kill, matching min_algorithm. Also records the values
+ * the block uses.
+ */
+static unsigned
+block_max_pressure(struct spill_ctx *ctx, agx_block *block, BITSET_WORD *live,
+                   BITSET_WORD *used)
+{
+   memset(live, 0, BITSET_BYTES(ctx->n));
+   unsigned pressure = 0;
+   U_SPARSE_BITSET_FOREACH_SET(&block->live_out, i) {
+      if (i < ctx->n && !ctx->remat[i]) {
+         BITSET_SET(live, i);
+         pressure += node_size(ctx, i);
+      }
+   }
+   unsigned max = pressure;
+   agx_foreach_instr_in_block_rev(block, I) {
+      if (I->op == AGX_OPCODE_PHI)
+         break;
+      unsigned defs = 0;
+      agx_foreach_ssa_dest(I, d) {
+         unsigned v = I->dest[d].value;
+         if (v >= ctx->n)
+            continue;
+         defs += node_size(ctx, v);
+         if (BITSET_TEST(live, v)) {
+            BITSET_CLEAR(live, v);
+            pressure -= node_size(ctx, v);
+         }
+      }
+      unsigned remat_srcs = 0;
+      agx_foreach_ssa_src(I, s) {
+         unsigned v = I->src[s].value;
+         if (v >= ctx->n)
+            continue;
+         BITSET_SET(used, v);
+         if (ctx->remat[v]) {
+            remat_srcs += node_size(ctx, v);
+         } else if (!BITSET_TEST(live, v)) {
+            BITSET_SET(live, v);
+            pressure += node_size(ctx, v);
+         }
+      }
+      max = MAX2(max, pressure + remat_srcs + defs);
+   }
+   return max;
+}
+
+/* Whether a live-in value of a loop header is in a register at the end of
+ * every forward predecessor, which have already been processed.
+ */
+static bool
+in_preheader_w_exit(struct spill_ctx *ctx, agx_block *header, unsigned node)
+{
+   /* The header's own phis are defined on the entry edge */
+   agx_foreach_phi_in_block(header, phi) {
+      if (phi->dest[0].value == node)
+         return true;
+   }
+
+   agx_foreach_predecessor(header, pred) {
+      if ((*pred)->index >= header->index)
+         continue;
+      struct spill_block *sp = spill_block(ctx, *pred);
+      bool found = false;
+      for (unsigned i = 0; i < sp->nW_exit && !found; ++i)
+         found = sp->W_exit[i] == node;
+      if (!found)
+         return false;
+   }
+   return true;
+}
+
 /*
- * TODO: Implement section 4.2 of the paper.
+ * Section 4.2 of the paper: at a loop header, keep the values used inside the
+ * loop in registers, nearest next use first. Values live through the loop but
+ * unused in it (next use beyond a loop exit) are kept only in registers the
+ * loop's own peak demand leaves free; otherwise they are spilled once, before
+ * the loop, instead of being evicted and reloaded on every iteration.
  *
- * For now, we implement the simpler heuristic in Hack's thesis: sort
- * the live-in set (+ destinations of phis) by next-use distance.
+ * Without loop handling, fall back to the heuristic in Hack's thesis: sort the
+ * live-in set (+ destinations of phis) by next-use distance.
  */
 static ATTRIBUTE_NOINLINE void
 compute_w_entry_loop_header(struct spill_ctx *ctx)
@@ -864,19 +1014,79 @@ compute_w_entry_loop_header(struct spill_ctx *ctx)
    /* Sort by next-use distance */
    util_qsort_r(candidates, j, sizeof(struct candidate), cmp_dist, ctx);
 
+   /* Values live through the loop but unused in it are live in every block
+    * of the loop, so registers left for them are k minus the loop's peak
+    * demand without them.
+    */
+   unsigned through_budget = ctx->k;
+   BITSET_WORD *used = NULL;
+   if (ctx->loop_end && ctx->loop_end[block->index]) {
+      unsigned end = ctx->loop_end[block->index];
+      BITSET_WORD *live = malloc(BITSET_BYTES(ctx->n));
+      used = calloc(BITSET_WORDS(ctx->n), sizeof(BITSET_WORD));
+      unsigned peak = 0;
+      agx_foreach_block_from(ctx->shader, block, b) {
+         if (b->index > end)
+            break;
+         peak = MAX2(peak, block_max_pressure(ctx, b, live, used));
+         agx_foreach_phi_in_block(b, phi) {
+            agx_foreach_ssa_src(phi, s) {
+               agx_block *pred =
+                  *util_dynarray_element(&b->predecessors, agx_block *, s);
+               if (loop_contains(ctx->loop_end, block->index, pred->index) &&
+                   phi->src[s].value < ctx->n)
+                  BITSET_SET(used, phi->src[s].value);
+            }
+         }
+      }
+      free(live);
+      unsigned through = 0;
+      for (unsigned i = 0; i < j; ++i) {
+         unsigned v = candidates[i].node;
+         if (!BITSET_TEST(used, v) && !ctx->remat[v])
+            through += node_size(ctx, v);
+      }
+      unsigned own = peak > through ? peak - through : 0;
+      through_budget = own < ctx->k ? ctx->k - own : 0;
+      if (spill_trace_loops())
+         fprintf(stderr,
+                 "SPILL_LOOP header=%u end=%u k=%u live_in=%u peak=%u "
+                 "through=%u budget=%u\n",
+                 block->index, end, ctx->k, j, peak, through, through_budget);
+   }
+
    /* Take as much as we can */
+   unsigned through_taken = 0;
    for (unsigned i = 0; i < j; ++i) {
       unsigned node = candidates[i].node;
       unsigned comps = node_size(ctx, node);
+      bool through = used && !BITSET_TEST(used, node);
 
-      if ((ctx->nW + comps) <= ctx->k) {
+      /* Reloading a value before a loop that does not use it never pays:
+       * keep it only if the preheader still has it in a register, and only
+       * in registers the loop leaves free.
+       */
+      bool fits = (ctx->nW + comps) <= ctx->k;
+      if (through) {
+         fits &= through_taken + comps <= through_budget &&
+                 in_preheader_w_exit(ctx, block, node);
+      }
+
+      if (fits) {
          insert_W(ctx, node);
          sb->W_entry[sb->nW_entry++] = node;
+         if (through)
+            through_taken += comps;
       }
+      if (spill_trace_loops())
+         fprintf(stderr, "  %%%u size=%u dist=%u%s%s\n", node, comps,
+                 candidates[i].dist, through ? " through" : "",
+                 fits ? " W" : "");
    }
 
    assert(ctx->nW <= ctx->k);
    free(candidates);
+   free(used);
 }
 
 /*
@@ -1021,7 +1231,7 @@ compute_s_entry(struct spill_ctx *ctx)
 
 static ATTRIBUTE_NOINLINE void
 global_next_use_distances(agx_context *ctx, void *memctx,
-                          struct spill_block *blocks)
+                          struct spill_block *blocks, const unsigned *loop_end)
 {
    u_worklist worklist;
    u_worklist_init(&worklist, ctx->num_blocks, NULL);
@@ -1043,8 +1253,9 @@ global_next_use_distances(agx_context *ctx, void *memctx,
    BITSET_WORD *defined =
       malloc(BITSET_WORDS(ctx->alloc) * sizeof(BITSET_WORD));
 
-   struct next_uses dists;
+   struct next_uses dists, far;
    init_next_uses(&dists, NULL);
+   init_next_uses(&far, NULL);
 
    /* Iterate the work list in reverse order since liveness is backwards */
    while (!u_worklist_is_empty(&worklist)) {
@@ -1120,6 +1331,16 @@ global_next_use_distances(agx_context *ctx, void *memctx,
             set_next_use(&dists, I->dest[0].value, DIST_INFINITY);
          }
 
+         /* Uses reached only by leaving loops are far away inside them. */
+         unsigned exits = loop_end ? loops_exited(ctx, loop_end, *pred, blk) : 0;
+         if (exits) {
+            clear_next_uses(&far);
+            foreach_next_use(&dists, node, dist) {
+               set_next_use(&far, node, dist_sum(dist, exits * LOOP_EXIT_DIST));
+            }
+            copy_next_uses(&dists, &far);
+         }
+
          /* Make live the corresponding source */
          agx_foreach_phi_in_block(blk, I) {
             agx_index operand = I->src[agx_predecessor_index(blk, *pred)];
@@ -1136,6 +1357,7 @@ global_next_use_distances(agx_context *ctx, void *memctx,
    free(defined);
    u_worklist_fini(&worklist);
    destroy_next_uses(&dists);
+   destroy_next_uses(&far);
 }
 
 static ATTRIBUTE_NOINLINE void
@@ -1197,7 +1419,9 @@ agx_spill(agx_context *ctx, unsigned k, bool remat_only)
       rzalloc_array(memctx, struct spill_block, ctx->num_blocks);
 
    /* Step 1. Compute global next-use distances */
-   global_next_use_distances(ctx, memctx, blocks);
+   unsigned *loop_end =
+      spill_loop_handling() ? compute_loop_ends(ctx, memctx) : NULL;
+   global_next_use_distances(ctx, memctx, blocks, loop_end);
    validate_next_use_info(ctx, blocks);
 
    /* Reserve a memory variable for every regular variable */
@@ -1226,6 +1450,7 @@ agx_spill(agx_context *ctx, unsigned k, bool remat_only)
          .S = S,
          .spill_base = n,
          .remat_only = remat_only,
+         .loop_end = loop_end,
       };
 
       compute_w_entry(&sctx);
@@ -1264,4 +1489,10 @@ agx_spill(agx_context *ctx, unsigned k, bool remat_only)
 
    /* Remat can introduce dead code */
    agx_dce(ctx, false);
+
+   if (spill_trace_loops()) {
+      fprintf(stderr, "SPILL_RESULT_BEGIN\n");
+      agx_print_shader(ctx, stderr);
+      fprintf(stderr, "SPILL_RESULT_END\n");
+   }
 }
