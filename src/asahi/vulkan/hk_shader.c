@@ -3863,6 +3863,70 @@ hk_apple9_needs_deferral(uint32_t count,
    return false;
 }
 
+/* Debug only (HK_APPLE9_EAGER_VARIANTS): compile a deferred pipeline's
+ * variant when it is created, as a draw would, so offline replay that never
+ * draws reaches the backend. State the pipeline leaves dynamic takes simple
+ * defaults, so the variant can differ from one a real draw selects.
+ */
+static void
+hk_apple9_eager_variant(struct hk_device *dev, uint32_t count,
+                        struct vk_shader *const *shaders,
+                        const struct vk_graphics_pipeline_state *pstate)
+{
+   struct hk_api_shader *api[HK_APPLE9_GFX_STAGES] = {NULL};
+   for (uint32_t i = 0; i < count; ++i)
+      api[shaders[i]->stage] = container_of(shaders[i], struct hk_api_shader, vk);
+   if ((!api[MESA_SHADER_VERTEX] && !api[MESA_SHADER_MESH]) ||
+       (pstate && (pstate->pipeline_flags &
+                   VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR)))
+      return;
+
+   struct vk_vertex_input_state vi = {.bindings_valid = 1};
+   vi.bindings[0].stride = 16;
+   vi.attributes_valid = BITFIELD_MASK(MESA_VK_MAX_VERTEX_ATTRIBUTES);
+   for (unsigned a = 0; a < MESA_VK_MAX_VERTEX_ATTRIBUTES; ++a)
+      vi.attributes[a].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+   struct vk_input_assembly_state ia = {
+      .primitive_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+   };
+   struct vk_viewport_state vp = {.viewport_count = 1, .scissor_count = 1};
+   struct vk_multisample_state ms = {
+      .rasterization_samples = VK_SAMPLE_COUNT_1_BIT,
+      .sample_mask = 0xffff,
+   };
+   struct vk_render_pass_state rp = {
+      .color_attachment_count = 1,
+      .color_attachment_formats = {VK_FORMAT_R8G8B8A8_UNORM},
+   };
+   struct vk_color_blend_state cb = {0};
+   struct vk_color_attachment_location_state cal;
+   for (unsigned rt = 0; rt < MESA_VK_MAX_COLOR_ATTACHMENTS; ++rt) {
+      cb.attachments[rt].write_mask = 0xf;
+      cal.color_map[rt] = rt;
+   }
+
+   struct vk_graphics_pipeline_state state = {
+      .vi = pstate && pstate->vi ? pstate->vi : &vi,
+      .ia = pstate && pstate->ia ? pstate->ia : &ia,
+      .vp = pstate && pstate->vp ? pstate->vp : &vp,
+      .ms = pstate && pstate->ms ? pstate->ms : &ms,
+      .rp = pstate && pstate->rp ? pstate->rp : &rp,
+      .cal = pstate && pstate->cal ? pstate->cal : &cal,
+      .pipeline_flags = pstate ? pstate->pipeline_flags : 0,
+   };
+   if (pstate && pstate->cb) {
+      state.cb = pstate->cb;
+   } else {
+      cb.attachment_count = state.rp->color_attachment_count;
+      state.cb = &cb;
+   }
+   BITSET_SET(state.dynamic, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES);
+
+   struct hk_api_shader *variant[HK_APPLE9_GFX_STAGES];
+   if (hk_apple9_resolve_graphics(dev, api, &state, variant) != VK_SUCCESS)
+      fprintf(stderr, "HK_APPLE9_EAGER_VARIANTS: variant compile failed\n");
+}
+
 static VkResult
 hk_apple9_defer_graphics(struct hk_device *dev, uint32_t count,
                          struct vk_shader_compile_info *infos,
@@ -3925,6 +3989,8 @@ hk_apple9_defer_graphics(struct hk_device *dev, uint32_t count,
             hk_api_shader_destroy(&dev->vk, out[i], alloc);
       }
       memset(out, 0, count * sizeof(*out));
+   } else if (getenv("HK_APPLE9_EAGER_VARIANTS")) {
+      hk_apple9_eager_variant(dev, count, out, state);
    }
    return result;
 }
