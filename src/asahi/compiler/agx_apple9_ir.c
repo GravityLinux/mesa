@@ -2054,7 +2054,7 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
                         condition == AGX_APPLE9_PREDICATE_EXT_FLE_SEQUENCE ||
                         condition == AGX_APPLE9_PREDICATE_EXT_IEQ);
             valid &= (short_form || extended_form || loop_form) &&
-                     instruction->nr_srcs == 2 &&
+                     instruction->nr_srcs + util_bitcount(instruction->alu_src_uniform_mask) == 2 &&
                      (instruction->immediate &
                       ~(0xffu | AGX_APPLE9_PREDICATE_INVERT |
                         AGX_APPLE9_PREDICATE_BANK_MASK)) == 0 &&
@@ -5591,7 +5591,7 @@ pack_predicate_compare(const struct agx_apple9_vir_instr *instruction,
    const bool loop_form =
       instruction->encoding == AGX_APPLE9_ENC_PREDICATE_COMPARE_LOOP;
    if ((!short_form && !extended_form && !loop_form) ||
-       instruction->nr_srcs != 2 ||
+       instruction->alu_src_immediate_mask ||
        (instruction->immediate & ~(0xffu | AGX_APPLE9_PREDICATE_INVERT |
                                    AGX_APPLE9_PREDICATE_BANK_MASK)) != 0)
       return false;
@@ -5612,10 +5612,11 @@ pack_predicate_compare(const struct agx_apple9_vir_instr *instruction,
       return false;
    }
 
-   const unsigned src0 = phys[instruction->src[0]];
-   const unsigned src1 = phys[instruction->src[1]];
-   if (src0 >= AGX_APPLE9_GPR_COUNT || src1 >= AGX_APPLE9_GPR_COUNT)
+   uint32_t source[3];
+   uint8_t live;
+   if (!apple9_alu_sources(instruction, phys, 2, source, &live))
       return false;
+   unsigned src0 = source[0], src1 = source[1];
 
    const unsigned predicate_bank =
       (instruction->immediate & AGX_APPLE9_PREDICATE_BANK_MASK) >>
@@ -5636,9 +5637,9 @@ pack_predicate_compare(const struct agx_apple9_vir_instr *instruction,
     * are hardware-proven only for the ordinary predicate forms; do not
     * extrapolate them to the loop form. */
    if (!loop_form) {
-      if (!(instruction->live_after_mask & BITFIELD_BIT(0)))
+      if (!(live & BITFIELD_BIT(0)))
          control |= 0x08;
-      if (!(instruction->live_after_mask & BITFIELD_BIT(1)))
+      if (!(live & BITFIELD_BIT(1)))
          control |= 0x10;
    }
 
@@ -5648,12 +5649,13 @@ pack_predicate_compare(const struct agx_apple9_vir_instr *instruction,
       uint8_t bytes[6] = {opcode,    (uint8_t)(((src0 & 63) << 1) | 1),
                           control,   (uint8_t)(((src1 & 63) << 1) | 1),
                           condition, 0x00};
-      set_bits(bytes, short_form ? 40 : 56, 1, src0 >> 6);
-      set_bits(bytes, short_form ? 42 : 58, 1, src1 >> 6);
+      set_bits(bytes, short_form ? 40 : 56, 1, (src0 >> 6) & 1);
+      set_bits(bytes, short_form ? 42 : 58, 1, (src1 >> 6) & 1);
       if (half) {
          bytes[1] &= ~1u;
          bytes[3] &= ~1u;
       }
+      pack_binary_uniforms(bytes, instruction, source);
       packed_init(packed, bytes, sizeof(bytes));
    } else {
       uint8_t bytes[10] = {
@@ -5663,11 +5665,19 @@ pack_predicate_compare(const struct agx_apple9_vir_instr *instruction,
          condition, 0x00, /* bits 61..63: dependency slot index */
          0x00,      0x00,
       };
-      set_bits(bytes, short_form ? 40 : 56, 1, src0 >> 6);
-      set_bits(bytes, short_form ? 42 : 58, 1, src1 >> 6);
+      set_bits(bytes, short_form ? 40 : 56, 1, (src0 >> 6) & 1);
+      set_bits(bytes, short_form ? 42 : 58, 1, (src1 >> 6) & 1);
       if (half) {
          bytes[1] &= ~1u;
          bytes[3] &= ~1u;
+      }
+      for (unsigned s = 0; s < 2; ++s) {
+         if (instruction->alu_src_uniform_mask & BITFIELD_BIT(s)) {
+            set_bits(bytes, s ? 31 : 15, 1, 0);
+            set_bits(bytes, s ? 20 : 19, 1, (source[s] >> 6) & 1);
+            set_bits(bytes, s ? 58 : 56, 1, source[s] >> 7);
+            set_bits(bytes, s ? 57 : 55, 1, 1);
+         }
       }
       packed_init(packed, bytes, sizeof(bytes));
    }
@@ -7030,7 +7040,8 @@ agx_apple9_pack_vir_instruction(const struct agx_apple9_vir_instr *instruction,
        instruction->op != AGX_APPLE9_VIR_UMAX &&
        instruction->op != AGX_APPLE9_VIR_FMIN &&
        instruction->op != AGX_APPLE9_VIR_FMAX &&
-       instruction->op != AGX_APPLE9_VIR_SELECT) {
+       instruction->op != AGX_APPLE9_VIR_SELECT &&
+       instruction->op != AGX_APPLE9_VIR_PREDICATE_COMPARE) {
       if (reason)
          *reason = "Apple9 operation does not admit inline ALU operands";
       return false;

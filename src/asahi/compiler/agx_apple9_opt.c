@@ -358,6 +358,9 @@ static void
 inline_alu_sources(struct agx_apple9_vir_instr *I, const uint16_t *uniform_read,
                       const bool *constant, const uint32_t *values)
 {
+   bool predicate = I->op == AGX_APPLE9_VIR_PREDICATE_COMPARE &&
+      (I->encoding == AGX_APPLE9_ENC_PREDICATE_COMPARE_SHORT ||
+       I->encoding == AGX_APPLE9_ENC_PREDICATE_COMPARE_EXTENDED);
    bool select = I->op == AGX_APPLE9_VIR_SELECT &&
       I->encoding != AGX_APPLE9_ENC_HALF_COMPARE_SELECT;
    bool fma = I->op == AGX_APPLE9_VIR_FMA;
@@ -371,7 +374,7 @@ inline_alu_sources(struct agx_apple9_vir_instr *I, const uint16_t *uniform_read,
       I->op == AGX_APPLE9_VIR_IMIN || I->op == AGX_APPLE9_VIR_IMAX ||
       I->op == AGX_APPLE9_VIR_UMIN || I->op == AGX_APPLE9_VIR_UMAX ||
       I->op == AGX_APPLE9_VIR_FMIN || I->op == AGX_APPLE9_VIR_FMAX;
-   if ((!select && !fma && !binary && !integer) ||
+   if ((!predicate && !select && !fma && !binary && !integer) ||
        I->nr_srcs != arity || I->alu_src_uniform_mask || I->alu_src_immediate_mask)
       return;
 
@@ -405,7 +408,7 @@ inline_alu_sources(struct agx_apple9_vir_instr *I, const uint16_t *uniform_read,
     * compact form when commuting a lone uniform to B; A immediates still
     * require materialization. Fixed integer operands are independent. */
    if ((fma && file[0] == AGX_APPLE9_FILE_IMMEDIATE) ||
-       (!select && !fma && !float2 && !integer && file[0] && file[1]))
+       (!predicate && !select && !fma && !float2 && !integer && file[0] && file[1]))
       file[0] = 0;
 
    unsigned source = 0;
@@ -642,8 +645,13 @@ agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
       default:
          break;
       }
-      if (!agx_apple9_instr_is_pure_alu(I))
+      if (!agx_apple9_instr_is_pure_alu(I)) {
+         /* A predicate has no SSA destination and cannot be CSE'd as an ALU
+          * value, but its explicit operands may still read uniforms. */
+         if (I->op == AGX_APPLE9_VIR_PREDICATE_COMPARE)
+            inline_alu_sources(I, uniform_read, constant, values);
          continue;
+      }
       /* Fixed interface values are not interchangeable with ordinary SSA. */
       bool constrained = false;
       for (unsigned c = 0; c < I->dest_components; ++c)

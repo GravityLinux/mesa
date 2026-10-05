@@ -1262,10 +1262,10 @@ static const struct agx_apple9_encoding_info encodings[] = {
                /* Both sources use the ordinary 32-bit descriptor
                 * (gpr << 1) | 1.  Source lifetime is encoded independently
                 * in byte 2. */
-               GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
+               REGISTER_SOURCE(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
                    95, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
-               GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32,
+               REGISTER_SOURCE(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32,
                    95, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
             },
@@ -1298,10 +1298,10 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
          .operands =
             {
-               GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
+               REGISTER_SOURCE(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
                    95, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
-               GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32,
+               REGISTER_SOURCE(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32,
                    95, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
             },

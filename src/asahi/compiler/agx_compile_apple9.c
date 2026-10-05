@@ -6160,8 +6160,15 @@ apple9_preamble_def_size(nir_def *def, unsigned *size, unsigned *align,
 static bool
 apple9_uniform_constant_use(nir_alu_instr *alu, unsigned s, uint32_t *value)
 {
-   bool is_float;
+   bool is_float, comparison = false;
    switch (alu->op) {
+   case nir_op_flt: case nir_op_fge: case nir_op_feq: case nir_op_fneu:
+   case nir_op_ilt: case nir_op_ige: case nir_op_ieq: case nir_op_ine:
+   case nir_op_ult: case nir_op_uge:
+      comparison = true;
+      /* Select/predicate sources have no folded float-immediate form yet. */
+      is_float = false;
+      break;
    case nir_op_bcsel:
       /* The condition is a boolean; only the selected 32-bit values use
        * these validated uniform operands. */
@@ -6180,7 +6187,9 @@ apple9_uniform_constant_use(nir_alu_instr *alu, unsigned s, uint32_t *value)
    default:
       return false;
    }
-   if (alu->def.num_components != 1 || alu->def.bit_size != 32 ||
+   if (alu->def.num_components != 1 ||
+       (alu->def.bit_size != 32 && !comparison) ||
+       alu->src[s].src.ssa->bit_size != 32 ||
        !nir_src_is_const(alu->src[s].src))
       return false;
    *value = nir_src_comp_as_uint(alu->src[s].src, alu->src[s].swizzle[0]);
