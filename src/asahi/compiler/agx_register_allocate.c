@@ -705,9 +705,9 @@ preferred_phi_register(struct ra_ctx *rctx, unsigned ssa, bool available)
       if (p->reg % count || p->reg + count > rctx->bound[cls] ||
           (available && BITSET_TEST_COUNT(rctx->used_regs[cls], p->reg, count)))
          continue;
-      if (best == ~0u || p->dead > dead ||
-          (p->dead == dead && (p->edge > edge ||
-           (p->edge == edge && (p->affinity > affinity ||
+      if (best == ~0u || p->edge > edge ||
+          (p->edge == edge && (p->dead > dead ||
+           (p->dead == dead && (p->affinity > affinity ||
             (p->affinity == affinity && p->reg < best)))))) {
          best = p->reg;
          dead = p->dead;
@@ -763,8 +763,8 @@ static bool
 placement_cheaper(struct placement_cost a, struct placement_cost b)
 {
    if (a.moves != b.moves) return a.moves < b.moves;
-   if (a.dead != b.dead) return a.dead < b.dead;
    if (a.edge != b.edge) return a.edge < b.edge;
+   if (a.dead != b.dead) return a.dead < b.dead;
    if (a.affinity != b.affinity) return a.affinity < b.affinity;
    if (a.collect != b.collect) return a.collect < b.collect;
    if (a.preference != b.preference) return a.preference < b.preference;
