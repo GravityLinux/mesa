@@ -143,6 +143,7 @@ apple9_system_source(nir_scalar scalar, struct apple9_system_source *source)
       base = 0xc3;
       components = 1;
       break;
+   case nir_intrinsic_load_tile_id_agx:
    case nir_intrinsic_load_workgroup_id:
       base = 0x9c;
       break;
@@ -945,6 +946,7 @@ apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
          return true;
       return op == nir_intrinsic_load_global_invocation_id ||
              op == nir_intrinsic_load_workgroup_id ||
+             op == nir_intrinsic_load_tile_id_agx ||
              op == nir_intrinsic_load_layer_id ||
              op == nir_intrinsic_load_local_invocation_id ||
              op == nir_intrinsic_load_local_invocation_index ||

@@ -226,7 +226,7 @@ static unsigned
 agx_calc_register_demand(agx_context *ctx, bool remat)
 {
    /* Print detailed demand calculation, helpful to debug spilling */
-   bool debug = false;
+   bool debug = agx_compiler_debug & AGX_DBG_DEMAND;
 
    if (debug) {
       agx_print_shader(ctx, stdout);
@@ -1903,6 +1903,28 @@ agx_ra(agx_context *ctx)
 
          agx_foreach_ssa_dest(I, v) {
             max_ncomps = MAX2(max_ncomps, agx_index_size_16(I->dest[v]));
+         }
+
+         /* Target instructions may need a tuple and all of its split results
+          * live together. Forced spilling must still fit one instruction plus
+          * the target's spill temporaries; no eviction can shrink that set. */
+         if (ctx->ra_target.max_registers) {
+            unsigned needed = MAX2(ctx->ra_target.reserved_registers,
+                                   ctx->ra_target.spill_reserved_registers);
+            agx_foreach_ssa_dest(I, v) {
+               if (!I->dest[v].memory)
+                  needed += util_next_power_of_two(agx_index_size_16(I->dest[v]));
+            }
+            agx_foreach_ssa_src(I, s) {
+               if (I->src[s].memory)
+                  continue;
+               bool duplicate = false;
+               for (unsigned prev = 0; prev < s; ++prev)
+                  duplicate |= agx_is_equiv(I->src[prev], I->src[s]);
+               if (!duplicate)
+                  needed += util_next_power_of_two(agx_index_size_16(I->src[s]));
+            }
+            d = MAX2(d, needed);
          }
       }
 

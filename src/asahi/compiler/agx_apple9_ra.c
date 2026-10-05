@@ -8,6 +8,7 @@
 #include "agx_apple9_profile.h"
 #include "agx_builder.h"
 #include "agx_compiler.h"
+#include "agx_debug.h"
 
 /* Apple9 selection keeps its machine operands and encoding contracts. The
  * shared IR carries their SSA dataflow, including genuine CFG phis, through
@@ -1693,6 +1694,10 @@ bool
 agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
                            nir_shader *nir, const char **reason)
 {
+   /* Apple9 bypasses agx_compile_shader_nir, which initializes these flags
+    * for the older backend. The shared allocator still consumes them. */
+   agx_compiler_debug = agx_get_compiler_debug();
+
    if (!agx_apple9_allocate_publications(program, reason))
       return false;
    struct agx_apple9_vir_program best, alternative;

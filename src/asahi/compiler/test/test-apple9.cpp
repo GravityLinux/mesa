@@ -6,6 +6,7 @@
 #include "agx_apple9_ir.h"
 #include "agx_apple9_machine.h"
 #include "agx_compile_apple9.h"
+#include "agx_debug.h"
 
 #include "compiler/nir/nir_builder.h"
 #include "compiler/nir/nir_xfb_info.h"
@@ -9651,7 +9652,10 @@ TEST(Apple9Compiler, PrivateArraysUseNativeScratchInAllStages)
 
 TEST(Apple9Spilling, VectorSpillsPreserveEveryComponent)
 {
-   for (unsigned words : {128u, 1280u, 2304u}) {
+   /* The 32-word case fits normally, but must spill under AGX_MESA_DEBUG=spill.
+    * Run this test in separate normal/forced processes (flags are cached). */
+   bool forced = agx_get_compiler_debug() & AGX_DBG_SPILL;
+   for (unsigned words : {32u, 128u, 1280u, 2304u}) {
       for (unsigned components : {2u, 4u}) {
          SCOPED_TRACE(words);
          SCOPED_TRACE(components);
@@ -9687,7 +9691,10 @@ TEST(Apple9Spilling, VectorSpillsPreserveEveryComponent)
          }
          const char *reason = nullptr;
          ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
-         ASSERT_GT(p.scratch_size, words > 1024 ? 4096u : 0u);
+         if (words > 32 || forced)
+            ASSERT_GT(p.scratch_size, words > 1024 ? 4096u : 0u);
+         else
+            ASSERT_EQ(p.scratch_size, 0u);
          /* Interpret allocated data movement, independently of register and
           * spill-slot choices. Distinct words expose omitted vector components. */
          std::vector<uint32_t> regs(p.value_count, 0xbad);
@@ -9745,8 +9752,13 @@ TEST(Apple9Spilling, VectorSpillsPreserveEveryComponent)
                FAIL() << "Unexpected data-movement opcode " << ins->op;
             }
          }
-         EXPECT_GT(saves, 0u);
-         EXPECT_GT(fills, 0u);
+         if (words > 32 || forced) {
+            EXPECT_GT(saves, 0u);
+            EXPECT_GT(fills, 0u);
+         } else {
+            EXPECT_EQ(saves, 0u);
+            EXPECT_EQ(fills, 0u);
+         }
          EXPECT_EQ(stores, count * components);
          agx_apple9_vir_finish(&p);
          ralloc_free(b.shader);
@@ -10041,7 +10053,7 @@ TEST(Apple9Compiler, BlockExportCompilesDynamicCoordinatesAndSparseImages)
       nir_builder b = nir_builder_init_simple_shader(
          MESA_SHADER_FRAGMENT, &agx_nir_options, "block export");
       b.shader->info.num_images = 8;
-      nir_def *group = nir_load_workgroup_id(&b);
+      nir_def *group = nir_load_tile_id_agx(&b);
       nir_def *xy = nir_imul_imm(&b, nir_trim_vector(&b, group, 2), 32);
       for (unsigned binding : {2u, 7u}) {
          nir_image_store_block_agx(&b, nir_imm_int(&b, binding),

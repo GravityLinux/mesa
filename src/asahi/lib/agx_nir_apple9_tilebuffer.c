@@ -26,7 +26,7 @@ agx_nir_apple9_tilebuffer(const nir_shader_compiler_options *options,
    }
    if (key->store) {
       b.shader->info.num_images = key->count;
-      nir_def *group = nir_load_workgroup_id(&b);
+      nir_def *group = nir_load_tile_id_agx(&b);
       nir_def *xy =
          nir_vec2(&b, nir_imul_imm(&b, nir_channel(&b, group, 0), 32),
                   nir_imul_imm(&b, nir_channel(&b, group, 1),

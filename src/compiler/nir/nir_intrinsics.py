@@ -2520,6 +2520,11 @@ store("uvs_agx", [1], [], [CAN_REORDER])
 intrinsic("load_uvs_index_agx", dest_comp = 1, bit_sizes=[16],
           indices=[IO_SEMANTICS], flags=[CAN_ELIMINATE, CAN_REORDER])
 
+# Tile x/y indices for AGX end-of-tile fragment shaders. These are uniform
+# within a tile and measured in tiles, not pixels or compute workgroups.
+intrinsic("load_tile_id_agx", dest_comp=2, bit_sizes=[32],
+          flags=[CAN_ELIMINATE, CAN_REORDER])
+
 # Load/store a pixel in local memory. This operation is formatted, with
 # conversion between the specified format and the implied register format of the
 # source/destination (for store/loads respectively). This mostly matters for
