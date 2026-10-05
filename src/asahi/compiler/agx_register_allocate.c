@@ -172,6 +172,11 @@ phi_web_interference(agx_context *ctx, BITSET_WORD *constants, void *memctx)
 
 struct phi_web_members {
    unsigned head, tail, next, count;
+
+   /* A private constant-use member keeps this edge's placement preference,
+    * without joining the shared constant definition to other phi classes.
+    */
+   struct phi_preference *constant;
 };
 
 static void
@@ -638,8 +643,13 @@ cache_phi_preferences(struct ra_ctx *rctx, unsigned ssa)
    unsigned root = phi_web_find(rctx->phi_web, ssa);
    for (unsigned v = rctx->web_members[root].head; v != ~0u;
         v = rctx->web_members[v].next) {
-      if (v != ssa && v < rctx->shader->alloc && rctx->last_reg[v] != ~0u)
+      if (v >= rctx->shader->alloc) {
+         struct phi_preference *p = rctx->web_members[v].constant;
+         if (p && p->other->has_reg)
+            add_reg_preference(rctx, p->other->reg, 0, p->weight);
+      } else if (v != ssa && rctx->last_reg[v] != ~0u) {
          add_reg_preference(rctx, rctx->last_reg[v], 0, rctx->phi_weights[v]);
+      }
    }
    rctx->affinity_reg = collect_affinity(rctx, ssa);
    rctx->affinity_ssa = ssa;
@@ -2276,7 +2286,6 @@ agx_ra(agx_context *ctx)
    }
 #endif
    ralloc_free(graph_memctx);
-   free(constants);
 
    struct phi_preference **phi_preferences =
       rzalloc_array(web_memctx, struct phi_preference *, ctx->alloc);
@@ -2299,11 +2308,15 @@ agx_ra(agx_context *ctx)
       for (unsigned b = header->index; b <= end; ++b)
          ++depth[b];
    }
+   unsigned next_constant_preference = ctx->alloc;
    agx_foreach_block(ctx, block) {
       agx_foreach_phi_in_block(block, phi) {
          agx_foreach_predecessor(block, pred) {
             unsigned s = agx_predecessor_index(block, *pred);
             agx_index *src = &phi->src[s], *dst = &phi->dest[0];
+            unsigned member = src->type == AGX_INDEX_NORMAL &&
+                              BITSET_TEST(constants, src->value)
+                                 ? next_constant_preference++ : ~0u;
             if (src->type != AGX_INDEX_NORMAL ||
                 src->size != dst->size || src->memory != dst->memory ||
                 agx_channels(*src) != agx_channels(*dst))
@@ -2321,9 +2334,13 @@ agx_ra(agx_context *ctx)
             phi_preferences[src->value] = reverse;
             phi_weights[src->value] += weight;
             phi_weights[dst->value] += weight;
+            if (member != ~0u)
+               web_members[member].constant = forward;
          }
       }
    }
+   assert(next_constant_preference == nr_web_members);
+   free(constants);
    struct util_dynarray reg_preferences;
    util_dynarray_init(&reg_preferences, web_memctx);
 
