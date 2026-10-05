@@ -3876,6 +3876,10 @@ hk_apple9_eager_variant(struct hk_device *dev, uint32_t count,
    struct hk_api_shader *api[HK_APPLE9_GFX_STAGES] = {NULL};
    for (uint32_t i = 0; i < count; ++i)
       api[shaders[i]->stage] = container_of(shaders[i], struct hk_api_shader, vk);
+   if (getenv("HK_APPLE9_EAGER_TRACE"))
+      fprintf(stderr, "HK_APPLE9_EAGER: %u stages vs=%d fs=%d flags=%#llx\n", count,
+              !!api[MESA_SHADER_VERTEX], !!api[MESA_SHADER_FRAGMENT],
+              pstate ? (unsigned long long)pstate->pipeline_flags : 0ull);
    if ((!api[MESA_SHADER_VERTEX] && !api[MESA_SHADER_MESH]) ||
        (pstate && (pstate->pipeline_flags &
                    VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR)))
