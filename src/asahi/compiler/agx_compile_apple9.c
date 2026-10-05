@@ -5072,21 +5072,59 @@ apple9_hoist_sample(nir_instr *instr)
    }
 }
 
-/* Instructions a sample can be hoisted across: pure ALU and reorderable
- * intrinsics. Anything else (stores, barriers, discards, volatile or ordered
- * loads) is a fence that keeps its position relative to samples.
+/* Instructions that may move up with a hoisted operation, as part of the
+ * slice computing its operands: pure ALU and reorderable intrinsics.
  */
 static bool
-apple9_hoist_fence(nir_instr *instr)
+apple9_hoist_movable(nir_instr *instr)
 {
    switch (instr->type) {
    case nir_instr_type_alu:
    case nir_instr_type_load_const:
    case nir_instr_type_undef:
    case nir_instr_type_tex:
-      return false;
+      return true;
    case nir_instr_type_intrinsic:
-      return !nir_intrinsic_can_reorder(nir_instr_as_intrinsic(instr));
+      return nir_intrinsic_can_reorder(nir_instr_as_intrinsic(instr));
+   default:
+      return false;
+   }
+}
+
+/* Instructions a hoisted operation may not cross. Stores, atomics and shared
+ * memory accesses cannot change what it reads: reorderable loads do not alias
+ * them, and sampled images are not coherent with writes made by the same
+ * invocation. Output stores and subgroup operations do not interact with it
+ * either. Anything that changes which invocations run (discard, demote,
+ * terminate), interlocks, barriers and unknown intrinsics stay fences.
+ */
+static bool
+apple9_hoist_fence(nir_instr *instr)
+{
+   if (apple9_hoist_movable(instr))
+      return false;
+   if (instr->type != nir_instr_type_intrinsic)
+      return true;
+   switch (nir_instr_as_intrinsic(instr)->intrinsic) {
+   case nir_intrinsic_store_output:
+   case nir_intrinsic_store_uvs_agx:
+   case nir_intrinsic_store_global_2x32:
+   case nir_intrinsic_store_ssbo:
+   case nir_intrinsic_load_shared:
+   case nir_intrinsic_store_shared:
+   case nir_intrinsic_global_atomic_2x32:
+   case nir_intrinsic_global_atomic_swap_2x32:
+   case nir_intrinsic_ssbo_atomic:
+   case nir_intrinsic_ssbo_atomic_swap:
+   case nir_intrinsic_shared_atomic:
+   case nir_intrinsic_shared_atomic_swap:
+   case nir_intrinsic_read_invocation:
+   case nir_intrinsic_read_first_invocation:
+   case nir_intrinsic_ballot:
+   case nir_intrinsic_exclusive_scan:
+   case nir_intrinsic_inclusive_scan:
+   case nir_intrinsic_reduce:
+      return false;
    default:
       return true;
    }
@@ -5154,7 +5192,7 @@ apple9_hoist_ready_src(nir_src *src, void *data)
       return !BITSET_TEST(s->pending, parent->index);
    if (s->visited[parent->index] == s->query)
       return true;
-   if (apple9_hoist_fence(parent) || apple9_hoist_sample(parent))
+   if (!apple9_hoist_movable(parent) || apple9_hoist_sample(parent))
       return false;
    s->visited[parent->index] = s->query;
    return nir_foreach_src(parent, apple9_hoist_ready_src, s);
