@@ -569,7 +569,10 @@ transferred results are 32-bit words. The full resource map is fixed before
 extraction and shared by setup and main, including resources used only in the
 preamble. Unused vector components are trimmed before assigning uniform words.
 Unsupported dependencies, masked setup, scratch, and setup bodies exceeding
-8192 bytes retain the original main shader. Only work in the shader's
+8192 bytes retain the original main shader. This is a compiler/driver policy
+bound, not a measured hardware limit. Repeated constants use the uniform words
+left after `nir_opt_preamble`, without a separate promotion-count cap; the
+assembled setup must still satisfy the code-size bound. Only work in the shader's
 top-level blocks is eligible: `nir_opt_preamble` keeps the control flow around
 what it hoists, so one eligible expression under an `if` used to discard the
 whole preamble. Every application fragment shader begins with such an `if`,

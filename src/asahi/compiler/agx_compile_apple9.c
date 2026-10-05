@@ -6241,11 +6241,11 @@ apple9_promote_constants(nir_shader *shader, nir_function_impl *preamble,
     * preamble store and spends a uniform word. */
    struct hash_table_u64 *slots = _mesa_hash_table_u64_create(NULL);
    nir_builder pb = nir_builder_at(nir_after_impl(preamble));
-   /* Each promotion adds about 22 bytes of setup; stay well inside the
-    * preamble size limit so the setup program is never rejected. */
-   unsigned promoted = 0;
-   for (unsigned i = 0; i < count && *used < budget && promoted < 64 &&
-                        sorted[i].uses >= 2; ++i, ++promoted) {
+   /* nir_opt_preamble has already reserved its result words. Spend only the
+    * remaining words; the completed setup is checked against the compiler's
+    * preamble code-size bound before it is attached to the main program. */
+   for (unsigned i = 0; i < count && *used < budget &&
+                        sorted[i].uses >= 2; ++i) {
       nir_store_preamble(&pb, nir_imm_int(&pb, sorted[i].value), .base = *used,
                          .preamble_class = nir_preamble_class_general);
       _mesa_hash_table_u64_insert(slots, sorted[i].value,

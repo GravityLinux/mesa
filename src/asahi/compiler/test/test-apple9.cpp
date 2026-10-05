@@ -11099,6 +11099,50 @@ TEST(Apple9Compiler, PreambleUsesAllWordsAfterThePaddedComputeRoots)
    }
 }
 
+TEST(Apple9Compiler, ConstantPromotionUsesMoreThanSixtyFourFreeWords)
+{
+   nir_builder b = apple9_compute_builder("constant_uniform_budget");
+   nir_def *gid = apple9_global_id_x(&b);
+   nir_def *u = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0),
+                           nir_imm_int(&b, 0), .align_mul = 4, .range = 4);
+   nir_def *other = nir_iadd(&b, gid, u);
+   b.shader->info.num_ubos = 1;
+   for (unsigned i = 0; i < 72; ++i) {
+      nir_def *constant = nir_imm_int(&b, 0x12340001u + i * 0x10001u);
+      nir_def *pair = nir_vec2(&b, nir_ixor(&b, gid, constant),
+                              nir_ixor(&b, other, constant));
+      apple9_store_output(&b, nir_iadd_imm(&b, gid, 2 * i), pair);
+   }
+   agx_shader_part compiled = {};
+   agx_apple9_compute_profile profile = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason))
+      << (reason ?: "");
+   ASSERT_GT(compiled.info.apple9_preamble_size, 0u);
+   EXPECT_LE(compiled.info.apple9_preamble_size, AGX_APPLE9_MAX_PREAMBLE_BYTES);
+
+   /* These repeated constants feed varying ALU operations, so their values
+    * must survive in main. Count distinct setup destinations rather than
+    * relying on allocation order or exact setup instruction sequences. */
+   const uint8_t *code = (const uint8_t *)compiled.binary +
+                         compiled.info.apple9_preamble_offset;
+   std::vector<bool> written(AGX_APPLE9_UNIFORM_COUNT, false);
+   for (unsigned at = 0; at + 10 <= compiled.info.apple9_preamble_size; at += 2) {
+      const uint8_t *p = code + at;
+      if (p[0] == 0x9f && p[1] == 1 && (p[2] & 0xfd) == 0x54 &&
+          (p[4] & 0xfe) == 0 && p[7] == 0xa8 && p[9] == 1) {
+         unsigned word = (p[3] >> 1) | ((p[4] & 1) << 7);
+         written[word] = true;
+      }
+   }
+   unsigned words = 0;
+   for (bool value : written)
+      words += value;
+   EXPECT_GE(words, 72u);
+   free(compiled.binary);
+   ralloc_free(b.shader);
+}
+
 TEST(Apple9Packer, UniformLogicPreservesHighRegistersAndDependencies)
 {
    agx_apple9_vir_instr ins = {};

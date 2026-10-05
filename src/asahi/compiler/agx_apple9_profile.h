@@ -33,6 +33,7 @@ enum agx_apple9_compute_abi {
  * complete four-word blocks in the argument window. Preamble results start
  * after that padded window and extend through the last uniform word. */
 #define AGX_APPLE9_GRAPHICS_ROOT_WORDS 12
+/* Compiler/driver policy bound, not a measured hardware limit. */
 #define AGX_APPLE9_MAX_PREAMBLE_BYTES 8192
 
 #define AGX_APPLE9_COMPUTE_DIRECT_MAX_RESOURCES 18
