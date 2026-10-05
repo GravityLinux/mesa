@@ -6239,6 +6239,12 @@ apple9_promote_constants(nir_shader *shader, nir_function_impl *preamble,
    struct util_dynarray list = UTIL_DYNARRAY_INIT;
 
    nir_foreach_block(block, impl) {
+      unsigned depth = 0;
+      for (nir_cf_node *node = block->cf_node.parent; node; node = node->parent)
+         depth += node->type == nir_cf_node_loop;
+      /* Approximate repeated execution without assuming a known trip count.
+       * Cap nesting and saturate the sum so large shaders cannot wrap it. */
+      unsigned weight = 1u << (3 * MIN2(depth, 6));
       nir_foreach_instr(instr, block) {
          if (instr->type != nir_instr_type_alu)
             continue;
@@ -6253,7 +6259,9 @@ apple9_promote_constants(nir_shader *shader, nir_function_impl *preamble,
                index = util_dynarray_num_elements(&list, struct apple9_constant_count);
                _mesa_hash_table_u64_insert(counts, value, (void *)index);
             }
-            util_dynarray_element(&list, struct apple9_constant_count, index - 1)->uses++;
+            struct apple9_constant_count *entry =
+               util_dynarray_element(&list, struct apple9_constant_count, index - 1);
+            entry->uses += MIN2(weight, UINT_MAX - entry->uses);
          }
       }
    }
@@ -6263,8 +6271,9 @@ apple9_promote_constants(nir_shader *shader, nir_function_impl *preamble,
    if (count)
       qsort(sorted, count, sizeof(*sorted), apple9_constant_count_cmp);
 
-   /* A constant used once gains nothing: it trades its mov_imm32 for a
-    * preamble store and spends a uniform word. */
+   /* A single use outside loops gains nothing: it trades its mov_imm32 for
+    * a preamble store and spends a uniform word. Loop uses carry their
+    * execution weight, allowing a lone static use to be promoted. */
    struct hash_table_u64 *slots = _mesa_hash_table_u64_create(NULL);
    nir_builder pb = nir_builder_at(nir_after_impl(preamble));
    /* nir_opt_preamble has already reserved its result words. Spend only the

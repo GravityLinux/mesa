@@ -12057,3 +12057,60 @@ TEST(Apple9Packer, RegisterTextureOperandsReachEntireGprFile)
       }
    }
 }
+
+
+TEST(Apple9Compiler, ConstantPromotionWeightsSingleUseInsideLoop)
+{
+   const uint32_t literal = 0x12345679;
+   for (bool in_loop : {false, true}) {
+      nir_builder b = apple9_compute_builder("loop_constant_uniform");
+      nir_def *gid = apple9_global_id_x(&b);
+      nir_def *u = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0),
+                              nir_imm_int(&b, 0), .align_mul = 4, .range = 4);
+      b.shader->info.num_ubos = 1;
+      nir_def *limit = nir_iadd(&b, gid, u);
+      if (in_loop) {
+         nir_def *initial = nir_imm_int(&b, 0);
+         nir_loop *loop = nir_push_loop(&b);
+         loop->control = nir_loop_control_dont_unroll;
+         nir_block *entry = nir_cf_node_as_block(nir_cf_node_prev(&loop->cf_node));
+         nir_block *header = nir_loop_first_block(loop);
+         nir_phi_instr *phi = nir_phi_instr_create(b.shader);
+         nir_def_init(&phi->instr, &phi->def, 1, 32);
+         nir_phi_instr_add_src(phi, entry, initial);
+         nir_break_if(&b, nir_uge(&b, &phi->def, limit));
+         apple9_store_output(&b, nir_iadd(&b, gid, &phi->def),
+                             nir_ixor(&b, &phi->def, nir_imm_int(&b, literal)));
+         nir_def *next = nir_iadd_imm(&b, &phi->def, 1);
+         nir_phi_instr_add_src(phi, nir_cursor_current_block(b.cursor), next);
+         nir_pop_loop(&b, loop);
+         b.cursor = nir_after_phis(header);
+         nir_builder_instr_insert(&b, &phi->instr);
+      } else {
+         apple9_store_output(&b, gid, nir_ixor(&b, limit, nir_imm_int(&b, literal)));
+      }
+      agx_shader_part compiled = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, nullptr, &reason))
+         << (reason ?: "");
+      ASSERT_GT(compiled.info.apple9_preamble_size, 0u);
+      auto has_literal = [&](unsigned offset, unsigned size) {
+         const uint8_t *code = (const uint8_t *)compiled.binary + offset;
+         for (unsigned reg = 0; reg < 64; ++reg) {
+            agx_apple9_packed_instruction imm;
+            if (!agx_apple9_pack_mov_imm32(reg, literal, &imm))
+               continue;
+            for (unsigned at = 0; at + imm.length <= size; at += 2) {
+               if (!memcmp(code + at, imm.bytes, imm.length))
+                  return true;
+            }
+         }
+         return false;
+      };
+      EXPECT_EQ(has_literal(0, compiled.info.main_size), !in_loop);
+      EXPECT_EQ(has_literal(compiled.info.apple9_preamble_offset,
+                            compiled.info.apple9_preamble_size), in_loop);
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
+}
