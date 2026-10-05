@@ -9,7 +9,7 @@
 #include "agx_test.h"
 
 static void
-test_shared_loop_initializers(bool computed)
+test_shared_loop_initializers(bool computed, bool live_source = false)
 {
    for (uint32_t initial : {0u, 7u, 0x3f800000u, 0xfeedfaceu}) {
       void *memctx = ralloc_context(nullptr);
@@ -23,6 +23,7 @@ test_shared_loop_initializers(bool computed)
       ctx->stage = MESA_SHADER_COMPUTE;
       ctx->key = &key;
       ctx->ra_target.max_registers = 32;
+      ctx->ra_target.cost_register_constraints = true;
       ctx->ra_target.disable_occupancy_rematerialization = true;
       auto entry = agx_test_block(ctx);
       auto header = agx_test_block(ctx);
@@ -50,8 +51,13 @@ test_shared_loop_initializers(bool computed)
          phis[i]->src[1] = agx_iadd(&b, phis[i]->dest[0],
                                     agx_immediate(i + 1), 0);
       b.cursor = agx_after_block(exit);
+      agx_index results[count];
       for (unsigned i = 0; i < count; ++i)
-         agx_export(&b, phis[i]->dest[0], 2 * i);
+         results[i] = live_source
+            ? agx_iadd(&b, phis[i]->dest[0], constant, 0)
+            : phis[i]->dest[0];
+      for (unsigned i = 0; i < count; ++i)
+         agx_export(&b, results[i], 2 * i);
 
       ASSERT_TRUE(agx_ra(ctx));
       ASSERT_EQ(ctx->scratch_size_B, 0u);
@@ -91,7 +97,8 @@ test_shared_loop_initializers(bool computed)
       execute(header);
       execute(exit);
       for (unsigned i = 0; i < count; ++i)
-         EXPECT_EQ(regs[2 * i], initial + 5 * (i + 1));
+         EXPECT_EQ(regs[2 * i], initial + 5 * (i + 1) +
+                   (live_source ? initial : 0));
       ralloc_free(nir.shader);
       ralloc_free(memctx);
    }
@@ -105,6 +112,12 @@ TEST(Apple9SharedRa, SharedConstantInitializersKeepIndependentLoopValues)
 TEST(Apple9SharedRa, SharedComputedInitializersKeepIndependentLoopValues)
 {
    test_shared_loop_initializers(true);
+}
+
+TEST(Apple9SharedRa, PhiFanoutKeepsStillLiveSourcesSeparate)
+{
+   test_shared_loop_initializers(false, true);
+   test_shared_loop_initializers(true, true);
 }
 
 TEST(Apple9SharedRa, PlacementCostsLeaveSpaceForRestrictedDefinitions)

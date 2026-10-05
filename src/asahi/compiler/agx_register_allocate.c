@@ -224,9 +224,23 @@ struct phi_preference {
    uint64_t weight;
 };
 
+/* A dying source can eliminate at most one copy in a parallel phi bundle.
+ * Keep all destination choices, but charge the edge only once per register. */
+struct phi_dead_destination {
+   struct phi_dead_destination *next;
+   const agx_index *index;
+};
+
+struct phi_dead_group {
+   struct phi_dead_group *next;
+   agx_block *successor, *predecessor;
+   struct phi_dead_destination *destinations;
+   uint64_t weight;
+};
+
 struct phi_reg_preference {
    unsigned reg;
-   uint64_t edge, affinity;
+   uint64_t dead, edge, affinity;
 };
 
 struct ra_ctx {
@@ -256,10 +270,11 @@ struct ra_ctx {
    struct phi_web_node *phi_web;
    struct phi_web_members *web_members;
    struct phi_preference **phi_preferences;
+   struct phi_dead_group **dead_groups;
    uint64_t *phi_weights;
    unsigned *last_reg;
    struct util_dynarray *reg_preferences;
-   uint64_t edge_total, affinity_total;
+   uint64_t dead_total, edge_total, affinity_total;
 
    /* If bit i of used_regs is set, and register i is the first consecutive
     * register holding an SSA value, then reg_to_ssa[i] is the SSA index of the
@@ -568,7 +583,7 @@ agx_calc_register_demand(agx_context *ctx, bool remat)
 }
 
 struct placement_cost {
-   uint64_t edge, affinity;
+   uint64_t dead, edge, affinity;
    unsigned moves, collect, preference, materialization, growth, scarcity, reg;
 };
 
@@ -607,19 +622,21 @@ collect_affinity(struct ra_ctx *rctx, unsigned ssa)
 
 static void
 add_reg_preference(struct ra_ctx *rctx, unsigned reg, uint64_t edge,
-                   uint64_t affinity)
+                   uint64_t affinity, uint64_t dead)
 {
+   rctx->dead_total += dead;
    rctx->edge_total += edge;
    rctx->affinity_total += affinity;
    util_dynarray_foreach(rctx->reg_preferences, struct phi_reg_preference, p) {
       if (p->reg == reg) {
+         p->dead += dead;
          p->edge += edge;
          p->affinity += affinity;
          return;
       }
    }
    util_dynarray_append(rctx->reg_preferences,
-                       ((struct phi_reg_preference){reg, edge, affinity}));
+                       ((struct phi_reg_preference){reg, dead, edge, affinity}));
 }
 
 static void
@@ -629,10 +646,10 @@ cache_phi_preferences(struct ra_ctx *rctx, unsigned ssa)
       return;
 
    util_dynarray_clear(rctx->reg_preferences);
-   rctx->edge_total = rctx->affinity_total = 0;
+   rctx->dead_total = rctx->edge_total = rctx->affinity_total = 0;
    for (struct phi_preference *p = rctx->phi_preferences[ssa]; p; p = p->next) {
       if (p->other->has_reg)
-         add_reg_preference(rctx, p->other->reg, p->weight, 0);
+         add_reg_preference(rctx, p->other->reg, p->weight, 0, 0);
    }
 
    /* Transitive class history helps before the other end of a direct edge has
@@ -646,10 +663,32 @@ cache_phi_preferences(struct ra_ctx *rctx, unsigned ssa)
       if (v >= rctx->shader->alloc) {
          struct phi_preference *p = rctx->web_members[v].constant;
          if (p && p->other->has_reg)
-            add_reg_preference(rctx, p->other->reg, 0, p->weight);
+            add_reg_preference(rctx, p->other->reg, 0, p->weight, 0);
       } else if (v != ssa && rctx->last_reg[v] != ~0u) {
-         add_reg_preference(rctx, rctx->last_reg[v], 0, rctx->phi_weights[v]);
+         add_reg_preference(rctx, rctx->last_reg[v], 0, rctx->phi_weights[v], 0);
       }
+   }
+   for (struct phi_dead_group *g = rctx->dead_groups[ssa]; g; g = g->next) {
+      BITSET_DECLARE(locations, AGX_NUM_REGS) = {0};
+      for (struct phi_dead_destination *d = g->destinations; d; d = d->next) {
+         if (d->index->has_reg) {
+            BITSET_SET(locations, d->index->reg);
+            continue;
+         }
+
+         /* Forward-edge destinations have not been assigned yet. Use their
+          * compatible class history as a prediction, without reserving it. */
+         unsigned root = phi_web_find(rctx->phi_web, d->index->value);
+         for (unsigned v = rctx->web_members[root].head; v != ~0u;
+              v = rctx->web_members[v].next) {
+            if (v < rctx->shader->alloc && v != ssa &&
+                rctx->last_reg[v] != ~0u)
+               BITSET_SET(locations, rctx->last_reg[v]);
+         }
+      }
+      unsigned reg;
+      BITSET_FOREACH_SET(reg, locations, AGX_NUM_REGS)
+         add_reg_preference(rctx, reg, 0, 0, g->weight);
    }
    rctx->affinity_reg = collect_affinity(rctx, ssa);
    rctx->affinity_ssa = ssa;
@@ -661,15 +700,17 @@ preferred_phi_register(struct ra_ctx *rctx, unsigned ssa, bool available)
    cache_phi_preferences(rctx, ssa);
    enum ra_class cls = rctx->classes[ssa];
    unsigned count = rctx->ncomps[ssa], best = ~0u;
-   uint64_t edge = 0, affinity = 0;
+   uint64_t dead = 0, edge = 0, affinity = 0;
    util_dynarray_foreach(rctx->reg_preferences, struct phi_reg_preference, p) {
       if (p->reg % count || p->reg + count > rctx->bound[cls] ||
           (available && BITSET_TEST_COUNT(rctx->used_regs[cls], p->reg, count)))
          continue;
-      if (best == ~0u || p->edge > edge ||
-          (p->edge == edge && (p->affinity > affinity ||
-           (p->affinity == affinity && p->reg < best)))) {
+      if (best == ~0u || p->dead > dead ||
+          (p->dead == dead && (p->edge > edge ||
+           (p->edge == edge && (p->affinity > affinity ||
+            (p->affinity == affinity && p->reg < best)))))) {
          best = p->reg;
+         dead = p->dead;
          edge = p->edge;
          affinity = p->affinity;
       }
@@ -682,10 +723,12 @@ placement_cost(struct ra_ctx *rctx, unsigned ssa, unsigned reg, unsigned count)
 {
    struct placement_cost cost = {.reg = reg};
    cache_phi_preferences(rctx, ssa);
+   cost.dead = rctx->dead_total;
    cost.edge = rctx->edge_total;
    cost.affinity = rctx->affinity_total;
    util_dynarray_foreach(rctx->reg_preferences, struct phi_reg_preference, p) {
       if (p->reg == reg) {
+         cost.dead -= p->dead;
          cost.edge -= p->edge;
          cost.affinity -= p->affinity;
          break;
@@ -720,6 +763,7 @@ static bool
 placement_cheaper(struct placement_cost a, struct placement_cost b)
 {
    if (a.moves != b.moves) return a.moves < b.moves;
+   if (a.dead != b.dead) return a.dead < b.dead;
    if (a.edge != b.edge) return a.edge < b.edge;
    if (a.affinity != b.affinity) return a.affinity < b.affinity;
    if (a.collect != b.collect) return a.collect < b.collect;
@@ -2302,10 +2346,10 @@ agx_ra(agx_context *ctx)
       }
    }
 #endif
-   ralloc_free(graph_memctx);
-
    struct phi_preference **phi_preferences =
       rzalloc_array(web_memctx, struct phi_preference *, ctx->alloc);
+   struct phi_dead_group **dead_groups =
+      rzalloc_array(web_memctx, struct phi_dead_group *, ctx->alloc);
    uint64_t *phi_weights = rzalloc_array(web_memctx, uint64_t, ctx->alloc);
    unsigned *last_reg = ralloc_array(web_memctx, unsigned, ctx->alloc);
    for (unsigned v = 0; v < ctx->alloc; ++v)
@@ -2339,6 +2383,29 @@ agx_ra(agx_context *ctx)
                 agx_channels(*src) != agx_channels(*dst))
                continue;
             uint64_t weight = 1ull << (3 * MIN2(depth[(*pred)->index], 6));
+            /* Successor live_in is after its parallel phi definitions. A
+             * source redefined by that bundle denotes the old iteration. */
+            bool redefined = false;
+            agx_foreach_phi_in_block(block, other)
+               redefined |= other->dest[0].value == src->value;
+            bool dead = redefined ||
+               !u_sparse_bitset_test(&block->live_in, src->value);
+            if (dead && !src->memory &&
+                !u_sparse_bitset_test(&interference[src->value], dst->value)) {
+               struct phi_dead_group *g = dead_groups[src->value];
+               while (g && (g->successor != block || g->predecessor != *pred))
+                  g = g->next;
+               if (!g) {
+                  g = rzalloc(web_memctx, struct phi_dead_group);
+                  *g = (struct phi_dead_group){dead_groups[src->value],
+                                              block, *pred, NULL, weight};
+                  dead_groups[src->value] = g;
+               }
+               struct phi_dead_destination *d =
+                  ralloc(web_memctx, struct phi_dead_destination);
+               *d = (struct phi_dead_destination){g->destinations, dst};
+               g->destinations = d;
+            }
             struct phi_preference *forward =
                ralloc(web_memctx, struct phi_preference);
             struct phi_preference *reverse =
@@ -2357,6 +2424,7 @@ agx_ra(agx_context *ctx)
       }
    }
    assert(next_constant_preference == nr_web_members);
+   ralloc_free(graph_memctx);
    free(constants);
    struct util_dynarray reg_preferences;
    util_dynarray_init(&reg_preferences, web_memctx);
@@ -2451,6 +2519,7 @@ agx_ra(agx_context *ctx)
          .phi_web = phi_web,
          .web_members = web_members,
          .phi_preferences = phi_preferences,
+         .dead_groups = dead_groups,
          .phi_weights = phi_weights,
          .last_reg = last_reg,
          .reg_preferences = &reg_preferences,
