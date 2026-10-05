@@ -569,7 +569,7 @@ agx_calc_register_demand(agx_context *ctx, bool remat)
 
 struct placement_cost {
    uint64_t edge, affinity;
-   unsigned moves, collect, preference, growth, scarcity, reg;
+   unsigned moves, collect, preference, materialization, growth, scarcity, reg;
 };
 
 /* Collects retain their tuple placement preference separately from phi edges. */
@@ -699,6 +699,14 @@ placement_cost(struct ra_ctx *rctx, unsigned ssa, unsigned reg, unsigned count)
       cost.preference = reg < c.min || reg > c.max || (reg % c.align);
    }
 
+   /* A constant outside the immediate destination bank needs a staging
+    * move. Prefer a directly encodable free register after honouring phi,
+    * tuple and operand preferences, but before conserving scarce banks. */
+   unsigned immediate_regs = rctx->shader->ra_target.mov_imm_registers;
+   if (immediate_regs && rctx->instr->op == AGX_OPCODE_MOV_IMM &&
+       rctx->instr->dest[0].value == ssa)
+      cost.materialization = reg + count > immediate_regs;
+
    /* Leave scarce banks available without raising the footprint beyond the
     * pressure already required by this program (or an existing fixed use). */
    unsigned limit = MAX2(rctx->demand, *rctx->count[RA_GPR]);
@@ -716,6 +724,8 @@ placement_cheaper(struct placement_cost a, struct placement_cost b)
    if (a.affinity != b.affinity) return a.affinity < b.affinity;
    if (a.collect != b.collect) return a.collect < b.collect;
    if (a.preference != b.preference) return a.preference < b.preference;
+   if (a.materialization != b.materialization)
+      return a.materialization < b.materialization;
    if (a.growth != b.growth) return a.growth < b.growth;
    if (a.scarcity != b.scarcity) return a.scarcity < b.scarcity;
    return a.reg < b.reg;

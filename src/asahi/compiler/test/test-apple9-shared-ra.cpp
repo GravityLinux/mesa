@@ -165,6 +165,82 @@ TEST(Apple9SharedRa, PlacementCostsLeaveSpaceForRestrictedDefinitions)
    EXPECT_LT(moves[1], moves[0]);
 }
 
+TEST(Apple9SharedRa, ConstantMaterializationRespectsOperandPreferences)
+{
+   for (bool high_use : {false, true}) {
+      void *memctx = ralloc_context(nullptr);
+      auto ctx = rzalloc(memctx, agx_context);
+      list_inithead(&ctx->blocks);
+      nir_builder nir = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "constant_bank_cost");
+      agx_shader_key key = {};
+      key.has_scratch = true;
+      ctx->nir = nir.shader; ctx->stage = MESA_SHADER_COMPUTE; ctx->key = &key;
+      ctx->ra_target.max_registers = 192;
+      ctx->ra_target.cost_register_constraints = true;
+      ctx->ra_target.disable_occupancy_rematerialization = true;
+      ctx->ra_target.mov_imm_registers = 128;
+      auto block = agx_test_block(ctx);
+      auto b = agx_init_builder(ctx, agx_after_block(block));
+      auto constant = agx_mov_imm_to(&b, agx_temp(ctx, AGX_SIZE_32), 0xfeedface);
+      auto use = agx_iadd_to(&b, agx_temp(ctx, AGX_SIZE_32),
+                              constant->dest[0], agx_immediate(1), 0);
+      use->reg_constraints = rzalloc_array(ctx, agx_reg_constraint, 3);
+      /* A later restricted destination makes the low bank scarce. The high
+       * export keeps both banks within the already-required footprint. */
+      use->reg_constraints[0] = {0, 126, 2};
+      use->reg_constraints[1] = {uint16_t(high_use ? 128 : 0), 190, 2};
+      use->reg_constraints[2] = {0, 190, 2};
+      agx_export(&b, use->dest[0], 170);
+      ASSERT_TRUE(agx_ra(ctx));
+      EXPECT_EQ(ctx->scratch_size_B, 0u);
+      EXPECT_EQ(constant->dest[0].value >= 128, high_use);
+      EXPECT_EQ(use->src[0].value, constant->dest[0].value);
+      ralloc_free(nir.shader); ralloc_free(memctx);
+   }
+}
+
+TEST(Apple9SharedRa, ConstantMaterializationKeepsPhiEdgePreference)
+{
+   void *memctx = ralloc_context(nullptr);
+   auto ctx = rzalloc(memctx, agx_context);
+   list_inithead(&ctx->blocks);
+   nir_builder nir = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "constant_phi_bank");
+   agx_shader_key key = {};
+   key.has_scratch = true;
+   ctx->nir = nir.shader; ctx->stage = MESA_SHADER_COMPUTE; ctx->key = &key;
+   ctx->ra_target.max_registers = 192;
+   ctx->ra_target.cost_register_constraints = true;
+   ctx->ra_target.disable_occupancy_rematerialization = true;
+   ctx->ra_target.mov_imm_registers = 128;
+   auto entry = agx_test_block(ctx), header = agx_test_block(ctx);
+   auto body = agx_test_block(ctx), exit = agx_test_block(ctx);
+   header->loop_header = true;
+   agx_block_add_successor(entry, header);
+   agx_block_add_successor(header, body);
+   agx_block_add_successor(header, exit);
+   agx_block_add_successor(body, header);
+   auto b = agx_init_builder(ctx, agx_after_block(entry));
+   auto initial = agx_preload(&b, agx_register(160, AGX_SIZE_32));
+   b.cursor = agx_after_block(header);
+   auto phi = agx_phi_to(&b, agx_temp(ctx, AGX_SIZE_32), 2);
+   phi->src[0] = initial;
+   b.cursor = agx_after_block(body);
+   auto constant = agx_mov_imm_to(&b, agx_temp(ctx, AGX_SIZE_32), 7);
+   phi->src[1] = constant->dest[0];
+   b.cursor = agx_after_block(exit);
+   agx_export(&b, phi->dest[0], 160);
+   ASSERT_TRUE(agx_ra(ctx));
+   EXPECT_EQ(ctx->scratch_size_B, 0u);
+   EXPECT_EQ(constant->dest[0].value, 160u);
+   agx_foreach_instr_in_block(body, I) {
+      EXPECT_NE(I->op, AGX_OPCODE_MOV);
+      EXPECT_NE(I->op, AGX_OPCODE_SWAP);
+   }
+   ralloc_free(nir.shader); ralloc_free(memctx);
+}
+
 TEST(Apple9SharedRa, InstructionConstraintsRelocateLiveValuesOutOfFullBanks)
 {
    void *memctx = ralloc_context(nullptr);

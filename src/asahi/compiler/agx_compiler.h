@@ -518,6 +518,9 @@ struct agx_ra_target {
     * while declining this optional code-size/occupancy tradeoff. */
    bool disable_occupancy_rematerialization;
    bool cost_register_constraints;
+   /* Number of half-registers directly addressable by MOV_IMM, or zero when
+    * its destination range does not add a materialization cost. */
+   uint16_t mov_imm_registers;
 };
 
 typedef struct {

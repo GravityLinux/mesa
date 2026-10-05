@@ -326,6 +326,7 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
       .preserve_source_kills = true,
       .defer_spill_lowering = true,
       .disable_occupancy_rematerialization = true,
+      .mov_imm_registers = 2 * 64,
    };
    list_inithead(&ctx->blocks);
    unsigned block_count = p->last_block->index + 1;
