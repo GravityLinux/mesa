@@ -549,6 +549,10 @@ apple9_memory_address(nir_shader *nir, nir_intrinsic_instr *intr, nir_def *offse
                !nir_addition_might_overflow(nir, bounds, other, constant);
             if (add < 0 && apple9_address_lower_bound(other) >= -add)
                safe = true;
+            /* EXPERIMENT ONLY: fold without a no-wrap proof, to observe
+             * whether the hardware forms index + displacement in 32 bits. */
+            if (getenv("AGX_APPLE9_FOLD_ASSUME_NO_WRAP") != NULL)
+               safe = true;
             /* An amul cannot overflow the variable it indexes, so for an
              * in-bounds access the 32-bit sum equals the hardware's 64-bit
              * index + displacement. Robust accesses still load out of
