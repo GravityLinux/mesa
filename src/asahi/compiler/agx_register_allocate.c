@@ -24,10 +24,6 @@ struct phi_web_node {
    /* Parent index, or circular for root */
    uint32_t parent;
 
-   /* If root, assigned register, or ~0 if no register assigned. */
-   uint16_t reg;
-   bool assigned;
-
    /* Rank, at most log2(n) so need ~5-bits */
    uint8_t rank;
 };
@@ -214,6 +210,20 @@ phi_web_union_noninterfering(struct phi_web_node *web,
    members[root].count += members[other].count;
 }
 
+/* Each phi operand is an edge preference. Keep the operand address so that
+ * live-range splits on predecessor edges are reflected in its register.
+ */
+struct phi_preference {
+   struct phi_preference *next;
+   const agx_index *other;
+   uint64_t weight;
+};
+
+struct phi_reg_preference {
+   unsigned reg;
+   uint64_t edge, affinity;
+};
+
 struct ra_ctx {
    agx_context *shader;
    agx_block *block;
@@ -237,8 +247,14 @@ struct ra_ctx {
    unsigned *count[RA_CLASSES];
 
    /* For affinities */
-   agx_instr **src_to_collect_phi;
+   agx_instr **src_to_collect;
    struct phi_web_node *phi_web;
+   struct phi_web_members *web_members;
+   struct phi_preference **phi_preferences;
+   uint64_t *phi_weights;
+   unsigned *last_reg;
+   struct util_dynarray *reg_preferences;
+   uint64_t edge_total, affinity_total;
 
    /* If bit i of used_regs is set, and register i is the first consecutive
     * register holding an SSA value, then reg_to_ssa[i] is the SSA index of the
@@ -259,7 +275,7 @@ struct ra_ctx {
    BITSET_WORD *reusable;
    uint64_t reused_sources;
 
-   /* constrained_affinity() result for the value being placed. */
+   /* Cached preferences for the value being placed. */
    unsigned affinity_ssa, affinity_reg;
 
    /* Soft placement hints. Instruction constraints remain the only hard
@@ -292,6 +308,9 @@ reserved_size(agx_context *ctx)
       return 0;
 }
 
+static unsigned preferred_phi_register(struct ra_ctx *rctx, unsigned ssa,
+                                       bool available);
+
 /* Opt-in evidence for failed phi-web affinities; never changes placement. */
 static void
 pressure_web_event(struct ra_ctx *rctx, unsigned ssa, const char *event,
@@ -301,8 +320,7 @@ pressure_web_event(struct ra_ctx *rctx, unsigned ssa, const char *event,
        !getenv("AGX_APPLE9_RA_WEBS") || rctx->classes[ssa] != RA_GPR)
       return;
    unsigned root = phi_web_find(rctx->phi_web, ssa);
-   const struct phi_web_node *web = &rctx->phi_web[root];
-   unsigned want = web->assigned ? web->reg : ~0u;
+   unsigned want = preferred_phi_register(rctx, ssa, false);
    unsigned count = rctx->ncomps[ssa];
    fprintf(stderr, "RA_WEB_%s id=%u block=%u loop=%u ssa=%u web=%u "
            "op=%s want=%u chosen=%u width=%u bound=%u min=%u max=%u align=%u owners=",
@@ -312,7 +330,7 @@ pressure_web_event(struct ra_ctx *rctx, unsigned ssa, const char *event,
            rctx->bound[RA_GPR], constraint ? constraint->min : 0,
            constraint ? constraint->max : rctx->bound[RA_GPR] - count,
            constraint ? constraint->align : count);
-   if (web->assigned) {
+   if (want != ~0u) {
       for (unsigned reg = reserved_size(rctx->shader);
            reg < rctx->bound[RA_GPR];) {
          if (!BITSET_TEST(rctx->used_regs[RA_GPR], reg)) {
@@ -545,24 +563,17 @@ agx_calc_register_demand(agx_context *ctx, bool remat)
 }
 
 struct placement_cost {
-   unsigned moves, affinity, preference, growth, scarcity, reg;
+   uint64_t edge, affinity;
+   unsigned moves, collect, preference, growth, scarcity, reg;
 };
 
-/* The register a constrained definition should take so that no copy is
- * needed, as pick_regs chooses for unconstrained ones: its phi web's register,
- * else its slot in the collect it feeds, beside an already placed source or in
- * a free range holding the complete collect. */
+/* Collects retain their tuple placement preference separately from phi edges. */
 static unsigned
-constrained_affinity(struct ra_ctx *rctx, unsigned ssa)
+collect_affinity(struct ra_ctx *rctx, unsigned ssa)
 {
-   if (rctx->affinity_ssa == ssa)
-      return rctx->affinity_reg;
    unsigned want = ~0u;
-   struct phi_web_node *web = &rctx->phi_web[phi_web_find(rctx->phi_web, ssa)];
-   agx_instr *collect = rctx->src_to_collect_phi[ssa];
-   if (web->assigned) {
-      want = web->reg;
-   } else if (collect && collect->op == AGX_OPCODE_COLLECT) {
+   agx_instr *collect = rctx->src_to_collect[ssa];
+   if (collect && collect->op == AGX_OPCODE_COLLECT) {
       unsigned ours = ~0u;
       agx_foreach_ssa_src(collect, s) {
          if (collect->src[s].value == ssa) {
@@ -586,17 +597,91 @@ constrained_affinity(struct ra_ctx *rctx, unsigned ssa)
             want = base + ours * width;
       }
    }
-   rctx->affinity_ssa = ssa;
-   rctx->affinity_reg = want;
    return want;
+}
+
+static void
+add_reg_preference(struct ra_ctx *rctx, unsigned reg, uint64_t edge,
+                   uint64_t affinity)
+{
+   rctx->edge_total += edge;
+   rctx->affinity_total += affinity;
+   util_dynarray_foreach(rctx->reg_preferences, struct phi_reg_preference, p) {
+      if (p->reg == reg) {
+         p->edge += edge;
+         p->affinity += affinity;
+         return;
+      }
+   }
+   util_dynarray_append(rctx->reg_preferences,
+                       ((struct phi_reg_preference){reg, edge, affinity}));
+}
+
+static void
+cache_phi_preferences(struct ra_ctx *rctx, unsigned ssa)
+{
+   if (rctx->affinity_ssa == ssa)
+      return;
+
+   util_dynarray_clear(rctx->reg_preferences);
+   rctx->edge_total = rctx->affinity_total = 0;
+   for (struct phi_preference *p = rctx->phi_preferences[ssa]; p; p = p->next) {
+      if (p->other->has_reg)
+         add_reg_preference(rctx, p->other->reg, p->weight, 0);
+   }
+
+   /* Transitive class history helps before the other end of a direct edge has
+    * been assigned. Retain every location, and refresh values when RA moves
+    * them, rather than permanently pinning the class to its first assignment.
+    * Direct edge matches take priority over this speculative history.
+    */
+   unsigned root = phi_web_find(rctx->phi_web, ssa);
+   for (unsigned v = rctx->web_members[root].head; v != ~0u;
+        v = rctx->web_members[v].next) {
+      if (v != ssa && v < rctx->shader->alloc && rctx->last_reg[v] != ~0u)
+         add_reg_preference(rctx, rctx->last_reg[v], 0, rctx->phi_weights[v]);
+   }
+   rctx->affinity_reg = collect_affinity(rctx, ssa);
+   rctx->affinity_ssa = ssa;
+}
+
+static unsigned
+preferred_phi_register(struct ra_ctx *rctx, unsigned ssa, bool available)
+{
+   cache_phi_preferences(rctx, ssa);
+   enum ra_class cls = rctx->classes[ssa];
+   unsigned count = rctx->ncomps[ssa], best = ~0u;
+   uint64_t edge = 0, affinity = 0;
+   util_dynarray_foreach(rctx->reg_preferences, struct phi_reg_preference, p) {
+      if (p->reg % count || p->reg + count > rctx->bound[cls] ||
+          (available && BITSET_TEST_COUNT(rctx->used_regs[cls], p->reg, count)))
+         continue;
+      if (best == ~0u || p->edge > edge ||
+          (p->edge == edge && (p->affinity > affinity ||
+           (p->affinity == affinity && p->reg < best)))) {
+         best = p->reg;
+         edge = p->edge;
+         affinity = p->affinity;
+      }
+   }
+   return best;
 }
 
 static struct placement_cost
 placement_cost(struct ra_ctx *rctx, unsigned ssa, unsigned reg, unsigned count)
 {
    struct placement_cost cost = {.reg = reg};
-   unsigned want = constrained_affinity(rctx, ssa);
-   cost.affinity = want != ~0u && want != reg;
+   cache_phi_preferences(rctx, ssa);
+   cost.edge = rctx->edge_total;
+   cost.affinity = rctx->affinity_total;
+   util_dynarray_foreach(rctx->reg_preferences, struct phi_reg_preference, p) {
+      if (p->reg == reg) {
+         cost.edge -= p->edge;
+         cost.affinity -= p->affinity;
+         break;
+      }
+   }
+   cost.collect = rctx->affinity_reg != ~0u && rctx->affinity_reg != reg;
    if (!rctx->preferred)
       return cost;
    struct agx_reg_constraint c = rctx->preferred[ssa];
@@ -617,7 +702,9 @@ static bool
 placement_cheaper(struct placement_cost a, struct placement_cost b)
 {
    if (a.moves != b.moves) return a.moves < b.moves;
+   if (a.edge != b.edge) return a.edge < b.edge;
    if (a.affinity != b.affinity) return a.affinity < b.affinity;
+   if (a.collect != b.collect) return a.collect < b.collect;
    if (a.preference != b.preference) return a.preference < b.preference;
    if (a.growth != b.growth) return a.growth < b.growth;
    if (a.scarcity != b.scarcity) return a.scarcity < b.scarcity;
@@ -739,6 +826,8 @@ set_ssa_to_reg(struct ra_ctx *rctx, unsigned ssa, unsigned reg)
    *(rctx->count[cls]) = MAX2(*(rctx->count[cls]), reg + rctx->ncomps[ssa]);
 
    rctx->ssa_to_reg[ssa] = reg;
+   rctx->last_reg[ssa] = reg;
+   rctx->affinity_ssa = ~0u;
 
    if (cls == RA_GPR) {
       rctx->reg_to_ssa[reg] = ssa;
@@ -1072,15 +1161,6 @@ assign_regs(struct ra_ctx *rctx, agx_index v, unsigned reg)
           "no interference");
 
    BITSET_SET_COUNT(rctx->used_regs[cls], reg, nr);
-
-   /* Phi webs need to remember which register they're assigned to */
-   struct phi_web_node *node =
-      &rctx->phi_web[phi_web_find(rctx->phi_web, v.value)];
-
-   if (!node->assigned) {
-      node->reg = reg;
-      node->assigned = true;
-   }
 }
 
 static void
@@ -1474,14 +1554,9 @@ pick_regs(struct ra_ctx *rctx, agx_instr *I, unsigned d)
    unsigned align = count;
 
    pressure_web_event(rctx, idx.value, "CHOOSE", ~0u, NULL);
-   /* Try to allocate entire phi webs compatibly */
-   unsigned phi_idx = phi_web_find(rctx->phi_web, idx.value);
-   if (rctx->phi_web[phi_idx].assigned) {
-      unsigned reg = rctx->phi_web[phi_idx].reg;
-      if ((reg % align) == 0 && reg + align < rctx->bound[cls] &&
-          !BITSET_TEST_COUNT(rctx->used_regs[cls], reg, align))
-         return reg;
-   }
+   unsigned preferred = preferred_phi_register(rctx, idx.value, true);
+   if (preferred != ~0u)
+      return preferred;
 
    /* Try to allocate moves compatibly with their sources */
    if (I->op == AGX_OPCODE_MOV && I->src[0].type == AGX_INDEX_NORMAL &&
@@ -1491,18 +1566,6 @@ pick_regs(struct ra_ctx *rctx, agx_instr *I, unsigned d)
       unsigned out;
       if (try_coalesce_with(rctx, I->src[0], count, false, &out))
          return out;
-   }
-
-   /* Try to allocate phis compatibly with their sources */
-   if (I->op == AGX_OPCODE_PHI) {
-      agx_foreach_ssa_src(I, s) {
-         /* Loop headers have phis with a source preceding the definition */
-         bool may_be_unvisited = rctx->block->loop_header;
-
-         unsigned out;
-         if (try_coalesce_with(rctx, I->src[s], count, may_be_unvisited, &out))
-            return out;
-      }
    }
 
    /* Try to allocate collects compatibly with their sources */
@@ -1526,9 +1589,9 @@ pick_regs(struct ra_ctx *rctx, agx_instr *I, unsigned d)
    }
 
    /* Try to coalesce scalar exports */
-   agx_instr *collect_phi = rctx->src_to_collect_phi[idx.value];
-   if (collect_phi && collect_phi->op == AGX_OPCODE_EXPORT) {
-      unsigned reg = collect_phi->imm;
+   agx_instr *collect_use = rctx->src_to_collect[idx.value];
+   if (collect_use && collect_use->op == AGX_OPCODE_EXPORT) {
+      unsigned reg = collect_use->imm;
 
       if (!BITSET_TEST_COUNT(rctx->used_regs[cls], reg, align) &&
           (reg % align) == 0)
@@ -1536,9 +1599,9 @@ pick_regs(struct ra_ctx *rctx, agx_instr *I, unsigned d)
    }
 
    /* Try to coalesce vector exports */
-   if (collect_phi && collect_phi->op == AGX_OPCODE_SPLIT) {
-      if (collect_phi->dest[0].type == AGX_INDEX_NORMAL) {
-         agx_instr *exp = rctx->src_to_collect_phi[collect_phi->dest[0].value];
+   if (collect_use && collect_use->op == AGX_OPCODE_SPLIT) {
+      if (collect_use->dest[0].type == AGX_INDEX_NORMAL) {
+         agx_instr *exp = rctx->src_to_collect[collect_use->dest[0].value];
          if (exp && exp->op == AGX_OPCODE_EXPORT) {
             unsigned reg = exp->imm;
 
@@ -1550,8 +1613,8 @@ pick_regs(struct ra_ctx *rctx, agx_instr *I, unsigned d)
    }
 
    /* Try to allocate sources of collects contiguously */
-   if (collect_phi && collect_phi->op == AGX_OPCODE_COLLECT) {
-      agx_instr *collect = collect_phi;
+   if (collect_use && collect_use->op == AGX_OPCODE_COLLECT) {
+      agx_instr *collect = collect_use;
 
       assert(count == align && "collect sources are scalar");
 
@@ -1613,26 +1676,6 @@ pick_regs(struct ra_ctx *rctx, agx_instr *I, unsigned d)
             if (!BITSET_TEST_COUNT(rctx->used_regs[cls], reg, count))
                return reg;
          }
-      }
-   }
-
-   /* Try to allocate phi sources compatibly with their phis */
-   if (collect_phi && collect_phi->op == AGX_OPCODE_PHI) {
-      agx_instr *phi = collect_phi;
-      unsigned out;
-
-      agx_foreach_ssa_src(phi, s) {
-         if (try_coalesce_with(rctx, phi->src[s], count, true, &out))
-            return out;
-      }
-
-      /* If we're in a loop, we may have already allocated the phi. Try that. */
-      if (phi->dest[0].has_reg) {
-         unsigned base = phi->dest[0].reg;
-
-         if (base + count <= rctx->bound[cls] &&
-             !BITSET_TEST_COUNT(rctx->used_regs[cls], base, count))
-            return base;
       }
    }
 
@@ -2197,8 +2240,9 @@ agx_ra(agx_context *ctx)
    void *web_memctx = ralloc_context(NULL);
    struct phi_web_members *web_members =
       ralloc_array(web_memctx, struct phi_web_members, nr_web_members);
+   void *graph_memctx = ralloc_context(web_memctx);
    struct u_sparse_bitset *interference =
-      phi_web_interference(ctx, constants, web_memctx);
+      phi_web_interference(ctx, constants, graph_memctx);
 
    for (unsigned i = 0; i < nr_web_members; ++i) {
       phi_web[i].parent = i;
@@ -2231,23 +2275,72 @@ agx_ra(agx_context *ctx)
       }
    }
 #endif
-   ralloc_free(web_memctx);
+   ralloc_free(graph_memctx);
    free(constants);
+
+   struct phi_preference **phi_preferences =
+      rzalloc_array(web_memctx, struct phi_preference *, ctx->alloc);
+   uint64_t *phi_weights = rzalloc_array(web_memctx, uint64_t, ctx->alloc);
+   unsigned *last_reg = ralloc_array(web_memctx, unsigned, ctx->alloc);
+   for (unsigned v = 0; v < ctx->alloc; ++v)
+      last_reg[v] = ~0u;
+
+   /* Structured source order gives each loop a header-to-last-backedge span.
+    * Weight an edge by its predecessor's depth, so a loop recurrence outweighs
+    * a one-time entry. Saturate depth to keep sums comfortably in uint64_t.
+    */
+   unsigned *depth = rzalloc_array(web_memctx, unsigned, ctx->num_blocks);
+   agx_foreach_block(ctx, header) {
+      if (!header->loop_header)
+         continue;
+      unsigned end = header->index;
+      agx_foreach_predecessor(header, pred)
+         end = MAX2(end, (*pred)->index);
+      for (unsigned b = header->index; b <= end; ++b)
+         ++depth[b];
+   }
+   agx_foreach_block(ctx, block) {
+      agx_foreach_phi_in_block(block, phi) {
+         agx_foreach_predecessor(block, pred) {
+            unsigned s = agx_predecessor_index(block, *pred);
+            agx_index *src = &phi->src[s], *dst = &phi->dest[0];
+            if (src->type != AGX_INDEX_NORMAL ||
+                src->size != dst->size || src->memory != dst->memory ||
+                agx_channels(*src) != agx_channels(*dst))
+               continue;
+            uint64_t weight = 1ull << (3 * MIN2(depth[(*pred)->index], 6));
+            struct phi_preference *forward =
+               ralloc(web_memctx, struct phi_preference);
+            struct phi_preference *reverse =
+               ralloc(web_memctx, struct phi_preference);
+            *forward = (struct phi_preference){
+               phi_preferences[dst->value], src, weight};
+            *reverse = (struct phi_preference){
+               phi_preferences[src->value], dst, weight};
+            phi_preferences[dst->value] = forward;
+            phi_preferences[src->value] = reverse;
+            phi_weights[src->value] += weight;
+            phi_weights[dst->value] += weight;
+         }
+      }
+   }
+   struct util_dynarray reg_preferences;
+   util_dynarray_init(&reg_preferences, web_memctx);
 
    uint8_t *ncomps = calloc(ctx->alloc, sizeof(uint8_t));
    uint8_t *ncomps_unrounded = calloc(ctx->alloc, sizeof(uint8_t));
    enum ra_class *classes = calloc(ctx->alloc, sizeof(enum ra_class));
-   agx_instr **src_to_collect_phi = calloc(ctx->alloc, sizeof(agx_instr *));
+   agx_instr **src_to_collect = calloc(ctx->alloc, sizeof(agx_instr *));
    enum agx_size *sizes = calloc(ctx->alloc, sizeof(enum agx_size));
    BITSET_WORD *visited = BITSET_CALLOC(ctx->alloc);
    unsigned max_ncomps = 1;
 
    agx_foreach_instr_global(ctx, I) {
-      /* Record collects/phis so we can coalesce when assigning */
-      if (I->op == AGX_OPCODE_COLLECT || I->op == AGX_OPCODE_PHI ||
-          I->op == AGX_OPCODE_EXPORT || I->op == AGX_OPCODE_SPLIT) {
+      /* Record tuple and export uses; all phi uses are retained separately. */
+      if (I->op == AGX_OPCODE_COLLECT || I->op == AGX_OPCODE_EXPORT ||
+          I->op == AGX_OPCODE_SPLIT) {
          agx_foreach_ssa_src(I, s) {
-            src_to_collect_phi[I->src[s].value] = I;
+            src_to_collect[I->src[s].value] = I;
          }
       }
 
@@ -2320,8 +2413,13 @@ agx_ra(agx_context *ctx)
       if (!agx_ra_assign_local(&(struct ra_ctx){
          .shader = ctx,
          .block = block,
-         .src_to_collect_phi = src_to_collect_phi,
+         .src_to_collect = src_to_collect,
          .phi_web = phi_web,
+         .web_members = web_members,
+         .phi_preferences = phi_preferences,
+         .phi_weights = phi_weights,
+         .last_reg = last_reg,
+         .reg_preferences = &reg_preferences,
          .ncomps = ncomps,
          .ncomps_unrounded = ncomps_unrounded,
          .sizes = sizes,
@@ -2500,8 +2598,9 @@ cleanup:
    }
 
    pressure_audit_end(ctx);
+   ralloc_free(web_memctx);
    free(phi_web);
-   free(src_to_collect_phi);
+   free(src_to_collect);
    free(ncomps);
    free(ncomps_unrounded);
    free(sizes);
