@@ -50,6 +50,9 @@ record_write(struct repair_ctx *ctx, agx_block *block, unsigned node,
              agx_index val)
 {
    assert(node < ctx->n);
+   if (getenv("AGX_APPLE9_RA_AUDIT"))
+      fprintf(stderr, "RA_AUDIT_HOME node=%u ssa=%u mem=%u block=%u\n",
+              node, val.value, val.memory, block->index);
    struct hash_table_u64 *defs = repair_block(ctx, block)->defs;
    _mesa_hash_table_u64_insert(defs, node,
                                ralloc_memdup(defs, &val, sizeof(val)));
@@ -327,5 +330,13 @@ agx_repair_ssa(agx_context *ctx)
    ralloc_free(blocks);
 
    agx_opt_trivial_phi(ctx);
+   if (getenv("AGX_APPLE9_RA_AUDIT")) {
+      unsigned next = 0;
+      agx_foreach_instr_global(ctx, I) {
+         agx_foreach_ssa_dest(I, d)
+            fprintf(stderr, "RA_AUDIT_REINDEX old=%u new=%u\n",
+                    I->dest[d].value, next++);
+      }
+   }
    agx_reindex_ssa(ctx);
 }
