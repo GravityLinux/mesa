@@ -1604,6 +1604,42 @@ apple9_lower_bool_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
          case nir_op_iand:
          case nir_op_ior:
          case nir_op_ixor: {
+            /* With a comparison operand, one SELECT replaces its 0/1
+             * materialization and the logic op: a | b = cmp ? 1 : b and
+             * a & b = cmp ? b : 0. Chains of compares ORed together are common
+             * in translated vertex shaders. Prefer a comparison no other user
+             * has materialized; signed comparisons need biasing, so fuse them
+             * only when this is their only use.
+             */
+            int fuse = -1;
+            for (unsigned s = 0; op != nir_op_ixor && s < 2; ++s) {
+               nir_scalar src =
+                  apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, s));
+               struct apple9_compare compare;
+               if (nir_def_instr_type(src.def) != nir_instr_type_alu ||
+                   !apple9_normalize_compare(nir_scalar_alu_op(src), &compare) ||
+                   (compare.domain == APPLE9_COMPARE_SIGNED &&
+                    !list_is_singular(&src.def->uses)))
+                  continue;
+               const unsigned src_key = src.def->index * 4 + src.comp;
+               if (fuse < 0 || (src_key < lower->ssa_map_count &&
+                                lower->ssa_to_vreg[src_key] ==
+                                   AGX_APPLE9_VREG_INVALID))
+                  fuse = s;
+            }
+            if (fuse >= 0) {
+               uint32_t other = apple9_lower_bool_scalar(
+                  lower, nir_scalar_chase_alu_src(scalar, 1 - fuse));
+               uint32_t constant = op == nir_op_ior ? apple9_dag_imm(lower, 1)
+                                                    : apple9_dag_zero(lower);
+               nir_scalar compare = nir_scalar_chase_alu_src(scalar, fuse);
+               if (other != AGX_APPLE9_VREG_INVALID &&
+                   constant != AGX_APPLE9_VREG_INVALID)
+                  value = op == nir_op_ior
+                     ? apple9_emit_dag_select(lower, compare, constant, other)
+                     : apple9_emit_dag_select(lower, compare, other, constant);
+               break;
+            }
             uint32_t sources[2] = {
                apple9_lower_bool_scalar(lower,
                                         nir_scalar_chase_alu_src(scalar, 0)),
