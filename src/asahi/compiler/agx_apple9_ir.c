@@ -4140,13 +4140,17 @@ pack_i2f32(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
            struct agx_apple9_packed_instruction *packed)
 {
    const unsigned dst = phys[instruction->dest];
-   const unsigned src = phys[instruction->src[0]];
-   if (instruction->nr_srcs != 1 || dst >= AGX_APPLE9_GPR_COUNT ||
-       src >= AGX_APPLE9_GPR_COUNT ||
+   uint32_t source[1];
+   uint8_t live;
+   if (instruction->alu_src_immediate_mask ||
+       !apple9_alu_sources(instruction, phys, 1, source, &live))
+      return false;
+   const unsigned src = source[0];
+   if (dst >= AGX_APPLE9_GPR_COUNT ||
        (instruction->op != AGX_APPLE9_VIR_U2F32 &&
         instruction->op != AGX_APPLE9_VIR_I2F32))
       return false;
-   const bool retain_source = instruction->live_after_mask & 1u;
+   const bool retain_source = live & 1u;
 
    /*
     * EXP-0013 and EXP-0144 hardware-validate the canonical 32-bit integer to
@@ -4157,16 +4161,18 @@ pack_i2f32(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
     * identifies those bits as the one-hot slot field instead. Source lifetime
     * is carried independently by byte 6 (0x8c retained, 0xac last use).
     */
-   const uint8_t bytes[] = {
+   uint8_t bytes[] = {
       0xa7,
       0x07,
       0x54,
       dst << 1,
       0x03,
       (src & 63) << 2,
-      (retain_source ? 0x8c : 0xac) | (src >> 6),
+      (retain_source ? 0x8c : 0xac) | ((src >> 6) & 1),
       instruction->op == AGX_APPLE9_VIR_I2F32 ? 0x60 : 0x20,
    };
+   if (instruction->alu_src_uniform_mask)
+      pack_integer_source(bytes, src, true, false, 42, 53, 61);
    packed_init(packed, bytes, sizeof(bytes));
    return true;
 }
@@ -4176,9 +4182,13 @@ pack_f2i32(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
            struct agx_apple9_packed_instruction *packed)
 {
    const unsigned dst = phys[instruction->dest];
-   const unsigned src = phys[instruction->src[0]];
-   if (instruction->nr_srcs != 1 || dst >= AGX_APPLE9_GPR_COUNT ||
-       src >= AGX_APPLE9_GPR_COUNT ||
+   uint32_t source[1];
+   uint8_t live;
+   if (instruction->alu_src_immediate_mask ||
+       !apple9_alu_sources(instruction, phys, 1, source, &live))
+      return false;
+   const unsigned src = source[0];
+   if (dst >= AGX_APPLE9_GPR_COUNT ||
        (instruction->op != AGX_APPLE9_VIR_F2I32 &&
         instruction->op != AGX_APPLE9_VIR_F2U32))
       return false;
@@ -4187,18 +4197,20 @@ pack_f2i32(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
     * EXP-0144 independently locates dst=byte3>>1 and src=byte5>>2. The
     * continuation's format bit must also match signedness: the signed format
     * with an unsigned operation saturates at 65535, not UINT32_MAX. */
-   const uint8_t bytes[] = {
+   uint8_t bytes[] = {
       0x27,
       0x07,
       0x54,
       dst << 1,
       0x03,
       (src & 63) << 2,
-      ((instruction->live_after_mask & 1) ? 0x96 : 0xb4) | (src >> 6),
+      ((live & 1) ? 0x96 : 0xb4) | ((src >> 6) & 1),
       instruction->op == AGX_APPLE9_VIR_F2I32 ? 0x48 : 0x08,
       instruction->op == AGX_APPLE9_VIR_F2I32 ? 0x03 : 0x02,
       0x00,
    };
+   if (instruction->alu_src_uniform_mask)
+      pack_integer_source(bytes, src, true, false, 42, 53, 59);
    packed_init(packed, bytes, sizeof(bytes));
    return true;
 }
@@ -7062,6 +7074,10 @@ agx_apple9_pack_vir_instruction(const struct agx_apple9_vir_instr *instruction,
        instruction->op != AGX_APPLE9_VIR_ISHR &&
        instruction->op != AGX_APPLE9_VIR_USHR &&
        instruction->op != AGX_APPLE9_VIR_ISHL &&
+       instruction->op != AGX_APPLE9_VIR_U2F32 &&
+       instruction->op != AGX_APPLE9_VIR_I2F32 &&
+       instruction->op != AGX_APPLE9_VIR_F2U32 &&
+       instruction->op != AGX_APPLE9_VIR_F2I32 &&
        instruction->op != AGX_APPLE9_VIR_SELECT &&
        instruction->op != AGX_APPLE9_VIR_PREDICATE_COMPARE) {
       if (reason)

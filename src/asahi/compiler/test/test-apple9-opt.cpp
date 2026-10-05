@@ -973,3 +973,46 @@ TEST_F(Apple9Optimization, UniformShiftAmountPreservesRegisterForm)
    EXPECT_EQ(I->alu_src_uniform_mask, 2u);
    EXPECT_EQ(I->encoding, AGX_APPLE9_ENC_SHIFT_LOGICAL_REGISTER);
 }
+
+TEST(Apple9Packer, UniformConversionsMatchT8132Probes)
+{
+   const struct {
+      agx_apple9_vir_opcode op;
+      agx_apple9_encoding encoding;
+      uint8_t bytes[10];
+      unsigned size;
+   } cases[] = {
+      {AGX_APPLE9_VIR_I2F32, AGX_APPLE9_ENC_SINT_TO_FLOAT, {0xa7,0x07,0x54,0x50,0x03,0xc0,0xaf,0x40}, 8},
+      {AGX_APPLE9_VIR_U2F32, AGX_APPLE9_ENC_UINT_TO_FLOAT, {0xa7,0x07,0x54,0x50,0x03,0xc0,0xaf,0x00}, 8},
+      {AGX_APPLE9_VIR_F2I32, AGX_APPLE9_ENC_FLOAT_TO_SINT, {0x27,0x07,0x54,0x50,0x03,0xc0,0xb7,0x40,0x03,0x00}, 10},
+      {AGX_APPLE9_VIR_F2U32, AGX_APPLE9_ENC_FLOAT_TO_UINT, {0x27,0x07,0x54,0x50,0x03,0xc0,0xb7,0x00,0x02,0x00}, 10},
+   };
+   for (const auto &c : cases) {
+      agx_apple9_vir_instr I = {};
+      I.op = c.op; I.encoding = c.encoding; I.dest = 0; I.dest_components = 1;
+      I.alu_src_uniform_mask = 1; I.alu_src_value[0] = 240;
+      const uint8_t phys[] = {40};
+      agx_apple9_packed_instruction packed;
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason)) << reason;
+      EXPECT_EQ(packed.length, c.size);
+      EXPECT_EQ(memcmp(packed.bytes, c.bytes, c.size), 0);
+      I.alu_src_value[0] = 256;
+      EXPECT_FALSE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason));
+   }
+}
+
+TEST_F(Apple9Optimization, UniformConversionRemovesGprImport)
+{
+   auto zero = imm(0);
+   auto input = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IOR_UNIFORM,
+      AGX_APPLE9_ENC_LOGIC_UNIFORM, &zero, 1, 240);
+   p.output = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_U2F32,
+      AGX_APPLE9_ENC_UINT_TO_FLOAT, &input, 1, 0);
+   ASSERT_TRUE(agx_apple9_optimize_vir(&p));
+   const auto *I = agx_apple9_definition(&p, p.output);
+   ASSERT_NE(I, nullptr);
+   EXPECT_EQ(I->nr_srcs, 0u);
+   EXPECT_EQ(I->alu_src_uniform_mask, 1u);
+   EXPECT_EQ(I->alu_src_value[0], 240u);
+}
