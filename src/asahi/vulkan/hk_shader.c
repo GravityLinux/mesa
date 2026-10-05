@@ -704,6 +704,29 @@ lower_load_global_bounded(nir_builder *b, nir_intrinsic_instr *intr)
    nir_def_replace(&intr->def, val);
 }
 
+/* Merging loads issues the combined load at the first one, so every later
+ * component stays live from there. Apple9 shaders that already reach the
+ * register limit then need more copies and swaps, so only merge accesses that
+ * are close together. HK_APPLE9_VECTORIZE_WINDOW overrides the distance.
+ */
+static bool
+hk_apple9_vectorize_cb(unsigned align_mul, unsigned align_offset,
+                       unsigned bit_size, unsigned num_components,
+                       int64_t hole_size, nir_intrinsic_instr *low,
+                       nir_intrinsic_instr *high, void *data)
+{
+   if (!agx_mem_vectorize_cb(align_mul, align_offset, bit_size, num_components,
+                             hole_size, low, high, data))
+      return false;
+   static int window = -1;
+   if (window < 0) {
+      const char *env = getenv("HK_APPLE9_VECTORIZE_WINDOW");
+      window = env ? atoi(env) : 4;
+   }
+   int64_t distance = (int64_t)high->instr.index - (int64_t)low->instr.index;
+   return llabs(distance) <= window;
+}
+
 static bool
 lower_load_global_constant_offset_instr(nir_builder *b,
                                         nir_intrinsic_instr *intrin, void *data)
@@ -2031,10 +2054,16 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
     * dynamically indexed struct becomes a separate scalar load.
     */
    if (dev->dev.chip == AGX_CHIP_G16G) {
+      /* Explicit I/O builds each access's base and offset afresh. The
+       * vectorizer only merges accesses sharing those definitions. */
+      NIR_PASS(_, nir, nir_opt_cse);
+      if (getenv("HK_APPLE9_TRACE_VECTORIZE") &&
+          nir->info.stage == MESA_SHADER_FRAGMENT)
+         nir_print_shader(nir, stderr);
       NIR_PASS(_, nir, nir_opt_load_store_vectorize,
                &(const nir_load_store_vectorize_options){
                   .modes = nir_var_mem_global,
-                  .callback = agx_mem_vectorize_cb,
+                  .callback = hk_apple9_vectorize_cb,
                });
    }
 
