@@ -4128,6 +4128,14 @@ agx_apple9_pack_get_global_id(unsigned dst, unsigned component,
 }
 
 static bool
+apple9_alu_sources(const struct agx_apple9_vir_instr *I, const uint8_t *phys,
+                  unsigned arity, uint32_t *values, uint8_t *live);
+
+static void
+pack_integer_source(uint8_t *bytes, unsigned source, bool uniform, bool live,
+                    unsigned value_bit, unsigned discard_bit, unsigned file_bit);
+
+static bool
 pack_i2f32(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
            struct agx_apple9_packed_instruction *packed)
 {
@@ -4314,18 +4322,23 @@ pack_shift(const struct agx_apple9_vir_instr *I, const uint8_t *phys,
            struct agx_apple9_packed_instruction *packed)
 {
    bool arithmetic = I->op == AGX_APPLE9_VIR_ISHR;
-   bool variable = I->nr_srcs == 2;
+   bool variable = I->encoding == AGX_APPLE9_ENC_SHIFT_ARITH_REGISTER ||
+                   I->encoding == AGX_APPLE9_ENC_SHIFT_LOGICAL_REGISTER;
+   uint32_t source[2];
+   uint8_t live;
+   if (I->alu_src_immediate_mask ||
+       !apple9_alu_sources(I, phys, variable ? 2 : 1, source, &live))
+      return false;
    enum agx_apple9_encoding encoding = arithmetic
       ? (variable ? AGX_APPLE9_ENC_SHIFT_ARITH_REGISTER
                   : AGX_APPLE9_ENC_SHIFT_EXTENDED)
       : (variable ? AGX_APPLE9_ENC_SHIFT_LOGICAL_REGISTER
                   : AGX_APPLE9_ENC_SHIFT_LOGICAL_IMMEDIATE);
-   unsigned dst = phys[I->dest], src = phys[I->src[0]];
-   if (I->encoding != encoding || (I->nr_srcs != 1 && !variable) ||
-       dst >= AGX_APPLE9_GPR_COUNT || src >= AGX_APPLE9_GPR_COUNT ||
+   unsigned dst = phys[I->dest], src = source[0];
+   if (I->encoding != encoding || dst >= AGX_APPLE9_GPR_COUNT ||
        (!arithmetic && I->op != AGX_APPLE9_VIR_USHR &&
         I->op != AGX_APPLE9_VIR_ISHL) ||
-       (variable ? (phys[I->src[1]] >= AGX_APPLE9_GPR_COUNT || I->immediate)
+       (variable ? I->immediate
                  : (I->immediate & ~(31u | (63u << AGX_APPLE9_SHIFT_WIDTH_SHIFT))) ||
                    ((I->immediate >> AGX_APPLE9_SHIFT_WIDTH_SHIFT) &&
                     I->op != AGX_APPLE9_VIR_USHR)))
@@ -4346,9 +4359,9 @@ pack_shift(const struct agx_apple9_vir_instr *I, const uint8_t *phys,
       }
    }
    set_bits(bytes, 25, 7, dst);
-   set_bits(bytes, 42, 7, src);
+   set_bits(bytes, 42, 7, src & 127);
    if (variable)
-      set_bits(bytes, 51, 7, phys[I->src[1]]);
+      set_bits(bytes, 51, 7, source[1] & 127);
    else
       set_bits(bytes, 50, 5, I->immediate & 31);
    /* Bitfield extract width, as in Metal's extract_bits (EXP-0013,
@@ -4359,10 +4372,16 @@ pack_shift(const struct agx_apple9_vir_instr *I, const uint8_t *phys,
    /* These datapaths have dedicated release flags, distinct from IMAD's
     * descriptor auxiliaries. The register amount consumes its low 16 bits;
     * selection explicitly limits NIR's shift amounts to five bits. */
-   if (I->live_after_mask & 1)
+   if (live & 1)
       set_bits(bytes, arithmetic ? 62 : 72, 1, 0);
-   if (variable && (I->live_after_mask & 2))
+   if (variable && (live & 2))
       set_bits(bytes, arithmetic ? 63 : 73, 1, 0);
+   for (unsigned s = 0; s < (variable ? 2 : 1); ++s) {
+      if (I->alu_src_uniform_mask & BITFIELD_BIT(s))
+         pack_integer_source(bytes, source[s], true, false, s ? 51 : 42,
+                             (arithmetic ? 62 : 72) + s,
+                             (arithmetic ? 69 : 80) + 2 * s);
+   }
    packed_init(packed, bytes, arithmetic ? 10 : 12);
    return true;
 }
@@ -7040,6 +7059,9 @@ agx_apple9_pack_vir_instruction(const struct agx_apple9_vir_instr *instruction,
        instruction->op != AGX_APPLE9_VIR_UMAX &&
        instruction->op != AGX_APPLE9_VIR_FMIN &&
        instruction->op != AGX_APPLE9_VIR_FMAX &&
+       instruction->op != AGX_APPLE9_VIR_ISHR &&
+       instruction->op != AGX_APPLE9_VIR_USHR &&
+       instruction->op != AGX_APPLE9_VIR_ISHL &&
        instruction->op != AGX_APPLE9_VIR_SELECT &&
        instruction->op != AGX_APPLE9_VIR_PREDICATE_COMPARE) {
       if (reason)

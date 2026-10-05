@@ -890,7 +890,8 @@ TEST(Apple9Packer, UniformPredicateSourcesMatchT8132Probes)
       I.dest = AGX_APPLE9_VREG_INVALID;
       I.nr_srcs = 1;
       I.src[0] = 0;
-      I.immediate = extended ? AGX_APPLE9_PREDICATE_EXT_FEQ : AGX_APPLE9_PREDICATE_ULT;
+      I.immediate = extended ? unsigned(AGX_APPLE9_PREDICATE_EXT_FEQ)
+                             : unsigned(AGX_APPLE9_PREDICATE_ULT);
       I.alu_src_uniform_mask = 2;
       I.alu_src_value[1] = 240;
       const uint8_t short_bytes[] = {0x0a,0x5b,0x3a,0x61,0x05,0x06};
@@ -919,4 +920,56 @@ TEST_F(Apple9Optimization, PredicateUniformSourcesFoldWithoutAResult)
    EXPECT_EQ(predicate->src[0], input);
    EXPECT_EQ(predicate->alu_src_uniform_mask, 2u);
    EXPECT_EQ(predicate->alu_src_value[1], 240u);
+}
+
+TEST(Apple9Packer, UniformShiftsMatchT8132Probes)
+{
+   const struct {
+      agx_apple9_vir_opcode op;
+      agx_apple9_encoding encoding;
+      unsigned slot, variable, gpr;
+      uint8_t bytes[12];
+      unsigned size;
+   } cases[] = {
+      {AGX_APPLE9_VIR_ISHR, AGX_APPLE9_ENC_SHIFT_EXTENDED, 0, 0, 42, {0xa7,0x01,0x54,0x50,0x02,0xc0,0x17,0x78,0x42,0x00}, 10},
+      {AGX_APPLE9_VIR_ISHR, AGX_APPLE9_ENC_SHIFT_ARITH_REGISTER, 0, 1, 42, {0xa7,0x01,0x54,0x50,0x02,0xc0,0x53,0xd9,0xc2,0x00}, 10},
+      {AGX_APPLE9_VIR_ISHR, AGX_APPLE9_ENC_SHIFT_ARITH_REGISTER, 1, 1, 45, {0xa7,0x01,0x54,0x50,0x02,0xb4,0x80,0xdf,0x62,0x00}, 10},
+      {AGX_APPLE9_VIR_USHR, AGX_APPLE9_ENC_SHIFT_LOGICAL_IMMEDIATE, 0, 0, 42, {0xa7,0x00,0x54,0x50,0x02,0xc0,0x17,0x00,0xf0,0x11,0x00,0x00}, 12},
+      {AGX_APPLE9_VIR_USHR, AGX_APPLE9_ENC_SHIFT_LOGICAL_REGISTER, 0, 1, 42, {0xa7,0x00,0x54,0x50,0x02,0xc0,0x53,0x01,0xf0,0x13,0x04,0x00}, 12},
+      {AGX_APPLE9_VIR_USHR, AGX_APPLE9_ENC_SHIFT_LOGICAL_REGISTER, 1, 1, 45, {0xa7,0x00,0x54,0x50,0x02,0xb4,0x80,0x07,0xf0,0x13,0x01,0x00}, 12},
+      {AGX_APPLE9_VIR_ISHL, AGX_APPLE9_ENC_SHIFT_LOGICAL_IMMEDIATE, 0, 0, 42, {0x27,0x00,0x54,0x50,0x02,0xc0,0x17,0x00,0xf0,0x11,0x00,0x00}, 12},
+      {AGX_APPLE9_VIR_ISHL, AGX_APPLE9_ENC_SHIFT_LOGICAL_REGISTER, 0, 1, 42, {0x27,0x00,0x54,0x50,0x02,0xc0,0x53,0x01,0xf0,0x13,0x04,0x00}, 12},
+      {AGX_APPLE9_VIR_ISHL, AGX_APPLE9_ENC_SHIFT_LOGICAL_REGISTER, 1, 1, 45, {0x27,0x00,0x54,0x50,0x02,0xb4,0x80,0x07,0xf0,0x13,0x01,0x00}, 12},
+   };
+   for (const auto &c : cases) {
+      agx_apple9_vir_instr I = {};
+      I.op = c.op; I.encoding = c.encoding; I.dest = 0; I.dest_components = 1;
+      I.nr_srcs = c.variable; I.src[0] = 1;
+      I.immediate = c.variable ? 0 : 5;
+      I.alu_src_uniform_mask = 1u << c.slot;
+      I.alu_src_value[c.slot] = 240;
+      const uint8_t phys[] = {40, (uint8_t)c.gpr};
+      agx_apple9_packed_instruction packed;
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason)) << reason;
+      EXPECT_EQ(packed.length, c.size);
+      EXPECT_EQ(memcmp(packed.bytes, c.bytes, c.size), 0);
+   }
+}
+
+TEST_F(Apple9Optimization, UniformShiftAmountPreservesRegisterForm)
+{
+   auto zero = imm(0);
+   auto amount = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IOR_UNIFORM,
+      AGX_APPLE9_ENC_LOGIC_UNIFORM, &zero, 1, 240);
+   auto input = agx_apple9_vir_input(&p, 45);
+   uint32_t src[] = {input, amount};
+   p.output = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_USHR,
+      AGX_APPLE9_ENC_SHIFT_LOGICAL_REGISTER, src, 2, 0);
+   ASSERT_TRUE(agx_apple9_optimize_vir(&p));
+   const auto *I = agx_apple9_definition(&p, p.output);
+   ASSERT_NE(I, nullptr);
+   EXPECT_EQ(I->nr_srcs, 1u);
+   EXPECT_EQ(I->alu_src_uniform_mask, 2u);
+   EXPECT_EQ(I->encoding, AGX_APPLE9_ENC_SHIFT_LOGICAL_REGISTER);
 }

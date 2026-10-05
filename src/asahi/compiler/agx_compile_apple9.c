@@ -6169,6 +6169,12 @@ apple9_uniform_constant_use(nir_alu_instr *alu, unsigned s, uint32_t *value)
       /* Select/predicate sources have no folded float-immediate form yet. */
       is_float = false;
       break;
+   case nir_op_ishl: case nir_op_ishr: case nir_op_ushr:
+      /* Constant shift amounts already have an immediate encoding. */
+      if (s != 0)
+         return false;
+      is_float = false;
+      break;
    case nir_op_bcsel:
       /* The condition is a boolean; only the selected 32-bit values use
        * these validated uniform operands. */

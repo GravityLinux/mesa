@@ -358,6 +358,8 @@ static void
 inline_alu_sources(struct agx_apple9_vir_instr *I, const uint16_t *uniform_read,
                       const bool *constant, const uint32_t *values)
 {
+   bool shift = I->op == AGX_APPLE9_VIR_ISHR || I->op == AGX_APPLE9_VIR_USHR ||
+                I->op == AGX_APPLE9_VIR_ISHL;
    bool predicate = I->op == AGX_APPLE9_VIR_PREDICATE_COMPARE &&
       (I->encoding == AGX_APPLE9_ENC_PREDICATE_COMPARE_SHORT ||
        I->encoding == AGX_APPLE9_ENC_PREDICATE_COMPARE_EXTENDED);
@@ -366,7 +368,7 @@ inline_alu_sources(struct agx_apple9_vir_instr *I, const uint16_t *uniform_read,
    bool fma = I->op == AGX_APPLE9_VIR_FMA;
    bool integer = I->op == AGX_APPLE9_VIR_IADD || I->op == AGX_APPLE9_VIR_ISUB ||
                   I->op == AGX_APPLE9_VIR_IMAD;
-   unsigned arity = select ? 4 : fma || I->op == AGX_APPLE9_VIR_IMAD ? 3 : 2;
+   unsigned arity = shift ? I->nr_srcs : select ? 4 : fma || I->op == AGX_APPLE9_VIR_IMAD ? 3 : 2;
    bool float2 = I->op == AGX_APPLE9_VIR_FADD || I->op == AGX_APPLE9_VIR_FSUB ||
                  I->op == AGX_APPLE9_VIR_FMUL;
    bool binary = float2 || I->op == AGX_APPLE9_VIR_IAND ||
@@ -374,7 +376,7 @@ inline_alu_sources(struct agx_apple9_vir_instr *I, const uint16_t *uniform_read,
       I->op == AGX_APPLE9_VIR_IMIN || I->op == AGX_APPLE9_VIR_IMAX ||
       I->op == AGX_APPLE9_VIR_UMIN || I->op == AGX_APPLE9_VIR_UMAX ||
       I->op == AGX_APPLE9_VIR_FMIN || I->op == AGX_APPLE9_VIR_FMAX;
-   if ((!predicate && !select && !fma && !binary && !integer) ||
+   if ((!shift && !predicate && !select && !fma && !binary && !integer) ||
        I->nr_srcs != arity || I->alu_src_uniform_mask || I->alu_src_immediate_mask)
       return;
 
@@ -408,7 +410,7 @@ inline_alu_sources(struct agx_apple9_vir_instr *I, const uint16_t *uniform_read,
     * compact form when commuting a lone uniform to B; A immediates still
     * require materialization. Fixed integer operands are independent. */
    if ((fma && file[0] == AGX_APPLE9_FILE_IMMEDIATE) ||
-       (!predicate && !select && !fma && !float2 && !integer && file[0] && file[1]))
+       (!shift && !predicate && !select && !fma && !float2 && !integer && file[0] && file[1]))
       file[0] = 0;
 
    unsigned source = 0;
