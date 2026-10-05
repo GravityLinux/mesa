@@ -5694,6 +5694,130 @@ apple9_preamble_def_size(nir_def *def, unsigned *size, unsigned *align,
    *class_ = nir_preamble_class_general;
 }
 
+/* Constants an ALU instruction can read from a uniform word. The backend
+ * folds such preamble reads into uniform operands; a constant left in the
+ * main program costs a mov_imm32 and a register, and above r63 a copy too.
+ */
+static bool
+apple9_uniform_constant_use(nir_alu_instr *alu, unsigned s, uint32_t *value)
+{
+   bool is_float;
+   switch (alu->op) {
+   case nir_op_fadd: case nir_op_fmul: case nir_op_ffma:
+   case nir_op_fmin: case nir_op_fmax:
+      is_float = true;
+      break;
+   case nir_op_iadd: case nir_op_iand: case nir_op_ior: case nir_op_ixor:
+   case nir_op_imin: case nir_op_imax: case nir_op_umin: case nir_op_umax:
+      is_float = false;
+      break;
+   default:
+      return false;
+   }
+   if (alu->def.num_components != 1 || alu->def.bit_size != 32 ||
+       !nir_src_is_const(alu->src[s].src))
+      return false;
+   *value = nir_src_comp_as_uint(alu->src[s].src, alu->src[s].swizzle[0]);
+   /* Packed float immediates are already free. */
+   uint8_t encoded;
+   return !(is_float && agx_apple9_encode_float_immediate(*value, &encoded));
+}
+
+struct apple9_constant_count {
+   uint32_t value;
+   unsigned uses;
+};
+
+static int
+apple9_constant_count_cmp(const void *a, const void *b)
+{
+   const struct apple9_constant_count *x = a, *y = b;
+   if (x->uses != y->uses)
+      return x->uses < y->uses ? 1 : -1;
+   return x->value < y->value ? -1 : x->value > y->value;
+}
+
+/* Move the most-used constants to free uniform words, as
+ * agx_opt_promote_constants does for Apple8: the preamble stores each one,
+ * and its ALU uses read it back as a uniform operand.
+ */
+static void
+apple9_promote_constants(nir_shader *shader, nir_function_impl *preamble,
+                         unsigned *used, unsigned budget)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+   struct hash_table_u64 *counts = _mesa_hash_table_u64_create(NULL);
+   struct util_dynarray list = UTIL_DYNARRAY_INIT;
+
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_alu)
+            continue;
+         nir_alu_instr *alu = nir_instr_as_alu(instr);
+         for (unsigned s = 0; s < nir_op_infos[alu->op].num_inputs; ++s) {
+            uint32_t value;
+            if (!apple9_uniform_constant_use(alu, s, &value))
+               continue;
+            uintptr_t index = (uintptr_t)_mesa_hash_table_u64_search(counts, value);
+            if (!index) {
+               util_dynarray_append(&list, ((struct apple9_constant_count){value, 0}));
+               index = util_dynarray_num_elements(&list, struct apple9_constant_count);
+               _mesa_hash_table_u64_insert(counts, value, (void *)index);
+            }
+            util_dynarray_element(&list, struct apple9_constant_count, index - 1)->uses++;
+         }
+      }
+   }
+
+   unsigned count = util_dynarray_num_elements(&list, struct apple9_constant_count);
+   struct apple9_constant_count *sorted = list.data;
+   if (count)
+      qsort(sorted, count, sizeof(*sorted), apple9_constant_count_cmp);
+
+   /* A constant used once gains nothing: it trades its mov_imm32 for a
+    * preamble store and spends a uniform word. */
+   struct hash_table_u64 *slots = _mesa_hash_table_u64_create(NULL);
+   nir_builder pb = nir_builder_at(nir_after_impl(preamble));
+   /* Each promotion adds about 22 bytes of setup; stay well inside the
+    * preamble size limit so the setup program is never rejected. */
+   unsigned promoted = 0;
+   for (unsigned i = 0; i < count && *used < budget && promoted < 64 &&
+                        sorted[i].uses >= 2; ++i, ++promoted) {
+      nir_store_preamble(&pb, nir_imm_int(&pb, sorted[i].value), .base = *used,
+                         .preamble_class = nir_preamble_class_general);
+      _mesa_hash_table_u64_insert(slots, sorted[i].value,
+                                  (void *)(uintptr_t)(*used + 1));
+      ++*used;
+   }
+
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_alu)
+            continue;
+         nir_alu_instr *alu = nir_instr_as_alu(instr);
+         for (unsigned s = 0; s < nir_op_infos[alu->op].num_inputs; ++s) {
+            uint32_t value;
+            if (!apple9_uniform_constant_use(alu, s, &value))
+               continue;
+            uintptr_t slot = (uintptr_t)_mesa_hash_table_u64_search(slots, value);
+            if (!slot)
+               continue;
+            nir_builder b = nir_builder_at(nir_before_instr(instr));
+            nir_def *uniform = nir_load_preamble(
+               &b, 1, 32, .base = slot - 1,
+               .preamble_class = nir_preamble_class_general);
+            nir_src_rewrite(&alu->src[s].src, uniform);
+            alu->src[s].swizzle[0] = 0;
+         }
+      }
+   }
+   nir_progress(true, impl, nir_metadata_control_flow);
+
+   _mesa_hash_table_u64_destroy(slots);
+   _mesa_hash_table_u64_destroy(counts);
+   util_dynarray_fini(&list);
+}
+
 static float
 apple9_preamble_cost(nir_instr *instr, const void *data)
 {
@@ -5823,6 +5947,10 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
       /* Setup currently admits ordinary linear ALU/UBO work. Masked setup and
        * scratch have independent execution contracts and are not assumed. */
       if (impl && !apple9_cf_list_has_control_flow(&impl->body)) {
+         if (!getenv("AGX_APPLE9_NO_PROMOTE"))
+            apple9_promote_constants(main, impl,
+                                     &sizes[nir_preamble_class_general],
+                                     options.preamble_storage_size[nir_preamble_class_general]);
          preamble = nir_shader_create(NULL, nir->info.stage, nir->options);
          preamble->info.stage = nir->info.stage;
          preamble->info.float_controls_execution_mode = nir->info.float_controls_execution_mode;
