@@ -1773,6 +1773,11 @@ agx_ra_assign_local(struct ra_ctx *rctx)
 
    agx_foreach_instr_in_block(block, I) {
       rctx->instr = I;
+      /* Early killing frees allocation space, but deferred destructive spill
+       * stores still need to know whether the original value survives. */
+      bool dead_spill_source = rctx->shader->ra_target.preserve_source_kills &&
+                               I->op == AGX_OPCODE_MOV && I->dest[0].memory &&
+                               !I->src[0].memory && I->src[0].kill;
 
       /* Optimization: if a split contains the last use of a vector, the split
        * can be removed by assigning the destinations overlapping the source.
@@ -1876,6 +1881,8 @@ agx_ra_assign_local(struct ra_ctx *rctx)
          agx_set_sources(rctx, I);
 
       agx_set_dests(rctx, I);
+      if (dead_spill_source)
+         I->src[0].kill = true;
    }
 
    for (unsigned i = 0; i < RA_CLASSES; ++i) {

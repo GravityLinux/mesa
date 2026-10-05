@@ -9700,6 +9700,7 @@ TEST(Apple9Spilling, VectorSpillsPreserveEveryComponent)
          std::vector<uint32_t> regs(p.value_count, 0xbad);
          std::vector<uint32_t> scratch(p.scratch_size / 4, 0xbad);
          unsigned stores = 0, saves = 0, fills = 0;
+         unsigned direct_saves = 0;
          for (unsigned i = 0; i < p.instruction_count; ++i) {
             const auto *ins = p.instructions[i];
             switch (ins->op) {
@@ -9718,6 +9719,8 @@ TEST(Apple9Spilling, VectorSpillsPreserveEveryComponent)
             case AGX_APPLE9_VIR_SPILL_STORE:
                ASSERT_LT(ins->immediate, scratch.size());
                scratch[ins->immediate] = regs[ins->src[0]];
+               regs[ins->src[0]] = 0xdeadbeef;
+               direct_saves += !p.reserved_gprs[ins->src[0]];
                ++saves;
                break;
             case AGX_APPLE9_VIR_SPILL_LOAD:
@@ -9755,6 +9758,7 @@ TEST(Apple9Spilling, VectorSpillsPreserveEveryComponent)
          if (words > 32 || forced) {
             EXPECT_GT(saves, 0u);
             EXPECT_GT(fills, 0u);
+            EXPECT_GT(direct_saves, 0u);
          } else {
             EXPECT_EQ(saves, 0u);
             EXPECT_EQ(fills, 0u);

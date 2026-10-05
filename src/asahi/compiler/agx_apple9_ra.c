@@ -740,17 +740,17 @@ apple9_physical_move(struct agx_apple9_vir_program *out, agx_index dst,
              apple9_physical_immediate(out, SPILL_INDEX_REG, 0) &&
              apple9_emit_physical(out, &store);
    }
-   /* SAVE releases its input. Use the target's parallel-copy temporary so
-    * a spilled SSA definition can remain live in its allocated GPR. */
+   /* SAVE releases its input. A last use can consume the allocated GPR;
+    * otherwise preserve the live definition through the copy temporary. */
    struct agx_apple9_vir_instr save = apple9_physical_instruction(
       AGX_APPLE9_VIR_SPILL_STORE, AGX_APPLE9_ENC_SPILL_STORE,
       AGX_APPLE9_VREG_INVALID);
-   save.src[0] = COPY_REG;
+   save.src[0] = src.kill ? src.value / 2 : COPY_REG;
    save.nr_srcs = 1;
    save.immediate = word;
    save.producer_scoreboard_slot = SPILL_TAG;
-   return apple9_physical_copy(out, COPY_REG, src.value / 2,
-                               AGX_APPLE9_SCOREBOARD_SLOT_NONE) &&
+   return (src.kill || apple9_physical_copy(out, COPY_REG, src.value / 2,
+                                           AGX_APPLE9_SCOREBOARD_SLOT_NONE)) &&
           apple9_emit_physical(out, &save);
 }
 
@@ -1118,8 +1118,11 @@ static bool
 apple9_producer_hazard(const struct agx_apple9_vir_instr *ins,
                        const struct agx_apple9_vir_instr *producer)
 {
-   for (unsigned c = 0; c < ins->dest_components; ++c) {
-      unsigned reg = ins->dest + c;
+   /* SAVE destroys its source just as a destination write would. In
+    * particular, wait for earlier asynchronous borrowers before consuming it. */
+   bool save = ins->op == AGX_APPLE9_VIR_SPILL_STORE;
+   for (unsigned c = 0; c < ins->dest_components + save; ++c) {
+      unsigned reg = save ? ins->src[0] : ins->dest + c;
       if (apple9_producer_result(producer, reg))
          return true;
       /* Includes texture parameter publications, which remain borrowed

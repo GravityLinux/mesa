@@ -570,6 +570,7 @@ check_loop_register_pressure()
    struct pending_write {
       bool memory;
       unsigned index, value, slot;
+      unsigned source;
    };
    std::vector<pending_write> pending;
    unsigned saves = 0, fills = 0;
@@ -583,6 +584,10 @@ check_loop_register_pressure()
             if (it->slot == I->scoreboard_slot ||
                 (I->op == AGX_APPLE9_VIR_WAIT &&
                  (I->immediate & BITFIELD_BIT(it->slot - 1)))) {
+               if (it->memory) {
+                  EXPECT_EQ(regs[it->source], it->value);
+                  regs[it->source] = 0xdeadbeef;
+               }
                (it->memory ? memory : regs)[it->index] = it->value;
                it = pending.erase(it);
             } else
@@ -591,6 +596,15 @@ check_loop_register_pressure()
          if (I->producer_scoreboard_slot) {
             for (const auto &write : pending)
                ASSERT_NE(write.slot, I->producer_scoreboard_slot);
+         }
+         for (const auto &write : pending) {
+            if (!write.memory)
+               continue;
+            for (unsigned c = 0; c < I->dest_components; ++c)
+               EXPECT_NE(I->dest + c, write.source);
+            if (I->op == AGX_APPLE9_VIR_SPILL_STORE) {
+               EXPECT_NE(I->src[0], write.source);
+            }
          }
          uint32_t a = I->nr_srcs ? regs[I->src[0]] : 0;
          uint32_t b = I->nr_srcs > 1 ? regs[I->src[1]] : 0;
@@ -613,14 +627,13 @@ check_loop_register_pressure()
          case AGX_APPLE9_VIR_SPILL_LOAD:
             ASSERT_LT(I->immediate, 1024u);
             pending.push_back({false, I->dest, memory[I->immediate],
-                               I->producer_scoreboard_slot});
+                               I->producer_scoreboard_slot, 0});
             ++fills;
             break;
          case AGX_APPLE9_VIR_SPILL_STORE:
             ASSERT_LT(I->immediate, 1024u);
             pending.push_back(
-               {true, I->immediate, a, I->producer_scoreboard_slot});
-            regs[I->src[0]] = 0xdeadbeef;
+               {true, I->immediate, a, I->producer_scoreboard_slot, I->src[0]});
             ++saves;
             break;
          case AGX_APPLE9_VIR_DEVICE_STORE:
