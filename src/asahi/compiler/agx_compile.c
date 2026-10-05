@@ -569,6 +569,14 @@ agx_format_for_pipe(enum pipe_format format)
    CASE(RG11B10F);
    CASE(RGB9E5);
 
+   /* Multi-word raw tile accesses (Apple9 colour helpers) carry an integer
+    * format with 2-4 32-bit lanes. The lane count is passed separately as a
+    * component mask, so a 32-bit integer element format is correct here. */
+   if (format == PIPE_FORMAT_R32G32_UINT ||
+       format == PIPE_FORMAT_R32G32B32_UINT ||
+       format == PIPE_FORMAT_R32G32B32A32_UINT)
+      return AGX_FORMAT_I32;
+
 #undef CASE
    UNREACHABLE("Invalid format");
 }
