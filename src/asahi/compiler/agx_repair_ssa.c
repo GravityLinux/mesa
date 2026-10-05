@@ -193,7 +193,7 @@ agx_opt_trivial_phi(agx_context *ctx)
                 * TODO: Handle cycles faster.
                 */
                if (phi->src[s].type != AGX_INDEX_NORMAL ||
-                   agx_is_null(remap[phi->src[s].value])) {
+                   !agx_is_null(remap[phi->src[s].value])) {
                   all_same = false;
                   break;
                }

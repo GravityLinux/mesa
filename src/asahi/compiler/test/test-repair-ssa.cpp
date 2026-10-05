@@ -106,3 +106,83 @@ TEST_F(RepairSSA, IfElse)
       agx_unit_test(b, agx_fadd(b, x, y3));
    });
 }
+
+/* Spill repair creates a phi even when a dominating definition reaches both
+ * edges unchanged. Exercise both register values and frame-slot SSA names. */
+TEST_F(RepairSSA, UnchangedValueAcrossDiamond)
+{
+   for (bool memory : {false, true}) {
+      auto b = agx_test_builder(mem_ctx);
+      auto A = agx_start_block(b->shader);
+      auto B = agx_test_block(b->shader);
+      auto C = agx_test_block(b->shader);
+      auto D = agx_test_block(b->shader);
+      agx_block_add_successor(A, B);
+      agx_block_add_successor(A, C);
+      agx_block_add_successor(B, D);
+      agx_block_add_successor(C, D);
+      b->cursor = agx_after_block(A);
+      auto x = agx_mov_imm(b, AGX_SIZE_32, 0xcafe);
+      if (memory) {
+         auto slot = agx_temp(b->shader, AGX_SIZE_32);
+         slot.memory = true;
+         agx_mov_to(b, slot, x);
+         x = slot;
+      }
+      b->cursor = agx_after_block(D);
+      agx_unit_test(b, memory ? agx_mov(b, x) : x);
+      pass(b->shader);
+      unsigned phis = 0;
+      agx_foreach_instr_global(b->shader, I)
+         phis += I->op == AGX_OPCODE_PHI;
+      EXPECT_EQ(phis, 0u) << "memory=" << memory;
+   }
+}
+
+TEST_F(RepairSSA, UnchangedValueAroundLoop)
+{
+   auto b = agx_test_builder(mem_ctx);
+   auto A = agx_start_block(b->shader);
+   auto H = agx_test_block(b->shader);
+   auto B = agx_test_block(b->shader);
+   auto E = agx_test_block(b->shader);
+   H->loop_header = true;
+   agx_block_add_successor(A, H);
+   agx_block_add_successor(H, B);
+   agx_block_add_successor(B, H);
+   agx_block_add_successor(B, E);
+   b->cursor = agx_after_block(A);
+   auto x = agx_mov_imm(b, AGX_SIZE_32, 0xcafe);
+   b->cursor = agx_after_block(B);
+   agx_unit_test(b, x);
+   b->cursor = agx_after_block(E);
+   agx_unit_test(b, x);
+   pass(b->shader);
+   unsigned phis = 0;
+   agx_foreach_instr_global(b->shader, I)
+      phis += I->op == AGX_OPCODE_PHI;
+   EXPECT_EQ(phis, 0u);
+}
+
+/* Keep the constant-source guard: the literal must never index remap[]. */
+TEST_F(RepairSSA, LargeConstantPhiRemains)
+{
+   auto b = agx_test_builder(mem_ctx);
+   auto A = agx_start_block(b->shader);
+   auto B = agx_test_block(b->shader);
+   auto C = agx_test_block(b->shader);
+   auto D = agx_test_block(b->shader);
+   agx_block_add_successor(A, B);
+   agx_block_add_successor(A, C);
+   agx_block_add_successor(B, D);
+   agx_block_add_successor(C, D);
+   b->cursor = agx_after_block(D);
+   auto phi = agx_phi_to(b, agx_temp(b->shader, AGX_SIZE_32), 2);
+   phi->src[0] = phi->src[1] = agx_immediate(0xffffu);
+   agx_unit_test(b, phi->dest[0]);
+   pass(b->shader);
+   EXPECT_EQ(phi->op, AGX_OPCODE_PHI);
+   EXPECT_EQ(phi->src[0].type, AGX_INDEX_IMMEDIATE);
+   EXPECT_EQ(phi->src[0].value, 0xffffu);
+   EXPECT_EQ(phi->src[1].value, 0xffffu);
+}
