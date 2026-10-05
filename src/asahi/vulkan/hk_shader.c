@@ -740,10 +740,19 @@ lower_load_global_constant_offset_instr(nir_builder *b,
    unsigned align_mul = nir_intrinsic_align_mul(intrin);
    unsigned align_offset = nir_intrinsic_align_offset(intrin);
 
+   /* Without robustness an access outside the buffer is undefined, so the
+    * load itself is in bounds. The Apple9 backend relies on this to fold
+    * constant offsets past an amul: the hardware adds the displacement in
+    * 64 bits, which differs from the 32-bit offset only outside the buffer.
+    */
+   enum gl_access_qualifier access = nir_intrinsic_access(intrin);
+   if (intrin->intrinsic == nir_intrinsic_load_global_constant_offset)
+      access |= ACCESS_IN_BOUNDS;
+
    nir_def *val = nir_load_global_constant(
       b, intrin->def.num_components, intrin->def.bit_size,
       nir_iadd(b, base_addr, nir_u2u64(b, offset)), .align_mul = align_mul,
-      .align_offset = align_offset, .access = nir_intrinsic_access(intrin));
+      .align_offset = align_offset, .access = access);
 
    if (intrin->intrinsic == nir_intrinsic_load_global_constant_bounded) {
       nir_scalar offs = nir_scalar_resolved(offset, 0);
@@ -2015,6 +2024,19 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       NIR_PASS(progress, nir, nir_opt_copy_prop);
       NIR_PASS(progress, nir, nir_opt_dce);
    } while (progress);
+
+   /* Apple9 vectorizes before the buffer base and offset become one 64-bit
+    * address. Afterwards the offset is hidden inside u2u64, where adjacent
+    * fields at x + c are no longer provably adjacent, and every field of a
+    * dynamically indexed struct becomes a separate scalar load.
+    */
+   if (dev->dev.chip == AGX_CHIP_G16G) {
+      NIR_PASS(_, nir, nir_opt_load_store_vectorize,
+               &(const nir_load_store_vectorize_options){
+                  .modes = nir_var_mem_global,
+                  .callback = agx_mem_vectorize_cb,
+               });
+   }
 
    nir_move_options opts = nir_move_load_ssbo | nir_move_load_ubo;
    NIR_PASS(progress, nir, nir_opt_sink, opts);

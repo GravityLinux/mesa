@@ -549,6 +549,14 @@ apple9_memory_address(nir_shader *nir, nir_intrinsic_instr *intr, nir_def *offse
                !nir_addition_might_overflow(nir, bounds, other, constant);
             if (add < 0 && apple9_address_lower_bound(other) >= -add)
                safe = true;
+            /* An amul cannot overflow the variable it indexes, so for an
+             * in-bounds access the 32-bit sum equals the hardware's 64-bit
+             * index + displacement. Robust accesses still load out of
+             * bounds before their result is discarded, so keep the proof. */
+            if ((nir_intrinsic_access(intr) & ACCESS_IN_BOUNDS) &&
+                nir_scalar_is_alu(other) &&
+                nir_scalar_alu_op(other) == nir_op_amul)
+               safe = true;
             if (safe) {
                *displacement = total;
                value = other;
