@@ -675,7 +675,16 @@ build_explicit_io_load(nir_builder *b, nir_intrinsic_instr *intrin,
             op = nir_intrinsic_load_ubo;
          break;
       case nir_var_mem_ssbo:
-         if (addr_format == nir_address_format_64bit_bounded_global &&
+         /* A read-only, reorderable SSBO load is constant for the shader,
+          * like a UBO load. Keeping its base and offset apart lets later
+          * passes see field offsets as offset + constant.
+          */
+         if (addr_format == nir_address_format_64bit_global_32bit_offset &&
+             (nir_intrinsic_access(intrin) &
+              (ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER)) ==
+                (ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER))
+            op = nir_intrinsic_load_global_constant_offset;
+         else if (addr_format == nir_address_format_64bit_bounded_global &&
              b->shader->options->has_load_global_bounded)
             op = nir_intrinsic_load_global_bounded;
          else if (addr_format_is_global(addr_format, mode))
