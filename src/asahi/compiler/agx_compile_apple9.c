@@ -1723,6 +1723,19 @@ apple9_dag_shift_imm(struct apple9_dag_lower *lower, nir_op op, uint32_t source,
       &source, 1, amount);
 }
 
+/* Unsigned bitfield extract (source >> offset) & (2^width - 1); width 0
+ * keeps every bit above offset, a plain logical shift. */
+static uint32_t
+apple9_dag_extract(struct apple9_dag_lower *lower, uint32_t source,
+                   unsigned offset, unsigned width)
+{
+   if (source == AGX_APPLE9_VREG_INVALID || (!offset && !width))
+      return source;
+   return apple9_dag_emit(lower, AGX_APPLE9_VIR_USHR,
+                          AGX_APPLE9_ENC_SHIFT_LOGICAL_IMMEDIATE, &source, 1,
+                          offset | (width << AGX_APPLE9_SHIFT_WIDTH_SHIFT));
+}
+
 static uint32_t
 apple9_dag_shift_variable(struct apple9_dag_lower *lower, nir_op op,
                           uint32_t source, nir_scalar shift, unsigned bits)
@@ -2907,6 +2920,35 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                   lower->ssa_to_vreg[key] = value;
                   return value;
                }
+            }
+            /* x & (2^w - 1) and (x >> k) & (2^w - 1) are one bitfield
+             * extract: the logical shift-right immediate form with a width. */
+            static int bfe = -1;
+            if (bfe < 0)
+               bfe = getenv("AGX_APPLE9_NO_BFE") == NULL;
+            for (unsigned i = 0; bfe && op == nir_op_iand &&
+                                 scalar.def->bit_size == 32 && i < 2; ++i) {
+               uint32_t mask, amount;
+               if (!apple9_const_u32(nir_scalar_chase_alu_src(scalar, i), &mask) ||
+                   !mask || mask == UINT32_MAX || (mask & (mask + 1)))
+                  continue;
+               unsigned width = util_bitcount(mask), offset = 0;
+               nir_scalar field =
+                  apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 1 - i));
+               uint32_t source;
+               if (nir_def_instr_type(field.def) == nir_instr_type_alu &&
+                   nir_scalar_alu_op(field) == nir_op_ushr &&
+                   field.def->bit_size == 32 &&
+                   apple9_const_u32(nir_scalar_chase_alu_src(field, 1), &amount)) {
+                  offset = amount & 31;
+                  source = apple9_lower_dag_source(lower, field, 0);
+               } else {
+                  source = apple9_lower_dag_source(lower, scalar, 1 - i);
+               }
+               value = apple9_dag_extract(lower, source, offset,
+                                          offset + width >= 32 ? 0 : width);
+               lower->ssa_to_vreg[key] = value;
+               return value;
             }
             enum agx_apple9_vir_opcode vir_op = apple9_dag_binary_opcode(op);
             enum agx_apple9_encoding encoding = apple9_dag_binary_encoding(op);
@@ -6146,6 +6188,10 @@ apple9_uniform_constant_use(nir_alu_instr *alu, unsigned s, uint32_t *value)
        !nir_src_is_const(alu->src[s].src))
       return false;
    *value = nir_src_comp_as_uint(alu->src[s].src, alu->src[s].swizzle[0]);
+   /* Low-bit masks select as bitfield extracts, which need no operand. */
+   if (alu->op == nir_op_iand && *value && *value != UINT32_MAX &&
+       !(*value & (*value + 1)) && getenv("AGX_APPLE9_NO_BFE") == NULL)
+      return false;
    /* Packed float immediates are already free. */
    uint8_t encoded;
    return !(is_float && agx_apple9_encode_float_immediate(*value, &encoded));

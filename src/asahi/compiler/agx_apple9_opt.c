@@ -202,7 +202,8 @@ fold_integer(struct agx_apple9_vir_instr *I, const bool *constant,
    case AGX_APPLE9_VIR_ISHR:
    case AGX_APPLE9_VIR_USHR:
    case AGX_APPLE9_VIR_ISHL: {
-      unsigned shift = I->nr_srcs == 2 ? (c[1] & 0xffff) : I->immediate;
+      unsigned shift = I->nr_srcs == 2 ? (c[1] & 0xffff) : I->immediate & 31;
+      unsigned width = I->nr_srcs == 2 ? 0 : I->immediate >> AGX_APPLE9_SHIFT_WIDTH_SHIFT;
       if (shift >= 32) {
          value = I->op == AGX_APPLE9_VIR_ISHR && (c[0] & 0x80000000u)
             ? UINT32_MAX : 0;
@@ -211,6 +212,8 @@ fold_integer(struct agx_apple9_vir_instr *I, const bool *constant,
       value = I->op == AGX_APPLE9_VIR_ISHL ? c[0] << shift : c[0] >> shift;
       if (I->op == AGX_APPLE9_VIR_ISHR && shift && (c[0] & 0x80000000u))
          value |= UINT32_MAX << (32 - shift);
+      if (I->op == AGX_APPLE9_VIR_USHR && width)
+         value &= BITFIELD_MASK(width);
       break;
    }
    default:

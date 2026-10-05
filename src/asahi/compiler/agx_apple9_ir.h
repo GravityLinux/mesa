@@ -246,6 +246,9 @@ enum agx_apple9_select_condition {
 };
 
 #define AGX_APPLE9_SELECT_EQUALITY (1u << 8)
+/* A logical shift-right immediate is a bitfield extract: immediate bits 0-4
+ * hold the offset, bits 8-13 the width (0 keeps every bit above it). */
+#define AGX_APPLE9_SHIFT_WIDTH_SHIFT 8
 
 /*
  * Apple9 asynchronous producers publish through a six-entry scoreboard.

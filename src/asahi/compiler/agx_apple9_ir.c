@@ -4326,7 +4326,9 @@ pack_shift(const struct agx_apple9_vir_instr *I, const uint8_t *phys,
        (!arithmetic && I->op != AGX_APPLE9_VIR_USHR &&
         I->op != AGX_APPLE9_VIR_ISHL) ||
        (variable ? (phys[I->src[1]] >= AGX_APPLE9_GPR_COUNT || I->immediate)
-                 : I->immediate >= 32))
+                 : (I->immediate & ~(31u | (63u << AGX_APPLE9_SHIFT_WIDTH_SHIFT))) ||
+                   ((I->immediate >> AGX_APPLE9_SHIFT_WIDTH_SHIFT) &&
+                    I->op != AGX_APPLE9_VIR_USHR)))
       return false;
 
    uint8_t bytes[12] = {0xa7, 0, 0x54, 0, 0x02, 0, 0, 0, 0xf0, 0x11, 0x01, 0};
@@ -4348,7 +4350,11 @@ pack_shift(const struct agx_apple9_vir_instr *I, const uint8_t *phys,
    if (variable)
       set_bits(bytes, 51, 7, phys[I->src[1]]);
    else
-      set_bits(bytes, 50, 5, I->immediate);
+      set_bits(bytes, 50, 5, I->immediate & 31);
+   /* Bitfield extract width, as in Metal's extract_bits (EXP-0013,
+    * EXP-M4-13 R6); 0 extends to bit 31. */
+   if (!variable && !arithmetic)
+      set_bits(bytes, 84, 6, I->immediate >> AGX_APPLE9_SHIFT_WIDTH_SHIFT);
 
    /* These datapaths have dedicated release flags, distinct from IMAD's
     * descriptor auxiliaries. The register amount consumes its low 16 bits;
