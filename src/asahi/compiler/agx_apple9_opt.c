@@ -228,6 +228,23 @@ fold_integer(struct agx_apple9_vir_instr *I, const bool *constant,
    return true;
 }
 
+bool
+agx_apple9_supports_special_uniform(enum agx_apple9_vir_opcode op)
+{
+   switch (op) {
+   case AGX_APPLE9_VIR_FFLOOR:
+   case AGX_APPLE9_VIR_FCEIL:
+   case AGX_APPLE9_VIR_FTRUNC:
+   case AGX_APPLE9_VIR_FROUND_EVEN:
+   case AGX_APPLE9_VIR_FRSQ:
+   case AGX_APPLE9_VIR_FEXP2:
+   case AGX_APPLE9_VIR_FLOG2:
+      return true;
+   default:
+      return false;
+   }
+}
+
 static void
 select_float_sources(struct agx_apple9_vir_instr *I,
                      struct agx_apple9_vir_instr **definitions,
@@ -358,7 +375,9 @@ static void
 inline_alu_sources(struct agx_apple9_vir_instr *I, const uint16_t *uniform_read,
                       const bool *constant, const uint32_t *values)
 {
-   bool unary = I->op == AGX_APPLE9_VIR_BIT_COUNT ||
+   bool special = I->encoding == AGX_APPLE9_ENC_FLOAT_SPECIAL &&
+                  agx_apple9_supports_special_uniform(I->op);
+   bool unary = special || I->op == AGX_APPLE9_VIR_BIT_COUNT ||
                 I->op == AGX_APPLE9_VIR_UFIND_MSB ||
                 I->op == AGX_APPLE9_VIR_BIT_REVERSE ||
                  I->op == AGX_APPLE9_VIR_U2F32 ||
@@ -437,6 +456,8 @@ inline_alu_sources(struct agx_apple9_vir_instr *I, const uint16_t *uniform_read,
       }
    }
    I->nr_srcs = source;
+   if (special && I->alu_src_uniform_mask)
+      I->encoding = AGX_APPLE9_ENC_FLOAT_SPECIAL_UNIFORM;
    if (fma) {
       I->encoding = (I->src_abs_mask & 3)
          ? AGX_APPLE9_ENC_FLOAT3_MODIFIER_EXTENDED

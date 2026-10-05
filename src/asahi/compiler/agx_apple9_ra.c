@@ -976,6 +976,7 @@ apple9_retaining_consumer(enum agx_apple9_encoding encoding)
       return true;
    switch (encoding) {
    case AGX_APPLE9_ENC_FLOAT_SPECIAL:
+   case AGX_APPLE9_ENC_FLOAT_SPECIAL_UNIFORM:
    case AGX_APPLE9_ENC_FLOAT2_EXPORT:
    case AGX_APPLE9_ENC_LOGIC_EXTENDED:
    case AGX_APPLE9_ENC_LOGIC_EXPORT:

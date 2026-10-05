@@ -534,6 +534,8 @@ void agx_apple9_vir_remove(struct agx_apple9_vir_program *program,
                           struct agx_apple9_vir_instr *instruction);
 void agx_apple9_vir_reindex(struct agx_apple9_vir_program *program);
 bool agx_apple9_instr_is_pure_alu(const struct agx_apple9_vir_instr *instruction);
+bool agx_apple9_supports_special_uniform(enum agx_apple9_vir_opcode op);
+
 bool agx_apple9_supports_saturate(const struct agx_apple9_vir_instr *instruction);
 bool agx_apple9_optimize_vir(struct agx_apple9_vir_program *program);
 bool agx_apple9_encode_float_immediate(uint32_t value, uint8_t *encoded);

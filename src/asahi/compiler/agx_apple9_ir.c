@@ -1577,7 +1577,8 @@ apple9_finalize_dependencies(struct agx_apple9_vir_program *program)
             ? AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR
             : AGX_APPLE9_DEVICE_LOAD_INDEX_LAST_USE_GPR;
       }
-      if (ins->encoding == AGX_APPLE9_ENC_FLOAT_SPECIAL) {
+      if (ins->encoding == AGX_APPLE9_ENC_FLOAT_SPECIAL ||
+          ins->encoding == AGX_APPLE9_ENC_FLOAT_SPECIAL_UNIFORM) {
          /* Bit zero's high-pressure meaning remains unproven; retain the
           * observed memory-only versus ALU-consumed result distinction. */
          ins->immediate = 2;
@@ -4220,14 +4221,21 @@ pack_fspecial(const struct agx_apple9_vir_instr *instruction, const uint8_t *phy
               struct agx_apple9_packed_instruction *packed)
 {
    const unsigned dst = phys[instruction->dest];
-   const unsigned src = phys[instruction->src[0]];
+   bool uniform_form = instruction->encoding == AGX_APPLE9_ENC_FLOAT_SPECIAL_UNIFORM;
+   if (uniform_form && !agx_apple9_supports_special_uniform(instruction->op))
+      return false;
+   uint32_t source[1];
+   uint8_t live;
+   if (instruction->alu_src_immediate_mask ||
+       !apple9_alu_sources(instruction, phys, 1, source, &live))
+      return false;
+   const unsigned src = source[0];
    bool reciprocal = instruction->op == AGX_APPLE9_VIR_FRCP ||
                      instruction->op == AGX_APPLE9_VIR_HRCP ||
                      instruction->op == AGX_APPLE9_VIR_HRCP_F32;
    bool half = instruction->encoding == AGX_APPLE9_ENC_HALF_SPECIAL;
-   if ((!half && instruction->encoding != AGX_APPLE9_ENC_FLOAT_SPECIAL) ||
-       instruction->nr_srcs != 1 || dst >= AGX_APPLE9_GPR_COUNT ||
-       src >= AGX_APPLE9_GPR_COUNT ||
+   if ((!half && !uniform_form && instruction->encoding != AGX_APPLE9_ENC_FLOAT_SPECIAL) ||
+       dst >= AGX_APPLE9_GPR_COUNT ||
        ((instruction->src_abs_mask | instruction->src_neg_mask) & ~1u) ||
        (instruction->immediate != 0x02 && instruction->immediate != 0x03))
       return false;
@@ -4308,15 +4316,17 @@ pack_fspecial(const struct agx_apple9_vir_instr *instruction, const uint8_t *phy
       dst << 1,
       instruction->immediate,
       (src & 63) << 2,
-      (src >> 6) | (reciprocal
-                       ? ((instruction->live_after_mask & 1u) ? 0x00 : 0x10)
-                       : ((instruction->live_after_mask & 1u)
+      ((src >> 6) & 1) | (reciprocal
+                       ? ((live & 1u) ? 0x00 : 0x10)
+                       : ((live & 1u)
                              ? (half ? (wide_factor ? 0x8a : 0x8c) : 0x90)
                              : (half ? (wide_factor ? 0xaa : 0xac) : 0xb0))),
       precision,
       rounding,
       0,
    };
+   if (instruction->alu_src_uniform_mask)
+      pack_integer_source(bytes, src, true, false, 42, 53, 62);
    if (instruction->saturate)
       set_bits(bytes, reciprocal ? 65 : 58, 1, 1);
    /* Reciprocal has a separate datapath. Both modifier layouts preserve
@@ -7095,6 +7105,7 @@ agx_apple9_pack_vir_instruction(const struct agx_apple9_vir_instr *instruction,
        instruction->op != AGX_APPLE9_VIR_BIT_COUNT &&
        instruction->op != AGX_APPLE9_VIR_UFIND_MSB &&
        instruction->op != AGX_APPLE9_VIR_BIT_REVERSE &&
+       !agx_apple9_supports_special_uniform(instruction->op) &&
        instruction->op != AGX_APPLE9_VIR_SELECT &&
        instruction->op != AGX_APPLE9_VIR_PREDICATE_COMPARE) {
       if (reason)

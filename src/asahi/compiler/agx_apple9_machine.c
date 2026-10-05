@@ -837,6 +837,27 @@ static const struct agx_apple9_encoding_info encodings[] = {
                    AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },
+   [AGX_APPLE9_ENC_FLOAT_SPECIAL_UNIFORM] =
+      {
+         .name = "float_special_uniform",
+         .length = 10,
+         .operand_count = 2,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .dependency_layout = AGX_APPLE9_DEPENDENCY_MASK_12_17,
+         .operands =
+            {
+               /* Wide unary operations have seven-bit destination and
+                * source fields at bits 25..31 and 42..48. The source field
+                * crosses from byte 5 into byte 6 bit 0. */
+               GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32,
+                   95, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                   AGX_APPLE9_EVIDENCE_HARDWARE),
+               REGISTER_SOURCE(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
+                   95, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                   AGX_APPLE9_EVIDENCE_HARDWARE),
+            },
+      },
    [AGX_APPLE9_ENC_INT_ADD_EXTENDED] =
       {
          .name = "int_add_extended",
