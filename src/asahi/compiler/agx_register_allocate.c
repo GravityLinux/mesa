@@ -78,6 +78,142 @@ phi_web_union(struct phi_web_node *web, unsigned x, unsigned y)
    }
 }
 
+/* Only phi participants can be merged. Restrict the interference graph to
+ * those values, while using the full CFG liveness already computed for RA.
+ * Constants have private incoming-use members and need no graph vertices.
+ */
+static struct u_sparse_bitset *
+phi_web_interference(agx_context *ctx, BITSET_WORD *constants, void *memctx)
+{
+   BITSET_WORD *participates = BITSET_RZALLOC(memctx, ctx->alloc);
+   BITSET_WORD *memory = BITSET_RZALLOC(memctx, ctx->alloc);
+   struct u_sparse_bitset *graph =
+      rzalloc_array(memctx, struct u_sparse_bitset, ctx->alloc);
+
+   for (unsigned i = 0; i < ctx->alloc; ++i)
+      u_sparse_bitset_init(&graph[i], ctx->alloc, memctx);
+
+   agx_foreach_instr_global(ctx, I) {
+      agx_foreach_ssa_dest(I, d) {
+         if (I->dest[d].memory)
+            BITSET_SET(memory, I->dest[d].value);
+      }
+
+      if (I->op != AGX_OPCODE_PHI)
+         continue;
+
+      BITSET_SET(participates, I->dest[0].value);
+      agx_foreach_ssa_src(I, s) {
+         if (!BITSET_TEST(constants, I->src[s].value))
+            BITSET_SET(participates, I->src[s].value);
+      }
+   }
+
+   struct u_sparse_bitset live;
+   u_sparse_bitset_init(&live, ctx->alloc, memctx);
+
+   agx_foreach_block(ctx, block) {
+      U_SPARSE_BITSET_FOREACH_SET(&block->live_out, v) {
+         if (BITSET_TEST(participates, v))
+            u_sparse_bitset_set(&live, v);
+      }
+
+      agx_foreach_instr_in_block_rev(block, I) {
+         if (I->op == AGX_OPCODE_PHI)
+            break;
+
+         /* All destinations are simultaneous writes, including dead results. */
+         agx_foreach_ssa_dest(I, d) {
+            if (BITSET_TEST(participates, I->dest[d].value))
+               u_sparse_bitset_set(&live, I->dest[d].value);
+         }
+
+         agx_foreach_ssa_dest(I, d) {
+            unsigned v = I->dest[d].value;
+            if (!BITSET_TEST(participates, v))
+               continue;
+
+            U_SPARSE_BITSET_FOREACH_SET(&live, other) {
+               if (v != other &&
+                   !!BITSET_TEST(memory, v) == !!BITSET_TEST(memory, other)) {
+                  u_sparse_bitset_set(&graph[v], other);
+                  u_sparse_bitset_set(&graph[other], v);
+               }
+            }
+         }
+
+         agx_foreach_ssa_dest(I, d)
+            u_sparse_bitset_clear(&live, I->dest[d].value);
+
+         agx_foreach_ssa_src(I, s) {
+            if (BITSET_TEST(participates, I->src[s].value))
+               u_sparse_bitset_set(&live, I->src[s].value);
+         }
+      }
+
+      /* Phis define a parallel bundle at block entry. Their inputs are uses on
+       * predecessor edges, already represented by the predecessors' live_out.
+       */
+      agx_foreach_phi_in_block(block, phi)
+         u_sparse_bitset_set(&live, phi->dest[0].value);
+
+      agx_foreach_phi_in_block(block, phi) {
+         unsigned v = phi->dest[0].value;
+         U_SPARSE_BITSET_FOREACH_SET(&live, other) {
+            if (v != other &&
+                !!BITSET_TEST(memory, v) == !!BITSET_TEST(memory, other)) {
+               u_sparse_bitset_set(&graph[v], other);
+               u_sparse_bitset_set(&graph[other], v);
+            }
+         }
+      }
+
+      u_sparse_bitset_clear_all(&live);
+   }
+
+   return graph;
+}
+
+struct phi_web_members {
+   unsigned head, tail, next, count;
+};
+
+static void
+phi_web_union_noninterfering(struct phi_web_node *web,
+                            struct phi_web_members *members,
+                            struct u_sparse_bitset *interference,
+                            unsigned nr_ssa, unsigned x, unsigned y)
+{
+   x = phi_web_find(web, x);
+   y = phi_web_find(web, y);
+   if (x == y)
+      return;
+
+   /* Inspect the smaller class. An interference edge to any member of the
+    * other class prevents the merge, not just an edge between the phi's own
+    * source and destination. This preserves noninterference transitively.
+    */
+   if (members[x].count > members[y].count)
+      SWAP(x, y);
+
+   for (unsigned v = members[x].head; v != ~0u; v = members[v].next) {
+      if (v >= nr_ssa) /* private constant-use affinity member */
+         continue;
+
+      U_SPARSE_BITSET_FOREACH_SET(&interference[v], other) {
+         if (phi_web_find(web, other) == y)
+            return;
+      }
+   }
+
+   phi_web_union(web, x, y);
+   unsigned root = phi_web_find(web, x);
+   unsigned other = root == x ? y : x;
+   members[members[root].tail].next = members[other].head;
+   members[root].tail = members[other].tail;
+   members[root].count += members[other].count;
+}
+
 struct ra_ctx {
    agx_context *shader;
    agx_block *block;
@@ -2058,8 +2194,15 @@ agx_ra(agx_context *ctx)
     * Members above ctx->alloc represent incoming constant uses, not SSA defs.
     */
    struct phi_web_node *phi_web = calloc(nr_web_members, sizeof(*phi_web));
+   void *web_memctx = ralloc_context(NULL);
+   struct phi_web_members *web_members =
+      ralloc_array(web_memctx, struct phi_web_members, nr_web_members);
+   struct u_sparse_bitset *interference =
+      phi_web_interference(ctx, constants, web_memctx);
+
    for (unsigned i = 0; i < nr_web_members; ++i) {
       phi_web[i].parent = i;
+      web_members[i] = (struct phi_web_members){i, i, ~0u, 1};
    }
 
    unsigned next_constant_member = ctx->alloc;
@@ -2070,11 +2213,25 @@ agx_ra(agx_context *ctx)
             if (BITSET_TEST(constants, member))
                member = next_constant_member++;
 
-            phi_web_union(phi_web, phi->dest[0].value, member);
+            if (phi->dest[0].size != phi->src[s].size ||
+                phi->dest[0].memory != phi->src[s].memory ||
+                agx_channels(phi->dest[0]) != agx_channels(phi->src[s]))
+               continue;
+
+            phi_web_union_noninterfering(phi_web, web_members, interference,
+                                        ctx->alloc, phi->dest[0].value, member);
          }
       }
    }
    assert(next_constant_member == nr_web_members);
+#ifndef NDEBUG
+   for (unsigned v = 0; v < ctx->alloc; ++v) {
+      U_SPARSE_BITSET_FOREACH_SET(&interference[v], other) {
+         assert(phi_web_find(phi_web, v) != phi_web_find(phi_web, other));
+      }
+   }
+#endif
+   ralloc_free(web_memctx);
    free(constants);
 
    uint8_t *ncomps = calloc(ctx->alloc, sizeof(uint8_t));

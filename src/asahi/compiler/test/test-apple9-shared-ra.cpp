@@ -8,7 +8,8 @@
 #include <gtest/gtest.h>
 #include "agx_test.h"
 
-TEST(Apple9SharedRa, SharedConstantInitializersKeepIndependentLoopValues)
+static void
+test_shared_loop_initializers(bool computed)
 {
    for (uint32_t initial : {0u, 7u, 0x3f800000u, 0xfeedfaceu}) {
       void *memctx = ralloc_context(nullptr);
@@ -35,6 +36,8 @@ TEST(Apple9SharedRa, SharedConstantInitializersKeepIndependentLoopValues)
 
       auto b = agx_init_builder(ctx, agx_after_block(entry));
       auto constant = agx_mov_imm(&b, 32, initial);
+      if (computed)
+         constant = agx_iadd(&b, constant, agx_immediate(0), 0);
       constexpr unsigned count = 8;
       agx_instr *phis[count];
       b.cursor = agx_after_block(header);
@@ -92,6 +95,16 @@ TEST(Apple9SharedRa, SharedConstantInitializersKeepIndependentLoopValues)
       ralloc_free(nir.shader);
       ralloc_free(memctx);
    }
+}
+
+TEST(Apple9SharedRa, SharedConstantInitializersKeepIndependentLoopValues)
+{
+   test_shared_loop_initializers(false);
+}
+
+TEST(Apple9SharedRa, SharedComputedInitializersKeepIndependentLoopValues)
+{
+   test_shared_loop_initializers(true);
 }
 
 TEST(Apple9SharedRa, PlacementCostsLeaveSpaceForRestrictedDefinitions)
