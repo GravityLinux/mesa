@@ -97,7 +97,7 @@ agx_apple9_instr_is_pure_alu(const struct agx_apple9_vir_instr *I)
 struct expression {
    uint32_t op, encoding, immediate, nr_srcs, components;
    uint32_t src_abs, src_neg, saturate;
-   uint32_t src_uniform, src_immediate, src_value[3];
+   uint32_t src_uniform, src_immediate, src_value[4];
    uint32_t src[AGX_APPLE9_MAX_VIR_SRCS];
 };
 
@@ -358,10 +358,12 @@ static void
 inline_alu_sources(struct agx_apple9_vir_instr *I, const uint16_t *uniform_read,
                       const bool *constant, const uint32_t *values)
 {
+   bool select = I->op == AGX_APPLE9_VIR_SELECT &&
+      I->encoding != AGX_APPLE9_ENC_HALF_COMPARE_SELECT;
    bool fma = I->op == AGX_APPLE9_VIR_FMA;
    bool integer = I->op == AGX_APPLE9_VIR_IADD || I->op == AGX_APPLE9_VIR_ISUB ||
                   I->op == AGX_APPLE9_VIR_IMAD;
-   unsigned arity = fma || I->op == AGX_APPLE9_VIR_IMAD ? 3 : 2;
+   unsigned arity = select ? 4 : fma || I->op == AGX_APPLE9_VIR_IMAD ? 3 : 2;
    bool float2 = I->op == AGX_APPLE9_VIR_FADD || I->op == AGX_APPLE9_VIR_FSUB ||
                  I->op == AGX_APPLE9_VIR_FMUL;
    bool binary = float2 || I->op == AGX_APPLE9_VIR_IAND ||
@@ -369,12 +371,12 @@ inline_alu_sources(struct agx_apple9_vir_instr *I, const uint16_t *uniform_read,
       I->op == AGX_APPLE9_VIR_IMIN || I->op == AGX_APPLE9_VIR_IMAX ||
       I->op == AGX_APPLE9_VIR_UMIN || I->op == AGX_APPLE9_VIR_UMAX ||
       I->op == AGX_APPLE9_VIR_FMIN || I->op == AGX_APPLE9_VIR_FMAX;
-   if ((!fma && !binary && !integer) ||
+   if ((!select && !fma && !binary && !integer) ||
        I->nr_srcs != arity || I->alu_src_uniform_mask || I->alu_src_immediate_mask)
       return;
 
-   uint8_t file[3] = {0};
-   uint32_t value[3] = {0};
+   uint8_t file[4] = {0};
+   uint32_t value[4] = {0};
    for (unsigned s = 0; s < arity; ++s) {
       if (uniform_read[I->src[s]]) {
          file[s] = AGX_APPLE9_FILE_UNIFORM;
@@ -403,7 +405,7 @@ inline_alu_sources(struct agx_apple9_vir_instr *I, const uint16_t *uniform_read,
     * compact form when commuting a lone uniform to B; A immediates still
     * require materialization. Fixed integer operands are independent. */
    if ((fma && file[0] == AGX_APPLE9_FILE_IMMEDIATE) ||
-       (!fma && !float2 && !integer && file[0] && file[1]))
+       (!select && !fma && !float2 && !integer && file[0] && file[1]))
       file[0] = 0;
 
    unsigned source = 0;
@@ -672,7 +674,7 @@ agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
          .src_uniform = I->alu_src_uniform_mask,
          .src_immediate = I->alu_src_immediate_mask,
       };
-      for (unsigned s = 0; s < 3; ++s) {
+      for (unsigned s = 0; s < ARRAY_SIZE(key->src_value); ++s) {
          if ((key->src_uniform | key->src_immediate) & BITFIELD_BIT(s))
             key->src_value[s] = I->alu_src_value[s];
       }

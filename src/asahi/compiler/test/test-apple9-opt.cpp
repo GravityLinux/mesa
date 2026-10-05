@@ -133,6 +133,64 @@ TEST_F(Apple9Optimization, UniformAndImmediateOperandsLeaveOnlyGprUses)
    ralloc_free(nir.shader);
 }
 
+TEST(Apple9Packer, SelectFourUniformOperandsMatchT8132Probe)
+{
+   agx_apple9_vir_instr I = {};
+   I.op = AGX_APPLE9_VIR_SELECT;
+   I.encoding = AGX_APPLE9_ENC_SELECT_GPR_WIDE;
+   I.dest = 0;
+   I.dest_components = 1;
+   I.immediate = AGX_APPLE9_SELECT_ULT;
+   I.alu_src_uniform_mask = 15;
+   for (unsigned s = 0; s < 4; ++s)
+      I.alu_src_value[s] = 240 + s;
+   const uint8_t phys[] = {40};
+   const uint8_t expected[] = {0x82,0x61,0x9f,0x63,0xe2,0x64,0x85,0x07,0xe0,0x66};
+   agx_apple9_packed_instruction packed;
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason)) << reason;
+   ASSERT_EQ(packed.length, sizeof(expected));
+   EXPECT_EQ(memcmp(packed.bytes, expected, sizeof(expected)), 0);
+   I.alu_src_value[3] = 256;
+   EXPECT_FALSE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason));
+}
+
+TEST_F(Apple9Optimization, SelectUniformOperandsDoNotOccupyGprs)
+{
+   auto zero = imm(0);
+   uint32_t src[4];
+   for (unsigned s = 0; s < 4; ++s)
+      src[s] = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IOR_UNIFORM,
+         AGX_APPLE9_ENC_LOGIC_UNIFORM, &zero, 1, 240 + s);
+   auto first = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_SELECT,
+      AGX_APPLE9_ENC_SELECT_GPR_WIDE, src, 4, AGX_APPLE9_SELECT_ULT);
+   src[3] = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IOR_UNIFORM,
+      AGX_APPLE9_ENC_LOGIC_UNIFORM, &zero, 1, 255);
+   auto second = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_SELECT,
+      AGX_APPLE9_ENC_SELECT_GPR_WIDE, src, 4, AGX_APPLE9_SELECT_ULT);
+   p.output = add(first, second);
+   ASSERT_TRUE(agx_apple9_optimize_vir(&p));
+   const auto *A = agx_apple9_definition(&p, first);
+   const auto *B = agx_apple9_definition(&p, second);
+   ASSERT_NE(A, nullptr);
+   ASSERT_NE(B, nullptr);
+   EXPECT_EQ(A->nr_srcs, 0u);
+   EXPECT_EQ(B->nr_srcs, 0u);
+   EXPECT_EQ(A->alu_src_uniform_mask, 15u);
+   EXPECT_EQ(B->alu_src_uniform_mask, 15u);
+   EXPECT_EQ(A->alu_src_value[3], 243u);
+   EXPECT_EQ(B->alu_src_value[3], 255u);
+   /* Source 3 participates in expression identity as well as packing. */
+   EXPECT_NE(agx_apple9_definition(&p, p.output)->src[0],
+             agx_apple9_definition(&p, p.output)->src[1]);
+   const char *reason = nullptr;
+   nir_builder nir = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "select_uniform_sources");
+   ASSERT_TRUE(agx_apple9_allocate_shared(&p, nir.shader, &reason)) << reason;
+   ASSERT_TRUE(agx_apple9_validate_vir_allocation(&p, &reason)) << reason;
+   ralloc_free(nir.shader);
+}
+
 TEST_F(Apple9Optimization, UniformWritesBlockReadFoldingAndExpressionReuse)
 {
    auto zero = imm(0);

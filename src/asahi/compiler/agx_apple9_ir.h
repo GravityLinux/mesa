@@ -380,7 +380,7 @@ struct agx_apple9_vir_instr {
     * use lists refer to that compact GPR list; these masks and modifiers refer
     * to the hardware operand slots. Uniform and immediate masks are disjoint. */
    uint8_t alu_src_uniform_mask, alu_src_immediate_mask;
-   uint32_t alu_src_value[3];
+   uint32_t alu_src_value[4];
    /* Clamp the floating result to [0, 1], mapping NaN to positive zero. */
    bool saturate;
 
@@ -440,7 +440,7 @@ agx_apple9_inline_source_file(const struct agx_apple9_vir_instr *I,
                               enum agx_apple9_operand_role role)
 {
    unsigned s = role - AGX_APPLE9_OPERAND_SRC0;
-   if (s >= 3)
+   if (s >= 4)
       return 0;
    return ((I->alu_src_uniform_mask >> s) & 1 ? AGX_APPLE9_FILE_UNIFORM : 0) |
           ((I->alu_src_immediate_mask >> s) & 1 ? AGX_APPLE9_FILE_IMMEDIATE : 0);

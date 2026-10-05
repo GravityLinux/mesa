@@ -5456,20 +5456,19 @@ pack_select(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    bool half = instruction->encoding == AGX_APPLE9_ENC_HALF_COMPARE_SELECT;
    bool extended = instruction->encoding == AGX_APPLE9_ENC_SELECT_MODIFIER_EXTENDED;
    if ((instruction->encoding != AGX_APPLE9_ENC_SELECT_GPR_WIDE && !extended && !half) ||
-       instruction->nr_srcs != 4 ||
+       instruction->alu_src_immediate_mask ||
        ((instruction->src_abs_mask | instruction->src_neg_mask) & ~15u) ||
        (instruction->src_neg_mask & 1) ||
        ((instruction->src_abs_mask & 3) && !extended))
       return false;
    unsigned dst = phys[instruction->dest];
-   unsigned cmp_a = phys[instruction->src[0]];
-   unsigned cmp_b = phys[instruction->src[1]];
-   unsigned if_true = phys[instruction->src[2]];
-   unsigned if_false = phys[instruction->src[3]];
-   if (dst >= AGX_APPLE9_GPR_COUNT || cmp_a >= AGX_APPLE9_GPR_COUNT ||
-       cmp_b >= AGX_APPLE9_GPR_COUNT || if_true >= AGX_APPLE9_GPR_COUNT ||
-       if_false >= AGX_APPLE9_GPR_COUNT)
+   uint32_t source[4];
+   uint8_t live;
+   if (dst >= AGX_APPLE9_GPR_COUNT ||
+       !apple9_alu_sources(instruction, phys, 4, source, &live))
       return false;
+   unsigned cmp_a = source[0], cmp_b = source[1];
+   unsigned if_true = source[2], if_false = source[3];
 
    /* All register banks share the same source lifetime fields. Start with
     * last-use operands, then retain the sources whose SSA values survive. */
@@ -5511,19 +5510,19 @@ pack_select(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
        * setting it is output-inert for the unsigned condition but breaks the
        * signed condition on T8132.
        */
-      if (instruction->live_after_mask & (1u << 0)) {
+      if (live & (1u << 0)) {
          set_bits(bytes, 15, 1, 1);
          set_bits(bytes, 19, 1, 0);
       }
-      if (instruction->live_after_mask & (1u << 1)) {
+      if (live & (1u << 1)) {
          set_bits(bytes, 31, 1, 1);
          set_bits(bytes, 20, 1, 0);
       }
-      if (instruction->live_after_mask & (1u << 2)) {
+      if (live & (1u << 2)) {
          set_bits(bytes, 47, 1, 1);
          set_bits(bytes, 39, 1, 0);
       }
-      if (instruction->live_after_mask & (1u << 3)) {
+      if (live & (1u << 3)) {
          set_bits(bytes, 79, 1, 1);
          set_bits(bytes, 71, 1, 0);
       }
@@ -5533,13 +5532,28 @@ pack_select(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    set_bits(bytes, 22, 2, (dst >> 4) & 3);
    set_bits(bytes, 60, 1, dst >> 6);
    set_bits(bytes, 9, 6, cmp_a & 0x3f);
-   set_bits(bytes, 56, 1, cmp_a >> 6);
+   set_bits(bytes, 56, 1, (cmp_a >> 6) & 1);
    set_bits(bytes, 25, 6, cmp_b & 0x3f);
-   set_bits(bytes, 58, 1, cmp_b >> 6);
+   set_bits(bytes, 58, 1, (cmp_b >> 6) & 1);
    set_bits(bytes, 41, 6, if_true & 0x3f);
-   set_bits(bytes, 38, 1, if_true >> 6);
+   set_bits(bytes, 38, 1, (if_true >> 6) & 1);
    set_bits(bytes, 73, 6, if_false & 0x3f);
-   set_bits(bytes, 70, 1, if_false >> 6);
+   set_bits(bytes, 70, 1, (if_false >> 6) & 1);
+   /* T8132 paired probes validate all four uniform sources, including
+    * simultaneous use. In the uniform file, discard/cache state carries
+    * index bits instead of GPR lifetime. */
+   static const unsigned cache[] = {15, 31, 47, 79};
+   static const unsigned discard[] = {19, 20, 39, 71};
+   static const unsigned high[] = {56, 58, 38, 70};
+   static const unsigned file[] = {55, 57, 37, 69};
+   for (unsigned s = 0; s < 4; ++s) {
+      if (instruction->alu_src_uniform_mask & BITFIELD_BIT(s)) {
+         set_bits(bytes, cache[s], 1, 0);
+         set_bits(bytes, discard[s], 1, (source[s] >> 6) & 1);
+         set_bits(bytes, high[s], 1, source[s] >> 7);
+         set_bits(bytes, file[s], 1, 1);
+      }
+   }
    if (extended) {
       set_bits(bytes, 32, 2, 3);
       set_bits(bytes, 96, 2, instruction->src_abs_mask & 3);
@@ -7015,7 +7029,8 @@ agx_apple9_pack_vir_instruction(const struct agx_apple9_vir_instr *instruction,
        instruction->op != AGX_APPLE9_VIR_UMIN &&
        instruction->op != AGX_APPLE9_VIR_UMAX &&
        instruction->op != AGX_APPLE9_VIR_FMIN &&
-       instruction->op != AGX_APPLE9_VIR_FMAX) {
+       instruction->op != AGX_APPLE9_VIR_FMAX &&
+       instruction->op != AGX_APPLE9_VIR_SELECT) {
       if (reason)
          *reason = "Apple9 operation does not admit inline ALU operands";
       return false;

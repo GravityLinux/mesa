@@ -6162,6 +6162,13 @@ apple9_uniform_constant_use(nir_alu_instr *alu, unsigned s, uint32_t *value)
 {
    bool is_float;
    switch (alu->op) {
+   case nir_op_bcsel:
+      /* The condition is a boolean; only the selected 32-bit values use
+       * these validated uniform operands. */
+      if (s == 0)
+         return false;
+      is_float = false;
+      break;
    case nir_op_fadd: case nir_op_fmul: case nir_op_ffma:
    case nir_op_fmin: case nir_op_fmax:
       is_float = true;
