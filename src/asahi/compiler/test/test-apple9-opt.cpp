@@ -1016,3 +1016,44 @@ TEST_F(Apple9Optimization, UniformConversionRemovesGprImport)
    EXPECT_EQ(I->alu_src_uniform_mask, 1u);
    EXPECT_EQ(I->alu_src_value[0], 240u);
 }
+TEST(Apple9Packer, UniformBitUnaryMatchT8132Probes)
+{
+   const struct {
+      agx_apple9_vir_opcode op;
+      agx_apple9_encoding encoding;
+      uint8_t bytes[10];
+      unsigned size;
+   } cases[] = {
+      {AGX_APPLE9_VIR_BIT_COUNT, AGX_APPLE9_ENC_BIT_UNARY, {0x27,0x05,0x54,0x50,0x03,0xc0,0xdf,0x00}, 8},
+      {AGX_APPLE9_VIR_BIT_REVERSE, AGX_APPLE9_ENC_BIT_UNARY, {0xa7,0x04,0x54,0x50,0x02,0xc0,0x5f,0x00}, 8},
+      {AGX_APPLE9_VIR_UFIND_MSB, AGX_APPLE9_ENC_BIT_UNARY, {0xa7,0x05,0x54,0x50,0x02,0xc0,0x5f,0x00}, 8},
+   };
+   for (const auto &c : cases) {
+      agx_apple9_vir_instr I = {};
+      I.op = c.op; I.encoding = c.encoding; I.dest = 0; I.dest_components = 1;
+      I.alu_src_uniform_mask = 1; I.alu_src_value[0] = 240;
+      const uint8_t phys[] = {40};
+      agx_apple9_packed_instruction packed;
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason)) << reason;
+      EXPECT_EQ(packed.length, c.size);
+      EXPECT_EQ(memcmp(packed.bytes, c.bytes, c.size), 0);
+      I.alu_src_value[0] = 256;
+      EXPECT_FALSE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason));
+   }
+}
+
+TEST_F(Apple9Optimization, UniformBitUnaryRemovesGprImport)
+{
+   auto zero = imm(0);
+   auto input = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IOR_UNIFORM,
+      AGX_APPLE9_ENC_LOGIC_UNIFORM, &zero, 1, 240);
+   p.output = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_BIT_REVERSE,
+      AGX_APPLE9_ENC_BIT_UNARY, &input, 1, 0);
+   ASSERT_TRUE(agx_apple9_optimize_vir(&p));
+   const auto *I = agx_apple9_definition(&p, p.output);
+   ASSERT_NE(I, nullptr);
+   EXPECT_EQ(I->nr_srcs, 0u);
+   EXPECT_EQ(I->alu_src_uniform_mask, 1u);
+   EXPECT_EQ(I->alu_src_value[0], 240u);
+}

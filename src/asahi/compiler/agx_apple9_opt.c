@@ -358,7 +358,10 @@ static void
 inline_alu_sources(struct agx_apple9_vir_instr *I, const uint16_t *uniform_read,
                       const bool *constant, const uint32_t *values)
 {
-   bool unary = I->op == AGX_APPLE9_VIR_U2F32 ||
+   bool unary = I->op == AGX_APPLE9_VIR_BIT_COUNT ||
+                I->op == AGX_APPLE9_VIR_UFIND_MSB ||
+                I->op == AGX_APPLE9_VIR_BIT_REVERSE ||
+                 I->op == AGX_APPLE9_VIR_U2F32 ||
                 I->op == AGX_APPLE9_VIR_I2F32 ||
                 I->op == AGX_APPLE9_VIR_F2U32 ||
                 I->op == AGX_APPLE9_VIR_F2I32;

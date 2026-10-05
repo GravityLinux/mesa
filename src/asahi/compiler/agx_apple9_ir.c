@@ -6836,23 +6836,37 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
    case AGX_APPLE9_VIR_UFIND_MSB:
    case AGX_APPLE9_VIR_BIT_REVERSE: {
       unsigned dst = phys[instruction->dest];
-      unsigned src = phys[instruction->src[0]];
+      uint32_t source[1];
+      uint8_t live;
+      if (instruction->alu_src_immediate_mask ||
+          !apple9_alu_sources(instruction, phys, 1, source, &live))
+         return false;
+      unsigned src = source[0];
       if (instruction->encoding != AGX_APPLE9_ENC_BIT_UNARY ||
-          instruction->nr_srcs != 1 || instruction->immediate ||
-          dst >= AGX_APPLE9_GPR_COUNT || src >= AGX_APPLE9_GPR_COUNT)
+          instruction->immediate ||
+          dst >= AGX_APPLE9_GPR_COUNT)
          return false;
 
       /* T8132 integer unary probes establish the shared conversion operand
        * layout, including zero -> -1 for UFIND_MSB, high registers, retained
        * sources and direct pending-load consumption. Operation selection is
        * independent of lifetime, register bits and the dependency mask. */
-      const uint8_t bytes[8] = {
+      uint8_t bytes[8] = {
          instruction->op == AGX_APPLE9_VIR_BIT_COUNT ? 0x27 : 0xa7,
          instruction->op == AGX_APPLE9_VIR_BIT_REVERSE ? 0x04 : 0x05,
          0x54, dst << 1, 0x02, (src & 63) << 2,
-         ((instruction->live_after_mask & 1) ? 0x4e : 0x5c) | (src >> 6),
+         ((live & 1) ? 0x4e : 0x5c) | ((src >> 6) & 1),
          0x04,
       };
+      if (instruction->alu_src_uniform_mask) {
+         /* The population-count uniform probe validated the alternate
+          * destination format. Keep that measured form for this opcode. */
+         if (instruction->op == AGX_APPLE9_VIR_BIT_COUNT) {
+            bytes[4] = 0x03;
+            bytes[6] = 0xcc;
+         }
+         pack_integer_source(bytes, src, true, false, 42, 52, 58);
+      }
       packed_init(packed, bytes, sizeof(bytes));
       return true;
    }
@@ -7078,6 +7092,9 @@ agx_apple9_pack_vir_instruction(const struct agx_apple9_vir_instr *instruction,
        instruction->op != AGX_APPLE9_VIR_I2F32 &&
        instruction->op != AGX_APPLE9_VIR_F2U32 &&
        instruction->op != AGX_APPLE9_VIR_F2I32 &&
+       instruction->op != AGX_APPLE9_VIR_BIT_COUNT &&
+       instruction->op != AGX_APPLE9_VIR_UFIND_MSB &&
+       instruction->op != AGX_APPLE9_VIR_BIT_REVERSE &&
        instruction->op != AGX_APPLE9_VIR_SELECT &&
        instruction->op != AGX_APPLE9_VIR_PREDICATE_COMPARE) {
       if (reason)

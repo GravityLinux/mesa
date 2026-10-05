@@ -6186,6 +6186,7 @@ apple9_uniform_constant_use(nir_alu_instr *alu, unsigned s, uint32_t *value)
    case nir_op_fmin: case nir_op_fmax:
       is_float = true;
       break;
+   case nir_op_bit_count: case nir_op_bitfield_reverse: case nir_op_ufind_msb:
    case nir_op_u2f32: case nir_op_i2f32: case nir_op_f2u32: case nir_op_f2i32:
    case nir_op_iadd: case nir_op_iand: case nir_op_ior: case nir_op_ixor:
    case nir_op_imin: case nir_op_imax: case nir_op_umin: case nir_op_umax:
