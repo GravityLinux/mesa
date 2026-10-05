@@ -548,6 +548,11 @@ typedef struct {
    /* For creating temporaries */
    unsigned alloc;
 
+   /* Opt-in spill coalescing prototype: original repair variable + 1 for each
+    * memory SSA definition, zero for other values. Reindexed with SSA. */
+   unsigned *spill_home;
+   unsigned spill_home_count;
+
    /* Does the shader statically use scratch memory? */
    bool any_scratch;
 
@@ -1085,6 +1090,12 @@ void agx_dce(agx_context *ctx, bool partial);
 void agx_pressure_schedule(agx_context *ctx);
 void agx_spill(agx_context *ctx, unsigned k, bool remat_only);
 void agx_repair_ssa(agx_context *ctx);
+
+struct agx_spill_interference;
+struct agx_spill_interference *agx_spill_coalesce_prepare(agx_context *ctx);
+bool agx_spill_coalesce_apply(agx_context *ctx,
+                              struct agx_spill_interference *graph,
+                              unsigned *half_slots);
 void agx_reindex_ssa(agx_context *ctx);
 bool agx_ra(agx_context *ctx);
 void agx_lower_64bit_postra(agx_context *ctx);

@@ -2056,6 +2056,8 @@ agx_ra(agx_context *ctx)
          constraint_preferences(ctx, preferred, scarcity, max_regs);
    }
 
+   struct agx_spill_interference *spill_graph =
+      ctx->spill_home ? agx_spill_coalesce_prepare(ctx) : NULL;
    bool success = false;
    if (!validate_constraint_windows(ctx, max_regs))
       goto cleanup;
@@ -2087,6 +2089,9 @@ agx_ra(agx_context *ctx)
       }))
          goto cleanup;
    }
+
+   if (spill_graph)
+      agx_spill_coalesce_apply(ctx, spill_graph, &mem_slot_count);
 
    ctx->max_reg = reg_count ? (reg_count - 1) : 0;
    ctx->spill_base_B = ctx->scratch_size_B;
@@ -2237,6 +2242,7 @@ agx_ra(agx_context *ctx)
    success = true;
 
 cleanup:
+   ralloc_free(spill_graph);
    agx_foreach_block(ctx, block) {
       for (unsigned i = 0; i < ARRAY_SIZE(block->reg_to_ssa_out); ++i) {
          free(block->reg_to_ssa_out[i]);

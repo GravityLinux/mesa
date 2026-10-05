@@ -37,6 +37,8 @@ struct repair_ctx {
 
    /* Information on blocks indexed in source order */
    struct repair_block *blocks;
+
+   struct hash_table_u64 *homes;
 };
 
 static inline struct repair_block *
@@ -50,6 +52,9 @@ record_write(struct repair_ctx *ctx, agx_block *block, unsigned node,
              agx_index val)
 {
    assert(node < ctx->n);
+   if (ctx->homes && val.memory)
+      _mesa_hash_table_u64_insert(ctx->homes, val.value,
+                                  (void *)(uintptr_t)(node + 1));
    if (getenv("AGX_APPLE9_RA_AUDIT"))
       fprintf(stderr, "RA_AUDIT_HOME node=%u ssa=%u mem=%u block=%u\n",
               node, val.value, val.memory, block->index);
@@ -249,12 +254,15 @@ agx_repair_ssa(agx_context *ctx)
    }
 
    unsigned n = ctx->alloc;
+   struct hash_table_u64 *homes = getenv("AGX_SPILL_COALESCE")
+      ? _mesa_hash_table_u64_create(blocks) : NULL;
 
    agx_foreach_block(ctx, block) {
       struct repair_ctx rctx = {
          .shader = ctx,
          .n = n,
          .blocks = blocks,
+         .homes = homes,
       };
 
       agx_foreach_instr_in_block(block, I) {
@@ -319,6 +327,7 @@ agx_repair_ssa(agx_context *ctx)
                .shader = ctx,
                .n = n,
                .blocks = blocks,
+               .homes = homes,
             };
 
             agx_replace_src(phi, s,
@@ -327,9 +336,22 @@ agx_repair_ssa(agx_context *ctx)
       }
    }
 
-   ralloc_free(blocks);
-
    agx_opt_trivial_phi(ctx);
+   ralloc_free(ctx->spill_home);
+   ctx->spill_home = NULL;
+   ctx->spill_home_count = 0;
+   if (homes) {
+      ctx->spill_home = rzalloc_array(ctx, unsigned, ctx->alloc);
+      ctx->spill_home_count = ctx->alloc;
+      agx_foreach_instr_global(ctx, I) {
+         agx_foreach_ssa_dest(I, d) {
+            if (I->dest[d].memory)
+               ctx->spill_home[I->dest[d].value] = (uintptr_t)
+                  _mesa_hash_table_u64_search(homes, I->dest[d].value);
+         }
+      }
+   }
+   ralloc_free(blocks);
    if (getenv("AGX_APPLE9_RA_AUDIT")) {
       unsigned next = 0;
       agx_foreach_instr_global(ctx, I) {

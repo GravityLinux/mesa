@@ -12,6 +12,8 @@ void
 agx_reindex_ssa(agx_context *ctx)
 {
    unsigned *remap = calloc(ctx->alloc, sizeof(*remap));
+   unsigned *homes = ctx->spill_home
+      ? rzalloc_array(ctx, unsigned, ctx->alloc) : NULL;
 
    ctx->alloc = 0;
 
@@ -19,6 +21,8 @@ agx_reindex_ssa(agx_context *ctx)
       agx_foreach_ssa_dest(I, d) {
          assert(!remap[I->dest[d].value] && "input is SSA");
          remap[I->dest[d].value] = ctx->alloc++;
+         if (homes && I->dest[d].value < ctx->spill_home_count)
+            homes[remap[I->dest[d].value]] = ctx->spill_home[I->dest[d].value];
          I->dest[d].value = remap[I->dest[d].value];
       }
    }
@@ -30,4 +34,7 @@ agx_reindex_ssa(agx_context *ctx)
    }
 
    free(remap);
+   ralloc_free(ctx->spill_home);
+   ctx->spill_home = homes;
+   ctx->spill_home_count = homes ? ctx->alloc : 0;
 }
