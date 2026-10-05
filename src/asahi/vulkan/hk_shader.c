@@ -3892,6 +3892,41 @@ hk_apple9_needs_deferral(uint32_t count,
    return false;
 }
 
+static VkResult
+hk_apple9_defer_graphics(struct hk_device *dev, uint32_t count,
+                         struct vk_shader_compile_info *infos,
+                         const struct vk_graphics_pipeline_state *state,
+                         const VkAllocationCallbacks *alloc,
+                         struct vk_shader **out);
+
+/* Debug only: a vertex shader writing zero to every generic varying a
+ * fragment shader reads. Offline replay never links a fragment shader
+ * compiled apart from its vertex shader; pairing it with this stub reaches
+ * the backend with a matching varying layout. */
+static nir_shader *
+hk_apple9_stub_vs_nir(uint64_t inputs)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_VERTEX,
+                                                 &agx_nir_options, "stub VS");
+   nir_def *zero = nir_imm_vec4(&b, 0.0, 0.0, 0.0, 1.0);
+   uint64_t written = VARYING_BIT_POS;
+   u_foreach_bit64(slot, inputs) {
+      if (slot >= VARYING_SLOT_VAR0 && slot < VARYING_SLOT_VAR0 + 32)
+         written |= BITFIELD64_BIT(slot);
+   }
+   u_foreach_bit64(slot, written) {
+      nir_store_output(&b, zero, nir_imm_int(&b, 0), .base = 0,
+                       .write_mask = 0xf, .component = 0,
+                       .src_type = nir_type_float32,
+                       .io_semantics.location = slot,
+                       .io_semantics.num_slots = 1);
+   }
+   b.shader->info.outputs_written = written;
+   return b.shader;
+}
+
+static __thread bool hk_apple9_eager_busy;
+
 /* Debug only (HK_APPLE9_EAGER_VARIANTS): compile a deferred pipeline's
  * variant when it is created, as a draw would, so offline replay that never
  * draws reaches the backend. State the pipeline leaves dynamic takes simple
@@ -3903,8 +3938,36 @@ hk_apple9_eager_variant(struct hk_device *dev, uint32_t count,
                         const struct vk_graphics_pipeline_state *pstate)
 {
    struct hk_api_shader *api[HK_APPLE9_GFX_STAGES] = {NULL};
+   if (hk_apple9_eager_busy)
+      return;
    for (uint32_t i = 0; i < count; ++i)
       api[shaders[i]->stage] = container_of(shaders[i], struct hk_api_shader, vk);
+
+   /* A fragment shader compiled alone: pair it with a stub vertex shader. */
+   struct hk_api_shader *stub = NULL;
+   if (!api[MESA_SHADER_VERTEX] && !api[MESA_SHADER_MESH] &&
+       api[MESA_SHADER_FRAGMENT] && api[MESA_SHADER_FRAGMENT]->apple9_deferred &&
+       !(pstate && (pstate->pipeline_flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR))) {
+      const struct hk_apple9_deferred *d = api[MESA_SHADER_FRAGMENT]->apple9_deferred;
+      struct blob_reader reader;
+      blob_reader_init(&reader, d->nir, d->nir_size);
+      nir_shader *fs = nir_deserialize(NULL, &agx_nir_options, &reader);
+      if (fs) {
+         struct vk_shader_compile_info info = {
+            .stage = MESA_SHADER_VERTEX,
+            .nir = hk_apple9_stub_vs_nir(fs->info.inputs_read),
+            .next_stage_mask = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .robustness = &vk_robustness_disabled,
+         };
+         ralloc_free(fs);
+         struct vk_shader *vs = NULL;
+         hk_apple9_eager_busy = true;
+         if (hk_apple9_defer_graphics(dev, 1, &info, NULL, NULL, &vs) == VK_SUCCESS)
+            stub = container_of(vs, struct hk_api_shader, vk);
+         hk_apple9_eager_busy = false;
+         api[MESA_SHADER_VERTEX] = stub;
+      }
+   }
    if (getenv("HK_APPLE9_EAGER_TRACE"))
       fprintf(stderr, "HK_APPLE9_EAGER: %u stages vs=%d fs=%d flags=%#llx\n", count,
               !!api[MESA_SHADER_VERTEX], !!api[MESA_SHADER_FRAGMENT],
@@ -3958,6 +4021,8 @@ hk_apple9_eager_variant(struct hk_device *dev, uint32_t count,
    struct hk_api_shader *variant[HK_APPLE9_GFX_STAGES];
    if (hk_apple9_resolve_graphics(dev, api, &state, variant) != VK_SUCCESS)
       fprintf(stderr, "HK_APPLE9_EAGER_VARIANTS: variant compile failed\n");
+   if (stub)
+      hk_api_shader_destroy(&dev->vk, &stub->vk, NULL);
 }
 
 static VkResult
