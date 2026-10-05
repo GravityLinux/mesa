@@ -1501,29 +1501,16 @@ apple9_emit_dag_select(struct apple9_dag_lower *lower, nir_scalar predicate,
    }
 
    if (compare.domain == APPLE9_COMPARE_INTEGER) {
+      /* The equality bit turns the integer less-than select into equality,
+       * as Metal emits it. Inequality swaps the arms. Validated on T8132:
+       * 11,271 operator/switch/loop/integer/subgroup CTS cases, while
+       * IGT with the bit is not equality.
+       */
       bool not_equal = compare.relation == APPLE9_COMPARE_NOT_EQUAL;
-      /* PROBE: Metal's second most common select is ILT with the equality
-       * bit, and it never sets that bit on ULT. Test whether an integer
-       * condition with the equality bit is native equality:
-       * AGX_APPLE9_PROBE_IEQ=<condition>. */
-      static int probe = -1;
-      if (probe < 0) {
-         const char *env = getenv("AGX_APPLE9_PROBE_IEQ");
-         probe = env ? atoi(env) : 0;
-      }
-      if (probe)
-         return apple9_emit_dag_select_raw(
-            lower, cmp_a, cmp_b, not_equal ? if_false : if_true,
-            not_equal ? if_true : if_false,
-            probe | AGX_APPLE9_SELECT_EQUALITY);
-      uint32_t xor_sources[2] = {cmp_a, cmp_b};
-      uint32_t difference = apple9_dag_emit(
-         lower, AGX_APPLE9_VIR_IXOR, AGX_APPLE9_ENC_LOGIC_EXTENDED, xor_sources,
-         ARRAY_SIZE(xor_sources), 0);
-      uint32_t one = apple9_dag_imm(lower, 1);
       return apple9_emit_dag_select_raw(
-         lower, difference, one, not_equal ? if_false : if_true,
-         not_equal ? if_true : if_false, AGX_APPLE9_SELECT_ULT);
+         lower, cmp_a, cmp_b, not_equal ? if_false : if_true,
+         not_equal ? if_true : if_false,
+         AGX_APPLE9_SELECT_ILT | AGX_APPLE9_SELECT_EQUALITY);
    }
 
    uint32_t immediate;
