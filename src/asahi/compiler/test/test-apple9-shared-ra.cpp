@@ -8,6 +8,92 @@
 #include <gtest/gtest.h>
 #include "agx_test.h"
 
+TEST(Apple9SharedRa, SharedConstantInitializersKeepIndependentLoopValues)
+{
+   for (uint32_t initial : {0u, 7u, 0x3f800000u, 0xfeedfaceu}) {
+      void *memctx = ralloc_context(nullptr);
+      auto ctx = rzalloc(memctx, agx_context);
+      list_inithead(&ctx->blocks);
+      nir_builder nir = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "shared_constant_phis");
+      agx_shader_key key = {};
+      key.has_scratch = true;
+      ctx->nir = nir.shader;
+      ctx->stage = MESA_SHADER_COMPUTE;
+      ctx->key = &key;
+      ctx->ra_target.max_registers = 32;
+      ctx->ra_target.disable_occupancy_rematerialization = true;
+      auto entry = agx_test_block(ctx);
+      auto header = agx_test_block(ctx);
+      auto body = agx_test_block(ctx);
+      auto exit = agx_test_block(ctx);
+      header->loop_header = true;
+      agx_block_add_successor(entry, header);
+      agx_block_add_successor(header, body);
+      agx_block_add_successor(header, exit);
+      agx_block_add_successor(body, header);
+
+      auto b = agx_init_builder(ctx, agx_after_block(entry));
+      auto constant = agx_mov_imm(&b, 32, initial);
+      constexpr unsigned count = 8;
+      agx_instr *phis[count];
+      b.cursor = agx_after_block(header);
+      for (unsigned i = 0; i < count; ++i) {
+         phis[i] = agx_phi_to(&b, agx_temp(ctx, AGX_SIZE_32), 2);
+         phis[i]->src[0] = constant;
+      }
+      b.cursor = agx_after_block(body);
+      for (unsigned i = 0; i < count; ++i)
+         phis[i]->src[1] = agx_iadd(&b, phis[i]->dest[0],
+                                    agx_immediate(i + 1), 0);
+      b.cursor = agx_after_block(exit);
+      for (unsigned i = 0; i < count; ++i)
+         agx_export(&b, phis[i]->dest[0], 2 * i);
+
+      ASSERT_TRUE(agx_ra(ctx));
+      ASSERT_EQ(ctx->scratch_size_B, 0u);
+      ASSERT_LT(ctx->max_reg, 32u);
+      uint32_t regs[32] = {};
+      auto execute = [&](agx_block *block) {
+         agx_foreach_instr_in_block(block, I) {
+            auto read = [&](agx_index x) {
+               return x.type == AGX_INDEX_IMMEDIATE ? x.value : regs[x.value];
+            };
+            switch (I->op) {
+            case AGX_OPCODE_MOV_IMM:
+               regs[I->dest[0].value] = I->imm;
+               break;
+            case AGX_OPCODE_MOV:
+               regs[I->dest[0].value] = read(I->src[0]);
+               break;
+            case AGX_OPCODE_IADD:
+               regs[I->dest[0].value] = read(I->src[0]) + read(I->src[1]);
+               break;
+            case AGX_OPCODE_SWAP:
+               std::swap(regs[I->src[0].value], regs[I->src[1].value]);
+               break;
+            case AGX_OPCODE_EXPORT:
+               regs[I->imm] = read(I->src[0]);
+               break;
+            default:
+               FAIL() << "unexpected opcode " << I->op;
+            }
+         }
+      };
+      execute(entry);
+      for (unsigned iteration = 0; iteration < 5; ++iteration) {
+         execute(header);
+         execute(body);
+      }
+      execute(header);
+      execute(exit);
+      for (unsigned i = 0; i < count; ++i)
+         EXPECT_EQ(regs[2 * i], initial + 5 * (i + 1));
+      ralloc_free(nir.shader);
+      ralloc_free(memctx);
+   }
+}
+
 TEST(Apple9SharedRa, PlacementCostsLeaveSpaceForRestrictedDefinitions)
 {
    unsigned moves[2] = {};

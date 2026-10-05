@@ -2033,22 +2033,49 @@ agx_ra(agx_context *ctx)
       assert(effective_demand <= max_possible_regs && "spiller post-condition");
    }
 
-   /* Record all phi webs. First initialize the union-find data structure with
-    * all SSA defs in their own singletons, then union together anything related
-    * by a phi. The resulting union-find structure will be the webs.
+   /* Constants shared by unrelated phis must not connect their affinity webs.
+    * Give each incoming constant use a private affinity member. The actual SSA
+    * source stays shared, so this does not increase pressure or emit extra
+    * materializations. Local phi/source coalescing can still use its register.
     */
-   struct phi_web_node *phi_web = calloc(ctx->alloc, sizeof(*phi_web));
-   for (unsigned i = 0; i < ctx->alloc; ++i) {
-      phi_web[i].parent = i;
+   BITSET_WORD *constants = BITSET_CALLOC(ctx->alloc);
+   agx_foreach_instr_global(ctx, I) {
+      if (I->op == AGX_OPCODE_MOV_IMM &&
+          I->dest[0].type == AGX_INDEX_NORMAL)
+         BITSET_SET(constants, I->dest[0].value);
    }
 
+   unsigned nr_web_members = ctx->alloc;
    agx_foreach_block(ctx, block) {
       agx_foreach_phi_in_block(block, phi) {
          agx_foreach_ssa_src(phi, s) {
-            phi_web_union(phi_web, phi->dest[0].value, phi->src[s].value);
+            nr_web_members += BITSET_TEST(constants, phi->src[s].value) != 0;
          }
       }
    }
+
+   /* Initialize singleton members, then join phi destinations to their inputs.
+    * Members above ctx->alloc represent incoming constant uses, not SSA defs.
+    */
+   struct phi_web_node *phi_web = calloc(nr_web_members, sizeof(*phi_web));
+   for (unsigned i = 0; i < nr_web_members; ++i) {
+      phi_web[i].parent = i;
+   }
+
+   unsigned next_constant_member = ctx->alloc;
+   agx_foreach_block(ctx, block) {
+      agx_foreach_phi_in_block(block, phi) {
+         agx_foreach_ssa_src(phi, s) {
+            unsigned member = phi->src[s].value;
+            if (BITSET_TEST(constants, member))
+               member = next_constant_member++;
+
+            phi_web_union(phi_web, phi->dest[0].value, member);
+         }
+      }
+   }
+   assert(next_constant_member == nr_web_members);
+   free(constants);
 
    uint8_t *ncomps = calloc(ctx->alloc, sizeof(uint8_t));
    uint8_t *ncomps_unrounded = calloc(ctx->alloc, sizeof(uint8_t));
