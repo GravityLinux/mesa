@@ -17,6 +17,8 @@
 #include "agx_opcodes.h"
 #include "shader_enums.h"
 
+#include "test/cs2-pressure/ra-audit.h"
+
 /* SSA-based register allocator */
 struct phi_web_node {
    /* Parent index, or circular for root */
@@ -726,6 +728,7 @@ agx_emit_move_before_phi(agx_context *ctx, agx_block *block,
 
    agx_instr *phi = agx_phi_to(&b, agx_register_like(copy->dest, copy->src),
                                agx_num_predecessors(block));
+   pressure_tag_phi(ctx, phi, "eviction-reconcile");
    assert(!copy->src.kill);
 
    agx_foreach_src(phi, s) {
@@ -828,6 +831,7 @@ reserve_live_in(struct ra_ctx *rctx)
       if (nr_preds > 1) {
          /* We'll fill in the destination after, to coalesce one of the moves */
          agx_instr *phi = agx_phi_to(&b, agx_null(), nr_preds);
+         pressure_tag_phi(rctx->shader, phi, "live-in-reconcile");
 
          agx_foreach_predecessor(rctx->block, pred) {
             unsigned pred_idx = agx_predecessor_index(rctx->block, *pred);
@@ -1717,6 +1721,7 @@ agx_insert_parallel_copies(agx_context *ctx, agx_block *block)
       unsigned i = 0;
 
       agx_foreach_phi_in_block(succ, phi) {
+         pressure_audit_edge(ctx, block, succ, phi, pred_index);
          agx_index dest = phi->dest[0];
          agx_index src = phi->src[pred_index];
 
@@ -1828,6 +1833,7 @@ constraint_preferences(agx_context *ctx, struct agx_reg_constraint *preferred,
 bool
 agx_ra(agx_context *ctx)
 {
+   pressure_audit_begin(ctx);
    ctx->ra_error = NULL;
    /* Destructive input operands get a private SSA lifetime. Ordinary move
     * coalescing removes the copy when the original value dies here. */
@@ -1906,8 +1912,10 @@ agx_ra(agx_context *ctx)
       max_possible_regs = 32;
    }
 
-   if (!validate_constraint_windows(ctx, max_possible_regs))
+   if (!validate_constraint_windows(ctx, max_possible_regs)) {
+      pressure_audit_end(ctx);
       return false;
+   }
 
    /* Calculate the demand. We'll use it to determine if we need to spill and to
     * bound register assignment.
@@ -1945,9 +1953,12 @@ agx_ra(agx_context *ctx)
              "internal shaders are unspillable");
 
       agx_spill(ctx, max_possible_regs, remat);
+      pressure_audit_spilled(ctx);
 
-      if (!validate_constraint_windows(ctx, max_possible_regs))
+      if (!validate_constraint_windows(ctx, max_possible_regs)) {
+         pressure_audit_end(ctx);
          return false;
+      }
 
       /* After spilling, recalculate liveness and demand */
       agx_compute_liveness(ctx);
@@ -2091,6 +2102,8 @@ agx_ra(agx_context *ctx)
 
    assert(ctx->max_reg <= max_regs);
 
+   pressure_audit_phis(ctx);
+
    /* Validate RA after assigning registers just before lowering SSA */
    agx_validate_ra(ctx);
 
@@ -2231,6 +2244,7 @@ cleanup:
       }
    }
 
+   pressure_audit_end(ctx);
    free(phi_web);
    free(src_to_collect_phi);
    free(ncomps);
