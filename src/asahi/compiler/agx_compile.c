@@ -569,6 +569,14 @@ agx_format_for_pipe(enum pipe_format format)
    CASE(RG11B10F);
    CASE(RGB9E5);
 
+   /* Multi-word raw tile accesses (Apple9 colour helpers) carry an integer
+    * format with 2-4 32-bit lanes. The lane count is passed separately as a
+    * component mask, so a 32-bit integer element format is correct here. */
+   if (format == PIPE_FORMAT_R32G32_UINT ||
+       format == PIPE_FORMAT_R32G32B32_UINT ||
+       format == PIPE_FORMAT_R32G32B32A32_UINT)
+      return AGX_FORMAT_I32;
+
 #undef CASE
    UNREACHABLE("Invalid format");
 }
@@ -2865,9 +2873,17 @@ set_speculate(nir_builder *b, nir_instr *instr, UNUSED void *_)
    return false;
 }
 
+static bool
+agx_mark_def_uniform(nir_def *def, void *state)
+{
+   def->divergent = false;
+   return true;
+}
+
 static void
 agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
-                 uint8_t *ts_count, uint8_t *ss_count)
+                 uint8_t *ts_count, uint8_t *ss_count,
+                 bool allow_workgroup_intrinsics)
 {
    /* This runs only once up front since other optimizations don't affect it */
    NIR_PASS(_, nir, nir_opt_shrink_stores, true);
@@ -2902,7 +2918,6 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
    NIR_PASS(_, nir, nir_lower_pack);
    NIR_PASS(_, nir, nir_opt_algebraic);
 
-   nir_divergence_analysis(nir);
    bool progress = false;
 
    static const nir_lower_subgroups_options subgroups_options = {
@@ -2912,7 +2927,26 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
       .lower_subgroup_masks = true,
    };
 
-   NIR_PASS(progress, nir, nir_opt_uniform_atomics, true);
+   if (allow_workgroup_intrinsics) {
+      /* Driver-internal helpers may read tile/workgroup system registers from a
+       * non-workgroup stage. NIR's divergence analysis rejects that, and these
+       * helpers contain no atomics or subgroup operations, so the uniform
+       * passes below have nothing to do. Mark the divergence metadata valid by
+       * treating every value as uniform, which is correct for these shaders.
+       */
+      nir_foreach_function_impl(impl, nir) {
+         nir_metadata_require(impl, nir_metadata_instr_index);
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block) {
+               nir_foreach_def(instr, agx_mark_def_uniform, NULL);
+            }
+         }
+         impl->valid_metadata |= nir_metadata_divergence;
+      }
+   } else {
+      nir_divergence_analysis(nir);
+      NIR_PASS(progress, nir, nir_opt_uniform_atomics, true);
+   }
 
    /* Lower addressing modes. The sooner we do this, the sooner we get rid of
     * amul/aadd instructions and can let nir_opt_algebraic do its job. But we
@@ -2921,9 +2955,11 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
     */
    NIR_PASS(_, nir, agx_nir_lower_address);
 
-   NIR_PASS(progress, nir, nir_opt_uniform_subgroup, &subgroups_options);
-   if (progress) {
-      NIR_PASS(_, nir, agx_nir_lower_subgroups);
+   if (!allow_workgroup_intrinsics) {
+      NIR_PASS(progress, nir, nir_opt_uniform_subgroup, &subgroups_options);
+      if (progress) {
+         NIR_PASS(_, nir, agx_nir_lower_subgroups);
+      }
    }
 
    /* The above create operations that need lowering/optimizing */
@@ -3792,7 +3828,8 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
       (key->secondary || !key->promote_textures) ? NULL
                                                  : &info->texture_state_count,
       (key->secondary || !key->promote_textures) ? NULL
-                                                 : &info->sampler_state_count);
+                                                 : &info->sampler_state_count,
+      key->allow_workgroup_intrinsics);
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       info->varyings.fs.nr_cf = key->fs.cf_base;

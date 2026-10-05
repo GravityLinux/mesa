@@ -950,6 +950,19 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
       memcpy(agx_bo_map(shader->bo), shader->b.binary, size);
       shader->preamble_addr =
          shader->bo->va->addr + shader->b.info.preamble_offset;
+
+      /* The rodata referenced by the immediate uniform descriptors must live
+       * below the 40-bit USC address limit. shader->bo sits in the fixed 1-TiB
+       * USC aperture (>= 2^40) for execution, so keep a low mirror for the
+       * descriptor to reference. */
+      if (shader->b.info.rodata.size_16) {
+         shader->rodata_bo = agx_bo_create(
+            &dev->dev, size, 0, AGX_BO_WRITEBACK, "Shader rodata");
+         if (shader->rodata_bo) {
+            memcpy(agx_bo_map(shader->rodata_bo), shader->b.binary, size);
+            shader->rodata_addr = shader->rodata_bo->va->addr;
+         }
+      }
    }
 
    if (!shader->linked.ht) {
@@ -1257,6 +1270,7 @@ hk_shader_destroy(struct hk_device *dev, struct hk_shader *s)
    free((void *)s->code_ptr);
    free((void *)s->data_ptr);
    agx_bo_unreference(&dev->dev, s->bo);
+   agx_bo_unreference(&dev->dev, s->rodata_bo);
 
    simple_mtx_destroy(&s->linked.lock);
 
@@ -1839,7 +1853,9 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
    struct agx_usc_builder b = agx_usc_builder(s->usc.data, sizeof(s->usc.data));
 
    if (main && main->b.info.rodata.size_16) {
-      agx_usc_immediates(&b, &main->b.info.rodata, main->bo->va->addr);
+      uint64_t rodata_base = main->rodata_bo ? main->rodata_addr
+                                             : main->bo->va->addr;
+      agx_usc_immediates(&b, &main->b.info.rodata, rodata_base);
    }
 
    if (s->b.uses_txf)

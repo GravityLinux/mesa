@@ -585,7 +585,8 @@ agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
          return;
       }
    }
-   if (apple9 && util_try_blit_via_copy_region(pipe, info, false))
+   if (apple9 && !ctx->apple9_copy_region_depth &&
+       util_try_blit_via_copy_region(pipe, info, false))
       return;
 
    if (!apple9 && asahi_compute_blit_supported(info)) {
@@ -760,14 +761,21 @@ asahi_reload_fs(struct pipe_context *pctx, const struct agx_color_reload_key *ke
       unsigned offset = 0;
       for (unsigned rt = 0; rt < key->count; ++rt) {
          if (key->mask & BITFIELD_BIT(rt)) {
+            /* store_block_agx takes the format of the local tile memory, which
+             * is the renderable (AIL ISA) format of the attachment. Passing
+             * the logical format here would leave the generic AGX emitter
+             * unable to decode it.
+             */
+            enum pipe_format tib_format =
+               ail_pixel_format[effective_format(key->formats[rt])].renderable;
             nir_image_store_block_agx(
-               &b, nir_imm_int(&b, rt), nir_imm_int(&b, offset),
+               &b, nir_imm_intN_t(&b, rt, 16), nir_imm_int(&b, offset),
                key->layered
                   ? nir_vec4(&b, nir_channel(&b, xy, 0), nir_channel(&b, xy, 1),
                               nir_load_layer_id(&b), nir_imm_int(&b, 0))
                   : nir_pad_vec4(&b, xy),
                .image_array = key->layered,
-               .format = agx_apple9_color_tile_format(key->formats[rt]),
+               .format = tib_format,
                .image_dim = key->samples > 1 ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D);
          }
          offset += 4 * agx_apple9_color_words(key->formats[rt]);
@@ -1543,8 +1551,16 @@ agx_resource_copy_region(struct pipe_context *pctx, struct pipe_resource *dst,
                     asahi_copy_texture(pctx, dst, dst_level, dstx, dsty, dstz,
                                        src, src_level, src_box))
          return;
+      /* The CPU fallback maps the tiled resources, and any writeback on unmap
+       * blits through agx_blit(). Guard against the blit path re-entering this
+       * function via util_try_blit_via_copy_region(), which would recurse
+       * without bound.
+       */
+      struct agx_context *ctx = agx_context(pctx);
+      ctx->apple9_copy_region_depth++;
       util_resource_copy_region(pctx, dst, dst_level, dstx, dsty, dstz, src,
                                  src_level, src_box);
+      ctx->apple9_copy_region_depth--;
       return;
    }
 
