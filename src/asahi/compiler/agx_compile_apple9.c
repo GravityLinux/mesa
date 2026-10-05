@@ -5035,6 +5035,198 @@ apple9_prepare_dag(nir_shader *nir)
                               nir_metadata_control_flow, NULL);
 }
 
+/* Samples that fetch from memory; queries return without waiting. */
+static bool
+apple9_hoist_sample(nir_instr *instr)
+{
+   return instr->type == nir_instr_type_tex &&
+          !nir_tex_instr_is_query(nir_instr_as_tex(instr));
+}
+
+/* Instructions a sample can be hoisted across: pure ALU and reorderable
+ * intrinsics. Anything else (stores, barriers, discards, volatile or ordered
+ * loads) is a fence that keeps its position relative to samples.
+ */
+static bool
+apple9_hoist_fence(nir_instr *instr)
+{
+   switch (instr->type) {
+   case nir_instr_type_alu:
+   case nir_instr_type_load_const:
+   case nir_instr_type_undef:
+   case nir_instr_type_tex:
+      return false;
+   case nir_instr_type_intrinsic:
+      return !nir_intrinsic_can_reorder(nir_instr_as_intrinsic(instr));
+   default:
+      return true;
+   }
+}
+
+struct apple9_hoist_state {
+   nir_block *block;
+   BITSET_WORD *emitted;
+   /* Emitted samples whose results no emitted instruction has consumed. */
+   BITSET_WORD *pending;
+   /* Readiness walk memo: instructions already found ready in this query. */
+   unsigned *visited;
+   unsigned query;
+   nir_instr **order;
+   unsigned count;
+};
+
+static void apple9_hoist_emit(struct apple9_hoist_state *s, nir_instr *instr);
+
+static bool
+apple9_hoist_emit_src(nir_src *src, void *data)
+{
+   struct apple9_hoist_state *s = data;
+   nir_instr *parent = nir_def_instr(src->ssa);
+   if (parent->block == s->block && parent->type != nir_instr_type_phi &&
+       !BITSET_TEST(s->emitted, parent->index))
+      apple9_hoist_emit(s, parent);
+   return true;
+}
+
+static bool
+apple9_hoist_retire_src(nir_src *src, void *data)
+{
+   struct apple9_hoist_state *s = data;
+   nir_instr *parent = nir_def_instr(src->ssa);
+   if (parent->block == s->block)
+      BITSET_CLEAR(s->pending, parent->index);
+   return true;
+}
+
+/* Emit an instruction after its unemitted in-block dependencies. */
+static void
+apple9_hoist_emit(struct apple9_hoist_state *s, nir_instr *instr)
+{
+   nir_foreach_src(instr, apple9_hoist_emit_src, s);
+   if (BITSET_TEST(s->emitted, instr->index))
+      return;
+   nir_foreach_src(instr, apple9_hoist_retire_src, s);
+   BITSET_SET(s->emitted, instr->index);
+   s->order[s->count++] = instr;
+}
+
+/* Whether a sample's unemitted dependency slice can move up to the current
+ * position: it contains no fence and no other sample, and does not consume a
+ * pending sample (that would wait for it early instead of overlapping).
+ */
+static bool
+apple9_hoist_ready_src(nir_src *src, void *data)
+{
+   struct apple9_hoist_state *s = data;
+   nir_instr *parent = nir_def_instr(src->ssa);
+   if (parent->block != s->block || parent->type == nir_instr_type_phi)
+      return true;
+   if (BITSET_TEST(s->emitted, parent->index))
+      return !BITSET_TEST(s->pending, parent->index);
+   if (s->visited[parent->index] == s->query)
+      return true;
+   if (apple9_hoist_fence(parent) || apple9_hoist_sample(parent))
+      return false;
+   s->visited[parent->index] = s->query;
+   return nir_foreach_src(parent, apple9_hoist_ready_src, s);
+}
+
+static unsigned
+apple9_hoist_inflight(struct apple9_hoist_state *s, unsigned words)
+{
+   unsigned n = 0;
+   for (unsigned i = 0; i < words; ++i)
+      n += util_bitcount(s->pending[i]);
+   return n;
+}
+
+/* Issue texture samples early. Selection follows NIR order, so a sample
+ * placed right before its first use waits for the whole fetch: in CS2, 87% of
+ * samples have no other sample in flight. Within each region between fences,
+ * pull later samples forward, with the arithmetic computing their
+ * coordinates, while fewer than AGX_APPLE9_HOIST_SAMPLES (default 8: eight
+ * four-register coordinate tuples fill p0-p31) are unconsumed. Everything
+ * else keeps its order.
+ */
+static bool
+apple9_hoist_samples(nir_shader *nir)
+{
+   const char *env = getenv("AGX_APPLE9_HOIST_SAMPLES");
+   unsigned limit = env ? atoi(env) : 8;
+   /* How far ahead to look for a sample to hoist. */
+   const unsigned horizon = 256;
+   if (!limit)
+      return false;
+
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   unsigned total = nir_index_instrs(impl);
+   unsigned words = BITSET_WORDS(total);
+   void *ctx = ralloc_context(NULL);
+   struct apple9_hoist_state s = {
+      .emitted = rzalloc_array(ctx, BITSET_WORD, words + 1),
+      .pending = rzalloc_array(ctx, BITSET_WORD, words + 1),
+      .visited = rzalloc_array(ctx, unsigned, total + 1),
+      .order = ralloc_array(ctx, nir_instr *, total + 1),
+   };
+   bool progress = false;
+
+   nir_foreach_block(block, impl) {
+      s.block = block;
+      s.count = 0;
+      nir_instr *jump = nir_block_last_instr(block);
+      if (jump && jump->type != nir_instr_type_jump)
+         jump = NULL;
+
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_phi || instr == jump ||
+             BITSET_TEST(s.emitted, instr->index))
+            continue;
+
+         /* Before an ordinary instruction, pull later samples of the same
+          * region forward while there is room. */
+         if (!apple9_hoist_fence(instr)) {
+            unsigned inflight = apple9_hoist_inflight(&s, words);
+            unsigned scanned = 0;
+            for (nir_instr *next = nir_instr_next(instr);
+                 next && next != jump && inflight < limit &&
+                 scanned < horizon && !apple9_hoist_fence(next);
+                 next = nir_instr_next(next), ++scanned) {
+               if (!apple9_hoist_sample(next) ||
+                   BITSET_TEST(s.emitted, next->index))
+                  continue;
+               ++s.query;
+               if (!nir_foreach_src(next, apple9_hoist_ready_src, &s))
+                  continue;
+               apple9_hoist_emit(&s, next);
+               BITSET_SET(s.pending, next->index);
+               ++inflight;
+               progress = true;
+            }
+         }
+
+         if (BITSET_TEST(s.emitted, instr->index))
+            continue;
+         apple9_hoist_emit(&s, instr);
+         if (apple9_hoist_sample(instr))
+            BITSET_SET(s.pending, instr->index);
+      }
+
+      /* Samples still pending are consumed in later blocks. */
+      memset(s.pending, 0, (words + 1) * sizeof(BITSET_WORD));
+
+      /* Rebuild the block: phis, the new order, then the jump. */
+      nir_cursor cursor = nir_after_phis(block);
+      for (unsigned i = 0; i < s.count; ++i) {
+         nir_instr_move(cursor, s.order[i]);
+         cursor = nir_after_instr(s.order[i]);
+      }
+   }
+   ralloc_free(ctx);
+   if (progress)
+      nir_progress(true, impl, nir_metadata_control_flow);
+   return progress;
+}
+
 static bool
 apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
                        struct agx_apple9_compute_profile *profile,
@@ -5052,6 +5244,7 @@ apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
                            nir_move_load_ssbo | nir_move_alu;
    nir_opt_sink(nir, move);
    nir_opt_move(nir, move);
+   apple9_hoist_samples(nir);
    if (getenv("AGX_APPLE9_TRACE_FINAL_NIR") != NULL)
       nir_print_shader(nir, stderr);
 
