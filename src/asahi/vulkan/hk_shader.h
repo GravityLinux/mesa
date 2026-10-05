@@ -147,6 +147,16 @@ struct hk_shader {
    /* BO for any uploaded shader part */
    struct agx_bo *bo;
 
+   /* Low-address (non-USC-heap) copy of the shader rodata section. The
+    * immediate/rodata uniform descriptor is only 38 bits wide (a 40-bit
+    * address after the shift), while LOW_VA executable BOs live in the fixed
+    * 1-TiB USC aperture starting at 2^40. Pointing that descriptor at the exec
+    * BO overflows the field, is silently truncated in release builds, and
+    * wedges the Apple9 firmware. Mirror the rodata into an ordinary low BO.
+    */
+   struct agx_bo *rodata_bo;
+   uint64_t rodata_addr;
+
    /* Cache of fast linked variants */
    struct {
       simple_mtx_t lock;
