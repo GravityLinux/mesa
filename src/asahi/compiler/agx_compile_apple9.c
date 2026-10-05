@@ -5895,10 +5895,27 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    /* As in agx_optimize_nir, reassociate before forming the preamble:
     * ordering chains by rank exposes uniform subexpressions to it and lets
     * CSE share common pairs. Buffer addresses are still 64-bit here, so the
-    * later 2x32 split sees the carry chains it expects.
+    * later 2x32 split sees the carry chains it expects. The loop runs
+    * algebraic cleanup, so give it this backend's options: reordered
+    * shifted-byte chains otherwise become pack_32_4x8, which Apple9 lacks.
     */
-   nir_opt_reassociate_loop(
-      nir, nir_reassociate_scalar_math | nir_reassociate_cse_heuristic);
+   {
+      const nir_shader_compiler_options *saved = nir->options;
+      nir_shader_compiler_options options = *saved;
+      options.lower_pack_unorm_2x16 = false;
+      options.lower_pack_unorm_4x8 = false;
+      options.lower_unpack_unorm_2x16 = false;
+      options.lower_unpack_unorm_4x8 = false;
+      options.lower_unpack_snorm_2x16 = false;
+      options.lower_unpack_snorm_4x8 = false;
+      options.lower_bitfield_extract = true;
+      options.has_bfe = false;
+      options.has_pack_32_4x8 = false;
+      nir->options = &options;
+      nir_opt_reassociate_loop(
+         nir, nir_reassociate_scalar_math | nir_reassociate_cse_heuristic);
+      nir->options = saved;
+   }
    apple9_prepare_dag(nir);
    struct apple9_buffer_map resources = {0};
    if (!apple9_collect_buffer_map(nir, &resources, reason))
