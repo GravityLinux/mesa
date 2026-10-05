@@ -156,6 +156,45 @@ reserved_size(agx_context *ctx)
       return 0;
 }
 
+/* Opt-in evidence for failed phi-web affinities; never changes placement. */
+static void
+pressure_web_event(struct ra_ctx *rctx, unsigned ssa, const char *event,
+                   unsigned chosen, const struct agx_reg_constraint *constraint)
+{
+   if (pressure_audit.ctx != rctx->shader ||
+       !getenv("AGX_APPLE9_RA_WEBS") || rctx->classes[ssa] != RA_GPR)
+      return;
+   unsigned root = phi_web_find(rctx->phi_web, ssa);
+   const struct phi_web_node *web = &rctx->phi_web[root];
+   unsigned want = web->assigned ? web->reg : ~0u;
+   unsigned count = rctx->ncomps[ssa];
+   fprintf(stderr, "RA_WEB_%s id=%u block=%u loop=%u ssa=%u web=%u "
+           "op=%s want=%u chosen=%u width=%u bound=%u min=%u max=%u align=%u owners=",
+           event, pressure_audit.serial, rctx->block->index,
+           rctx->block->loop_header, ssa, root,
+           agx_opcodes_info[rctx->instr->op].name, want, chosen, count,
+           rctx->bound[RA_GPR], constraint ? constraint->min : 0,
+           constraint ? constraint->max : rctx->bound[RA_GPR] - count,
+           constraint ? constraint->align : count);
+   if (web->assigned) {
+      for (unsigned reg = reserved_size(rctx->shader);
+           reg < rctx->bound[RA_GPR];) {
+         if (!BITSET_TEST(rctx->used_regs[RA_GPR], reg)) {
+            ++reg;
+            continue;
+         }
+         unsigned owner = rctx->reg_to_ssa[reg];
+         unsigned width = rctx->ncomps[owner];
+         assert(width);
+         if (reg < want + count && want < reg + width)
+            fprintf(stderr, "%u:%u:%u:%u,", owner,
+                    phi_web_find(rctx->phi_web, owner), reg, width);
+         reg += width;
+      }
+   }
+   fputc('\n', stderr);
+}
+
 UNUSED static void
 print_reg_file(struct ra_ctx *rctx, FILE *fp)
 {
@@ -883,6 +922,7 @@ static void
 assign_regs(struct ra_ctx *rctx, agx_index v, unsigned reg)
 {
    enum ra_class cls = ra_class_for_index(v);
+   pressure_web_event(rctx, v.value, "ASSIGN", reg, NULL);
    assert(reg < rctx->bound[cls] && "must not overflow register file");
    assert(v.type == AGX_INDEX_NORMAL && "only SSA gets registers allocated");
    set_ssa_to_reg(rctx, v.value, reg);
@@ -996,6 +1036,8 @@ place_constrained_value(struct ra_ctx *rctx, agx_index value,
       }
    }
 
+   if (!defined)
+      pressure_web_event(rctx, ssa, "CHOOSE", ~0u, &c);
    if (defined) {
       unsigned reg = rctx->ssa_to_reg[ssa];
       if (reg >= first && reg <= last && !(reg % align)) {
@@ -1295,6 +1337,7 @@ pick_regs(struct ra_ctx *rctx, agx_instr *I, unsigned d)
 
    unsigned align = count;
 
+   pressure_web_event(rctx, idx.value, "CHOOSE", ~0u, NULL);
    /* Try to allocate entire phi webs compatibly */
    unsigned phi_idx = phi_web_find(rctx->phi_web, idx.value);
    if (rctx->phi_web[phi_idx].assigned) {
