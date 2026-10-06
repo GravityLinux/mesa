@@ -182,7 +182,10 @@ static bool
 fold_integer(struct agx_apple9_vir_instr *I, const bool *constant,
              const uint32_t *values)
 {
-   if (!I->nr_srcs || I->nr_srcs > 3)
+   /* Register sources are only the operands still in the register file;
+    * a uniform or immediate operand is not a known constant here. */
+   if (!I->nr_srcs || I->nr_srcs > 3 || I->alu_src_uniform_mask ||
+       I->alu_src_immediate_mask)
       return false;
    uint32_t c[3] = {0};
    for (unsigned s = 0; s < I->nr_srcs; ++s) {
