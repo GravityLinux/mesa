@@ -139,6 +139,8 @@ TEST(Apple9Compiler, UniformDescriptorHoistingRequiresSafeIndependentReads)
             nir_pop_if(&b, nullptr);
             bool expected = speculate && reorder && !divergent;
             agx_nir_hoist_apple9_uniform_reads(b.shader);
+            EXPECT_EQ(nir_def_instr(addr)->block ==
+                         nir_start_block(nir_shader_get_entrypoint(b.shader)), !divergent);
             EXPECT_EQ(nir_def_instr(value)->block ==
                          nir_start_block(nir_shader_get_entrypoint(b.shader)), expected);
             nir_validate_shader(b.shader, "descriptor hoisting");
