@@ -212,3 +212,34 @@ TEST_F(SpillCoalesce, MixedWidthsKeepAlignmentAndDoNotOverlap)
    EXPECT_TRUE(sn->dest[0].reg < sa->dest[0].reg ||
                sn->dest[0].reg >= sa->dest[0].reg + 2);
 }
+
+TEST_F(SpillCoalesce, DenseLiveBoundarySpansBitsetWords)
+{
+   auto A = agx_start_block(b->shader);
+   auto B = agx_test_block(b->shader);
+   agx_block_add_successor(A, B);
+   b->cursor = agx_after_block(A);
+   auto input = imm(0, 7);
+   std::vector<agx_index> values;
+   std::vector<agx_instr *> saves, fills;
+   constexpr unsigned count = 97;
+   for (unsigned i = 0; i < count; ++i) {
+      values.push_back(value(2 * i, true, 1));
+      saves.push_back(agx_mov_to(b, values.back(), input));
+   }
+   b->cursor = agx_after_block(B);
+   for (auto v : values)
+      fills.push_back(load(v));
+   unsigned half_slots = count * 2;
+   ASSERT_TRUE(run(&half_slots));
+   EXPECT_EQ(half_slots, count * 2);
+   std::vector<bool> used(half_slots, false);
+   for (unsigned i = 0; i < count; ++i) {
+      unsigned reg = saves[i]->dest[0].reg;
+      ASSERT_LT(reg + 1, half_slots);
+      EXPECT_EQ(reg % 2, 0u);
+      EXPECT_FALSE(used[reg]);
+      used[reg] = used[reg + 1] = true;
+      EXPECT_EQ(fills[i]->src[0].reg, reg);
+   }
+}

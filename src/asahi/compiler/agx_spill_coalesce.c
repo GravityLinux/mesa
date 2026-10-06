@@ -34,10 +34,14 @@ interfere(struct agx_spill_interference *g, unsigned x, unsigned y)
 static void
 clique(struct agx_spill_interference *g, BITSET_WORD *live)
 {
-   unsigned x, y;
+   unsigned x;
    BITSET_FOREACH_SET(x, live, g->n) {
-      BITSET_FOREACH_SET(y, live, g->n)
-         interfere(g, x, y);
+      BITSET_WORD *row = neighbors(g, x);
+      /* Every live vertex gets the same live set. Union whole words instead
+       * of inserting both directions of every pair separately. */
+      for (unsigned word = 0; word < g->stride; ++word)
+         row[word] |= live[word];
+      BITSET_CLEAR(row, x);
    }
 }
 

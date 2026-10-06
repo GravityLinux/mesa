@@ -39,6 +39,7 @@ struct repair_ctx {
    struct repair_block *blocks;
 
    struct hash_table_u64 *homes;
+   bool audit;
 };
 
 static inline struct repair_block *
@@ -55,7 +56,7 @@ record_write(struct repair_ctx *ctx, agx_block *block, unsigned node,
    if (ctx->homes && val.memory)
       _mesa_hash_table_u64_insert(ctx->homes, val.value,
                                   (void *)(uintptr_t)(node + 1));
-   if (getenv("AGX_APPLE9_RA_AUDIT"))
+   if (ctx->audit)
       fprintf(stderr, "RA_AUDIT_HOME node=%u ssa=%u mem=%u block=%u\n",
               node, val.value, val.memory, block->index);
    struct hash_table_u64 *defs = repair_block(ctx, block)->defs;
@@ -254,6 +255,7 @@ agx_repair_ssa(agx_context *ctx)
    }
 
    unsigned n = ctx->alloc;
+   const bool audit = getenv("AGX_APPLE9_RA_AUDIT") != NULL;
    struct hash_table_u64 *homes = getenv("AGX_SPILL_COALESCE")
       ? _mesa_hash_table_u64_create(blocks) : NULL;
 
@@ -263,6 +265,7 @@ agx_repair_ssa(agx_context *ctx)
          .n = n,
          .blocks = blocks,
          .homes = homes,
+         .audit = audit,
       };
 
       agx_foreach_instr_in_block(block, I) {
@@ -328,6 +331,7 @@ agx_repair_ssa(agx_context *ctx)
                .n = n,
                .blocks = blocks,
                .homes = homes,
+               .audit = audit,
             };
 
             agx_replace_src(phi, s,
@@ -352,7 +356,7 @@ agx_repair_ssa(agx_context *ctx)
       }
    }
    ralloc_free(blocks);
-   if (getenv("AGX_APPLE9_RA_AUDIT")) {
+   if (audit) {
       unsigned next = 0;
       agx_foreach_instr_global(ctx, I) {
          agx_foreach_ssa_dest(I, d)
