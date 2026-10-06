@@ -21,6 +21,9 @@ extern "C" {
 
 bool agx_nir_lower_apple9_math(nir_shader *shader);
 
+/* Schedule texture operations without increasing estimated scalar-word pressure. */
+bool agx_nir_hoist_apple9_samples(nir_shader *shader);
+
 /* After generic texture lowering, backend1 holds a packed Apple9 LOD/bias
  * word rather than the original floating-point LOD or integer fetch level. */
 bool agx_nir_lower_apple9_texture_lod(nir_shader *shader);

@@ -7301,6 +7301,48 @@ TEST(Apple9Compiler, GraphicsTrigUsesOneFactorPerOperation)
    }
 }
 
+TEST(Apple9Scheduling, HoistsSamplesOnlyWhenWordPressureDoesNotGrow)
+{
+   for (bool consume_separately : {false, true}) {
+      SCOPED_TRACE(consume_separately);
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "sample_pressure");
+      nir_def *coord = nir_imm_vec2(&b, 0.25, 0.75);
+      auto sample = [&]() {
+         nir_tex_instr *tex = nir_tex_instr_create(b.shader, 1);
+         tex->op = nir_texop_tex;
+         tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+         tex->dest_type = nir_type_float32;
+         tex->coord_components = 2;
+         tex->src[0].src_type = nir_tex_src_coord;
+         tex->src[0].src = nir_src_for_ssa(coord);
+         nir_def_init(&tex->instr, &tex->def, 4, 32);
+         nir_builder_instr_insert(&b, &tex->instr);
+         return tex;
+      };
+      auto store = [&](nir_def *value) {
+         nir_store_output(&b, value, nir_imm_int(&b, 0),
+                          .write_mask = 15, .src_type = nir_type_float32,
+                          .io_semantics = {.location = FRAG_RESULT_DATA0,
+                                           .num_slots = 1});
+      };
+      nir_def *value = &sample()->def;
+      for (unsigned i = 0; i < 16; ++i)
+         value = nir_fneg(&b, value);
+      nir_instr *last_alu = nir_def_instr(value);
+      if (consume_separately)
+         store(value);
+      nir_tex_instr *second = sample();
+      store(consume_separately ? &second->def : nir_fadd(&b, value, &second->def));
+      nir_validate_shader(b.shader, "before sample scheduling");
+      EXPECT_EQ(agx_nir_hoist_apple9_samples(b.shader), !consume_separately);
+      nir_index_instrs(nir_shader_get_entrypoint(b.shader));
+      EXPECT_EQ(second->instr.index < last_alu->index, !consume_separately);
+      nir_validate_shader(b.shader, "after sample scheduling");
+      ralloc_free(b.shader);
+   }
+}
+
 TEST(Apple9Compiler, TextureCoordinatesAndResultUseAllocatedRegisters)
 {
    nir_builder b = nir_builder_init_simple_shader(

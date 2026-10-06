@@ -5150,8 +5150,8 @@ apple9_hoist_limit(void)
 }
 
 /* Long-latency operations to issue early: samples that fetch from memory
- * (queries return without waiting) and reorderable buffer loads.
- * AGX_APPLE9_HOIST_LOADS=0 limits hoisting to samples. */
+ * (queries return without waiting). Buffer-load hoisting is opt-in with
+ * AGX_APPLE9_HOIST_LOADS=1 until its register-pressure tradeoffs improve. */
 static bool
 apple9_hoist_sample(nir_instr *instr)
 {
@@ -5167,7 +5167,7 @@ apple9_hoist_sample(nir_instr *instr)
       static int loads = -1;
       if (loads < 0) {
          const char *env = getenv("AGX_APPLE9_HOIST_LOADS");
-         loads = !env || atoi(env);
+         loads = env && atoi(env);
       }
       return loads && nir_intrinsic_can_reorder(intr);
    }
@@ -5232,6 +5232,69 @@ apple9_hoist_fence(nir_instr *instr)
    default:
       return true;
    }
+}
+
+/* Scalar-word liveness is a conservative scheduling cost, not a physical
+ * register bound: later uniform folding and operand constraints can change
+ * allocation. Compare both orders with the same model before extending
+ * texture-result lifetimes. */
+struct apple9_word_pressure {
+   unsigned *width;
+   BITSET_WORD *live;
+   unsigned demand;
+};
+
+static bool
+apple9_record_width(nir_def *def, void *data)
+{
+   unsigned *width = data;
+   width[def->index] = def->num_components * DIV_ROUND_UP(def->bit_size, 32);
+   return true;
+}
+
+static bool
+apple9_add_live(nir_src *src, void *data)
+{
+   struct apple9_word_pressure *s = data;
+   if (!nir_src_is_undef(*src) && !BITSET_TEST(s->live, src->ssa->index)) {
+      BITSET_SET(s->live, src->ssa->index);
+      s->demand += s->width[src->ssa->index];
+   }
+   return true;
+}
+
+static bool
+apple9_kill_live(nir_def *def, void *data)
+{
+   struct apple9_word_pressure *s = data;
+   if (BITSET_TEST(s->live, def->index)) {
+      BITSET_CLEAR(s->live, def->index);
+      s->demand -= s->width[def->index];
+   }
+   return true;
+}
+
+static unsigned
+apple9_schedule_pressure(nir_block *block, nir_instr **order, unsigned count,
+                         unsigned *width, BITSET_WORD *live, unsigned words)
+{
+   memset(live, 0, words * sizeof(*live));
+   struct apple9_word_pressure s = {.width = width, .live = live};
+   U_SPARSE_BITSET_FOREACH_SET(&block->live_out, id) {
+      BITSET_SET(live, id);
+      s.demand += width[id];
+   }
+   nir_if *following = nir_block_get_following_if(block);
+   if (following)
+      apple9_add_live(&following->condition, &s);
+   unsigned peak = s.demand;
+   while (count) {
+      nir_instr *instr = order[--count];
+      nir_foreach_def(instr, apple9_kill_live, &s);
+      nir_foreach_src(instr, apple9_add_live, &s);
+      peak = MAX2(peak, s.demand);
+   }
+   return peak;
 }
 
 struct apple9_hoist_state {
@@ -5312,25 +5375,27 @@ apple9_hoist_inflight(struct apple9_hoist_state *s, unsigned words)
 }
 
 /* Issue texture samples early. Selection follows NIR order, so a sample
- * placed right before its first use waits for the whole fetch: in CS2, 87% of
- * samples have no other sample in flight. Within each region between fences,
+ * placed right before its first use waits for the whole fetch. Within each region between fences,
  * pull later samples forward, with the arithmetic computing their
  * coordinates, while fewer than AGX_APPLE9_HOIST_SAMPLES (default 8: eight
  * four-register coordinate tuples fill p0-p31) are unconsumed. Everything
  * else keeps its order.
  */
-static bool
-apple9_hoist_samples(nir_shader *nir)
+static bool apple9_has_samples(nir_shader *nir);
+
+bool
+agx_nir_hoist_apple9_samples(nir_shader *nir)
 {
    unsigned limit = apple9_hoist_limit();
    /* How far ahead, in NIR instructions, to look for a sample to hoist: an
     * upper bound on how far one moves. */
    const char *distance = getenv("AGX_APPLE9_HOIST_DISTANCE");
    const unsigned horizon = distance ? atoi(distance) : 256;
-   if (!limit)
+   if (!limit || !apple9_has_samples(nir))
       return false;
 
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   nir_metadata_require(impl, nir_metadata_live_defs);
    unsigned total = nir_index_instrs(impl);
    unsigned words = BITSET_WORDS(total);
    void *ctx = ralloc_context(NULL);
@@ -5340,11 +5405,25 @@ apple9_hoist_samples(nir_shader *nir)
       .visited = rzalloc_array(ctx, unsigned, total + 1),
       .order = ralloc_array(ctx, nir_instr *, total + 1),
    };
+   unsigned *width = rzalloc_array(ctx, unsigned, impl->ssa_alloc);
+   nir_foreach_block(b, impl) {
+      nir_foreach_instr(i, b)
+         nir_foreach_def(i, apple9_record_width, width);
+   }
+   unsigned live_words = BITSET_WORDS(impl->ssa_alloc);
+   BITSET_WORD *live = rzalloc_array(ctx, BITSET_WORD, live_words);
+   nir_instr **original = ralloc_array(ctx, nir_instr *, total + 1);
    bool progress = false;
 
    nir_foreach_block(block, impl) {
       s.block = block;
       s.count = 0;
+      bool block_progress = false;
+      unsigned original_count = 0;
+      nir_foreach_instr(i, block) {
+         if (i->type != nir_instr_type_phi && i->type != nir_instr_type_jump)
+            original[original_count++] = i;
+      }
       nir_instr *jump = nir_block_last_instr(block);
       if (jump && jump->type != nir_instr_type_jump)
          jump = NULL;
@@ -5372,7 +5451,7 @@ apple9_hoist_samples(nir_shader *nir)
                apple9_hoist_emit(&s, next);
                BITSET_SET(s.pending, next->index);
                ++inflight;
-               progress = true;
+               block_progress = true;
             }
          }
 
@@ -5386,6 +5465,14 @@ apple9_hoist_samples(nir_shader *nir)
       /* Samples still pending are consumed in later blocks. */
       memset(s.pending, 0, (words + 1) * sizeof(BITSET_WORD));
 
+      if (!block_progress)
+         continue;
+      assert(original_count == s.count);
+      if (apple9_schedule_pressure(block, s.order, s.count, width, live, live_words) >
+          apple9_schedule_pressure(block, original, original_count, width, live, live_words))
+         continue;
+
+      progress = true;
       /* Rebuild the block: phis, the new order, then the jump. */
       nir_cursor cursor = nir_after_phis(block);
       for (unsigned i = 0; i < s.count; ++i) {
@@ -5433,7 +5520,7 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
    nir_opt_sink(nir, move);
    nir_opt_move(nir, move);
    if (hoist)
-      apple9_hoist_samples(nir);
+      agx_nir_hoist_apple9_samples(nir);
    if (getenv("AGX_APPLE9_TRACE_FINAL_NIR") != NULL)
       nir_print_shader(nir, apple9_log());
 
