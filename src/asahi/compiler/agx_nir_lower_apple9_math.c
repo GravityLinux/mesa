@@ -395,3 +395,51 @@ agx_nir_lower_apple9_math(nir_shader *shader)
    }
    return progress;
 }
+
+/* Compute linear groups are consecutive sets of four local invocations.
+ * Use the same subgroup lane transport as quad operations, with explicit
+ * subtraction so no fragment-only derivative instruction is required.
+ */
+static bool
+lower_compute_derivative(nir_builder *b, nir_intrinsic_instr *intr,
+                         UNUSED void *data)
+{
+   bool y, coarse;
+   switch (intr->intrinsic) {
+   case nir_intrinsic_ddx:
+   case nir_intrinsic_ddx_fine:
+   case nir_intrinsic_ddx_coarse:
+      y = false;
+      break;
+   case nir_intrinsic_ddy:
+   case nir_intrinsic_ddy_fine:
+   case nir_intrinsic_ddy_coarse:
+      y = true;
+      break;
+   default:
+      return false;
+   }
+   coarse = intr->intrinsic == nir_intrinsic_ddx_coarse ||
+            intr->intrinsic == nir_intrinsic_ddy_coarse;
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *lane = nir_load_subgroup_invocation(b);
+   unsigned step = y ? 2 : 1;
+   nir_def *lo = nir_iand_imm(b, lane, ~(coarse ? 3u : step));
+   nir_def *hi = nir_ior_imm(b, lo, step);
+   nir_def *value = intr->src[0].ssa;
+   nir_def *a = nir_shuffle(b, value, lo);
+   nir_def *z = nir_shuffle(b, value, hi);
+   nir_def_replace(&intr->def, nir_fsub(b, z, a));
+   return true;
+}
+
+bool
+agx_nir_lower_apple9_compute_derivatives(nir_shader *shader)
+{
+   if (shader->info.stage != MESA_SHADER_COMPUTE ||
+       shader->info.derivative_group != DERIVATIVE_GROUP_LINEAR)
+      return false;
+
+   return nir_shader_intrinsics_pass(shader, lower_compute_derivative,
+                                      nir_metadata_control_flow, NULL);
+}

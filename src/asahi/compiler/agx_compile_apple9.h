@@ -20,6 +20,7 @@ extern "C" {
 #endif
 
 bool agx_nir_lower_apple9_math(nir_shader *shader);
+bool agx_nir_lower_apple9_compute_derivatives(nir_shader *shader);
 bool agx_nir_lower_apple9_denorms(nir_shader *shader);
 bool agx_nir_lower_apple9_subgroup_denorms(nir_shader *shader);
 

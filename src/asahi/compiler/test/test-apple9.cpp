@@ -21,6 +21,96 @@ extern "C" {
 #include <vector>
 #include "gallium/include/pipe/p_defines.h"
 
+TEST(Apple9Compiler, LinearComputeDerivativeLanePairs)
+{
+   const nir_intrinsic_op ops[] = {
+      nir_intrinsic_ddx, nir_intrinsic_ddy,
+      nir_intrinsic_ddx_fine, nir_intrinsic_ddy_fine,
+      nir_intrinsic_ddx_coarse, nir_intrinsic_ddy_coarse,
+   };
+   for (unsigned op = 0; op < ARRAY_SIZE(ops); ++op) {
+      for (unsigned lane = 0; lane < 32; ++lane) {
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_COMPUTE, &agx_nir_options, "linear_derivative_pairs");
+         b.shader->info.derivative_group = DERIVATIVE_GROUP_LINEAR;
+         nir_def *input = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 0),
+                                       nir_imm_int(&b, 0), .align_mul = 4);
+         nir_intrinsic_instr *d = nir_intrinsic_instr_create(b.shader, ops[op]);
+         d->num_components = 1;
+         d->src[0] = nir_src_for_ssa(input);
+         nir_def_init(&d->instr, &d->def, 1, 32);
+         nir_builder_instr_insert(&b, &d->instr);
+         nir_store_ssbo(&b, &d->def, nir_imm_int(&b, 1), nir_imm_int(&b, 0),
+                        .align_mul = 4);
+         auto *store = nir_instr_as_intrinsic(
+            nir_block_last_instr(nir_cursor_current_block(b.cursor)));
+         ASSERT_TRUE(agx_nir_lower_apple9_compute_derivatives(b.shader));
+         /* Interpret lane transport against the nonlinear input f(i)=i*i.
+          * This distinguishes rows, columns, coarse pairs, and quad bases. */
+         nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+            nir_foreach_instr_safe(instr, block) {
+               if (instr->type != nir_instr_type_intrinsic)
+                  continue;
+               auto *intr = nir_instr_as_intrinsic(instr);
+               if (intr->intrinsic != nir_intrinsic_load_subgroup_invocation)
+                  continue;
+               b.cursor = nir_before_instr(instr);
+               nir_def_replace(&intr->def, nir_imm_int(&b, lane));
+            }
+         }
+         nir_opt_constant_folding(b.shader);
+         nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+            nir_foreach_instr_safe(instr, block) {
+               if (instr->type != nir_instr_type_intrinsic)
+                  continue;
+               auto *intr = nir_instr_as_intrinsic(instr);
+               if (intr->intrinsic != nir_intrinsic_shuffle)
+                  continue;
+               ASSERT_TRUE(nir_src_is_const(intr->src[1]));
+               unsigned index = nir_src_as_uint(intr->src[1]);
+               ASSERT_LT(index, 32u);
+               b.cursor = nir_before_instr(instr);
+               nir_def_replace(&intr->def, nir_imm_float(&b, index * index));
+            }
+         }
+         nir_opt_constant_folding(b.shader);
+         ASSERT_TRUE(nir_src_is_const(store->src[0]));
+         unsigned x = lane % 2, y = (lane % 4) / 2, base = lane - lane % 4;
+         unsigned a = op >= 4 ? base : (op % 2 ? base + x : base + 2 * y);
+         unsigned z = a + (op % 2 ? 2 : 1);
+         EXPECT_EQ(nir_src_as_float(store->src[0]), float(z * z - a * a));
+         ralloc_free(b.shader);
+      }
+   }
+}
+
+TEST(Apple9Compiler, LinearComputeDerivativesCompile)
+{
+   for (unsigned width : {1u, 2u, 3u, 4u}) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "linear_derivative_compile");
+      b.shader->info.derivative_group = DERIVATIVE_GROUP_LINEAR;
+      b.shader->info.workgroup_size[0] = 4;
+      b.shader->info.workgroup_size[1] = 4;
+      b.shader->info.workgroup_size[2] = 1;
+      nir_def *v = nir_load_ssbo(&b, width, 32, nir_imm_int(&b, 0),
+                                nir_imm_int(&b, 0), .align_mul = 4);
+      nir_def *d[] = {nir_ddx(&b, v), nir_ddy(&b, v),
+                     nir_ddx_fine(&b, v), nir_ddy_fine(&b, v),
+                     nir_ddx_coarse(&b, v), nir_ddy_coarse(&b, v)};
+      for (unsigned i = 0; i < ARRAY_SIZE(d); ++i)
+         nir_store_ssbo(&b, d[i], nir_imm_int(&b, 1), nir_imm_int(&b, 16 * i),
+                        .align_mul = 4);
+      agx_shader_part compiled = {};
+      agx_apple9_compute_profile profile = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason))
+         << reason;
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
+}
+
 TEST(Apple9Compiler, DenormCanonicalizePreservesNormalAndSpecialBits)
 {
    const uint32_t values[] = {
