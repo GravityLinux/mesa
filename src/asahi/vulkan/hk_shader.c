@@ -1386,6 +1386,57 @@ hk_apple9_encode_texel(nir_builder *b, nir_def *value, nir_def *layout,
    return nir_vec(b, words, 4);
 }
 
+/* The storage texel metadata carries the full address, including the view's
+ * byte offset. The legacy PBE prefix is retained only for image queries.
+ */
+static nir_def *
+hk_apple9_buffer_texel_address(nir_builder *b, nir_def *meta, nir_def *coord,
+                               nir_def *size_B)
+{
+   nir_def *base = nir_load_global_constant(b, 1, 64,
+      nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, base)),
+      .align_mul = 8);
+   nir_def *offset = nir_imul(b, nir_channel(b, coord, 0), size_B);
+   return nir_iadd(b, base, nir_u2u64(b, offset));
+}
+
+static bool
+hk_apple9_lower_buffer_address(nir_builder *b, nir_intrinsic_instr *intr,
+                                UNUSED void *data)
+{
+   bool atomic = intr->intrinsic == nir_intrinsic_bindless_image_atomic;
+   bool swap = intr->intrinsic == nir_intrinsic_bindless_image_atomic_swap;
+   if (!atomic && !swap &&
+       intr->intrinsic != nir_intrinsic_bindless_image_texel_address)
+      return false;
+   if (nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_BUF)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *pbe = nir_load_from_texture_handle_agx(b, intr->src[0].ssa);
+   nir_def *meta = nir_iadd_imm(b, pbe,
+      offsetof(struct hk_apple9_storage_descriptor, metadata) -
+      offsetof(struct hk_storage_image_descriptor, pbe));
+   unsigned size_B = atomic || swap ? intr->def.bit_size / 8 :
+      util_format_get_blocksize(nir_intrinsic_format(intr));
+   nir_def *addr = hk_apple9_buffer_texel_address(
+      b, meta, intr->src[1].ssa, nir_imm_int(b, size_B));
+   nir_def *result = addr;
+   if (atomic || swap) {
+      result = swap ? nir_global_atomic_swap(b, intr->def.bit_size, addr,
+         intr->src[3].ssa, intr->src[4].ssa,
+         .atomic_op = nir_intrinsic_atomic_op(intr)) :
+         nir_global_atomic(b, intr->def.bit_size, addr, intr->src[3].ssa,
+                           .atomic_op = nir_intrinsic_atomic_op(intr));
+      /* Preserve the memory-to-texture fence used by common image lowering. */
+      if (!(nir_intrinsic_access(intr) & ACCESS_NON_READABLE))
+         nir_fence_mem_to_tex_agx(b);
+   }
+   nir_def_replace(&intr->def, result);
+   b->shader->info.use_lowered_image_to_global = true;
+   return true;
+}
+
 /* Storage access without a shader format reads the texel layout from the
  * Apple9 storage descriptor, then converts each component at run time.
  */
@@ -1448,7 +1499,7 @@ hk_apple9_lower_formatless_storage(nir_builder *b, nir_intrinsic_instr *intr,
    nir_def *pbe_addr = nir_load_from_texture_handle_agx(b, pbe);
    nir_def *addr;
    if (dim == GLSL_SAMPLER_DIM_BUF) {
-      addr = libagx_buffer_texel_address(b, pbe_addr, coord, size_B);
+      addr = hk_apple9_buffer_texel_address(b, meta, coord, size_B);
    } else {
       bool layered = array || cube || dim == GLSL_SAMPLER_DIM_3D;
       addr = libagx_image_texel_address(
@@ -2151,6 +2202,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    }
 
    if (dev->dev.chip == AGX_CHIP_G16G) {
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass, hk_apple9_lower_buffer_address,
+               nir_metadata_control_flow, NULL);
       NIR_PASS(_, nir, agx_nir_lower_images);
       /* The ordinary descriptor prefix also serves storage-image/buffer
        * queries. Keep these GPU reads independent of native sampled tables. */

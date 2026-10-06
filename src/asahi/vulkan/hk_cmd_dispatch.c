@@ -238,10 +238,20 @@ hk_apple9_upload_textures(struct hk_cmd_buffer *cmd, const struct hk_descriptor_
          return false;
       hk_apple9_texture_info((uint32_t *)((uint8_t *)info +
          AGX_APPLE9_TEXTURE_INFO_OFFSET + i * AGX_APPLE9_TEXTURE_INFO_STRIDE), state);
-      if ((shader->b.info.apple9_texture_mask & BITFIELD_BIT(i)) &&
-          !agx_apple9_translate_texture((uint8_t *)tex +
-             slot++ * AGX_APPLE9_TEXTURE_TABLE_STRIDE, state))
-         return false;
+      if (shader->b.info.apple9_texture_mask & BITFIELD_BIT(i)) {
+         /* Sampled images and uniform texel buffers both embed the native
+          * record at byte 64. Repacking the query prefix would lose high VAs.
+          */
+         static_assert(offsetof(struct hk_apple9_image_descriptor, texture) ==
+                          offsetof(struct hk_apple9_texel_descriptor, texture),
+                       "native texture records have a common offset");
+         const struct hk_apple9_texel_descriptor *native = hk_apple9_descriptor(
+            desc, bindings->textures[i], sizeof(*native));
+         if (!native)
+            return false;
+         memcpy((uint8_t *)tex + slot++ * AGX_APPLE9_TEXTURE_TABLE_STRIDE,
+                native->texture, AGX_APPLE9_TEXTURE_TABLE_STRIDE);
+      }
    }
    /* Software offset filtering may consume a sampler whose hardware sample
     * was replaced by private-sampler fetches. Publish every logical sampler. */
