@@ -312,6 +312,7 @@ TEST(Apple9Rematerialization, HoistOnlyInvariantSpillStores)
             auto I = agx_alloc_instr(b, AGX_OPCODE_APPLE9_PURE, 1, 0);
             I->apple9 = rzalloc(mem, agx_apple9_vir_instr);
             I->apple9->op = AGX_APPLE9_VIR_DEVICE_LOAD;
+            I->apple9->immediate = i + 17;
             I->apple9->dest_components = 1;
             I->dest[0] = agx_temp(ctx, AGX_SIZE_32);
             values.push_back(I->dest[0]);
@@ -345,8 +346,41 @@ TEST(Apple9Rematerialization, HoistOnlyInvariantSpillStores)
             phis[i]->src[1] = I->dest[0];
             agx_builder_insert(&b->cursor, I);
          }
+         auto execute = [&]() {
+            std::vector<uint32_t> data(ctx->alloc), observed;
+            auto run = [&](agx_block *block, unsigned edge) {
+               const auto incoming = data;
+               agx_foreach_instr_in_block(block, I) {
+                  auto read = [&](agx_index x) {
+                     return x.type == AGX_INDEX_IMMEDIATE ? x.value : data[x.value];
+                  };
+                  if (I->op == AGX_OPCODE_PHI) {
+                     agx_index x = I->src[edge];
+                     data[I->dest[0].value] = x.type == AGX_INDEX_IMMEDIATE
+                        ? x.value : incoming[x.value];
+                  } else if (I->op == AGX_OPCODE_MOV)
+                     data[I->dest[0].value] = read(I->src[0]);
+                  else if (I->op == AGX_OPCODE_MOV_IMM)
+                     data[I->dest[0].value] = I->imm;
+                  else if (I->op == AGX_OPCODE_APPLE9_PURE)
+                     data[I->dest[0].value] = I->nr_srcs
+                        ? read(I->src[0]) + 1 : I->apple9->immediate;
+                  else if (I->op == AGX_OPCODE_APPLE9)
+                     observed.push_back(read(I->src[0]));
+               }
+            };
+            run(entry, 0);
+            for (unsigned iteration = 0; iteration < 3; ++iteration) {
+               run(header, iteration ? 1 : 0);
+               run(body, 0);
+            }
+            return observed;
+         };
+         auto expected = execute();
+         ASSERT_EQ(expected.size(), 36u);
          agx_compute_liveness(ctx);
          agx_spill(ctx, 20, false);
+         EXPECT_EQ(execute(), expected);
          unsigned inside = 0, outside = 0;
          agx_foreach_block(ctx, block) {
             agx_foreach_instr_in_block(block, I) {
