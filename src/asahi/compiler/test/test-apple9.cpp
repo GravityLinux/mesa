@@ -10875,6 +10875,39 @@ protected:
    }
 };
 
+TEST_F(Apple9Completion, FullScoreboardRetiresOldestLoadInsteadOfNewest)
+{
+   auto zero = imm(0);
+   uint32_t values[12];
+   for (unsigned i = 0; i < ARRAY_SIZE(values); ++i)
+      values[i] = load(zero, i);
+   for (unsigned i = 0; i < ARRAY_SIZE(values); ++i)
+      output(values[i], i);
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
+
+   unsigned loads = 0;
+   unsigned first_slots[6] = {};
+   for (unsigned i = 0; i < p.instruction_count; ++i) {
+      const auto *ins = p.instructions[i];
+      if (ins->op != AGX_APPLE9_VIR_DEVICE_LOAD)
+         continue;
+      if (loads < 6) {
+         for (unsigned j = 0; j < loads; ++j)
+            EXPECT_NE(ins->producer_scoreboard_slot, first_slots[j]);
+         first_slots[loads] = ins->producer_scoreboard_slot;
+      } else {
+         EXPECT_EQ(ins->producer_scoreboard_slot, first_slots[loads - 6]);
+         ASSERT_GT(i, 0u);
+         EXPECT_EQ(p.instructions[i - 1]->op, AGX_APPLE9_VIR_WAIT);
+         EXPECT_EQ(p.instructions[i - 1]->immediate,
+                   BITFIELD_BIT(first_slots[loads - 6] - 1));
+      }
+      ++loads;
+   }
+   EXPECT_EQ(loads, ARRAY_SIZE(values));
+}
+
 TEST_F(Apple9Completion, PointerTupleRetiresAtRetainedAddressUse)
 {
    auto zero = imm(0);
