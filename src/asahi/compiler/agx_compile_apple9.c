@@ -6421,6 +6421,109 @@ apple9_lower_texture_handles(nir_shader *nir)
 }
 
 static bool
+apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
+                   struct agx_apple9_compute_profile *profile,
+                   const struct agx_apple9_varying_layout *varyings,
+                   const struct apple9_buffer_map *resources,
+                   unsigned uniform_budget, bool promote_constants,
+                   unsigned *preamble_bytes)
+{
+   nir_shader *main = nir_shader_clone(NULL, nir);
+   if (!main)
+      return false;
+   /* Avoid spending uniform words on unused components of frontend UBO
+    * vectors. Removing leading components can also reduce the alignment:
+    * vec4 at byte 16 may become vec3 at byte 20. Re-legalize that access
+    * before selecting its memory format or extracting a preamble. */
+   nir_opt_shrink_vectors(main, true);
+   nir_opt_constant_folding(main);
+   apple9_legalize_buffer_accesses(main);
+   nir_function_impl *main_impl = nir_shader_get_entrypoint(main);
+   nir_index_ssa_defs(main_impl);
+   struct apple9_preamble_eligibility eligibility = {
+      .state = calloc(MAX2(main_impl->ssa_alloc, 1), sizeof(uint8_t)),
+   };
+   if (!eligibility.state) {
+      ralloc_free(main);
+      return false;
+   }
+   const nir_opt_preamble_options options = {
+      .cb_data = &eligibility,
+      .def_size = apple9_preamble_def_size,
+      .preamble_storage_size[nir_preamble_class_general] =
+         uniform_budget,
+      .instr_cost_cb = apple9_preamble_cost,
+      .rewrite_cost_cb = apple9_preamble_rewrite_cost,
+      .avoid_instr_cb = apple9_preamble_avoid,
+   };
+   unsigned sizes[nir_preamble_num_classes] = {0};
+   struct agx_shader_part setup = {0}, candidate = {0};
+   struct agx_apple9_compute_profile candidate_profile = {0};
+   const char *candidate_reason = NULL;
+   nir_shader *preamble = NULL;
+   if (main && nir_opt_preamble(main, &options, sizes)) {
+      nir_function_impl *impl = nir_shader_get_preamble(main);
+      /* Setup currently admits ordinary linear ALU/UBO work. Masked setup and
+       * scratch have independent execution contracts and are not assumed. */
+      if (impl && !apple9_cf_list_has_control_flow(&impl->body)) {
+         if (promote_constants)
+            apple9_promote_constants(main, impl,
+                                     &sizes[nir_preamble_class_general],
+                                     options.preamble_storage_size[nir_preamble_class_general]);
+         preamble = nir_shader_create(NULL, nir->info.stage, nir->options);
+         preamble->info.stage = nir->info.stage;
+         preamble->info.float_controls_execution_mode = nir->info.float_controls_execution_mode;
+         memcpy(preamble->info.workgroup_size, nir->info.workgroup_size,
+                sizeof(preamble->info.workgroup_size));
+         nir_function *fn = nir_function_create(preamble, "main");
+         fn->is_entrypoint = true;
+         fn->impl = nir_function_impl_clone(preamble, impl);
+         fn->impl->function = fn;
+         nir_opt_dce(main);
+         nir_opt_dce(preamble);
+         if (apple9_compile_dag_body(preamble, &setup, NULL, NULL, resources,
+                                    true, &candidate_reason) &&
+             !setup.info.scratch_size &&
+             setup.info.main_size > 4 &&
+             setup.info.main_size <= AGX_APPLE9_MAX_PREAMBLE_BYTES &&
+             apple9_compile_dag_body(main, &candidate,
+                                    profile ? &candidate_profile : NULL,
+                                    varyings, resources, false, &candidate_reason)) {
+            unsigned size = setup.info.main_size;
+            uint8_t *binary = realloc(candidate.binary, candidate.info.binary_size + size);
+            if (binary) {
+               memcpy(binary + candidate.info.binary_size, setup.binary, size);
+               candidate.info.apple9_preamble_offset = candidate.info.binary_size;
+               candidate.info.apple9_preamble_size = size;
+               candidate.info.binary_size += size;
+               candidate.binary = binary;
+               *out = candidate;
+               if (profile) {
+                  candidate_profile.preamble_offset = out->info.apple9_preamble_offset;
+                  candidate_profile.preamble_size = size;
+                  *profile = candidate_profile;
+               }
+               free(eligibility.state);
+               free(setup.binary);
+               ralloc_free(preamble);
+               ralloc_free(main);
+               return true;
+            }
+         }
+      }
+   }
+   if (agx_apple9_trace_enabled() && candidate_reason)
+      fprintf(stderr, "APPLE9_PREAMBLE_FALLBACK %s\n", candidate_reason);
+   *preamble_bytes = setup.info.main_size;
+   free(setup.binary);
+   free(candidate.binary);
+   free(eligibility.state);
+   ralloc_free(preamble);
+   ralloc_free(main);
+   return false;
+}
+
+static bool
 apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
                   struct agx_apple9_compute_profile *profile,
                   const struct agx_apple9_varying_layout *varyings,
@@ -6456,102 +6559,30 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    if (!apple9_collect_buffer_map(nir, &resources, reason))
       return false;
 
-   nir_shader *main = nir_shader_clone(NULL, nir);
-   if (!main)
-      return apple9_compile_dag_body(nir, out, profile, varyings, &resources,
-                                    false, reason);
-   /* Avoid spending uniform words on unused components of frontend UBO
-    * vectors. Removing leading components can also reduce the alignment:
-    * vec4 at byte 16 may become vec3 at byte 20. Re-legalize that access
-    * before selecting its memory format or extracting a preamble. */
-   nir_opt_shrink_vectors(main, true);
-   nir_opt_constant_folding(main);
-   apple9_legalize_buffer_accesses(main);
-   nir_function_impl *main_impl = nir_shader_get_entrypoint(main);
-   nir_index_ssa_defs(main_impl);
-   struct apple9_preamble_eligibility eligibility = {
-      .state = calloc(MAX2(main_impl->ssa_alloc, 1), sizeof(uint8_t)),
-   };
-   if (!eligibility.state) {
-      ralloc_free(main);
-      return apple9_compile_dag_body(nir, out, profile, varyings, &resources,
-                                    false, reason);
-   }
-   const nir_opt_preamble_options options = {
-      .cb_data = &eligibility,
-      .def_size = apple9_preamble_def_size,
-      .preamble_storage_size[nir_preamble_class_general] =
-         AGX_APPLE9_UNIFORM_COUNT -
-         (resources.descriptor_tables
-             ? AGX_APPLE9_GRAPHICS_ROOT_WORDS
-             : agx_apple9_compute_preamble_base(resources.count)),
-      .instr_cost_cb = apple9_preamble_cost,
-      .rewrite_cost_cb = apple9_preamble_rewrite_cost,
-      .avoid_instr_cb = apple9_preamble_avoid,
-   };
-   unsigned sizes[nir_preamble_num_classes] = {0};
-   struct agx_shader_part setup = {0}, candidate = {0};
-   struct agx_apple9_compute_profile candidate_profile = {0};
-   const char *candidate_reason = NULL;
-   nir_shader *preamble = NULL;
-   if (main && nir_opt_preamble(main, &options, sizes)) {
-      nir_function_impl *impl = nir_shader_get_preamble(main);
-      /* Setup currently admits ordinary linear ALU/UBO work. Masked setup and
-       * scratch have independent execution contracts and are not assumed. */
-      if (impl && !apple9_cf_list_has_control_flow(&impl->body)) {
-         if (!getenv("AGX_APPLE9_NO_PROMOTE"))
-            apple9_promote_constants(main, impl,
-                                     &sizes[nir_preamble_class_general],
-                                     options.preamble_storage_size[nir_preamble_class_general]);
-         preamble = nir_shader_create(NULL, nir->info.stage, nir->options);
-         preamble->info.stage = nir->info.stage;
-         preamble->info.float_controls_execution_mode = nir->info.float_controls_execution_mode;
-         memcpy(preamble->info.workgroup_size, nir->info.workgroup_size,
-                sizeof(preamble->info.workgroup_size));
-         nir_function *fn = nir_function_create(preamble, "main");
-         fn->is_entrypoint = true;
-         fn->impl = nir_function_impl_clone(preamble, impl);
-         fn->impl->function = fn;
-         nir_opt_dce(main);
-         nir_opt_dce(preamble);
-         if (apple9_compile_dag_body(preamble, &setup, NULL, NULL, &resources,
-                                    true, &candidate_reason) &&
-             !setup.info.scratch_size &&
-             setup.info.main_size > 4 &&
-             setup.info.main_size <= AGX_APPLE9_MAX_PREAMBLE_BYTES &&
-             apple9_compile_dag_body(main, &candidate,
-                                    profile ? &candidate_profile : NULL,
-                                    varyings, &resources, false, &candidate_reason)) {
-            unsigned size = setup.info.main_size;
-            uint8_t *binary = realloc(candidate.binary, candidate.info.binary_size + size);
-            if (binary) {
-               memcpy(binary + candidate.info.binary_size, setup.binary, size);
-               candidate.info.apple9_preamble_offset = candidate.info.binary_size;
-               candidate.info.apple9_preamble_size = size;
-               candidate.info.binary_size += size;
-               candidate.binary = binary;
-               *out = candidate;
-               if (profile) {
-                  candidate_profile.preamble_offset = out->info.apple9_preamble_offset;
-                  candidate_profile.preamble_size = size;
-                  *profile = candidate_profile;
-               }
-               free(eligibility.state);
-               free(setup.binary);
-               ralloc_free(preamble);
-               ralloc_free(main);
-               return true;
-            }
-         }
+   unsigned budget = AGX_APPLE9_UNIFORM_COUNT -
+      (resources.descriptor_tables ? AGX_APPLE9_GRAPHICS_ROOT_WORDS
+                                   : agx_apple9_compute_preamble_base(resources.count));
+   bool promote_constants = !getenv("AGX_APPLE9_NO_PROMOTE");
+   /* Constant stores must not discard an otherwise useful preamble when
+    * they cross the code-size policy bound. Retry without them first.
+    * If the extracted expressions alone exceed the bound, reduce their
+    * uniform budget using the measured setup size. Every attempt starts
+    * from the same prepared NIR and still checks the assembled code size.
+    * Bound retries so pathological setup code cannot multiply compile time.
+    */
+   for (unsigned attempt = 0; attempt < 4 && budget; ++attempt) {
+      unsigned bytes = 0;
+      if (apple9_try_preamble(nir, out, profile, varyings, &resources, budget,
+                             promote_constants, &bytes))
+         return true;
+      if (bytes <= AGX_APPLE9_MAX_PREAMBLE_BYTES)
+         break;
+      if (promote_constants) {
+         promote_constants = false;
+      } else {
+         budget = (uint64_t)budget * AGX_APPLE9_MAX_PREAMBLE_BYTES / bytes;
       }
    }
-   if (agx_apple9_trace_enabled() && candidate_reason)
-      fprintf(stderr, "APPLE9_PREAMBLE_FALLBACK %s\n", candidate_reason);
-   free(setup.binary);
-   free(candidate.binary);
-   free(eligibility.state);
-   ralloc_free(preamble);
-   ralloc_free(main);
    return apple9_compile_dag_body(nir, out, profile, varyings, &resources,
                                  false, reason);
 }

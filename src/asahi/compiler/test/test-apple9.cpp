@@ -11143,6 +11143,35 @@ TEST(Apple9Compiler, ConstantPromotionUsesMoreThanSixtyFourFreeWords)
    ralloc_free(b.shader);
 }
 
+TEST(Apple9Compiler, OversizedPreambleKeepsBoundedUniformWork)
+{
+   nir_builder b = apple9_compute_builder("bounded_preamble");
+   nir_def *gid = apple9_global_id_x(&b);
+   b.shader->info.num_ubos = 1;
+   for (unsigned i = 0; i < 200; ++i) {
+      nir_def *value = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0),
+                                  nir_imm_int(&b, 4 * i),
+                                  .align_mul = 4, .range = 4);
+      for (unsigned j = 0; j < 5; ++j)
+         value = nir_ixor(&b, nir_imul_imm(&b, value, 0x123401u + j * 2),
+                          nir_ushr_imm(&b, value, 3 + j));
+      apple9_store_output(&b, nir_iadd_imm(&b, gid, i),
+                          nir_ixor(&b, value, gid));
+   }
+   agx_shader_part compiled = {};
+   agx_apple9_compute_profile profile = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason))
+      << (reason ?: "");
+   EXPECT_GT(compiled.info.apple9_preamble_size, 0u);
+   EXPECT_LE(compiled.info.apple9_preamble_size, AGX_APPLE9_MAX_PREAMBLE_BYTES);
+   EXPECT_EQ(compiled.info.apple9_preamble_offset, compiled.info.main_size);
+   EXPECT_EQ(compiled.info.binary_size,
+             compiled.info.main_size + compiled.info.apple9_preamble_size);
+   free(compiled.binary);
+   ralloc_free(b.shader);
+}
+
 TEST(Apple9Packer, UniformLogicPreservesHighRegistersAndDependencies)
 {
    agx_apple9_vir_instr ins = {};
