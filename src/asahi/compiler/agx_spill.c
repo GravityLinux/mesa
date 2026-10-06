@@ -650,6 +650,16 @@ insert_coupling_code(struct spill_ctx *ctx, agx_block *pred, agx_block *succ)
    struct spill_block *sp = spill_block(ctx, pred);
    struct spill_block *ss = spill_block(ctx, succ);
 
+   /* These scratch sets are no longer needed by the per-block MIN pass.
+    * Index the predecessor state once; repeated linear membership scans and
+    * phi scans otherwise become quadratic at large control-flow joins. */
+   memset(ctx->S, 0, BITSET_BYTES(ctx->n));
+   memset(ctx->W, 0, BITSET_BYTES(ctx->n));
+   for (unsigned i = 0; i < sp->nS_exit; ++i)
+      BITSET_SET(ctx->S, sp->S_exit[i]);
+   for (unsigned i = 0; i < sp->nW_exit; ++i)
+      BITSET_SET(ctx->W, sp->W_exit[i]);
+
    agx_foreach_phi_in_block(succ, I) {
       if (!I->dest[0].memory)
          continue;
@@ -682,15 +692,7 @@ insert_coupling_code(struct spill_ctx *ctx, agx_block *pred, agx_block *succ)
          continue;
       }
 
-      bool spilled = false;
-      for (unsigned i = 0; i < sp->nS_exit; ++i) {
-         if (sp->S_exit[i] == I->src[s].value) {
-            spilled = true;
-            break;
-         }
-      }
-
-      if (!spilled) {
+      if (!BITSET_TEST(ctx->S, I->src[s].value)) {
          /* Spill the phi source. TODO: avoid redundant spills here */
          agx_builder b =
             agx_init_builder(ctx->shader, agx_after_block_logical(pred));
@@ -714,54 +716,32 @@ insert_coupling_code(struct spill_ctx *ctx, agx_block *pred, agx_block *succ)
    /* Anything assumed to be spilled at the start of succ must be spilled along
     * all edges.
     */
+   agx_foreach_phi_in_block(succ, phi)
+      BITSET_SET(ctx->S, chase_mem_index(phi->dest[0], ctx->spill_base));
+
    for (unsigned i = 0; i < ss->nS_entry; ++i) {
       unsigned v = ss->S_entry[i];
 
-      bool spilled = false;
-      for (unsigned j = 0; j < sp->nS_exit; ++j) {
-         if (sp->S_exit[j] == v) {
-            spilled = true;
-            break;
-         }
-      }
-
-      /* We handle spilling phi destinations separately */
-      agx_foreach_phi_in_block(succ, phi) {
-         if (chase_mem_index(phi->dest[0], ctx->spill_base) == v) {
-            spilled = true;
-            break;
-         }
-      }
-
-      if (spilled)
+      /* Phi destinations are handled separately. */
+      if (BITSET_TEST(ctx->S, v))
          continue;
 
       agx_builder b = agx_init_builder(ctx->shader, agx_along_edge(pred, succ));
       insert_spill(&b, ctx, v);
    }
 
+   /* Register phi destinations are also defined along the edge. Keep W as
+    * the original predecessor set for the final phi-source reloads below. */
+   memset(ctx->S, 0, BITSET_BYTES(ctx->n));
+   agx_foreach_phi_in_block(succ, phi) {
+      if (phi->dest[0].value < ctx->n)
+         BITSET_SET(ctx->S, phi->dest[0].value);
+   }
+
    /* Variables in W at the start of succ must be defined along the edge. */
    for (unsigned i = 0; i < ss->nW_entry; ++i) {
       unsigned node = ss->W_entry[i];
-      bool defined = false;
-
-      /* Variables live at the end of the predecessor are live along the edge */
-      for (unsigned j = 0; j < sp->nW_exit; ++j) {
-         if (sp->W_exit[j] == node) {
-            defined = true;
-            break;
-         }
-      }
-
-      /* Phis are defined along the edge */
-      agx_foreach_phi_in_block(succ, phi) {
-         if (phi->dest[0].value == node) {
-            defined = true;
-            break;
-         }
-      }
-
-      if (defined)
+      if (BITSET_TEST(ctx->W, node) || BITSET_TEST(ctx->S, node))
          continue;
 
       /* Otherwise, inserting a reload defines the variable along the edge */
@@ -787,16 +767,8 @@ insert_coupling_code(struct spill_ctx *ctx, agx_block *pred, agx_block *succ)
          continue;
       }
 
-      bool live = false;
-      for (unsigned i = 0; i < sp->nW_exit; ++i) {
-         if (sp->W_exit[i] == I->src[s].value) {
-            live = true;
-            break;
-         }
-      }
-
-      /* Fill the phi source in the predecessor */
-      if (!live) {
+      /* Fill the phi source in the predecessor. */
+      if (!BITSET_TEST(ctx->W, I->src[s].value)) {
          agx_block *reload_block = agx_edge_to_block(pred, succ);
          insert_reload(ctx, reload_block, agx_along_edge(pred, succ),
                        I->src[s].value);
