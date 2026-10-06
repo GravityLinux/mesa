@@ -9,6 +9,7 @@
 #include "agx_builder.h"
 #include "agx_compiler.h"
 #include "agx_debug.h"
+#include "util/hash_table.h"
 
 /* Apple9 selection keeps its machine operands and encoding contracts. The
  * shared IR carries their SSA dataflow, including genuine CFG phis, through
@@ -1269,9 +1270,18 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
    unsigned *position = calloc(count, sizeof(*position));
    bool *header = calloc(count, sizeof(*header));
    struct apple9_pending (*entry)[7] = calloc(count, sizeof(*entry));
+   struct hash_table *nir_blocks = _mesa_pointer_hash_table_create(NULL);
    bool success = false;
-   if (!blocks || !successors || !position || !header || !entry)
+   if (!blocks || !successors || !position || !header || !entry || !nir_blocks)
       goto cleanup;
+   /* Several physical blocks may come from one NIR block. As with the old
+    * layout scan, logical successors name its last physical block. Build the
+    * mapping once instead of searching the whole shader for every CFG edge.
+    */
+   for (struct agx_apple9_block *block = program->blocks; block; block = block->next) {
+      if (block->nir)
+         _mesa_hash_table_insert(nir_blocks, block->nir, block);
+   }
    for (unsigned b = 0; b < count; ++b) {
       blocks[b] = agx_apple9_block_create(&out);
       if (!blocks[b])
@@ -1291,10 +1301,12 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
             succ[1] = last->branch_target;
       }
       for (unsigned s = 0; block->nir && s < 2; ++s) {
-         for (struct agx_apple9_block *b = program->blocks; b; b = b->next) {
-            if (block->nir->successors[s] && b->nir == block->nir->successors[s])
-               succ[2 + s] = b;
-         }
+         if (!block->nir->successors[s])
+            continue;
+         struct hash_entry *entry =
+            _mesa_hash_table_search(nir_blocks, block->nir->successors[s]);
+         if (entry)
+            succ[2 + s] = entry->data;
       }
    }
    for (struct agx_apple9_block *block = program->blocks; block; block = block->next) {
@@ -1440,6 +1452,7 @@ cleanup:
    free(position);
    free(header);
    free(entry);
+   _mesa_hash_table_destroy(nir_blocks, NULL);
    agx_apple9_vir_finish(&out);
    return success;
 }
