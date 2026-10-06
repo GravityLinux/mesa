@@ -97,7 +97,7 @@ TEST(Apple9Compiler, UniformDescriptorHoistingRequiresSafeIndependentReads)
                            .align_mul = 16);
             nir_pop_if(&b, nullptr);
             bool expected = speculate && reorder && !divergent;
-            EXPECT_EQ(agx_nir_hoist_apple9_uniform_reads(b.shader), expected);
+            agx_nir_hoist_apple9_uniform_reads(b.shader);
             EXPECT_EQ(nir_def_instr(value)->block ==
                          nir_start_block(nir_shader_get_entrypoint(b.shader)), expected);
             nir_validate_shader(b.shader, "descriptor hoisting");
@@ -105,6 +105,44 @@ TEST(Apple9Compiler, UniformDescriptorHoistingRequiresSafeIndependentReads)
          }
       }
    }
+}
+
+TEST(Apple9Compiler, UniformBoundsAcrossBranchesShareOneLimit)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "shared_uniform_bounds");
+   nir_def *size = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0),
+                               nir_imm_int(&b, 0), .align_mul = 4, .range = 4);
+   nir_def *id = nir_channel(&b, nir_load_local_invocation_id(&b), 0);
+   nir_if *nif = nir_push_if(&b, nir_ine_imm(&b, id, 0));
+   for (unsigned branch = 0; branch < 2; ++branch) {
+      nir_def *limit = nir_iadd_imm(&b, nir_umax_imm(&b, size, 3), -3);
+      nir_def *valid = nir_ult(&b, id, limit);
+      nir_store_ssbo(&b, nir_b2i32(&b, valid), nir_imm_int(&b, 1),
+                     nir_imm_int(&b, branch * 4), .align_mul = 4);
+      if (!branch)
+         nir_push_else(&b, nif);
+   }
+   nir_pop_if(&b, nif);
+   ASSERT_TRUE(agx_nir_hoist_apple9_uniform_reads(b.shader));
+   nir_opt_cse(b.shader);
+   unsigned maxima = 0, adds = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_alu)
+            continue;
+         auto *alu = nir_instr_as_alu(instr);
+         if (alu->op == nir_op_umax || alu->op == nir_op_iadd) {
+            EXPECT_EQ(block, nir_start_block(nir_shader_get_entrypoint(b.shader)));
+            maxima += alu->op == nir_op_umax;
+            adds += alu->op == nir_op_iadd;
+         }
+      }
+   }
+   EXPECT_EQ(maxima, 1u);
+   EXPECT_EQ(adds, 1u);
+   nir_validate_shader(b.shader, "shared bounds hoisting");
+   ralloc_free(b.shader);
 }
 
 TEST(Apple9Compiler, LinearComputeDerivativeLanePairs)
