@@ -155,16 +155,16 @@ fp32_result_is_canonical(nir_scalar s, unsigned depth,
 
    /* This query runs before rewriting any instruction. Under explicit FTZ,
     * floating ALU results are canonical either natively or after this pass.
-    * The consumer check below deliberately excludes sign/min/max operations:
-    * a producer cannot defer its flush to one of these bit-preserving users.
+    * The initial consumer check excludes sign/min/max operations. Only after
+    * selecting all checks may pruning defer one to a bit-preserving user.
     */
    return nir_alu_type_get_base_type(nir_op_infos[alu->op].output_type) ==
           nir_type_float;
 }
 
 static bool
-only_used_by_fp32_daz(nir_def *def, unsigned depth,
-                      const struct set *flush)
+fp32_flush_is_unobservable(nir_def *def, unsigned depth,
+                           const struct set *flush)
 {
    if (depth == 8)
       return false;
@@ -174,8 +174,8 @@ only_used_by_fp32_daz(nir_def *def, unsigned depth,
          return false;
       nir_instr *instr = nir_src_use_instr(src);
       if (flush && instr->type == nir_instr_type_phi) {
-         if (!only_used_by_fp32_daz(&nir_instr_as_phi(instr)->def,
-                                    depth + 1, flush))
+         if (!fp32_flush_is_unobservable(&nir_instr_as_phi(instr)->def,
+                                         depth + 1, flush))
             return false;
          continue;
       }
@@ -198,7 +198,7 @@ only_used_by_fp32_daz(nir_def *def, unsigned depth,
          break;
       case nir_op_bcsel:
          if (!flush || src == &alu->src[0].src ||
-             !only_used_by_fp32_daz(&alu->def, depth + 1, flush))
+             !fp32_flush_is_unobservable(&alu->def, depth + 1, flush))
             return false;
          break;
       case nir_op_fneg:
@@ -214,12 +214,12 @@ only_used_by_fp32_daz(nir_def *def, unsigned depth,
           * while constructing the initial canonical-producer proof. */
          if (!flush ||
              (!_mesa_set_search(flush, alu) &&
-              !only_used_by_fp32_daz(&alu->def, depth + 1, flush)))
+              !fp32_flush_is_unobservable(&alu->def, depth + 1, flush)))
             return false;
          break;
       default:
          if (!nir_op_is_vec_or_mov(alu->op) ||
-             !only_used_by_fp32_daz(&alu->def, depth + 1, flush))
+             !fp32_flush_is_unobservable(&alu->def, depth + 1, flush))
             return false;
          break;
       }
@@ -229,7 +229,7 @@ only_used_by_fp32_daz(nir_def *def, unsigned depth,
 
 static bool
 fp32_minmax_has_normal_bound(nir_scalar s, bool lower,
-                             const uint32_t *uniform_constants)
+                            const uint32_t *uniform_constants)
 {
    s = nir_scalar_chase_movs(s);
    uint32_t value;
@@ -324,7 +324,7 @@ needs_fp32_flush(nir_alu_instr *alu, const BITSET_WORD *canonical_uniforms,
       break;
    }
 
-   return !only_used_by_fp32_daz(&alu->def, 0, NULL);
+   return !fp32_flush_is_unobservable(&alu->def, 0, NULL);
 }
 
 static bool
@@ -472,7 +472,7 @@ agx_nir_lower_apple9_denorms(nir_shader *shader)
                   continue;
                nir_alu_instr *alu = nir_instr_as_alu(instr);
                struct set_entry *entry = _mesa_set_search(flush, alu);
-               if (entry && only_used_by_fp32_daz(&alu->def, 0, flush))
+               if (entry && fp32_flush_is_unobservable(&alu->def, 0, flush))
                   _mesa_set_remove(flush, entry);
             }
          }
