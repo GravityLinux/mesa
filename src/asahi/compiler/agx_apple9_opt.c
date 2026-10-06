@@ -676,6 +676,10 @@ agx_apple9_optimize_vir_with_constants(
    const struct agx_apple9_uniform_constants *constants)
 {
    assert(!p->physical && !p->dependencies_finalized);
+   /* Preserve literal operands through folding and modifier selection first.
+    * Only then trade remaining register sources for known uniform words. */
+   if (constants && constants->count && !agx_apple9_optimize_vir(p))
+      return false;
    if (!p->value_count)
       return true;
 

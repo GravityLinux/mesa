@@ -6151,7 +6151,8 @@ apple9_compile_dag_trial(nir_shader *nir, struct agx_shader_part *out,
                          struct agx_apple9_compute_profile *profile,
                          const struct agx_apple9_varying_layout *varyings,
                          const struct apple9_buffer_map *resources,
-                         const struct agx_apple9_uniform_constants *constants, bool hoist,
+                         const struct agx_apple9_uniform_constants *constants,
+                         bool hoist,
                          struct apple9_dag_cost *cost, char **log,
                          size_t *log_size, const char **reason)
 {
@@ -6209,7 +6210,8 @@ apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
       const char *plain_reason = NULL;
       bool plain_ok = apple9_compile_dag_trial(
          plain, &plain_out, profile ? &plain_profile : NULL, varyings,
-         resources, constants, false, &plain_cost, &plain_log, &plain_size, &plain_reason);
+         resources, constants, false, &plain_cost, &plain_log, &plain_size,
+         &plain_reason);
       use_plain = plain_ok &&
                   (!ok || apple9_dag_cost_less(&plain_cost, &hoisted_cost));
       if (use_plain) {
@@ -6385,10 +6387,10 @@ apple9_constant_count_cmp(const void *a, const void *b)
    return x->value < y->value ? -1 : x->value > y->value;
 }
 
-/* Move the most-used constants to free uniform words, as
- * agx_opt_promote_constants does for Apple8: the preamble stores each one,
- * and its ALU uses read it back as a uniform operand.
- */
+/* Store the most-used constants in free uniform words. Keep their literal
+ * NIR values through instruction selection: opaque preamble loads would hide
+ * address offsets, integer folds and source modifiers. Native optimization
+ * uses this table to select uniforms for the remaining constant operands. */
 static void
 apple9_promote_constants(nir_shader *shader, nir_function_impl *preamble,
                          unsigned *used, unsigned budget,
