@@ -6508,9 +6508,9 @@ apple9_lower_texture_handles(nir_shader *nir)
                        nir_metadata_control_flow);
 }
 
-/* Read-only descriptor loads and uniform ALU marked speculatable can execute
- * before their original branch. This includes buffer-size limits shared by
- * bounds checks. Move only uniform dependency chains, then let preamble
+/* Read-only descriptor loads and uniform buffer-size limits can execute
+ * before their original branch. Move only speculatable uniform dependency
+ * chains, then let preamble
  * extraction choose which values are worth storing. Ordinary guarded buffer
  * reads lack CAN_SPECULATE and must remain guarded.
  */
@@ -6519,6 +6519,33 @@ struct apple9_uniform_hoist {
    uint8_t *state;
    nir_cursor cursor;
 };
+
+static bool
+apple9_is_bounds_limit(nir_instr *instr)
+{
+   if (instr->type != nir_instr_type_alu)
+      return false;
+   nir_alu_instr *alu = nir_instr_as_alu(instr);
+   if (alu->op != nir_op_iadd || alu->def.bit_size != 32 ||
+       alu->def.num_components != 1)
+      return false;
+
+   nir_scalar root = nir_get_scalar(&alu->def, 0);
+   for (unsigned s = 0; s < 2; ++s) {
+      uint32_t addend, minimum;
+      nir_scalar max = nir_scalar_chase_alu_src(root, 1 - s);
+      if (!apple9_const_u32(nir_scalar_chase_alu_src(root, s), &addend) ||
+          !addend || !nir_scalar_is_alu(max) ||
+          nir_scalar_alu_op(max) != nir_op_umax)
+         continue;
+      for (unsigned m = 0; m < 2; ++m) {
+         if (apple9_const_u32(nir_scalar_chase_alu_src(max, m), &minimum) &&
+             minimum == -addend)
+            return true;
+      }
+   }
+   return false;
+}
 
 static bool
 apple9_can_hoist_uniform(nir_src *src, void *data)
@@ -6577,7 +6604,7 @@ agx_nir_hoist_apple9_uniform_reads(nir_shader *nir)
       if (block == s.entry)
          continue;
       nir_foreach_instr_safe(instr, block) {
-         if (instr->type != nir_instr_type_alu &&
+         if (!apple9_is_bounds_limit(instr) &&
              !(instr->type == nir_instr_type_intrinsic &&
                nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_global_2x32))
             continue;
@@ -6654,12 +6681,6 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
          fn->impl = nir_function_impl_clone(preamble, impl);
          fn->impl->function = fn;
          nir_opt_dce(main);
-         /* Preamble selection may leave some hoisted uniform expressions in
-          * the main program. Shorten those live ranges again; exposing them
-          * to the preamble must not force all of them live at shader entry.
-          */
-         nir_opt_sink(main, nir_move_const_undef | nir_move_alu |
-                            nir_move_copies | nir_move_comparisons);
          nir_opt_dce(preamble);
          if (apple9_compile_dag_body(preamble, &setup, NULL, NULL, resources,
                                     true, &candidate_reason) &&
