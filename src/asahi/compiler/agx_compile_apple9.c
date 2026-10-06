@@ -7329,14 +7329,16 @@ apple9_lower_texture_lod_query(nir_builder *b, nir_instr *instr, void *data)
    /* LOD queries have spatial coordinates only, even for array/shadow
     * samplers. Supply the native array operand without reading a nonexistent
     * NIR component; comparison does not participate in a LOD query. */
-   if (tex->is_array && (tex->sampler_dim == GLSL_SAMPLER_DIM_2D ||
+   if (tex->is_array && (tex->sampler_dim == GLSL_SAMPLER_DIM_1D ||
+                         tex->sampler_dim == GLSL_SAMPLER_DIM_2D ||
                          tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE)) {
       int coord = nir_tex_instr_src_index(tex, nir_tex_src_coord);
       if (coord < 0)
          return false;
       b->cursor = nir_before_instr(instr);
       nir_def *coords = tex->src[coord].src.ssa;
-      unsigned spatial = tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE ? 3 : 2;
+      unsigned spatial = tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE ? 3 :
+                         tex->sampler_dim == GLSL_SAMPLER_DIM_1D ? 1 : 2;
       nir_src_rewrite(&tex->src[coord].src,
          nir_pad_vector_imm_int(b, nir_trim_vector(b, coords, spatial), 0,
                                 spatial + 1));
@@ -7347,6 +7349,13 @@ apple9_lower_texture_lod_query(nir_builder *b, nir_instr *instr, void *data)
    tex->op = nir_tex_instr_src_index(tex, nir_tex_src_bias) >= 0
                 ? nir_texop_txb : nir_texop_tex;
    tex->backend_flags |= AGX_APPLE9_TEXTURE_LOD_QUERY;
+   /* The backend query flag selects a two-component result, but generic NIR
+    * sample operations have four components. Keep NIR well-formed while
+    * later gradient/cube lowering runs; only XY are consumed and published. */
+   tex->def.num_components = 4;
+   b->cursor = nir_after_instr(instr);
+   nir_def *query_result = nir_trim_vector(b, &tex->def, 2);
+   nir_def_rewrite_uses_after(&tex->def, query_result);
    if (data && tex->sampler_index < 32) {
       const struct agx_apple9_sampler_key *key = data;
       b->cursor = nir_after_instr(instr);
@@ -7605,12 +7614,15 @@ apple9_native_min_lod(const nir_tex_instr *tex)
 static bool
 apple9_lower_implicit_gradients(nir_builder *b, nir_instr *instr, void *data)
 {
-   if (instr->type != nir_instr_type_tex ||
-       b->shader->info.stage != MESA_SHADER_FRAGMENT)
+   if (instr->type != nir_instr_type_tex)
+      return false;
+   bool compute = b->shader->info.stage == MESA_SHADER_COMPUTE &&
+                  b->shader->info.derivative_group == DERIVATIVE_GROUP_LINEAR;
+   if (!compute && b->shader->info.stage != MESA_SHADER_FRAGMENT)
       return false;
    nir_tex_instr *tex = nir_instr_as_tex(instr);
-   if (!(tex->is_array && tex->is_shadow &&
-         tex->sampler_dim == GLSL_SAMPLER_DIM_2D) &&
+   if (!compute && !(tex->is_array && tex->is_shadow &&
+                    tex->sampler_dim == GLSL_SAMPLER_DIM_2D) &&
        !apple9_native_min_lod(tex))
       return false;
    if (tex->op != nir_texop_tex && tex->op != nir_texop_txb)
@@ -7623,8 +7635,9 @@ apple9_lower_implicit_gradients(nir_builder *b, nir_instr *instr, void *data)
       nir_src_rewrite(&tex->src[coord].src,
          nir_fdiv(b, tex->src[coord].src.ssa, projector));
    }
-   nir_def *xy = nir_trim_vector(b, tex->src[coord].src.ssa, 2);
-   nir_def *dx = nir_ddx(b, xy), *dy = nir_ddy(b, xy);
+   unsigned spatial = tex->coord_components - tex->is_array;
+   nir_def *position = nir_trim_vector(b, tex->src[coord].src.ssa, spatial);
+   nir_def *dx = nir_ddx(b, position), *dy = nir_ddy(b, position);
    int bias = nir_tex_instr_src_index(tex, nir_tex_src_bias);
    if (bias >= 0) {
       nir_def *scale = nir_fexp2(b, tex->src[bias].src.ssa);
@@ -9023,6 +9036,10 @@ apple9_lower_textures(nir_shader *nir)
       .lower_txd_cube_map = true,
       .lower_txd_clamp = true,
    };
+   if (nir->info.stage == MESA_SHADER_COMPUTE &&
+       nir->info.derivative_group == DERIVATIVE_GROUP_LINEAR)
+      nir_shader_instructions_pass(nir, apple9_lower_texture_lod_query,
+                                   nir_metadata_control_flow, NULL);
    nir_shader_instructions_pass(nir, apple9_lower_implicit_gradients,
                                 nir_metadata_control_flow, NULL);
    nir_shader_instructions_pass(nir, apple9_lower_rectangle,
