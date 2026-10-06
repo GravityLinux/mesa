@@ -1795,18 +1795,10 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
          const unsigned banks = c & 1, slack = slacks[c >> 1];
          agx_apple9_vir_init(&alternative);
          const char *unused_reason = NULL;
-         bool traced = apple9_allocate_candidate(program, nir, banks, true, slack,
+         bool built = apple9_allocate_candidate(program, nir, banks, true, slack,
                                         copy_register, true, &alternative,
                                         &unused_reason);
-         if (traced && getenv("AGX_APPLE9_TRACE_LATENCY")) {
-            struct apple9_allocation_cost c = apple9_allocation_cost(&alternative);
-            fprintf(stderr, "LATENCY_CANDIDATE slack=%u banks=%u base=%llu,%llu,%llu,%u,%llu lat=%llu,%llu,%llu,%u,%llu\n",
-                    slack, banks, (unsigned long long)cost.spills, (unsigned long long)cost.instructions,
-                    (unsigned long long)cost.bytes, cost.registers, (unsigned long long)cost.dependency_gaps,
-                    (unsigned long long)c.spills, (unsigned long long)c.instructions,
-                    (unsigned long long)c.bytes, c.registers, (unsigned long long)c.dependency_gaps);
-         }
-         if (traced &&
+         if (built &&
              apple9_latency_cheaper(apple9_allocation_cost(&alternative), cost)) {
             SWAP(best, alternative);
             cost = apple9_allocation_cost(&best);

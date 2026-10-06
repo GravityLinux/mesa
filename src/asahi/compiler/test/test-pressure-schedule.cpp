@@ -81,6 +81,62 @@ TEST_F(ResourceSchedule, SeparatesLongDependencyWithIndependentWork)
    EXPECT_GT(between, 0u);
 }
 
+/* Resource bit 1 is memory below: loads read it, stores/atomics write it,
+ * and a fence reads and writes every resource. */
+TEST_F(ResourceSchedule, PressureSlackOverlapsIndependentLoads)
+{
+   for (unsigned slack : {0u, 2u}) {
+      SCOPED_TRACE(slack);
+      void *ctx = ralloc_context(nullptr);
+      agx_builder *saved = b;
+      b = agx_test_builder(ctx);
+      b->shader->schedule_resources = saved->shader->schedule_resources;
+      b->shader->schedule_delay = saved->shader->schedule_delay;
+      b->shader->schedule_pressure_slack = slack;
+      auto *first = emit(1, 0, 8, agx_null(), true);
+      auto *use_first = emit(0, 0, 1, first->dest[0]);
+      auto *second = emit(1, 0, 8, agx_null(), true);
+      auto *use_second = emit(0, 0, 1, second->dest[0]);
+      agx_pressure_schedule(b->shader);
+      EXPECT_LT(position(first), position(use_first));
+      EXPECT_LT(position(second), position(use_second));
+      /* Overlap keeps both results live at once: one extra register. */
+      bool overlapped = std::max(position(first), position(second)) <
+                        std::min(position(use_first), position(use_second));
+      EXPECT_EQ(overlapped, slack != 0);
+      b = saved;
+      ralloc_free(ctx);
+   }
+}
+
+TEST_F(ResourceSchedule, PressureSlackKeepsLoadsBehindMemoryWriters)
+{
+   b->shader->schedule_pressure_slack = 16;
+   /* An aliasing store, an atomic and a full fence each order a later load
+    * after themselves, however much latency moving the load could hide. */
+   for (unsigned blocker_write : {1u, 1u | 2u, 0xffu}) {
+      SCOPED_TRACE(blocker_write);
+      void *ctx = ralloc_context(nullptr);
+      agx_builder *saved = b;
+      b = agx_test_builder(ctx);
+      b->shader->schedule_resources = saved->shader->schedule_resources;
+      b->shader->schedule_delay = saved->shader->schedule_delay;
+      b->shader->schedule_pressure_slack = 16;
+      auto *first = emit(1, 0, 8, agx_null(), true);
+      auto *use_first = emit(0, 0, 1, first->dest[0]);
+      auto *blocker = emit(blocker_write, blocker_write);
+      auto *second = emit(1, 0, 8, agx_null(), true);
+      auto *use_second = emit(0, 0, 1, second->dest[0]);
+      agx_pressure_schedule(b->shader);
+      EXPECT_LT(position(first), position(blocker));
+      EXPECT_LT(position(blocker), position(second));
+      EXPECT_LT(position(second), position(use_second));
+      (void)use_first;
+      b = saved;
+      ralloc_free(ctx);
+   }
+}
+
 TEST_F(ResourceSchedule, PhiRemainsAtBlockEntryWithTargetResources)
 {
    auto value = agx_temp(b->shader, AGX_SIZE_32);
