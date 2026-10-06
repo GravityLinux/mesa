@@ -338,6 +338,153 @@ TEST(Apple9Compiler, ExplicitDenormModeCompilesRawResultOperations)
    }
 }
 
+static unsigned
+count_nir_alu(nir_shader *shader, nir_op op)
+{
+   unsigned count = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            count += instr->type == nir_instr_type_alu &&
+                     nir_instr_as_alu(instr)->op == op;
+         }
+      }
+   }
+   return count;
+}
+
+TEST(Apple9Compiler, DenormChecksCanonicalProducerBeforeRawResult)
+{
+   for (nir_op op : {nir_op_fneg, nir_op_fabs, nir_op_fmin, nir_op_fmax,
+                     nir_op_fsat, nir_op_fcanonicalize}) {
+      for (bool canonical : {false, true}) {
+         SCOPED_TRACE(nir_op_infos[op].name);
+         SCOPED_TRACE(canonical);
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_COMPUTE, &agx_nir_options, "denorm_producer");
+         b.shader->info.float_controls_execution_mode =
+            FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32;
+         b.fp_math_ctrl = nir_fp_no_fast_math;
+         nir_def *x = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 0),
+                                   nir_imm_int(&b, 0), .align_mul = 4);
+         if (canonical)
+            x = nir_fadd_imm(&b, x, 1.0f);
+         nir_def *result = nir_build_alu(&b, op, x, nir_imm_float(&b, 1), NULL, NULL);
+         nir_store_ssbo(&b, result, nir_imm_int(&b, 1), nir_imm_int(&b, 0),
+                        .align_mul = 4);
+         agx_nir_lower_apple9_denorms(b.shader);
+         EXPECT_EQ(count_nir_alu(b.shader, nir_op_ult), canonical ? 0u : 1u);
+         EXPECT_EQ(count_nir_alu(b.shader, nir_op_fcanonicalize), 0u);
+         ralloc_free(b.shader);
+      }
+   }
+}
+
+TEST(Apple9Compiler, DenormDefersToDazButKeepsObservableBits)
+{
+   for (bool store_bits : {false, true}) {
+      for (nir_op consumer : {nir_op_fadd, nir_op_fmul, nir_op_ffma,
+                              nir_op_feq, nir_op_fmin}) {
+         SCOPED_TRACE(store_bits);
+         SCOPED_TRACE(nir_op_infos[consumer].name);
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_COMPUTE, &agx_nir_options, "denorm_consumer");
+         b.shader->info.float_controls_execution_mode =
+            FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32;
+         b.fp_math_ctrl = nir_fp_no_fast_math;
+         nir_def *x = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 0),
+                                   nir_imm_int(&b, 0), .align_mul = 4);
+         nir_def *neg = nir_fneg(&b, x);
+         nir_def *result = nir_build_alu(&b, consumer, neg,
+            nir_imm_float(&b, 1), nir_imm_float(&b, 2), NULL);
+         if (result->bit_size == 1)
+            result = nir_b2i32(&b, result);
+         nir_store_ssbo(&b, result, nir_imm_int(&b, 1), nir_imm_int(&b, 0),
+                        .align_mul = 4);
+         if (store_bits)
+            nir_store_ssbo(&b, neg, nir_imm_int(&b, 1), nir_imm_int(&b, 4),
+                           .align_mul = 4);
+         agx_nir_lower_apple9_denorms(b.shader);
+         /* Min/max selects operand bits, even when its comparison uses DAZ. */
+         EXPECT_EQ(count_nir_alu(b.shader, nir_op_ult),
+                   store_bits || consumer == nir_op_fmin ? 1u : 0u);
+         ralloc_free(b.shader);
+      }
+   }
+}
+
+TEST(Apple9Compiler, DenormSwizzlesDoNotHideSubnormalConstants)
+{
+   for (unsigned component : {0u, 1u}) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "denorm_swizzle");
+      b.shader->info.float_controls_execution_mode =
+         FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32;
+      nir_def *v = nir_vec2(&b, nir_imm_int(&b, 0x80000001),
+                               nir_imm_int(&b, 0x3f800000));
+      nir_def *result = nir_fneg(&b, nir_channel(&b, v, component));
+      nir_store_ssbo(&b, result, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
+                     .align_mul = 4);
+      auto *store = nir_instr_as_intrinsic(
+         nir_block_last_instr(nir_cursor_current_block(b.cursor)));
+      agx_nir_lower_apple9_denorms(b.shader);
+      EXPECT_EQ(count_nir_alu(b.shader, nir_op_ult), component == 0 ? 1u : 0u);
+      nir_opt_constant_folding(b.shader);
+      nir_opt_copy_prop(b.shader);
+      ASSERT_TRUE(nir_src_is_const(store->src[0]));
+      EXPECT_EQ(nir_src_as_uint(store->src[0]), component == 0 ? 0u : 0xbf800000u);
+      ralloc_free(b.shader);
+   }
+}
+
+TEST(Apple9Compiler, DenormCanonicalizeSurvivesEarlyMathLowering)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "denorm_late_canonicalize");
+   b.shader->info.float_controls_execution_mode =
+      FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32;
+   nir_def *x = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 0),
+                             nir_imm_int(&b, 0), .align_mul = 4);
+   nir_def *canon = nir_fcanonicalize(&b, nir_fadd_imm(&b, x, 1.0f));
+   nir_store_ssbo(&b, canon, nir_imm_int(&b, 1), nir_imm_int(&b, 0), .align_mul = 4);
+   agx_nir_lower_apple9_math(b.shader);
+   EXPECT_EQ(count_nir_alu(b.shader, nir_op_fcanonicalize), 1u);
+   EXPECT_EQ(count_nir_alu(b.shader, nir_op_ult), 0u);
+   agx_nir_lower_apple9_denorms(b.shader);
+   EXPECT_EQ(count_nir_alu(b.shader, nir_op_fcanonicalize), 0u);
+   EXPECT_EQ(count_nir_alu(b.shader, nir_op_ult), 0u);
+   ralloc_free(b.shader);
+}
+
+TEST(Apple9Compiler, DenormDoesNotConflateFastMathPermissions)
+{
+   for (unsigned flags : {unsigned(nir_fp_fast_math),
+                          unsigned(nir_fp_no_reassoc | nir_fp_no_transform),
+                          unsigned(nir_fp_no_contract), unsigned(nir_fp_no_fast_math)}) {
+      SCOPED_TRACE(flags);
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "denorm_float_controls2");
+      b.shader->info.float_controls_execution_mode =
+         FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32;
+      b.fp_math_ctrl = flags;
+      nir_def *x = nir_load_ssbo(&b, 3, 32, nir_imm_int(&b, 0),
+                                nir_imm_int(&b, 0), .align_mul = 4);
+      nir_def *result = nir_fadd(&b,
+         nir_fmul(&b, nir_channel(&b, x, 0), nir_channel(&b, x, 1)),
+         nir_channel(&b, x, 2));
+      nir_store_ssbo(&b, result, nir_imm_int(&b, 1), nir_imm_int(&b, 0), .align_mul = 4);
+      nir_opt_algebraic_late(b.shader);
+      agx_nir_lower_apple9_denorms(b.shader);
+      nir_opt_dce(b.shader);
+      bool contract = !(flags & nir_fp_no_contract);
+      EXPECT_EQ(count_nir_alu(b.shader, nir_op_ffma), contract ? 1u : 0u);
+      EXPECT_EQ(count_nir_alu(b.shader, nir_op_fmul), contract ? 0u : 1u);
+      EXPECT_EQ(count_nir_alu(b.shader, nir_op_fadd), contract ? 0u : 1u);
+      EXPECT_EQ(count_nir_alu(b.shader, nir_op_ult), 0u);
+      ralloc_free(b.shader);
+   }
+}
+
 TEST(Apple9Compiler, DenormSingleLaneReductionSurvivesSubgroupLowering)
 {
    for (nir_op op : {nir_op_fmin, nir_op_fmax, nir_op_imin}) {
