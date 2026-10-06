@@ -1638,6 +1638,17 @@ apple9_vir_publishes(const struct agx_apple9_vir_instr *instruction)
 }
 
 static unsigned
+apple9_publication_bound(const struct agx_apple9_vir_instr *instruction)
+{
+   const struct agx_apple9_operand_constraint *dest =
+      agx_apple9_find_operand(instruction->encoding, AGX_APPLE9_OPERAND_DEST);
+   assert(dest);
+   /* Every word of a publication tuple must fit the producer's encoding,
+    * even when only its base is constrained by the consumer. */
+   return MIN2(AGX_APPLE9_PUBLICATION_COUNT, dest->max_index + 1);
+}
+
+static unsigned
 apple9_first_consumer(const struct agx_apple9_vir_program *program,
                       unsigned producer_index);
 
@@ -1758,7 +1769,7 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
       unsigned end = apple9_publication_end(program, i);
       for (unsigned c = 0; c < apple9_vir_dest_components(ins); ++c) {
          unsigned index = program->phys[ins->dest + c];
-         if (index >= AGX_APPLE9_PUBLICATION_COUNT ||
+         if (index >= apple9_publication_bound(ins) ||
              (publication_used[index] && publication_end[index] >= i)) {
             if (reason)
                *reason = "Apple9 publication slots overlap or exceed the encoding";
@@ -2540,10 +2551,11 @@ retry:
       if (!apple9_vir_publishes(ins))
          continue;
       unsigned width = ins->dest_components;
+      unsigned bound = apple9_publication_bound(ins);
       unsigned align = MAX2(agx_apple9_encoding_info(ins->encoding)
                               ->operands[0].alignment_halves / 2, 1);
       unsigned slot;
-      for (slot = 0; slot + width <= AGX_APPLE9_PUBLICATION_COUNT; slot += align) {
+      for (slot = 0; slot + width <= bound; slot += align) {
          bool available = true;
          for (unsigned c = 0; c < width; ++c) {
             unsigned max = program->max_phys[ins->dest + c];
@@ -2553,7 +2565,7 @@ retry:
          if (available)
             break;
       }
-      if (slot + width > AGX_APPLE9_PUBLICATION_COUNT) {
+      if (slot + width > bound) {
          /* A texture borrows its parameter publication until its result
           * handoff. Under pressure, consume an outstanding result in the
           * producer's block, then retry with the shortened lifetime. The

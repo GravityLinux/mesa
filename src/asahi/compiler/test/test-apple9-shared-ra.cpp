@@ -809,6 +809,53 @@ TEST(Apple9SharedRa, TexturePublicationPressurePreservesEarlyHandoffs)
    }
 }
 
+TEST(Apple9SharedRa, GradientPublicationFitsItsWholeEncodingWindow)
+{
+   for (unsigned dimension : {0u, 2u, 3u}) {
+      for (unsigned pending : {0u, 4u, 6u, 7u}) {
+         SCOPED_TRACE(dimension);
+         SCOPED_TRACE(pending);
+         nir_builder nir = nir_builder_init_simple_shader(
+            MESA_SHADER_COMPUTE, &agx_nir_options, "gradient_publication_window");
+         nir_block logical = {};
+         agx_apple9_vir_program p;
+         agx_apple9_vir_init(&p);
+         auto block = agx_apple9_block_create(&p);
+         block->nir = &logical;
+         agx_apple9_block_begin(&p, block);
+         auto zero = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IMM,
+            AGX_APPLE9_ENC_MOV_IMM32, nullptr, 0, 0);
+         uint32_t coords[] = {zero, zero};
+         std::vector<uint32_t> samples;
+         for (unsigned i = 0; i < pending; ++i)
+            samples.push_back(agx_apple9_vir_emit_texture_lod(
+               &p, coords, zero, i, 0, false));
+         uint32_t parameters[9];
+         for (auto &value : parameters) value = zero;
+         samples.push_back(agx_apple9_vir_emit_texture_grad(
+            &p, parameters, pending, 0, dimension, false, false));
+         for (auto sample : samples) {
+            uint32_t rgba[] = {sample, sample + 1, sample + 2, sample + 3};
+            ASSERT_TRUE(agx_apple9_vir_emit_device_store(&p, 0, zero, rgba, 4, 32));
+         }
+         const char *reason = nullptr;
+         ASSERT_TRUE(agx_apple9_allocate_publications(&p, &reason)) << reason;
+         EXPECT_LE(p.publication_count, 32u);
+         ASSERT_TRUE(agx_apple9_allocate_shared(&p, nir.shader, &reason)) << reason;
+         for (unsigned i = 0; i < p.instruction_count; ++i) {
+            auto I = p.instructions[i];
+            if (I->op != AGX_APPLE9_VIR_PUBLICATION_TUPLE) continue;
+            EXPECT_LE(p.phys[I->dest] + I->dest_components, 32u);
+            agx_apple9_packed_instruction packed;
+            EXPECT_TRUE(agx_apple9_pack_vir_instruction(I, p.phys, &packed, &reason))
+               << (reason ?: "");
+         }
+         agx_apple9_vir_finish(&p);
+         ralloc_free(nir.shader);
+      }
+   }
+}
+
 TEST(Apple9SharedRa, PublicationHandoffStaysInProducerBlock)
 {
    agx_apple9_vir_program p;
