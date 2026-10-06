@@ -253,28 +253,30 @@ TEST(Apple9Compiler, LinearComputeDerivativeLanePairs)
 
 TEST(Apple9Compiler, LinearComputeDerivativesCompile)
 {
-   for (unsigned width : {1u, 2u, 3u, 4u}) {
-      nir_builder b = nir_builder_init_simple_shader(
-         MESA_SHADER_COMPUTE, &agx_nir_options, "linear_derivative_compile");
-      b.shader->info.derivative_group = DERIVATIVE_GROUP_LINEAR;
-      b.shader->info.workgroup_size[0] = 4;
-      b.shader->info.workgroup_size[1] = 4;
-      b.shader->info.workgroup_size[2] = 1;
-      nir_def *v = nir_load_ssbo(&b, width, 32, nir_imm_int(&b, 0),
-                                nir_imm_int(&b, 0), .align_mul = 4);
-      nir_def *d[] = {nir_ddx(&b, v), nir_ddy(&b, v),
-                     nir_ddx_fine(&b, v), nir_ddy_fine(&b, v),
-                     nir_ddx_coarse(&b, v), nir_ddy_coarse(&b, v)};
-      for (unsigned i = 0; i < ARRAY_SIZE(d); ++i)
-         nir_store_ssbo(&b, d[i], nir_imm_int(&b, 1), nir_imm_int(&b, 16 * i),
-                        .align_mul = 4);
-      agx_shader_part compiled = {};
-      agx_apple9_compute_profile profile = {};
-      const char *reason = nullptr;
-      ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason))
-         << reason;
-      free(compiled.binary);
-      ralloc_free(b.shader);
+   for (unsigned bits : {16u, 32u}) {
+      for (unsigned width : {1u, 2u, 3u, 4u}) {
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_COMPUTE, &agx_nir_options, "linear_derivative_compile");
+         b.shader->info.derivative_group = DERIVATIVE_GROUP_LINEAR;
+         b.shader->info.workgroup_size[0] = 4;
+         b.shader->info.workgroup_size[1] = 4;
+         b.shader->info.workgroup_size[2] = 1;
+         nir_def *v = nir_load_ssbo(&b, width, bits, nir_imm_int(&b, 0),
+                                   nir_imm_int(&b, 0), .align_mul = 4);
+         nir_def *d[] = {nir_ddx(&b, v), nir_ddy(&b, v),
+                        nir_ddx_fine(&b, v), nir_ddy_fine(&b, v),
+                        nir_ddx_coarse(&b, v), nir_ddy_coarse(&b, v)};
+         for (unsigned i = 0; i < ARRAY_SIZE(d); ++i)
+            nir_store_ssbo(&b, d[i], nir_imm_int(&b, 1), nir_imm_int(&b, 16 * i),
+                           .align_mul = 4);
+         agx_shader_part compiled = {};
+         agx_apple9_compute_profile profile = {};
+         const char *reason = nullptr;
+         ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason))
+            << reason;
+         free(compiled.binary);
+         ralloc_free(b.shader);
+      }
    }
 }
 
