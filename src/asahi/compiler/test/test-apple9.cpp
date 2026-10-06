@@ -188,6 +188,26 @@ TEST(Apple9Compiler, UniformBoundsAcrossBranchesShareOneLimit)
    ralloc_free(b.shader);
 }
 
+TEST(Apple9Compiler, PreambleAddressImportSinksToItsConditionalRead)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "sink_preamble_address");
+   nir_def *address = nir_load_preamble(&b, 2, 32, .base = 0,
+                                       .preamble_class = nir_preamble_class_general);
+   nir_def *id = nir_channel(&b, nir_load_local_invocation_id(&b), 0);
+   nir_push_if(&b, nir_ine_imm(&b, id, 0));
+   nir_def *value = nir_load_global_2x32(&b, 1, 32, address,
+                                        .access = ACCESS_CAN_REORDER, .align_mul = 4);
+   nir_store_ssbo(&b, value, nir_imm_int(&b, 1), nir_imm_int(&b, 0), .align_mul = 4);
+   nir_pop_if(&b, nullptr);
+   ASSERT_TRUE(nir_opt_sink(b.shader, nir_move_load_uniform));
+   EXPECT_EQ(nir_def_instr(address)->block, nir_def_instr(value)->block);
+   EXPECT_NE(nir_def_instr(address)->block,
+             nir_start_block(nir_shader_get_entrypoint(b.shader)));
+   nir_validate_shader(b.shader, "preamble import sinking");
+   ralloc_free(b.shader);
+}
+
 TEST(Apple9Compiler, LinearComputeDerivativeLanePairs)
 {
    const nir_intrinsic_op ops[] = {
