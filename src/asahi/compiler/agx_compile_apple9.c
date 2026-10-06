@@ -5515,6 +5515,7 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
     * movement options as the Apple8 backend; NIR checks load reorderability.
     */
    nir_move_options move = nir_move_const_undef | nir_move_load_ubo |
+                           nir_move_load_uniform |
                            nir_move_load_input | nir_move_load_frag_coord |
                            nir_move_comparisons | nir_move_copies |
                            nir_move_load_ssbo | nir_move_alu;
