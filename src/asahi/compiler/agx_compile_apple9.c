@@ -7020,6 +7020,9 @@ agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
     * one backedge, matching the Apple9 loop machine directly. */
    nir_lower_continue_constructs(nir);
 
+   agx_nir_lower_apple9_compute_derivatives(nir);
+   apple9_lower_subgroups(nir);
+
    /* Internal compute shaders may use function temporaries just like API
     * frontends. Normalize them to the SSA form consumed by this backend. */
    agx_nir_lower_printf_buffer(nir);
@@ -7048,8 +7051,8 @@ agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
    apple9_lower_textures(nir);
    apple9_lower_idiv(nir);
    agx_nir_lower_apple9_math(nir);
-   agx_nir_lower_apple9_compute_derivatives(nir);
-   apple9_lower_subgroups(nir);
+   if (agx_nir_lower_apple9_compute_derivatives(nir))
+      apple9_lower_subgroups(nir);
    nir_lower_alu_to_scalar(nir, NULL, NULL);
    nir_lower_all_phis_to_scalar(nir);
 

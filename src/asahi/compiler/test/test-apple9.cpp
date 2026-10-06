@@ -21,6 +21,39 @@ extern "C" {
 #include <vector>
 #include "gallium/include/pipe/p_defines.h"
 
+TEST(Apple9Compiler, UniformDescriptorHoistingRequiresSafeIndependentReads)
+{
+   for (bool speculate : {false, true}) {
+      for (bool reorder : {false, true}) {
+         for (bool divergent : {false, true}) {
+            nir_builder b = nir_builder_init_simple_shader(
+               MESA_SHADER_COMPUTE, &agx_nir_options, "descriptor_hoist");
+            nir_def *root = nir_load_ubo(&b, 2, 32, nir_imm_int(&b, 0),
+                                        nir_imm_int(&b, 0), .align_mul = 8, .range = 8);
+            nir_def *id = nir_channel(&b, nir_load_local_invocation_id(&b), 0);
+            nir_push_if(&b, nir_ine_imm(&b, id, 0));
+            nir_def *lo = nir_iadd(&b, nir_channel(&b, root, 0),
+                                  divergent ? id : nir_imm_int(&b, 16));
+            nir_def *addr = nir_vec2(&b, lo, nir_channel(&b, root, 1));
+            nir_def *value = nir_load_global_2x32(
+               &b, 4, 32, addr,
+               .access = (gl_access_qualifier)((speculate ? ACCESS_CAN_SPECULATE : 0) |
+                                               (reorder ? ACCESS_CAN_REORDER : 0)),
+               .align_mul = 16);
+            nir_store_ssbo(&b, value, nir_imm_int(&b, 1), nir_imm_int(&b, 0),
+                           .align_mul = 16);
+            nir_pop_if(&b, nullptr);
+            bool expected = speculate && reorder && !divergent;
+            EXPECT_EQ(agx_nir_hoist_apple9_uniform_reads(b.shader), expected);
+            EXPECT_EQ(nir_def_instr(value)->block ==
+                         nir_start_block(nir_shader_get_entrypoint(b.shader)), expected);
+            nir_validate_shader(b.shader, "descriptor hoisting");
+            ralloc_free(b.shader);
+         }
+      }
+   }
+}
+
 TEST(Apple9Compiler, LinearComputeDerivativeLanePairs)
 {
    const nir_intrinsic_op ops[] = {
