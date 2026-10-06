@@ -509,6 +509,13 @@ try_fold_txd_to_txl(nir_builder *b, nir_tex_instr *tex)
    if (min_lod_idx >= 0)
       return false;
 
+   /* Backend operands can encode constraints tied to the gradient opcode,
+    * such as a packed minimum LOD. Generic folding cannot reinterpret them
+    * for an explicit-LOD sample. */
+   if (nir_tex_instr_src_index(tex, nir_tex_src_backend1) >= 0 ||
+       nir_tex_instr_src_index(tex, nir_tex_src_backend2) >= 0)
+      return false;
+
    if (!nir_src_is_const(tex->src[ddx_idx].src) || !nir_src_is_const(tex->src[ddy_idx].src))
       return false;
 

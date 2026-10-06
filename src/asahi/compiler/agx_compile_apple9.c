@@ -7530,12 +7530,22 @@ apple9_lower_compute_lod_query(nir_builder *b, nir_instr *instr, void *data)
    dx = nir_fmul(b, dx, extent);
    dy = nir_fmul(b, dy, extent);
    nir_def *xx = nir_fdot(b, dx, dx), *yy = nir_fdot(b, dy, dy);
-   nir_def *major = nir_fmax(b, xx, yy), *minor = nir_fmin(b, xx, yy);
-   nir_def *aniso = agx_apple9_sampler_field(b, tex, AGX_APPLE9_SAMP_MAX_ANISOTROPY);
-   aniso = nir_fmax(b, aniso, nir_imm_float(b, 1.0));
-   /* Cube gradients are lowered to scalar LODs by the common texture pass. */
-   if (!cube)
+   nir_def *major = nir_fmax(b, xx, yy);
+   /* Native 2D anisotropic sampling uses footprint area divided by its
+    * longest derivative. This also handles nonorthogonal and rank-one
+    * footprints; the shorter derivative's length would overestimate them.
+    * Native 3D sampling is isotropic. Cube gradients are lowered to scalar
+    * LODs by the common texture pass. */
+   if (!cube && tex->sampler_dim != GLSL_SAMPLER_DIM_3D) {
+      nir_def *area = dims == 1 ? nir_imm_float(b, 0) :
+         nir_fsub(b, nir_fmul(b, nir_channel(b, dx, 0), nir_channel(b, dy, 1)),
+                     nir_fmul(b, nir_channel(b, dx, 1), nir_channel(b, dy, 0)));
+      nir_def *minor = nir_bcsel(b, nir_flt(b, nir_imm_float(b, 0), major),
+         nir_fdiv(b, nir_fmul(b, area, area), major), nir_imm_float(b, 0));
+      nir_def *aniso = agx_apple9_sampler_field(b, tex, AGX_APPLE9_SAMP_MAX_ANISOTROPY);
+      aniso = nir_fmax(b, aniso, nir_imm_float(b, 1.0));
       major = nir_fmax(b, minor, nir_fdiv(b, major, nir_fmul(b, aniso, aniso)));
+   }
    nir_def *lod = nir_fmul_imm(b, nir_flog2(b, major), 0.5);
    int bias_src = nir_tex_instr_src_index(tex, nir_tex_src_bias);
    nir_def *bias = bias_src >= 0 ? nir_f2f32(b, tex->src[bias_src].src.ssa) :
