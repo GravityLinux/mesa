@@ -369,7 +369,8 @@ TEST(Apple9Compiler, DenormChecksCanonicalProducerBeforeRawResult)
                                    nir_imm_int(&b, 0), .align_mul = 4);
          if (canonical)
             x = nir_fadd_imm(&b, x, 1.0f);
-         nir_def *result = nir_build_alu(&b, op, x, nir_imm_float(&b, 1), NULL, NULL);
+         nir_def *result = nir_build_alu(&b, op, x,
+            nir_imm_float(&b, op == nir_op_fmax ? -1 : 1), NULL, NULL);
          nir_store_ssbo(&b, result, nir_imm_int(&b, 1), nir_imm_int(&b, 0),
                         .align_mul = 4);
          agx_nir_lower_apple9_denorms(b.shader);
@@ -434,6 +435,155 @@ TEST(Apple9Compiler, DenormSwizzlesDoNotHideSubnormalConstants)
       ASSERT_TRUE(nir_src_is_const(store->src[0]));
       EXPECT_EQ(nir_src_as_uint(store->src[0]), component == 0 ? 0u : 0xbf800000u);
       ralloc_free(b.shader);
+   }
+}
+
+TEST(Apple9Compiler, DenormDefersThroughValueSelectionsAndSignChains)
+{
+   for (bool raw_escape : {false, true}) {
+      for (bool condition_use : {false, true}) {
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_COMPUTE, &agx_nir_options, "denorm_chain");
+         b.shader->info.float_controls_execution_mode =
+            FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32;
+         b.fp_math_ctrl = nir_fp_no_fast_math;
+         nir_def *x = nir_load_ssbo(&b, 3, 32, nir_imm_int(&b, 0),
+                                   nir_imm_int(&b, 0), .align_mul = 4);
+         nir_def *value = nir_fneg(&b, nir_channel(&b, x, 0));
+         nir_def *cond = nir_ine_imm(&b,
+            condition_use ? value : nir_channel(&b, x, 1), 0);
+         nir_def *selected = nir_bcsel(&b, cond, value, nir_channel(&b, x, 2));
+         nir_def *sign = nir_fabs(&b, selected);
+         nir_def *result = nir_fmul_imm(&b, sign, 2);
+         nir_store_ssbo(&b, result, nir_imm_int(&b, 1), nir_imm_int(&b, 0),
+                        .align_mul = 4);
+         if (raw_escape)
+            nir_store_ssbo(&b, value, nir_imm_int(&b, 1), nir_imm_int(&b, 4),
+                           .align_mul = 4);
+         agx_nir_lower_apple9_denorms(b.shader);
+         EXPECT_EQ(count_nir_alu(b.shader, nir_op_ult),
+                   raw_escape || condition_use ? 1u : 0u);
+         ralloc_free(b.shader);
+      }
+   }
+}
+
+TEST(Apple9Compiler, DenormMinMaxSharesFinalCanonicalization)
+{
+   for (bool raw_escape : {false, true}) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "denorm_clamp");
+      b.shader->info.float_controls_execution_mode =
+         FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32;
+      b.fp_math_ctrl = nir_fp_no_fast_math;
+      nir_def *x = nir_load_ssbo(&b, 3, 32, nir_imm_int(&b, 0),
+                                nir_imm_int(&b, 0), .align_mul = 4);
+      nir_def *lo = nir_fmax(&b, nir_channel(&b, x, 0), nir_channel(&b, x, 1));
+      nir_def *hi = nir_fmin(&b, lo, nir_channel(&b, x, 2));
+      nir_store_ssbo(&b, hi, nir_imm_int(&b, 1), nir_imm_int(&b, 0),
+                     .align_mul = 4);
+      auto *store = nir_instr_as_intrinsic(
+         nir_block_last_instr(nir_cursor_current_block(b.cursor)));
+      if (raw_escape)
+         nir_store_ssbo(&b, lo, nir_imm_int(&b, 1), nir_imm_int(&b, 4),
+                        .align_mul = 4);
+      agx_nir_lower_apple9_denorms(b.shader);
+      EXPECT_EQ(count_nir_alu(b.shader, nir_op_ult), raw_escape ? 2u : 1u);
+      /* The check retained at the store must canonicalize the final clamp. */
+      ASSERT_EQ(nir_def_as_alu(store->src[0].ssa)->op, nir_op_bcsel);
+      EXPECT_EQ(nir_def_as_alu(store->src[0].ssa)->src[2].src.ssa, hi);
+      ralloc_free(b.shader);
+   }
+}
+
+TEST(Apple9Compiler, DenormPhiChecksAllDownstreamUses)
+{
+   for (bool raw_escape : {false, true}) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "denorm_phi");
+      b.shader->info.float_controls_execution_mode =
+         FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32;
+      b.fp_math_ctrl = nir_fp_no_fast_math;
+      nir_def *x = nir_load_ssbo(&b, 2, 32, nir_imm_int(&b, 0),
+                                nir_imm_int(&b, 0), .align_mul = 4);
+      nir_if *nif = nir_push_if(&b, nir_ine_imm(&b, nir_channel(&b, x, 1), 0));
+      nir_def *yes = nir_fneg(&b, nir_channel(&b, x, 0));
+      nir_push_else(&b, nif);
+      nir_def *no = nir_imm_float(&b, 0);
+      nir_pop_if(&b, nif);
+      nir_def *merged = nir_if_phi(&b, yes, no);
+      nir_def *result = nir_fmul_imm(&b, merged, 2);
+      nir_store_ssbo(&b, result, nir_imm_int(&b, 1), nir_imm_int(&b, 0),
+                     .align_mul = 4);
+      if (raw_escape)
+         nir_store_ssbo(&b, merged, nir_imm_int(&b, 1), nir_imm_int(&b, 4),
+                        .align_mul = 4);
+      agx_nir_lower_apple9_denorms(b.shader);
+      EXPECT_EQ(count_nir_alu(b.shader, nir_op_ult), raw_escape ? 1u : 0u);
+      ralloc_free(b.shader);
+   }
+}
+
+TEST(Apple9Compiler, DenormReciprocalDoesNotAssumeBareRcpDaz)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "denorm_reciprocal");
+   b.shader->info.float_controls_execution_mode =
+      FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32;
+   b.fp_math_ctrl = nir_fp_no_fast_math;
+   nir_def *x = nir_load_ssbo(&b, 2, 32, nir_imm_int(&b, 0),
+                             nir_imm_int(&b, 0), .align_mul = 4);
+   nir_def *value = nir_fmax(&b, nir_channel(&b, x, 0), nir_channel(&b, x, 1));
+   nir_def *result = nir_frcp(&b, value);
+   nir_store_ssbo(&b, result, nir_imm_int(&b, 1), nir_imm_int(&b, 0),
+                  .align_mul = 4);
+   agx_nir_lower_apple9_denorms(b.shader);
+   EXPECT_EQ(count_nir_alu(b.shader, nir_op_ult), 2u);
+   EXPECT_NE(nir_def_as_alu(result)->src[0].src.ssa, value);
+   ralloc_free(b.shader);
+}
+
+TEST(Apple9Compiler, DenormMinMaxNormalBoundsIncludePreambleConstants)
+{
+   const struct {
+      nir_op op;
+      uint32_t bound;
+      unsigned checks;
+   } cases[] = {
+      {nir_op_fmax, 0x3f800000, 0}, {nir_op_fmin, 0xbf800000, 0},
+      {nir_op_fmax, 0x00800000, 0}, {nir_op_fmin, 0x80800000, 0},
+      {nir_op_fmax, 0x7f800000, 0}, {nir_op_fmin, 0xff800000, 0},
+      {nir_op_fmax, 0x007fffff, 1}, {nir_op_fmin, 0x807fffff, 1},
+      {nir_op_fmax, 0xbf800000, 1}, {nir_op_fmin, 0x3f800000, 1},
+      {nir_op_fmax, 0x7fc00000, 1}, {nir_op_fmin, 0xffc00000, 1},
+      {nir_op_fmax, 0x00000000, 1}, {nir_op_fmin, 0x80000000, 1},
+   };
+   for (const auto &test : cases) {
+      for (bool preamble : {false, true}) {
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_COMPUTE, &agx_nir_options, "denorm_bound");
+         b.shader->info.float_controls_execution_mode =
+            FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32;
+         b.fp_math_ctrl = nir_fp_no_fast_math;
+         nir_def *x = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 0),
+                                   nir_imm_int(&b, 0), .align_mul = 4);
+         nir_def *bound;
+         if (preamble) {
+            nir_builder p = nir_builder_at(nir_before_impl(nir_shader_get_preamble(b.shader)));
+            nir_store_preamble(&p, nir_imm_int(&p, test.bound), .base = 6,
+                               .preamble_class = nir_preamble_class_general);
+            bound = nir_load_preamble(&b, 1, 32, .base = 6,
+                                      .preamble_class = nir_preamble_class_general);
+         } else {
+            bound = nir_imm_int(&b, test.bound);
+         }
+         nir_def *result = nir_build_alu(&b, test.op, x, bound, NULL, NULL);
+         nir_store_ssbo(&b, result, nir_imm_int(&b, 1), nir_imm_int(&b, 0),
+                        .align_mul = 4);
+         agx_nir_lower_apple9_denorms(b.shader);
+         EXPECT_EQ(count_nir_alu(b.shader, nir_op_ult), test.checks);
+         ralloc_free(b.shader);
+      }
    }
 }
 
