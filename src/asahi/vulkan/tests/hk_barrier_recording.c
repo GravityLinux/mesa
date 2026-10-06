@@ -18,7 +18,7 @@ main(void)
    cmd->sync_events = UTIL_DYNARRAY_INIT;
    cmd->sync_remap = UTIL_DYNARRAY_INIT;
    uint8_t pool[4096] = {0};
-   cmd->uploader[HK_CMD_POOL_MAIN].map = pool;
+   cmd->uploader[HK_CMD_POOL_MAIN].chunks[0].map = pool;
 
    uint8_t compute_bytes[4096] = {0}, render_bytes[4096] = {0};
    struct hk_cs compute = {
