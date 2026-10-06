@@ -6508,8 +6508,9 @@ apple9_lower_texture_handles(nir_shader *nir)
                        nir_metadata_control_flow);
 }
 
-/* Read-only descriptor loads marked speculatable can execute before their
- * original branch. Move only uniform dependency chains, then let preamble
+/* Read-only descriptor loads and uniform ALU marked speculatable can execute
+ * before their original branch. This includes buffer-size limits shared by
+ * bounds checks. Move only uniform dependency chains, then let preamble
  * extraction choose which values are worth storing. Ordinary guarded buffer
  * reads lack CAN_SPECULATE and must remain guarded.
  */
@@ -6576,12 +6577,11 @@ agx_nir_hoist_apple9_uniform_reads(nir_shader *nir)
       if (block == s.entry)
          continue;
       nir_foreach_instr_safe(instr, block) {
-         if (instr->type != nir_instr_type_intrinsic)
+         if (instr->type != nir_instr_type_alu &&
+             !(instr->type == nir_instr_type_intrinsic &&
+               nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_global_2x32))
             continue;
-         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-         if (intr->intrinsic != nir_intrinsic_load_global_2x32)
-            continue;
-         nir_src src = nir_src_for_ssa(&intr->def);
+         nir_src src = nir_src_for_ssa(nir_instr_def(instr));
          if (apple9_can_hoist_uniform(&src, &s)) {
             apple9_hoist_uniform_source(&src, &s);
             progress = true;
