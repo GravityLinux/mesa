@@ -6426,7 +6426,7 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
                    const struct agx_apple9_varying_layout *varyings,
                    const struct apple9_buffer_map *resources,
                    unsigned uniform_budget, bool promote_constants,
-                   unsigned *preamble_bytes)
+                   unsigned *preamble_bytes, unsigned *preamble_words)
 {
    nir_shader *main = nir_shader_clone(NULL, nir);
    if (!main)
@@ -6515,6 +6515,7 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
    if (agx_apple9_trace_enabled() && candidate_reason)
       fprintf(stderr, "APPLE9_PREAMBLE_FALLBACK %s\n", candidate_reason);
    *preamble_bytes = setup.info.main_size;
+   *preamble_words = sizes[nir_preamble_class_general];
    free(setup.binary);
    free(candidate.binary);
    free(eligibility.state);
@@ -6571,16 +6572,17 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
     * Bound retries so pathological setup code cannot multiply compile time.
     */
    for (unsigned attempt = 0; attempt < 4 && budget; ++attempt) {
-      unsigned bytes = 0;
+      unsigned bytes = 0, words = 0;
       if (apple9_try_preamble(nir, out, profile, varyings, &resources, budget,
-                             promote_constants, &bytes))
+                             promote_constants, &bytes, &words))
          return true;
       if (bytes <= AGX_APPLE9_MAX_PREAMBLE_BYTES)
          break;
       if (promote_constants) {
          promote_constants = false;
       } else {
-         budget = (uint64_t)budget * AGX_APPLE9_MAX_PREAMBLE_BYTES / bytes;
+         budget = (uint64_t)MIN2(budget, words) *
+                  AGX_APPLE9_MAX_PREAMBLE_BYTES / bytes;
       }
    }
    return apple9_compile_dag_body(nir, out, profile, varyings, &resources,
