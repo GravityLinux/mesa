@@ -861,6 +861,7 @@ apple9_init_physical(struct agx_apple9_vir_program *out)
 
 struct apple9_pending {
    unsigned count;
+   unsigned latest_issue;
    bool unknown;
    struct agx_apple9_vir_instr producer[APPLE9_PENDING_MERGE];
 };
@@ -1208,6 +1209,7 @@ apple9_merge_pending(struct apple9_pending *to, const struct apple9_pending *fro
       struct apple9_pending *t = &to[slot];
       const struct apple9_pending *f = &from[slot];
       t->unknown |= f->unknown;
+      t->latest_issue = MAX2(t->latest_issue, f->latest_issue);
       for (unsigned i = 0; i < f->count; ++i) {
          bool present = false;
          for (unsigned j = 0; j < t->count; ++j)
@@ -1403,8 +1405,17 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
                      break;
                   }
                }
-               if (!slot)
+               if (!slot) {
+                  /* All tags are occupied. Retire the oldest pending group,
+                   * allowing recent loads to overlap instead of repeatedly
+                   * draining the newest producer in the preferred slot.
+                   * At a CFG merge use the latest issue on either path. */
                   slot = first;
+                  for (unsigned candidate = 1; candidate <= 6; ++candidate) {
+                     if (pending[candidate].latest_issue < pending[slot].latest_issue)
+                        slot = candidate;
+                  }
+               }
             }
             if (!apple9_retire(&out, pending, BITFIELD_BIT(slot - 1)))
                goto cleanup;
@@ -1417,7 +1428,8 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
                };
                ins.device_load_raw_token = tokens[slot - 1];
             }
-            pending[slot] = (struct apple9_pending){.count = 1, .producer = {ins}};
+            pending[slot] = (struct apple9_pending){
+               .count = 1, .latest_issue = out.instruction_count, .producer = {ins}};
          }
          apple9_select_compact_alu(&ins);
          if (!apple9_emit_physical(&out, &ins))
