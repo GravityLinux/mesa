@@ -643,13 +643,21 @@ agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
    for (unsigned v = 0; v < p->value_count; ++v)
       replacement[v] = v;
 
+   /* Main-program uniforms cannot change. Their SSA imports keep naming
+    * the same word across control-flow and active-lane boundaries. Setup
+    * programs that write the window retain the local tracking rules. */
+   bool uniform_writes = false;
+   for (unsigned i = 0; i < p->instruction_count; ++i)
+      uniform_writes |= p->instructions[i]->op == AGX_APPLE9_VIR_STORE_UNIFORM;
+
    struct agx_apple9_block *block = NULL;
    for (unsigned i = 0; i < p->instruction_count; ++i) {
       struct agx_apple9_vir_instr *I = p->instructions[i];
       if (block != agx_apple9_instr_block(I)) {
          block = agx_apple9_instr_block(I);
          _mesa_hash_table_clear(expressions, NULL);
-         memset(uniform_read, 0, p->value_count * sizeof(*uniform_read));
+         if (uniform_writes)
+            memset(uniform_read, 0, p->value_count * sizeof(*uniform_read));
       }
       for (unsigned s = 0; s < I->nr_srcs; ++s)
          I->src[s] = resolve(replacement, I->src[s]);
@@ -670,7 +678,8 @@ agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
          /* A synthetic mask transition may share a logical block. Values
           * produced under its old active lanes need not cover the new ones. */
          _mesa_hash_table_clear(expressions, NULL);
-         memset(uniform_read, 0, p->value_count * sizeof(*uniform_read));
+         if (uniform_writes)
+            memset(uniform_read, 0, p->value_count * sizeof(*uniform_read));
          break;
       default:
          break;

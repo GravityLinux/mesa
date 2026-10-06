@@ -1127,3 +1127,47 @@ TEST_F(Apple9Optimization, ReciprocalDoesNotFoldUnvalidatedUniformSource)
    const char *reason = nullptr;
    EXPECT_FALSE(agx_apple9_pack_vir_instruction(&invalid, phys, &packed, &reason));
 }
+
+
+TEST_F(Apple9Optimization, ImmutableUniformImportsFoldAcrossBlocksAndMasks)
+{
+   auto zero = imm(0);
+   auto uniform = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IOR_UNIFORM,
+      AGX_APPLE9_ENC_LOGIC_UNIFORM, &zero, 1, 240);
+   auto input = agx_apple9_vir_input(&p, 4);
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_EXEC_MASK_ELSE,
+      AGX_APPLE9_ENC_EXEC_MASK_ELSE, nullptr, 0, 0));
+   auto after_mask = add(input, uniform);
+   agx_apple9_block_begin(&p, agx_apple9_block_create(&p));
+   auto after_block = add(input, uniform);
+   p.output = add(after_mask, after_block);
+   ASSERT_TRUE(agx_apple9_optimize_vir(&p));
+   for (auto value : {after_mask, after_block}) {
+      const auto *I = agx_apple9_definition(&p, value);
+      ASSERT_NE(I, nullptr);
+      EXPECT_EQ(I->nr_srcs, 1u);
+      EXPECT_EQ(I->alu_src_uniform_mask, 2u);
+      EXPECT_EQ(I->alu_src_value[1], 240u);
+   }
+   /* Register expressions remain scoped to their original active lanes. */
+   EXPECT_EQ(agx_apple9_definition(&p, p.output)->src[0], after_mask);
+   EXPECT_EQ(agx_apple9_definition(&p, p.output)->src[1], after_block);
+}
+
+TEST_F(Apple9Optimization, MutableUniformWindowKeepsCrossBlockImportsInGprs)
+{
+   auto zero = imm(0);
+   auto uniform = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IOR_UNIFORM,
+      AGX_APPLE9_ENC_LOGIC_UNIFORM, &zero, 1, 240);
+   auto input = agx_apple9_vir_input(&p, 4);
+   agx_apple9_block_begin(&p, agx_apple9_block_create(&p));
+   p.output = add(input, uniform);
+   /* A later write can reach earlier blocks through a loop backedge. */
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_STORE_UNIFORM,
+      AGX_APPLE9_ENC_STORE_UNIFORM, &input, 1, 240));
+   ASSERT_TRUE(agx_apple9_optimize_vir(&p));
+   const auto *I = agx_apple9_definition(&p, p.output);
+   ASSERT_NE(I, nullptr);
+   EXPECT_EQ(I->nr_srcs, 2u);
+   EXPECT_EQ(I->alu_src_uniform_mask, 0u);
+}
