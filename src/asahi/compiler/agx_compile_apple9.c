@@ -6654,6 +6654,12 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
          fn->impl = nir_function_impl_clone(preamble, impl);
          fn->impl->function = fn;
          nir_opt_dce(main);
+         /* Preamble selection may leave some hoisted uniform expressions in
+          * the main program. Shorten those live ranges again; exposing them
+          * to the preamble must not force all of them live at shader entry.
+          */
+         nir_opt_sink(main, nir_move_const_undef | nir_move_alu |
+                            nir_move_copies | nir_move_comparisons);
          nir_opt_dce(preamble);
          if (apple9_compile_dag_body(preamble, &setup, NULL, NULL, resources,
                                     true, &candidate_reason) &&
