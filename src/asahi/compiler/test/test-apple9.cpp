@@ -7,6 +7,11 @@
 #include "agx_apple9_machine.h"
 #include "agx_compile_apple9.h"
 #include "agx_debug.h"
+#include "asahi/lib/agx_abi.h"
+
+extern "C" {
+#include "agx_nir.h"
+}
 
 #include "compiler/nir/nir_builder.h"
 #include "compiler/nir/nir_xfb_info.h"
@@ -103,6 +108,35 @@ TEST(Apple9Compiler, WritableSinkPointer)
    EXPECT_EQ(profile.resource_binding_count, 1);
    free(compiled.binary);
    ralloc_free(b.shader);
+}
+
+TEST(Apple9Compiler, WritableSinkAddressLowering)
+{
+   for (uint64_t address : {uint64_t(AGX_ZERO_PAGE_ADDRESS), uint64_t(0x123456780)}) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "sink_address_lowering");
+      nir_def *pointer = address == AGX_ZERO_PAGE_ADDRESS
+         ? nir_load_ro_sink_address_poly(&b) : nir_imm_int64(&b, address);
+      nir_store_global(&b, nir_imm_int(&b, 1), nir_ro_to_rw_poly(&b, pointer),
+                       .write_mask = 1, .align_mul = 4);
+      ASSERT_TRUE(agx_nir_lower_sink_address(b.shader));
+      nir_opt_constant_folding(b.shader);
+      nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            auto *intr = nir_instr_as_intrinsic(instr);
+            EXPECT_NE(intr->intrinsic, nir_intrinsic_ro_to_rw_poly);
+            EXPECT_NE(intr->intrinsic, nir_intrinsic_load_ro_sink_address_poly);
+            if (intr->intrinsic == nir_intrinsic_store_global) {
+               EXPECT_EQ(nir_src_as_uint(intr->src[1]),
+                         address == AGX_ZERO_PAGE_ADDRESS
+                            ? AGX_SCRATCH_PAGE_ADDRESS : address);
+            }
+         }
+      }
+      ralloc_free(b.shader);
+   }
 }
 
 TEST(Apple9Machine, PhysicalModel)

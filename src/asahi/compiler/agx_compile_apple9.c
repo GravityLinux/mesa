@@ -6617,6 +6617,11 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
                   const struct agx_apple9_varying_layout *varyings,
                   const char **reason)
 {
+   /* Preamble extraction runs divergence analysis, which requires generic
+    * sink pointers to have been lowered to this driver's concrete addresses.
+    * In particular, writes to the read-only zero page use the scratch page.
+    */
+   agx_nir_lower_sink_address(nir);
    apple9_lower_texture_handles(nir);
    /* As in agx_optimize_nir, reassociate before forming the preamble:
     * ordering chains by rank exposes uniform subexpressions to it and lets
