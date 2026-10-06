@@ -1516,7 +1516,7 @@ apple9_returns_device_atomic(const struct agx_apple9_vir_program *program)
 static bool
 apple9_allocate_candidate(struct agx_apple9_vir_program *program,
                           nir_shader *nir, bool cost_constraints, bool latency,
-                          bool copy_register, bool uniform_remat,
+                          unsigned pressure_slack, bool copy_register, bool uniform_remat,
                           struct agx_apple9_vir_program *result,
                           const char **reason)
 {
@@ -1540,6 +1540,7 @@ apple9_allocate_candidate(struct agx_apple9_vir_program *program,
    if (latency) {
       ra.ctx->schedule_resources = apple9_schedule_resources;
       ra.ctx->schedule_delay = apple9_schedule_delay;
+      ra.ctx->schedule_pressure_slack = pressure_slack;
    }
    agx_dce(ra.ctx, true);
    /* Unused texture channels still need the read that releases their
@@ -1757,14 +1758,14 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
    /* Prefer an allocation without reserved registers; constants placed above
     * r63 need the copy register, so retry with it reserved. */
    bool copy_register = false;
-   if (!apple9_allocate_candidate(program, nir, false, false, false, true, &best,
+   if (!apple9_allocate_candidate(program, nir, false, false, 0, false, true, &best,
                                   reason)) {
       if (*reason != apple9_copy_register_reason)
          return false;
       agx_apple9_vir_finish(&best);
       agx_apple9_vir_init(&best);
       copy_register = true;
-      if (!apple9_allocate_candidate(program, nir, false, false, true, true, &best,
+      if (!apple9_allocate_candidate(program, nir, false, false, 0, true, true, &best,
                                      reason))
          return false;
    }
@@ -1775,7 +1776,7 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
        * Compare completed allocations so those costs are paid by the policy
        * which caused them, including rematerialization and spill lowering. */
       const char *unused_reason = NULL;
-      if (apple9_allocate_candidate(program, nir, true, false, copy_register, true,
+      if (apple9_allocate_candidate(program, nir, true, false, 0, copy_register, true,
                                      &alternative, &unused_reason) &&
           apple9_allocation_cheaper(apple9_allocation_cost(&alternative), cost))
          SWAP(best, alternative);
@@ -1786,16 +1787,21 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
    for (unsigned i = 0; i < program->instruction_count; ++i)
       long_dependencies += apple9_dependency_delay(program->instructions[i]) > 1;
    if (long_dependencies > 1) {
-      for (unsigned banks = 0; banks < 2; ++banks) {
+      /* Overlapping independent long-latency operations needs registers;
+       * also offer schedules that may raise a block's peak pressure by eight
+       * GPRs. Spills and the occupancy tier still decide between them. */
+      static const unsigned slacks[] = {0, 16};
+      for (unsigned c = 0; c < 2 * ARRAY_SIZE(slacks); ++c) {
+         const unsigned banks = c & 1, slack = slacks[c >> 1];
          agx_apple9_vir_init(&alternative);
          const char *unused_reason = NULL;
-         bool traced = apple9_allocate_candidate(program, nir, banks, true,
+         bool traced = apple9_allocate_candidate(program, nir, banks, true, slack,
                                         copy_register, true, &alternative,
                                         &unused_reason);
          if (traced && getenv("AGX_APPLE9_TRACE_LATENCY")) {
             struct apple9_allocation_cost c = apple9_allocation_cost(&alternative);
-            fprintf(stderr, "LATENCY_CANDIDATE banks=%u base=%llu,%llu,%llu,%u,%llu lat=%llu,%llu,%llu,%u,%llu\n",
-                    banks, (unsigned long long)cost.spills, (unsigned long long)cost.instructions,
+            fprintf(stderr, "LATENCY_CANDIDATE slack=%u banks=%u base=%llu,%llu,%llu,%u,%llu lat=%llu,%llu,%llu,%u,%llu\n",
+                    slack, banks, (unsigned long long)cost.spills, (unsigned long long)cost.instructions,
                     (unsigned long long)cost.bytes, cost.registers, (unsigned long long)cost.dependency_gaps,
                     (unsigned long long)c.spills, (unsigned long long)c.instructions,
                     (unsigned long long)c.bytes, c.registers, (unsigned long long)c.dependency_gaps);
@@ -1818,14 +1824,14 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
             agx_apple9_vir_init(&alternative);
             const char *unused_reason = NULL;
             bool ok = apple9_allocate_candidate(
-               program, nir, banks, latency, copy_register, false,
+               program, nir, banks, latency, 0, copy_register, false,
                &alternative, &unused_reason);
             if (!ok && !copy_register &&
                 unused_reason == apple9_copy_register_reason) {
                agx_apple9_vir_finish(&alternative);
                agx_apple9_vir_init(&alternative);
                ok = apple9_allocate_candidate(
-                  program, nir, banks, latency, true, false,
+                  program, nir, banks, latency, 0, true, false,
                   &alternative, &unused_reason);
             }
             if (ok && apple9_allocation_cheaper(
