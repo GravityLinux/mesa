@@ -5387,6 +5387,7 @@ apple9_log(void)
 }
 
 struct apple9_dag_cost {
+   uint64_t weighted_spills;
    unsigned spills, instructions, gprs;
 };
 
@@ -5853,8 +5854,19 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
       };
       for (unsigned i = 0; i < lower.program.instruction_count; ++i) {
          enum agx_apple9_vir_opcode op = lower.program.instructions[i]->op;
-         cost->spills += op == AGX_APPLE9_VIR_SPILL_STORE ||
-                         op == AGX_APPLE9_VIR_SPILL_LOAD;
+         if (op == AGX_APPLE9_VIR_SPILL_STORE ||
+             op == AGX_APPLE9_VIR_SPILL_LOAD) {
+            const struct agx_apple9_block *block =
+               agx_apple9_instr_block(lower.program.instructions[i]);
+            unsigned depth = 0;
+            for (nir_cf_node *node = block && block->nir
+                                       ? block->nir->cf_node.parent : NULL;
+                 node; node = node->parent)
+               depth += node->type == nir_cf_node_loop;
+            /* A loop-depth heuristic, not measured invocation counts. */
+            cost->weighted_spills += 1u << (3 * MIN2(depth, 6));
+            ++cost->spills;
+         }
       }
    }
    if (getenv("AGX_APPLE9_STATS") != NULL) {
@@ -6022,7 +6034,7 @@ apple9_compile_dag_trial(nir_shader *nir, struct agx_shader_part *out,
 /* Hoisting samples lengthens live ranges. In a shader that already fills the
  * register file, the extra spills and copies can cost more than the latency
  * hidden, so compile such shaders both ways and keep the result with fewer
- * spills, then fewer instructions (the allocator's own preference order).
+ * loop-weighted spills, then fewer static spills and instructions.
  */
 static bool
 apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
@@ -6052,9 +6064,11 @@ apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
          plain, &plain_out, profile ? &plain_profile : NULL, varyings,
          resources, false, &plain_cost, &plain_log, &plain_size, &plain_reason);
       use_plain = plain_ok &&
-                  (!ok || plain_cost.spills < hoisted_cost.spills ||
-                   (plain_cost.spills == hoisted_cost.spills &&
-                    plain_cost.instructions < hoisted_cost.instructions));
+                  (!ok || plain_cost.weighted_spills < hoisted_cost.weighted_spills ||
+                   (plain_cost.weighted_spills == hoisted_cost.weighted_spills &&
+                    (plain_cost.spills < hoisted_cost.spills ||
+                     (plain_cost.spills == hoisted_cost.spills &&
+                      plain_cost.instructions < hoisted_cost.instructions))));
       if (use_plain) {
          if (ok)
             free(out->binary);
