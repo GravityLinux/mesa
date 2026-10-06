@@ -671,7 +671,9 @@ fold_uniform_stores(struct agx_apple9_vir_program *p)
 }
 
 bool
-agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
+agx_apple9_optimize_vir_with_constants(
+   struct agx_apple9_vir_program *p,
+   const struct agx_apple9_uniform_constants *constants)
 {
    assert(!p->physical && !p->dependencies_finalized);
    if (!p->value_count)
@@ -686,6 +688,7 @@ agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
       CALLOC(p->value_count, sizeof(*definitions));
    struct hash_table *expressions =
       _mesa_hash_table_create(NULL, expression_hash, expression_equal);
+   struct hash_table_u64 *constant_words = NULL;
    bool success = replacement && values && constant && uniform_read && keys && definitions && expressions;
    if (!success)
       goto cleanup;
@@ -699,6 +702,17 @@ agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
    for (unsigned i = 0; i < p->instruction_count; ++i)
       uniform_writes |= p->instructions[i]->op == AGX_APPLE9_VIR_STORE_UNIFORM;
 
+   constant_words = _mesa_hash_table_u64_create(NULL);
+   if (!constant_words) {
+      success = false;
+      goto cleanup;
+   }
+   if (constants && !uniform_writes) {
+      assert(constants->base + constants->count <= AGX_APPLE9_UNIFORM_COUNT);
+      for (unsigned i = 0; i < constants->count; ++i)
+         _mesa_hash_table_u64_insert(constant_words, constants->values[i],
+            (void *)(uintptr_t)(constants->base + i + 1));
+   }
    struct agx_apple9_block *block = NULL;
    for (unsigned i = 0; i < p->instruction_count; ++i) {
       struct agx_apple9_vir_instr *I = p->instructions[i];
@@ -757,6 +771,8 @@ agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
       if (I->op == AGX_APPLE9_VIR_IMM) {
          constant[I->dest] = true;
          values[I->dest] = I->immediate;
+         uniform_read[I->dest] = (uintptr_t)_mesa_hash_table_u64_search(
+            constant_words, I->immediate);
       }
       if (I->op == AGX_APPLE9_VIR_IOR_UNIFORM && I->nr_srcs == 1 &&
           I->immediate < AGX_APPLE9_UNIFORM_COUNT && constant[I->src[0]] && !values[I->src[0]])
@@ -802,6 +818,8 @@ agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
    success = fold_saturate(p, replacement) && fold_uniform_stores(p);
 
 cleanup:
+   if (constant_words)
+      _mesa_hash_table_u64_destroy(constant_words);
    free(uniform_read);
    agx_apple9_invalidate_uses(p);
    if (expressions)
@@ -812,4 +830,11 @@ cleanup:
    free(values);
    free(replacement);
    return success;
+}
+
+
+bool
+agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
+{
+   return agx_apple9_optimize_vir_with_constants(p, NULL);
 }
