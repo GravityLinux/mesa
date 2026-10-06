@@ -1721,6 +1721,26 @@ apple9_allocation_cheaper(struct apple9_allocation_cost a,
    return a.dependency_gaps < b.dependency_gaps;
 }
 
+/* A latency-scheduled candidate trades issued instructions for exposed
+ * long-latency dependency slots. Spills still dominate. Apple9's occupancy
+ * curve is unmeasured, so the established halfreg granules stand in for it:
+ * never accept a candidate that drops into a lower tier. Within a tier, count
+ * a modelled stall slot at a quarter of an issued instruction, since other
+ * resident threads hide part of it. */
+static bool
+apple9_latency_cheaper(struct apple9_allocation_cost a,
+                       struct apple9_allocation_cost b)
+{
+   if (a.spills != b.spills)
+      return a.spills < b.spills;
+   unsigned threads_a = agx_occupancy_for_register_count(2 * a.registers).max_threads;
+   unsigned threads_b = agx_occupancy_for_register_count(2 * b.registers).max_threads;
+   if (threads_a != threads_b)
+      return threads_a > threads_b;
+   return 4 * a.instructions + a.dependency_gaps <
+          4 * b.instructions + b.dependency_gaps;
+}
+
 bool
 agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
                            nir_shader *nir, const char **reason)
@@ -1781,7 +1801,7 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
                     (unsigned long long)c.bytes, c.registers, (unsigned long long)c.dependency_gaps);
          }
          if (traced &&
-             apple9_allocation_cheaper(apple9_allocation_cost(&alternative), cost)) {
+             apple9_latency_cheaper(apple9_allocation_cost(&alternative), cost)) {
             SWAP(best, alternative);
             cost = apple9_allocation_cost(&best);
          }
