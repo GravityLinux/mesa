@@ -247,8 +247,13 @@ choose_instr(struct sched_ctx *s)
          }
       }
 
+      /* Newly exposed producers are appended to the ready list. On a tie
+       * which increases pressure, follow the most recently exposed producer
+       * instead of opening another expression tree. Breadth-first expansion
+       * can keep an entire reduction level live despite equal local costs. */
       if (dependency > best_dependency ||
-          (dependency == best_dependency && delta < min_delta)) {
+          (dependency == best_dependency &&
+           (delta < min_delta || (delta == min_delta && delta > 0)))) {
          best = n;
          min_delta = delta;
          best_dependency = dependency;

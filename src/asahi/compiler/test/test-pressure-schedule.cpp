@@ -91,3 +91,46 @@ TEST_F(ResourceSchedule, PhiRemainsAtBlockEntryWithTargetResources)
    agx_pressure_schedule(b->shader);
    EXPECT_EQ(position(phi), 0u);
 }
+
+TEST(PressureSchedule, EqualCostReductionTreesStayDepthFirst)
+{
+   void *mem = ralloc_context(nullptr);
+   auto b = agx_test_builder(mem);
+   std::vector<agx_index> level;
+   for (unsigned i = 0; i < 32; ++i)
+      level.push_back(agx_mov_imm(b, 32, i + 1));
+   while (level.size() > 1) {
+      std::vector<agx_index> next;
+      for (unsigned i = 0; i < level.size(); i += 2)
+         next.push_back(agx_iadd(b, level[i], level[i + 1], 0));
+      level = next;
+   }
+   agx_export(b, level[0], 0);
+   agx_pressure_schedule(b->shader);
+
+   /* A breadth-first backwards walk opens all 32 leaves before consuming
+    * them. A depth-first walk needs only one value per level plus a leaf.
+    * Native comparisons exposed this tie in a large 16-bit UBO reduction. */
+   std::vector<bool> live(b->shader->alloc, false);
+   unsigned pressure = 0, peak = 0;
+   agx_foreach_block(b->shader, block) {
+      agx_foreach_instr_in_block_rev(block, I) {
+         agx_foreach_ssa_dest(I, d) {
+            if (live[I->dest[d].value]) {
+               live[I->dest[d].value] = false;
+               --pressure;
+            }
+         }
+         agx_foreach_ssa_src(I, s) {
+            if (!live[I->src[s].value]) {
+               live[I->src[s].value] = true;
+               ++pressure;
+            }
+         }
+         peak = MAX2(peak, pressure);
+      }
+   }
+   EXPECT_LE(peak, 6u);
+   EXPECT_EQ(pressure, 0u);
+   ralloc_free(mem);
+}
