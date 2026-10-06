@@ -4,6 +4,7 @@
  */
 
 #include "agx_apple9_ir.h"
+#include "util/bitscan.h"
 #include "util/hash_table.h"
 #include "util/u_memory.h"
 
@@ -451,23 +452,58 @@ inline_alu_sources(struct agx_apple9_vir_instr *I, const uint16_t *uniform_read,
       I->op == AGX_APPLE9_VIR_IMIN || I->op == AGX_APPLE9_VIR_IMAX ||
       I->op == AGX_APPLE9_VIR_UMIN || I->op == AGX_APPLE9_VIR_UMAX ||
       I->op == AGX_APPLE9_VIR_FMIN || I->op == AGX_APPLE9_VIR_FMAX;
+   /* A later pass may fill logical slots left as registers by an earlier
+    * one, for example after literal folding selected some operands. */
+   const unsigned filled = I->alu_src_uniform_mask | I->alu_src_immediate_mask;
    if ((!unary && !shift && !predicate && !select && !fma && !binary && !integer) ||
-       I->nr_srcs != arity || I->alu_src_uniform_mask || I->alu_src_immediate_mask)
+       I->nr_srcs + util_bitcount(filled) != arity)
       return;
 
    uint8_t file[4] = {0};
    uint32_t value[4] = {0};
-   for (unsigned s = 0; s < arity; ++s) {
-      if (uniform_read[I->src[s]]) {
+   uint32_t reg[4] = {0};
+   for (unsigned s = 0, k = 0; s < arity; ++s) {
+      if (filled & BITFIELD_BIT(s))
+         continue;
+      reg[s] = I->src[k++];
+      if (uniform_read[reg[s]]) {
          file[s] = AGX_APPLE9_FILE_UNIFORM;
-         value[s] = uniform_read[I->src[s]] - 1;
-      } else if (fma && constant[I->src[s]]) {
+         value[s] = uniform_read[reg[s]] - 1;
+      } else if (fma && !filled && constant[reg[s]]) {
          uint8_t encoded;
-         if (agx_apple9_encode_float_immediate(values[I->src[s]], &encoded)) {
+         if (agx_apple9_encode_float_immediate(values[reg[s]], &encoded)) {
             file[s] = AGX_APPLE9_FILE_IMMEDIATE;
-            value[s] = values[I->src[s]];
+            value[s] = values[reg[s]];
          }
       }
+   }
+   if (filled) {
+      /* Only one of the two leading operands of a plain binary operation may
+       * leave the register file; keep whichever was already selected. */
+      if (!shift && !predicate && !select && !fma && !float2 && !integer &&
+          (filled & 3) && (file[0] || file[1]))
+         file[0] = file[1] = 0;
+      unsigned source = 0;
+      for (unsigned s = 0; s < arity; ++s) {
+         if (filled & BITFIELD_BIT(s))
+            continue;
+         if (file[s] == AGX_APPLE9_FILE_UNIFORM) {
+            I->alu_src_uniform_mask |= BITFIELD_BIT(s);
+            I->alu_src_value[s] = value[s];
+         } else {
+            I->src[source++] = reg[s];
+         }
+      }
+      I->nr_srcs = source;
+      if (special && I->alu_src_uniform_mask)
+         I->encoding = AGX_APPLE9_ENC_FLOAT_SPECIAL_UNIFORM;
+      if (fma) {
+         I->encoding = (I->src_abs_mask & 3)
+            ? AGX_APPLE9_ENC_FLOAT3_MODIFIER_EXTENDED
+            : AGX_APPLE9_ENC_FLOAT3_EXTENDED;
+         select_saturated_encoding(I);
+      }
+      return;
    }
    /* FMA's second multiplicand has a native alternative file selector.
     * Commuting the product preserves its absolute/negate composition. */
