@@ -6705,7 +6705,7 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
          bytes[10] = 0;
       }
       if (instruction->texture_lod_query) {
-         if (multisampled || instruction->texture_shadow ||
+         if (gradient || multisampled || instruction->texture_shadow ||
              instruction->texture_fetch || (mask & ~3u))
             return false;
          bytes[10] = 0x20;
