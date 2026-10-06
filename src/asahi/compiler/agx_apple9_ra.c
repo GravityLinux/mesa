@@ -1725,7 +1725,8 @@ apple9_allocation_cheaper(struct apple9_allocation_cost a,
 /* A latency-scheduled candidate trades issued instructions for exposed
  * long-latency dependency slots. Spills still dominate. Apple9's occupancy
  * curve is unmeasured, so the established halfreg granules stand in for it:
- * never accept a candidate that drops into a lower tier. Within a tier, count
+ * never accept a candidate that drops into a lower tier or adds registers up
+ * to its boundary. Within a tier, count
  * a modelled stall slot at a quarter of an issued instruction, since other
  * resident threads hide part of it. */
 static bool
@@ -1734,10 +1735,14 @@ apple9_latency_cheaper(struct apple9_allocation_cost a,
 {
    if (a.spills != b.spills)
       return a.spills < b.spills;
-   unsigned threads_a = agx_occupancy_for_register_count(2 * a.registers).max_threads;
-   unsigned threads_b = agx_occupancy_for_register_count(2 * b.registers).max_threads;
-   if (threads_a != threads_b)
-      return threads_a > threads_b;
+   struct agx_occupancy tier_a = agx_occupancy_for_register_count(2 * a.registers);
+   struct agx_occupancy tier_b = agx_occupancy_for_register_count(2 * b.registers);
+   if (tier_a.max_threads != tier_b.max_threads)
+      return tier_a.max_threads > tier_b.max_threads;
+   /* The granules are a stand-in and may be off by one on Apple9. Do not let
+    * added registers reach the boundary of the tier the program occupies. */
+   if (a.registers > b.registers && 2 * a.registers >= tier_b.max_registers)
+      return false;
    return 4 * a.instructions + a.dependency_gaps <
           4 * b.instructions + b.dependency_gaps;
 }
