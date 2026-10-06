@@ -8,12 +8,14 @@
 #pragma once
 
 #include "hk_private.h"
+#include "hk_sync.h"
 #include "vk_queue.h"
 
 struct hk_device;
 
 struct hk_queue {
    struct vk_queue vk;
+   struct hk_sync_state sync;
 
    struct {
       /* Asahi kernel queue ID */

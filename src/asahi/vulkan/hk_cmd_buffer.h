@@ -24,6 +24,7 @@
 
 #include "hk_private.h"
 #include "hk_shader.h"
+#include "hk_sync.h"
 
 #include "hk_cmd_pool.h"
 #include "hk_descriptor_set.h"
@@ -398,6 +399,10 @@ struct hk_cs {
    /* Data master */
    enum hk_cs_type type;
 
+   uint32_t sync_id;
+   unsigned sync_stages;
+   bool cdm_dirty;
+
    /* Address of the root control stream for the job */
    uint64_t addr;
 
@@ -541,6 +546,16 @@ struct hk_cmd_buffer {
    /* List of all recorded control streams */
    struct list_head control_streams;
 
+   /* Immutable after recording; resolved afresh for every queue submission. */
+   struct util_dynarray sync_events;
+   struct util_dynarray sync_remap;
+   uint32_t sync_next_group;
+   unsigned sync_scope;
+   unsigned sync_render_stages;
+   bool sync_render_continuation;
+   bool sync_fallback;
+   bool api_dispatch;
+
    /* Current recorded control stream */
    struct {
       /* VDM stream for 3D */
@@ -678,13 +693,19 @@ hk_pool_cs_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment,
 }
 
 void hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
+void hk_cmd_sync_work(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+                      unsigned stages);
+void hk_cmd_sync_barrier(struct hk_cmd_buffer *cmd,
+                         VkPipelineStageFlags2 src, VkPipelineStageFlags2 dst,
+                         VkAccessFlags2 src_access, VkAccessFlags2 dst_access);
+void hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs);
 uint32_t hk_default_sample_positions(unsigned nr_samples);
 struct vk_sample_locations_state;
 uint32_t hk_pack_ppp_multisamplectrl(const struct vk_sample_locations_state *sl);
 
 static inline struct hk_cs *
 hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
-                             bool compute)
+                             bool compute, unsigned stages)
 {
    if ((*ptr) == NULL) {
       /* Allocate root control stream */
@@ -695,6 +716,10 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
 
       /* Allocate hk_cs for the new stream */
       struct hk_cs *cs = malloc(sizeof(*cs));
+      if (!cs) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+         return NULL;
+      }
       *cs = (struct hk_cs){
          .cmd = cmd,
          .type = compute ? HK_CS_CDM : HK_CS_VDM,
@@ -703,11 +728,18 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
          .chunk = root,
          .current = root.cpu,
          .end = root.cpu + initial_size,
+         .sync_id = util_dynarray_num_elements(&cmd->sync_remap, uint32_t),
       };
+
+      util_dynarray_append(&cmd->sync_remap, cs->sync_id);
 
       list_inithead(&cs->node);
 
       bool before_gfx = (ptr == &cmd->current_cs.pre_gfx);
+      /* These helpers are physically reordered around rendering. Until their
+       * logical operations are split out, preserve the existing full ordering.
+       */
+      cmd->sync_fallback |= before_gfx || ptr == &cmd->current_cs.post_gfx;
 
       /* Insert into the command buffer. We usually append to the end of the
        * command buffer, except for pre-graphics streams which go right before
@@ -728,6 +760,7 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
    }
 
    assert(*ptr != NULL);
+   hk_cmd_sync_work(cmd, *ptr, stages);
    return *ptr;
 }
 
@@ -735,7 +768,10 @@ static inline struct hk_cs *
 hk_cmd_buffer_get_cs(struct hk_cmd_buffer *cmd, bool compute)
 {
    struct hk_cs **ptr = compute ? &cmd->current_cs.cs : &cmd->current_cs.gfx;
-   return hk_cmd_buffer_get_cs_general(cmd, ptr, compute);
+   unsigned stages = cmd->sync_scope ? cmd->sync_scope :
+      compute ? HK_SYNC_COMPUTE | HK_SYNC_DISPATCH_INDIRECT :
+                HK_SYNC_GRAPHICS | HK_SYNC_DRAW_INDIRECT;
+   return hk_cmd_buffer_get_cs_general(cmd, ptr, compute, stages);
 }
 
 void hk_ensure_cs_has_space(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
@@ -792,6 +828,10 @@ hk_cmd_buffer_end_compute_internal(struct hk_cmd_buffer *cmd,
       if (cs->imm_writes.size) {
          hk_dispatch_imm_writes(cmd, cs);
       }
+
+      /* Availability at the stream boundary, including the last dispatch. */
+      if (cs->cdm_dirty)
+         hk_cdm_cache_flush(hk_cmd_buffer_device(cmd), cs);
    }
 
    *ptr = NULL;
@@ -813,6 +853,10 @@ static void
 hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
 {
    struct hk_cs *cs = cmd->current_cs.gfx;
+   if (cs) {
+      cmd->sync_render_stages = cs->sync_stages;
+      cmd->sync_render_continuation = true;
+   }
 
    if (cs && cs->stats.cmds == 0) {
       hk_optimize_empty_vdm(cmd);
@@ -929,8 +973,6 @@ uint32_t hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
 
 void hk_usc_upload_spilled_rt_descs(struct agx_usc_builder *b,
                                     struct hk_cmd_buffer *cmd);
-
-void hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs);
 
 void hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
                                  struct agx_cdm_launch_word_0_packed launch,

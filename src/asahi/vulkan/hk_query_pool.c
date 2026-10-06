@@ -159,7 +159,7 @@ hk_queue_write(struct hk_cmd_buffer *cmd, uint64_t address, uint32_t value,
                bool after_gfx)
 {
    struct hk_cs *cs = hk_cmd_buffer_get_cs_general(
-      cmd, after_gfx ? &cmd->current_cs.post_gfx : &cmd->current_cs.cs, true);
+      cmd, after_gfx ? &cmd->current_cs.post_gfx : &cmd->current_cs.cs, true, HK_SYNC_ALL);
    if (!cs)
       return;
 
@@ -209,7 +209,7 @@ hk_flush_query_writes(struct hk_cmd_buffer *cmd)
 
    if (writes) {
       struct hk_cs *cs =
-         hk_cmd_buffer_get_cs_general(cmd, &cmd->current_cs.cs, true);
+         hk_cmd_buffer_get_cs_general(cmd, &cmd->current_cs.cs, true, HK_SYNC_ALL);
       if (cs) {
          /* Results must be visible system-wide once marked available, as in
           * hk_dispatch_imm_writes. */
@@ -441,7 +441,7 @@ hk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
    }
 
    struct hk_cs *cs = hk_cmd_buffer_get_cs_general(
-      cmd, after_gfx ? &cmd->current_cs.gfx : &cmd->current_cs.cs, true);
+      cmd, after_gfx ? &cmd->current_cs.gfx : &cmd->current_cs.cs, true, HK_SYNC_ALL);
    if (!cs)
       return;
 

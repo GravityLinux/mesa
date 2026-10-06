@@ -542,6 +542,9 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
                      const VkRenderingInfo *pRenderingInfo)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   cmd->sync_render_continuation =
+      (pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT) != 0;
+   cmd->sync_render_stages = cmd->sync_scope ?: HK_SYNC_GRAPHICS;
    cmd->state.gfx.render_gen++;
    struct hk_rendering_state *render = &cmd->state.gfx.render;
 
@@ -1762,7 +1765,7 @@ hk_apple9_dispatch_prerast(struct hk_cmd_buffer *cmd, struct hk_shader *s,
       return;
 
    struct hk_cs *cs =
-      hk_cmd_buffer_get_cs_general(cmd, &cmd->current_cs.pre_gfx, true);
+      hk_cmd_buffer_get_cs_general(cmd, &cmd->current_cs.pre_gfx, true, HK_SYNC_ALL);
    if (!cs)
       return;
 
@@ -4315,7 +4318,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
 
       if (geom || tess) {
          ccs =
-            hk_cmd_buffer_get_cs_general(cmd, &cmd->current_cs.pre_gfx, true);
+            hk_cmd_buffer_get_cs_general(cmd, &cmd->current_cs.pre_gfx, true, HK_SYNC_ALL);
          if (!ccs)
             return;
       }

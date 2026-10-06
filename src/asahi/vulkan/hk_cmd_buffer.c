@@ -72,6 +72,8 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd)
    util_dynarray_clear(&cmd->large_bos);
    util_dynarray_clear(&cmd->query_adds);
    util_dynarray_clear(&cmd->query_writes);
+   util_dynarray_clear(&cmd->sync_events);
+   util_dynarray_clear(&cmd->sync_remap);
 }
 
 static void
@@ -85,6 +87,8 @@ hk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
    util_dynarray_fini(&cmd->large_bos);
    util_dynarray_fini(&cmd->query_adds);
    util_dynarray_fini(&cmd->query_writes);
+   util_dynarray_fini(&cmd->sync_events);
+   util_dynarray_fini(&cmd->sync_remap);
    vk_command_buffer_finish(&cmd->vk);
    vk_free(&pool->vk.alloc, cmd);
 }
@@ -119,6 +123,8 @@ hk_create_cmd_buffer(struct vk_command_pool *vk_pool,
    cmd->large_bos = UTIL_DYNARRAY_INIT;
    cmd->query_adds = UTIL_DYNARRAY_INIT;
    cmd->query_writes = UTIL_DYNARRAY_INIT;
+   cmd->sync_events = UTIL_DYNARRAY_INIT;
+   cmd->sync_remap = UTIL_DYNARRAY_INIT;
 
    cmd->vk.dynamic_graphics_state.vi = &cmd->state.gfx._dynamic_vi;
    cmd->vk.dynamic_graphics_state.ms.sample_locations =
@@ -160,6 +166,12 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    cmd->geom_instance_count = 0;
    cmd->uses_heap = false;
    cmd->uses_mesh_heap = false;
+   cmd->sync_fallback = false;
+   cmd->sync_next_group = 0;
+   cmd->sync_scope = 0;
+   cmd->sync_render_stages = 0;
+   cmd->sync_render_continuation = false;
+   cmd->api_dispatch = false;
 
    memset(&cmd->state, 0, sizeof(cmd->state));
 }
@@ -293,6 +305,9 @@ merge_control_streams(struct hk_cmd_buffer *cmd)
           !last->timestamp.end.handle) {
 
          hk_cs_merge_cdm(last, cs);
+         last->sync_stages |= cs->sync_stages;
+         *util_dynarray_element(&cmd->sync_remap, uint32_t, cs->sync_id) =
+            last->sync_id;
          list_del(&cs->node);
          hk_cs_destroy(cs);
       } else {
@@ -332,6 +347,87 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
    return vk_command_buffer_get_record_result(&cmd->vk);
 }
 
+void
+hk_cmd_sync_work(struct hk_cmd_buffer *cmd, struct hk_cs *cs, unsigned stages)
+{
+   if (cs->type == HK_CS_VDM && !cs->sync_stages &&
+       cmd->sync_render_continuation) {
+      /* Resuming a split render pass loads the preceding stream's attachment
+       * stores. This dependency is implicit in Vulkan, including splits caused
+       * by changes to state that is immutable within a hardware render.
+       */
+      struct hk_sync_event event = {
+         .stream = HK_SYNC_NONE,
+         .src = cmd->sync_render_stages,
+         .dst = stages,
+      };
+      util_dynarray_append(&cmd->sync_events, event);
+      cmd->sync_render_continuation = false;
+   }
+   cs->sync_stages |= stages;
+
+   /* A stream can contain many draws. Coalesce repeated scope declarations
+    * until a barrier or another stream intervenes.
+    */
+   if (cmd->sync_events.size) {
+      struct hk_sync_event *last =
+         util_dynarray_top_ptr(&cmd->sync_events, struct hk_sync_event);
+      if (last->stream == cs->sync_id && last->dst == stages)
+         return;
+   }
+
+   struct hk_sync_event event = {.stream = cs->sync_id, .dst = stages};
+   util_dynarray_append(&cmd->sync_events, event);
+}
+
+void
+hk_cmd_sync_barrier(struct hk_cmd_buffer *cmd,
+                    VkPipelineStageFlags2 src, VkPipelineStageFlags2 dst,
+                    VkAccessFlags2 src_access, VkAccessFlags2 dst_access)
+{
+   unsigned src_stages = hk_sync_stage_mask(src, true);
+   unsigned dst_stages = hk_sync_stage_mask(dst, false);
+   /* vk_meta barriers name implementation stages. Its operations are tracked
+    * in the API command's logical scope, so retain full internal dependencies.
+    */
+   if (cmd->in_meta) {
+      src_stages = src_stages ? HK_SYNC_ALL : 0;
+      dst_stages = dst_stages ? HK_SYNC_ALL : 0;
+   }
+
+   /* Access scopes govern availability/visibility, not execution ordering:
+    * even zero-access WAR barriers must split ordered streams. Stream endings
+    * currently provide full cache maintenance, covering the filtered access
+    * scopes as well as implicit attachment stores.
+    */
+   src_access = vk_filter_src_access_flags2(src, src_access);
+   dst_access = vk_filter_dst_access_flags2(dst, dst_access);
+
+   unsigned ordered = hk_sync_ordered_stages(src_stages, dst_stages,
+                                             src_access, dst_access);
+   const unsigned compute = HK_SYNC_COMPUTE | HK_SYNC_DISPATCH_INDIRECT;
+   struct hk_cs *cs = cmd->current_cs.cs;
+   if (!cmd->sync_fallback && cs && ordered && !(ordered & ~compute) &&
+       !(cs->sync_stages & ~compute)) {
+      /* The cache barrier is also an execution barrier. Keep compute-only
+       * dependencies in one CDM stream; no firmware command boundary is needed.
+       */
+      hk_ensure_cs_has_space(cmd, cs, AGX_CDM_BARRIER_LENGTH);
+      hk_cdm_cache_flush(hk_cmd_buffer_device(cmd), cs);
+   } else if (cmd->sync_fallback ||
+       (cmd->current_cs.cs && (cmd->current_cs.cs->sync_stages & ordered)))
+      hk_cmd_buffer_end_compute(cmd);
+
+   if (cmd->sync_fallback ||
+       (cmd->current_cs.gfx && (cmd->current_cs.gfx->sync_stages & ordered)))
+      hk_cmd_buffer_end_graphics(cmd);
+
+   struct hk_sync_event event = {
+      .stream = HK_SYNC_NONE, .src = src_stages, .dst = dst_stages,
+   };
+   util_dynarray_append(&cmd->sync_events, event);
+}
+
 VKAPI_ATTR void VKAPI_CALL
 hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
                        const VkDependencyInfo *pDependencyInfo)
@@ -344,12 +440,25 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
 
    perf_debug(cmd, "Pipeline barrier");
 
-   /* The big hammer. We end both compute and graphics batches. Ending compute
-    * here is necessary to properly handle graphics->compute dependencies.
-    *
-    * XXX: perf. */
-   hk_cmd_buffer_end_compute(cmd);
-   hk_cmd_buffer_end_graphics(cmd);
+   /* Preserve individual pairs rather than creating a cross product of all
+    * source and destination scopes. Resource ranges cannot narrow execution
+    * scopes without alias analysis. Layouts have no transition work on AGX.
+    */
+   uint32_t group = ++cmd->sync_next_group;
+   assert(group != 0);
+#define BARRIER(b) do {                                                        \
+      hk_cmd_sync_barrier(cmd, (b).srcStageMask, (b).dstStageMask,                \
+                           (b).srcAccessMask, (b).dstAccessMask);               \
+      util_dynarray_top_ptr(&cmd->sync_events,                                 \
+                            struct hk_sync_event)->barrier_group = group;      \
+   } while (0)
+   for (unsigned i = 0; i < pDependencyInfo->memoryBarrierCount; ++i)
+      BARRIER(pDependencyInfo->pMemoryBarriers[i]);
+   for (unsigned i = 0; i < pDependencyInfo->bufferMemoryBarrierCount; ++i)
+      BARRIER(pDependencyInfo->pBufferMemoryBarriers[i]);
+   for (unsigned i = 0; i < pDependencyInfo->imageMemoryBarrierCount; ++i)
+      BARRIER(pDependencyInfo->pImageMemoryBarriers[i]);
+#undef BARRIER
 }
 
 void
@@ -792,7 +901,8 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
                            : (barrier & AGX_PREGFX) ? &cmd->current_cs.pre_gfx
                                                     : &cmd->current_cs.cs;
 
-   struct hk_cs *cs = hk_cmd_buffer_get_cs_general(cmd, target, true);
+   struct hk_cs *cs = hk_cmd_buffer_get_cs_general(
+      cmd, target, true, cmd->sync_scope ?: HK_SYNC_ALL);
    if (!cs)
       return;
 
@@ -980,5 +1090,6 @@ hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd)
     * replaced by equivalent other operations.
     */
    list_del(&cs->node);
+   *util_dynarray_element(&cmd->sync_remap, uint32_t, cs->sync_id) = HK_SYNC_NONE;
    hk_cs_destroy(cs);
 }

@@ -53,6 +53,7 @@ hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
 
    cs->current = agx_cdm_barrier(cs->current, dev->dev.chip);
    cs->stats.flushes++;
+   cs->cdm_dirty = false;
 }
 
 void
@@ -62,12 +63,16 @@ hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
                             struct agx_workgroup wg)
 {
    hk_ensure_cs_has_space(cs->cmd, cs, 0x2000 /* TODO */);
+   if (!cs->cmd->api_dispatch && cs->cdm_dirty)
+      hk_cdm_cache_flush(dev, cs);
    cs->stats.cmds++;
 
    cs->current =
       agx_cdm_launch(cs->current, dev->dev.chip, grid, wg, launch, usc);
 
-   hk_cdm_cache_flush(dev, cs);
+   cs->cdm_dirty = true;
+   if (!cs->cmd->api_dispatch)
+      hk_cdm_cache_flush(dev, cs);
 }
 
 void
@@ -364,15 +369,18 @@ hk_apple9_dispatch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    }
 
    hk_ensure_cs_has_space(cmd, cs, 0x2000);
+   bool barrier = !cmd->api_dispatch;
+   if (barrier && cs->cdm_dirty)
+      hk_cdm_cache_flush(dev, cs);
    /* Indirect-local grids hold thread counts and local sizes, and launch
     * partial workgroups like a direct dispatch.
     */
    bool indirect_local = grid.mode == AGX_CDM_MODE_INDIRECT_LOCAL;
    bool ok = agx_is_indirect(grid)
       ? agx_apple9_emit_indirect_dispatch(cs->current, launch, grid.ptr,
-                                         geometry.local, indirect_local, p)
+                                         geometry.local, indirect_local, p, barrier)
       : agx_apple9_emit_direct_dispatch(cs->current, launch, geometry.threads,
-                                       geometry.local, p);
+                                       geometry.local, p, barrier);
    if (!ok) {
       fprintf(stderr, "Apple9 dispatch failed (6)\n");
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
@@ -381,6 +389,10 @@ hk_apple9_dispatch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    cs->current += indirect_local ? AGX_APPLE9_COMPUTE_INDIRECT_LOCAL_CDM_RECORD_SIZE
                   : agx_is_indirect(grid) ? AGX_APPLE9_COMPUTE_INDIRECT_CDM_RECORD_SIZE
                                           : AGX_APPLE9_COMPUTE_CDM_RECORD_SIZE;
+   if (!barrier)
+      cs->current -= AGX_CDM_BARRIER_LENGTH;
+   cs->cdm_dirty = !barrier;
+   cs->stats.flushes += barrier;
    cs->stats.cmds++;
    cs->stats.calls++;
 }
@@ -423,7 +435,9 @@ dispatch(struct hk_cmd_buffer *cmd, struct agx_grid grid)
             grid.count[d] *= s->info.apple9.local_size[d];
       }
       uint64_t root = hk_cmd_buffer_upload_root(cmd, VK_PIPELINE_BIND_POINT_COMPUTE);
+      cmd->api_dispatch = !cmd->in_meta;
       hk_apple9_dispatch(cmd, cs, s->bo, &s->info.apple9, grid, root, s, NULL);
+      cmd->api_dispatch = false;
       return;
    }
    struct hk_cs *cs = hk_cmd_buffer_get_cs(cmd, true /* compute */);
@@ -451,7 +465,9 @@ dispatch(struct hk_cmd_buffer *cmd, struct agx_grid grid)
       grid.count[2] *= local_size.z;
    }
 
+   cmd->api_dispatch = !cmd->in_meta;
    hk_dispatch_with_local_size(cmd, cs, s, grid, local_size);
+   cmd->api_dispatch = false;
    cs->stats.calls++;
 }
 

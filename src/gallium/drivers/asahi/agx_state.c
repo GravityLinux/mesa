@@ -3953,9 +3953,9 @@ agx_apple9_launch_compute(struct agx_batch *batch, struct agx_grid grid,
    agx_ensure_cmdbuf_has_space(batch, &batch->cdm, size + 4);
    bool ok = indirect
       ? agx_apple9_emit_indirect_dispatch(batch->cdm.current, launch, grid.ptr,
-                                         geometry.local, indirect_local, profile)
+                                         geometry.local, indirect_local, profile, true)
       : agx_apple9_emit_direct_dispatch(batch->cdm.current, launch,
-                                        geometry.threads, geometry.local, profile);
+                                        geometry.threads, geometry.local, profile, true);
    if (!ok)
       abort();
    batch->cdm.current += size;
@@ -7571,11 +7571,11 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
          is_indirect
             ? agx_apple9_emit_indirect_dispatch(
                  batch->cdm.current, launch_address, indirect,
-                 geometry.local, false, &cs->apple9_compute_profile)
+                 geometry.local, false, &cs->apple9_compute_profile, true)
             : agx_apple9_emit_direct_dispatch(
                  batch->cdm.current, launch_address,
                  geometry.threads, geometry.local,
-                 &cs->apple9_compute_profile);
+                 &cs->apple9_compute_profile, true);
       if (!cdm_built) {
          fprintf(stderr, "Apple9 dispatch encoding failed\n");
          return;
