@@ -5127,7 +5127,6 @@ apple9_prepare_dag(nir_shader *nir)
     * every shader, not only shaders which happened to contain division.
     * Re-legalize scalar packing/extraction introduced by those rules. */
    nir_opt_algebraic_late(nir);
-   agx_nir_lower_apple9_denorms(nir);
    nir_shader_alu_pass(nir, apple9_lower_memory_pack,
                       nir_metadata_control_flow, NULL);
    do {
@@ -5510,6 +5509,21 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
                         bool preamble, bool hoist,
                         struct apple9_dag_cost *cost, const char **reason)
 {
+   /* Preamble preparation runs algebraic optimization after prepare_dag and
+    * can recreate fcanonicalize or bit-preserving float operations. Lower
+    * FTZ after that last optimization boundary, independently in each main
+    * and preamble candidate. Do not run algebraic rules after materializing
+    * the integer checks. */
+   if (agx_nir_lower_apple9_denorms(nir)) {
+      bool progress;
+      do {
+         progress = nir_opt_constant_folding(nir);
+         progress |= nir_opt_copy_prop(nir);
+         progress |= nir_opt_cse(nir);
+         progress |= nir_opt_dce(nir);
+      } while (progress);
+   }
+
    /* Selection follows NIR order, so shorten live ranges after lowering and
     * before collecting loads or assigning virtual registers. Use the same
     * movement options as the Apple8 backend; NIR checks load reorderability.

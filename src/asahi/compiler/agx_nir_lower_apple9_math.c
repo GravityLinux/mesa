@@ -5,6 +5,9 @@
 
 #include "compiler/nir/nir_builder.h"
 #include "agx_compile_apple9.h"
+#include "agx_apple9_machine.h"
+#include "util/bitset.h"
+#include "util/set.h"
 
 static bool
 apple9_const_operand(nir_scalar s, nir_op op, nir_scalar *value, uint32_t *c)
@@ -109,22 +112,99 @@ flush_fp32(nir_builder *b, nir_def *x)
 }
 
 static bool
-lower_denorm(nir_builder *b, nir_alu_instr *alu, UNUSED void *data)
+fp32_result_is_canonical(nir_scalar s, unsigned depth,
+                         const BITSET_WORD *canonical_uniforms)
+{
+   if (s.def->bit_size != 32 || depth == 8)
+      return false;
+
+   s = nir_scalar_chase_movs(s);
+   if (nir_scalar_is_const(s)) {
+      uint32_t magnitude = nir_scalar_as_uint(s) & 0x7fffffff;
+      return magnitude == 0 || magnitude >= 0x00800000;
+   }
+
+   if (nir_def_instr(s.def)->type == nir_instr_type_phi) {
+      nir_foreach_phi_src(src, nir_def_as_phi(s.def)) {
+         if (!fp32_result_is_canonical(nir_get_scalar(src->src.ssa, s.comp),
+                                       depth + 1, canonical_uniforms))
+            return false;
+      }
+      return true;
+   }
+
+   if (canonical_uniforms && nir_def_instr_type(s.def) == nir_instr_type_intrinsic) {
+      nir_intrinsic_instr *intr = nir_def_as_intrinsic(s.def);
+      if (intr->intrinsic == nir_intrinsic_load_preamble &&
+          nir_intrinsic_preamble_class(intr) == nir_preamble_class_general) {
+         unsigned word = nir_intrinsic_base(intr) + s.comp;
+         return word < AGX_APPLE9_UNIFORM_COUNT &&
+                BITSET_TEST(canonical_uniforms, word);
+      }
+   }
+
+   if (!nir_scalar_is_alu(s))
+      return false;
+
+   nir_alu_instr *alu = nir_def_as_alu(s.def);
+   if (alu->op == nir_op_bcsel)
+      return fp32_result_is_canonical(nir_scalar_chase_alu_src(s, 1), depth + 1,
+                                      canonical_uniforms) &&
+             fp32_result_is_canonical(nir_scalar_chase_alu_src(s, 2), depth + 1,
+                                      canonical_uniforms);
+
+   /* This query runs before rewriting any instruction. Under explicit FTZ,
+    * floating ALU results are canonical either natively or after this pass.
+    * The consumer check below deliberately excludes sign/min/max operations:
+    * a producer cannot defer its flush to one of these bit-preserving users.
+    */
+   return nir_alu_type_get_base_type(nir_op_infos[alu->op].output_type) ==
+          nir_type_float;
+}
+
+static bool
+only_used_by_fp32_daz(nir_def *def, unsigned depth)
+{
+   if (depth == 8)
+      return false;
+
+   nir_foreach_use(src, def) {
+      if (nir_src_is_if(src))
+         return false;
+      nir_instr *instr = nir_src_use_instr(src);
+      if (instr->type != nir_instr_type_alu)
+         return false;
+      nir_alu_instr *alu = nir_instr_as_alu(instr);
+      switch (alu->op) {
+      /* All forms of these native FP32 operations consume subnormals as
+       * signed zero. Min/max and sign operations do not: their selected or
+       * modified operand bits can escape through a store or integer use. */
+      case nir_op_fadd:
+      case nir_op_fsub:
+      case nir_op_fmul:
+      case nir_op_ffma:
+      case nir_op_ffma_weak:
+      case nir_op_flt:
+      case nir_op_fge:
+      case nir_op_feq:
+      case nir_op_fneu:
+         break;
+      default:
+         if (!nir_op_is_vec_or_mov(alu->op) ||
+             !only_used_by_fp32_daz(&alu->def, depth + 1))
+            return false;
+         break;
+      }
+   }
+   return true;
+}
+
+static bool
+needs_fp32_flush(nir_alu_instr *alu, const BITSET_WORD *canonical_uniforms)
 {
    if (alu->def.bit_size != 32 ||
        nir_alu_type_get_base_type(nir_op_infos[alu->op].output_type) !=
           nir_type_float)
-      return false;
-
-   bool ftz = nir_is_denorm_flush_to_zero(
-      b->shader->info.float_controls_execution_mode, 32);
-   if (alu->op == nir_op_fcanonicalize) {
-      b->cursor = nir_before_instr(&alu->instr);
-      nir_def *x = nir_ssa_for_alu_src(b, alu, 0);
-      nir_def_replace(&alu->def, ftz ? flush_fp32(b, x) : x);
-      return true;
-   }
-   if (!ftz)
       return false;
 
    switch (alu->op) {
@@ -153,6 +233,25 @@ lower_denorm(nir_builder *b, nir_alu_instr *alu, UNUSED void *data)
    case nir_op_frsq:
    case nir_op_flog2:
       return false;
+   case nir_op_fneg:
+   case nir_op_fabs:
+   case nir_op_fsat:
+   case nir_op_fcanonicalize:
+   case nir_op_fmin:
+   case nir_op_fmax: {
+      /* These operations cannot create a subnormal from canonical operands.
+       * Prove every component, including swizzles, before eliding the check. */
+      bool canonical = true;
+      for (unsigned c = 0; c < alu->def.num_components; ++c) {
+         nir_scalar result = nir_get_scalar(&alu->def, c);
+         for (unsigned i = 0; i < nir_op_infos[alu->op].num_inputs; ++i)
+            canonical &= fp32_result_is_canonical(
+               nir_scalar_chase_alu_src(result, i), 0, canonical_uniforms);
+      }
+      if (canonical)
+         return false;
+      break;
+   }
    case nir_op_f2f32:
       if (alu->src[0].src.ssa->bit_size == 16)
          return false;
@@ -160,6 +259,22 @@ lower_denorm(nir_builder *b, nir_alu_instr *alu, UNUSED void *data)
    default:
       break;
    }
+
+   return !only_used_by_fp32_daz(&alu->def, 0);
+}
+
+static bool
+lower_denorm(nir_builder *b, nir_alu_instr *alu, void *data)
+{
+   bool flush = _mesa_set_search(data, alu) != NULL;
+   if (alu->op == nir_op_fcanonicalize && alu->def.bit_size == 32) {
+      b->cursor = nir_before_instr(&alu->instr);
+      nir_def *x = nir_ssa_for_alu_src(b, alu, 0);
+      nir_def_replace(&alu->def, flush ? flush_fp32(b, x) : x);
+      return true;
+   }
+   if (!flush)
+      return false;
 
    /* Run after algebraic optimization, which can replace arithmetic with
     * min/max or sign operations. Moves, selects, loads and stores are bit
@@ -235,8 +350,51 @@ agx_nir_lower_apple9_subgroup_denorms(nir_shader *shader)
 bool
 agx_nir_lower_apple9_denorms(nir_shader *shader)
 {
+   /* Decide on the original SSA graph, before explicit integer flushes hide
+    * the provenance of floating results. Keep this independent of fast-math
+    * permissions: removing an unobservable flush preserves even exact math. */
+   struct set *flush = _mesa_pointer_set_create(NULL);
+   if (nir_is_denorm_flush_to_zero(shader->info.float_controls_execution_mode,
+                                   32)) {
+      BITSET_DECLARE(canonical_uniforms, AGX_APPLE9_UNIFORM_COUNT) = {0};
+      nir_function *preamble = nir_shader_get_entrypoint(shader)->preamble;
+      if (preamble) {
+         /* Extraction replaces SSA edges by uniform transfers. Retain the
+          * canonical-result proof across those transfers, including promoted
+          * constants. A store is a raw-bit use, so its floating producer may
+          * not defer a required flush to a consumer in the main shader. */
+         nir_foreach_block(block, preamble->impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type != nir_instr_type_intrinsic)
+                  continue;
+               nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+               if (intr->intrinsic != nir_intrinsic_store_preamble ||
+                   nir_intrinsic_preamble_class(intr) != nir_preamble_class_general ||
+                   intr->src[0].ssa->bit_size != 32)
+                  continue;
+               unsigned base = nir_intrinsic_base(intr);
+               for (unsigned c = 0; c < intr->src[0].ssa->num_components; ++c) {
+                  if (base + c < AGX_APPLE9_UNIFORM_COUNT &&
+                      fp32_result_is_canonical(nir_get_scalar(intr->src[0].ssa, c),
+                                                0, NULL))
+                     BITSET_SET(canonical_uniforms, base + c);
+               }
+            }
+         }
+      }
+      nir_foreach_function_impl(impl, shader) {
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type == nir_instr_type_alu &&
+                   needs_fp32_flush(nir_instr_as_alu(instr), canonical_uniforms))
+                  _mesa_set_add(flush, nir_instr_as_alu(instr));
+            }
+         }
+      }
+   }
    bool progress = nir_shader_alu_pass(shader, lower_denorm,
-                                       nir_metadata_control_flow, NULL);
+                                       nir_metadata_control_flow, flush);
+   _mesa_set_destroy(flush, NULL);
    if (nir_is_denorm_flush_to_zero(shader->info.float_controls_execution_mode,
                                    32))
       progress |= nir_shader_intrinsics_pass(shader, lower_denorm_intrinsic,
@@ -404,8 +562,7 @@ math_filter(const nir_instr *instr, UNUSED const void *data)
        alu->def.bit_size == 16)
       return true;
    return alu->def.bit_size == 32 &&
-          (alu->op == nir_op_iabs || alu->op == nir_op_fsin || alu->op == nir_op_fcos ||
-           alu->op == nir_op_fcanonicalize);
+          (alu->op == nir_op_iabs || alu->op == nir_op_fsin || alu->op == nir_op_fcos);
 }
 
 /* Round to nearest, then step one ulp toward zero if that rounded away. */
@@ -459,10 +616,6 @@ lower_math(nir_builder *b, nir_instr *instr, UNUSED void *data)
          components[i] = nir_f2f16(b, wide);
       } else if (alu->op == nir_op_iabs) {
          components[i] = nir_imax(b, x, nir_ineg(b, x));
-      } else if (alu->op == nir_op_fcanonicalize) {
-         components[i] = nir_is_denorm_flush_to_zero(
-            b->shader->info.float_controls_execution_mode, 32)
-            ? flush_fp32(b, x) : x;
       } else if (b->shader->info.stage == MESA_SHADER_VERTEX ||
                  b->shader->info.stage == MESA_SHADER_FRAGMENT) {
          components[i] = lower_graphics_sincos(b, x, alu->op == nir_op_fcos);
