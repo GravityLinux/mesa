@@ -179,6 +179,7 @@ hk_apple9_runtime_sampler(uint32_t *data, const struct agx_sampler_packed *state
    data[AGX_APPLE9_SAMP_BIAS] = 0;
    data[AGX_APPLE9_SAMP_BORDER] = sampler.border_colour;
    data[AGX_APPLE9_SAMP_PIXEL_COORDS] = sampler.pixel_coordinates;
+   data[AGX_APPLE9_SAMP_MAX_ANISOTROPY] = fui(sampler.maximum_anisotropy);
    return true;
 }
 

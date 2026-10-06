@@ -502,7 +502,7 @@ try_fold_txd_to_txl(nir_builder *b, nir_tex_instr *tex)
    const int ddy_idx = nir_tex_instr_src_index(tex, nir_tex_src_ddy);
    const int min_lod_idx = nir_tex_instr_src_index(tex, nir_tex_src_min_lod);
 
-   if (ddx_idx < 0 || ddx_idx < 0)
+   if (ddx_idx < 0 || ddy_idx < 0)
       return false;
 
    /* min_lod is applied after the sampler bias is added, so we can't use it as lod */
@@ -526,7 +526,10 @@ try_fold_txd_to_txl(nir_builder *b, nir_tex_instr *tex)
    nir_steal_tex_src(tex, nir_tex_src_ddx);
    nir_steal_tex_src(tex, nir_tex_src_ddy);
 
-   nir_def *lod = nir_imm_int(b, 0);
+   /* log2(0) remains at the lowest LOD even after positive sampler bias.
+    * Substituting zero would incorrectly turn magnification into minification.
+    */
+   nir_def *lod = nir_imm_float(b, -INFINITY);
    nir_tex_instr_add_src(tex, nir_tex_src_lod, lod);
    tex->op = nir_texop_txl;
    return true;
