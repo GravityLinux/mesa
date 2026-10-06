@@ -5135,6 +5135,13 @@ apple9_prepare_dag(nir_shader *nir)
       progress |= nir_opt_cse(nir);
       progress |= nir_opt_dce(nir);
    } while (progress);
+   /* Constant folding can turn zero gradients into txl after texture lowering.
+    * Normalize those new LOD operands before selection/preamble extraction. */
+   if (agx_nir_lower_apple9_texture_lod(nir)) {
+      nir_opt_constant_folding(nir);
+      nir_opt_copy_prop(nir);
+      nir_opt_dce(nir);
+   }
    nir_shader_intrinsics_pass(nir, apple9_widen_shared_offset,
                               nir_metadata_control_flow, NULL);
 }
@@ -7752,34 +7759,34 @@ apple9_native_min_lod(const nir_tex_instr *tex)
           nir_tex_instr_src_index(tex, nir_tex_src_offset) < 0;
 }
 
-/* Route implicit array-shadow sampling, and implicit 2D sampling with a
- * minimum LOD, through native explicit gradients. Only spatial coordinates
- * contribute derivatives; neither the layer nor comparator does. An
- * instruction bias scales those gradients, so that the minimum LOD clamps
+/* Route linear compute sampling, implicit array-shadow sampling,
+ * and implicit 2D sampling with a minimum LOD through explicit gradients.
+ * Only spatial coordinates contribute derivatives, excluding the layer and
+ * comparator. An instruction bias scales gradients so the minimum LOD clamps
  * the biased LOD, while the sampler's bias is applied afterwards. */
 static bool
 apple9_lower_implicit_gradients(nir_builder *b, nir_instr *instr, void *data)
 {
-   if (instr->type != nir_instr_type_tex ||
-       b->shader->info.stage != MESA_SHADER_FRAGMENT)
+   if (instr->type != nir_instr_type_tex)
+      return false;
+   bool compute = b->shader->info.stage == MESA_SHADER_COMPUTE &&
+                  b->shader->info.derivative_group == DERIVATIVE_GROUP_LINEAR;
+   if (!compute && b->shader->info.stage != MESA_SHADER_FRAGMENT)
       return false;
    nir_tex_instr *tex = nir_instr_as_tex(instr);
-   if (!(tex->is_array && tex->is_shadow &&
-         tex->sampler_dim == GLSL_SAMPLER_DIM_2D) &&
+   if (!compute && !(tex->is_array && tex->is_shadow &&
+                    tex->sampler_dim == GLSL_SAMPLER_DIM_2D) &&
        !apple9_native_min_lod(tex))
       return false;
    if (tex->op != nir_texop_tex && tex->op != nir_texop_txb)
       return false;
    b->cursor = nir_before_instr(instr);
    int coord = nir_tex_instr_src_index(tex, nir_tex_src_coord);
-   /* Derivatives are of the projected coordinates. */
-   nir_def *projector = nir_steal_tex_src(tex, nir_tex_src_projector);
-   if (projector) {
-      nir_src_rewrite(&tex->src[coord].src,
-         nir_fdiv(b, tex->src[coord].src.ssa, projector));
-   }
-   nir_def *xy = nir_trim_vector(b, tex->src[coord].src.ssa, 2);
-   nir_def *dx = nir_ddx(b, xy), *dy = nir_ddy(b, xy);
+   /* Projection, including the shadow comparator, is already lowered. */
+   assert(nir_tex_instr_src_index(tex, nir_tex_src_projector) < 0);
+   unsigned spatial = tex->coord_components - tex->is_array;
+   nir_def *position = nir_trim_vector(b, tex->src[coord].src.ssa, spatial);
+   nir_def *dx = nir_ddx(b, position), *dy = nir_ddy(b, position);
    int bias = nir_tex_instr_src_index(tex, nir_tex_src_bias);
    if (bias >= 0) {
       nir_def *scale = nir_fexp2(b, tex->src[bias].src.ssa);
@@ -9168,10 +9175,12 @@ apple9_lower_textures(nir_shader *nir)
    nir_shader_instructions_pass(nir, apple9_lower_fetch_min_lod,
                                 nir_metadata_control_flow, NULL);
    agx_nir_legalize_apple9_texture_sources(nir);
-   /* Compatibility GL supplies projective texture coordinates. Reuse the
-    * common NIR quotient lowering before selecting ordinary 2D sampling. */
+   /* Gradients must follow projection. Common NIR lowering also projects
+    * shadow comparators and leaves array layers unchanged. */
+   const nir_lower_tex_options projection = {.lower_txp = ~0u};
+   nir_lower_tex(nir, &projection);
    const nir_lower_tex_options tex_options = {
-      .lower_txp = ~0u, .lower_1d = true,
+      .lower_1d = true,
       .lower_rect = true, .lower_rect_offset = true,
       .lower_invalid_implicit_lod = true,
       .lower_txf_offset = true,
