@@ -74,6 +74,47 @@ TEST(Apple9Compiler, BoundsSizeLimitRejectsDifferentClamp)
    ralloc_free(b.shader);
 }
 
+TEST(Apple9Compiler, BoundsFieldOffsetFoldKeepsWrappingSums)
+{
+   const nir_op ops[] = {nir_op_amul, nir_op_imul, nir_op_ishl, nir_op_iand};
+   for (nir_op op : ops) {
+      for (uint32_t add : {0u, 1u, 3u, 12u, 15u, 16u, 17u, UINT32_MAX}) {
+         for (uint32_t index : {0u, 1u, 2u, 0x0fffffffu, UINT32_MAX - 1, UINT32_MAX}) {
+            for (uint32_t size : {0u, 1u, 3u, 4u, 12u, 16u, 20u, 32u, UINT32_MAX}) {
+               for (uint32_t k : {3u, 7u, 15u}) {
+                  nir_builder b = nir_builder_init_simple_shader(
+                     MESA_SHADER_COMPUTE, &agx_nir_options, "bounds_field_offset");
+                  nir_def *x = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 0),
+                                             nir_imm_int(&b, 0), .align_mul = 4);
+                  nir_def *bound = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 0),
+                                                nir_imm_int(&b, 4), .align_mul = 4);
+                  uint32_t scale = op == nir_op_ishl ? 4 : op == nir_op_iand ? ~15u : 16;
+                  nir_def *base = nir_build_alu(&b, op, x, nir_imm_int(&b, scale), nullptr, nullptr);
+                  nir_def *offset = nir_iadd_imm(&b, base, add);
+                  nir_def *last = nir_iadd_imm(&b, nir_umin_imm(&b, offset, UINT32_MAX-k), k);
+                  nir_store_ssbo(&b, nir_b2i32(&b, nir_ult(&b, last, bound)),
+                                 nir_imm_int(&b, 1), nir_imm_int(&b, 0), .align_mul = 4);
+                  auto *store = nir_instr_as_intrinsic(
+                     nir_block_last_instr(nir_cursor_current_block(b.cursor)));
+                  ASSERT_TRUE(agx_nir_opt_apple9_bounds(b.shader));
+                  b.cursor = nir_before_instr(nir_def_instr(x));
+                  nir_def_replace(x, nir_imm_int(&b, index));
+                  b.cursor = nir_before_instr(nir_def_instr(bound));
+                  nir_def_replace(bound, nir_imm_int(&b, size));
+                  nir_opt_constant_folding(b.shader);
+                  uint32_t byte_offset = (op == nir_op_iand ? index & ~15u : index * 16u) + add;
+                  ASSERT_TRUE(nir_src_is_const(store->src[0]));
+                  EXPECT_EQ(nir_src_as_uint(store->src[0]), uint64_t(byte_offset) + k < size)
+                     << "op=" << op << " index=" << index << " add=" << add
+                     << " size=" << size << " k=" << k;
+                  ralloc_free(b.shader);
+               }
+            }
+         }
+      }
+   }
+}
+
 TEST(Apple9Compiler, UniformDescriptorHoistingRequiresSafeIndependentReads)
 {
    for (bool speculate : {false, true}) {

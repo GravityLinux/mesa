@@ -27,6 +27,31 @@ apple9_const_operand(nir_scalar s, nir_op op, nir_scalar *value, uint32_t *c)
 }
 
 static bool
+bound_offset_add_cannot_wrap(nir_scalar offset, uint32_t addend)
+{
+   /* These operations leave known zero bits at the bottom of a byte
+    * offset, even if their input arithmetic wraps. Use only that fact:
+    * amul's relaxed overflow rules are not a reason to drop a robust check.
+    */
+   nir_scalar value;
+   uint32_t c, maximum = UINT32_MAX;
+   if (nir_scalar_is_const(offset)) {
+      maximum = nir_scalar_as_uint(offset);
+   } else if (apple9_const_operand(offset, nir_op_amul, &value, &c) ||
+              apple9_const_operand(offset, nir_op_imul, &value, &c)) {
+      maximum = c ? UINT32_MAX << (ffs(c) - 1) : 0;
+   } else if (apple9_const_operand(offset, nir_op_iand, &value, &c)) {
+      maximum = c;
+   } else if (nir_scalar_is_alu(offset) &&
+              nir_scalar_alu_op(offset) == nir_op_ishl &&
+              nir_scalar_is_const(nir_scalar_chase_alu_src(offset, 1))) {
+      c = nir_scalar_as_uint(nir_scalar_chase_alu_src(offset, 1));
+      maximum = UINT32_MAX << (c & 31);
+   }
+   return addend <= UINT32_MAX - maximum;
+}
+
+static bool
 opt_bounds(nir_builder *b, nir_alu_instr *alu, UNUSED void *data)
 {
    if (alu->op != nir_op_ult || alu->def.num_components != 1 ||
@@ -40,6 +65,19 @@ opt_bounds(nir_builder *b, nir_alu_instr *alu, UNUSED void *data)
        !apple9_const_operand(clamped, nir_op_umin, &offset, &ceiling) ||
        ceiling != UINT32_MAX - last)
       return false;
+
+   /* Fold an in-field constant into the size limit only after proving the
+    * original 32-bit offset addition cannot wrap. In particular, x*16+12
+    * permits this but x*16+16 does not for unrestricted x.
+    */
+   nir_scalar base;
+   uint32_t addend;
+   while (apple9_const_operand(offset, nir_op_iadd, &base, &addend) &&
+          addend <= UINT32_MAX - last &&
+          bound_offset_add_cannot_wrap(base, addend)) {
+      offset = base;
+      last += addend;
+   }
 
    /* min(offset, UINT_MAX-k) + k < size is exactly equivalent to
     * offset < max(size, k) - k, including short/empty buffers and offsets
