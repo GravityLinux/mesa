@@ -1106,15 +1106,21 @@ find_regs(struct ra_ctx *rctx, agx_instr *I, unsigned dest_idx, unsigned count,
 }
 
 static uint32_t
-search_ssa_to_reg_out(struct ra_ctx *ctx, struct agx_block *blk,
-                      enum ra_class cls, unsigned ssa)
+search_ssa_to_reg_out(struct agx_block *blk, unsigned ssa)
 {
-   for (unsigned reg = 0; reg < ctx->bound[cls]; ++reg) {
-      if (blk->reg_to_ssa_out[cls][reg] == ssa)
-         return reg;
+   unsigned lo = 0, hi = blk->nr_ssa_to_reg_out;
+
+   while (lo < hi) {
+      unsigned mid = lo + (hi - lo) / 2;
+      if (blk->ssa_to_reg_out[mid].ssa < ssa)
+         lo = mid + 1;
+      else
+         hi = mid;
    }
 
-   UNREACHABLE("variable not defined in block");
+   assert(lo < blk->nr_ssa_to_reg_out &&
+          blk->ssa_to_reg_out[lo].ssa == ssa && "variable not defined in block");
+   return blk->ssa_to_reg_out[lo].reg;
 }
 
 /*
@@ -1167,7 +1173,7 @@ reserve_live_in(struct ra_ctx *rctx)
             phi->src[pred_idx] = agx_get_vec_index(i, size, channels);
             phi->src[pred_idx].memory = cls == RA_MEM;
 
-            if ((*pred)->reg_to_ssa_out[cls] == NULL) {
+            if ((*pred)->ssa_to_reg_out == NULL) {
                /* If this is a loop header, we don't know where the register
                 * will end up. So, we create a phi conservatively but don't fill
                 * it in until the end of the loop. Stash in the information
@@ -1177,7 +1183,7 @@ reserve_live_in(struct ra_ctx *rctx)
             } else {
                /* Otherwise, we can build the phi now */
                phi->src[pred_idx].reg =
-                  search_ssa_to_reg_out(rctx, *pred, cls, i);
+                  search_ssa_to_reg_out(*pred, i);
                phi->src[pred_idx].has_reg = true;
             }
          }
@@ -1195,8 +1201,7 @@ reserve_live_in(struct ra_ctx *rctx)
          assert(nr_preds == 1);
 
          agx_block **pred = util_dynarray_begin(&rctx->block->predecessors);
-         /* TODO: Flip logic to eliminate the search */
-         base = search_ssa_to_reg_out(rctx, *pred, cls, i);
+         base = search_ssa_to_reg_out(*pred, i);
       }
 
       set_ssa_to_reg(rctx, i, base);
@@ -1939,17 +1944,22 @@ agx_ra_assign_local(struct ra_ctx *rctx)
          I->src[0].kill = true;
    }
 
-   for (unsigned i = 0; i < RA_CLASSES; ++i) {
-      block->reg_to_ssa_out[i] =
-         malloc(rctx->bound[i] * sizeof(*block->reg_to_ssa_out[i]));
-
-      /* Initialize with sentinel so we don't have unused regs mapping to r0 */
-      memset(block->reg_to_ssa_out[i], 0xFF,
-             rctx->bound[i] * sizeof(*block->reg_to_ssa_out[i]));
+   /* Sparse-bitset iteration is ordered by SSA name. Store just the live-out
+    * assignments so each successor can binary-search them, instead of scanning
+    * the register file once per live-in value (including the large spill file).
+    */
+   block->nr_ssa_to_reg_out = 0;
+   U_SPARSE_BITSET_FOREACH_SET(&block->live_out, i) {
+      block->nr_ssa_to_reg_out++;
    }
 
+   /* Keep the visited marker non-NULL even for blocks with no live-out values. */
+   block->ssa_to_reg_out =
+      malloc(MAX2(block->nr_ssa_to_reg_out, 1) * sizeof(*block->ssa_to_reg_out));
+   unsigned live_out_index = 0;
    U_SPARSE_BITSET_FOREACH_SET(&block->live_out, i) {
-      block->reg_to_ssa_out[rctx->classes[i]][rctx->ssa_to_reg[i]] = i;
+      block->ssa_to_reg_out[live_out_index].ssa = i;
+      block->ssa_to_reg_out[live_out_index++].reg = rctx->ssa_to_reg[i];
    }
 
    /* Also set the sources for the phis in our successors, since that logically
@@ -2694,10 +2704,9 @@ agx_ra(agx_context *ctx)
 cleanup:
    ralloc_free(spill_graph);
    agx_foreach_block(ctx, block) {
-      for (unsigned i = 0; i < ARRAY_SIZE(block->reg_to_ssa_out); ++i) {
-         free(block->reg_to_ssa_out[i]);
-         block->reg_to_ssa_out[i] = NULL;
-      }
+      free(block->ssa_to_reg_out);
+      block->ssa_to_reg_out = NULL;
+      block->nr_ssa_to_reg_out = 0;
    }
 
    pressure_audit_end(ctx);

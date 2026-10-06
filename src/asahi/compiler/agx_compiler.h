@@ -483,11 +483,14 @@ typedef struct agx_block {
    BITSET_DECLARE(reg_live_in, AGX_NUM_REGS);
    BITSET_DECLARE(reg_live_out, AGX_NUM_REGS);
 
-   /* For visited blocks during register assignment and live-out registers, the
-    * mapping of registers to SSA names at the end of the block. This is dense,
-    * unlike its inverse.
+   /* Live-out SSA names and their assigned registers, sorted by SSA name.
+    * A non-NULL array also marks blocks already visited by register assignment.
     */
-   uint32_t *reg_to_ssa_out[2];
+   struct {
+      uint32_t ssa;
+      uint32_t reg;
+   } *ssa_to_reg_out;
+   unsigned nr_ssa_to_reg_out;
 
    /* Is this block a loop header? If not, all of its predecessors precede it in
     * source order.
