@@ -4,6 +4,7 @@
  */
 
 #include "agx_apple9_ir.h"
+#include "util/bitscan.h"
 #include "util/hash_table.h"
 #include "util/u_memory.h"
 
@@ -181,7 +182,10 @@ static bool
 fold_integer(struct agx_apple9_vir_instr *I, const bool *constant,
              const uint32_t *values)
 {
-   if (!I->nr_srcs || I->nr_srcs > 3)
+   /* Register sources are only the operands still in the register file;
+    * a uniform or immediate operand is not a known constant here. */
+   if (!I->nr_srcs || I->nr_srcs > 3 || I->alu_src_uniform_mask ||
+       I->alu_src_immediate_mask)
       return false;
    uint32_t c[3] = {0};
    for (unsigned s = 0; s < I->nr_srcs; ++s) {
@@ -451,23 +455,58 @@ inline_alu_sources(struct agx_apple9_vir_instr *I, const uint16_t *uniform_read,
       I->op == AGX_APPLE9_VIR_IMIN || I->op == AGX_APPLE9_VIR_IMAX ||
       I->op == AGX_APPLE9_VIR_UMIN || I->op == AGX_APPLE9_VIR_UMAX ||
       I->op == AGX_APPLE9_VIR_FMIN || I->op == AGX_APPLE9_VIR_FMAX;
+   /* A later pass may fill logical slots left as registers by an earlier
+    * one, for example after literal folding selected some operands. */
+   const unsigned filled = I->alu_src_uniform_mask | I->alu_src_immediate_mask;
    if ((!unary && !shift && !predicate && !select && !fma && !binary && !integer) ||
-       I->nr_srcs != arity || I->alu_src_uniform_mask || I->alu_src_immediate_mask)
+       I->nr_srcs + util_bitcount(filled) != arity)
       return;
 
    uint8_t file[4] = {0};
    uint32_t value[4] = {0};
-   for (unsigned s = 0; s < arity; ++s) {
-      if (uniform_read[I->src[s]]) {
+   uint32_t reg[4] = {0};
+   for (unsigned s = 0, k = 0; s < arity; ++s) {
+      if (filled & BITFIELD_BIT(s))
+         continue;
+      reg[s] = I->src[k++];
+      if (uniform_read[reg[s]]) {
          file[s] = AGX_APPLE9_FILE_UNIFORM;
-         value[s] = uniform_read[I->src[s]] - 1;
-      } else if (fma && constant[I->src[s]]) {
+         value[s] = uniform_read[reg[s]] - 1;
+      } else if (fma && !filled && constant[reg[s]]) {
          uint8_t encoded;
-         if (agx_apple9_encode_float_immediate(values[I->src[s]], &encoded)) {
+         if (agx_apple9_encode_float_immediate(values[reg[s]], &encoded)) {
             file[s] = AGX_APPLE9_FILE_IMMEDIATE;
-            value[s] = values[I->src[s]];
+            value[s] = values[reg[s]];
          }
       }
+   }
+   if (filled) {
+      /* Only one of the two leading operands of a plain binary operation may
+       * leave the register file; keep whichever was already selected. */
+      if (!shift && !predicate && !select && !fma && !float2 && !integer &&
+          (filled & 3) && (file[0] || file[1]))
+         file[0] = file[1] = 0;
+      unsigned source = 0;
+      for (unsigned s = 0; s < arity; ++s) {
+         if (filled & BITFIELD_BIT(s))
+            continue;
+         if (file[s] == AGX_APPLE9_FILE_UNIFORM) {
+            I->alu_src_uniform_mask |= BITFIELD_BIT(s);
+            I->alu_src_value[s] = value[s];
+         } else {
+            I->src[source++] = reg[s];
+         }
+      }
+      I->nr_srcs = source;
+      if (special && I->alu_src_uniform_mask)
+         I->encoding = AGX_APPLE9_ENC_FLOAT_SPECIAL_UNIFORM;
+      if (fma) {
+         I->encoding = (I->src_abs_mask & 3)
+            ? AGX_APPLE9_ENC_FLOAT3_MODIFIER_EXTENDED
+            : AGX_APPLE9_ENC_FLOAT3_EXTENDED;
+         select_saturated_encoding(I);
+      }
+      return;
    }
    /* FMA's second multiplicand has a native alternative file selector.
     * Commuting the product preserves its absolute/negate composition. */
@@ -671,9 +710,15 @@ fold_uniform_stores(struct agx_apple9_vir_program *p)
 }
 
 bool
-agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
+agx_apple9_optimize_vir_with_constants(
+   struct agx_apple9_vir_program *p,
+   const struct agx_apple9_uniform_constants *constants)
 {
    assert(!p->physical && !p->dependencies_finalized);
+   /* Preserve literal operands through folding and modifier selection first.
+    * Only then trade remaining register sources for known uniform words. */
+   if (constants && constants->count && !agx_apple9_optimize_vir(p))
+      return false;
    if (!p->value_count)
       return true;
 
@@ -686,6 +731,7 @@ agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
       CALLOC(p->value_count, sizeof(*definitions));
    struct hash_table *expressions =
       _mesa_hash_table_create(NULL, expression_hash, expression_equal);
+   struct hash_table_u64 *constant_words = NULL;
    bool success = replacement && values && constant && uniform_read && keys && definitions && expressions;
    if (!success)
       goto cleanup;
@@ -699,6 +745,17 @@ agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
    for (unsigned i = 0; i < p->instruction_count; ++i)
       uniform_writes |= p->instructions[i]->op == AGX_APPLE9_VIR_STORE_UNIFORM;
 
+   constant_words = _mesa_hash_table_u64_create(NULL);
+   if (!constant_words) {
+      success = false;
+      goto cleanup;
+   }
+   if (constants && !uniform_writes) {
+      assert(constants->base + constants->count <= AGX_APPLE9_UNIFORM_COUNT);
+      for (unsigned i = 0; i < constants->count; ++i)
+         _mesa_hash_table_u64_insert(constant_words, constants->values[i],
+            (void *)(uintptr_t)(constants->base + i + 1));
+   }
    struct agx_apple9_block *block = NULL;
    for (unsigned i = 0; i < p->instruction_count; ++i) {
       struct agx_apple9_vir_instr *I = p->instructions[i];
@@ -757,6 +814,8 @@ agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
       if (I->op == AGX_APPLE9_VIR_IMM) {
          constant[I->dest] = true;
          values[I->dest] = I->immediate;
+         uniform_read[I->dest] = (uintptr_t)_mesa_hash_table_u64_search(
+            constant_words, I->immediate);
       }
       if (I->op == AGX_APPLE9_VIR_IOR_UNIFORM && I->nr_srcs == 1 &&
           I->immediate < AGX_APPLE9_UNIFORM_COUNT && constant[I->src[0]] && !values[I->src[0]])
@@ -802,6 +861,8 @@ agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
    success = fold_saturate(p, replacement) && fold_uniform_stores(p);
 
 cleanup:
+   if (constant_words)
+      _mesa_hash_table_u64_destroy(constant_words);
    free(uniform_read);
    agx_apple9_invalidate_uses(p);
    if (expressions)
@@ -812,4 +873,11 @@ cleanup:
    free(values);
    free(replacement);
    return success;
+}
+
+
+bool
+agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
+{
+   return agx_apple9_optimize_vir_with_constants(p, NULL);
 }

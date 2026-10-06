@@ -96,6 +96,29 @@ TEST_F(Apple9Optimization, FoldsWrappingArithmeticAndArithmeticRightShift)
    EXPECT_EQ(agx_apple9_definition(&p, result)->immediate, 0u);
 }
 
+TEST_F(Apple9Optimization, RepeatedOperandSelectionKeepsUniformAddends)
+{
+   /* dEQP-VK.glsl.switch.switch_in_switch_uniform_*: the second operand
+    * selection pass saw iadd(uniform, -1) with a single constant register
+    * source and folded it to -1, dropping the uniform addend. */
+   auto zero = imm(0);
+   auto uniform = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IOR_UNIFORM,
+      AGX_APPLE9_ENC_LOGIC_UNIFORM, &zero, 1, 4);
+   p.output = add(uniform, imm(0xffffffff));
+   struct agx_apple9_uniform_constants constants = {};
+   constants.base = 10;
+   constants.count = 1;
+   constants.values[0] = 2;
+   ASSERT_TRUE(agx_apple9_optimize_vir_with_constants(&p, &constants));
+   ASSERT_TRUE(agx_apple9_analyze_uses(&p));
+   const auto *A = agx_apple9_definition(&p, p.output);
+   EXPECT_EQ(A->op, AGX_APPLE9_VIR_IADD);
+   EXPECT_EQ(A->alu_src_uniform_mask, 1);
+   EXPECT_EQ(A->alu_src_value[0], 4u);
+   ASSERT_EQ(A->nr_srcs, 1);
+   EXPECT_EQ(agx_apple9_definition(&p, A->src[0])->immediate, 0xffffffffu);
+}
+
 TEST_F(Apple9Optimization, UniformAndImmediateOperandsLeaveOnlyGprUses)
 {
    auto zero = imm(0);

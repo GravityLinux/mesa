@@ -5513,6 +5513,7 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
                         struct agx_apple9_compute_profile *profile,
                         const struct agx_apple9_varying_layout *varyings,
                         const struct apple9_buffer_map *resources,
+                        const struct agx_apple9_uniform_constants *constants,
                         bool preamble, bool hoist,
                         struct apple9_dag_cost *cost, const char **reason)
 {
@@ -5787,7 +5788,7 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
    agx_apple9_place_phis(&lower.program);
    lower.program.fragment_shader = nir->info.stage == MESA_SHADER_FRAGMENT;
 
-   if (!agx_apple9_optimize_vir(&lower.program)) {
+   if (!agx_apple9_optimize_vir_with_constants(&lower.program, constants)) {
       *reason = "out of memory optimizing Apple9 virtual IR";
       goto fail;
    }
@@ -6149,7 +6150,9 @@ static bool
 apple9_compile_dag_trial(nir_shader *nir, struct agx_shader_part *out,
                          struct agx_apple9_compute_profile *profile,
                          const struct agx_apple9_varying_layout *varyings,
-                         const struct apple9_buffer_map *resources, bool hoist,
+                         const struct apple9_buffer_map *resources,
+                         const struct agx_apple9_uniform_constants *constants,
+                         bool hoist,
                          struct apple9_dag_cost *cost, char **log,
                          size_t *log_size, const char **reason)
 {
@@ -6157,7 +6160,7 @@ apple9_compile_dag_trial(nir_shader *nir, struct agx_shader_part *out,
    FILE *previous = apple9_log_stream;
    apple9_log_stream = stream;
    bool ok = apple9_compile_dag_once(nir, out, profile, varyings, resources,
-                                     false, hoist, cost, reason);
+                                     constants, false, hoist, cost, reason);
    apple9_log_stream = previous;
    if (stream)
       fclose(stream);
@@ -6184,6 +6187,7 @@ apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
                        struct agx_apple9_compute_profile *profile,
                        const struct agx_apple9_varying_layout *varyings,
                        const struct apple9_buffer_map *resources,
+                       const struct agx_apple9_uniform_constants *constants,
                        bool preamble, struct apple9_dag_cost *cost,
                        const char **reason)
 {
@@ -6191,13 +6195,13 @@ apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
    if (preamble || !apple9_hoist_limit() || !apple9_has_samples(nir) ||
        !(plain = nir_shader_clone(NULL, nir)))
       return apple9_compile_dag_once(nir, out, profile, varyings, resources,
-                                     preamble, true, cost, reason);
+                                     constants, preamble, true, cost, reason);
 
    struct apple9_dag_cost hoisted_cost = {0}, plain_cost = {0};
    char *hoisted_log = NULL, *plain_log = NULL;
    size_t hoisted_size = 0, plain_size = 0;
    bool ok = apple9_compile_dag_trial(nir, out, profile, varyings, resources,
-                                      true, &hoisted_cost, &hoisted_log,
+                                      constants, true, &hoisted_cost, &hoisted_log,
                                       &hoisted_size, reason);
    bool use_plain = false;
    if (!ok || hoisted_cost.spills || hoisted_cost.gprs >= AGX_APPLE9_GPR_COUNT) {
@@ -6206,7 +6210,8 @@ apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
       const char *plain_reason = NULL;
       bool plain_ok = apple9_compile_dag_trial(
          plain, &plain_out, profile ? &plain_profile : NULL, varyings,
-         resources, false, &plain_cost, &plain_log, &plain_size, &plain_reason);
+         resources, constants, false, &plain_cost, &plain_log, &plain_size,
+         &plain_reason);
       use_plain = plain_ok &&
                   (!ok || apple9_dag_cost_less(&plain_cost, &hoisted_cost));
       if (use_plain) {
@@ -6382,13 +6387,14 @@ apple9_constant_count_cmp(const void *a, const void *b)
    return x->value < y->value ? -1 : x->value > y->value;
 }
 
-/* Move the most-used constants to free uniform words, as
- * agx_opt_promote_constants does for Apple8: the preamble stores each one,
- * and its ALU uses read it back as a uniform operand.
- */
+/* Store the most-used constants in free uniform words. Keep their literal
+ * NIR values through instruction selection: opaque preamble loads would hide
+ * address offsets, integer folds and source modifiers. Native optimization
+ * uses this table to select uniforms for the remaining constant operands. */
 static void
 apple9_promote_constants(nir_shader *shader, nir_function_impl *preamble,
-                         unsigned *used, unsigned budget)
+                         unsigned *used, unsigned budget,
+                         struct agx_apple9_uniform_constants *constants)
 {
    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
    struct hash_table_u64 *counts = _mesa_hash_table_u64_create(NULL);
@@ -6430,7 +6436,8 @@ apple9_promote_constants(nir_shader *shader, nir_function_impl *preamble,
    /* A single use outside loops gains nothing: it trades its mov_imm32 for
     * a preamble store and spends a uniform word. Loop uses carry their
     * execution weight, allowing a lone static use to be promoted. */
-   struct hash_table_u64 *slots = _mesa_hash_table_u64_create(NULL);
+   constants->base = *used;
+   constants->count = 0;
    nir_builder pb = nir_builder_at(nir_after_impl(preamble));
    /* nir_opt_preamble has already reserved its result words. Spend only the
     * remaining words; the completed setup is checked against the compiler's
@@ -6439,35 +6446,10 @@ apple9_promote_constants(nir_shader *shader, nir_function_impl *preamble,
                         sorted[i].uses >= 2; ++i) {
       nir_store_preamble(&pb, nir_imm_int(&pb, sorted[i].value), .base = *used,
                          .preamble_class = nir_preamble_class_general);
-      _mesa_hash_table_u64_insert(slots, sorted[i].value,
-                                  (void *)(uintptr_t)(*used + 1));
+      constants->values[constants->count++] = sorted[i].value;
       ++*used;
    }
 
-   nir_foreach_block(block, impl) {
-      nir_foreach_instr(instr, block) {
-         if (instr->type != nir_instr_type_alu)
-            continue;
-         nir_alu_instr *alu = nir_instr_as_alu(instr);
-         for (unsigned s = 0; s < nir_op_infos[alu->op].num_inputs; ++s) {
-            uint32_t value;
-            if (!apple9_uniform_constant_use(alu, s, &value))
-               continue;
-            uintptr_t slot = (uintptr_t)_mesa_hash_table_u64_search(slots, value);
-            if (!slot)
-               continue;
-            nir_builder b = nir_builder_at(nir_before_instr(instr));
-            nir_def *uniform = nir_load_preamble(
-               &b, 1, 32, .base = slot - 1,
-               .preamble_class = nir_preamble_class_general);
-            nir_src_rewrite(&alu->src[s].src, uniform);
-            alu->src[s].swizzle[0] = 0;
-         }
-      }
-   }
-   nir_progress(true, impl, nir_metadata_control_flow);
-
-   _mesa_hash_table_u64_destroy(slots);
    _mesa_hash_table_u64_destroy(counts);
    util_dynarray_fini(&list);
 }
@@ -6756,6 +6738,7 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
    };
    unsigned sizes[nir_preamble_num_classes] = {0};
    struct agx_shader_part setup = {0}, candidate = {0};
+   struct agx_apple9_uniform_constants constants = {0};
    struct agx_apple9_compute_profile candidate_profile = {0};
    const char *candidate_reason = NULL;
    nir_shader *preamble = NULL;
@@ -6769,7 +6752,11 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
          if (promote_constants)
             apple9_promote_constants(main, impl,
                                      &sizes[nir_preamble_class_general],
-                                     options.preamble_storage_size[nir_preamble_class_general]);
+                                     options.preamble_storage_size[nir_preamble_class_general],
+                                     &constants);
+         constants.base += resources->descriptor_tables
+            ? AGX_APPLE9_GRAPHICS_ROOT_WORDS
+            : agx_apple9_compute_preamble_base(resources->count);
          preamble = nir_shader_create(NULL, nir->info.stage, nir->options);
          preamble->info.stage = nir->info.stage;
          preamble->info.float_controls_execution_mode = nir->info.float_controls_execution_mode;
@@ -6782,13 +6769,13 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
          nir_opt_dce(main);
          nir_opt_dce(preamble);
          if (apple9_compile_dag_body(preamble, &setup, NULL, NULL, resources,
-                                    true, NULL, &candidate_reason) &&
+                                    NULL, true, NULL, &candidate_reason) &&
              !setup.info.scratch_size &&
              setup.info.main_size > 4 &&
              setup.info.main_size <= AGX_APPLE9_MAX_PREAMBLE_BYTES &&
              apple9_compile_dag_body(main, &candidate,
                                     profile ? &candidate_profile : NULL,
-                                    varyings, resources, false, cost, &candidate_reason)) {
+                                    varyings, resources, &constants, false, cost, &candidate_reason)) {
             unsigned size = setup.info.main_size;
             uint8_t *binary = realloc(candidate.binary, candidate.info.binary_size + size);
             if (binary) {
@@ -6959,7 +6946,7 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
       return true;
 
    return apple9_compile_dag_body(nir, out, profile, varyings, &resources,
-                                 false, NULL, reason);
+                                 NULL, false, NULL, reason);
 }
 
 /* Internal shaders can arrive with generic Asahi options. Preserve operations

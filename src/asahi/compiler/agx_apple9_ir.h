@@ -537,6 +537,15 @@ bool agx_apple9_instr_is_pure_alu(const struct agx_apple9_vir_instr *instruction
 bool agx_apple9_supports_special_uniform(enum agx_apple9_vir_opcode op);
 
 bool agx_apple9_supports_saturate(const struct agx_apple9_vir_instr *instruction);
+/* Known literal values stored in a contiguous, immutable main-program
+ * uniform window. Preserve their constant semantics until operand selection. */
+struct agx_apple9_uniform_constants {
+   unsigned base, count;
+   uint32_t values[AGX_APPLE9_UNIFORM_COUNT];
+};
+bool agx_apple9_optimize_vir_with_constants(
+   struct agx_apple9_vir_program *program,
+   const struct agx_apple9_uniform_constants *constants);
 bool agx_apple9_optimize_vir(struct agx_apple9_vir_program *program);
 bool agx_apple9_encode_float_immediate(uint32_t value, uint8_t *encoded);
 
