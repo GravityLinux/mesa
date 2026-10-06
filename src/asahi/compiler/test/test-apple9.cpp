@@ -11485,6 +11485,41 @@ TEST(Apple9Compiler, InvocationDependentUboStaysInMain)
    ralloc_free(nir);
 }
 
+TEST(Apple9Compiler, UnselectedUniformAddressesDoNotStayLiveAcrossBranches)
+{
+   nir_builder b = apple9_compute_builder("guarded_uniform_address_pressure");
+   nir_def *gid = apple9_global_id_x(&b);
+   nir_def *descriptor = nir_load_ubo(&b, 4, 32, nir_imm_int(&b, 7),
+      nir_imm_int(&b, 0), .align_mul = 16, .range = 16);
+   for (unsigned i = 0; i < 160; ++i) {
+      nir_push_if(&b, nir_ine_imm(&b, nir_iand_imm(&b, gid, 1u << (i % 31)), 0));
+      nir_def *valid = nir_ult(&b, nir_imm_int(&b, 4 * i + 3),
+                               nir_channel(&b, descriptor, 2));
+      nir_def *lo = nir_bcsel(&b, valid, nir_channel(&b, descriptor, 0),
+                              nir_imm_int(&b, 0));
+      nir_def *hi = nir_bcsel(&b, valid, nir_channel(&b, descriptor, 1),
+                              nir_imm_int(&b, 1));
+      nir_def *sum = nir_iadd_imm(&b, lo, 4 * i);
+      nir_def *address = nir_vec2(&b, sum,
+         nir_iadd(&b, hi, nir_b2i32(&b, nir_ult(&b, sum, lo))));
+      nir_def *value = nir_load_global_2x32(&b, 1, 32, address,
+         .access = ACCESS_CAN_REORDER, .align_mul = 4);
+      apple9_store_output(&b, nir_iadd_imm(&b, gid, i), value);
+      nir_pop_if(&b, nullptr);
+   }
+   agx_shader_part compiled = {};
+   agx_apple9_compute_profile profile = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason))
+      << (reason ?: "");
+   EXPECT_GT(compiled.info.apple9_preamble_size, 0u);
+   /* Each branch needs only one address and value at a time, even when the
+    * preamble cannot store every redirected pointer. */
+   EXPECT_EQ(compiled.info.scratch_size, 0u);
+   free(compiled.binary);
+   ralloc_free(b.shader);
+}
+
 TEST(Apple9Compiler, PreambleShrinkingPreservesBufferByteAddresses)
 {
    nir_builder b = apple9_compute_builder("preamble_vector_start");

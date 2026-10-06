@@ -6518,6 +6518,7 @@ struct apple9_uniform_hoist {
    nir_block *entry;
    uint8_t *state;
    nir_cursor cursor;
+   struct hash_table *original_blocks;
 };
 
 static bool
@@ -6582,18 +6583,21 @@ apple9_hoist_uniform_source(nir_src *src, void *data)
    if (instr->block == s->entry)
       return true;
    nir_foreach_src(instr, apple9_hoist_uniform_source, s);
+   if (s->original_blocks)
+      _mesa_hash_table_insert(s->original_blocks, instr, instr->block);
    nir_instr_move(s->cursor, instr);
    s->cursor = nir_after_instr(instr);
    return true;
 }
 
-bool
-agx_nir_hoist_apple9_uniform_reads(nir_shader *nir)
+static bool
+apple9_hoist_uniform_reads(nir_shader *nir, struct hash_table *original_blocks)
 {
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
    nir_index_ssa_defs(impl);
    struct apple9_uniform_hoist s = {
       .entry = nir_start_block(impl),
+      .original_blocks = original_blocks,
       .state = calloc(MAX2(impl->ssa_alloc, 1), 1),
       .cursor = nir_after_block_before_jump(nir_start_block(impl)),
    };
@@ -6631,6 +6635,46 @@ agx_nir_hoist_apple9_uniform_reads(nir_shader *nir)
    return nir_progress(progress, impl, nir_metadata_control_flow);
 }
 
+bool
+agx_nir_hoist_apple9_uniform_reads(nir_shader *nir)
+{
+   return apple9_hoist_uniform_reads(nir, NULL);
+}
+
+/* Exposing an address to preamble extraction must not leave every unselected
+ * expression live from shader entry. Restore surviving hoisted instructions
+ * toward their original blocks. CSE may have shared them with other branches,
+ * so include all uses when choosing a dominating block. Reverse traversal
+ * moves consumers before sources, preserving their order after the phis. */
+static void
+apple9_restore_unselected_hoists(nir_shader *nir, struct hash_table *original_blocks)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   nir_metadata_require(impl, nir_metadata_block_index | nir_metadata_dominance |
+                              nir_metadata_dominance_lca);
+   nir_block *entry = nir_start_block(impl);
+   bool progress = false;
+   nir_foreach_instr_reverse_safe(instr, entry) {
+      /* Extraction creates load_preamble intrinsics and frees selected
+       * definitions. Do not associate new allocations with old pointer keys. */
+      if (instr->type == nir_instr_type_intrinsic &&
+          nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_preamble)
+         continue;
+      struct hash_entry *found = _mesa_hash_table_search(original_blocks, instr);
+      if (!found)
+         continue;
+      nir_def *def = nir_instr_def(instr);
+      nir_block *target = found->data;
+      nir_foreach_use_including_if(use, def)
+         target = nir_dominance_lca(target, nir_src_get_block(use));
+      if (target != entry) {
+         nir_instr_move(nir_after_phis(target), instr);
+         progress = true;
+      }
+   }
+   nir_progress(progress, impl, nir_metadata_control_flow);
+}
+
 static bool
 apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
                    struct agx_apple9_compute_profile *profile,
@@ -6649,7 +6693,12 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
    nir_opt_shrink_vectors(main, true);
    nir_opt_constant_folding(main);
    apple9_legalize_buffer_accesses(main);
-   if (agx_nir_hoist_apple9_uniform_reads(main))
+   struct hash_table *original_blocks = _mesa_pointer_hash_table_create(NULL);
+   if (!original_blocks) {
+      ralloc_free(main);
+      return false;
+   }
+   if (apple9_hoist_uniform_reads(main, original_blocks))
       nir_opt_cse(main);
    nir_function_impl *main_impl = nir_shader_get_entrypoint(main);
    nir_index_ssa_defs(main_impl);
@@ -6657,6 +6706,7 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
       .state = calloc(MAX2(main_impl->ssa_alloc, 1), sizeof(uint8_t)),
    };
    if (!eligibility.state) {
+      _mesa_hash_table_destroy(original_blocks, NULL);
       ralloc_free(main);
       return false;
    }
@@ -6675,6 +6725,7 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
    const char *candidate_reason = NULL;
    nir_shader *preamble = NULL;
    if (main && nir_opt_preamble(main, &options, sizes)) {
+      apple9_restore_unselected_hoists(main, original_blocks);
       nir_function_impl *impl = nir_shader_get_preamble(main);
       /* Setup currently admits ordinary linear ALU/UBO work. Masked setup and
        * scratch have independent execution contracts and are not assumed. */
@@ -6716,6 +6767,7 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
                   candidate_profile.preamble_size = size;
                   *profile = candidate_profile;
                }
+               _mesa_hash_table_destroy(original_blocks, NULL);
                free(eligibility.state);
                free(setup.binary);
                ralloc_free(preamble);
