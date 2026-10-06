@@ -1670,12 +1670,27 @@ apple9_lower_bool_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
             break;
          }
          case nir_op_bcsel: {
-            uint32_t condition = apple9_lower_bool_scalar(
-               lower, nir_scalar_chase_alu_src(scalar, 0));
             uint32_t if_true = apple9_lower_bool_scalar(
                lower, nir_scalar_chase_alu_src(scalar, 1));
             uint32_t if_false = apple9_lower_bool_scalar(
                lower, nir_scalar_chase_alu_src(scalar, 2));
+            nir_scalar predicate =
+               apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 0));
+            while (nir_def_instr_type(predicate.def) == nir_instr_type_alu &&
+                   nir_scalar_alu_op(predicate) == nir_op_inot) {
+               uint32_t temporary = if_true;
+               if_true = if_false;
+               if_false = temporary;
+               predicate = apple9_chase_trivial(
+                  nir_scalar_chase_alu_src(predicate, 0));
+            }
+            struct apple9_compare compare;
+            if (nir_def_instr_type(predicate.def) == nir_instr_type_alu &&
+                apple9_normalize_compare(nir_scalar_alu_op(predicate), &compare)) {
+               value = apple9_emit_dag_select(lower, predicate, if_true, if_false);
+               break;
+            }
+            uint32_t condition = apple9_lower_bool_scalar(lower, predicate);
             uint32_t zero = apple9_dag_zero(lower);
             value = apple9_emit_dag_select_raw(lower, zero, condition, if_true,
                                                if_false, AGX_APPLE9_SELECT_ULT);
@@ -2630,6 +2645,14 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
             uint32_t if_false = apple9_lower_dag_source(lower, scalar, 2);
             nir_scalar predicate =
                apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 0));
+            while (nir_def_instr_type(predicate.def) == nir_instr_type_alu &&
+                   nir_scalar_alu_op(predicate) == nir_op_inot) {
+               uint32_t temporary = if_true;
+               if_true = if_false;
+               if_false = temporary;
+               predicate = apple9_chase_trivial(
+                  nir_scalar_chase_alu_src(predicate, 0));
+            }
             struct apple9_compare compare;
             if (if_true == AGX_APPLE9_VREG_INVALID ||
                 if_false == AGX_APPLE9_VREG_INVALID) {

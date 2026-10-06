@@ -1171,3 +1171,59 @@ TEST_F(Apple9Optimization, MutableUniformWindowKeepsCrossBlockImportsInGprs)
    EXPECT_EQ(I->nr_srcs, 2u);
    EXPECT_EQ(I->alu_src_uniform_mask, 0u);
 }
+
+TEST_F(Apple9Optimization, SelectXorSwapsComplementaryArmsAndKeepsOtherUses)
+{
+   for (uint32_t mask : {1u, 0xffffffffu}) {
+      for (bool uniform_compare : {false, true}) {
+         agx_apple9_vir_finish(&p);
+         agx_apple9_vir_init(&p);
+         auto input = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_GET_GLOBAL_ID,
+            AGX_APPLE9_ENC_GET_SR, nullptr, 0, 0);
+         auto zero = imm(0), one = imm(mask);
+         auto compare = uniform_compare ? agx_apple9_vir_emit(&p,
+            AGX_APPLE9_VIR_IOR_UNIFORM, AGX_APPLE9_ENC_LOGIC_UNIFORM,
+            &zero, 1, 241) : imm(17);
+         uint32_t selected[] = {input, compare, one, zero};
+         auto original = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_SELECT,
+            AGX_APPLE9_ENC_SELECT_GPR_WIDE, selected, 4, AGX_APPLE9_SELECT_ULT);
+         uint32_t inverted[] = {one, original};
+         auto result = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IXOR,
+            AGX_APPLE9_ENC_LOGIC_EXTENDED, inverted, 2, 0);
+         p.output = add(original, result);
+         ASSERT_TRUE(agx_apple9_optimize_vir(&p));
+         ASSERT_TRUE(agx_apple9_analyze_uses(&p));
+         auto S = agx_apple9_definition(&p, original);
+         auto R = agx_apple9_definition(&p, result);
+         ASSERT_EQ(S->op, AGX_APPLE9_VIR_SELECT);
+         ASSERT_EQ(R->op, AGX_APPLE9_VIR_SELECT);
+         EXPECT_EQ(R->alu_src_uniform_mask, uniform_compare ? 2u : 0u);
+         if (uniform_compare) EXPECT_EQ(R->alu_src_value[1], 241u);
+         EXPECT_EQ(R->src[0], input);
+         for (unsigned x : {0u, 16u, 17u, 18u, 0xffffffffu}) {
+            unsigned branch = x < 17 ? 0 : 1;
+            auto old_arm = agx_apple9_definition(&p, S->src[S->nr_srcs - 2 + branch]);
+            auto new_arm = agx_apple9_definition(&p, R->src[R->nr_srcs - 2 + branch]);
+            ASSERT_EQ(old_arm->op, AGX_APPLE9_VIR_IMM);
+            ASSERT_EQ(new_arm->op, AGX_APPLE9_VIR_IMM);
+            EXPECT_EQ(new_arm->immediate, old_arm->immediate ^ mask);
+            EXPECT_EQ(old_arm->immediate, branch ? 0u : mask);
+         }
+      }
+   }
+}
+
+TEST_F(Apple9Optimization, SelectXorKeepsNoncomplementaryArms)
+{
+   auto input = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_GET_GLOBAL_ID,
+      AGX_APPLE9_ENC_GET_SR, nullptr, 0, 0);
+   uint32_t selected[] = {input, imm(17), imm(0), imm(3)};
+   auto original = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_SELECT,
+      AGX_APPLE9_ENC_SELECT_GPR_WIDE, selected, 4, AGX_APPLE9_SELECT_ULT);
+   uint32_t inverted[] = {original, imm(1)};
+   p.output = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IXOR,
+      AGX_APPLE9_ENC_LOGIC_EXTENDED, inverted, 2, 0);
+   ASSERT_TRUE(agx_apple9_optimize_vir(&p));
+   ASSERT_TRUE(agx_apple9_analyze_uses(&p));
+   EXPECT_EQ(agx_apple9_definition(&p, p.output)->op, AGX_APPLE9_VIR_IXOR);
+}

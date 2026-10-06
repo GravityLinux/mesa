@@ -246,6 +246,55 @@ agx_apple9_supports_special_uniform(enum agx_apple9_vir_opcode op)
 }
 
 static void
+fold_select_xor(struct agx_apple9_vir_instr *I,
+                struct agx_apple9_vir_instr **definitions,
+                const bool *constant, const uint32_t *values,
+                bool uniform_writes)
+{
+   if (I->op != AGX_APPLE9_VIR_IXOR || I->nr_srcs != 2 ||
+       I->alu_src_uniform_mask || I->alu_src_immediate_mask)
+      return;
+
+   for (unsigned c = 0; c < 2; ++c) {
+      if (!constant[I->src[c]])
+         continue;
+      const struct agx_apple9_vir_instr *S = definitions[I->src[1 - c]];
+      if (!S || S->op != AGX_APPLE9_VIR_SELECT || S->nr_srcs < 2 ||
+          S->encoding == AGX_APPLE9_ENC_HALF_COMPARE_SELECT ||
+          !agx_apple9_instr_is_pure_alu(S) ||
+          agx_apple9_instr_block(S) != agx_apple9_instr_block(I) ||
+          ((S->alu_src_uniform_mask | S->alu_src_immediate_mask |
+            S->src_abs_mask | S->src_neg_mask) & 0xc) ||
+          (uniform_writes && S->alu_src_uniform_mask))
+         continue;
+
+      /* The selected arms are the final two compact GPR sources. Swapping
+       * them implements XOR only when they are complements under this mask;
+       * an arbitrary Boolean-valued select need not have opposite arms. */
+      unsigned a = S->nr_srcs - 2, b = S->nr_srcs - 1;
+      if (!constant[S->src[a]] || !constant[S->src[b]] ||
+          (values[S->src[a]] ^ values[S->src[b]]) != values[I->src[c]])
+         continue;
+
+      /* Copy the expression into this definition, keeping the original for
+       * any other users and preserving this instruction's destination. */
+      I->op = S->op;
+      I->encoding = S->encoding;
+      I->nr_srcs = S->nr_srcs;
+      I->immediate = S->immediate;
+      I->src_abs_mask = S->src_abs_mask;
+      I->src_neg_mask = S->src_neg_mask;
+      I->alu_src_uniform_mask = S->alu_src_uniform_mask;
+      I->alu_src_immediate_mask = S->alu_src_immediate_mask;
+      memcpy(I->alu_src_value, S->alu_src_value, sizeof(I->alu_src_value));
+      memcpy(I->src, S->src, S->nr_srcs * sizeof(I->src[0]));
+      I->src[a] = S->src[b];
+      I->src[b] = S->src[a];
+      return;
+   }
+}
+
+static void
 select_float_sources(struct agx_apple9_vir_instr *I,
                      struct agx_apple9_vir_instr **definitions,
                      const bool *constant, const uint32_t *values)
@@ -700,6 +749,7 @@ agx_apple9_optimize_vir(struct agx_apple9_vir_program *p)
          continue;
 
       fold_integer(I, constant, values);
+      fold_select_xor(I, definitions, constant, values, uniform_writes);
       select_float_sources(I, definitions, constant, values);
       inline_alu_sources(I, uniform_read, constant, values);
       for (unsigned c = 0; c < I->dest_components; ++c)
