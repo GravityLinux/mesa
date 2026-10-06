@@ -274,6 +274,8 @@ struct ra_ctx {
    uint64_t *phi_weights;
    unsigned *last_reg;
    struct util_dynarray *reg_preferences;
+   /* Index of each register's entry in reg_preferences, or -1. */
+   int16_t *reg_preference_index;
    uint64_t dead_total, edge_total, affinity_total;
 
    /* If bit i of used_regs is set, and register i is the first consecutive
@@ -627,13 +629,28 @@ add_reg_preference(struct ra_ctx *rctx, unsigned reg, uint64_t edge,
    rctx->dead_total += dead;
    rctx->edge_total += edge;
    rctx->affinity_total += affinity;
-   util_dynarray_foreach(rctx->reg_preferences, struct phi_reg_preference, p) {
-      if (p->reg == reg) {
+   /* Spill-memory locations lie beyond the GPR index; search those. */
+   if (reg >= AGX_NUM_REGS) {
+      util_dynarray_foreach(rctx->reg_preferences, struct phi_reg_preference, p) {
+         if (p->reg == reg) {
+            p->dead += dead;
+            p->edge += edge;
+            p->affinity += affinity;
+            return;
+         }
+      }
+   } else {
+      int16_t index = rctx->reg_preference_index[reg];
+      if (index >= 0) {
+         struct phi_reg_preference *p = util_dynarray_element(
+            rctx->reg_preferences, struct phi_reg_preference, index);
          p->dead += dead;
          p->edge += edge;
          p->affinity += affinity;
          return;
       }
+      rctx->reg_preference_index[reg] = util_dynarray_num_elements(
+         rctx->reg_preferences, struct phi_reg_preference);
    }
    util_dynarray_append(rctx->reg_preferences,
                        ((struct phi_reg_preference){reg, dead, edge, affinity}));
@@ -645,6 +662,10 @@ cache_phi_preferences(struct ra_ctx *rctx, unsigned ssa)
    if (rctx->affinity_ssa == ssa)
       return;
 
+   util_dynarray_foreach(rctx->reg_preferences, struct phi_reg_preference, p) {
+      if (p->reg < AGX_NUM_REGS)
+         rctx->reg_preference_index[p->reg] = -1;
+   }
    util_dynarray_clear(rctx->reg_preferences);
    rctx->dead_total = rctx->edge_total = rctx->affinity_total = 0;
    for (struct phi_preference *p = rctx->phi_preferences[ssa]; p; p = p->next) {
@@ -726,13 +747,24 @@ placement_cost(struct ra_ctx *rctx, unsigned ssa, unsigned reg, unsigned count)
    cost.dead = rctx->dead_total;
    cost.edge = rctx->edge_total;
    cost.affinity = rctx->affinity_total;
-   util_dynarray_foreach(rctx->reg_preferences, struct phi_reg_preference, p) {
-      if (p->reg == reg) {
-         cost.dead -= p->dead;
-         cost.edge -= p->edge;
-         cost.affinity -= p->affinity;
-         break;
+   const struct phi_reg_preference *pref = NULL;
+   if (reg < AGX_NUM_REGS) {
+      int16_t index = rctx->reg_preference_index[reg];
+      if (index >= 0)
+         pref = util_dynarray_element(rctx->reg_preferences,
+                                      struct phi_reg_preference, index);
+   } else {
+      util_dynarray_foreach(rctx->reg_preferences, struct phi_reg_preference, p) {
+         if (p->reg == reg) {
+            pref = p;
+            break;
+         }
       }
+   }
+   if (pref) {
+      cost.dead -= pref->dead;
+      cost.edge -= pref->edge;
+      cost.affinity -= pref->affinity;
    }
    cost.collect = rctx->affinity_reg != ~0u && rctx->affinity_reg != reg;
    if (!rctx->preferred)
@@ -2438,6 +2470,8 @@ agx_ra(agx_context *ctx)
    free(constants);
    struct util_dynarray reg_preferences;
    util_dynarray_init(&reg_preferences, web_memctx);
+   int16_t reg_preference_index[AGX_NUM_REGS];
+   memset(reg_preference_index, 0xff, sizeof(reg_preference_index));
 
    uint8_t *ncomps = calloc(ctx->alloc, sizeof(uint8_t));
    uint8_t *ncomps_unrounded = calloc(ctx->alloc, sizeof(uint8_t));
@@ -2533,6 +2567,7 @@ agx_ra(agx_context *ctx)
          .phi_weights = phi_weights,
          .last_reg = last_reg,
          .reg_preferences = &reg_preferences,
+         .reg_preference_index = reg_preference_index,
          .ncomps = ncomps,
          .ncomps_unrounded = ncomps_unrounded,
          .sizes = sizes,
