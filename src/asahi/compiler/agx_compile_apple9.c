@@ -6508,6 +6508,90 @@ apple9_lower_texture_handles(nir_shader *nir)
                        nir_metadata_control_flow);
 }
 
+/* Read-only descriptor loads marked speculatable can execute before their
+ * original branch. Move only uniform dependency chains, then let preamble
+ * extraction choose which values are worth storing. Ordinary guarded buffer
+ * reads lack CAN_SPECULATE and must remain guarded.
+ */
+struct apple9_uniform_hoist {
+   nir_block *entry;
+   uint8_t *state;
+   nir_cursor cursor;
+};
+
+static bool
+apple9_can_hoist_uniform(nir_src *src, void *data)
+{
+   struct apple9_uniform_hoist *s = data;
+   nir_instr *instr = nir_def_instr(src->ssa);
+   uint8_t *state = &s->state[src->ssa->index];
+   if (*state)
+      return *state == 2;
+   *state = 1;
+   if (instr->block != s->entry && !nir_instr_can_speculate(instr))
+      return false;
+   if (instr->type == nir_instr_type_intrinsic) {
+      nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+      if (intr->intrinsic != nir_intrinsic_load_ubo &&
+          !(intr->intrinsic == nir_intrinsic_load_global_2x32 &&
+            (nir_intrinsic_access(intr) & ACCESS_CAN_REORDER)))
+         return false;
+   } else if (instr->type != nir_instr_type_alu &&
+              instr->type != nir_instr_type_load_const) {
+      return false;
+   }
+   if (!nir_foreach_src(instr, apple9_can_hoist_uniform, s))
+      return false;
+   *state = 2;
+   return true;
+}
+
+static bool
+apple9_hoist_uniform_source(nir_src *src, void *data)
+{
+   struct apple9_uniform_hoist *s = data;
+   nir_instr *instr = nir_def_instr(src->ssa);
+   if (instr->block == s->entry)
+      return true;
+   nir_foreach_src(instr, apple9_hoist_uniform_source, s);
+   nir_instr_move(s->cursor, instr);
+   s->cursor = nir_after_instr(instr);
+   return true;
+}
+
+bool
+agx_nir_hoist_apple9_uniform_reads(nir_shader *nir)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   nir_index_ssa_defs(impl);
+   struct apple9_uniform_hoist s = {
+      .entry = nir_start_block(impl),
+      .state = calloc(MAX2(impl->ssa_alloc, 1), 1),
+      .cursor = nir_after_block_before_jump(nir_start_block(impl)),
+   };
+   if (!s.state)
+      return false;
+   bool progress = false;
+   nir_foreach_block(block, impl) {
+      if (block == s.entry)
+         continue;
+      nir_foreach_instr_safe(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic != nir_intrinsic_load_global_2x32)
+            continue;
+         nir_src src = nir_src_for_ssa(&intr->def);
+         if (apple9_can_hoist_uniform(&src, &s)) {
+            apple9_hoist_uniform_source(&src, &s);
+            progress = true;
+         }
+      }
+   }
+   free(s.state);
+   return nir_progress(progress, impl, nir_metadata_control_flow);
+}
+
 static bool
 apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
                    struct agx_apple9_compute_profile *profile,
@@ -6526,6 +6610,8 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
    nir_opt_shrink_vectors(main, true);
    nir_opt_constant_folding(main);
    apple9_legalize_buffer_accesses(main);
+   if (agx_nir_hoist_apple9_uniform_reads(main))
+      nir_opt_cse(main);
    nir_function_impl *main_impl = nir_shader_get_entrypoint(main);
    nir_index_ssa_defs(main_impl);
    struct apple9_preamble_eligibility eligibility = {
