@@ -7554,11 +7554,14 @@ apple9_lower_compute_lod_query(nir_builder *b, nir_instr *instr, void *data)
       agx_apple9_sampler_field(b, tex, AGX_APPLE9_SAMP_MIN_LOD),
       agx_apple9_sampler_field(b, tex, AGX_APPLE9_SAMP_MAX_LOD));
    nir_def *mip = agx_apple9_sampler_field(b, tex, AGX_APPLE9_SAMP_MIP);
-   level = nir_bcsel(b, nir_ieq_imm(b, mip, PIPE_TEX_MIPFILTER_NEAREST),
-      nir_fadd_imm(b, nir_fceil(b, nir_fadd_imm(b, level, 0.5)), -1.0), level);
    nir_def *levels = agx_apple9_texture_info(b, tex, 3);
    level = nir_fclamp(b, level, nir_imm_float(b, 0),
                         nir_u2f32(b, nir_iadd_imm(b, levels, -1)));
+   int view_min = nir_tex_instr_src_index(tex, nir_tex_src_min_lod);
+   if (view_min >= 0)
+      level = nir_fmax(b, level, nir_f2f32(b, tex->src[view_min].src.ssa));
+   level = nir_bcsel(b, nir_ieq_imm(b, mip, PIPE_TEX_MIPFILTER_NEAREST),
+      nir_fadd_imm(b, nir_fceil(b, nir_fadd_imm(b, level, 0.5)), -1.0), level);
    level = nir_bcsel(b, nir_ieq_imm(b, mip, PIPE_TEX_MIPFILTER_NONE),
                        nir_imm_float(b, 0), level);
    nir_def *result = nir_bcsel(b, nir_ieq_imm(b, levels, 0),
