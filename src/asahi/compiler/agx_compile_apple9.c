@@ -7547,6 +7547,8 @@ apple9_lower_compute_lod_query(nir_builder *b, nir_instr *instr, void *data)
          .align_mul = 4, .range = 4);
       bias = nir_fadd(b, bias, state_bias);
    }
+   /* Honeykrisp advertises maxSamplerLodBias = 15. */
+   bias = nir_fclamp(b, bias, nir_imm_float(b, -15), nir_imm_float(b, 15));
    lod = nir_fadd(b, lod, bias);
    nir_def *level = nir_fclamp(b, lod,
       agx_apple9_sampler_field(b, tex, AGX_APPLE9_SAMP_MIN_LOD),
