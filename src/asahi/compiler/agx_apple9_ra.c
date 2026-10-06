@@ -1629,6 +1629,7 @@ apple9_allocate_candidate(struct agx_apple9_vir_program *program,
       goto cleanup;
    }
    out.peak_live_gprs = ra.ctx->max_reg / 2 + 1;
+   out.pre_spill_gprs = DIV_ROUND_UP(ra.ctx->pre_spill_register_demand, 2);
    out.publication_count = program->publication_count;
    out.fragment_shader = program->fragment_shader;
    out.dependencies_finalized = out.physical = true;

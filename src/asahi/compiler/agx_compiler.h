@@ -606,6 +606,8 @@ typedef struct {
    /* Stats for shader-db */
    unsigned loop_count;
    unsigned max_reg;
+   /* Peak half-register demand before spilling, including reserved registers. */
+   unsigned pre_spill_register_demand;
 
    /* Promoted constants. These will be appended to the binary at the end. */
    uint16_t rodata[512];

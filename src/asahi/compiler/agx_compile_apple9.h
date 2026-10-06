@@ -20,6 +20,7 @@ extern "C" {
 #endif
 
 bool agx_nir_lower_apple9_math(nir_shader *shader);
+bool agx_nir_opt_apple9_licm(nir_shader *shader);
 
 /* After generic texture lowering, backend1 holds a packed Apple9 LOD/bias
  * word rather than the original floating-point LOD or integer fetch level. */

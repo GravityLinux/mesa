@@ -2237,6 +2237,7 @@ agx_ra(agx_context *ctx)
     */
    agx_compute_liveness(ctx);
    unsigned effective_demand = agx_calc_register_demand(ctx, false);
+   ctx->pre_spill_register_demand = effective_demand;
    bool spilling = (effective_demand > max_possible_regs);
    bool remat = false;
 
