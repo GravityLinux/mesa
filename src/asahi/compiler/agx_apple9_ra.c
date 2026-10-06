@@ -1672,14 +1672,17 @@ cleanup:
 
 struct apple9_allocation_cost {
    uint64_t spills, instructions, bytes, dependency_gaps;
-   unsigned registers;
+   unsigned registers, peak_registers;
    bool has_copies;
 };
 
 static struct apple9_allocation_cost
 apple9_allocation_cost(const struct agx_apple9_vir_program *p)
 {
-   struct apple9_allocation_cost cost = {.registers = p->max_phys_gpr + 1};
+   struct apple9_allocation_cost cost = {
+      .registers = p->max_phys_gpr + 1,
+      .peak_registers = MAX2(p->max_phys_gpr + 1, p->peak_live_gprs),
+   };
    unsigned nesting = 0;
    unsigned ready[AGX_APPLE9_GPR_COUNT] = {0}, issue = 0;
    for (unsigned i = 0; i < p->instruction_count; ++i) {
@@ -1735,13 +1738,14 @@ apple9_latency_cheaper(struct apple9_allocation_cost a,
 {
    if (a.spills != b.spills)
       return a.spills < b.spills;
-   struct agx_occupancy tier_a = agx_occupancy_for_register_count(2 * a.registers);
-   struct agx_occupancy tier_b = agx_occupancy_for_register_count(2 * b.registers);
+   struct agx_occupancy tier_a = agx_occupancy_for_register_count(2 * a.peak_registers);
+   struct agx_occupancy tier_b = agx_occupancy_for_register_count(2 * b.peak_registers);
    if (tier_a.max_threads != tier_b.max_threads)
       return tier_a.max_threads > tier_b.max_threads;
    /* The granules are a stand-in and may be off by one on Apple9. Do not let
     * added registers reach the boundary of the tier the program occupies. */
-   if (a.registers > b.registers && 2 * a.registers >= tier_b.max_registers)
+   if (a.peak_registers > b.peak_registers &&
+       2 * a.peak_registers >= tier_b.max_registers)
       return false;
    return 4 * a.instructions + a.dependency_gaps <
           4 * b.instructions + b.dependency_gaps;
