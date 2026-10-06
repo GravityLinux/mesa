@@ -10,6 +10,7 @@
 #include "agx_compiler.h"
 #include "agx_debug.h"
 #include "util/hash_table.h"
+#include "util/mesa-blake3.h"
 
 /* Apple9 selection keeps its machine operands and encoding contracts. The
  * shared IR carries their SSA dataflow, including genuine CFG phis, through
@@ -1513,12 +1514,55 @@ apple9_returns_device_atomic(const struct agx_apple9_vir_program *program)
    return false;
 }
 
+static const char apple9_duplicate_candidate_reason[] =
+   "Apple9 allocation candidate repeats an evaluated schedule";
+
+/* Everything after scheduling depends only on the scheduled IR and these
+ * policy inputs, so an equal digest means an identical allocation, which
+ * can never be strictly cheaper than the one already compared. */
+static bool
+apple9_seen_schedule(agx_context *ctx, struct util_dynarray *seen,
+                     bool cost_constraints, bool copy_register,
+                     bool uniform_remat)
+{
+   struct mesa_blake3 sha;
+   _mesa_blake3_init(&sha);
+   const uint8_t flags[] = {cost_constraints, copy_register, uniform_remat};
+   _mesa_blake3_update(&sha, flags, sizeof(flags));
+   char *text = NULL;
+   size_t size = 0;
+   FILE *stream = open_memstream(&text, &size);
+   if (!stream)
+      return false;
+   agx_foreach_block(ctx, block) {
+      fprintf(stream, "block %u\n", block->index);
+      agx_foreach_instr_in_block(block, I) {
+         agx_print_instr(I, stream);
+         fprintf(stream, "%p\n", (const void *)I->apple9);
+      }
+   }
+   fclose(stream);
+   _mesa_blake3_update(&sha, text, size);
+   free(text);
+   blake3_hash digest;
+   _mesa_blake3_final(&sha, digest);
+   for (unsigned off = 0; off + BLAKE3_OUT_LEN <= seen->size;
+        off += BLAKE3_OUT_LEN) {
+      if (!memcmp((const uint8_t *)seen->data + off, digest, BLAKE3_OUT_LEN))
+         return true;
+   }
+   util_dynarray_append_array(seen, uint8_t, digest, BLAKE3_OUT_LEN);
+   return false;
+}
+
 static bool
 apple9_allocate_candidate(struct agx_apple9_vir_program *program,
                           nir_shader *nir, bool cost_constraints, bool latency,
                           unsigned pressure_slack, bool copy_register, bool uniform_remat,
                           struct agx_apple9_vir_program *result,
-                          const char **reason)
+                          const char **reason, bool *remat_used,
+                          unsigned *rejected_increase,
+                          struct util_dynarray *seen)
 {
    struct apple9_shared_ra ra = {.program = program};
    ra.ctx = rzalloc(NULL, agx_context);
@@ -1552,6 +1596,11 @@ apple9_allocate_candidate(struct agx_apple9_vir_program *program,
          I->dest[0] = agx_temp(ra.ctx, AGX_SIZE_32);
    }
    agx_pressure_schedule(ra.ctx);
+   if (seen && apple9_seen_schedule(ra.ctx, seen, cost_constraints,
+                                    copy_register, uniform_remat)) {
+      *reason = apple9_duplicate_candidate_reason;
+      goto cleanup;
+   }
    if (getenv("AGX_APPLE9_TRACE_SHARED_RA") != NULL)
       agx_print_shader(ra.ctx, stderr);
    if (!agx_ra(ra.ctx)) {
@@ -1590,15 +1639,35 @@ apple9_allocate_candidate(struct agx_apple9_vir_program *program,
       /* Physical scheduling follows the logical CFG's loop edges too. */
       blocks[block->index]->nir = block->nir;
    }
+   /* Instruction indices grouped by block, in program order, for blocks
+    * emitted directly from VIR. */
+   unsigned *block_first = rzalloc_array(ra.ctx, unsigned, count + 1);
+   unsigned *block_order =
+      ralloc_array(ra.ctx, unsigned, MAX2(program->instruction_count, 1));
+   if (!block_first || !block_order)
+      goto cleanup;
+   for (unsigned i = 0; i < program->instruction_count; ++i)
+      ++block_first[agx_apple9_instr_block(program->instructions[i])->index + 1];
+   for (unsigned b = 0; b < count; ++b)
+      block_first[b + 1] += block_first[b];
+   {
+      unsigned *fill = rzalloc_array(ra.ctx, unsigned, count);
+      if (!fill)
+         goto cleanup;
+      for (unsigned i = 0; i < program->instruction_count; ++i) {
+         unsigned b = agx_apple9_instr_block(program->instructions[i])->index;
+         block_order[block_first[b] + fill[b]++] = i;
+      }
+   }
    for (struct agx_apple9_block *block = program->blocks; block;
         block = block->next) {
       agx_apple9_block_begin(&out, blocks[block->index]);
       agx_block *common = apple9_shared_block(&ra, block);
       if (!common) {
-         for (unsigned i = 0; i < program->instruction_count; ++i) {
+         for (unsigned k = block_first[block->index];
+              k < block_first[block->index + 1]; ++k) {
+            const unsigned i = block_order[k];
             struct agx_apple9_vir_instr ins = *program->instructions[i];
-            if (agx_apple9_instr_block(program->instructions[i]) != block)
-               continue;
             if (ins.branch_target)
                ins.branch_target = blocks[ins.branch_target->index];
             if (!apple9_emit_physical(&out, &ins))
@@ -1665,6 +1734,10 @@ apple9_allocate_candidate(struct agx_apple9_vir_program *program,
    memset(&out, 0, sizeof(out));
    success = true;
 cleanup:
+   if (remat_used)
+      *remat_used = ra.ctx->uniform_remat_used;
+   if (rejected_increase)
+      *rejected_increase = ra.ctx->schedule_rejected_increase;
    agx_apple9_vir_finish(&out);
    ralloc_free(ra.ctx);
    return success;
@@ -1767,17 +1840,28 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
    /* Prefer an allocation without reserved registers; constants placed above
     * r63 need the copy register, so retry with it reserved. */
    bool copy_register = false;
+   struct util_dynarray seen;
+   util_dynarray_init(&seen, NULL);
+   /* Whether the successful rematerializing candidate for [latency][banks]
+    * (slack 0, current copy_register) actually rematerialized a uniform. If
+    * not, the non-rematerializing allocation is the same computation. */
+   bool remat_known[2][2] = {{false}}, remat_used[2][2] = {{false}};
    if (!apple9_allocate_candidate(program, nir, false, false, 0, false, true, &best,
-                                  reason)) {
-      if (*reason != apple9_copy_register_reason)
+                                  reason, &remat_used[0][0], NULL, &seen)) {
+      if (*reason != apple9_copy_register_reason) {
+         util_dynarray_fini(&seen);
          return false;
+      }
       agx_apple9_vir_finish(&best);
       agx_apple9_vir_init(&best);
       copy_register = true;
       if (!apple9_allocate_candidate(program, nir, false, false, 0, true, true, &best,
-                                     reason))
+                                     reason, &remat_used[0][0], NULL, &seen)) {
+         util_dynarray_fini(&seen);
          return false;
+      }
    }
+   remat_known[0][0] = true;
 
    struct apple9_allocation_cost cost = apple9_allocation_cost(&best);
    if (cost.has_copies || cost.spills) {
@@ -1785,8 +1869,11 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
        * Compare completed allocations so those costs are paid by the policy
        * which caused them, including rematerialization and spill lowering. */
       const char *unused_reason = NULL;
-      if (apple9_allocate_candidate(program, nir, true, false, 0, copy_register, true,
-                                     &alternative, &unused_reason) &&
+      bool built = apple9_allocate_candidate(program, nir, true, false, 0,
+                                             copy_register, true, &alternative,
+                                             &unused_reason, &remat_used[0][1], NULL, &seen);
+      remat_known[0][1] = built;
+      if (built &&
           apple9_allocation_cheaper(apple9_allocation_cost(&alternative), cost))
          SWAP(best, alternative);
    }
@@ -1800,13 +1887,26 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
        * also offer schedules that may raise a block's peak pressure by eight
        * GPRs. Spills and the occupancy tier still decide between them. */
       static const unsigned slacks[] = {0, 16};
+      /* A larger slack changes the schedule only if a smaller one rejected a
+       * reorder whose increase it would now admit; otherwise its allocation
+       * repeats the previous one exactly. */
+      unsigned rejected[2] = {UINT_MAX, UINT_MAX};
       for (unsigned c = 0; c < 2 * ARRAY_SIZE(slacks); ++c) {
          const unsigned banks = c & 1, slack = slacks[c >> 1];
+         if (slack && rejected[banks] <= slacks[(c >> 1) - 1])
+            continue;
          agx_apple9_vir_init(&alternative);
          const char *unused_reason = NULL;
+         bool used = false;
+         unsigned increase = UINT_MAX;
          bool built = apple9_allocate_candidate(program, nir, banks, true, slack,
                                         copy_register, true, &alternative,
-                                        &unused_reason);
+                                        &unused_reason, &used, &increase, &seen);
+         rejected[banks] = built ? increase : UINT_MAX;
+         if (!slack) {
+            remat_known[1][banks] = built;
+            remat_used[1][banks] = used;
+         }
          if (built &&
              apple9_latency_cheaper(apple9_allocation_cost(&alternative), cost)) {
             SWAP(best, alternative);
@@ -1822,18 +1922,20 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
    if (cost.spills) {
       for (unsigned latency = 0; latency <= (long_dependencies > 1); ++latency) {
          for (unsigned banks = 0; banks < 2; ++banks) {
+            if (remat_known[latency][banks] && !remat_used[latency][banks])
+               continue;
             agx_apple9_vir_init(&alternative);
             const char *unused_reason = NULL;
             bool ok = apple9_allocate_candidate(
                program, nir, banks, latency, 0, copy_register, false,
-               &alternative, &unused_reason);
+               &alternative, &unused_reason, NULL, NULL, &seen);
             if (!ok && !copy_register &&
                 unused_reason == apple9_copy_register_reason) {
                agx_apple9_vir_finish(&alternative);
                agx_apple9_vir_init(&alternative);
                ok = apple9_allocate_candidate(
                   program, nir, banks, latency, 0, true, false,
-                  &alternative, &unused_reason);
+                  &alternative, &unused_reason, NULL, NULL, &seen);
             }
             if (ok && apple9_allocation_cheaper(
                          apple9_allocation_cost(&alternative), cost)) {
@@ -1844,6 +1946,7 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
          }
       }
    }
+   util_dynarray_fini(&seen);
    agx_apple9_vir_finish(program);
    *program = best;
    for (struct agx_apple9_block *block = program->allocated_blocks; block;

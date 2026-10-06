@@ -538,10 +538,16 @@ typedef struct {
     * Resource bit assignments belong to the target. */
    void (*schedule_resources)(const agx_instr *instruction,
                               uint32_t *reads, uint32_t *writes);
+   /* Set when uniform rematerialization marked at least one value. */
+   bool uniform_remat_used;
    /* Relative dependency separation in issue positions, not hardware cycles. */
    unsigned (*schedule_delay)(const agx_instr *instruction);
    /* Half-registers a latency schedule may add to a block's peak pressure. */
    unsigned schedule_pressure_slack;
+   /* Largest peak-pressure increase of a latency reorder that was rejected
+    * for exceeding the slack, so callers can tell whether more slack changes
+    * the schedule. */
+   unsigned schedule_rejected_increase;
    nir_shader *nir;
    mesa_shader_stage stage;
    bool is_preamble;

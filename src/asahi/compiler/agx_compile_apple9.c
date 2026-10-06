@@ -55,6 +55,39 @@ apple9_emit_stop(struct apple9_emitter *emitter)
  * Gallium's GLSL path keeps SSBO offsets as a low/high pair until late NIR.
  * Peel only representation-preserving wrappers plus additions by zero.
  */
+static bool
+apple9_trivial_zero(nir_scalar scalar)
+{
+   for (unsigned iteration = 0; iteration < 32; ++iteration) {
+      scalar = nir_scalar_chase_movs(scalar);
+      if (nir_scalar_is_const(scalar))
+         return nir_scalar_as_uint(scalar) == 0;
+      if (nir_def_instr_type(scalar.def) != nir_instr_type_alu)
+         return false;
+
+      nir_op op = nir_scalar_alu_op(scalar);
+      if (op == nir_op_vec2 || op == nir_op_vec3 || op == nir_op_vec4) {
+         scalar = nir_scalar_chase_alu_src(scalar, scalar.comp);
+         continue;
+      }
+      if (op != nir_op_iadd)
+         return false;
+
+      /* A sum is trivially zero only if both terms are. Test a constant term
+       * first so ordinary address chains stop at their displacement. */
+      nir_scalar left = nir_scalar_chase_movs(nir_scalar_chase_alu_src(scalar, 0));
+      nir_scalar right = nir_scalar_chase_movs(nir_scalar_chase_alu_src(scalar, 1));
+      if (nir_scalar_is_const(left) && nir_scalar_as_uint(left) != 0)
+         return false;
+      if (nir_scalar_is_const(right) && nir_scalar_as_uint(right) != 0)
+         return false;
+      if (!apple9_trivial_zero(left))
+         return false;
+      scalar = right;
+   }
+   return false;
+}
+
 static nir_scalar
 apple9_chase_trivial(nir_scalar scalar)
 {
@@ -69,16 +102,17 @@ apple9_chase_trivial(nir_scalar scalar)
          continue;
       }
 
+      /* Only an addition with a term that reduces to zero is peeled; the
+       * other term is chased further. Deciding that needs a zero test, not
+       * a full chase of both terms. */
       if (op == nir_op_iadd) {
-         nir_scalar left =
-            apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 0));
-         nir_scalar right =
-            apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 1));
-         if (nir_scalar_is_const(left) && nir_scalar_as_uint(left) == 0) {
+         nir_scalar left = nir_scalar_chase_alu_src(scalar, 0);
+         nir_scalar right = nir_scalar_chase_alu_src(scalar, 1);
+         if (apple9_trivial_zero(left)) {
             scalar = right;
             continue;
          }
-         if (nir_scalar_is_const(right) && nir_scalar_as_uint(right) == 0) {
+         if (apple9_trivial_zero(right)) {
             scalar = left;
             continue;
          }
