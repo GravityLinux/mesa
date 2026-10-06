@@ -6604,20 +6604,6 @@ agx_nir_hoist_apple9_uniform_reads(nir_shader *nir)
       if (block == s.entry)
          continue;
       nir_foreach_instr_safe(instr, block) {
-         if (instr->type == nir_instr_type_intrinsic &&
-             nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_global_2x32) {
-            /* A guarded data read need not be speculatable for its pure,
-             * uniform address calculation to be shared in the preamble.
-             * In particular, bounds-conditioned pointers can move while
-             * the actual read remains in its original control flow.
-             */
-            nir_src address = nir_instr_as_intrinsic(instr)->src[0];
-            if (nir_def_instr(address.ssa)->block != s.entry &&
-                apple9_can_hoist_uniform(&address, &s)) {
-               apple9_hoist_uniform_source(&address, &s);
-               progress = true;
-            }
-         }
          if (!apple9_is_bounds_limit(instr) &&
              !(instr->type == nir_instr_type_intrinsic &&
                nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_global_2x32))
