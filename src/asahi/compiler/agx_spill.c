@@ -367,7 +367,7 @@ can_remat(agx_instr *I)
 static bool
 apple9_remat_alu(const agx_instr *I)
 {
-   if (I->op != AGX_OPCODE_APPLE9_PURE || I->nr_dests != 1 ||
+   if (I->op != AGX_OPCODE_APPLE9_PURE || !I->apple9 || I->nr_dests != 1 ||
        I->dest[0].size != AGX_SIZE_32 || agx_channels(I->dest[0]) != 1 ||
        !agx_apple9_instr_is_pure_alu(I->apple9))
       return false;
@@ -401,30 +401,35 @@ apple9_remat_alu(const agx_instr *I)
    }
 }
 
-static void
+static unsigned
 find_apple9_remat(agx_context *ctx, agx_instr **remat, void *memctx)
 {
    /* Preamble writes make uniforms mutable. Treat that entire shader part
     * conservatively; the main shader's file is immutable. */
    agx_foreach_instr_global(ctx, I) {
       if ((I->op == AGX_OPCODE_APPLE9 || I->op == AGX_OPCODE_APPLE9_PURE) &&
-          I->apple9->op == AGX_APPLE9_VIR_STORE_UNIFORM)
-         return;
+          I->apple9 && I->apple9->op == AGX_APPLE9_VIR_STORE_UNIFORM)
+         return 0;
    }
 
    uint8_t *cost = rzalloc_array(memctx, uint8_t, ctx->alloc);
+   unsigned *peak = rzalloc_array(memctx, unsigned, ctx->alloc);
    agx_foreach_instr_global(ctx, I) {
-      if (I->op == AGX_OPCODE_MOV_IMM)
+      if (I->op == AGX_OPCODE_MOV_IMM) {
          cost[I->dest[0].value] = 1;
+         peak[I->dest[0].value] =
+            util_next_power_of_two(agx_index_size_16(I->dest[0]));
+      }
    }
 
+   unsigned extra = 0;
    bool progress;
    do {
       progress = false;
       agx_foreach_instr_global(ctx, I) {
          if (!apple9_remat_alu(I) || cost[I->dest[0].value])
             continue;
-         unsigned total = 1;
+         unsigned total = 1, held = 0, demand = 0;
          agx_foreach_src(I, s) {
             if (I->src[s].type != AGX_INDEX_NORMAL ||
                 !cost[I->src[s].value]) {
@@ -432,14 +437,21 @@ find_apple9_remat(agx_context *ctx, agx_instr **remat, void *memctx)
                break;
             }
             total += cost[I->src[s].value];
+            demand = MAX2(demand, held + peak[I->src[s].value]);
+            held += util_next_power_of_two(agx_index_size_16(I->src[s]));
          }
          if (total <= 4) {
+            unsigned width = agx_index_size_16(I->dest[0]);
+            demand = MAX2(demand, held + width);
+            peak[I->dest[0].value] = demand;
+            extra = MAX2(extra, demand - width);
             cost[I->dest[0].value] = total;
             remat[I->dest[0].value] = I;
             progress = true;
          }
       }
    } while (progress);
+   return extra;
 }
 
 static agx_instr *
@@ -1481,6 +1493,70 @@ validate_next_use_info(UNUSED agx_context *ctx,
 #endif
 }
 
+/* A spilled loop-invariant SSA value has the same bits on every iteration.
+ * If it is already available at the unique preheader exit, write its scratch
+ * copy there once. Do not extend a register live range through the preheader:
+ * require either an existing scratch copy or membership in its exit W set.
+ * Loop-carried phis are excluded because their destination is not live-in.
+ */
+static void
+hoist_loop_invariant_spills(agx_context *ctx, unsigned n,
+                            const struct spill_block *blocks,
+                            const unsigned *loop_end)
+{
+   if (!loop_end || !ctx->ra_target.defer_spill_lowering)
+      return;
+
+   agx_foreach_block(ctx, header) {
+      unsigned end = loop_end[header->index];
+      if (!end)
+         continue;
+      agx_block *preheader = NULL;
+      unsigned entries = 0;
+      agx_foreach_predecessor(header, pred) {
+         if (!loop_contains(loop_end, header->index, (*pred)->index)) {
+            preheader = *pred;
+            ++entries;
+         }
+      }
+      if (entries != 1 || preheader->successors[1] ||
+          preheader->successors[0] != header)
+         continue;
+
+      BITSET_WORD *available = calloc(BITSET_WORDS(n), sizeof(BITSET_WORD));
+      BITSET_WORD *stored = calloc(BITSET_WORDS(n), sizeof(BITSET_WORD));
+      const struct spill_block *sb = &blocks[preheader->index];
+      for (unsigned i = 0; i < sb->nW_exit; ++i)
+         BITSET_SET(available, sb->W_exit[i]);
+      for (unsigned i = 0; i < sb->nS_exit; ++i)
+         BITSET_SET(stored, sb->S_exit[i]);
+
+      agx_foreach_block_from(ctx, header, block) {
+         if (block->index > end)
+            break;
+         agx_foreach_instr_in_block_safe(block, I) {
+            if (I->op != AGX_OPCODE_MOV || !I->dest[0].memory ||
+                I->src[0].memory || I->src[0].type != AGX_INDEX_NORMAL)
+               continue;
+            unsigned v = I->src[0].value;
+            if (v >= n || I->dest[0].value != n + v ||
+                !u_sparse_bitset_test(&header->live_in, v) ||
+                (!BITSET_TEST(available, v) && !BITSET_TEST(stored, v)))
+               continue;
+            if (!BITSET_TEST(stored, v)) {
+               agx_builder b = agx_init_builder(
+                  ctx, agx_after_block_logical(preheader));
+               agx_mov_to(&b, I->dest[0], I->src[0]);
+               BITSET_SET(stored, v);
+            }
+            agx_remove_instruction(I);
+         }
+      }
+      free(available);
+      free(stored);
+   }
+}
+
 void
 agx_spill(agx_context *ctx, unsigned k, bool remat_only)
 {
@@ -1512,7 +1588,9 @@ agx_spill(agx_context *ctx, unsigned k, bool remat_only)
       }
    }
 
-   find_apple9_remat(ctx, remat, memctx);
+   /* Reconstructed sources overlap their result under late-kill accounting.
+    * Leave room for the worst tree at every reload, including CFG edges. */
+   k -= find_apple9_remat(ctx, remat, memctx);
 
    struct spill_block *blocks =
       rzalloc_array(memctx, struct spill_block, ctx->num_blocks);
@@ -1580,6 +1658,7 @@ agx_spill(agx_context *ctx, unsigned k, bool remat_only)
       }
    }
 
+   hoist_loop_invariant_spills(ctx, n, blocks, loop_end);
    ralloc_free(memctx);
 
    /* Spilling breaks SSA, so we need to repair before validating */

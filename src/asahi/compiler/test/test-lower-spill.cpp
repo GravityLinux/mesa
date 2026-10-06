@@ -246,3 +246,79 @@ TEST(Apple9Rematerialization, BoundedImmutableExpressions)
       }
    }
 }
+
+TEST(Apple9Rematerialization, HoistOnlyInvariantSpillStores)
+{
+   for (bool carried : {false, true}) {
+      for (bool hoist : {false, true}) {
+         SCOPED_TRACE(carried);
+         SCOPED_TRACE(hoist);
+         void *mem = ralloc_context(nullptr);
+         agx_builder *b = agx_test_builder(mem);
+         agx_context *ctx = b->shader;
+         ctx->ra_target.defer_spill_lowering = hoist;
+         auto entry = agx_start_block(ctx);
+         auto header = agx_test_block(ctx);
+         auto body = agx_test_block(ctx);
+         auto exit = agx_test_block(ctx);
+         header->loop_header = true;
+         agx_block_add_successor(entry, header);
+         agx_block_add_successor(header, body);
+         agx_block_add_successor(header, exit);
+         agx_block_add_successor(body, header);
+         std::vector<agx_index> values;
+         for (unsigned i = 0; i < 12; ++i) {
+            auto I = agx_alloc_instr(b, AGX_OPCODE_APPLE9_PURE, 1, 0);
+            I->apple9 = rzalloc(mem, agx_apple9_vir_instr);
+            I->apple9->op = AGX_APPLE9_VIR_DEVICE_LOAD;
+            I->apple9->dest_components = 1;
+            I->dest[0] = agx_temp(ctx, AGX_SIZE_32);
+            values.push_back(I->dest[0]);
+            agx_builder_insert(&b->cursor, I);
+         }
+         std::vector<agx_instr *> phis;
+         if (carried) {
+            b->cursor = agx_after_block(header);
+            for (auto &value : values) {
+               auto phi = agx_phi_to(b, agx_temp(ctx, AGX_SIZE_32), 2);
+               phi->src[0] = value;
+               value = phi->dest[0];
+               phis.push_back(phi);
+            }
+         }
+         b->cursor = agx_after_block(body);
+         for (auto value = values.rbegin(); value != values.rend(); ++value) {
+            auto I = agx_alloc_instr(b, AGX_OPCODE_APPLE9, 0, 1);
+            I->apple9 = rzalloc(mem, agx_apple9_vir_instr);
+            I->apple9->op = AGX_APPLE9_VIR_DEVICE_STORE;
+            I->src[0] = *value;
+            agx_builder_insert(&b->cursor, I);
+         }
+         for (unsigned i = 0; i < phis.size(); ++i) {
+            auto I = agx_alloc_instr(b, AGX_OPCODE_APPLE9_PURE, 1, 1);
+            I->apple9 = rzalloc(mem, agx_apple9_vir_instr);
+            I->apple9->op = AGX_APPLE9_VIR_DEVICE_LOAD;
+            I->apple9->dest_components = 1;
+            I->src[0] = values[i];
+            I->dest[0] = agx_temp(ctx, AGX_SIZE_32);
+            phis[i]->src[1] = I->dest[0];
+            agx_builder_insert(&b->cursor, I);
+         }
+         agx_compute_liveness(ctx);
+         agx_spill(ctx, 20, false);
+         unsigned inside = 0, outside = 0;
+         agx_foreach_block(ctx, block) {
+            agx_foreach_instr_in_block(block, I) {
+               if (I->op == AGX_OPCODE_MOV && I->dest[0].memory) {
+                  if (block == entry) ++outside;
+                  else ++inside;
+               }
+            }
+         }
+         EXPECT_GT(outside, 0u);
+         if (hoist && !carried) EXPECT_EQ(inside, 0u);
+         else EXPECT_GT(inside, 0u);
+         ralloc_free(mem);
+      }
+   }
+}
