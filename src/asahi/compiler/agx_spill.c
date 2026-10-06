@@ -402,7 +402,8 @@ apple9_remat_alu(const agx_instr *I)
 }
 
 static unsigned
-find_apple9_remat(agx_context *ctx, agx_instr **remat, void *memctx)
+find_apple9_remat(agx_context *ctx, agx_instr **remat, void *memctx,
+                  unsigned max_extra)
 {
    if (ctx->ra_target.disable_uniform_rematerialization)
       return 0;
@@ -445,6 +446,8 @@ find_apple9_remat(agx_context *ctx, agx_instr **remat, void *memctx)
          if (total <= 4) {
             unsigned width = agx_index_size_16(I->dest[0]);
             demand = MAX2(demand, held + width);
+            if (demand - width > max_extra)
+               continue;
             peak[I->dest[0].value] = demand;
             extra = MAX2(extra, demand - width);
             cost[I->dest[0].value] = total;
@@ -1591,8 +1594,29 @@ agx_spill(agx_context *ctx, unsigned k, bool remat_only)
    }
 
    /* Reconstructed sources overlap their result under late-kill accounting.
-    * Leave room for the worst tree at every reload, including CFG edges. */
-   k -= find_apple9_remat(ctx, remat, memctx);
+    * Reserve their temporaries without making the remaining budget smaller
+    * than one instruction's simultaneous sources and destinations. In that
+    * case limit() could evict a current source, which cannot release its
+    * register until after the instruction. This matters for forced spilling
+    * where a vector load may already consume the entire available budget. */
+   unsigned minimum = 0;
+   agx_foreach_instr_global(ctx, I) {
+      if (I->op == AGX_OPCODE_PHI)
+         continue;
+      unsigned needed = 0;
+      agx_foreach_ssa_dest(I, d)
+         needed += util_next_power_of_two(agx_index_size_16(I->dest[d]));
+      agx_foreach_ssa_src(I, s) {
+         bool duplicate = false;
+         for (unsigned prev = 0; prev < s; ++prev)
+            duplicate |= agx_is_equiv(I->src[prev], I->src[s]);
+         if (!duplicate)
+            needed += util_next_power_of_two(agx_index_size_16(I->src[s]));
+      }
+      minimum = MAX2(minimum, needed);
+   }
+   k -= find_apple9_remat(ctx, remat, memctx,
+                          k > minimum ? k - minimum : 0);
 
    struct spill_block *blocks =
       rzalloc_array(memctx, struct spill_block, ctx->num_blocks);
