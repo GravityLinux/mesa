@@ -211,6 +211,7 @@ TEST(Apple9Rematerialization, BoundedImmutableExpressions)
          if (mutable_uniforms) {
             auto selected = rzalloc(mem, agx_apple9_vir_instr);
             selected->op = AGX_APPLE9_VIR_STORE_UNIFORM;
+            selected->immediate = 12;
             auto I = agx_alloc_instr(b, AGX_OPCODE_APPLE9, 0, 1);
             I->apple9 = selected;
             I->src[0] = zero;
@@ -238,6 +239,46 @@ TEST(Apple9Rematerialization, BoundedImmutableExpressions)
             }
          }
          EXPECT_EQ(imports, 12u);
+         /* Execute the repaired SSA, including scratch copies and a uniform
+          * overwrite between definitions and uses. This catches a reload
+          * accidentally reading the changed uniform instead of the old value. */
+         std::vector<uint32_t> data(b->shader->alloc), uniforms(256);
+         auto bits = [](float f) {
+            uint32_t u;
+            memcpy(&u, &f, sizeof(u));
+            return u;
+         };
+         for (unsigned i = 0; i < 12; ++i)
+            uniforms[12 + i] = bits(float(i + 1));
+         unsigned outputs = 0;
+         agx_foreach_instr_global(b->shader, I) {
+            auto read = [&](agx_index x) {
+               return x.type == AGX_INDEX_IMMEDIATE ? x.value : data[x.value];
+            };
+            if (I->op == AGX_OPCODE_MOV_IMM)
+               data[I->dest[0].value] = I->imm;
+            else if (I->op == AGX_OPCODE_MOV)
+               data[I->dest[0].value] = read(I->src[0]);
+            else if (I->op == AGX_OPCODE_APPLE9_PURE) {
+               if (I->apple9->op == AGX_APPLE9_VIR_IOR_UNIFORM)
+                  data[I->dest[0].value] = read(I->src[0]) |
+                     uniforms[I->apple9->immediate];
+               else {
+                  uint32_t u = read(I->src[0]);
+                  float f;
+                  memcpy(&f, &u, sizeof(f));
+                  data[I->dest[0].value] = bits(f + 1.0f);
+               }
+            } else if (I->op == AGX_OPCODE_APPLE9) {
+               if (I->apple9->op == AGX_APPLE9_VIR_STORE_UNIFORM)
+                  uniforms[I->apple9->immediate] = read(I->src[0]);
+               else {
+                  EXPECT_EQ(read(I->src[0]), bits(float(outputs + 1 + layers)));
+                  ++outputs;
+               }
+            }
+         }
+         EXPECT_EQ(outputs, 12u);
          if (mutable_uniforms || layers == 3)
             EXPECT_GT(memory_moves, 0u);
          else
