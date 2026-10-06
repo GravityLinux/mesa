@@ -729,6 +729,34 @@ apple9_texture_table_masks(const nir_tex_instr *tex, uint32_t *textures,
       *samplers |= BITFIELD_BIT(tex->sampler_index);
 }
 
+/* Explicit query operands use backend sources so the query remains a query
+ * through NIR optimization. Treating it as txd would let zero-gradient folding
+ * replace the unclamped query LOD (-infinity) with an explicit LOD of zero. */
+static bool
+apple9_texture_is_gradient(const nir_tex_instr *tex)
+{
+   return tex->op == nir_texop_txd ||
+          (tex->op == nir_texop_lod &&
+           nir_tex_instr_src_index(tex, nir_tex_src_backend2) >= 0);
+}
+
+static nir_tex_src_type
+apple9_texture_gradient_source(const nir_tex_instr *tex, bool y)
+{
+   return tex->op == nir_texop_lod
+      ? (y ? nir_tex_src_backend2 : nir_tex_src_backend1)
+      : (y ? nir_tex_src_ddy : nir_tex_src_ddx);
+}
+
+static bool
+apple9_texture_is_explicit_lod(const nir_tex_instr *tex)
+{
+   return tex->op == nir_texop_txl || tex->op == nir_texop_txb ||
+          tex->op == nir_texop_txf ||
+          (tex->op == nir_texop_lod && !apple9_texture_is_gradient(tex) &&
+           nir_tex_instr_src_index(tex, nir_tex_src_backend1) >= 0);
+}
+
 static bool
 apple9_texture_supported(const nir_tex_instr *tex)
 {
@@ -746,15 +774,15 @@ apple9_texture_supported(const nir_tex_instr *tex)
    if (nir_tex_instr_src_index(tex, nir_tex_src_offset) >= 0)
       return false;
    bool gather = tex->op == nir_texop_tg4;
-   bool explicit_lod = tex->op == nir_texop_txl || tex->op == nir_texop_txb ||
-                       tex->op == nir_texop_txf;
-   bool gradient = tex->op == nir_texop_txd;
+   bool explicit_lod = apple9_texture_is_explicit_lod(tex);
+   bool gradient = apple9_texture_is_gradient(tex);
    bool query = tex->backend_flags & AGX_APPLE9_TEXTURE_LOD_QUERY;
    bool array = tex->is_array && tex->sampler_dim == GLSL_SAMPLER_DIM_2D;
    bool cube_array = tex->is_array && tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE;
    bool volume = array || tex->sampler_dim == GLSL_SAMPLER_DIM_3D ||
                  tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE;
-   if ((!explicit_lod && !gradient && !gather && tex->op != nir_texop_tex) ||
+   if ((!explicit_lod && !gradient && !gather && tex->op != nir_texop_tex &&
+        !(query && tex->op == nir_texop_lod)) ||
        (gather && (tex->def.num_components != 4 || tex->is_gather_implicit_lod ||
                    tex->component > 3)) ||
        (!volume && tex->sampler_dim != GLSL_SAMPLER_DIM_2D) ||
@@ -769,7 +797,8 @@ apple9_texture_supported(const nir_tex_instr *tex)
         tex->dest_type != nir_type_uint32) ||
        tex->num_srcs != (gradient ? 3 : explicit_lod ? 2 : 1) + tex->is_shadow +
                         apple9_texture_handle_count(tex) +
-                        (nir_tex_instr_src_index(tex, nir_tex_src_backend2) >= 0) ||
+                        (tex->op != nir_texop_lod &&
+                         nir_tex_instr_src_index(tex, nir_tex_src_backend2) >= 0) ||
        tex->texture_index >= 32 ||
        (tex->sampler_index > APPLE9_FETCH_SAMPLER))
       return false;
@@ -777,15 +806,14 @@ apple9_texture_supported(const nir_tex_instr *tex)
    int lod = nir_tex_instr_src_index(tex, tex->op == nir_texop_txb
                                              ? nir_tex_src_bias : nir_tex_src_lod);
    int packed_lod = nir_tex_instr_src_index(tex, nir_tex_src_backend1);
-   if (packed_lod >= 0) {
+   if (packed_lod >= 0 && !gradient) {
       if (!explicit_lod || lod >= 0)
          return false;
       lod = packed_lod;
    }
    if (gradient) {
-      for (enum nir_tex_src_type type = nir_tex_src_ddx;
-           type <= nir_tex_src_ddy; ++type) {
-         int source = nir_tex_instr_src_index(tex, type);
+      for (unsigned y = 0; y < 2; ++y) {
+         int source = nir_tex_instr_src_index(tex, apple9_texture_gradient_source(tex, y));
          if (source < 0 || tex->src[source].src.ssa->bit_size != 32 ||
              tex->src[source].src.ssa->num_components !=
                 (tex->sampler_dim == GLSL_SAMPLER_DIM_3D ? 3 : 2))
@@ -796,7 +824,8 @@ apple9_texture_supported(const nir_tex_instr *tex)
    if (tex->is_shadow && (comparator < 0 || tex->src[comparator].src.ssa->bit_size != 32))
       return false;
    /* A packed minimum LOD accompanies only 2D and 2D array gradients. */
-   int min_lod = nir_tex_instr_src_index(tex, nir_tex_src_backend2);
+   int min_lod = tex->op == nir_texop_lod ? -1 :
+                    nir_tex_instr_src_index(tex, nir_tex_src_backend2);
    if (min_lod >= 0 && (!gradient || tex->is_shadow ||
                         tex->sampler_dim != GLSL_SAMPLER_DIM_2D ||
                         tex->src[min_lod].src.ssa->bit_size != 32))
@@ -2012,11 +2041,12 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
          result = agx_apple9_vir_emit_texture_ms(
             &lower->program, coords, texture,
             util_bitcount(lower->sampler_mask), tex->is_array);
-      } else if (tex->op == nir_texop_txd) {
+      } else if (apple9_texture_is_gradient(tex)) {
          unsigned dimension = tex->is_array ? 2 :
             tex->sampler_dim == GLSL_SAMPLER_DIM_3D ? 3 : 0;
          unsigned axes = dimension == 3 ? 3 : 2;
-         int min_lod = nir_tex_instr_src_index(tex, nir_tex_src_backend2);
+         int min_lod = tex->op == nir_texop_lod ? -1 :
+                          nir_tex_instr_src_index(tex, nir_tex_src_backend2);
          unsigned prefix = dimension == 3 ? 3 :
             dimension || tex->is_shadow || min_lod >= 0 ? 4 : 2;
          uint32_t sources[10] = {coords[0], coords[1]};
@@ -2036,7 +2066,7 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
          }
          for (unsigned derivative = 0; derivative < 2; ++derivative) {
             int source = nir_tex_instr_src_index(
-               tex, derivative ? nir_tex_src_ddy : nir_tex_src_ddx);
+               tex, apple9_texture_gradient_source(tex, derivative));
             for (unsigned c = 0; c < axes; ++c)
                sources[prefix + 2 * c + derivative] = apple9_lower_dag_scalar(
                   lower, nir_get_scalar(tex->src[source].src.ssa, c));
@@ -2045,8 +2075,7 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
             &lower->program, sources, texture,
             util_bitcount(lower->sampler_mask & BITFIELD_MASK(tex->sampler_index)),
             dimension, tex->is_shadow, min_lod >= 0);
-      } else if (tex->op == nir_texop_txl || tex->op == nir_texop_txb ||
-                 tex->op == nir_texop_txf ||
+      } else if (apple9_texture_is_explicit_lod(tex) ||
                  (tex->op == nir_texop_tg4 &&
                   (tex->coord_components >= 3 || tex->is_shadow))) {
          bool bias = tex->op == nir_texop_txb;
@@ -5136,6 +5165,13 @@ apple9_prepare_dag(nir_shader *nir)
       progress |= nir_opt_cse(nir);
       progress |= nir_opt_dce(nir);
    } while (progress);
+   /* Constant folding can turn zero gradients into txl after texture lowering.
+    * Normalize those new LOD operands before selection/preamble extraction. */
+   if (agx_nir_lower_apple9_texture_lod(nir)) {
+      nir_opt_constant_folding(nir);
+      nir_opt_copy_prop(nir);
+      nir_opt_dce(nir);
+   }
    nir_shader_intrinsics_pass(nir, apple9_widen_shared_offset,
                               nir_metadata_control_flow, NULL);
 }
@@ -7606,8 +7642,9 @@ apple9_native_min_lod(const nir_tex_instr *tex)
           nir_tex_instr_src_index(tex, nir_tex_src_offset) < 0;
 }
 
-/* Route implicit array-shadow sampling, and implicit 2D sampling with a
- * minimum LOD, through native explicit gradients. Only spatial coordinates
+/* Route linear compute sampling/queries, implicit array-shadow sampling,
+ * and implicit 2D sampling with a minimum LOD through explicit gradients.
+ * Only spatial coordinates
  * contribute derivatives; neither the layer nor comparator does. An
  * instruction bias scales those gradients, so that the minimum LOD clamps
  * the biased LOD, while the sampler's bias is applied afterwards. */
@@ -7629,12 +7666,8 @@ apple9_lower_implicit_gradients(nir_builder *b, nir_instr *instr, void *data)
       return false;
    b->cursor = nir_before_instr(instr);
    int coord = nir_tex_instr_src_index(tex, nir_tex_src_coord);
-   /* Derivatives are of the projected coordinates. */
-   nir_def *projector = nir_steal_tex_src(tex, nir_tex_src_projector);
-   if (projector) {
-      nir_src_rewrite(&tex->src[coord].src,
-         nir_fdiv(b, tex->src[coord].src.ssa, projector));
-   }
+   /* Projection, including the shadow comparator, is already lowered. */
+   assert(nir_tex_instr_src_index(tex, nir_tex_src_projector) < 0);
    unsigned spatial = tex->coord_components - tex->is_array;
    nir_def *position = nir_trim_vector(b, tex->src[coord].src.ssa, spatial);
    nir_def *dx = nir_ddx(b, position), *dy = nir_ddy(b, position);
@@ -9019,6 +9052,31 @@ apple9_lower_min_lod(nir_builder *b, nir_instr *instr, UNUSED void *data)
    return true;
 }
 
+static bool
+apple9_preserve_query_semantics(nir_builder *b, nir_instr *instr, UNUSED void *data)
+{
+   if (instr->type != nir_instr_type_tex)
+      return false;
+   nir_tex_instr *tex = nir_instr_as_tex(instr);
+   if (!(tex->backend_flags & AGX_APPLE9_TEXTURE_LOD_QUERY) ||
+       (tex->op != nir_texop_txd && tex->op != nir_texop_txl))
+      return false;
+
+   /* Keep the semantic query opcode after target operand lowering. backend1
+    * is a packed LOD for an explicit-LOD query, or dX when backend2 holds dY.
+    * A query has no instruction MinLod, so these source uses are unambiguous. */
+   for (unsigned i = 0; i < tex->num_srcs; ++i) {
+      if (tex->src[i].src_type == nir_tex_src_ddx)
+         tex->src[i].src_type = nir_tex_src_backend1;
+      else if (tex->src[i].src_type == nir_tex_src_ddy)
+         tex->src[i].src_type = nir_tex_src_backend2;
+   }
+   assert(!(nir_def_components_read(&tex->def) & ~3u));
+   tex->op = nir_texop_lod;
+   tex->def.num_components = 2;
+   return true;
+}
+
 static void
 apple9_lower_textures(nir_shader *nir)
 {
@@ -9026,10 +9084,12 @@ apple9_lower_textures(nir_shader *nir)
    nir_shader_instructions_pass(nir, apple9_lower_fetch_min_lod,
                                 nir_metadata_control_flow, NULL);
    agx_nir_legalize_apple9_texture_sources(nir);
-   /* Compatibility GL supplies projective texture coordinates. Reuse the
-    * common NIR quotient lowering before selecting ordinary 2D sampling. */
+   /* Gradients must follow projection. Common NIR lowering also projects
+    * shadow comparators and leaves array layers unchanged. */
+   const nir_lower_tex_options projection = {.lower_txp = ~0u};
+   nir_lower_tex(nir, &projection);
    const nir_lower_tex_options tex_options = {
-      .lower_txp = ~0u, .lower_1d = true,
+      .lower_1d = true,
       .lower_rect = true, .lower_rect_offset = true,
       .lower_invalid_implicit_lod = true,
       .lower_txf_offset = true,
@@ -9062,6 +9122,8 @@ apple9_lower_textures(nir_shader *nir)
    nir_shader_instructions_pass(nir, apple9_lower_sampler_bias,
                                 nir_metadata_control_flow, NULL);
    agx_nir_lower_apple9_texture_lod(nir);
+   nir_shader_instructions_pass(nir, apple9_preserve_query_semantics,
+                                nir_metadata_control_flow, NULL);
 }
 
 /* Coverage-only tests clamp interpolated depth to [0, 1]. For a single
