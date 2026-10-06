@@ -507,7 +507,6 @@ struct agx_apple9_vir_program {
    bool *publication;
    unsigned publication_count;
    unsigned peak_live_gprs;
-   unsigned pre_spill_gprs; /* Scheduled demand, before introducing spills. */
    unsigned max_phys_gpr;
    unsigned private_size; /* NIR private arrays, placed after register spills. */
    unsigned scratch_size; /* Total bytes per invocation, rounded to 16. */

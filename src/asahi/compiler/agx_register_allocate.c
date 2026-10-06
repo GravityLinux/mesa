@@ -582,66 +582,6 @@ agx_calc_register_demand(agx_context *ctx, bool remat)
    return max_demand;
 }
 
-/* Reuse a previous read of the same SSA scratch value inside a block only
- * when extending its lifetime fits the already selected spill pressure. The
- * spiller intentionally breaks these lifetimes, so ordinary unrestricted CSE
- * here could undo its work. Memory SSA identities, not frame slot numbers,
- * establish that the two loads read the same value.
- */
-bool
-agx_reuse_spill_reloads(agx_context *ctx)
-{
-   agx_compute_liveness(ctx);
-   const unsigned bound = agx_calc_register_demand(ctx, false);
-   agx_instr **previous = calloc(ctx->alloc, sizeof(*previous));
-   bool progress = false;
-   struct reload_rewrite { agx_instr *instr; unsigned src; agx_index old; };
-   struct util_dynarray rewrites = UTIL_DYNARRAY_INIT;
-
-   agx_foreach_block(ctx, block) {
-      memset(previous, 0, ctx->alloc * sizeof(*previous));
-      agx_foreach_instr_in_block_safe(block, I) {
-         if (I->op != AGX_OPCODE_MOV || I->src[0].type != AGX_INDEX_NORMAL ||
-             I->dest[0].type != AGX_INDEX_NORMAL || !I->src[0].memory ||
-             I->dest[0].memory || agx_channels(I->dest[0]) != 1)
-            continue;
-         agx_instr *earlier = previous[I->src[0].value];
-         if (!earlier || !agx_is_equiv(earlier->src[0], I->src[0]) ||
-             earlier->dest[0].size != I->dest[0].size ||
-             u_sparse_bitset_test(&block->live_out, I->dest[0].value)) {
-            previous[I->src[0].value] = I;
-            continue;
-         }
-
-         util_dynarray_clear(&rewrites);
-         agx_foreach_instr_in_block(block, use) {
-            agx_foreach_ssa_src(use, src) {
-               if (use->src[src].value != I->dest[0].value)
-                  continue;
-               util_dynarray_append(&rewrites, ((struct reload_rewrite){
-                  use, src, use->src[src]}));
-               use->src[src].value = earlier->dest[0].value;
-            }
-         }
-         struct list_head *before = I->link.prev;
-         agx_remove_instruction(I);
-         agx_compute_liveness(ctx);
-         if (agx_calc_register_demand(ctx, false) <= bound) {
-            progress = true;
-         } else {
-            list_add(&I->link, before);
-            util_dynarray_foreach(&rewrites, struct reload_rewrite, rewrite)
-               rewrite->instr->src[rewrite->src] = rewrite->old;
-            agx_compute_liveness(ctx);
-            previous[I->src[0].value] = I;
-         }
-      }
-   }
-   util_dynarray_fini(&rewrites);
-   free(previous);
-   return progress;
-}
-
 struct placement_cost {
    uint64_t dead, edge, affinity;
    unsigned moves, collect, preference, materialization, growth, scarcity, reg;
@@ -2297,7 +2237,6 @@ agx_ra(agx_context *ctx)
     */
    agx_compute_liveness(ctx);
    unsigned effective_demand = agx_calc_register_demand(ctx, false);
-   ctx->pre_spill_register_demand = effective_demand;
    bool spilling = (effective_demand > max_possible_regs);
    bool remat = false;
 
@@ -2329,8 +2268,6 @@ agx_ra(agx_context *ctx)
              "internal shaders are unspillable");
 
       agx_spill(ctx, max_possible_regs, remat);
-      if (ctx->ra_target.defer_spill_lowering)
-         agx_reuse_spill_reloads(ctx);
       pressure_audit_spilled(ctx);
 
       if (!validate_constraint_windows(ctx, max_possible_regs)) {

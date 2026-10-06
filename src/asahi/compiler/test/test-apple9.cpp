@@ -12114,39 +12114,3 @@ TEST(Apple9Compiler, ConstantPromotionWeightsSingleUseInsideLoop)
       ralloc_free(b.shader);
    }
 }
-
-TEST(Apple9Compiler, LicmHoistsInvariantMathButPreservesLoadsAndCarriedValues)
-{
-   nir_builder b = apple9_compute_builder("licm_invariant_math");
-   nir_def *gid = apple9_global_id_x(&b);
-   nir_def *base = nir_i2f32(&b, gid);
-   nir_def *initial = nir_imm_int(&b, 0);
-   nir_loop *loop = nir_push_loop(&b);
-   nir_block *entry = nir_loop_predecessor_block(loop);
-   nir_block *header = nir_loop_first_block(loop);
-   nir_phi_instr *phi = nir_phi_instr_create(b.shader);
-   nir_def_init(&phi->instr, &phi->def, 1, 32);
-   nir_phi_instr_add_src(phi, entry, initial);
-   nir_break_if(&b, nir_uge(&b, &phi->def, gid));
-   nir_def *log = nir_flog2(&b, base);
-   nir_def *product = nir_fmul(&b, log, base);
-   nir_def *varying = nir_iadd(&b, &phi->def, gid);
-   nir_def *load = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 0),
-                               nir_imm_int(&b, 0), .align_mul = 4);
-   apple9_store_output(&b, varying, nir_fadd(&b, product, load));
-   nir_def *next = nir_iadd_imm(&b, &phi->def, 1);
-   nir_phi_instr_add_src(phi, nir_cursor_current_block(b.cursor), next);
-   nir_pop_loop(&b, loop);
-   b.cursor = nir_after_phis(header);
-   nir_builder_instr_insert(&b, &phi->instr);
-   nir_block *varying_block = nir_def_block(varying);
-   nir_block *load_block = nir_def_block(load);
-   ASSERT_TRUE(agx_nir_opt_apple9_licm(b.shader));
-   EXPECT_EQ(nir_def_block(log), entry);
-   EXPECT_EQ(nir_def_block(product), entry);
-   EXPECT_EQ(nir_def_block(varying), varying_block);
-   EXPECT_EQ(nir_def_block(load), load_block);
-   EXPECT_EQ(phi->instr.block, header);
-   nir_validate_shader(b.shader, "Apple9 scalar ALU LICM");
-   ralloc_free(b.shader);
-}

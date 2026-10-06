@@ -5410,54 +5410,16 @@ apple9_log(void)
 }
 
 struct apple9_dag_cost {
-   uint64_t weighted_spills, weighted_instructions;
-   unsigned spills, instructions, gprs, pre_spill_gprs;
+   uint64_t weighted_spills;
+   unsigned spills, instructions, gprs;
 };
-
-/* Pure per-lane ALU and immutable preamble reads may execute speculatively.
- * Do not hoist memory loads, samples, derivatives, subgroup operations or other
- * implicit-state accesses.
- * The completed allocation decides whether the longer live ranges are useful.
- */
-static bool
-apple9_licm_alu(nir_instr *instr, nir_loop *loop, bool dominates_exit)
-{
-   if (instr->type == nir_instr_type_intrinsic)
-      return nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_preamble;
-   return instr->type == nir_instr_type_alu &&
-          nir_instr_as_alu(instr)->def.bit_size == 32;
-}
-
-bool
-agx_nir_opt_apple9_licm(nir_shader *nir)
-{
-   bool progress = nir_opt_licm(nir, apple9_licm_alu);
-   /* LICM moves every constant, including those used only by varying work.
-    * Keep those literals close to their uses instead of lengthening all of
-    * their lifetimes through the loop. Vector constructors are allowed above
-    * so their component users can move, even after scalar ALU lowering. */
-   if (progress)
-      nir_opt_sink(nir, nir_move_const_undef);
-   return progress;
-}
-
-static unsigned
-apple9_instruction_loop_weight(const struct agx_apple9_vir_instr *ins)
-{
-   const struct agx_apple9_block *block = agx_apple9_instr_block(ins);
-   unsigned depth = 0;
-   for (nir_cf_node *node = block && block->nir ? block->nir->cf_node.parent : NULL;
-        node; node = node->parent)
-      depth += node->type == nir_cf_node_loop;
-   return 1u << (3 * MIN2(depth, 6));
-}
 
 static bool
 apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
                         struct agx_apple9_compute_profile *profile,
                         const struct agx_apple9_varying_layout *varyings,
                         const struct apple9_buffer_map *resources,
-                        bool preamble, bool hoist, bool licm,
+                        bool preamble, bool hoist,
                         struct apple9_dag_cost *cost, const char **reason)
 {
    /* Selection follows NIR order, so shorten live ranges after lowering and
@@ -5470,8 +5432,6 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
                            nir_move_load_ssbo | nir_move_alu;
    nir_opt_sink(nir, move);
    nir_opt_move(nir, move);
-   if (licm)
-      agx_nir_opt_apple9_licm(nir);
    if (hoist)
       apple9_hoist_samples(nir);
    if (getenv("AGX_APPLE9_TRACE_FINAL_NIR") != NULL)
@@ -5914,15 +5874,20 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
       *cost = (struct apple9_dag_cost){
          .instructions = lower.program.instruction_count,
          .gprs = lower.program.peak_live_gprs,
-         .pre_spill_gprs = lower.program.pre_spill_gprs,
       };
       for (unsigned i = 0; i < lower.program.instruction_count; ++i) {
-         const struct agx_apple9_vir_instr *ins = lower.program.instructions[i];
-         unsigned weight = apple9_instruction_loop_weight(ins);
-         cost->weighted_instructions += weight;
-         if (ins->op == AGX_APPLE9_VIR_SPILL_STORE ||
-             ins->op == AGX_APPLE9_VIR_SPILL_LOAD) {
-            cost->weighted_spills += weight;
+         enum agx_apple9_vir_opcode op = lower.program.instructions[i]->op;
+         if (op == AGX_APPLE9_VIR_SPILL_STORE ||
+             op == AGX_APPLE9_VIR_SPILL_LOAD) {
+            const struct agx_apple9_block *block =
+               agx_apple9_instr_block(lower.program.instructions[i]);
+            unsigned depth = 0;
+            for (nir_cf_node *node = block && block->nir
+                                       ? block->nir->cf_node.parent : NULL;
+                 node; node = node->parent)
+               depth += node->type == nir_cf_node_loop;
+            /* A loop-depth heuristic, not measured invocation counts. */
+            cost->weighted_spills += 1u << (3 * MIN2(depth, 6));
             ++cost->spills;
          }
       }
@@ -6076,16 +6041,14 @@ apple9_compile_dag_trial(nir_shader *nir, struct agx_shader_part *out,
                          struct agx_apple9_compute_profile *profile,
                          const struct agx_apple9_varying_layout *varyings,
                          const struct apple9_buffer_map *resources, bool hoist,
-                         bool licm,
                          struct apple9_dag_cost *cost, char **log,
                          size_t *log_size, const char **reason)
 {
    FILE *stream = open_memstream(log, log_size);
-   FILE *saved_log = apple9_log_stream;
    apple9_log_stream = stream;
    bool ok = apple9_compile_dag_once(nir, out, profile, varyings, resources,
-                                     false, hoist, licm, cost, reason);
-   apple9_log_stream = saved_log;
+                                     false, hoist, cost, reason);
+   apple9_log_stream = NULL;
    if (stream)
       fclose(stream);
    return ok;
@@ -6097,24 +6060,23 @@ apple9_compile_dag_trial(nir_shader *nir, struct agx_shader_part *out,
  * loop-weighted spills, then fewer static spills and instructions.
  */
 static bool
-apple9_compile_dag_scheduled(nir_shader *nir, struct agx_shader_part *out,
+apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
                        struct agx_apple9_compute_profile *profile,
                        const struct agx_apple9_varying_layout *varyings,
                        const struct apple9_buffer_map *resources,
-                       bool preamble, bool licm,
-                       struct apple9_dag_cost *cost, const char **reason)
+                       bool preamble, const char **reason)
 {
    nir_shader *plain = NULL;
    if (preamble || !apple9_hoist_limit() || !apple9_has_samples(nir) ||
        !(plain = nir_shader_clone(NULL, nir)))
       return apple9_compile_dag_once(nir, out, profile, varyings, resources,
-                                     preamble, true, licm, cost, reason);
+                                     preamble, true, NULL, reason);
 
    struct apple9_dag_cost hoisted_cost = {0}, plain_cost = {0};
    char *hoisted_log = NULL, *plain_log = NULL;
    size_t hoisted_size = 0, plain_size = 0;
    bool ok = apple9_compile_dag_trial(nir, out, profile, varyings, resources,
-                                      true, licm, &hoisted_cost, &hoisted_log,
+                                      true, &hoisted_cost, &hoisted_log,
                                       &hoisted_size, reason);
    bool use_plain = false;
    if (!ok || hoisted_cost.spills || hoisted_cost.gprs >= AGX_APPLE9_GPR_COUNT) {
@@ -6123,7 +6085,7 @@ apple9_compile_dag_scheduled(nir_shader *nir, struct agx_shader_part *out,
       const char *plain_reason = NULL;
       bool plain_ok = apple9_compile_dag_trial(
          plain, &plain_out, profile ? &plain_profile : NULL, varyings,
-         resources, false, licm, &plain_cost, &plain_log, &plain_size, &plain_reason);
+         resources, false, &plain_cost, &plain_log, &plain_size, &plain_reason);
       use_plain = plain_ok &&
                   (!ok || plain_cost.weighted_spills < hoisted_cost.weighted_spills ||
                    (plain_cost.weighted_spills == hoisted_cost.weighted_spills &&
@@ -6141,98 +6103,13 @@ apple9_compile_dag_scheduled(nir_shader *nir, struct agx_shader_part *out,
          free(plain_out.binary);
       }
    }
-   if (cost)
-      *cost = use_plain ? plain_cost : hoisted_cost;
    const char *log = use_plain ? plain_log : hoisted_log;
    size_t size = use_plain ? plain_size : hoisted_size;
    if (log && size)
-      fwrite(log, 1, size, apple9_log());
+      fwrite(log, 1, size, stderr);
    free(hoisted_log);
    free(plain_log);
    ralloc_free(plain);
-   return ok;
-}
-
-/* The original program remains a candidate. Hoisting invariant arithmetic
- * must not raise scheduled pressure or add spill traffic merely to reduce the
- * loop body. Comparing after allocation includes constraints and edge copies.
- */
-static bool
-apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
-                       struct agx_apple9_compute_profile *profile,
-                       const struct agx_apple9_varying_layout *varyings,
-                       const struct apple9_buffer_map *resources,
-                       bool preamble, const char **reason)
-{
-   nir_shader *hoisted = NULL;
-   if (!preamble) {
-      nir_foreach_block(block, nir_shader_get_entrypoint(nir)) {
-         bool in_loop = false;
-         for (nir_cf_node *node = block->cf_node.parent; node; node = node->parent)
-            in_loop |= node->type == nir_cf_node_loop;
-         if (!in_loop)
-            continue;
-         nir_foreach_instr(instr, block) {
-            if (apple9_licm_alu(instr, NULL, false)) {
-               hoisted = nir_shader_clone(NULL, nir);
-               break;
-            }
-         }
-         if (hoisted)
-            break;
-      }
-   }
-   if (!hoisted)
-      return apple9_compile_dag_scheduled(nir, out, profile, varyings, resources,
-                                          preamble, false, NULL, reason);
-
-   struct apple9_dag_cost original_cost = {0}, hoisted_cost = {0};
-   char *original_log = NULL, *hoisted_log = NULL;
-   size_t original_size = 0, hoisted_size = 0;
-   /* The scheduling trials already capture their own logs; redirect their
-    * selected output so this outer choice also emits only the chosen program.
-    */
-   FILE *original_stream = open_memstream(&original_log, &original_size);
-   FILE *saved_log = apple9_log_stream;
-   apple9_log_stream = original_stream;
-   bool ok = apple9_compile_dag_scheduled(nir, out, profile, varyings, resources,
-                                         false, false, &original_cost, reason);
-   apple9_log_stream = saved_log;
-   if (original_stream)
-      fclose(original_stream);
-   struct agx_shader_part hoisted_out = {0};
-   struct agx_apple9_compute_profile hoisted_profile = {0};
-   const char *unused_reason = NULL;
-   FILE *hoisted_stream = open_memstream(&hoisted_log, &hoisted_size);
-   apple9_log_stream = hoisted_stream;
-   bool hoisted_ok = apple9_compile_dag_scheduled(
-      hoisted, &hoisted_out, profile ? &hoisted_profile : NULL,
-      varyings, resources, false, true, &hoisted_cost, &unused_reason);
-   apple9_log_stream = saved_log;
-   if (hoisted_stream)
-      fclose(hoisted_stream);
-
-   bool use_hoisted = hoisted_ok && ok &&
-      hoisted_cost.pre_spill_gprs <= original_cost.pre_spill_gprs &&
-      hoisted_cost.gprs <= original_cost.gprs &&
-      hoisted_cost.spills <= original_cost.spills &&
-      hoisted_cost.weighted_spills <= original_cost.weighted_spills &&
-      hoisted_cost.weighted_instructions < original_cost.weighted_instructions;
-   if (use_hoisted) {
-      free(out->binary);
-      *out = hoisted_out;
-      if (profile)
-         *profile = hoisted_profile;
-   } else {
-      free(hoisted_out.binary);
-   }
-   const char *log = use_hoisted ? hoisted_log : original_log;
-   size_t size = use_hoisted ? hoisted_size : original_size;
-   if (log && size)
-      fwrite(log, 1, size, apple9_log());
-   free(original_log);
-   free(hoisted_log);
-   ralloc_free(hoisted);
    return ok;
 }
 

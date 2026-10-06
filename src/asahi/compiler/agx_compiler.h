@@ -606,8 +606,6 @@ typedef struct {
    /* Stats for shader-db */
    unsigned loop_count;
    unsigned max_reg;
-   /* Peak half-register demand before spilling, including reserved registers. */
-   unsigned pre_spill_register_demand;
 
    /* Promoted constants. These will be appended to the binary at the end. */
    uint16_t rodata[512];
@@ -1096,7 +1094,6 @@ void agx_dce(agx_context *ctx, bool partial);
 void agx_pressure_schedule(agx_context *ctx);
 void agx_spill(agx_context *ctx, unsigned k, bool remat_only);
 void agx_repair_ssa(agx_context *ctx);
-bool agx_reuse_spill_reloads(agx_context *ctx);
 
 struct agx_spill_interference;
 struct agx_spill_interference *agx_spill_coalesce_prepare(agx_context *ctx);
