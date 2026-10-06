@@ -322,7 +322,9 @@ union drm_asahi_cmd {
 static inline unsigned
 max_commands_per_submit(struct hk_device *dev)
 {
-   return HK_PERF(dev, BATCH) ? 64 : 1;
+   return HK_PERF(dev, BATCH) ?
+      MAX2(1, MIN2(dev->dev.params.max_commands_per_submission,
+                   DRM_ASAHI_BARRIER_NONE - 1)) : 1;
 }
 
 static VkResult
@@ -385,7 +387,6 @@ queue_submit_looped(struct hk_device *dev, struct drm_asahi_submit *submit,
 {
    uint8_t *cmdbuf = (uint8_t *)(uintptr_t)submit->cmdbuf;
    uint32_t offs = 0;
-   unsigned submitted_vdm = 0, submitted_cdm = 0;
    unsigned commands_remaining = command_count;
 
    uint64_t out_syncs =
@@ -402,43 +403,14 @@ queue_submit_looped(struct hk_device *dev, struct drm_asahi_submit *submit,
       assert(count > 0);
 
       unsigned base_offs = offs;
-      unsigned cdm_count = 0, vdm_count = 0;
 
-      /* We need to fix up the barriers since barriers are ioctl-relative */
+      /* Headers already contain slice-relative barriers. */
       for (unsigned i = 0; i < count; ++i) {
          struct drm_asahi_cmd_header *cmd = (void *)(cmdbuf + offs);
          offs += sizeof(*cmd) + cmd->size;
 
-         if (cmd->cmd_type == DRM_ASAHI_CMD_RENDER)
-            vdm_count++;
-         else if (cmd->cmd_type == DRM_ASAHI_CMD_COMPUTE)
-            cdm_count++;
-
-         if (cmd->vdm_barrier != DRM_ASAHI_BARRIER_NONE) {
-            assert(cmd->vdm_barrier >= submitted_vdm);
-            cmd->vdm_barrier -= submitted_vdm;
-         }
-
-         if (cmd->cdm_barrier != DRM_ASAHI_BARRIER_NONE) {
-            assert(cmd->cdm_barrier >= submitted_cdm);
-            cmd->cdm_barrier -= submitted_cdm;
-         }
       }
 
-      /* We can't signal the out-syncobjs until all prior work finishes. Since
-       * only the last ioctl will signal, make sure it waits on prior ioctls.
-       *
-       * TODO: there might be a more performant way to do this.
-       */
-      if (last && !first) {
-         struct drm_asahi_cmd_header *cmd = (void *)(cmdbuf + base_offs);
-
-         if (cmd->vdm_barrier == DRM_ASAHI_BARRIER_NONE)
-            cmd->vdm_barrier = 0;
-
-         if (cmd->cdm_barrier == DRM_ASAHI_BARRIER_NONE)
-            cmd->cdm_barrier = 0;
-      }
 
       bool has_in_syncs = first;
       bool has_out_syncs = last;
@@ -458,8 +430,6 @@ queue_submit_looped(struct hk_device *dev, struct drm_asahi_submit *submit,
       if (result != VK_SUCCESS)
          return result;
 
-      submitted_cdm += cdm_count;
-      submitted_vdm += vdm_count;
    }
 
    return VK_SUCCESS;
@@ -848,6 +818,46 @@ hk_queue_submit_bind_sparse_memory(struct hk_device *device,
    return VK_SUCCESS;
 }
 
+/* Resolve recording-time stream identities only in submission-local storage.
+ * In particular, secondary replay, repeated submissions, and simultaneous use
+ * must never write queue-relative indices into a recorded command buffer.
+ */
+static struct hk_sync_stream *
+hk_resolve_sync(struct hk_cmd_buffer *cmd, struct hk_sync_state *state,
+                uint32_t nr_vdm, uint32_t nr_cdm)
+{
+   unsigned count = util_dynarray_num_elements(&cmd->sync_remap, uint32_t);
+   struct hk_sync_stream *streams = calloc(MAX2(count, 1), sizeof(*streams));
+   if (!streams)
+      return NULL;
+
+   uint32_t next[HK_SYNC_ENGINE_COUNT] = {nr_vdm, nr_cdm};
+   list_for_each_entry(struct hk_cs, cs, &cmd->control_streams, node) {
+      struct hk_sync_stream *s = &streams[cs->sync_id];
+      s->wait = hk_sync_empty();
+      memcpy(s->before, next, sizeof(next));
+      s->engine = cs->type == HK_CS_CDM ? HK_SYNC_CDM : HK_SYNC_RENDER;
+      s->index = ++next[s->engine];
+   }
+
+   bool precise = hk_sync_resolve(
+      state, cmd->sync_events.data,
+      util_dynarray_num_elements(&cmd->sync_events, struct hk_sync_event),
+      cmd->sync_remap.data, streams, count, cmd->sync_fallback);
+   if (!precise)
+      perf_debug(cmd, "Conservative synchronization for reordered helpers");
+
+   return streams;
+}
+
+static uint16_t
+hk_ioctl_barrier(uint32_t index, uint32_t submitted)
+{
+   uint32_t rebased = hk_sync_rebase(index, submitted);
+   assert(rebased == HK_SYNC_NONE || rebased < DRM_ASAHI_BARRIER_NONE);
+   return rebased == HK_SYNC_NONE ? DRM_ASAHI_BARRIER_NONE : rebased;
+}
+
 static VkResult
 queue_submit(struct hk_device *dev, struct hk_queue *queue,
              struct vk_queue_submit *submit)
@@ -875,8 +885,22 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
                   "Submitting %u control streams (%u command buffers)",
                   command_count, submit->command_buffer_count);
 
-   if (command_count == 0)
-      return queue_submit_empty(dev, queue, submit);
+   struct hk_sync_state sync = queue->sync;
+   if (command_count == 0) {
+      for (unsigned i = 0; i < submit->command_buffer_count; ++i) {
+         struct hk_cmd_buffer *cmd = (void *)submit->command_buffers[i];
+         struct hk_sync_stream *streams = hk_resolve_sync(cmd, &sync, 0, 0);
+         if (!streams)
+            return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+         free(streams);
+      }
+      VkResult result = queue_submit_empty(dev, queue, submit);
+      if (result == VK_SUCCESS) {
+         hk_sync_next_submit(&sync);
+         queue->sync = sync;
+      }
+      return result;
+   }
 
    unsigned wait_count = 0;
    struct drm_asahi_sync *syncs =
@@ -927,15 +951,32 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
    struct util_dynarray payload = UTIL_DYNARRAY_INIT;
 
    unsigned nr_vdm = 0, nr_cdm = 0;
+   unsigned slice_vdm = 0, slice_cdm = 0, emitted = 0;
+   unsigned last_slice_offset = 0;
+   const unsigned slice_limit = max_commands_per_submit(dev);
 
    for (unsigned i = 0; i < submit->command_buffer_count; ++i) {
       struct hk_cmd_buffer *cmdbuf =
          (struct hk_cmd_buffer *)submit->command_buffers[i];
 
+      struct hk_sync_stream *streams =
+         hk_resolve_sync(cmdbuf, &sync, nr_vdm, nr_cdm);
+      if (!streams) {
+         util_dynarray_fini(&payload);
+         return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+      }
+
       list_for_each_entry(struct hk_cs, cs, &cmdbuf->control_streams, node) {
-         /* Barrier on previous command */
+         if ((emitted++ % slice_limit) == 0) {
+            slice_vdm = nr_vdm;
+            slice_cdm = nr_cdm;
+            last_slice_offset = payload.size;
+         }
+         const struct hk_sync_dep *wait = &streams[cs->sync_id].wait;
          struct drm_asahi_cmd_header header =
-            agx_cmd_header(cs->type == HK_CS_CDM, nr_vdm, nr_cdm);
+            agx_cmd_header(cs->type == HK_CS_CDM,
+                           hk_ioctl_barrier(wait->engine[HK_SYNC_RENDER], slice_vdm),
+                           hk_ioctl_barrier(wait->engine[HK_SYNC_CDM], slice_cdm));
 
          util_dynarray_append(&payload, header);
 
@@ -968,7 +1009,18 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
             nr_vdm++;
          }
       }
+      free(streams);
    }
+
+   /* Output semaphores and the queue timeline cover all preceding work. Each
+    * engine present in the final ioctl covers its own older work by subqueue
+    * order. Join any absent engine explicitly, including for a single ioctl.
+    */
+   struct drm_asahi_cmd_header *join = payload.data + last_slice_offset;
+   if (nr_vdm == slice_vdm && join->vdm_barrier == DRM_ASAHI_BARRIER_NONE)
+      join->vdm_barrier = 0;
+   if (nr_cdm == slice_cdm && join->cdm_barrier == DRM_ASAHI_BARRIER_NONE)
+      join->cdm_barrier = 0;
 
    if (dev->dev.debug & AGX_DBG_TRACE) {
       agxdecode_drm_cmdbuf(dev->dev.agxdecode, &dev->dev.params, &payload,
@@ -997,6 +1049,10 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
    }
 
    util_dynarray_fini(&payload);
+   if (result == VK_SUCCESS) {
+      hk_sync_next_submit(&sync);
+      queue->sync = sync;
+   }
    return result;
 }
 
@@ -1093,6 +1149,7 @@ hk_queue_init(struct hk_device *dev, const VkDeviceQueueCreateInfo *pCreateInfo,
       return result;
 
    queue->vk.driver_submit = hk_queue_submit;
+   hk_sync_init(&queue->sync);
 
    queue->drm.id = agx_create_command_queue(&dev->dev, drm_priority);
    queue->drm.virt_ring_idx = drm_priority + 1;

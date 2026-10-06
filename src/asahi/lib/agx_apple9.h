@@ -292,13 +292,19 @@ bool agx_apple9_prepare_compute_dispatch(
    const struct agx_apple9_compute_geometry *geometry,
    uint64_t preamble_address, uint64_t *launch_address);
 
+/* Record-size constants include the optional trailing CDM barrier. Without
+ * it, the emitted launch is one uint32_t shorter; the caller supplies the next
+ * dependency barrier or a final stream barrier.
+ */
 bool agx_apple9_emit_direct_dispatch(
    void *out, uint64_t launch, const uint32_t global[3],
-   const uint32_t local[3], const struct agx_apple9_compute_profile *profile);
+   const uint32_t local[3], const struct agx_apple9_compute_profile *profile,
+   bool barrier);
 
 bool agx_apple9_emit_indirect_dispatch(
    void *out, uint64_t launch, uint64_t indirect, const uint32_t local[3],
-   bool indirect_local, const struct agx_apple9_compute_profile *profile);
+   bool indirect_local, const struct agx_apple9_compute_profile *profile,
+   bool barrier);
 
 /* Translate common image/sampler state to native Apple9 table records. */
 struct agx_texture_packed;

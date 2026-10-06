@@ -563,7 +563,8 @@ agx_apple9_compute_enabled(const struct agx_device *dev)
 bool
 agx_apple9_emit_direct_dispatch(
    void *out, uint64_t launch, const uint32_t global[3],
-   const uint32_t local[3], const struct agx_apple9_compute_profile *profile)
+   const uint32_t local[3], const struct agx_apple9_compute_profile *profile,
+   bool barrier)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
    if (!out || !abi || (launch & 0x3f) ||
@@ -581,14 +582,16 @@ agx_apple9_emit_direct_dispatch(
       apple9_put_u32(record + 0x10 + (i * 4), global[i]);
       apple9_put_u32(record + 0x1c + (i * 4), local[i]);
    }
-   apple9_put_u32(record + 0x28, abi->cdm_tail);
+   if (barrier)
+      apple9_put_u32(record + 0x28, abi->cdm_tail);
    return true;
 }
 
 bool
 agx_apple9_emit_indirect_dispatch(
    void *out, uint64_t launch, uint64_t indirect, const uint32_t local[3],
-   bool indirect_local, const struct agx_apple9_compute_profile *profile)
+   bool indirect_local, const struct agx_apple9_compute_profile *profile,
+   bool barrier)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
    if (!out || !abi || !abi->supports_indirect_dispatch || !indirect ||
@@ -622,7 +625,8 @@ agx_apple9_emit_indirect_dispatch(
       for (unsigned d = 0; d < 3; ++d)
          apple9_put_u32(record + 0x18 + d * 4, local[d]);
    }
-   apple9_put_u32(record + (indirect_local ? 0x18 : 0x24), abi->cdm_tail);
+   if (barrier)
+      apple9_put_u32(record + (indirect_local ? 0x18 : 0x24), abi->cdm_tail);
    return true;
 }
 

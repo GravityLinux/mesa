@@ -8,6 +8,7 @@
 #pragma once
 
 #include "hk_private.h"
+#include "hk_sync.h"
 #include "vk_queue.h"
 
 struct hk_device;
@@ -17,6 +18,7 @@ struct hk_queue {
 #ifdef HK_GPU_BUSY_COUNTERS
    struct hk_gpu_busy_queue *gpu_busy;
 #endif
+   struct hk_sync_state sync;
 
    struct {
       /* Asahi kernel queue ID */

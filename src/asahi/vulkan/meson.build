@@ -49,6 +49,8 @@ hk_files = files(
   'hk_sampler.h',
   'hk_shader.c',
   'hk_shader.h',
+  'hk_sync.c',
+  'hk_sync.h',
   'hk_wsi.c',
   'hk_wsi.h'
 )
@@ -127,6 +129,32 @@ libvulkan_asahi = shared_library(
   gnu_symbol_visibility : 'hidden',
   install : true,
 )
+
+if with_tests
+  test(
+    'hk_barrier_recording',
+    executable(
+      'hk_barrier_recording',
+      'tests/hk_barrier_recording.c',
+      include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                             inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+      dependencies : [hk_deps],
+      link_with : [libhk],
+    ),
+    suite : ['asahi', 'honeykrisp'],
+  )
+  test(
+    'hk_sync_tests',
+    executable(
+      'hk_sync_tests',
+      ['hk_sync.c', 'tests/hk_sync.cpp'],
+      include_directories : [inc_include],
+      dependencies : [idep_gtest],
+    ),
+    suite : ['asahi', 'honeykrisp'],
+    protocol : 'gtest',
+  )
+endif
 
 icd_file_name = libname_prefix + 'vulkan_asahi.' + libname_suffix
 
