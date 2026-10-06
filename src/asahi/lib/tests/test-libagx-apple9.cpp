@@ -65,10 +65,10 @@ TEST(Apple9Dispatch, PacketFootprints)
       out.fill(0xa5);
       bool ok = mode == 0
          ? agx_apple9_emit_direct_dispatch(out.data() + 16, 0x10000010000ull,
-                                          global, local, &profile)
+                                          global, local, &profile, true)
          : agx_apple9_emit_indirect_dispatch(out.data() + 16, 0x10000010000ull,
                                             0x200000000ull, local, mode == 2,
-                                            &profile);
+                                            &profile, true);
       ASSERT_TRUE(ok);
       for (unsigned i = 0; i < 16; ++i)
          EXPECT_EQ(out[i], 0xa5);
