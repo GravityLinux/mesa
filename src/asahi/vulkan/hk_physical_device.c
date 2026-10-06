@@ -1692,10 +1692,11 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
    /* With early fragment tests, occlusion counting precedes the sample
     * mask test. */
    props->earlyFragmentSampleMaskTestBeforeSampleCounting = false;
-   /* FP32 arithmetic flushes denormal inputs and results, but minimum,
-    * maximum and sign operations pass them through, so a shader's
-    * flush-to-zero mode cannot be honoured without per-operation fixups. */
-   props->shaderDenormFlushToZeroFloat32 = false;
+   /* FP32 arithmetic flushes natively. The Apple9 compiler canonicalizes
+    * raw-result operations for explicit FTZ, including min/max, sign-bit
+    * operations, subgroup reductions and floating atomic return values.
+    * FP32 preservation remains unsupported by the flushing arithmetic. */
+   props->shaderDenormFlushToZeroFloat32 = true;
    /* The rasterized interface carries at most this many user scalars. */
    props->maxVertexOutputComponents = AGX_APPLE9_MAX_VARYING_COMPONENTS;
    props->maxTessellationEvaluationOutputComponents =

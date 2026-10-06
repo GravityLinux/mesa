@@ -34,6 +34,40 @@ lower_denorm(nir_builder *b, nir_alu_instr *alu, UNUSED void *data)
    if (!ftz)
       return false;
 
+   switch (alu->op) {
+   /* T8132 exact-bit probes separate input DAZ from output FTZ for these
+    * native operations, including compact, immediate and source-modifier
+    * forms. FMA retains an underflowing product until the final rounding. */
+   case nir_op_fadd:
+   case nir_op_fsub:
+   case nir_op_fmul:
+   case nir_op_ffma:
+   case nir_op_ffma_weak:
+      return false;
+   /* Normal inputs producing subnormal exp2 results also flush on T8132. */
+   case nir_op_fexp2:
+      return false;
+   /* These results are integral, or have magnitudes bounded away from the
+    * FP32 subnormal interval by their input format. */
+   case nir_op_b2f32:
+   case nir_op_i2f32:
+   case nir_op_u2f32:
+   case nir_op_ffloor:
+   case nir_op_fceil:
+   case nir_op_ftrunc:
+   case nir_op_fround_even:
+   case nir_op_fsqrt:
+   case nir_op_frsq:
+   case nir_op_flog2:
+      return false;
+   case nir_op_f2f32:
+      if (alu->src[0].src.ssa->bit_size == 16)
+         return false;
+      break;
+   default:
+      break;
+   }
+
    /* Run after algebraic optimization, which can replace arithmetic with
     * min/max or sign operations. Moves, selects, loads and stores are bit
     * preserving and deliberately do not enter this float-result path. */
@@ -43,11 +77,78 @@ lower_denorm(nir_builder *b, nir_alu_instr *alu, UNUSED void *data)
    return true;
 }
 
+static bool
+lower_denorm_intrinsic(nir_builder *b, nir_intrinsic_instr *intr,
+                       UNUSED void *data)
+{
+   bool affected;
+   switch (intr->intrinsic) {
+   case nir_intrinsic_ddx:
+   case nir_intrinsic_ddy:
+   case nir_intrinsic_ddx_fine:
+   case nir_intrinsic_ddy_fine:
+   case nir_intrinsic_ddx_coarse:
+   case nir_intrinsic_ddy_coarse:
+      affected = true;
+      break;
+   default:
+      affected = nir_intrinsic_has_atomic_op(intr) &&
+                 (nir_intrinsic_atomic_op(intr) == nir_atomic_op_fadd ||
+                  nir_intrinsic_atomic_op(intr) == nir_atomic_op_fmin ||
+                  nir_intrinsic_atomic_op(intr) == nir_atomic_op_fmax);
+      break;
+   }
+   if (!affected || intr->def.bit_size != 32)
+      return false;
+
+   /* Floating atomic arithmetic must canonicalize its returned value too.
+    * Integer atomics and bit-preserving exchange/load remain untouched. */
+   b->cursor = nir_after_instr(&intr->instr);
+   nir_def *result = flush_fp32(b, &intr->def);
+   nir_def_rewrite_uses_after(&intr->def, result);
+   return true;
+}
+
+static bool
+lower_denorm_reduction(nir_builder *b, nir_intrinsic_instr *intr,
+                       UNUSED void *data)
+{
+   if ((intr->intrinsic != nir_intrinsic_reduce &&
+        intr->intrinsic != nir_intrinsic_inclusive_scan &&
+        intr->intrinsic != nir_intrinsic_exclusive_scan) ||
+       intr->def.bit_size != 32 ||
+       (nir_intrinsic_reduction_op(intr) != nir_op_fmin &&
+        nir_intrinsic_reduction_op(intr) != nir_op_fmax))
+      return false;
+
+   /* A scan's first active lane, or a one-element cluster, may bypass every
+    * ALU operation. Keep the original reduction's result semantics before
+    * generic subgroup lowering turns it into bit-preserving shuffles/selects. */
+   b->cursor = nir_after_instr(&intr->instr);
+   nir_def *result = flush_fp32(b, &intr->def);
+   nir_def_rewrite_uses_after(&intr->def, result);
+   return true;
+}
+
+bool
+agx_nir_lower_apple9_subgroup_denorms(nir_shader *shader)
+{
+   return nir_is_denorm_flush_to_zero(
+             shader->info.float_controls_execution_mode, 32) &&
+          nir_shader_intrinsics_pass(shader, lower_denorm_reduction,
+                                     nir_metadata_control_flow, NULL);
+}
+
 bool
 agx_nir_lower_apple9_denorms(nir_shader *shader)
 {
-   return nir_shader_alu_pass(shader, lower_denorm,
-                              nir_metadata_control_flow, NULL);
+   bool progress = nir_shader_alu_pass(shader, lower_denorm,
+                                       nir_metadata_control_flow, NULL);
+   if (nir_is_denorm_flush_to_zero(shader->info.float_controls_execution_mode,
+                                   32))
+      progress |= nir_shader_intrinsics_pass(shader, lower_denorm_intrinsic,
+                                             nir_metadata_control_flow, NULL);
+   return progress;
 }
 
 static nir_def *
@@ -282,8 +383,8 @@ lower_math(nir_builder *b, nir_instr *instr, UNUSED void *data)
 bool
 agx_nir_lower_apple9_math(nir_shader *shader)
 {
-   bool progress =
-      nir_shader_lower_instructions(shader, math_filter, lower_math, NULL);
+   bool progress = agx_nir_lower_apple9_subgroup_denorms(shader);
+   progress |= nir_shader_lower_instructions(shader, math_filter, lower_math, NULL);
    /* Apple9 has ordinary multiply/add/FMA, but no modeled interpolation
     * instruction. Use NIR's precision-aware lowering for FP32 mix. */
    progress |= nir_lower_flrp(shader, 16 | 32, false);

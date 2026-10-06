@@ -21,6 +21,7 @@ extern "C" {
 
 bool agx_nir_lower_apple9_math(nir_shader *shader);
 bool agx_nir_lower_apple9_denorms(nir_shader *shader);
+bool agx_nir_lower_apple9_subgroup_denorms(nir_shader *shader);
 
 /* Schedule texture operations without increasing estimated scalar-word pressure. */
 bool agx_nir_hoist_apple9_samples(nir_shader *shader);

@@ -81,6 +81,36 @@ TEST(Apple9Compiler, ExplicitDenormModeCompilesRawResultOperations)
    }
 }
 
+TEST(Apple9Compiler, DenormSingleLaneReductionSurvivesSubgroupLowering)
+{
+   for (nir_op op : {nir_op_fmin, nir_op_fmax, nir_op_imin}) {
+      for (bool ftz : {false, true}) {
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_COMPUTE, &agx_nir_options, "denorm_single_lane");
+         if (ftz)
+            b.shader->info.float_controls_execution_mode =
+               FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32;
+         nir_def *x = nir_imm_int(&b, 0x80000001);
+         nir_def *result = nir_reduce(&b, x, .reduction_op = op, .cluster_size = 1);
+         nir_store_ssbo(&b, result, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
+                        .align_mul = 4);
+         nir_intrinsic_instr *store = nir_instr_as_intrinsic(
+            nir_block_last_instr(nir_cursor_current_block(b.cursor)));
+         agx_nir_lower_apple9_subgroup_denorms(b.shader);
+         nir_lower_subgroups_options options = {};
+         options.subgroup_size = 32;
+         options.lower_reduce = true;
+         nir_lower_subgroups(b.shader, &options);
+         nir_opt_constant_folding(b.shader);
+         nir_opt_copy_prop(b.shader);
+         ASSERT_TRUE(nir_src_is_const(store->src[0]));
+         EXPECT_EQ(nir_src_as_uint(store->src[0]),
+                   ftz && op != nir_op_imin ? 0x80000000u : 0x80000001u);
+         ralloc_free(b.shader);
+      }
+   }
+}
+
 TEST(Apple9Compiler, GlobalPointerLoadsAndStores)
 {
    for (unsigned bits : {8u, 16u, 32u, 64u}) {
@@ -8876,23 +8906,28 @@ TEST(Apple9Compiler, FrontAndLoweredBackFacePredicatesCompile)
 
 TEST(Apple9Compiler, CoarseDerivativesUseNativeFragmentDifferencing)
 {
-   nir_builder b = nir_builder_init_simple_shader(
-      MESA_SHADER_FRAGMENT, &agx_nir_options, "coarse_derivatives");
-   nir_def *position = nir_load_frag_coord(&b);
-   nir_def *x = nir_channel(&b, position, 0);
-   nir_def *y = nir_channel(&b, position, 1);
-   nir_def *value = nir_fmul(&b, x, y);
-   nir_def *dx = nir_ddx_coarse(&b, value);
-   nir_def *dy = nir_ddy_coarse(&b, value);
-   nir_store_output(&b, nir_vec4(&b, dx, dy, value, nir_imm_float(&b, 1)),
-      nir_imm_int(&b, 0), .write_mask = 15, .src_type = nir_type_float32,
-      .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
-   b.shader->info.io_lowered = true;
-   agx_shader_part compiled = {};
-   const char *reason = nullptr;
-   ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason)) << reason;
-   free(compiled.binary);
-   ralloc_free(b.shader);
+   for (bool ftz : {false, true}) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "coarse_derivatives");
+      if (ftz)
+         b.shader->info.float_controls_execution_mode =
+            FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32;
+      nir_def *position = nir_load_frag_coord(&b);
+      nir_def *x = nir_channel(&b, position, 0);
+      nir_def *y = nir_channel(&b, position, 1);
+      nir_def *value = nir_fmul(&b, x, y);
+      nir_def *dx = nir_ddx_coarse(&b, value);
+      nir_def *dy = nir_ddy_coarse(&b, value);
+      nir_store_output(&b, nir_vec4(&b, dx, dy, value, nir_imm_float(&b, 1)),
+         nir_imm_int(&b, 0), .write_mask = 15, .src_type = nir_type_float32,
+         .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+      b.shader->info.io_lowered = true;
+      agx_shader_part compiled = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason)) << reason;
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
 }
 
 TEST(Apple9Machine, DerivativeAxisIsIndependentOfSourceLifetime)

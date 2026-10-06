@@ -6888,6 +6888,7 @@ apple9_subgroup_width(const nir_instr *instr, UNUSED void *data)
 static void
 apple9_lower_subgroups(nir_shader *nir)
 {
+   agx_nir_lower_apple9_subgroup_denorms(nir);
    nir_lower_bit_size(nir, apple9_subgroup_width, NULL);
    /* Subgroup operations are expressed through the native ballot and
     * simd_shuffle, which takes a per-lane source index. 32-bit integer
