@@ -456,6 +456,31 @@ TEST(Apple9Compiler, DenormCanonicalizeSurvivesEarlyMathLowering)
    ralloc_free(b.shader);
 }
 
+TEST(Apple9Compiler, DenormCanonicalityCrossesPreambleTransfers)
+{
+   for (unsigned source : {0u, 1u, 2u, 3u}) {
+      SCOPED_TRACE(source);
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "denorm_uniform_transfer");
+      b.shader->info.float_controls_execution_mode =
+         FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32;
+      nir_builder p = nir_builder_at(nir_before_impl(nir_shader_get_preamble(b.shader)));
+      nir_def *raw = nir_load_ubo(&p, 1, 32, nir_imm_int(&p, 0),
+                                 nir_imm_int(&p, 0), .align_mul = 4);
+      nir_def *value = source == 0 ? raw : source == 1 ? nir_imm_int(&p, 1) :
+                       source == 2 ? nir_imm_float(&p, 1) : nir_fadd_imm(&p, raw, 1);
+      nir_store_preamble(&p, nir_vec2(&p, nir_imm_int(&p, 0), value), .base = 6,
+                         .preamble_class = nir_preamble_class_general);
+      nir_def *uniform = nir_load_preamble(&b, 2, 32, .base = 6,
+                                           .preamble_class = nir_preamble_class_general);
+      nir_store_ssbo(&b, nir_fneg(&b, nir_channel(&b, uniform, 1)),
+                     nir_imm_int(&b, 1), nir_imm_int(&b, 0), .align_mul = 4);
+      agx_nir_lower_apple9_denorms(b.shader);
+      EXPECT_EQ(count_nir_alu(b.shader, nir_op_ult), source < 2 ? 1u : 0u);
+      ralloc_free(b.shader);
+   }
+}
+
 TEST(Apple9Compiler, DenormDoesNotConflateFastMathPermissions)
 {
    for (unsigned flags : {unsigned(nir_fp_fast_math),

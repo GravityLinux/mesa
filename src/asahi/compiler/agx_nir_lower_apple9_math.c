@@ -5,6 +5,8 @@
 
 #include "compiler/nir/nir_builder.h"
 #include "agx_compile_apple9.h"
+#include "agx_apple9_machine.h"
+#include "util/bitset.h"
 #include "util/set.h"
 
 static bool
@@ -110,7 +112,8 @@ flush_fp32(nir_builder *b, nir_def *x)
 }
 
 static bool
-fp32_result_is_canonical(nir_scalar s, unsigned depth)
+fp32_result_is_canonical(nir_scalar s, unsigned depth,
+                         const BITSET_WORD *canonical_uniforms)
 {
    if (s.def->bit_size != 32 || depth == 8)
       return false;
@@ -124,10 +127,20 @@ fp32_result_is_canonical(nir_scalar s, unsigned depth)
    if (nir_def_instr(s.def)->type == nir_instr_type_phi) {
       nir_foreach_phi_src(src, nir_def_as_phi(s.def)) {
          if (!fp32_result_is_canonical(nir_get_scalar(src->src.ssa, s.comp),
-                                       depth + 1))
+                                       depth + 1, canonical_uniforms))
             return false;
       }
       return true;
+   }
+
+   if (canonical_uniforms && nir_def_instr_type(s.def) == nir_instr_type_intrinsic) {
+      nir_intrinsic_instr *intr = nir_def_as_intrinsic(s.def);
+      if (intr->intrinsic == nir_intrinsic_load_preamble &&
+          nir_intrinsic_preamble_class(intr) == nir_preamble_class_general) {
+         unsigned word = nir_intrinsic_base(intr) + s.comp;
+         return word < AGX_APPLE9_UNIFORM_COUNT &&
+                BITSET_TEST(canonical_uniforms, word);
+      }
    }
 
    if (!nir_scalar_is_alu(s))
@@ -135,8 +148,10 @@ fp32_result_is_canonical(nir_scalar s, unsigned depth)
 
    nir_alu_instr *alu = nir_def_as_alu(s.def);
    if (alu->op == nir_op_bcsel)
-      return fp32_result_is_canonical(nir_scalar_chase_alu_src(s, 1), depth + 1) &&
-             fp32_result_is_canonical(nir_scalar_chase_alu_src(s, 2), depth + 1);
+      return fp32_result_is_canonical(nir_scalar_chase_alu_src(s, 1), depth + 1,
+                                      canonical_uniforms) &&
+             fp32_result_is_canonical(nir_scalar_chase_alu_src(s, 2), depth + 1,
+                                      canonical_uniforms);
 
    /* This query runs before rewriting any instruction. Under explicit FTZ,
     * floating ALU results are canonical either natively or after this pass.
@@ -185,7 +200,7 @@ only_used_by_fp32_daz(nir_def *def, unsigned depth)
 }
 
 static bool
-needs_fp32_flush(nir_alu_instr *alu)
+needs_fp32_flush(nir_alu_instr *alu, const BITSET_WORD *canonical_uniforms)
 {
    if (alu->def.bit_size != 32 ||
        nir_alu_type_get_base_type(nir_op_infos[alu->op].output_type) !=
@@ -231,7 +246,7 @@ needs_fp32_flush(nir_alu_instr *alu)
          nir_scalar result = nir_get_scalar(&alu->def, c);
          for (unsigned i = 0; i < nir_op_infos[alu->op].num_inputs; ++i)
             canonical &= fp32_result_is_canonical(
-               nir_scalar_chase_alu_src(result, i), 0);
+               nir_scalar_chase_alu_src(result, i), 0, canonical_uniforms);
       }
       if (canonical)
          return false;
@@ -341,11 +356,37 @@ agx_nir_lower_apple9_denorms(nir_shader *shader)
    struct set *flush = _mesa_pointer_set_create(NULL);
    if (nir_is_denorm_flush_to_zero(shader->info.float_controls_execution_mode,
                                    32)) {
+      BITSET_DECLARE(canonical_uniforms, AGX_APPLE9_UNIFORM_COUNT) = {0};
+      nir_function *preamble = nir_shader_get_entrypoint(shader)->preamble;
+      if (preamble) {
+         /* Extraction replaces SSA edges by uniform transfers. Retain the
+          * canonical-result proof across those transfers, including promoted
+          * constants. A store is a raw-bit use, so its floating producer may
+          * not defer a required flush to a consumer in the main shader. */
+         nir_foreach_block(block, preamble->impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type != nir_instr_type_intrinsic)
+                  continue;
+               nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+               if (intr->intrinsic != nir_intrinsic_store_preamble ||
+                   nir_intrinsic_preamble_class(intr) != nir_preamble_class_general ||
+                   intr->src[0].ssa->bit_size != 32)
+                  continue;
+               unsigned base = nir_intrinsic_base(intr);
+               for (unsigned c = 0; c < intr->src[0].ssa->num_components; ++c) {
+                  if (base + c < AGX_APPLE9_UNIFORM_COUNT &&
+                      fp32_result_is_canonical(nir_get_scalar(intr->src[0].ssa, c),
+                                                0, NULL))
+                     BITSET_SET(canonical_uniforms, base + c);
+               }
+            }
+         }
+      }
       nir_foreach_function_impl(impl, shader) {
          nir_foreach_block(block, impl) {
             nir_foreach_instr(instr, block) {
                if (instr->type == nir_instr_type_alu &&
-                   needs_fp32_flush(nir_instr_as_alu(instr)))
+                   needs_fp32_flush(nir_instr_as_alu(instr), canonical_uniforms))
                   _mesa_set_add(flush, nir_instr_as_alu(instr));
             }
          }
