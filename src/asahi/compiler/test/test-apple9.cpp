@@ -21,6 +21,59 @@ extern "C" {
 #include <vector>
 #include "gallium/include/pipe/p_defines.h"
 
+TEST(Apple9Compiler, BoundsSizeLimitPreservesOverflowAndShortBuffers)
+{
+   uint32_t random = 0x51a2f39bu;
+   for (uint32_t k : {1u, 3u, 7u, 15u, 255u, 65535u, 0x7fffffffu, UINT32_MAX}) {
+      std::vector<uint32_t> values = {0, 1, k - 1, k, k + 1,
+                                      UINT32_MAX - k, UINT32_MAX - k + 1,
+                                      UINT32_MAX - 1, UINT32_MAX};
+      for (unsigned i = 0; i < 16; ++i) {
+         random = random * 1664525u + 1013904223u;
+         values.push_back(random);
+      }
+      for (uint32_t offset : values) {
+         for (uint32_t size : values) {
+            nir_builder b = nir_builder_init_simple_shader(
+               MESA_SHADER_COMPUTE, &agx_nir_options, "bounds_limit");
+            nir_def *x = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 0),
+                                       nir_imm_int(&b, 0), .align_mul = 4);
+            nir_def *bound = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 0),
+                                           nir_imm_int(&b, 4), .align_mul = 4);
+            nir_def *last = nir_iadd_imm(&b, nir_umin_imm(&b, x, UINT32_MAX - k), k);
+            nir_store_ssbo(&b, nir_b2i32(&b, nir_ult(&b, last, bound)),
+                           nir_imm_int(&b, 1), nir_imm_int(&b, 0), .align_mul = 4);
+            auto *store = nir_instr_as_intrinsic(
+               nir_block_last_instr(nir_cursor_current_block(b.cursor)));
+            ASSERT_TRUE(agx_nir_opt_apple9_bounds(b.shader));
+            b.cursor = nir_before_instr(nir_def_instr(x));
+            nir_def_replace(x, nir_imm_int(&b, offset));
+            b.cursor = nir_before_instr(nir_def_instr(bound));
+            nir_def_replace(bound, nir_imm_int(&b, size));
+            nir_opt_constant_folding(b.shader);
+            ASSERT_TRUE(nir_src_is_const(store->src[0]));
+            /* Widened reference includes an overflowing last-byte offset. */
+            EXPECT_EQ(nir_src_as_uint(store->src[0]), uint64_t(offset) + k < size)
+               << "offset=" << offset << " size=" << size << " k=" << k;
+            ralloc_free(b.shader);
+         }
+      }
+   }
+}
+
+TEST(Apple9Compiler, BoundsSizeLimitRejectsDifferentClamp)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "different_clamp");
+   nir_def *x = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 0),
+                              nir_imm_int(&b, 0), .align_mul = 4);
+   nir_def *last = nir_iadd_imm(&b, nir_umin_imm(&b, x, UINT32_MAX - 4), 3);
+   nir_store_ssbo(&b, nir_b2i32(&b, nir_ult_imm(&b, last, 1024)),
+                  nir_imm_int(&b, 1), nir_imm_int(&b, 0), .align_mul = 4);
+   EXPECT_FALSE(agx_nir_opt_apple9_bounds(b.shader));
+   ralloc_free(b.shader);
+}
+
 TEST(Apple9Compiler, UniformDescriptorHoistingRequiresSafeIndependentReads)
 {
    for (bool speculate : {false, true}) {

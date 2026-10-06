@@ -21,6 +21,7 @@ extern "C" {
 
 bool agx_nir_hoist_apple9_uniform_reads(nir_shader *shader);
 bool agx_nir_lower_apple9_math(nir_shader *shader);
+bool agx_nir_opt_apple9_bounds(nir_shader *shader);
 bool agx_nir_lower_apple9_compute_derivatives(nir_shader *shader);
 bool agx_nir_lower_apple9_denorms(nir_shader *shader);
 bool agx_nir_lower_apple9_subgroup_denorms(nir_shader *shader);

@@ -6,6 +6,61 @@
 #include "compiler/nir/nir_builder.h"
 #include "agx_compile_apple9.h"
 
+static bool
+apple9_const_operand(nir_scalar s, nir_op op, nir_scalar *value, uint32_t *c)
+{
+   if (!nir_scalar_is_alu(s) || nir_scalar_alu_op(s) != op)
+      return false;
+   nir_scalar x = nir_scalar_chase_alu_src(s, 0);
+   nir_scalar y = nir_scalar_chase_alu_src(s, 1);
+   if (nir_scalar_is_const(x)) {
+      *value = y;
+      *c = nir_scalar_as_uint(x);
+      return true;
+   }
+   if (nir_scalar_is_const(y)) {
+      *value = x;
+      *c = nir_scalar_as_uint(y);
+      return true;
+   }
+   return false;
+}
+
+static bool
+opt_bounds(nir_builder *b, nir_alu_instr *alu, UNUSED void *data)
+{
+   if (alu->op != nir_op_ult || alu->def.num_components != 1 ||
+       alu->src[0].src.ssa->bit_size != 32)
+      return false;
+
+   nir_scalar lhs = nir_scalar_chase_alu_src(nir_get_scalar(&alu->def, 0), 0);
+   nir_scalar clamped, offset;
+   uint32_t last, ceiling;
+   if (!apple9_const_operand(lhs, nir_op_iadd, &clamped, &last) || !last ||
+       !apple9_const_operand(clamped, nir_op_umin, &offset, &ceiling) ||
+       ceiling != UINT32_MAX - last)
+      return false;
+
+   /* min(offset, UINT_MAX-k) + k < size is exactly equivalent to
+    * offset < max(size, k) - k, including short/empty buffers and offsets
+    * whose last byte would overflow. Keep offset arithmetic unchanged:
+    * an earlier wrapping add is not interchangeable with a 64-bit address
+    * displacement. Moving the adjustment to size lets CSE and the preamble
+    * share it across accesses to a uniform descriptor.
+    */
+   b->cursor = nir_before_instr(&alu->instr);
+   nir_def *size = nir_ssa_for_alu_src(b, alu, 1);
+   nir_def *limit = nir_iadd_imm(b, nir_umax_imm(b, size, last), -last);
+   nir_def_replace(&alu->def, nir_ult(b, nir_mov_scalar(b, offset), limit));
+   return true;
+}
+
+bool
+agx_nir_opt_apple9_bounds(nir_shader *shader)
+{
+   return nir_shader_alu_pass(shader, opt_bounds, nir_metadata_control_flow, NULL);
+}
+
 static nir_def *
 flush_fp32(nir_builder *b, nir_def *x)
 {

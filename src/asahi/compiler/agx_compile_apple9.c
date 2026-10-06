@@ -7050,6 +7050,7 @@ agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
    } while (progress);
    apple9_lower_textures(nir);
    apple9_lower_idiv(nir);
+   agx_nir_opt_apple9_bounds(nir);
    agx_nir_lower_apple9_math(nir);
    if (agx_nir_lower_apple9_compute_derivatives(nir))
       apple9_lower_subgroups(nir);
@@ -9385,6 +9386,7 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
    apple9_lower_idiv(nir);
    /* Format lowering can introduce powers and other high-level ALU ops. */
    apple9_opt_algebraic(nir);
+   agx_nir_opt_apple9_bounds(nir);
    agx_nir_lower_apple9_math(nir);
    nir_lower_alu_to_scalar(nir, NULL, NULL);
    nir_opt_constant_folding(nir);
