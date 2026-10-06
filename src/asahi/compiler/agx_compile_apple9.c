@@ -5135,6 +5135,13 @@ apple9_prepare_dag(nir_shader *nir)
       progress |= nir_opt_cse(nir);
       progress |= nir_opt_dce(nir);
    } while (progress);
+   /* Constant folding can turn zero gradients into txl after texture lowering.
+    * Normalize those new LOD operands before selection/preamble extraction. */
+   if (agx_nir_lower_apple9_texture_lod(nir)) {
+      nir_opt_constant_folding(nir);
+      nir_opt_copy_prop(nir);
+      nir_opt_dce(nir);
+   }
    nir_shader_intrinsics_pass(nir, apple9_widen_shared_offset,
                               nir_metadata_control_flow, NULL);
 }
@@ -7470,6 +7477,110 @@ apple9_lower_rectangle(nir_builder *b, nir_instr *instr, UNUSED void *data)
    return true;
 }
 
+/* Compute has no implicit texture-unit footprint. Derive it from the declared
+ * derivative group, using the same spatial coordinates as explicit gradients.
+ * Array layers and shadow comparisons never participate in the footprint. */
+static bool
+apple9_lower_compute_lod_query(nir_builder *b, nir_instr *instr, void *data)
+{
+   if (b->shader->info.stage != MESA_SHADER_COMPUTE ||
+       b->shader->info.derivative_group != DERIVATIVE_GROUP_LINEAR ||
+       instr->type != nir_instr_type_tex)
+      return false;
+   nir_tex_instr *tex = nir_instr_as_tex(instr);
+   if (tex->op != nir_texop_lod)
+      return false;
+
+   b->cursor = nir_before_instr(instr);
+   unsigned dims = tex->sampler_dim == GLSL_SAMPLER_DIM_1D ? 1 :
+                   tex->sampler_dim == GLSL_SAMPLER_DIM_3D ||
+                   tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE ? 3 : 2;
+   int coord = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+   nir_def *p = nir_trim_vector(b, tex->src[coord].src.ssa, dims);
+   nir_def *dx = nir_ddx(b, p), *dy = nir_ddy(b, p);
+   bool cube = tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE;
+   if (cube) {
+      /* Project each derivative onto the selected face with the quotient
+       * rule. Signs of the face axes do not affect the footprint length. */
+      nir_def *a = nir_fabs(b, p);
+      nir_def *x = nir_channel(b, a, 0), *y = nir_channel(b, a, 1);
+      nir_def *z = nir_channel(b, a, 2);
+      nir_def *use_z = nir_fge(b, z, nir_fmax(b, x, y));
+      nir_def *use_y = nir_fge(b, y, nir_fmax(b, x, z));
+      unsigned xzy[] = {0, 2, 1}, yzx[] = {1, 2, 0};
+      nir_def *values[] = {p, dx, dy};
+      for (unsigned i = 0; i < 3; ++i)
+         values[i] = nir_bcsel(b, use_z, values[i],
+            nir_bcsel(b, use_y, nir_swizzle(b, values[i], xzy, 3),
+                                 nir_swizzle(b, values[i], yzx, 3)));
+      nir_def *rcp = nir_frcp(b, nir_channel(b, values[0], 2));
+      nir_def *uv = nir_fmul(b, nir_trim_vector(b, values[0], 2), rcp);
+      for (unsigned i = 1; i < 3; ++i)
+         values[i] = nir_fmul(b, nir_fmul_imm(b, rcp, 0.5),
+            nir_fsub(b, nir_trim_vector(b, values[i], 2),
+                        nir_fmul(b, uv, nir_channel(b, values[i], 2))));
+      dx = values[1];
+      dy = values[2];
+      dims = 2;
+   }
+   nir_def *size[3];
+   for (unsigned c = 0; c < dims; ++c)
+      size[c] = nir_u2f32(b, agx_apple9_texture_info(b, tex, cube ? 0 : c));
+   nir_def *extent = nir_vec(b, size, dims);
+   dx = nir_fmul(b, dx, extent);
+   dy = nir_fmul(b, dy, extent);
+   nir_def *xx = nir_fdot(b, dx, dx), *yy = nir_fdot(b, dy, dy);
+   nir_def *major = nir_fmax(b, xx, yy);
+   /* Native 2D anisotropic sampling uses footprint area divided by its
+    * longest derivative. This also handles nonorthogonal and rank-one
+    * footprints; the shorter derivative's length would overestimate them.
+    * Native 3D sampling is isotropic. Cube gradients are lowered to scalar
+    * LODs by the common texture pass. */
+   if (!cube && tex->sampler_dim != GLSL_SAMPLER_DIM_3D) {
+      nir_def *area = dims == 1 ? nir_imm_float(b, 0) :
+         nir_fsub(b, nir_fmul(b, nir_channel(b, dx, 0), nir_channel(b, dy, 1)),
+                     nir_fmul(b, nir_channel(b, dx, 1), nir_channel(b, dy, 0)));
+      nir_def *minor = nir_bcsel(b, nir_flt(b, nir_imm_float(b, 0), major),
+         nir_fdiv(b, nir_fmul(b, area, area), major), nir_imm_float(b, 0));
+      nir_def *aniso = agx_apple9_sampler_field(b, tex, AGX_APPLE9_SAMP_MAX_ANISOTROPY);
+      aniso = nir_fmax(b, aniso, nir_imm_float(b, 1.0));
+      major = nir_fmax(b, minor, nir_fdiv(b, major, nir_fmul(b, aniso, aniso)));
+   }
+   nir_def *lod = nir_fmul_imm(b, nir_flog2(b, major), 0.5);
+   int bias_src = nir_tex_instr_src_index(tex, nir_tex_src_bias);
+   nir_def *bias = bias_src >= 0 ? nir_f2f32(b, tex->src[bias_src].src.ssa) :
+                                 nir_imm_float(b, 0);
+   if (nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle) < 0) {
+      nir_def *state_bias = nir_load_ubo(b, 1, 32,
+         nir_imm_int(b, AGX_APPLE9_GRAPHICS_SYSVAL_BINDING),
+         nir_imm_int(b, AGX_APPLE9_SAMPLER_BIAS_OFFSET + tex->sampler_index * 4),
+         .align_mul = 4, .range = 4);
+      bias = nir_fadd(b, bias, state_bias);
+   }
+   /* Honeykrisp advertises maxSamplerLodBias = 15. */
+   bias = nir_fclamp(b, bias, nir_imm_float(b, -15), nir_imm_float(b, 15));
+   lod = nir_fadd(b, lod, bias);
+   nir_def *level = nir_fclamp(b, lod,
+      agx_apple9_sampler_field(b, tex, AGX_APPLE9_SAMP_MIN_LOD),
+      agx_apple9_sampler_field(b, tex, AGX_APPLE9_SAMP_MAX_LOD));
+   nir_def *mip = agx_apple9_sampler_field(b, tex, AGX_APPLE9_SAMP_MIP);
+   nir_def *levels = agx_apple9_texture_info(b, tex, 3);
+   level = nir_fclamp(b, level, nir_imm_float(b, 0),
+                        nir_u2f32(b, nir_iadd_imm(b, levels, -1)));
+   int view_min = nir_tex_instr_src_index(tex, nir_tex_src_min_lod);
+   if (view_min >= 0)
+      level = nir_fmax(b, level, nir_f2f32(b, tex->src[view_min].src.ssa));
+   level = nir_bcsel(b, nir_ieq_imm(b, mip, PIPE_TEX_MIPFILTER_NEAREST),
+      nir_fadd_imm(b, nir_fceil(b, nir_fadd_imm(b, level, 0.5)), -1.0), level);
+   level = nir_bcsel(b, nir_ieq_imm(b, mip, PIPE_TEX_MIPFILTER_NONE),
+                       nir_imm_float(b, 0), level);
+   nir_def *result = nir_bcsel(b, nir_ieq_imm(b, levels, 0),
+      nir_imm_vec2(b, 0, 0), nir_vec2(b, level, lod));
+   nir_def_rewrite_uses(&tex->def, result);
+   nir_instr_remove(instr);
+   return true;
+}
+
 /* LOD queries use the texture unit's derivative and clamp machinery. The
  * hardware returns continuous LODs; GL additionally applies mip selection to
  * the first component. Bias goes through the normal sample-bias operand. */
@@ -7752,34 +7863,34 @@ apple9_native_min_lod(const nir_tex_instr *tex)
           nir_tex_instr_src_index(tex, nir_tex_src_offset) < 0;
 }
 
-/* Route implicit array-shadow sampling, and implicit 2D sampling with a
- * minimum LOD, through native explicit gradients. Only spatial coordinates
- * contribute derivatives; neither the layer nor comparator does. An
- * instruction bias scales those gradients, so that the minimum LOD clamps
+/* Route linear compute sampling, implicit array-shadow sampling,
+ * and implicit 2D sampling with a minimum LOD through explicit gradients.
+ * Only spatial coordinates contribute derivatives, excluding the layer and
+ * comparator. An instruction bias scales gradients so the minimum LOD clamps
  * the biased LOD, while the sampler's bias is applied afterwards. */
 static bool
 apple9_lower_implicit_gradients(nir_builder *b, nir_instr *instr, void *data)
 {
-   if (instr->type != nir_instr_type_tex ||
-       b->shader->info.stage != MESA_SHADER_FRAGMENT)
+   if (instr->type != nir_instr_type_tex)
+      return false;
+   bool compute = b->shader->info.stage == MESA_SHADER_COMPUTE &&
+                  b->shader->info.derivative_group == DERIVATIVE_GROUP_LINEAR;
+   if (!compute && b->shader->info.stage != MESA_SHADER_FRAGMENT)
       return false;
    nir_tex_instr *tex = nir_instr_as_tex(instr);
-   if (!(tex->is_array && tex->is_shadow &&
-         tex->sampler_dim == GLSL_SAMPLER_DIM_2D) &&
+   if (!compute && !(tex->is_array && tex->is_shadow &&
+                    tex->sampler_dim == GLSL_SAMPLER_DIM_2D) &&
        !apple9_native_min_lod(tex))
       return false;
    if (tex->op != nir_texop_tex && tex->op != nir_texop_txb)
       return false;
    b->cursor = nir_before_instr(instr);
    int coord = nir_tex_instr_src_index(tex, nir_tex_src_coord);
-   /* Derivatives are of the projected coordinates. */
-   nir_def *projector = nir_steal_tex_src(tex, nir_tex_src_projector);
-   if (projector) {
-      nir_src_rewrite(&tex->src[coord].src,
-         nir_fdiv(b, tex->src[coord].src.ssa, projector));
-   }
-   nir_def *xy = nir_trim_vector(b, tex->src[coord].src.ssa, 2);
-   nir_def *dx = nir_ddx(b, xy), *dy = nir_ddy(b, xy);
+   /* Projection, including the shadow comparator, is already lowered. */
+   assert(nir_tex_instr_src_index(tex, nir_tex_src_projector) < 0);
+   unsigned spatial = tex->coord_components - tex->is_array;
+   nir_def *position = nir_trim_vector(b, tex->src[coord].src.ssa, spatial);
+   nir_def *dx = nir_ddx(b, position), *dy = nir_ddy(b, position);
    int bias = nir_tex_instr_src_index(tex, nir_tex_src_bias);
    if (bias >= 0) {
       nir_def *scale = nir_fexp2(b, tex->src[bias].src.ssa);
@@ -9168,10 +9279,14 @@ apple9_lower_textures(nir_shader *nir)
    nir_shader_instructions_pass(nir, apple9_lower_fetch_min_lod,
                                 nir_metadata_control_flow, NULL);
    agx_nir_legalize_apple9_texture_sources(nir);
-   /* Compatibility GL supplies projective texture coordinates. Reuse the
-    * common NIR quotient lowering before selecting ordinary 2D sampling. */
+   /* Gradients must follow projection. Common NIR lowering also projects
+    * shadow comparators and leaves array layers unchanged. */
+   const nir_lower_tex_options projection = {.lower_txp = ~0u};
+   nir_lower_tex(nir, &projection);
+   nir_shader_instructions_pass(nir, apple9_lower_compute_lod_query,
+                                nir_metadata_control_flow, NULL);
    const nir_lower_tex_options tex_options = {
-      .lower_txp = ~0u, .lower_1d = true,
+      .lower_1d = true,
       .lower_rect = true, .lower_rect_offset = true,
       .lower_invalid_implicit_lod = true,
       .lower_txf_offset = true,

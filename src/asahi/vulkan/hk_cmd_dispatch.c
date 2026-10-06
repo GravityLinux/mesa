@@ -124,7 +124,10 @@ hk_apple9_texture_info(uint32_t *data, const struct agx_texture_packed *state)
       ? u_minify(image.depth, image.first_level)
       : image.layout == AGX_LAYOUT_LINEAR && image.extended
          ? image.depth_linear : image.depth;
-   data[3] = image.last_level - image.first_level + 1;
+   /* Null images use a dummy zero-page texture for safe hardware sampling.
+    * Preserve their logical emptiness for shader-side LOD queries. */
+   data[3] = image.address == AGX_ZERO_PAGE_ADDRESS
+                ? 0 : image.last_level - image.first_level + 1;
    data[4] = (image.dimension == AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED ||
               image.dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY_MULTISAMPLED)
       ? (2 << image.samples) : 1;
@@ -179,6 +182,7 @@ hk_apple9_runtime_sampler(uint32_t *data, const struct agx_sampler_packed *state
    data[AGX_APPLE9_SAMP_BIAS] = 0;
    data[AGX_APPLE9_SAMP_BORDER] = sampler.border_colour;
    data[AGX_APPLE9_SAMP_PIXEL_COORDS] = sampler.pixel_coordinates;
+   data[AGX_APPLE9_SAMP_MAX_ANISOTROPY] = fui(sampler.maximum_anisotropy);
    return true;
 }
 

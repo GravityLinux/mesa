@@ -319,6 +319,108 @@ TEST(Apple9Compiler, LinearComputeDerivativesCompile)
    }
 }
 
+TEST(Apple9Compiler, LinearComputeTexturesUseExplicitGradients)
+{
+   for (auto dim : {GLSL_SAMPLER_DIM_1D, GLSL_SAMPLER_DIM_2D,
+                    GLSL_SAMPLER_DIM_3D, GLSL_SAMPLER_DIM_CUBE}) {
+      for (bool array : {false, true}) {
+         if (array && dim == GLSL_SAMPLER_DIM_3D)
+            continue;
+         for (auto op : {nir_texop_tex, nir_texop_txb}) {
+            SCOPED_TRACE(::testing::Message() << dim << ":" << array << ":" << op);
+            nir_builder b = nir_builder_init_simple_shader(
+               MESA_SHADER_COMPUTE, &agx_nir_options, "linear_compute_texture");
+            b.shader->info.derivative_group = DERIVATIVE_GROUP_LINEAR;
+            b.shader->info.workgroup_size[0] = 16;
+            b.shader->info.workgroup_size[1] = 1;
+            b.shader->info.workgroup_size[2] = 1;
+            unsigned spatial = dim == GLSL_SAMPLER_DIM_1D ? 1 :
+                               dim == GLSL_SAMPLER_DIM_2D ? 2 : 3;
+            unsigned components = spatial + array;
+            nir_def *coord = nir_load_ssbo(&b, components, 32, nir_imm_int(&b, 0),
+               nir_imul_imm(&b, nir_load_local_invocation_index(&b), 16),
+               .align_mul = 16);
+            nir_tex_instr *tex = nir_tex_instr_create(b.shader, op == nir_texop_txb ? 2 : 1);
+            tex->op = op;
+            tex->sampler_dim = dim;
+            tex->is_array = array;
+            tex->dest_type = nir_type_float32;
+            tex->coord_components = components;
+            tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, coord);
+            if (op == nir_texop_txb)
+               tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_bias, nir_imm_float(&b, .5));
+            nir_def_init(&tex->instr, &tex->def, 4, 32);
+            nir_builder_instr_insert(&b, &tex->instr);
+            nir_store_ssbo(&b, &tex->def, nir_imm_int(&b, 1), nir_imm_int(&b, 0),
+                           .align_mul = 16);
+            agx_shader_part compiled = {};
+            agx_apple9_compute_profile profile = {};
+            const char *reason = nullptr;
+            ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason))
+               << (reason ?: "");
+            unsigned samples = 0;
+            nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+               nir_foreach_instr(instr, block) {
+                  if (instr->type != nir_instr_type_tex)
+                     continue;
+                  auto *lowered = nir_instr_as_tex(instr);
+                  EXPECT_NE(lowered->op, nir_texop_tex);
+                  EXPECT_NE(lowered->op, nir_texop_txb);
+                  samples++;
+               }
+            }
+            EXPECT_GT(samples, 0u);
+            free(compiled.binary);
+            ralloc_free(b.shader);
+         }
+      }
+   }
+}
+
+TEST(Apple9Compiler, LinearComputeProjectionIncludesShadowComparator)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "projective_compute_shadow");
+   b.shader->info.derivative_group = DERIVATIVE_GROUP_LINEAR;
+   b.shader->info.workgroup_size[0] = 16;
+   b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
+   tex->op = nir_texop_tex;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->is_shadow = tex->is_new_style_shadow = true;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 2;
+   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, nir_imm_vec2(&b, .125, .25));
+   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_comparator, nir_imm_float(&b, .125));
+   tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_projector, nir_imm_float(&b, .5));
+   nir_def_init(&tex->instr, &tex->def, 1, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+   nir_store_ssbo(&b, &tex->def, nir_imm_int(&b, 0), nir_imm_int(&b, 0), .align_mul = 4);
+   agx_shader_part compiled = {};
+   agx_apple9_compute_profile profile = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason))
+      << (reason ?: "");
+   unsigned checked = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_tex)
+            continue;
+         auto *sample = nir_instr_as_tex(instr);
+         EXPECT_TRUE(sample->op == nir_texop_txd || sample->op == nir_texop_txl);
+         int cmp = nir_tex_instr_src_index(sample, nir_tex_src_comparator);
+         ASSERT_GE(cmp, 0);
+         ASSERT_TRUE(nir_src_is_const(sample->src[cmp].src));
+         EXPECT_EQ(nir_src_as_float(sample->src[cmp].src), .25f);
+         EXPECT_LT(nir_tex_instr_src_index(sample, nir_tex_src_projector), 0);
+         checked++;
+      }
+   }
+   EXPECT_EQ(checked, 1u);
+   free(compiled.binary);
+   ralloc_free(b.shader);
+}
+
 TEST(Apple9Compiler, DenormCanonicalizePreservesNormalAndSpecialBits)
 {
    const uint32_t values[] = {

@@ -992,6 +992,16 @@ static bool
 lower_min_lod(nir_builder *b, nir_tex_instr *tex, void *data)
 {
    const bool *float_fetch = data;
+   if (*float_fetch && tex->op == nir_texop_lod &&
+       b->shader->info.stage == MESA_SHADER_COMPUTE &&
+       b->shader->info.derivative_group == DERIVATIVE_GROUP_LINEAR) {
+      /* The compute query consumes the view clamp after sampler/view level
+       * clamping, before mip rounding. It is not a sampler minimum LOD. */
+      b->cursor = nir_before_instr(&tex->instr);
+      nir_tex_instr_add_src(tex, nir_tex_src_min_lod,
+                            query_min_lod(b, tex, false));
+      return true;
+   }
    if (nir_tex_instr_is_query(tex))
       return false;
 
