@@ -5391,22 +5391,31 @@ struct apple9_dag_cost {
    unsigned spills, instructions, gprs, pre_spill_gprs;
 };
 
-/* Pure per-lane scalar ALU may execute speculatively. Do not hoist loads,
- * samples, derivatives, subgroup operations or other implicit-state accesses.
+/* Pure per-lane ALU and immutable preamble reads may execute speculatively.
+ * Do not hoist memory loads, samples, derivatives, subgroup operations or other
+ * implicit-state accesses.
  * The completed allocation decides whether the longer live ranges are useful.
  */
 static bool
 apple9_licm_alu(nir_instr *instr, nir_loop *loop, bool dominates_exit)
 {
+   if (instr->type == nir_instr_type_intrinsic)
+      return nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_preamble;
    return instr->type == nir_instr_type_alu &&
-          nir_instr_as_alu(instr)->def.bit_size == 32 &&
-          nir_instr_as_alu(instr)->def.num_components == 1;
+          nir_instr_as_alu(instr)->def.bit_size == 32;
 }
 
 bool
 agx_nir_opt_apple9_licm(nir_shader *nir)
 {
-   return nir_opt_licm(nir, apple9_licm_alu);
+   bool progress = nir_opt_licm(nir, apple9_licm_alu);
+   /* LICM moves every constant, including those used only by varying work.
+    * Keep those literals close to their uses instead of lengthening all of
+    * their lifetimes through the loop. Vector constructors are allowed above
+    * so their component users can move, even after scalar ALU lowering. */
+   if (progress)
+      nir_opt_sink(nir, nir_move_const_undef);
+   return progress;
 }
 
 static unsigned
