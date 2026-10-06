@@ -4,6 +4,8 @@
  */
 
 #include "agx_builder.h"
+#include "agx_apple9_ir.h"
+#include <vector>
 #include "agx_compile.h"
 #include "agx_compiler.h"
 #include "agx_test.h"
@@ -161,4 +163,86 @@ TEST_F(LowerSpill, Vec6Fill)
          agx_stack_load_to(b, vec2, agx_immediate(32 + 4 * 4), i32,
                            BITFIELD_MASK(2));
       });
+}
+
+/* Selected uniform expressions must reconstruct their complete input graph,
+ * preserve machine constraints, and decline mutable uniforms. */
+TEST(Apple9Rematerialization, BoundedImmutableExpressions)
+{
+   for (unsigned layers : {0u, 1u, 3u}) {
+      for (bool mutable_uniforms : {false, true}) {
+         SCOPED_TRACE(layers);
+         SCOPED_TRACE(mutable_uniforms);
+         void *mem = ralloc_context(nullptr);
+         agx_builder *b = agx_test_builder(mem);
+         std::vector<agx_index> values;
+         auto zero = agx_mov_imm(b, 32, 0);
+         struct agx_reg_constraint constraint = {.max = 126, .align = 2};
+         for (unsigned i = 0; i < 12; ++i) {
+            auto selected = rzalloc(mem, agx_apple9_vir_instr);
+            selected->op = AGX_APPLE9_VIR_IOR_UNIFORM;
+            selected->encoding = AGX_APPLE9_ENC_LOGIC_UNIFORM;
+            selected->dest_components = 1;
+            selected->nr_srcs = 1;
+            selected->immediate = 12 + i;
+            auto I = agx_alloc_instr(b, AGX_OPCODE_APPLE9_PURE, 1, 1);
+            I->apple9 = selected;
+            I->dest[0] = agx_temp(b->shader, AGX_SIZE_32);
+            I->src[0] = zero;
+            I->reg_constraints = rzalloc_array(mem, agx_reg_constraint, 2);
+            I->reg_constraints[0] = constraint;
+            I->reg_constraints[1] = constraint;
+            agx_builder_insert(&b->cursor, I);
+            agx_index value = I->dest[0];
+            for (unsigned j = 0; j < layers; ++j) {
+               auto add = agx_alloc_instr(b, AGX_OPCODE_APPLE9_PURE, 1, 1);
+               add->apple9 = rzalloc(mem, agx_apple9_vir_instr);
+               add->apple9->op = AGX_APPLE9_VIR_FADD_IMM;
+               add->apple9->dest_components = 1;
+               add->apple9->nr_srcs = 1;
+               add->apple9->immediate = 0x3f800000;
+               add->reg_constraints = I->reg_constraints;
+               add->src[0] = value;
+               value = add->dest[0] = agx_temp(b->shader, AGX_SIZE_32);
+               agx_builder_insert(&b->cursor, add);
+            }
+            values.push_back(value);
+         }
+         if (mutable_uniforms) {
+            auto selected = rzalloc(mem, agx_apple9_vir_instr);
+            selected->op = AGX_APPLE9_VIR_STORE_UNIFORM;
+            auto I = agx_alloc_instr(b, AGX_OPCODE_APPLE9, 0, 1);
+            I->apple9 = selected;
+            I->src[0] = zero;
+            agx_builder_insert(&b->cursor, I);
+         }
+         for (auto value : values) {
+            auto I = agx_alloc_instr(b, AGX_OPCODE_APPLE9, 0, 1);
+            I->src[0] = value;
+            I->apple9 = rzalloc(mem, agx_apple9_vir_instr);
+            I->apple9->op = AGX_APPLE9_VIR_DEVICE_STORE;
+            agx_builder_insert(&b->cursor, I);
+         }
+         agx_compute_liveness(b->shader);
+         agx_spill(b->shader, 16, false);
+         unsigned memory_moves = 0, imports = 0;
+         agx_foreach_instr_global(b->shader, I) {
+            if (I->op == AGX_OPCODE_MOV)
+               memory_moves += I->dest[0].memory || I->src[0].memory;
+            if (I->op == AGX_OPCODE_APPLE9_PURE) {
+               imports += I->apple9->op == AGX_APPLE9_VIR_IOR_UNIFORM;
+               ASSERT_NE(I->reg_constraints, nullptr);
+               EXPECT_EQ(I->reg_constraints[0].max, constraint.max);
+               EXPECT_EQ(I->reg_constraints[0].align, constraint.align);
+               EXPECT_EQ(I->nr_srcs, 1u);
+            }
+         }
+         EXPECT_EQ(imports, 12u);
+         if (mutable_uniforms || layers == 3)
+            EXPECT_GT(memory_moves, 0u);
+         else
+            EXPECT_EQ(memory_moves, 0u);
+         ralloc_free(mem);
+      }
+   }
 }

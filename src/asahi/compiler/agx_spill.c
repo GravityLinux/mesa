@@ -12,6 +12,7 @@
 #include "util/u_dynarray.h"
 #include "util/u_qsort.h"
 #include "agx_builder.h"
+#include "agx_apple9_ir.h"
 #include "agx_compiler.h"
 #include "agx_opcodes.h"
 
@@ -358,17 +359,113 @@ can_remat(agx_instr *I)
    }
 }
 
+/* Rebuild short scalar expressions whose complete input graph consists of
+ * constants and immutable uniforms. No GPR input is kept live for this: every
+ * dependency is reconstructed at the use. Limit the total instruction count,
+ * including repeated dependencies, to avoid expanding large expression trees.
+ */
+static bool
+apple9_remat_alu(const agx_instr *I)
+{
+   if (I->op != AGX_OPCODE_APPLE9_PURE || I->nr_dests != 1 ||
+       I->dest[0].size != AGX_SIZE_32 || agx_channels(I->dest[0]) != 1 ||
+       !agx_apple9_instr_is_pure_alu(I->apple9))
+      return false;
+
+   switch (I->apple9->op) {
+   case AGX_APPLE9_VIR_IOR_UNIFORM:
+   case AGX_APPLE9_VIR_IADD:
+   case AGX_APPLE9_VIR_ISUB:
+   case AGX_APPLE9_VIR_IAND:
+   case AGX_APPLE9_VIR_IOR:
+   case AGX_APPLE9_VIR_IXOR:
+   case AGX_APPLE9_VIR_ISHR:
+   case AGX_APPLE9_VIR_USHR:
+   case AGX_APPLE9_VIR_ISHL:
+   case AGX_APPLE9_VIR_FADD:
+   case AGX_APPLE9_VIR_FSUB:
+   case AGX_APPLE9_VIR_FMUL:
+   case AGX_APPLE9_VIR_FADD_IMM:
+   case AGX_APPLE9_VIR_FMUL_IMM:
+   case AGX_APPLE9_VIR_SELECT:
+   case AGX_APPLE9_VIR_BIT_COUNT:
+   case AGX_APPLE9_VIR_BIT_REVERSE:
+   case AGX_APPLE9_VIR_UFIND_MSB:
+   case AGX_APPLE9_VIR_U2F32:
+   case AGX_APPLE9_VIR_I2F32:
+   case AGX_APPLE9_VIR_F2I32:
+   case AGX_APPLE9_VIR_F2U32:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static void
+find_apple9_remat(agx_context *ctx, agx_instr **remat, void *memctx)
+{
+   /* Preamble writes make uniforms mutable. Treat that entire shader part
+    * conservatively; the main shader's file is immutable. */
+   agx_foreach_instr_global(ctx, I) {
+      if ((I->op == AGX_OPCODE_APPLE9 || I->op == AGX_OPCODE_APPLE9_PURE) &&
+          I->apple9->op == AGX_APPLE9_VIR_STORE_UNIFORM)
+         return;
+   }
+
+   uint8_t *cost = rzalloc_array(memctx, uint8_t, ctx->alloc);
+   agx_foreach_instr_global(ctx, I) {
+      if (I->op == AGX_OPCODE_MOV_IMM)
+         cost[I->dest[0].value] = 1;
+   }
+
+   bool progress;
+   do {
+      progress = false;
+      agx_foreach_instr_global(ctx, I) {
+         if (!apple9_remat_alu(I) || cost[I->dest[0].value])
+            continue;
+         unsigned total = 1;
+         agx_foreach_src(I, s) {
+            if (I->src[s].type != AGX_INDEX_NORMAL ||
+                !cost[I->src[s].value]) {
+               total = 5;
+               break;
+            }
+            total += cost[I->src[s].value];
+         }
+         if (total <= 4) {
+            cost[I->dest[0].value] = total;
+            remat[I->dest[0].value] = I;
+            progress = true;
+         }
+      }
+   } while (progress);
+}
+
 static agx_instr *
 remat_to(agx_builder *b, agx_index dst, struct spill_ctx *ctx, unsigned node)
 {
    agx_instr *I = ctx->remat[node];
-   assert(can_remat(I));
+   assert(can_remat(I) || apple9_remat_alu(I));
 
    switch (I->op) {
    case AGX_OPCODE_MOV_IMM:
       return agx_mov_imm_to(b, dst, I->imm);
    case AGX_OPCODE_GET_SR:
       return agx_get_sr_to(b, dst, I->sr);
+   case AGX_OPCODE_APPLE9_PURE: {
+      agx_instr *copy = agx_alloc_instr(b, I->op, 1, I->nr_srcs);
+      copy->dest[0] = dst;
+      copy->apple9 = I->apple9;
+      copy->reg_constraints = I->reg_constraints;
+      agx_foreach_src(I, s) {
+         agx_index tmp = agx_temp_like(b->shader, I->src[s]);
+         remat_to(b, tmp, ctx, I->src[s].value);
+         copy->src[s] = tmp;
+      }
+      agx_builder_insert(&b->cursor, copy);
+      return copy;
+   }
    default:
       UNREACHABLE("invalid remat");
    }
@@ -1414,6 +1511,8 @@ agx_spill(agx_context *ctx, unsigned k, bool remat_only)
          channels[I->dest[d].value] = agx_channels(I->dest[d]);
       }
    }
+
+   find_apple9_remat(ctx, remat, memctx);
 
    struct spill_block *blocks =
       rzalloc_array(memctx, struct spill_block, ctx->num_blocks);
