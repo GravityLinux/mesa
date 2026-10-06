@@ -540,6 +540,8 @@ typedef struct {
                               uint32_t *reads, uint32_t *writes);
    /* Relative dependency separation in issue positions, not hardware cycles. */
    unsigned (*schedule_delay)(const agx_instr *instruction);
+   /* Half-registers a latency schedule may add to a block's peak pressure. */
+   unsigned schedule_pressure_slack;
    nir_shader *nir;
    mesa_shader_stage stage;
    bool is_preamble;
