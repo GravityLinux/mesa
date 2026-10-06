@@ -1303,6 +1303,7 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
 
       /* Other extensions implemented by the common runtime or CPU paths */
       .KHR_calibrated_timestamps = true,
+      .KHR_compute_shader_derivatives = true,
       .KHR_maintenance7 = true,
       .KHR_shader_maximal_reconvergence = true,
       .KHR_shader_quad_control = true,
@@ -1537,6 +1538,10 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
       .shaderSharedFloat32Atomics = true,
       .shaderImageFloat32Atomics = true,
       .shaderImageFloat32AtomicAdd = true,
+
+      /* Linear groups use consecutive subgroup lanes; quad-layout compute
+       * dispatch remains unsupported. */
+      .computeDerivativeGroupLinear = true,
 
       /* Extensions */
       KEEP(mutableDescriptorType),
