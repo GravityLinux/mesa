@@ -6612,6 +6612,18 @@ agx_nir_hoist_apple9_uniform_reads(nir_shader *nir)
          if (apple9_can_hoist_uniform(&src, &s)) {
             apple9_hoist_uniform_source(&src, &s);
             progress = true;
+         } else if (instr->type == nir_instr_type_intrinsic &&
+                    nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_global_2x32) {
+            /* The guarded read itself may not speculate, while its uniform
+             * address can. Hoist that pure dependency chain so preamble
+             * extraction can select bounds checks and redirected pointers
+             * without moving the memory access across its condition. */
+            nir_src *address = &nir_instr_as_intrinsic(instr)->src[0];
+            if (nir_def_instr(address->ssa)->block != s.entry &&
+                apple9_can_hoist_uniform(address, &s)) {
+               apple9_hoist_uniform_source(address, &s);
+               progress = true;
+            }
          }
       }
    }
