@@ -6583,6 +6583,11 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
       } else {
          budget = (uint64_t)MIN2(budget, words) *
                   AGX_APPLE9_MAX_PREAMBLE_BYTES / bytes;
+         /* Shared setup dependencies make code size nonlinear in result
+          * words. Reserve the last retry for a substantial reduction if
+          * the proportional estimate has not fitted the setup yet. */
+         if (attempt == 2)
+            budget = MIN2(budget, words / 2);
       }
    }
    return apple9_compile_dag_body(nir, out, profile, varyings, &resources,
