@@ -1096,6 +1096,7 @@ void agx_dce(agx_context *ctx, bool partial);
 void agx_pressure_schedule(agx_context *ctx);
 void agx_spill(agx_context *ctx, unsigned k, bool remat_only);
 void agx_repair_ssa(agx_context *ctx);
+bool agx_reuse_spill_reloads(agx_context *ctx);
 
 struct agx_spill_interference;
 struct agx_spill_interference *agx_spill_coalesce_prepare(agx_context *ctx);

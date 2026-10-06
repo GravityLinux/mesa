@@ -397,3 +397,62 @@ TEST(Apple9Rematerialization, HoistOnlyInvariantSpillStores)
       }
    }
 }
+
+TEST(Apple9ReloadReuse, PreservesValuesAndRejectsIncreasedPressure)
+{
+   for (bool pressure_gap : {false, true}) {
+      for (bool different_home : {false, true}) {
+         SCOPED_TRACE(pressure_gap);
+         SCOPED_TRACE(different_home);
+         void *mem = ralloc_context(nullptr);
+         agx_builder *b = agx_test_builder(mem);
+         b->shader->ra_target.late_kill_sources = true;
+         auto sink = [&](std::vector<agx_index> values) {
+            auto I = agx_alloc_instr(b, AGX_OPCODE_APPLE9, 0, values.size());
+            for (unsigned i = 0; i < values.size(); ++i)
+               I->src[i] = values[i];
+            agx_builder_insert(&b->cursor, I);
+         };
+         auto home = agx_temp(b->shader, AGX_SIZE_32);
+         home.memory = true;
+         agx_mov_to(b, home, agx_mov_imm(b, 32, 42));
+         auto first = agx_mov(b, home);
+         sink({first});
+         if (pressure_gap) {
+            std::vector<agx_index> gap;
+            for (unsigned i = 0; i < 3; ++i)
+               gap.push_back(agx_mov_imm(b, 32, 80 + i));
+            sink(gap);
+         }
+         if (different_home) {
+            home = agx_temp(b->shader, AGX_SIZE_32);
+            home.memory = true;
+            agx_mov_to(b, home, agx_mov_imm(b, 32, 43));
+         }
+         auto second = agx_mov(b, home);
+         sink({second});
+         EXPECT_EQ(agx_reuse_spill_reloads(b->shader),
+                   !pressure_gap && !different_home);
+         std::vector<uint32_t> values(b->shader->alloc), outputs;
+         unsigned reloads = 0;
+         agx_foreach_instr_global(b->shader, I) {
+            if (I->op == AGX_OPCODE_MOV_IMM)
+               values[I->dest[0].value] = I->imm;
+            else if (I->op == AGX_OPCODE_MOV) {
+               values[I->dest[0].value] = values[I->src[0].value];
+               reloads += I->src[0].memory;
+            } else {
+               agx_foreach_src(I, s)
+                  outputs.push_back(values[I->src[s].value]);
+            }
+         }
+         std::vector<uint32_t> expected = {42};
+         if (pressure_gap)
+            expected.insert(expected.end(), {80, 81, 82});
+         expected.push_back(different_home ? 43 : 42);
+         EXPECT_EQ(outputs, expected);
+         EXPECT_EQ(reloads, (!pressure_gap && !different_home) ? 1u : 2u);
+         ralloc_free(mem);
+      }
+   }
+}
