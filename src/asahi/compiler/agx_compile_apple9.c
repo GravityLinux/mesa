@@ -5127,6 +5127,7 @@ apple9_prepare_dag(nir_shader *nir)
     * every shader, not only shaders which happened to contain division.
     * Re-legalize scalar packing/extraction introduced by those rules. */
    nir_opt_algebraic_late(nir);
+   agx_nir_lower_apple9_denorms(nir);
    nir_shader_alu_pass(nir, apple9_lower_memory_pack,
                       nir_metadata_control_flow, NULL);
    do {

@@ -7,6 +7,50 @@
 #include "agx_compile_apple9.h"
 
 static nir_def *
+flush_fp32(nir_builder *b, nir_def *x)
+{
+   /* Integer classification must distinguish subnormals from signed zero,
+    * normals, infinities and NaNs without first consuming x as a float. */
+   nir_def *tiny = nir_ult_imm(b, nir_iand_imm(b, x, 0x7fffffff), 0x00800000);
+   return nir_bcsel(b, tiny, nir_iand_imm(b, x, 0x80000000), x);
+}
+
+static bool
+lower_denorm(nir_builder *b, nir_alu_instr *alu, UNUSED void *data)
+{
+   if (alu->def.bit_size != 32 ||
+       nir_alu_type_get_base_type(nir_op_infos[alu->op].output_type) !=
+          nir_type_float)
+      return false;
+
+   bool ftz = nir_is_denorm_flush_to_zero(
+      b->shader->info.float_controls_execution_mode, 32);
+   if (alu->op == nir_op_fcanonicalize) {
+      b->cursor = nir_before_instr(&alu->instr);
+      nir_def *x = nir_ssa_for_alu_src(b, alu, 0);
+      nir_def_replace(&alu->def, ftz ? flush_fp32(b, x) : x);
+      return true;
+   }
+   if (!ftz)
+      return false;
+
+   /* Run after algebraic optimization, which can replace arithmetic with
+    * min/max or sign operations. Moves, selects, loads and stores are bit
+    * preserving and deliberately do not enter this float-result path. */
+   b->cursor = nir_after_instr(&alu->instr);
+   nir_def *result = flush_fp32(b, &alu->def);
+   nir_def_rewrite_uses_after(&alu->def, result);
+   return true;
+}
+
+bool
+agx_nir_lower_apple9_denorms(nir_shader *shader)
+{
+   return nir_shader_alu_pass(shader, lower_denorm,
+                              nir_metadata_control_flow, NULL);
+}
+
+static nir_def *
 select_word(nir_builder *b, nir_def **words, nir_def *index, unsigned offset)
 {
    /* The reduced exponent makes index range from two through six. */
@@ -120,8 +164,13 @@ lower_sincos(nir_builder *b, nir_def *x, bool cosine)
    /* Preserve sin's signed zero and tiny inputs without a flushing ALU use. */
    result = nir_bcsel(b, nir_ult_imm(b, ax, 0x39800000),
                       cosine ? nir_imm_float(b, 1) : x, result);
-   return nir_bcsel(b, nir_uge_imm(b, ax, 0x7f800000),
-                    nir_imm_int(b, 0x7fc00000), result);
+   result = nir_bcsel(b, nir_uge_imm(b, ax, 0x7f800000),
+                      nir_imm_int(b, 0x7fc00000), result);
+   /* The small-input path above returns raw bits, so retain the original
+    * fsin operation's denormal-result semantics before it disappears. */
+   return nir_is_denorm_flush_to_zero(
+             b->shader->info.float_controls_execution_mode, 32)
+             ? flush_fp32(b, result) : result;
 }
 
 /* Graphics uses bounded-accuracy floating-point reduction, like the existing
@@ -217,7 +266,9 @@ lower_math(nir_builder *b, nir_instr *instr, UNUSED void *data)
       } else if (alu->op == nir_op_iabs) {
          components[i] = nir_imax(b, x, nir_ineg(b, x));
       } else if (alu->op == nir_op_fcanonicalize) {
-         components[i] = nir_fmul_imm(b, x, 1.0f);
+         components[i] = nir_is_denorm_flush_to_zero(
+            b->shader->info.float_controls_execution_mode, 32)
+            ? flush_fp32(b, x) : x;
       } else if (b->shader->info.stage == MESA_SHADER_VERTEX ||
                  b->shader->info.stage == MESA_SHADER_FRAGMENT) {
          components[i] = lower_graphics_sincos(b, x, alu->op == nir_op_fcos);

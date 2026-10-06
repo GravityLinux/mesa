@@ -21,6 +21,66 @@ extern "C" {
 #include <vector>
 #include "gallium/include/pipe/p_defines.h"
 
+TEST(Apple9Compiler, DenormCanonicalizePreservesNormalAndSpecialBits)
+{
+   const uint32_t values[] = {
+      0, 0x80000000, 1, 0x80000001, 0x007fffff, 0x807fffff,
+      0x00800000, 0x80800000, 0x3f800000, 0xbf800000,
+      0x7f800000, 0xff800000, 0x7fc12345, 0xffc12345,
+   };
+   for (unsigned mode : {0u, unsigned(FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32),
+                         unsigned(FLOAT_CONTROLS_DENORM_PRESERVE_FP32)}) {
+      for (uint32_t bits : values) {
+         SCOPED_TRACE(mode);
+         SCOPED_TRACE(bits);
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_COMPUTE, &agx_nir_options, "denorm_canonicalize");
+         b.shader->info.float_controls_execution_mode = mode;
+         nir_def *x = nir_imm_int(&b, bits);
+         nir_def *result = nir_fcanonicalize(&b, x);
+         nir_store_ssbo(&b, result, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
+                        .align_mul = 4);
+         nir_intrinsic_instr *store = nir_instr_as_intrinsic(
+            nir_block_last_instr(nir_cursor_current_block(b.cursor)));
+         ASSERT_TRUE(agx_nir_lower_apple9_denorms(b.shader));
+         nir_opt_constant_folding(b.shader);
+         nir_opt_copy_prop(b.shader);
+         ASSERT_TRUE(nir_src_is_const(store->src[0]));
+         uint32_t expected = mode == FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32 &&
+                             (bits & 0x7fffffff) < 0x00800000
+                                ? bits & 0x80000000 : bits;
+         EXPECT_EQ(nir_src_as_uint(store->src[0]), expected);
+         ralloc_free(b.shader);
+      }
+   }
+}
+
+TEST(Apple9Compiler, ExplicitDenormModeCompilesRawResultOperations)
+{
+   for (nir_op op : {nir_op_fneg, nir_op_fabs, nir_op_fmin, nir_op_fmax,
+                     nir_op_fcanonicalize, nir_op_fsin}) {
+      SCOPED_TRACE(nir_op_infos[op].name);
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "denorm_dynamic");
+      b.shader->info.float_controls_execution_mode =
+         FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32;
+      b.shader->info.workgroup_size[0] = 32;
+      b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
+      nir_def *x = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 0),
+                                nir_imm_int(&b, 0), .align_mul = 4);
+      nir_def *result = nir_build_alu(&b, op, x, nir_imm_float(&b, 1), NULL, NULL);
+      nir_store_ssbo(&b, result, nir_imm_int(&b, 1), nir_imm_int(&b, 0),
+                     .align_mul = 4);
+      agx_shader_part compiled = {};
+      agx_apple9_compute_profile profile = {};
+      const char *reason = nullptr;
+      EXPECT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason))
+         << (reason ? reason : "no diagnostic");
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
+}
+
 TEST(Apple9Compiler, GlobalPointerLoadsAndStores)
 {
    for (unsigned bits : {8u, 16u, 32u, 64u}) {
