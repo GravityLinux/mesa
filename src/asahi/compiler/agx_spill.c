@@ -404,6 +404,8 @@ apple9_remat_alu(const agx_instr *I)
 static unsigned
 find_apple9_remat(agx_context *ctx, agx_instr **remat, void *memctx)
 {
+   if (ctx->ra_target.disable_uniform_rematerialization)
+      return 0;
    /* Preamble writes make uniforms mutable. Treat that entire shader part
     * conservatively; the main shader's file is immutable. */
    agx_foreach_instr_global(ctx, I) {

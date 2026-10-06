@@ -1491,7 +1491,7 @@ apple9_returns_device_atomic(const struct agx_apple9_vir_program *program)
 static bool
 apple9_allocate_candidate(struct agx_apple9_vir_program *program,
                           nir_shader *nir, bool cost_constraints, bool latency,
-                          bool copy_register,
+                          bool copy_register, bool uniform_remat,
                           struct agx_apple9_vir_program *result,
                           const char **reason)
 {
@@ -1503,6 +1503,7 @@ apple9_allocate_candidate(struct agx_apple9_vir_program *program,
    if (!ra.ctx || !apple9_shared_dataflow(&ra, nir, reason))
       goto cleanup;
    ra.ctx->ra_target.cost_register_constraints = cost_constraints;
+   ra.ctx->ra_target.disable_uniform_rematerialization = !uniform_remat;
    /* A returning device atomic stores its old value in invocation-frame word
     * 0, which its result record then loads (agx_apple9_pack_device_atomic);
     * that store overwrote spill slot 0. Spills and private arrays start one
@@ -1711,14 +1712,14 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
    /* Prefer an allocation without reserved registers; constants placed above
     * r63 need the copy register, so retry with it reserved. */
    bool copy_register = false;
-   if (!apple9_allocate_candidate(program, nir, false, false, false, &best,
+   if (!apple9_allocate_candidate(program, nir, false, false, false, true, &best,
                                   reason)) {
       if (*reason != apple9_copy_register_reason)
          return false;
       agx_apple9_vir_finish(&best);
       agx_apple9_vir_init(&best);
       copy_register = true;
-      if (!apple9_allocate_candidate(program, nir, false, false, true, &best,
+      if (!apple9_allocate_candidate(program, nir, false, false, true, true, &best,
                                      reason))
          return false;
    }
@@ -1729,7 +1730,7 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
        * Compare completed allocations so those costs are paid by the policy
        * which caused them, including rematerialization and spill lowering. */
       const char *unused_reason = NULL;
-      if (apple9_allocate_candidate(program, nir, true, false, copy_register,
+      if (apple9_allocate_candidate(program, nir, true, false, copy_register, true,
                                      &alternative, &unused_reason) &&
           apple9_allocation_cheaper(apple9_allocation_cost(&alternative), cost))
          SWAP(best, alternative);
@@ -1744,13 +1745,42 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
          agx_apple9_vir_init(&alternative);
          const char *unused_reason = NULL;
          if (apple9_allocate_candidate(program, nir, banks, true,
-                                        copy_register, &alternative,
+                                        copy_register, true, &alternative,
                                         &unused_reason) &&
              apple9_allocation_cheaper(apple9_allocation_cost(&alternative), cost)) {
             SWAP(best, alternative);
             cost = apple9_allocation_cost(&best);
          }
          agx_apple9_vir_finish(&alternative);
+      }
+   }
+   /* Rebuilding uniform expressions can need temporary registers. Compare
+    * the fully allocated alternatives when scratch remains, so reserving those
+    * temporaries never wins merely by saving cheap moves while adding spills.
+    * Keep invariant-store placement in both policies. */
+   if (cost.spills) {
+      for (unsigned latency = 0; latency <= (long_dependencies > 1); ++latency) {
+         for (unsigned banks = 0; banks < 2; ++banks) {
+            agx_apple9_vir_init(&alternative);
+            const char *unused_reason = NULL;
+            bool ok = apple9_allocate_candidate(
+               program, nir, banks, latency, copy_register, false,
+               &alternative, &unused_reason);
+            if (!ok && !copy_register &&
+                unused_reason == apple9_copy_register_reason) {
+               agx_apple9_vir_finish(&alternative);
+               agx_apple9_vir_init(&alternative);
+               ok = apple9_allocate_candidate(
+                  program, nir, banks, latency, true, false,
+                  &alternative, &unused_reason);
+            }
+            if (ok && apple9_allocation_cheaper(
+                         apple9_allocation_cost(&alternative), cost)) {
+               SWAP(best, alternative);
+               cost = apple9_allocation_cost(&best);
+            }
+            agx_apple9_vir_finish(&alternative);
+         }
       }
    }
    agx_apple9_vir_finish(program);
