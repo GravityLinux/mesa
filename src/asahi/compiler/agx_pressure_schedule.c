@@ -310,6 +310,10 @@ pressure_schedule_block(agx_context *ctx, agx_block *block, struct sched_ctx *s)
    /* Bail if it looks like it's worse */
    signed limit = orig_max_pressure +
                   (ctx->schedule_delay ? (signed)ctx->schedule_pressure_slack : 0);
+   if (ctx->schedule_delay && max_pressure > limit)
+      ctx->schedule_rejected_increase =
+         MAX2(ctx->schedule_rejected_increase,
+              (unsigned)(max_pressure - orig_max_pressure));
    if (max_pressure > limit ||
        (max_pressure == orig_max_pressure && !ctx->schedule_delay)) {
       free(schedule);

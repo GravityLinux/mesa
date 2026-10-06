@@ -452,6 +452,7 @@ find_apple9_remat(agx_context *ctx, agx_instr **remat, void *memctx,
             extra = MAX2(extra, demand - width);
             cost[I->dest[0].value] = total;
             remat[I->dest[0].value] = I;
+            ctx->uniform_remat_used = true;
             progress = true;
          }
       }
