@@ -154,29 +154,42 @@ hk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
    assert(tail_offset_el * util_format_get_blocksize(format) == tail_offset_B &&
           "must be texel aligned");
 
+   const bool apple9 = device->dev.chip == AGX_CHIP_G16G;
+   struct AGX_TEXTURE texture = {AGX_TEXTURE_header};
+   texture.dimension = AGX_TEXTURE_DIMENSION_2D;
+   texture.layout = AGX_LAYOUT_LINEAR;
+   texture.channels = ail_pixel_format[format].channels;
+   texture.type = ail_pixel_format[format].type;
+   texture.swizzle_r = agx_channel_from_pipe(format_swizzle[0]);
+   texture.swizzle_g = agx_channel_from_pipe(format_swizzle[1]);
+   texture.swizzle_b = agx_channel_from_pipe(format_swizzle[2]);
+   texture.swizzle_a = agx_channel_from_pipe(format_swizzle[3]);
+
+   texture.width = AGX_TEXTURE_BUFFER_WIDTH;
+   texture.height = DIV_ROUND_UP(view->vk.elements + tail_offset_el, texture.width);
+   texture.first_level = texture.last_level = 0;
+
+   texture.address = ro_base;
+   texture.buffer_size_sw = view->vk.elements;
+   texture.buffer_offset_sw = tail_offset_el;
+
+   texture.srgb = (desc->colorspace == UTIL_FORMAT_COLORSPACE_SRGB);
+   texture.srgb_2_channel = texture.srgb && util_format_colormask(desc) == 0x3;
+
+   texture.depth = 1;
+   texture.stride = (texture.width * util_format_get_blocksize(format)) - 16;
+
+   if (apple9) {
+      bool packed = agx_apple9_pack_texture(view->apple9_texture, &texture);
+      assert(packed);
+      (void)packed;
+      /* The common prefix is software query state on G16. Storage accesses
+       * use the full address in apple9 metadata, not a legacy PBE pointer.
+       */
+      texture.address = 0;
+   }
    agx_pack(&view->tex, TEXTURE, cfg) {
-      cfg.dimension = AGX_TEXTURE_DIMENSION_2D;
-      cfg.layout = AGX_LAYOUT_LINEAR;
-      cfg.channels = ail_pixel_format[format].channels;
-      cfg.type = ail_pixel_format[format].type;
-      cfg.swizzle_r = agx_channel_from_pipe(format_swizzle[0]);
-      cfg.swizzle_g = agx_channel_from_pipe(format_swizzle[1]);
-      cfg.swizzle_b = agx_channel_from_pipe(format_swizzle[2]);
-      cfg.swizzle_a = agx_channel_from_pipe(format_swizzle[3]);
-
-      cfg.width = AGX_TEXTURE_BUFFER_WIDTH;
-      cfg.height = DIV_ROUND_UP(view->vk.elements + tail_offset_el, cfg.width);
-      cfg.first_level = cfg.last_level = 0;
-
-      cfg.address = ro_base;
-      cfg.buffer_size_sw = view->vk.elements;
-      cfg.buffer_offset_sw = tail_offset_el;
-
-      cfg.srgb = (desc->colorspace == UTIL_FORMAT_COLORSPACE_SRGB);
-      cfg.srgb_2_channel = cfg.srgb && util_format_colormask(desc) == 0x3;
-
-      cfg.depth = 1;
-      cfg.stride = (cfg.width * util_format_get_blocksize(format)) - 16;
+      cfg = texture;
    }
 
    agx_pack(&view->pbe, PBE, cfg) {
@@ -199,7 +212,7 @@ hk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
             cfg.swizzle_a = i;
       }
 
-      cfg.buffer = rw_base;
+      cfg.buffer = apple9 ? 0 : rw_base;
       cfg.buffer_offset_sw = tail_offset_el;
 
       cfg.width = AGX_TEXTURE_BUFFER_WIDTH;

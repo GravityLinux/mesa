@@ -747,6 +747,16 @@ bool
 agx_apple9_translate_texture(void *out, const struct agx_texture_packed *state)
 {
    agx_unpack(stderr, state, TEXTURE, tex);
+   return agx_apple9_pack_texture(out, &tex);
+}
+
+bool
+agx_apple9_pack_texture(void *out, const struct AGX_TEXTURE *state)
+{
+   struct AGX_TEXTURE tex = *state;
+   if ((tex.address & 15) || (tex.address >> 48))
+      return false;
+
    bool single_layer_linear = tex.layout == AGX_LAYOUT_LINEAR && tex.extended &&
       (tex.dimension == AGX_TEXTURE_DIMENSION_1D ||
        tex.dimension == AGX_TEXTURE_DIMENSION_2D ||
@@ -773,20 +783,31 @@ agx_apple9_translate_texture(void *out, const struct agx_texture_packed *state)
    array |= tex.dimension == AGX_TEXTURE_DIMENSION_CUBE_ARRAY;
    /* A single linear layer needs no extended array stride. Preserve the
     * dimension expected by the shader, including array coordinates. */
-   struct agx_texture_packed single_layer;
    if (single_layer_linear) {
       tex.extended = false;
       /* The legacy extended flag overlaps the unpacked stride's top bit. */
       tex.stride &= BITFIELD_MASK(21);
       tex.depth = 1;
-      agx_pack(&single_layer, TEXTURE, cfg) {
-         cfg = tex;
-      }
-      state = &single_layer;
    }
    uint8_t *descriptor = out;
    memset(descriptor, 0, AGX_APPLE9_TEXTURE_TABLE_STRIDE);
-   memcpy(descriptor, state, 8);
+   /* Only the format and dimensions use the legacy layout. In particular,
+    * never route the native 48-bit byte address through its 40-bit field.
+    */
+   struct agx_texture_packed prefix;
+   agx_pack(&prefix, TEXTURE, cfg) {
+      cfg.dimension = tex.dimension;
+      cfg.layout = tex.layout;
+      cfg.channels = tex.channels;
+      cfg.type = tex.type;
+      cfg.swizzle_r = tex.swizzle_r;
+      cfg.swizzle_g = tex.swizzle_g;
+      cfg.swizzle_b = tex.swizzle_b;
+      cfg.swizzle_a = tex.swizzle_a;
+      cfg.width = tex.width;
+      cfg.height = tex.height;
+   }
+   memcpy(descriptor, &prefix, 8);
    uint32_t dimensions;
    memcpy(&dimensions, descriptor + 4, 4);
    dimensions = (dimensions & 0x00ffffff) |

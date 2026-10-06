@@ -310,6 +310,8 @@ bool agx_apple9_emit_indirect_dispatch(
 struct agx_texture_packed;
 struct agx_sampler_packed;
 struct AGX_SAMPLER;
+struct AGX_TEXTURE;
+bool agx_apple9_pack_texture(void *out, const struct AGX_TEXTURE *state);
 bool agx_apple9_pack_sampler_state(void *out, const struct AGX_SAMPLER *state);
 bool agx_apple9_translate_texture(void *out,
                                   const struct agx_texture_packed *state);

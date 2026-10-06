@@ -4,6 +4,7 @@
  */
 
 #include "agx_pack.h"
+#include "agx_apple9.h"
 
 #include <gtest/gtest.h>
 
@@ -82,4 +83,57 @@ TEST(Groups, Decode)
                            group_cases[i].length),
          expected);
    }
+}
+
+/* Apple9 keeps VA[47:4] below the sRGB and stride fields. Exercise each of
+ * the eight address bits which cannot pass through a legacy descriptor.
+ */
+TEST(Apple9Texture, FullAddressDoesNotOverlapFlagsOrStride)
+{
+   struct AGX_TEXTURE tex = {AGX_TEXTURE_header};
+   tex.dimension = AGX_TEXTURE_DIMENSION_2D;
+   tex.layout = AGX_LAYOUT_LINEAR;
+   tex.width = 1024;
+   tex.height = 3;
+   tex.stride = 4096 - 16;
+   tex.srgb = true;
+   tex.srgb_2_channel = true;
+
+   for (unsigned bit = 40; bit < 48; ++bit) {
+      tex.address = (UINT64_C(1) << bit) | 0x12345670;
+      uint32_t words[AGX_APPLE9_TEXTURE_TABLE_STRIDE / 4] = {};
+      ASSERT_TRUE(agx_apple9_pack_texture(words, &tex));
+      uint64_t address_word = words[2] | (uint64_t(words[3]) << 32);
+      EXPECT_EQ((address_word & ((UINT64_C(1) << 44) - 1)) << 4,
+                tex.address);
+      EXPECT_EQ((address_word >> 44) & 3, 3u);
+      EXPECT_EQ(address_word >> 46, tex.stride >> 4);
+   }
+   uint32_t words[AGX_APPLE9_TEXTURE_TABLE_STRIDE / 4];
+   tex.address = UINT64_C(1) << 48;
+   EXPECT_FALSE(agx_apple9_pack_texture(words, &tex));
+   tex.address = (UINT64_C(1) << 40) | 1;
+   EXPECT_FALSE(agx_apple9_pack_texture(words, &tex));
+}
+
+TEST(Apple9Texture, LinearR32fWithHighAddress)
+{
+   struct AGX_TEXTURE tex = {AGX_TEXTURE_header};
+   tex.dimension = AGX_TEXTURE_DIMENSION_2D;
+   tex.layout = AGX_LAYOUT_LINEAR;
+   tex.channels = AGX_CHANNELS_R32;
+   tex.type = AGX_TEXTURE_TYPE_FLOAT;
+   tex.swizzle_r = AGX_CHANNEL_R;
+   tex.swizzle_g = tex.swizzle_b = AGX_CHANNEL_0;
+   tex.swizzle_a = AGX_CHANNEL_1;
+   tex.width = 17;
+   tex.height = 9;
+   tex.address = UINT64_C(0x10000018000);
+   uint32_t words[8];
+   ASSERT_TRUE(agx_apple9_pack_texture(words, &tex));
+   const uint32_t reference[8] = {
+      0x09688842, 0x00002001, 0x00001800, 0x00000010, 0, 0, 0, 0,
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(words); ++i)
+      EXPECT_EQ(words[i], reference[i]) << "word " << i;
 }

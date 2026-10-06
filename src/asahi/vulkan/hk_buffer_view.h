@@ -23,6 +23,7 @@ struct hk_buffer_view {
    struct agx_texture_packed tex;
    struct agx_pbe_packed pbe;
    struct hk_apple9_texel_metadata apple9;
+   uint8_t apple9_texture[AGX_APPLE9_TEXTURE_TABLE_STRIDE];
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(hk_buffer_view, vk.base, VkBufferView,

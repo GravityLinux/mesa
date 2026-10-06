@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  * Native Vulkan 1.0 texel-buffer format, bounds, and descriptor replacement probe.
- * Usage: apple9-texel float.spv uint.spv sint.spv
+ * Usage: apple9-texel float.spv uint.spv sint.spv [index]
  */
 #include <math.h>
 #include <stdbool.h>
@@ -76,9 +76,12 @@ load_shader(VkDevice dev, const char *path)
 
 int main(int argc, char **argv)
 {
-   if (argc != 4) { fprintf(stderr, "usage: %s float.spv uint.spv sint.spv\n", argv[0]); return 1; }
+   if (argc != 4 && argc != 5) { fprintf(stderr, "usage: %s float.spv uint.spv sint.spv [index]\n", argv[0]); return 1; }
+   bool index_buffer = argc == 5 && strcmp(argv[4], "index") == 0;
+   if (argc == 5 && !index_buffer) return 1;
    setbuf(stdout, NULL);
-   VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .apiVersion = VK_API_VERSION_1_0};
+   printf("buffer usage: %s\n", index_buffer ? "index + uniform texel (high VA on Apple9)" : "uniform texel");
+   VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .apiVersion = index_buffer ? VK_API_VERSION_1_2 : VK_API_VERSION_1_0};
    VkInstanceCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app};
    VkInstance instance;
    CHECK(vkCreateInstance(&ici, NULL, &instance));
@@ -102,9 +105,13 @@ int main(int argc, char **argv)
    VkDeviceQueueCreateInfo qci = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
       .queueFamilyIndex = qi, .queueCount = 1, .pQueuePriorities = &priority};
    VkPhysicalDeviceFeatures features = {.robustBufferAccess = VK_TRUE};
+   VkPhysicalDeviceBufferDeviceAddressFeatures bda = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
+      .bufferDeviceAddress = VK_TRUE};
    VkDeviceCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
       .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci, .pEnabledFeatures = &features};
    VkDevice dev;
+   if (index_buffer) dci.pNext = &bda;
    CHECK(vkCreateDevice(phy, &dci, NULL, &dev));
    VkQueue queue;
    vkGetDeviceQueue(dev, qi, 0, &queue);
@@ -116,6 +123,8 @@ int main(int argc, char **argv)
    for (unsigned b = 0; b < 2; ++b) {
       VkBufferCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
          .size = offset + 4096, .usage = b ? VK_BUFFER_USAGE_STORAGE_BUFFER_BIT : VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT};
+      if (b == 0 && index_buffer)
+         ci.usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
       CHECK(vkCreateBuffer(dev, &ci, NULL, &buffers[b]));
       VkMemoryRequirements req;
       vkGetBufferMemoryRequirements(dev, buffers[b], &req);
@@ -126,8 +135,24 @@ int main(int argc, char **argv)
              (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) break;
       if (type == mp.memoryTypeCount) return 1;
       VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size, .memoryTypeIndex = type};
+      VkMemoryAllocateFlagsInfo flags = {
+         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+         .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
+      if (b == 0 && index_buffer) ai.pNext = &flags;
       CHECK(vkAllocateMemory(dev, &ai, NULL, &memory[b]));
       CHECK(vkBindBufferMemory(dev, buffers[b], memory[b], 0));
+      if (b == 0 && index_buffer) {
+         VkBufferDeviceAddressInfo info = {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+            .buffer = buffers[b]};
+         VkDeviceAddress address = vkGetBufferDeviceAddress(dev, &info);
+         printf("texel buffer VA: 0x%llx view offset: 0x%llx\n",
+                (unsigned long long)address, (unsigned long long)offset);
+         if (address < (1ull << 40)) {
+            fprintf(stderr, "index buffer did not exercise a high VA\n");
+            return 1;
+         }
+      }
       CHECK(vkMapMemory(dev, memory[b], 0, VK_WHOLE_SIZE, 0, &maps[b]));
    }
    VkDescriptorSetLayoutBinding bindings[2] = {

@@ -264,10 +264,11 @@ write_buffer_view_desc(struct hk_descriptor_set *set,
       if (view) {
          desc.tex = view->tex;
          desc.metadata = view->apple9;
+         memcpy(desc.texture, view->apple9_texture, sizeof(desc.texture));
       } else {
          agx_set_null_texture(&desc.tex);
+         agx_apple9_translate_texture(desc.texture, &desc.tex);
       }
-      agx_apple9_translate_texture(desc.texture, &desc.tex);
       write_desc(set, binding, elem, &desc, sizeof(desc));
    } else if (dev->dev.chip == AGX_CHIP_G16G) {
       struct hk_apple9_storage_descriptor desc = {};
