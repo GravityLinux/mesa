@@ -310,9 +310,34 @@ hk_UpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount,
                         uint32_t descriptorCopyCount,
                         const VkCopyDescriptorSet *pDescriptorCopies)
 {
+   VK_FROM_HANDLE(hk_device, dev, device);
+
    for (uint32_t w = 0; w < descriptorWriteCount; w++) {
       const VkWriteDescriptorSet *write = &pDescriptorWrites[w];
       VK_FROM_HANDLE(hk_descriptor_set, set, write->dstSet);
+
+      /* vkd3d-proton writes null descriptors of one type into every mutable
+       * binding of its heap, including bindings whose type list holds only
+       * buffers. An Apple9 image descriptor is larger than those slots and
+       * would overwrite the following descriptors, so make such slots null
+       * buffers instead.
+       */
+      const struct hk_descriptor_set_binding_layout *binding_layout =
+         &set->layout->binding[write->dstBinding];
+      if (binding_layout->type == VK_DESCRIPTOR_TYPE_MUTABLE_EXT) {
+         uint32_t stride, alignment;
+         hk_descriptor_stride_align_for_type(hk_device_physical(dev),
+                                             write->descriptorType, NULL,
+                                             &stride, &alignment);
+         if (stride > binding_layout->stride) {
+            const VkDescriptorBufferInfo null_info = {.range = VK_WHOLE_SIZE};
+            for (uint32_t j = 0; j < write->descriptorCount; j++) {
+               write_buffer_desc(set, &null_info, write->dstBinding,
+                                 write->dstArrayElement + j, false);
+            }
+            continue;
+         }
+      }
 
       switch (write->descriptorType) {
       case VK_DESCRIPTOR_TYPE_SAMPLER:
