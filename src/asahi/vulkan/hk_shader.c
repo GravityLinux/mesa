@@ -695,6 +695,13 @@ lower_load_global_bounded(nir_builder *b, nir_intrinsic_instr *intr)
       access |= ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER;
    }
 
+   /* The bounds check redirects out-of-range reads to the zero page, so a
+    * read of memory the shader cannot write may also speculate, letting
+    * uniform reads move whole into the preamble rather than their robust
+    * address pairs. */
+   if (access & ACCESS_CAN_REORDER)
+      access |= ACCESS_CAN_SPECULATE;
+
    nir_def *val = nir_load_global(
       b, intr->def.num_components, intr->def.bit_size,
       nir_iadd(b, base, nir_u2u64(b, offset)),
