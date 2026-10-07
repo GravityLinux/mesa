@@ -1151,6 +1151,20 @@ hk_queue_init(struct hk_device *dev, const VkDeviceQueueCreateInfo *pCreateInfo,
    queue->vk.driver_submit = hk_queue_submit;
    hk_sync_init(&queue->sync);
 
+   /* Under virtio, the host's native context gives each kernel queue the
+    * fence timeline of its priority (ring = priority + 1) and retires a ring's
+    * guest fences when the latest submission on that timeline completes, while
+    * the guest kernel skips waits on fences from the submitting ring. Two
+    * queues of equal priority on independent kernel queues would share a
+    * timeline: a fence could retire on the other queue's work, and waits
+    * between them would be dropped. Give the second family its own priority
+    * bucket, and so its own timeline and ring. */
+   if (dev->dev.is_virtio && pCreateInfo->queueFamilyIndex != 0) {
+      drm_priority = drm_priority == DRM_ASAHI_PRIORITY_LOW
+                        ? DRM_ASAHI_PRIORITY_MEDIUM
+                        : DRM_ASAHI_PRIORITY_LOW;
+   }
+
    queue->drm.id = agx_create_command_queue(&dev->dev, drm_priority);
    queue->drm.virt_ring_idx = drm_priority + 1;
 
