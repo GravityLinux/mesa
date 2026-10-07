@@ -6958,7 +6958,14 @@ apple9_licm_filter(nir_instr *instr, nir_loop *loop, bool dominates_exit)
       return true;
    case nir_instr_type_intrinsic:
    case nir_instr_type_tex:
-      return dominates_exit || nir_instr_can_speculate(instr);
+      /* Hoisting memory or texture work out of a branch runs it on every
+       * iteration of every thread, which costs far more than it saves in
+       * per-pixel loops (Lethal Company lighting). Hoist only from blocks
+       * every iteration executes; AGX_APPLE9_LICM_SPECULATE allows leaving
+       * branches for speculatable accesses. */
+      return dominates_exit ||
+             (nir_instr_can_speculate(instr) &&
+              getenv("AGX_APPLE9_LICM_SPECULATE"));
    default:
       return false;
    }
@@ -7004,7 +7011,7 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    /* Loads and samples cost far more than the registers that hold their
     * loop-invariant results. Hoist them, and their address math, out of
     * loops before preamble selection, which can then also take uniform
-    * ones. Leaving a branch requires the access to be speculatable. */
+    * ones. */
    if (!getenv("AGX_APPLE9_NO_LICM") && nir_opt_licm(nir, apple9_licm_filter)) {
       nir_opt_cse(nir);
       nir_opt_dce(nir);
