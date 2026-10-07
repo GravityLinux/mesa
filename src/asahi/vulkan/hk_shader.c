@@ -2292,7 +2292,10 @@ hk_apple9_lower_storage_image(nir_builder *b, nir_intrinsic_instr *intr,
          .image_dim = dim, .image_array = array);
       inside = nir_iand(b, inside, nir_ult(b, nir_u2u32(b, intr->src[2].ssa), samples));
    }
-   bool route = load && data && _mesa_set_search(data, intr);
+   /* Typed loads already decode with a known format; the texture unit only
+    * pays off for formatless ones. HK_APPLE9_TEXTURE_LOADS_TYPED measures. */
+   bool route = load && data && _mesa_set_search(data, intr) &&
+                getenv("HK_APPLE9_TEXTURE_LOADS_TYPED");
    nir_def *ok = route ? hk_apple9_native_ok(b, tex) : NULL;
    /* See hk_apple9_lower_formatless_storage: address ahead of the check. */
    nir_def *addr = route ? NULL : nir_bindless_image_texel_address(b, 64, pbe, coord,
