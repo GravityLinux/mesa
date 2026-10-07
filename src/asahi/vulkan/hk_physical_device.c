@@ -1698,8 +1698,10 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
    /* FP32 arithmetic flushes natively. The Apple9 compiler canonicalizes
     * raw-result operations for explicit FTZ, including min/max, sign-bit
     * operations, subgroup reductions and floating atomic return values.
-    * FP32 preservation remains unsupported by the flushing arithmetic. */
+    * DenormPreserve shaders take guarded software paths around the
+    * flushing arithmetic (agx_nir_lower_apple9_denorm_preserve). */
    props->shaderDenormFlushToZeroFloat32 = true;
+   props->shaderDenormPreserveFloat32 = true;
    /* The rasterized interface carries at most this many user scalars. */
    props->maxVertexOutputComponents = AGX_APPLE9_MAX_VARYING_COMPONENTS;
    props->maxTessellationEvaluationOutputComponents =
