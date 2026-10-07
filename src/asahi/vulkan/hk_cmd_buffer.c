@@ -74,11 +74,48 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd)
       agx_bo_unreference(&dev->dev, *bo);
    }
 
+   if (cmd->apple9_pinned) {
+      simple_mtx_lock(&dev->dev.apple9_entry_lock);
+      set_foreach(cmd->apple9_pinned, entry)
+         ((struct agx_bo *)entry->key)->apple9_entry_pins--;
+      simple_mtx_unlock(&dev->dev.apple9_entry_lock);
+      set_foreach(cmd->apple9_pinned, entry)
+         agx_bo_unreference(&dev->dev, (struct agx_bo *)entry->key);
+      _mesa_set_clear(cmd->apple9_pinned, NULL);
+   }
+   cmd->apple9_last_pin[0] = cmd->apple9_last_pin[1] = NULL;
+
    util_dynarray_clear(&cmd->large_bos);
    util_dynarray_clear(&cmd->query_adds);
    util_dynarray_clear(&cmd->query_writes);
    util_dynarray_clear(&cmd->sync_events);
    util_dynarray_clear(&cmd->sync_remap);
+}
+
+/* agx_device::apple9_pin_entry. Every Apple9 entry is requested while
+ * recording a command buffer, which passes itself as the allocator. */
+bool
+hk_apple9_pin_entry(void *allocator, struct agx_bo *bo)
+{
+   struct hk_cmd_buffer *cmd = allocator;
+   if (cmd->apple9_last_pin[0] == bo || cmd->apple9_last_pin[1] == bo)
+      return true;
+
+   if (!cmd->apple9_pinned) {
+      cmd->apple9_pinned = _mesa_pointer_set_create(NULL);
+      if (!cmd->apple9_pinned)
+         return false;
+   }
+   bool found;
+   if (!_mesa_set_search_or_add(cmd->apple9_pinned, bo, &found))
+      return false;
+   if (!found) {
+      agx_bo_reference(bo);
+      bo->apple9_entry_pins++;
+   }
+   cmd->apple9_last_pin[1] = cmd->apple9_last_pin[0];
+   cmd->apple9_last_pin[0] = bo;
+   return true;
 }
 
 static void
@@ -89,6 +126,7 @@ hk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
    struct hk_cmd_pool *pool = hk_cmd_buffer_pool(cmd);
 
    hk_free_resettable_cmd_buffer(cmd);
+   _mesa_set_destroy(cmd->apple9_pinned, NULL);
    util_dynarray_fini(&cmd->large_bos);
    util_dynarray_fini(&cmd->query_adds);
    util_dynarray_fini(&cmd->query_writes);

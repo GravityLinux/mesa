@@ -508,6 +508,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    }
 
    simple_mtx_init(&dev->apple9_variants.lock, mtx_plain);
+   dev->dev.apple9_pin_entry = hk_apple9_pin_entry;
    simple_mtx_init(&dev->apple9_tile_helpers.lock, mtx_plain);
    result = hk_device_init_meta(dev);
    if (result != VK_SUCCESS)

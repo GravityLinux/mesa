@@ -610,6 +610,11 @@ struct hk_cmd_buffer {
 
    /* Owned large BOs */
    struct util_dynarray large_bos;
+
+   /* Apple9 shader BOs whose arena entries this recording may encode, each
+    * referenced and pinned once until reset, and the last two pinned. */
+   struct set *apple9_pinned;
+   struct agx_bo *apple9_last_pin[2];
 };
 
 VK_DEFINE_HANDLE_CASTS(hk_cmd_buffer, vk.base, VkCommandBuffer,
@@ -1059,6 +1064,7 @@ struct hk_bg_eot hk_apple9_build_bg_eot(
    struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
    bool store, bool partial, bool incomplete);
 
+bool hk_apple9_pin_entry(void *allocator, struct agx_bo *bo);
 bool hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd);
 void hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
                     struct agx_draw draw);

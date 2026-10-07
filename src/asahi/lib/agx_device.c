@@ -780,6 +780,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
 
    if (dev->chip == AGX_CHIP_G16G || dev->chip == AGX_CHIP_G17P) {
       simple_mtx_init(&dev->apple9_entry_lock, mtx_plain);
+      list_inithead(&dev->apple9_entry_lru);
       util_vma_heap_init(&dev->apple9_entry_heap, AGX_APPLE9_ENTRY_HEADER_SIZE,
                         AGX_APPLE9_ENTRY_ARENA_SIZE - AGX_APPLE9_ENTRY_HEADER_SIZE);
       dev->apple9_entry_heap.alloc_high = false;

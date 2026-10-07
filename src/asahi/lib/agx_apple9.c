@@ -439,18 +439,57 @@ agx_apple9_initialize_entries(struct agx_device *dev)
    agx_bo_note_cpu_write(dev->apple9_entries, 0, AGX_APPLE9_ENTRY_HEADER_SIZE);
 }
 
-/* Compiled shader objects and pending batches retain the body BO. Tying the
- * entry allocation to that BO prevents deletion or cache reuse from changing
- * the target of an already encoded launch. */
+/* The launch target addresses entries in a few megabytes, room for about
+ * 43k shader bodies. Draw-time variants can exceed that over a session, so
+ * entries are only fixed while a recording that may encode them is alive:
+ * the device's pin hook ties the body to the recording's lifetime. When the
+ * arena is full, free the least recently pinned unpinned entries. No live
+ * recording, and hence no pending batch, encodes them; their bodies get a new
+ * entry on their next use. Launch records cached by content cannot alias a
+ * recycled entry, since they also encode the body's preamble address.
+ */
+static void
+apple9_evict_entries(struct agx_device *dev)
+{
+   const unsigned target =
+      AGX_APPLE9_ENTRY_ARENA_SIZE / AGX_APPLE9_ENTRY_BLOCK_SIZE / 4;
+   unsigned freed = 0;
+   list_for_each_entry_safe(struct agx_bo, bo, &dev->apple9_entry_lru,
+                            apple9_entry_link) {
+      if (freed == target)
+         break;
+      if (bo->apple9_entry_pins || bo->apple9_entry_fixed)
+         continue;
+      util_vma_heap_free(&dev->apple9_entry_heap,
+                         bo->apple9_entry_offset - AGX_APPLE9_ENTRY_CODE_OFFSET,
+                         AGX_APPLE9_ENTRY_BLOCK_SIZE);
+      bo->apple9_entry_offset = 0;
+      list_del(&bo->apple9_entry_link);
+      ++freed;
+   }
+}
+
 static uint32_t
-apple9_shader_entry(struct agx_device *dev, struct agx_bo *body, bool compute)
+apple9_shader_entry(struct agx_device *dev, void *allocator,
+                    struct agx_bo *body, bool compute)
 {
    simple_mtx_lock(&dev->apple9_entry_lock);
+   if (!allocator || !dev->apple9_pin_entry ||
+       !dev->apple9_pin_entry(allocator, body))
+      body->apple9_entry_fixed = true;
    uint32_t entry = body->apple9_entry_offset;
-   if (!entry) {
+   if (entry) {
+      list_move_to(&body->apple9_entry_link, &dev->apple9_entry_lru);
+   } else {
       uint32_t block = util_vma_heap_alloc(&dev->apple9_entry_heap,
                                           AGX_APPLE9_ENTRY_BLOCK_SIZE,
                                           AGX_APPLE9_ENTRY_ALIGNMENT);
+      if (!block) {
+         apple9_evict_entries(dev);
+         block = util_vma_heap_alloc(&dev->apple9_entry_heap,
+                                     AGX_APPLE9_ENTRY_BLOCK_SIZE,
+                                     AGX_APPLE9_ENTRY_ALIGNMENT);
+      }
       if (block) {
          entry = block + AGX_APPLE9_ENTRY_CODE_OFFSET;
          uint8_t *bytes = (uint8_t *)dev->apple9_entry_map + block;
@@ -466,6 +505,7 @@ apple9_shader_entry(struct agx_device *dev, struct agx_bo *body, bool compute)
             agx_bo_note_cpu_write(dev->apple9_entries, block,
                                   AGX_APPLE9_ENTRY_BLOCK_SIZE);
             body->apple9_entry_offset = entry;
+            list_addtail(&body->apple9_entry_link, &dev->apple9_entry_lru);
          } else {
             util_vma_heap_free(&dev->apple9_entry_heap, block,
                                AGX_APPLE9_ENTRY_BLOCK_SIZE);
@@ -493,7 +533,7 @@ agx_apple9_prepare_compute_dispatch_alloc(
        !!preamble_address != !!profile->preamble_size)
       return false;
 
-   uint32_t entry = apple9_shader_entry(dev, body, true);
+   uint32_t entry = apple9_shader_entry(dev, allocator, body, true);
    if (!entry)
       return false;
 
@@ -1067,7 +1107,7 @@ agx_apple9_prepare_graphics_stage(
    unsigned stage = fragment;
    if (!shader->bo || !shader->publication_count_valid)
       return false;
-   unsigned entry = apple9_shader_entry(dev, shader->bo, false);
+   unsigned entry = apple9_shader_entry(dev, allocator, shader->bo, false);
    if (!entry)
       return false;
    if (shader->preamble_size > AGX_APPLE9_MAX_PREAMBLE_BYTES ||

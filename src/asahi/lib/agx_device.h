@@ -157,6 +157,13 @@ struct agx_device {
    void *apple9_entry_map;
    struct util_vma_heap apple9_entry_heap;
    simple_mtx_t apple9_entry_lock;
+   /* BOs holding an entry, least recently pinned first. */
+   struct list_head apple9_entry_lru;
+   /* Optional: pin a shader BO for the lifetime of the recording that
+    * allocator belongs to, with apple9_entry_lock held. Returns false if the
+    * BO cannot be pinned. Without it, entries are never evicted.
+    */
+   bool (*apple9_pin_entry)(void *allocator, struct agx_bo *bo);
 
    struct renderonly *ro;
 
