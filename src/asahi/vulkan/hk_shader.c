@@ -605,16 +605,13 @@ is_op(nir_scalar s, nir_op op)
    return nir_scalar_is_alu(s) && nir_scalar_alu_op(s) == op;
 }
 
+/* Whether the first load_size bytes of a bounded access are in bounds. */
 static nir_def *
-check_in_bounds(nir_builder *b, nir_intrinsic_instr *intr)
+check_in_bounds_size(nir_builder *b, nir_intrinsic_instr *intr,
+                     unsigned load_size)
 {
    nir_def *offset = intr->src[1].ssa;
    nir_def *bound = intr->src[2].ssa;
-
-   unsigned bit_size = intr->def.bit_size;
-   assert(bit_size >= 8 && bit_size % 8 == 0);
-   unsigned byte_size = bit_size / 8;
-   unsigned load_size = byte_size * intr->num_components;
 
    /* Try to bounds check in terms of elements */
    nir_scalar offset_s = nir_scalar_resolved(offset, 0);
@@ -635,6 +632,14 @@ check_in_bounds(nir_builder *b, nir_intrinsic_instr *intr)
    /* Otherwise bounds check in bytes */
    nir_def *sat_offset = nir_umin_imm(b, offset, UINT32_MAX - (load_size - 1));
    return nir_ult(b, nir_iadd_imm(b, sat_offset, load_size - 1), bound);
+}
+
+static nir_def *
+check_in_bounds(nir_builder *b, nir_intrinsic_instr *intr)
+{
+   unsigned bit_size = intr->def.bit_size;
+   assert(bit_size >= 8 && bit_size % 8 == 0);
+   return check_in_bounds_size(b, intr, bit_size / 8 * intr->num_components);
 }
 
 static nir_def *
@@ -678,14 +683,24 @@ bound_offset(nir_builder *b, nir_def *valid, nir_scalar offset)
 }
 
 static void
-lower_load_global_bounded(nir_builder *b, nir_intrinsic_instr *intr)
+lower_load_global_bounded(nir_builder *b, nir_intrinsic_instr *intr,
+                          bool per_component_bounds)
 {
    b->cursor = nir_before_instr(&intr->instr);
    nir_def *base = intr->src[0].ssa;
    nir_def *offset = intr->src[1].ssa;
 
+   /* A vector merged from separate accesses (bounds_checked_modes) keeps
+    * each component's own check: robustness2 returns in-bounds components
+    * even when a later one is out of bounds. Address the load by its first
+    * component; the vectorizer only merges naturally aligned accesses, so
+    * the read stays within one aligned block of the same page. */
+   unsigned byte_size = intr->def.bit_size / 8;
+   bool per_component = per_component_bounds && intr->def.num_components > 1;
+
    /* Bounds check compatibly with the hardware address mode */
-   nir_def *valid = check_in_bounds(b, intr);
+   nir_def *valid = per_component ? check_in_bounds_size(b, intr, byte_size)
+                                  : check_in_bounds(b, intr);
    base = nir_bcsel(b, valid, base, nir_imm_int64(b, AGX_ZERO_PAGE_ADDRESS));
    offset = bound_offset(b, valid, nir_scalar_resolved(offset, 0));
 
@@ -707,6 +722,17 @@ lower_load_global_bounded(nir_builder *b, nir_intrinsic_instr *intr)
       nir_iadd(b, base, nir_u2u64(b, offset)),
       .align_mul = nir_intrinsic_align_mul(intr),
       .align_offset = nir_intrinsic_align_offset(intr), .access = access);
+
+   if (per_component) {
+      nir_def *comps[NIR_MAX_VEC_COMPONENTS];
+      comps[0] = nir_channel(b, val, 0);
+      for (unsigned c = 1; c < intr->def.num_components; ++c) {
+         comps[c] = nir_bcsel(b, check_in_bounds_size(b, intr, (c + 1) * byte_size),
+                              nir_channel(b, val, c),
+                              nir_imm_zero(b, 1, intr->def.bit_size));
+      }
+      val = nir_vec(b, comps, intr->def.num_components);
+   }
 
    nir_def_replace(&intr->def, val);
 }
@@ -731,20 +757,38 @@ hk_apple9_vectorize_cb(unsigned align_mul, unsigned align_offset,
       window = env ? atoi(env) : 4;
    }
    int64_t distance = (int64_t)high->instr.index - (int64_t)low->instr.index;
-   return llabs(distance) <= window;
+   if (llabs(distance) > window)
+      return false;
+   /* A merged bounded load may read past the end of its buffer when only
+    * its first components are in bounds. Natural alignment keeps that read
+    * inside one aligned block, so it cannot cross into another page. */
+   if (low->intrinsic == nir_intrinsic_load_global_bounded ||
+       low->intrinsic == nir_intrinsic_load_global_constant_bounded) {
+      unsigned bytes = util_next_power_of_two(num_components * bit_size / 8);
+      if (hole_size > 0 || align_mul < bytes || align_offset % bytes)
+         return false;
+   }
+   return true;
 }
+
+struct hk_bounded_lowering {
+   bool soft_fault;
+   /* Merged vector loads are checked per component (bounds_checked_modes). */
+   bool per_component;
+};
 
 static bool
 lower_load_global_constant_offset_instr(nir_builder *b,
                                         nir_intrinsic_instr *intrin, void *data)
 {
-   bool *has_soft_fault = data;
+   const struct hk_bounded_lowering *opts = data;
+   const bool *has_soft_fault = &opts->soft_fault;
 
    if (intrin->intrinsic == nir_intrinsic_load_global_bounded ||
        (intrin->intrinsic == nir_intrinsic_load_global_constant_bounded &&
         !(*has_soft_fault))) {
 
-      lower_load_global_bounded(b, intrin);
+      lower_load_global_bounded(b, intrin, opts->per_component);
       return true;
    }
 
@@ -2131,6 +2175,7 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       NIR_PASS(_, nir, nir_opt_load_store_vectorize,
                &(const nir_load_store_vectorize_options){
                   .modes = nir_var_mem_global,
+                  .bounds_checked_modes = nir_var_mem_global,
                   .callback = hk_apple9_vectorize_cb,
                });
    }
@@ -2139,10 +2184,13 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    NIR_PASS(progress, nir, nir_opt_sink, opts);
    NIR_PASS(progress, nir, nir_opt_move, opts);
 
-   bool soft_fault = agx_has_soft_fault(&dev->dev);
+   struct hk_bounded_lowering bounded = {
+      .soft_fault = agx_has_soft_fault(&dev->dev),
+      .per_component = dev->dev.chip == AGX_CHIP_G16G,
+   };
    NIR_PASS(_, nir, nir_shader_intrinsics_pass,
             lower_load_global_constant_offset_instr, nir_metadata_none,
-            &soft_fault);
+            &bounded);
 
    assert(nir->info.shared_size == 0);
 
