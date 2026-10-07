@@ -3,6 +3,7 @@
  * unions, without retaining a command trace or changing application queries.
  */
 #include "hk_gpu_busy.h"
+#include "git_sha1.h"
 #ifdef HK_GPU_BUSY_COUNTERS
 #include <errno.h>
 #include <fcntl.h>
@@ -370,7 +371,8 @@ hk_gpu_busy_init(struct hk_queue *queue)
               " frequency_hz=%" PRIu64
               " slots_per_queue=%u bins=%u ranges_per_union=%u"
               " source=firmware-command-timestamps scope=VkDevice"
-              " interval_union=exact revision_policy=replace\n",
+              " interval_union=exact revision_policy=replace"
+              " build" MESA_GIT_SHA1 "\n",
               getpid(), (void *)dev, gpu, before, after, unix_before,
               unix_after,
               (uint64_t)dev->dev.params.command_timestamp_frequency_hz,
