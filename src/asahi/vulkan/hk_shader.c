@@ -2633,10 +2633,7 @@ hk_apple9_use_descriptor_handle(nir_builder *b, nir_tex_instr *tex,
    b->cursor = nir_before_instr(&tex->instr);
    unsigned set = nir_intrinsic_desc_set(handle);
    unsigned root = hk_root_descriptor_offset(sets) + set * sizeof(uint64_t);
-   /* The root table is always readable, so this may speculate with the
-    * descriptor reads it addresses. */
    nir_def *base = nir_load_ubo(b, 1, 32, nir_imm_int(b, 0), nir_imm_int(b, root),
-                                .access = ACCESS_CAN_SPECULATE,
                                 .align_mul = 8, .range_base = root, .range = 4);
    nir_def *offset = handle->src[0].ssa;
    if (sampler) {
@@ -2856,8 +2853,7 @@ hk_apple9_lower_roots(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       unsigned slot = offsetof(struct hk_root_descriptor_table, sets) +
                       nir_intrinsic_desc_set(handle) * sizeof(uint64_t);
       nir_def *set = nir_load_ubo(b, 1, 64, nir_imm_int(b, 0),
-                                 nir_imm_int(b, slot),
-                                 .access = ACCESS_CAN_SPECULATE, .align_mul = 8,
+                                 nir_imm_int(b, slot), .align_mul = 8,
                                  .range_base = slot, .range = 8);
       nir_def_replace(&intr->def,
          nir_iadd(b, set, nir_u2u64(b, handle->src[0].ssa)));
@@ -2875,8 +2871,7 @@ hk_apple9_lower_roots(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 
    b->cursor = nir_before_instr(&intr->instr);
    nir_def *ptr = nir_load_ubo(b, 1, 64, nir_imm_int(b, 0),
-                              nir_imm_int(b, offset),
-                              .access = ACCESS_CAN_SPECULATE, .align_mul = 8,
+                              nir_imm_int(b, offset), .align_mul = 8,
                               .range_base = offset, .range = 8);
    nir_def_replace(&intr->def, ptr);
    return true;
