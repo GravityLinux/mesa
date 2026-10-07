@@ -1770,7 +1770,8 @@ hk_outermost_loop(nir_block *block)
 static void
 hk_apple9_texture_route_loads(nir_shader *nir, struct set *safe)
 {
-   if (getenv("HK_APPLE9_NO_TEXTURE_LOADS"))
+   if (getenv("HK_APPLE9_NO_TEXTURE_LOADS") ||
+       (nir->info.internal && !getenv("HK_APPLE9_TEXTURE_LOADS_META")))
       return;
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
    struct set *write_loops = _mesa_pointer_set_create(NULL);
