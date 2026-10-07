@@ -375,6 +375,7 @@ VkResult hk_apple9_resolve_graphics(
 bool hk_apple9_deferred_sample_shading(const struct hk_api_shader *fs);
 
 void hk_apple9_variants_finish(struct hk_device *dev);
+void hk_apple9_bodies_finish(struct hk_device *dev);
 
 #define hk_foreach_variant(api_shader, var)                                    \
    for (struct hk_shader *var = api_shader->variants;                          \

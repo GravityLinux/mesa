@@ -508,6 +508,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    }
 
    simple_mtx_init(&dev->apple9_variants.lock, mtx_plain);
+   simple_mtx_init(&dev->apple9_bodies.lock, mtx_plain);
    dev->dev.apple9_pin_entry = hk_apple9_pin_entry;
    simple_mtx_init(&dev->apple9_tile_helpers.lock, mtx_plain);
    result = hk_device_init_meta(dev);
@@ -600,6 +601,7 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
 
    hk_device_finish_meta(dev);
    hk_apple9_variants_finish(dev);
+   hk_apple9_bodies_finish(dev);
    hk_apple9_tile_helpers_finish(dev);
    hk_destroy_internal_shaders(dev, &dev->kernels, false);
    hk_destroy_internal_shaders(dev, &dev->prolog_epilog, true);
@@ -624,6 +626,7 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
       hk_api_shader_destroy(&dev->vk, &dev->null_fs->vk, pAllocator);
    }
    simple_mtx_destroy(&dev->apple9_variants.lock);
+   simple_mtx_destroy(&dev->apple9_bodies.lock);
    simple_mtx_destroy(&dev->apple9_tile_helpers.lock);
 
    if (dev->apple9_fetch_sampler)

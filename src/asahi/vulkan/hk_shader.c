@@ -2733,6 +2733,112 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
             nir_opt_if_optimize_phi_true_false | nir_opt_if_avoid_64bit_phis);
 }
 
+/* Byte-identical Apple9 bodies share one code BO, and so one shader entry.
+ * Pipelines and draw-time variants often compile to the same code: in the
+ * CS2 capture, three in four bodies duplicate another. The table keeps the
+ * most recently uploaded bodies referenced, so a body may outlive its last
+ * shader until evicted.
+ */
+#define HK_APPLE9_BODY_CACHE_SIZE 4096
+
+struct hk_apple9_body {
+   blake3_hash hash;
+   uint32_t size;
+   struct agx_bo *bo;
+   struct list_head link;
+};
+
+static uint32_t
+hk_apple9_body_hash(const void *key)
+{
+   const struct hk_apple9_body *body = key;
+   return _mesa_hash_data(body->hash, sizeof(body->hash));
+}
+
+static bool
+hk_apple9_body_equal(const void *a, const void *b)
+{
+   const struct hk_apple9_body *x = a, *y = b;
+   return x->size == y->size && !memcmp(x->hash, y->hash, sizeof(x->hash));
+}
+
+static struct agx_bo *
+hk_apple9_body_bo(struct hk_device *dev, const void *code, uint32_t size)
+{
+   struct hk_apple9_body key = {.size = size};
+   _mesa_blake3_compute(code, size, key.hash);
+
+   simple_mtx_lock(&dev->apple9_bodies.lock);
+   if (!dev->apple9_bodies.ht) {
+      dev->apple9_bodies.ht = _mesa_hash_table_create(
+         NULL, hk_apple9_body_hash, hk_apple9_body_equal);
+      list_inithead(&dev->apple9_bodies.lru);
+   }
+   struct hash_entry *entry =
+      dev->apple9_bodies.ht ? _mesa_hash_table_search(dev->apple9_bodies.ht, &key)
+                            : NULL;
+   if (entry) {
+      struct hk_apple9_body *body = entry->data;
+      list_move_to(&body->link, &dev->apple9_bodies.lru);
+      agx_bo_reference(body->bo);
+      simple_mtx_unlock(&dev->apple9_bodies.lock);
+      return body->bo;
+   }
+   simple_mtx_unlock(&dev->apple9_bodies.lock);
+
+   struct agx_bo *bo = agx_bo_create(&dev->dev, size, 0,
+                                     AGX_BO_EXEC | AGX_BO_LOW_VA,
+                                     "Apple9 shader");
+   if (!bo)
+      return NULL;
+   memcpy(agx_bo_map(bo), code, size);
+
+   struct hk_apple9_body *body = malloc(sizeof(*body));
+   if (!body)
+      return bo;
+   *body = key;
+   body->bo = bo;
+
+   struct agx_bo *evict = NULL;
+   simple_mtx_lock(&dev->apple9_bodies.lock);
+   if (!dev->apple9_bodies.ht ||
+       _mesa_hash_table_search(dev->apple9_bodies.ht, body)) {
+      /* Uploaded concurrently, or no table: keep this copy unshared. */
+      free(body);
+   } else {
+      agx_bo_reference(bo);
+      _mesa_hash_table_insert(dev->apple9_bodies.ht, body, body);
+      list_add(&body->link, &dev->apple9_bodies.lru);
+      if (++dev->apple9_bodies.count > HK_APPLE9_BODY_CACHE_SIZE) {
+         struct hk_apple9_body *old = list_last_entry(
+            &dev->apple9_bodies.lru, struct hk_apple9_body, link);
+         list_del(&old->link);
+         _mesa_hash_table_remove_key(dev->apple9_bodies.ht, old);
+         dev->apple9_bodies.count--;
+         evict = old->bo;
+         free(old);
+      }
+   }
+   simple_mtx_unlock(&dev->apple9_bodies.lock);
+   if (evict)
+      agx_bo_unreference(&dev->dev, evict);
+   return bo;
+}
+
+void
+hk_apple9_bodies_finish(struct hk_device *dev)
+{
+   if (!dev->apple9_bodies.ht)
+      return;
+   list_for_each_entry_safe(struct hk_apple9_body, body,
+                            &dev->apple9_bodies.lru, link) {
+      agx_bo_unreference(&dev->dev, body->bo);
+      free(body);
+   }
+   _mesa_hash_table_destroy(dev->apple9_bodies.ht, NULL);
+   dev->apple9_bodies.ht = NULL;
+}
+
 static VkResult
 hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
 {
@@ -2741,11 +2847,9 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
           (shader->info.stage == MESA_SHADER_COMPUTE &&
            agx_is_shader_empty(&shader->b)))
          return VK_SUCCESS;
-      shader->bo = agx_bo_create(&dev->dev, shader->code_size, 0,
-                                AGX_BO_EXEC | AGX_BO_LOW_VA, "Apple9 shader");
+      shader->bo = hk_apple9_body_bo(dev, shader->code_ptr, shader->code_size);
       if (!shader->bo)
          return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
-      memcpy(agx_bo_map(shader->bo), shader->code_ptr, shader->code_size);
       return VK_SUCCESS;
    }
    if (shader->b.info.has_preamble || shader->b.info.rodata.size_16) {
