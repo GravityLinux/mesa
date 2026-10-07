@@ -35,6 +35,10 @@
 #include "vk_device.h"
 #include "vk_pipeline_cache.h"
 #include "vk_shader.h"
+#include "hk_queue.h"
+#include "util/libsync.h"
+#include <xf86drm.h>
+#include <sys/ioctl.h>
 
 #include <fcntl.h>
 #include <xf86drm.h>
@@ -251,10 +255,55 @@ hk_sampler_heap_remove(struct hk_device *dev, struct hk_rc_sampler *rc)
    simple_mtx_unlock(&h->lock);
 }
 
+/* Returns the dma-fence status of a queue's latest submitted timeline point:
+ * 1 signaled, 0 pending, negative errno if the work completed with an error.
+ * The kernel sets EIO on the fences of commands that fail on the GPU and
+ * ECANCELED on those it cancels behind them.
+ */
+static int
+hk_queue_fence_status(struct hk_device *dev, struct hk_queue *queue)
+{
+   uint64_t point = queue->drm.timeline_value;
+   if (!point)
+      return 1;
+
+   uint32_t binary;
+   if (drmSyncobjCreate(dev->dev.fd, 0, &binary))
+      return 0;
+
+   int status = 0, fd = -1;
+   if (!drmSyncobjTransfer(dev->dev.fd, binary, 0, queue->drm.syncobj, point,
+                           0) &&
+       !drmSyncobjExportSyncFile(dev->dev.fd, binary, &fd)) {
+      struct sync_file_info info = {0};
+      if (ioctl(fd, SYNC_IOC_FILE_INFO, &info) == 0)
+         status = info.status;
+      close(fd);
+   }
+
+   drmSyncobjDestroy(dev->dev.fd, binary);
+   return status;
+}
+
 static VkResult
 hk_check_status(struct vk_device *device)
 {
    struct hk_device *dev = container_of(device, struct hk_device, vk);
+
+   /* A GPU fault or timeout completes the affected fences with an error, so
+    * waits succeed. Without this check the application would read garbage
+    * instead of seeing VK_ERROR_DEVICE_LOST. Guest fences under virtio carry
+    * no error; there only failed submissions report device loss.
+    */
+   vk_foreach_queue(vk_queue, &dev->vk) {
+      struct hk_queue *queue = container_of(vk_queue, struct hk_queue, vk);
+      int status = hk_queue_fence_status(dev, queue);
+      if (status < 0) {
+         return vk_device_set_lost(&dev->vk, "GPU work failed: %s",
+                                   strerror(-status));
+      }
+   }
+
    return vk_check_printf_status(&dev->vk, &dev->dev.printf);
 }
 

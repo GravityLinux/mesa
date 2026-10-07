@@ -128,6 +128,14 @@ queue_submit_empty(struct hk_device *dev, struct hk_queue *queue,
    u_watchdog_end(&wd);
    STACK_ARRAY_FINISH(wd_syncs);
 #endif
+   /* The timeline value was already advanced: a failed transfer would leave
+    * waits on it hanging forever.
+    */
+   if (wd_result) {
+      mesa_loge("empty submit syncobj transfer failed: %s", strerror(wd_error));
+      return VK_ERROR_DEVICE_LOST;
+   }
+
    return VK_SUCCESS;
 }
 
@@ -361,16 +369,20 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
                     0, UINT64_MAX, wd_waits);
 #endif
    int ret = dev->dev.ops.submit(&dev->dev, submit, &virt);
+   int submit_errno = errno;
    u_watchdog_submit_result(wd_id, ret, errno);
    u_watchdog_ioctl("HK submit", dev->dev.fd, ret, errno);
 
    if (dev->dev.is_virtio)
       u_rwlock_rdunlock(&dev->external_bos.lock);
 
-   /* XXX: don't trap */
+   /* The kernel rejects submissions once the GPU has failed (EIO) or when
+    * a command is invalid. Either way the queue cannot make progress: report
+    * device loss rather than silently dropping the work.
+    */
    if (ret) {
-      fprintf(stderr, "DRM_IOCTL_ASAHI_SUBMIT failed: %m\n");
-      assert(0);
+      mesa_loge("DRM_IOCTL_ASAHI_SUBMIT failed: %s", strerror(submit_errno));
+      return VK_ERROR_DEVICE_LOST;
    }
 
    return VK_SUCCESS;
