@@ -30,6 +30,7 @@
 #include <xf86drm.h>
 #include "util/list.h"
 #include "util/macros.h"
+#include "util/u_debug.h"
 #include "util/u_dynarray.h"
 #include "vulkan/vulkan_core.h"
 
@@ -835,6 +836,7 @@ hk_resolve_sync(struct hk_cmd_buffer *cmd, struct hk_sync_state *state,
    list_for_each_entry(struct hk_cs, cs, &cmd->control_streams, node) {
       struct hk_sync_stream *s = &streams[cs->sync_id];
       s->wait = hk_sync_empty();
+      s->wait_tiling = hk_sync_empty();
       memcpy(s->before, next, sizeof(next));
       s->engine = cs->type == HK_CS_CDM ? HK_SYNC_CDM : HK_SYNC_RENDER;
       s->index = ++next[s->engine];
@@ -848,6 +850,24 @@ hk_resolve_sync(struct hk_cmd_buffer *cmd, struct hk_sync_state *state,
       perf_debug(cmd, "Conservative synchronization for reordered helpers");
 
    return streams;
+}
+
+/* Defer a render command's render dependency to its fragment stage when its
+ * tiling stage depends on no earlier render work. Tiling commands on one queue
+ * run in order, and fragment work waits for the same render completions as
+ * before. Opt-in until measured: without the kernel's render_barrier=2 the
+ * deferred wait costs more per pass than the tiling wait it replaces.
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(hk_apple9_fragment_barrier,
+                           "HK_APPLE9_FRAGMENT_BARRIER", false)
+
+static bool
+hk_defer_render_wait(struct hk_device *dev, const struct hk_sync_stream *s)
+{
+   return (dev->dev.params.features & DRM_ASAHI_FEATURE_FRAGMENT_BARRIER) &&
+          debug_get_option_hk_apple9_fragment_barrier() &&
+          s->wait.engine[HK_SYNC_RENDER] != HK_SYNC_NONE &&
+          s->wait_tiling.engine[HK_SYNC_RENDER] == HK_SYNC_NONE;
 }
 
 static uint16_t
@@ -1004,6 +1024,8 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
 
             struct drm_asahi_cmd_render cmd;
             asahi_fill_vdm_command(dev, cs, &cmd);
+            if (hk_defer_render_wait(dev, &streams[cs->sync_id]))
+               cmd.flags |= DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT;
             hk_gpu_busy_render(queue, &cmd);
             util_dynarray_append(&payload, cmd);
             nr_vdm++;

@@ -468,12 +468,13 @@ hk_cmd_sync_work(struct hk_cmd_buffer *cmd, struct hk_cs *cs, unsigned stages)
        cmd->sync_render_continuation) {
       /* Resuming a split render pass loads the preceding stream's attachment
        * stores. This dependency is implicit in Vulkan, including splits caused
-       * by changes to state that is immutable within a hardware render.
+       * by changes to state that is immutable within a hardware render. Only
+       * the fragment stage loads attachments.
        */
       struct hk_sync_event event = {
          .stream = HK_SYNC_NONE,
          .src = cmd->sync_render_stages,
-         .dst = stages,
+         .dst = (stages & HK_SYNC_FRAGMENT) ? HK_SYNC_FRAGMENT : stages,
       };
       util_dynarray_append(&cmd->sync_events, event);
       cmd->sync_render_continuation = false;

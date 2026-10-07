@@ -18,6 +18,7 @@ protected:
       unsigned id = streams.size();
       hk_sync_stream s = {};
       s.wait = hk_sync_empty();
+      s.wait_tiling = hk_sync_empty();
       s.before[0] = next[0];
       s.before[1] = next[1];
       s.engine = engine;
@@ -48,7 +49,127 @@ protected:
       EXPECT_EQ(streams[id].wait.engine[HK_SYNC_RENDER], render);
       EXPECT_EQ(streams[id].wait.engine[HK_SYNC_CDM], compute);
    }
+
+   /* Render dependency needed before tiling; the rest of wait can be
+    * deferred to the fragment stage.
+    */
+   void expect_tiling(unsigned id, uint32_t render)
+   {
+      EXPECT_EQ(streams[id].wait_tiling.engine[HK_SYNC_RENDER], render);
+   }
+
+   void vk_barrier(VkPipelineStageFlags2 src, VkPipelineStageFlags2 dst)
+   {
+      barrier(hk_sync_stage_mask(src, true), hk_sync_stage_mask(dst, false));
+   }
+
+   /* Two render passes with a barrier between them. */
+   void two_passes(VkPipelineStageFlags2 src, VkPipelineStageFlags2 dst)
+   {
+      unsigned a = stream(HK_SYNC_RENDER);
+      work(a, HK_SYNC_GRAPHICS | HK_SYNC_DRAW_INDIRECT);
+      vk_barrier(src, dst);
+      unsigned b = stream(HK_SYNC_RENDER);
+      work(b, HK_SYNC_GRAPHICS | HK_SYNC_DRAW_INDIRECT);
+      ASSERT_TRUE(resolve());
+   }
 };
+
+TEST_F(Sync, FragmentConsumerDefersToFragment)
+{
+   two_passes(VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+              VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
+   expect(1, 1, HK_SYNC_NONE);
+   expect_tiling(1, HK_SYNC_NONE);
+}
+
+TEST_F(Sync, AttachmentReuseDefersToFragment)
+{
+   two_passes(VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+                 VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+              VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+                 VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT);
+   expect(1, 1, HK_SYNC_NONE);
+   expect_tiling(1, HK_SYNC_NONE);
+}
+
+TEST_F(Sync, VertexConsumerWaitsBeforeTiling)
+{
+   two_passes(VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+              VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT);
+   expect(1, 1, HK_SYNC_NONE);
+   expect_tiling(1, 1);
+}
+
+TEST_F(Sync, VertexInputAndIndirectConsumersWaitBeforeTiling)
+{
+   two_passes(VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+              VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT);
+   expect_tiling(1, 1);
+   SetUp();
+   streams.clear(), remap.clear(), events.clear(), next[0] = next[1] = 0;
+   two_passes(VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+              VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT);
+   expect_tiling(1, 1);
+}
+
+TEST_F(Sync, WriteAfterReadInTilingWaitsBeforeTiling)
+{
+   /* A later pass's vertex stage overwrites what an earlier fragment stage
+    * read: an execution-only dependency, but tiling must still wait.
+    */
+   two_passes(VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+              VK_PIPELINE_STAGE_2_PRE_RASTERIZATION_SHADERS_BIT);
+   expect_tiling(1, 1);
+}
+
+TEST_F(Sync, AllGraphicsAndAllCommandsWaitBeforeTiling)
+{
+   two_passes(VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT,
+              VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT);
+   expect_tiling(1, 1);
+   SetUp();
+   streams.clear(), remap.clear(), events.clear(), next[0] = next[1] = 0;
+   two_passes(VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+              VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+   expect_tiling(1, 1);
+}
+
+TEST_F(Sync, ComputeToFragmentKeepsComputeWaitButNoRenderWait)
+{
+   unsigned c = stream(HK_SYNC_CDM), r = stream(HK_SYNC_RENDER);
+   work(c, HK_SYNC_COMPUTE);
+   vk_barrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+              VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
+   work(r, HK_SYNC_GRAPHICS | HK_SYNC_DRAW_INDIRECT);
+   ASSERT_TRUE(resolve());
+   expect(r, HK_SYNC_NONE, 1);
+   expect_tiling(r, HK_SYNC_NONE);
+}
+
+TEST_F(Sync, HelpersBetweenPassesWaitBeforeTiling)
+{
+   unsigned a = stream(HK_SYNC_RENDER), helper = stream(HK_SYNC_CDM);
+   unsigned b = stream(HK_SYNC_RENDER);
+   work(a, HK_SYNC_GRAPHICS);
+   work(helper, HK_SYNC_ALL);
+   work(b, HK_SYNC_GRAPHICS);
+   ASSERT_TRUE(resolve());
+   expect(b, 1, 1);
+   expect_tiling(b, 1);
+}
+
+TEST_F(Sync, FallbackWaitsBeforeTiling)
+{
+   unsigned helper = stream(HK_SYNC_CDM), r = stream(HK_SYNC_RENDER);
+   unsigned r2 = stream(HK_SYNC_RENDER);
+   work(r, HK_SYNC_GRAPHICS);
+   work(helper, HK_SYNC_ALL);
+   work(r2, HK_SYNC_GRAPHICS);
+   ASSERT_FALSE(resolve());
+   expect(r2, 1, 1);
+   expect_tiling(r2, 1);
+}
 
 TEST_F(Sync, IndependentEngines)
 {
@@ -235,6 +356,20 @@ TEST(SyncScopes, NoneTopBottomAndAliases)
              HK_SYNC_GRAPHICS | HK_SYNC_DRAW_INDIRECT);
    EXPECT_EQ(hk_sync_stage_mask(VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, false),
              HK_SYNC_GRAPHICS | HK_SYNC_DRAW_INDIRECT);
+}
+
+TEST(SyncScopes, FragmentAndPreRasterScopes)
+{
+   EXPECT_EQ(hk_sync_stage_mask(VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, false),
+             HK_SYNC_FRAGMENT);
+   EXPECT_EQ(hk_sync_stage_mask(VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, false),
+             HK_SYNC_FRAGMENT);
+   EXPECT_EQ(hk_sync_stage_mask(VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT, false),
+             HK_SYNC_GRAPHICS);
+   EXPECT_EQ(hk_sync_stage_mask(VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT, true),
+             HK_SYNC_PRE_RASTER | HK_SYNC_DRAW_INDIRECT);
+   EXPECT_EQ(hk_sync_stage_mask(VK_PIPELINE_STAGE_2_TRANSFORM_FEEDBACK_BIT_EXT, false),
+             HK_SYNC_GRAPHICS);
 }
 
 TEST(SyncScopes, PipelineOrderingAndUnknownStages)

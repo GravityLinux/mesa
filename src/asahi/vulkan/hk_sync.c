@@ -68,6 +68,11 @@ hk_sync_resolve(struct hk_sync_state *state,
           */
          if (ev->dst == HK_SYNC_ALL)
             hk_sync_barrier(state, HK_SYNC_ALL, HK_SYNC_ALL);
+         if (s->engine == HK_SYNC_RENDER) {
+            hk_sync_join(&s->wait_tiling,
+                         hk_sync_pending(state, ev->dst & HK_SYNC_TILING,
+                                         s->engine, s->index));
+         }
          struct hk_sync_dep dep = hk_sync_work(state, ev->dst, s->engine, s->index);
          hk_sync_join(&s->wait, dep);
          if (ev->dst == HK_SYNC_ALL)
@@ -88,6 +93,7 @@ hk_sync_resolve(struct hk_sync_state *state,
          if (!s->index)
             continue;
          s->wait = (struct hk_sync_dep){{s->before[0], s->before[1]}};
+         s->wait_tiling = s->wait;
          hk_sync_work(state, HK_SYNC_ALL, s->engine, s->index);
       }
       hk_sync_barrier(state, HK_SYNC_ALL, HK_SYNC_ALL);
@@ -107,8 +113,7 @@ hk_sync_stage_mask(VkPipelineStageFlags2 stages, bool source)
    stages &= ~(VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT |
                VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT);
 
-   const VkPipelineStageFlags2 graphics =
-      VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
+   const VkPipelineStageFlags2 pre_raster =
       VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
       VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT |
       VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT |
@@ -119,11 +124,14 @@ hk_sync_stage_mask(VkPipelineStageFlags2 stages, bool source)
       VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT |
       VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT |
       VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT |
+      VK_PIPELINE_STAGE_2_TRANSFORM_FEEDBACK_BIT_EXT;
+   const VkPipelineStageFlags2 fragment =
       VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
       VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
       VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
-      VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
-      VK_PIPELINE_STAGE_2_TRANSFORM_FEEDBACK_BIT_EXT;
+      VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+   const VkPipelineStageFlags2 graphics =
+      VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | pre_raster | fragment;
    const VkPipelineStageFlags2 transfer =
       VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT |
       VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_BLIT_BIT |
@@ -138,8 +146,10 @@ hk_sync_stage_mask(VkPipelineStageFlags2 stages, bool source)
       return HK_SYNC_ALL;
 
    unsigned mask = 0;
-   if (stages & graphics)
-      mask |= HK_SYNC_GRAPHICS;
+   if (stages & (VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | pre_raster))
+      mask |= HK_SYNC_PRE_RASTER;
+   if (stages & (VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | fragment))
+      mask |= HK_SYNC_FRAGMENT;
    if (stages & compute)
       mask |= HK_SYNC_COMPUTE;
    if (stages & transfer)
@@ -150,9 +160,14 @@ hk_sync_stage_mask(VkPipelineStageFlags2 stages, bool source)
       mask |= HK_SYNC_DRAW_INDIRECT;
 
    /* Source scopes include logically earlier stages; destination scopes
-    * include logically later ones. Render stages share a completion point in
-    * this UAPI. In particular compute -> fragment waits before tiling.
+    * include logically later ones. A render command completes both of its
+    * stages together, and only render dependencies can be deferred to the
+    * fragment stage: compute -> fragment still waits before tiling.
     */
+   if (source && (mask & HK_SYNC_FRAGMENT))
+      mask |= HK_SYNC_PRE_RASTER;
+   if (!source && (mask & HK_SYNC_PRE_RASTER))
+      mask |= HK_SYNC_FRAGMENT;
    if (source && (mask & HK_SYNC_GRAPHICS))
       mask |= HK_SYNC_DRAW_INDIRECT;
    if (source && (mask & HK_SYNC_COMPUTE))
