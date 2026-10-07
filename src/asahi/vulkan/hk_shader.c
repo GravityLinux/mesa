@@ -1837,6 +1837,10 @@ hk_apple9_texture_load(nir_builder *b, nir_intrinsic_instr *intr,
    tex->is_array = array;
    tex->coord_components = coords;
    tex->dest_type = nir_intrinsic_dest_type(intr);
+   /* The caller has bounds-checked every coordinate, including the layer.
+    * Robustness clamps would read the legacy texture state at the handle,
+    * which here addresses the native entry instead. */
+   tex->backend_flags |= AGX_TEXTURE_FLAG_NO_CLAMP;
    tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord,
       nir_trim_vector(b, nir_u2u32(b, coord), coords));
    tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_int(b, 0));
