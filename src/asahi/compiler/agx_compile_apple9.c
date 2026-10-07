@@ -5556,7 +5556,11 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
     * FTZ after that last optimization boundary, independently in each main
     * and preamble candidate. Do not run algebraic rules after materializing
     * the integer checks. */
-   if (agx_nir_lower_apple9_denorms(nir)) {
+   /* FP32 DenormPreserve takes the same boundary: guard every affected
+    * operation once no later rule can recreate one. */
+   bool denorm_progress = agx_nir_lower_apple9_denorms(nir);
+   denorm_progress |= agx_nir_lower_apple9_denorm_preserve(nir);
+   if (denorm_progress) {
       bool progress;
       do {
          progress = nir_opt_constant_folding(nir);
