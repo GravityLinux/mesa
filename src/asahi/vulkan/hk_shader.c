@@ -792,6 +792,13 @@ hk_first_use_index(nir_intrinsic_instr *load)
    return first == INT64_MAX ? -1 : first;
 }
 
+DEBUG_GET_ONCE_NUM_OPTION(hk_apple9_vectorize_window,
+                          "HK_APPLE9_VECTORIZE_WINDOW", 4)
+DEBUG_GET_ONCE_NUM_OPTION(hk_apple9_vectorize_use_window,
+                          "HK_APPLE9_VECTORIZE_USE_WINDOW", 2)
+DEBUG_GET_ONCE_NUM_OPTION(hk_apple9_robust_merge_bytes,
+                          "HK_APPLE9_ROBUST_MERGE_BYTES", 16)
+
 static bool
 hk_apple9_vectorize_cb(unsigned align_mul, unsigned align_offset,
                        unsigned bit_size, unsigned num_components,
@@ -801,11 +808,7 @@ hk_apple9_vectorize_cb(unsigned align_mul, unsigned align_offset,
    if (!agx_mem_vectorize_cb(align_mul, align_offset, bit_size, num_components,
                              hole_size, low, high, data))
       return false;
-   static int window = -1;
-   if (window < 0) {
-      const char *env = getenv("HK_APPLE9_VECTORIZE_WINDOW");
-      window = env ? atoi(env) : 4;
-   }
+   int64_t window = debug_get_option_hk_apple9_vectorize_window();
    int64_t distance = (int64_t)high->instr.index - (int64_t)low->instr.index;
    if (llabs(distance) > window)
       return false;
@@ -813,22 +816,14 @@ hk_apple9_vectorize_cb(unsigned align_mul, unsigned align_offset,
     * near the register limit that keeps later fields live much longer, so
     * only merge robust fields whose first uses are close as well.
     * HK_APPLE9_VECTORIZE_USE_WINDOW overrides the distance. */
-   static int use_window = -1;
-   if (use_window < 0) {
-      const char *env = getenv("HK_APPLE9_VECTORIZE_USE_WINDOW");
-      use_window = env ? atoi(env) : 2;
-   }
+   int64_t use_window = debug_get_option_hk_apple9_vectorize_use_window();
    bool bounded = low->intrinsic == nir_intrinsic_load_global_bounded ||
                   low->intrinsic == nir_intrinsic_load_global_constant_bounded;
    /* Robust merges of fields whose first uses are adjacent shorten Lethal
     * Company's light loops without extra spills at the register limit.
     * HK_APPLE9_ROBUST_MERGE_BYTES caps the merged size. */
-   static int robust_bytes = -1;
-   if (robust_bytes < 0) {
-      const char *env = getenv("HK_APPLE9_ROBUST_MERGE_BYTES");
-      robust_bytes = env ? atoi(env) : 16;
-   }
-   if (bounded && num_components * bit_size / 8 > (unsigned)robust_bytes)
+   int64_t robust_bytes = debug_get_option_hk_apple9_robust_merge_bytes();
+   if (bounded && num_components * bit_size / 8 > robust_bytes)
       return false;
    if (bounded) {
       int64_t low_use = hk_first_use_index(low), high_use = hk_first_use_index(high);

@@ -9,6 +9,7 @@
 #include "util/hash_table.h"
 #include "util/ralloc.h"
 #include "util/sparse_bitset.h"
+#include "util/u_debug.h"
 #include "util/u_dynarray.h"
 #include "util/u_qsort.h"
 #include "agx_builder.h"
@@ -92,22 +93,20 @@ loops_exited(agx_context *ctx, const unsigned *loop_end, agx_block *pred,
    return exits;
 }
 
+DEBUG_GET_ONCE_BOOL_OPTION(spill_trace_loops, "AGX_SPILL_TRACE_LOOPS", false)
+DEBUG_GET_ONCE_BOOL_OPTION(spill_no_loop_handling,
+                           "AGX_SPILL_NO_LOOP_HANDLING", false)
+
 static bool
 spill_trace_loops(void)
 {
-   static int enabled = -1;
-   if (enabled < 0)
-      enabled = getenv("AGX_SPILL_TRACE_LOOPS") != NULL;
-   return enabled;
+   return debug_get_option_spill_trace_loops();
 }
 
 static bool
 spill_loop_handling(void)
 {
-   static int enabled = -1;
-   if (enabled < 0)
-      enabled = getenv("AGX_SPILL_NO_LOOP_HANDLING") == NULL;
-   return enabled;
+   return !debug_get_option_spill_no_loop_handling();
 }
 
 struct next_uses {
