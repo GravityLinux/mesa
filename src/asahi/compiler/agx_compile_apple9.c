@@ -7024,7 +7024,11 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
     * loop-invariant results. Hoist them, and their address math, out of
     * loops before preamble selection, which can then also take uniform
     * ones. */
-   if (!getenv("AGX_APPLE9_NO_LICM") && nir_opt_licm(nir, apple9_licm_filter)) {
+   /* LICM keeps hoisted values live across the whole loop. In shaders at
+    * the register limit that costs far more than it saves (Lethal Company's
+    * hot fragment shader quintupled its spills), so it is opt-in until it
+    * has a register-pressure model. AGX_APPLE9_LICM=1 enables it. */
+   if (getenv("AGX_APPLE9_LICM") && nir_opt_licm(nir, apple9_licm_filter)) {
       nir_opt_cse(nir);
       nir_opt_dce(nir);
    }
