@@ -1569,8 +1569,8 @@ hk_apple9_decode_texel_select(nir_builder *b, nir_def *words, nir_def *layout,
 
 /* Encode a texel into zero-padded 32-bit words for its descriptor layout. */
 static nir_def *
-hk_apple9_encode_texel(nir_builder *b, nir_def *value, nir_def *layout,
-                       bool floating)
+hk_apple9_encode_texel_kind(nir_builder *b, nir_def *value, nir_def *layout,
+                            bool floating, int cls)
 {
    nir_def *words[4] = {
       nir_imm_int(b, 0), nir_imm_int(b, 0), nir_imm_int(b, 0), nir_imm_int(b, 0),
@@ -1586,7 +1586,7 @@ hk_apple9_encode_texel(nir_builder *b, nir_def *value, nir_def *layout,
                                nir_isub(b, nir_imm_int(b, 32), width));
       nir_def *v = nir_channel(b, value, c);
       nir_def *bits = v;
-      if (floating) {
+      if (floating && cls < 0) {
          nir_def *unorm = nir_f2u32(b, nir_fround_even(b,
             nir_fmul(b, nir_fsat(b, v), nir_u2f32(b, mask))));
          nir_def *snorm = nir_f2i32(b, nir_fround_even(b,
@@ -1597,15 +1597,29 @@ hk_apple9_encode_texel(nir_builder *b, nir_def *value, nir_def *layout,
          bits = nir_bcsel(b, nir_ieq_imm(b, kind, HK_TEXEL_FLOAT16),
                           nir_pack_half_2x16_split(b, v, nir_imm_float(b, 0)), bits);
          bits = nir_bcsel(b, nir_ieq_imm(b, kind, HK_TEXEL_FLOAT32), v, bits);
+      } else if (floating && cls == HK_TEXEL_UNORM) {
+         bits = nir_f2u32(b, nir_fround_even(b,
+            nir_fmul(b, nir_fsat(b, v), nir_u2f32(b, mask))));
+      } else if (floating && cls == HK_TEXEL_SNORM) {
+         bits = nir_f2i32(b, nir_fround_even(b,
+            nir_fmul(b, nir_fmin(b, nir_fmax(b, v, nir_imm_float(b, -1.0)),
+                                 nir_imm_float(b, 1.0)),
+                     nir_u2f32(b, nir_ushr_imm(b, mask, 1)))));
+      } else if (floating && cls == HK_TEXEL_FLOAT16) {
+         bits = nir_pack_half_2x16_split(b, v, nir_imm_float(b, 0));
       }
       bits = nir_ishl(b, nir_iand(b, bits, mask), shift);
       /* Packed float formats encode all three components at once. */
-      if (floating && c == 0) {
-         bits = nir_bcsel(b, nir_ieq_imm(b, kind, HK_TEXEL_FLOAT11),
-                          nir_format_pack_11f11f10f(b, rgb), bits);
-         bits = nir_bcsel(b, nir_ieq_imm(b, kind, HK_TEXEL_RGB9E5),
-                          nir_format_pack_r9g9b9e5(b, rgb), bits);
-      } else if (floating && c < 3) {
+      if (floating && c == 0 && (cls < 0 || cls == HK_TEXEL_FLOAT11 ||
+                                  cls == HK_TEXEL_RGB9E5)) {
+         if (cls < 0 || cls == HK_TEXEL_FLOAT11)
+            bits = nir_bcsel(b, nir_ieq_imm(b, kind, HK_TEXEL_FLOAT11),
+                             nir_format_pack_11f11f10f(b, rgb), bits);
+         if (cls < 0 || cls == HK_TEXEL_RGB9E5)
+            bits = nir_bcsel(b, nir_ieq_imm(b, kind, HK_TEXEL_RGB9E5),
+                             nir_format_pack_r9g9b9e5(b, rgb), bits);
+      } else if (floating && c < 3 && (cls < 0 || cls == HK_TEXEL_FLOAT11 ||
+                                       cls == HK_TEXEL_RGB9E5)) {
          bits = nir_bcsel(b, nir_ior(b, nir_ieq_imm(b, kind, HK_TEXEL_FLOAT11),
                                      nir_ieq_imm(b, kind, HK_TEXEL_RGB9E5)),
                           nir_imm_int(b, 0), bits);
@@ -1619,6 +1633,47 @@ hk_apple9_encode_texel(nir_builder *b, nir_def *value, nir_def *layout,
       }
    }
    return nir_vec(b, words, 4);
+}
+
+static nir_def *
+hk_apple9_encode_texel_classes(nir_builder *b, nir_def *value, nir_def *layout,
+                               bool floating, const unsigned *classes,
+                               unsigned count)
+{
+   if (!count)
+      return hk_apple9_encode_texel_kind(b, value, layout, floating, -1);
+   nir_def *in_class = nir_imm_true(b);
+   for (unsigned c = 0; c < 4; ++c) {
+      nir_def *k = nir_ushr_imm(b, nir_channel(b, layout, c), 18);
+      nir_def *ok = nir_ieq_imm(b, k, classes[0]);
+      if (c)
+         ok = nir_ior(b, ok, nir_ior(b, nir_ieq_imm(b, k, HK_TEXEL_ZERO),
+                                     nir_ieq_imm(b, k, HK_TEXEL_ONE)));
+      in_class = nir_iand(b, in_class, ok);
+   }
+   nir_push_if(b, in_class);
+   nir_def *then_words = hk_apple9_encode_texel_kind(b, value, layout, floating,
+                                                     classes[0]);
+   nir_push_else(b, NULL);
+   nir_def *else_words = hk_apple9_encode_texel_classes(
+      b, value, layout, floating, classes + 1, count - 1);
+   nir_pop_if(b, NULL);
+   return nir_if_phi(b, then_words, else_words);
+}
+
+/* As for decoding, branch on the uniform format class of the texel. */
+static nir_def *
+hk_apple9_encode_texel(nir_builder *b, nir_def *value, nir_def *layout,
+                       bool floating)
+{
+   static const unsigned float_classes[] = {
+      HK_TEXEL_UNORM, HK_TEXEL_FLOAT32, HK_TEXEL_FLOAT16, HK_TEXEL_SNORM,
+      HK_TEXEL_FLOAT11, HK_TEXEL_RGB9E5,
+   };
+   return floating
+      ? hk_apple9_encode_texel_classes(b, value, layout, true, float_classes,
+                                       ARRAY_SIZE(float_classes))
+      : hk_apple9_encode_texel_kind(b, value, layout, false, -1);
 }
 
 /* The storage texel metadata carries the full address, including the view's
