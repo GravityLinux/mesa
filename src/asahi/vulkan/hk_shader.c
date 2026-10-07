@@ -660,7 +660,8 @@ hk_unencodable_scale(nir_scalar s)
 /* Classes of reads the preamble may take once per dispatch.
  * HK_APPLE9_UNIFORM_SAFE_CLASSES restricts them, e.g. to tell apart the
  * effect of hoisting uniform-buffer values, storage-buffer values and
- * descriptor metadata. */
+ * descriptor metadata. Only descriptor metadata qualifies by default: in
+ * Lethal Company it ran crash-free and helped the compute pass it changed. */
 enum hk_uniform_safe_class {
    HK_UNIFORM_SAFE_UBO = BITFIELD_BIT(0),
    HK_UNIFORM_SAFE_SSBO = BITFIELD_BIT(1),
@@ -669,6 +670,7 @@ enum hk_uniform_safe_class {
 
 static const struct debug_named_value hk_uniform_safe_options[] = {
    {"all", ~0u, "Every class"},
+   {"none", 0, "No class"},
    {"ubo", HK_UNIFORM_SAFE_UBO, "Uniform-buffer values"},
    {"ssbo", HK_UNIFORM_SAFE_SSBO, "Read-only storage-buffer values"},
    {"meta", HK_UNIFORM_SAFE_META, "Descriptor metadata"},
@@ -677,7 +679,7 @@ static const struct debug_named_value hk_uniform_safe_options[] = {
 
 DEBUG_GET_ONCE_FLAGS_OPTION(hk_uniform_safe_classes,
                             "HK_APPLE9_UNIFORM_SAFE_CLASSES",
-                            hk_uniform_safe_options, ~0u)
+                            hk_uniform_safe_options, HK_UNIFORM_SAFE_META)
 
 static enum gl_access_qualifier
 hk_uniform_safe(enum hk_uniform_safe_class cls)
