@@ -24,6 +24,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+DEBUG_GET_ONCE_BOOL_OPTION(apple9_no_bfe, "AGX_APPLE9_NO_BFE", false)
+DEBUG_GET_ONCE_NUM_OPTION(apple9_hoist_loads, "AGX_APPLE9_HOIST_LOADS", 0)
+
 /* Apple9 compute compilation uses one NIR-to-VIR-to-machine pipeline. */
 
 struct apple9_emitter {
@@ -2989,9 +2992,7 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
             }
             /* x & (2^w - 1) and (x >> k) & (2^w - 1) are one bitfield
              * extract: the logical shift-right immediate form with a width. */
-            static int bfe = -1;
-            if (bfe < 0)
-               bfe = getenv("AGX_APPLE9_NO_BFE") == NULL;
+            bool bfe = !debug_get_option_apple9_no_bfe();
             for (unsigned i = 0; bfe && op == nir_op_iand &&
                                  scalar.def->bit_size == 32 && i < 2; ++i) {
                uint32_t mask, amount;
@@ -5225,12 +5226,8 @@ apple9_hoist_sample(nir_instr *instr)
    case nir_intrinsic_load_ubo:
    case nir_intrinsic_load_ssbo:
    case nir_intrinsic_load_global_2x32: {
-      static int loads = -1;
-      if (loads < 0) {
-         const char *env = getenv("AGX_APPLE9_HOIST_LOADS");
-         loads = env && atoi(env);
-      }
-      return loads && nir_intrinsic_can_reorder(intr);
+      return debug_get_option_apple9_hoist_loads() &&
+             nir_intrinsic_can_reorder(intr);
    }
    default:
       return false;
