@@ -203,6 +203,7 @@ write_storage_image_view_desc(struct hk_descriptor_set *set,
          ext.metadata.base = hk_apple9_view_residency(dev, view, 0);
          ext.metadata.elements =
             view->vk.base_mip_level | (view->vk.base_array_layer << 16);
+         ext.native_ok = agx_apple9_translate_texture(ext.texture, &desc.tex);
       }
       write_desc(set, binding, elem, &ext, sizeof(ext));
       return;

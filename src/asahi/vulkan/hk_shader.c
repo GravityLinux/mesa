@@ -1736,9 +1736,128 @@ hk_apple9_lower_buffer_address(nir_builder *b, nir_intrinsic_instr *intr,
 /* Storage access without a shader format reads the texel layout from the
  * Apple9 storage descriptor, then converts each component at run time.
  */
+/* Storage-image loads can read through the texture unit, whose cache does
+ * not observe shader writes. That is only correct for a load that no image
+ * write or atomic of the same invocation can precede: none earlier in
+ * program order, none in a loop around it, and no image barrier that could
+ * make another invocation's write visible. Volatile loads stay on memory,
+ * as do coherent ones when the shader writes images at all.
+ */
+static bool
+hk_apple9_image_write(const nir_intrinsic_instr *intr)
+{
+   switch (intr->intrinsic) {
+   case nir_intrinsic_bindless_image_store:
+   case nir_intrinsic_bindless_image_atomic:
+   case nir_intrinsic_bindless_image_atomic_swap:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static nir_loop *
+hk_outermost_loop(nir_block *block)
+{
+   nir_loop *loop = NULL;
+   for (nir_cf_node *n = block->cf_node.parent; n; n = n->parent) {
+      if (n->type == nir_cf_node_loop)
+         loop = nir_cf_node_as_loop(n);
+   }
+   return loop;
+}
+
+static void
+hk_apple9_texture_route_loads(nir_shader *nir, struct set *safe)
+{
+   if (getenv("HK_APPLE9_NO_TEXTURE_LOADS"))
+      return;
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   struct set *write_loops = _mesa_pointer_set_create(NULL);
+   bool writes = false;
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_intrinsic &&
+             hk_apple9_image_write(nir_instr_as_intrinsic(instr))) {
+            writes = true;
+            nir_loop *loop = hk_outermost_loop(block);
+            if (loop)
+               _mesa_set_add(write_loops, loop);
+         }
+      }
+   }
+   bool written = false;
+   nir_foreach_block(block, impl) {
+      nir_loop *loop = hk_outermost_loop(block);
+      bool loop_writes = loop && _mesa_set_search(write_loops, loop);
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (hk_apple9_image_write(intr)) {
+            written = true;
+         } else if (intr->intrinsic == nir_intrinsic_barrier) {
+            if (writes && (nir_intrinsic_memory_modes(intr) & nir_var_image))
+               written = true;
+         } else if (intr->intrinsic == nir_intrinsic_bindless_image_load) {
+            enum gl_access_qualifier access = nir_intrinsic_access(intr);
+            enum glsl_sampler_dim dim = nir_intrinsic_image_dim(intr);
+            if (!written && !loop_writes && !(access & ACCESS_VOLATILE) &&
+                !(writes && (access & ACCESS_COHERENT)) &&
+                dim != GLSL_SAMPLER_DIM_BUF && dim != GLSL_SAMPLER_DIM_MS &&
+                dim != GLSL_SAMPLER_DIM_SUBPASS && dim != GLSL_SAMPLER_DIM_SUBPASS_MS)
+               _mesa_set_add(safe, intr);
+         }
+      }
+   }
+   _mesa_set_destroy(write_loops, NULL);
+}
+
+/* Fetch a storage texel through the native entry of the descriptor that
+ * load handle `tex` points at, see hk_apple9_storage_descriptor. */
+static nir_def *
+hk_apple9_texture_load(nir_builder *b, nir_intrinsic_instr *intr,
+                       nir_intrinsic_instr *handle, nir_def *coord)
+{
+   enum glsl_sampler_dim dim = nir_intrinsic_image_dim(intr);
+   bool cube = dim == GLSL_SAMPLER_DIM_CUBE;
+   bool array = nir_intrinsic_image_array(intr) || cube;
+   unsigned coords = (dim == GLSL_SAMPLER_DIM_1D ? 1 : dim == GLSL_SAMPLER_DIM_3D ? 3 : 2) +
+                     (array && dim != GLSL_SAMPLER_DIM_3D);
+   nir_def *native = nir_bindless_image_agx(
+      b, nir_iadd_imm(b, handle->src[0].ssa,
+                      offsetof(struct hk_apple9_storage_descriptor, texture) -
+                         AGX_APPLE9_DESCRIPTOR_TEXTURE_ENTRY *
+                            AGX_APPLE9_TEXTURE_TABLE_STRIDE),
+      .desc_set = nir_intrinsic_desc_set(handle));
+   nir_tex_instr *tex = nir_tex_instr_create(b->shader, 3);
+   tex->op = nir_texop_txf;
+   tex->sampler_dim = cube ? GLSL_SAMPLER_DIM_2D : dim;
+   tex->is_array = array;
+   tex->coord_components = coords;
+   tex->dest_type = nir_intrinsic_dest_type(intr);
+   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord,
+      nir_trim_vector(b, nir_u2u32(b, coord), coords));
+   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_int(b, 0));
+   tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_texture_handle, native);
+   nir_def_init(&tex->instr, &tex->def, 4, intr->def.bit_size);
+   nir_builder_instr_insert(b, &tex->instr);
+   return &tex->def;
+}
+
+/* Whether the descriptor behind load handle `tex` has a native entry. */
+static nir_def *
+hk_apple9_native_ok(nir_builder *b, nir_def *tex)
+{
+   return nir_ine_imm(b, nir_load_global_constant(b, 1, 32,
+      nir_iadd_imm(b, nir_load_from_texture_handle_agx(b, tex),
+                   offsetof(struct hk_apple9_storage_descriptor, native_ok)),
+      .align_mul = 4), 0);
+}
+
 static bool
 hk_apple9_lower_formatless_storage(nir_builder *b, nir_intrinsic_instr *intr,
-                                   bool load)
+                                   bool load, bool route)
 {
    if (nir_def_instr(intr->src[0].ssa)->type != nir_instr_type_intrinsic)
       return false;
@@ -1794,11 +1913,12 @@ hk_apple9_lower_formatless_storage(nir_builder *b, nir_intrinsic_instr *intr,
    /* The address is arithmetic on the descriptor, valid for any coordinate,
     * so compute it ahead of the bounds check: its uniform part can then
     * move to the preamble. Only the access below depends on the check. */
+   nir_def *ok = route ? hk_apple9_native_ok(b, tex) : NULL;
    nir_def *pbe_addr = nir_load_from_texture_handle_agx(b, pbe);
-   nir_def *addr;
+   nir_def *addr = NULL;
    if (dim == GLSL_SAMPLER_DIM_BUF) {
       addr = hk_apple9_buffer_texel_address(b, meta, coord, size_B);
-   } else {
+   } else if (!route) {
       bool layered = array || cube || dim == GLSL_SAMPLER_DIM_3D;
       addr = libagx_image_texel_address(
          b, pbe_addr, nir_pad_vector_imm_int(b, coord, 0, 4),
@@ -1812,8 +1932,25 @@ hk_apple9_lower_formatless_storage(nir_builder *b, nir_intrinsic_instr *intr,
    if (load) {
       bool floating = nir_alu_type_get_base_type(nir_intrinsic_dest_type(intr)) ==
                       nir_type_float;
+      nir_def *fetched = NULL;
+      if (route) {
+         nir_push_if(b, ok);
+         fetched = hk_apple9_texture_load(b, intr, handle, coord);
+         nir_push_else(b, NULL);
+         bool layered = array || cube || dim == GLSL_SAMPLER_DIM_3D;
+         addr = libagx_image_texel_address(
+            b, pbe_addr, nir_pad_vector_imm_int(b, coord, 0, 4),
+            nir_u2u32(b, intr->src[2].ssa), size_B,
+            nir_imm_bool(b, dim == GLSL_SAMPLER_DIM_1D),
+            nir_imm_bool(b, false), nir_imm_bool(b, layered),
+            nir_imm_bool(b, false));
+      }
       nir_def *words = hk_apple9_load_texel_words(b, addr, size_B, access);
       value = hk_apple9_decode_texel(b, words, layout, floating);
+      if (route) {
+         nir_pop_if(b, NULL);
+         value = nir_if_phi(b, fetched, value);
+      }
    } else {
       bool floating = nir_alu_type_get_base_type(nir_intrinsic_src_type(intr)) ==
                       nir_type_float;
@@ -2089,14 +2226,15 @@ hk_apple9_lower_sparse_intrinsic(nir_builder *b, nir_intrinsic_instr *intr,
  */
 static bool
 hk_apple9_lower_storage_image(nir_builder *b, nir_intrinsic_instr *intr,
-                              UNUSED void *data)
+                              void *data)
 {
    bool load = intr->intrinsic == nir_intrinsic_bindless_image_load;
    if (!load && intr->intrinsic != nir_intrinsic_bindless_image_store)
       return false;
    enum pipe_format format = nir_intrinsic_format(intr);
    if (format == PIPE_FORMAT_NONE)
-      return hk_apple9_lower_formatless_storage(b, intr, load);
+      return hk_apple9_lower_formatless_storage(b, intr, load,
+                                                load && data && _mesa_set_search(data, intr));
    const struct util_format_description *desc = util_format_description(format);
    unsigned size_B = util_format_get_blocksize(format);
    if ((desc->layout != UTIL_FORMAT_LAYOUT_PLAIN &&
@@ -2147,16 +2285,31 @@ hk_apple9_lower_storage_image(nir_builder *b, nir_intrinsic_instr *intr,
          .image_dim = dim, .image_array = array);
       inside = nir_iand(b, inside, nir_ult(b, nir_u2u32(b, intr->src[2].ssa), samples));
    }
+   bool route = load && data && _mesa_set_search(data, intr);
+   nir_def *ok = route ? hk_apple9_native_ok(b, tex) : NULL;
    /* See hk_apple9_lower_formatless_storage: address ahead of the check. */
-   nir_def *addr = nir_bindless_image_texel_address(b, 64, pbe, coord,
+   nir_def *addr = route ? NULL : nir_bindless_image_texel_address(b, 64, pbe, coord,
       intr->src[2].ssa, .image_dim = dim,
       .image_array = array, .format = format, .access = nir_intrinsic_access(intr));
    nir_push_if(b, inside);
    nir_def *value = NULL;
    if (load) {
+      nir_def *fetched = NULL;
+      if (route) {
+         nir_push_if(b, ok);
+         fetched = hk_apple9_texture_load(b, intr, handle, coord);
+         nir_push_else(b, NULL);
+         addr = nir_bindless_image_texel_address(b, 64, pbe, coord,
+            intr->src[2].ssa, .image_dim = dim,
+            .image_array = array, .format = format, .access = nir_intrinsic_access(intr));
+      }
       nir_def *raw = nir_load_global(b, DIV_ROUND_UP(size_B, 4), MIN2(32, size_B * 8),
          addr, .align_mul = size_B, .access = nir_intrinsic_access(intr));
       value = nir_format_unpack_rgba(b, raw, format);
+      if (route) {
+         nir_pop_if(b, NULL);
+         value = nir_if_phi(b, fetched, nir_pad_vector_imm_int(b, value, 0, 4));
+      }
    } else {
       nir_def *raw = nir_format_pack_rgba(b, format, intr->src[3].ssa);
       raw = size_B <= 4 ? nir_u2uN(b, raw, size_B * 8)
@@ -2501,8 +2654,11 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
                hk_apple9_lower_sparse_intrinsic, nir_metadata_none, NULL);
       NIR_PASS(_, nir, nir_shader_tex_pass, hk_apple9_lower_texel_buffer,
                nir_metadata_control_flow, NULL);
+      struct set *texture_loads = _mesa_pointer_set_create(NULL);
+      hk_apple9_texture_route_loads(nir, texture_loads);
       NIR_PASS(_, nir, nir_shader_intrinsics_pass, hk_apple9_lower_storage_image,
-               nir_metadata_control_flow, NULL);
+               nir_metadata_none, texture_loads);
+      _mesa_set_destroy(texture_loads, NULL);
    }
 
    if (dev->dev.chip == AGX_CHIP_G16G) {
