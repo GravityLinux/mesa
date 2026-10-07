@@ -1277,7 +1277,7 @@ hk_apple9_lower_texel_buffer(nir_builder *b, nir_tex_instr *tex, UNUSED void *da
    ptr = nir_iadd_imm(b, ptr, offsetof(struct hk_apple9_texel_descriptor, metadata));
    nir_def *count = nir_load_global_constant(b, 1, 32,
       nir_iadd_imm(b, ptr, offsetof(struct hk_apple9_texel_metadata, elements)),
-      .align_mul = 4);
+      .align_mul = 4, .access = ACCESS_UNIFORM_SAFE_AGX);
    if (tex->op == nir_texop_txs) {
       nir_def_replace(&tex->def, count);
       return true;
@@ -1289,10 +1289,10 @@ hk_apple9_lower_texel_buffer(nir_builder *b, nir_tex_instr *tex, UNUSED void *da
    nir_push_if(b, nir_ult(b, coord, count));
    nir_def *base = nir_load_global_constant(b, 1, 64,
       nir_iadd_imm(b, ptr, offsetof(struct hk_apple9_texel_metadata, base)),
-      .align_mul = 8);
+      .align_mul = 8, .access = ACCESS_UNIFORM_SAFE_AGX);
    nir_def *size = nir_load_global_constant(b, 1, 32,
       nir_iadd_imm(b, ptr, offsetof(struct hk_apple9_texel_metadata, size_B)),
-      .align_mul = 4);
+      .align_mul = 4, .access = ACCESS_UNIFORM_SAFE_AGX);
    nir_push_if(b, nir_ieq_imm(b, size, 12));
    nir_def *xyz = nir_load_global(b, 3, 32,
       nir_iadd(b, base, nir_u2u64(b, nir_imul_imm(b, coord, 12))), .align_mul = 4);
@@ -1334,7 +1334,7 @@ hk_apple9_lower_texel_buffer(nir_builder *b, nir_tex_instr *tex, UNUSED void *da
    if (tex->def.num_components == 4) {
       nir_def *alpha_kind = nir_ushr_imm(b, nir_load_global_constant(b, 1, 32,
          nir_iadd_imm(b, ptr, offsetof(struct hk_apple9_texel_metadata, component[3])),
-         .align_mul = 4), 18);
+         .align_mul = 4, .access = ACCESS_UNIFORM_SAFE_AGX), 18);
       nir_def *one = floating ? nir_imm_float(b, 1.0) : nir_imm_int(b, 1);
       zero = nir_vector_insert_imm(b, zero,
          nir_bcsel(b, nir_ieq_imm(b, alpha_kind, HK_TEXEL_ONE), one,
@@ -1688,7 +1688,7 @@ hk_apple9_buffer_texel_address(nir_builder *b, nir_def *meta, nir_def *coord,
 {
    nir_def *base = nir_load_global_constant(b, 1, 64,
       nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, base)),
-      .align_mul = 8);
+      .align_mul = 8, .access = ACCESS_UNIFORM_SAFE_AGX);
    nir_def *offset = nir_imul(b, nir_channel(b, coord, 0), size_B);
    return nir_iadd(b, base, nir_u2u64(b, offset));
 }
@@ -1770,10 +1770,10 @@ hk_apple9_lower_formatless_storage(nir_builder *b, nir_intrinsic_instr *intr,
       offsetof(struct hk_apple9_storage_descriptor, metadata));
    nir_def *size_B = nir_load_global_constant(b, 1, 32,
       nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, size_B)),
-      .align_mul = 4);
+      .align_mul = 4, .access = ACCESS_UNIFORM_SAFE_AGX);
    nir_def *layout = nir_load_global_constant(b, 4, 32,
       nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, component)),
-      .align_mul = 4);
+      .align_mul = 4, .access = ACCESS_UNIFORM_SAFE_AGX);
 
    /* Honeykrisp's storage cube descriptors are 2D arrays of faces. */
    nir_def *size = nir_bindless_image_size(b, dimensions, 32, tex, nir_imm_int(b, 0),
@@ -1880,14 +1880,14 @@ hk_apple9_buffer_residency_code(nir_builder *b, nir_def *meta, nir_def *x)
 {
    nir_def *table = nir_load_global_constant(b, 1, 64,
       nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, residency)),
-      .align_mul = 8);
+      .align_mul = 8, .access = ACCESS_UNIFORM_SAFE_AGX);
    nir_def *code;
    nir_push_if(b, nir_ine_imm(b, table, 0));
    {
       nir_def *base = nir_load_global_constant(b, 1, 64, meta, .align_mul = 8);
       nir_def *fields = nir_load_global_constant(b, 2, 32,
          nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, elements)),
-         .align_mul = 8);
+         .align_mul = 8, .access = ACCESS_UNIFORM_SAFE_AGX);
       nir_def *elements = nir_channel(b, fields, 0);
       nir_def *size_B = nir_channel(b, fields, 1);
       x = nir_umin(b, x, nir_iadd_imm(b, nir_umax_imm(b, elements, 1), -1));
@@ -2054,7 +2054,7 @@ hk_apple9_lower_sparse_intrinsic(nir_builder *b, nir_intrinsic_instr *intr,
       nir_def *table = nir_load_global_constant(b, 1, 64, meta, .align_mul = 8);
       nir_def *base = nir_load_global_constant(b, 1, 32,
          nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, elements)),
-         .align_mul = 4);
+         .align_mul = 4, .access = ACCESS_UNIFORM_SAFE_AGX);
       nir_def *coord = nir_u2u32(b, intr->src[1].ssa);
       bool layered = nir_intrinsic_image_array(intr) || dim == GLSL_SAMPLER_DIM_CUBE;
       code = hk_apple9_residency_code(b, table, base, nir_imm_int(b, 0),

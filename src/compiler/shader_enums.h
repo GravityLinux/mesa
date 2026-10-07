@@ -1290,6 +1290,13 @@ enum gl_access_qualifier
     * one-time accesses or if the data is larger than what the memory can store.
     */
    ACCESS_ESTREAM_PAN = (1 << 22),
+
+   /**
+    * AGX: a read that is safe to perform once per dispatch at a uniform
+    * address, such as driver descriptor metadata, without being generally
+    * speculatable. Only the backend's preamble hoisting acts on it.
+    */
+   ACCESS_UNIFORM_SAFE_AGX = (1 << 23),
 };
 
 enum gl_tess_spacing

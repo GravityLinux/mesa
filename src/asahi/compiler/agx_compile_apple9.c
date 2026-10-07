@@ -6625,8 +6625,8 @@ apple9_is_bounds_limit(nir_instr *instr)
 /* Reads that are always safe once per dispatch at a uniform address, but
  * that must not be generally speculatable: if-conversion or code motion
  * would then run them for every thread on paths that skipped them.
- * Driver UBOs (app UBOs are global by now) and descriptor memory in the
- * USC aperture qualify. */
+ * Driver UBOs (app UBOs are global by now), descriptor memory in the USC
+ * aperture and reads the driver marks ACCESS_UNIFORM_SAFE_AGX qualify. */
 static bool
 apple9_preamble_safe_read(nir_instr *instr)
 {
@@ -6638,6 +6638,8 @@ apple9_preamble_safe_read(nir_instr *instr)
    if (intr->intrinsic != nir_intrinsic_load_global_2x32 ||
        !(nir_intrinsic_access(intr) & ACCESS_CAN_REORDER))
       return false;
+   if (nir_intrinsic_access(intr) & ACCESS_UNIFORM_SAFE_AGX)
+      return true;
    nir_scalar hi = nir_scalar_chase_movs(nir_get_scalar(intr->src[0].ssa, 1));
    return nir_scalar_is_const(hi) &&
           nir_scalar_as_uint(hi) == (AGX_APPLE9_USC_BASE >> 32);
