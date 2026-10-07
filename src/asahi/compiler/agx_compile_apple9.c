@@ -6913,21 +6913,6 @@ apple9_preamble_trial(nir_shader *nir, struct agx_shader_part *out,
 }
 
 static bool
-apple9_licm_filter(nir_instr *instr, nir_loop *loop, bool dominates_exit)
-{
-   switch (instr->type) {
-   case nir_instr_type_alu:
-   case nir_instr_type_load_const:
-      return true;
-   case nir_instr_type_intrinsic:
-   case nir_instr_type_tex:
-      return dominates_exit || nir_instr_can_speculate(instr);
-   default:
-      return false;
-   }
-}
-
-static bool
 apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
                   struct agx_apple9_compute_profile *profile,
                   const struct agx_apple9_varying_layout *varyings,
@@ -6964,14 +6949,6 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
       nir->options = saved;
    }
    apple9_prepare_dag(nir);
-   /* Loads and samples cost far more than the registers that hold their
-    * loop-invariant results. Hoist them, and their address math, out of
-    * loops before preamble selection, which can then also take uniform
-    * ones. Leaving a branch requires the access to be speculatable. */
-   if (!getenv("AGX_APPLE9_NO_LICM") && nir_opt_licm(nir, apple9_licm_filter)) {
-      nir_opt_cse(nir);
-      nir_opt_dce(nir);
-   }
    struct apple9_buffer_map resources = {0};
    if (!apple9_collect_buffer_map(nir, &resources, reason))
       return false;
