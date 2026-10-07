@@ -105,6 +105,16 @@ nir_inline_function_impl(struct nir_builder *b,
 {
    nir_function_impl *copy = nir_function_impl_clone(b->shader, impl);
 
+   /* Give the inlined definitions unused indices of the caller, so callers
+    * need not reindex the whole function after each inlining. */
+   nir_foreach_block(block, copy) {
+      nir_foreach_instr(instr, block) {
+         nir_def *def = nir_instr_def(instr);
+         if (def)
+            def->index = b->impl->ssa_alloc++;
+      }
+   }
+
    exec_list_append(&b->impl->locals, &copy->locals);
 
    /* Normally, NIR function returns are deref based, but for bindgen, we use a
