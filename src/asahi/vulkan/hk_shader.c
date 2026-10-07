@@ -1506,6 +1506,16 @@ hk_apple9_decode_texel_classes(nir_builder *b, nir_def *words, nir_def *layout,
    return nir_if_phi(b, then_value, else_value);
 }
 
+/* HK_APPLE9_TEXEL_CLASSES limits the format classes with a dedicated
+ * branch (0 keeps only the full select), trading executed work for code
+ * size. */
+static unsigned
+hk_apple9_texel_class_limit(unsigned count)
+{
+   const char *env = getenv("HK_APPLE9_TEXEL_CLASSES");
+   return env ? MIN2((unsigned)atoi(env), count) : count;
+}
+
 static nir_def *
 hk_apple9_decode_texel(nir_builder *b, nir_def *words, nir_def *layout,
                        bool floating)
@@ -1517,9 +1527,9 @@ hk_apple9_decode_texel(nir_builder *b, nir_def *words, nir_def *layout,
    static const unsigned int_classes[] = {HK_TEXEL_UINT, HK_TEXEL_SINT};
    return floating
       ? hk_apple9_decode_texel_classes(b, words, layout, true, float_classes,
-                                       ARRAY_SIZE(float_classes))
+            hk_apple9_texel_class_limit(ARRAY_SIZE(float_classes)))
       : hk_apple9_decode_texel_classes(b, words, layout, false, int_classes,
-                                       ARRAY_SIZE(int_classes));
+            hk_apple9_texel_class_limit(ARRAY_SIZE(int_classes)));
 }
 
 /* Decode a texel from the per-component layout of its descriptor, as
@@ -1672,7 +1682,7 @@ hk_apple9_encode_texel(nir_builder *b, nir_def *value, nir_def *layout,
    };
    return floating
       ? hk_apple9_encode_texel_classes(b, value, layout, true, float_classes,
-                                       ARRAY_SIZE(float_classes))
+            hk_apple9_texel_class_limit(ARRAY_SIZE(float_classes)))
       : hk_apple9_encode_texel_kind(b, value, layout, false, -1);
 }
 
