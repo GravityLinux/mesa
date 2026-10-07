@@ -275,9 +275,25 @@ hk_queue_fence_status(struct hk_device *dev, struct hk_queue *queue)
    if (!drmSyncobjTransfer(dev->dev.fd, binary, 0, queue->drm.syncobj, point,
                            0) &&
        !drmSyncobjExportSyncFile(dev->dev.fd, binary, &fd)) {
+      /* A timeline point resolves to a fence chain node, whose own status
+       * does not carry the error of the fence it wraps. The per-fence entries
+       * are unwrapped, so check those too.
+       */
       struct sync_file_info info = {0};
-      if (ioctl(fd, SYNC_IOC_FILE_INFO, &info) == 0)
+      if (ioctl(fd, SYNC_IOC_FILE_INFO, &info) == 0) {
          status = info.status;
+         if (info.num_fences > 0 && info.num_fences <= 64) {
+            struct sync_fence_info fences[64];
+            memset(fences, 0, sizeof(fences));
+            info.sync_fence_info = (uint64_t)(uintptr_t)fences;
+            if (ioctl(fd, SYNC_IOC_FILE_INFO, &info) == 0) {
+               for (unsigned i = 0; i < info.num_fences; ++i) {
+                  if (fences[i].status < 0)
+                     status = fences[i].status;
+               }
+            }
+         }
+      }
       close(fd);
    }
 
