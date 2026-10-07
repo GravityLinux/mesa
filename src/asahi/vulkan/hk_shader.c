@@ -819,13 +819,13 @@ hk_apple9_vectorize_cb(unsigned align_mul, unsigned align_offset,
    }
    bool bounded = low->intrinsic == nir_intrinsic_load_global_bounded ||
                   low->intrinsic == nir_intrinsic_load_global_constant_bounded;
-   /* Pairs keep loop bodies shorter without extra spills in shaders at the
-    * register limit; wider robust merges add spills there (Lethal Company
-    * light loops). HK_APPLE9_ROBUST_MERGE_BYTES overrides the size. */
+   /* Robust merges of fields whose first uses are adjacent shorten Lethal
+    * Company's light loops without extra spills at the register limit.
+    * HK_APPLE9_ROBUST_MERGE_BYTES caps the merged size. */
    static int robust_bytes = -1;
    if (robust_bytes < 0) {
       const char *env = getenv("HK_APPLE9_ROBUST_MERGE_BYTES");
-      robust_bytes = env ? atoi(env) : 8;
+      robust_bytes = env ? atoi(env) : 16;
    }
    if (bounded && num_components * bit_size / 8 > (unsigned)robust_bytes)
       return false;
