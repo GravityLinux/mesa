@@ -784,10 +784,20 @@ hk_apple9_vectorize_cb(unsigned align_mul, unsigned align_offset,
    static int use_window = -1;
    if (use_window < 0) {
       const char *env = getenv("HK_APPLE9_VECTORIZE_USE_WINDOW");
-      use_window = env ? atoi(env) : 16;
+      use_window = env ? atoi(env) : 2;
    }
    bool bounded = low->intrinsic == nir_intrinsic_load_global_bounded ||
                   low->intrinsic == nir_intrinsic_load_global_constant_bounded;
+   /* Pairs keep loop bodies shorter without extra spills in shaders at the
+    * register limit; wider robust merges add spills there (Lethal Company
+    * light loops). HK_APPLE9_ROBUST_MERGE_BYTES overrides the size. */
+   static int robust_bytes = -1;
+   if (robust_bytes < 0) {
+      const char *env = getenv("HK_APPLE9_ROBUST_MERGE_BYTES");
+      robust_bytes = env ? atoi(env) : 8;
+   }
+   if (bounded && num_components * bit_size / 8 > (unsigned)robust_bytes)
+      return false;
    if (bounded) {
       int64_t low_use = hk_first_use_index(low), high_use = hk_first_use_index(high);
       if (low_use < 0 || high_use < 0 || llabs(high_use - low_use) > use_window)
