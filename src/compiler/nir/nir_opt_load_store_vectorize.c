@@ -101,8 +101,6 @@ get_info(nir_intrinsic_op op)
       LOAD(nir_var_mem_global, global_constant, -1, 0, -1, 1)
       LOAD(nir_var_mem_global, global_offset, 0, 1, -1, 1)
       LOAD(nir_var_mem_global, global_constant_offset, 0, 1, -1, 1)
-      LOAD(nir_var_mem_global, global_bounded, 0, 1, -1, 1)
-      LOAD(nir_var_mem_global, global_constant_bounded, 0, 1, -1, 1)
       STORE(nir_var_mem_global, global_offset, 1, 2, -1, 0, 1)
       LOAD(nir_var_mem_task_payload, task_payload, -1, 0, -1, 1)
       STORE(nir_var_mem_task_payload, task_payload, -1, 1, -1, 0, 1)
@@ -1497,16 +1495,6 @@ can_vectorize(struct vectorize_ctx *ctx, struct entry *first, struct entry *seco
    /* We can't change the bit size of atomic load/store */
    if ((first->access & ACCESS_ATOMIC) && get_bit_size(first) != get_bit_size(second))
       return false;
-
-   /* A bounded load checks its own range against src[2]. Merging is only
-    * exact when both share that bound and the backend checks each
-    * component of the merged load separately. */
-   if (first->intrin->intrinsic == nir_intrinsic_load_global_bounded ||
-       first->intrin->intrinsic == nir_intrinsic_load_global_constant_bounded) {
-      if (!(get_variable_mode(first) & ctx->options->bounds_checked_modes) ||
-          !nir_srcs_equal(first->intrin->src[2], second->intrin->src[2]))
-         return false;
-   }
 
    if (first->intrin->intrinsic == nir_intrinsic_load_buffer_amd ||
        first->intrin->intrinsic == nir_intrinsic_store_buffer_amd) {

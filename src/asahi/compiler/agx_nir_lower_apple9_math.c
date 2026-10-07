@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <math.h>
 #include "compiler/nir/nir_builder.h"
 #include "agx_compile_apple9.h"
 #include "agx_apple9_machine.h"
@@ -585,121 +584,10 @@ lower_math(nir_builder *b, nir_instr *instr, UNUSED void *data)
    return nir_vec(b, components, alu->def.num_components);
 }
 
-/* T8132 F2I32 and F2U32 saturate to the destination range, convert NaN to
- * zero, and F2U32 converts negative values to zero (exact-bit probes with
- * +-2^31, +-2^32, +-1e30, +-inf and NaNs). Range checks that rebuild these
- * results around a conversion, such as DXVK's saturating ftoi/ftou, are
- * therefore redundant. NIR leaves out-of-range conversions undefined, so
- * fold them only here, at the backend boundary, and only for non-constant
- * inputs that constant folding cannot evaluate differently. */
-static bool
-float_const(nir_scalar s, float *value)
-{
-   s = nir_scalar_chase_movs(s);
-   if (!nir_scalar_is_const(s) || s.def->bit_size != 32)
-      return false;
-   *value = uif(nir_scalar_as_uint(s));
-   return true;
-}
-
-/* cond selects k exactly when the saturating conversion of x yields k. */
-static bool
-conversion_select_redundant(nir_scalar cond, nir_scalar x, uint32_t k, bool sign)
-{
-   if (!nir_scalar_is_alu(cond))
-      return false;
-   nir_op op = nir_scalar_alu_op(cond);
-   nir_scalar a = nir_scalar_chase_movs(nir_scalar_chase_alu_src(cond, 0));
-   nir_scalar b = nir_scalar_chase_movs(nir_scalar_chase_alu_src(cond, 1));
-   float c;
-   if (op == nir_op_fneu && nir_scalar_equal(a, x) && nir_scalar_equal(b, x))
-      return k == 0;
-   /* x > c, with every float above c at or past the saturation bound. */
-   if ((op == nir_op_flt && nir_scalar_equal(b, x) && float_const(a, &c)) ||
-       (op == nir_op_fge && nir_scalar_equal(a, x) && float_const(b, &c) &&
-        (c = nextafterf(c, -INFINITY), true))) {
-      return sign ? (k == 0x7fffffff && c >= 2147483520.0f)
-                  : (k == 0xffffffff && c >= 4294967040.0f);
-   }
-   /* x < c, with every float below c at or past the lower bound. */
-   if ((op == nir_op_flt && nir_scalar_equal(a, x) && float_const(b, &c)) ||
-       (op == nir_op_fge && nir_scalar_equal(b, x) && float_const(a, &c) &&
-        (c = nextafterf(c, INFINITY), true))) {
-      return sign ? (k == 0x80000000 && c <= -2147483648.0f)
-                  : (k == 0 && c <= 0.0f);
-   }
-   return false;
-}
-
-/* The conversion at the core of a chain of redundant range selects. */
-static bool
-saturating_conversion(nir_scalar s, nir_scalar *x, bool *sign)
-{
-   s = nir_scalar_chase_movs(s);
-   if (!nir_scalar_is_alu(s))
-      return false;
-   nir_op op = nir_scalar_alu_op(s);
-   if (op == nir_op_f2i32 || op == nir_op_f2u32) {
-      if (nir_scalar_chase_alu_src(s, 0).def->bit_size != 32)
-         return false;
-      *x = nir_scalar_chase_movs(nir_scalar_chase_alu_src(s, 0));
-      *sign = op == nir_op_f2i32;
-      return !nir_scalar_is_const(*x);
-   }
-   if (op != nir_op_bcsel)
-      return false;
-   uint32_t k;
-   nir_scalar sel = nir_scalar_chase_movs(nir_scalar_chase_alu_src(s, 1));
-   if (!nir_scalar_is_const(sel))
-      return false;
-   k = nir_scalar_as_uint(sel);
-   return saturating_conversion(nir_scalar_chase_alu_src(s, 2), x, sign) &&
-          conversion_select_redundant(nir_scalar_chase_alu_src(s, 0), *x, k, *sign);
-}
-
-static bool
-fold_saturating_conversion(nir_builder *b, nir_alu_instr *alu, UNUSED void *data)
-{
-   if (alu->def.bit_size != 32 || alu->def.num_components != 1)
-      return false;
-   if (alu->op == nir_op_f2u32) {
-      /* F2U32 already maps negative values and NaN to zero. */
-      nir_scalar src = nir_scalar_chase_alu_src(nir_get_scalar(&alu->def, 0), 0);
-      if (!nir_scalar_is_alu(src) || nir_scalar_alu_op(src) != nir_op_fmax ||
-          src.def->bit_size != 32)
-         return false;
-      for (unsigned i = 0; i < 2; ++i) {
-         nir_scalar zero = nir_scalar_chase_movs(nir_scalar_chase_alu_src(src, i));
-         nir_scalar other = nir_scalar_chase_alu_src(src, 1 - i);
-         if (nir_scalar_is_const(zero) && (nir_scalar_as_uint(zero) & 0x7fffffff) == 0 &&
-             !nir_scalar_is_const(nir_scalar_chase_movs(other))) {
-            b->cursor = nir_before_instr(&alu->instr);
-            nir_src_rewrite(&alu->src[0].src, nir_mov_scalar(b, other));
-            alu->src[0].swizzle[0] = 0;
-            return true;
-         }
-      }
-      return false;
-   }
-   if (alu->op != nir_op_bcsel)
-      return false;
-   nir_scalar x;
-   bool sign;
-   nir_scalar self = nir_get_scalar(&alu->def, 0);
-   if (!saturating_conversion(self, &x, &sign))
-      return false;
-   nir_scalar inner = nir_scalar_chase_alu_src(self, 2);
-   b->cursor = nir_before_instr(&alu->instr);
-   nir_def_replace(&alu->def, nir_mov_scalar(b, inner));
-   return true;
-}
-
 bool
 agx_nir_lower_apple9_math(nir_shader *shader)
 {
    bool progress = agx_nir_lower_apple9_subgroup_denorms(shader);
-   progress |= nir_shader_alu_pass(shader, fold_saturating_conversion,
-                                   nir_metadata_control_flow, NULL);
    progress |= nir_shader_lower_instructions(shader, math_filter, lower_math, NULL);
    /* Apple9 has ordinary multiply/add/FMA, but no modeled interpolation
     * instruction. Use NIR's precision-aware lowering for FP32 mix. */
