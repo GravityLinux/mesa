@@ -263,10 +263,44 @@ is_nan(nir_builder *b, nir_def *x)
    return nir_ult(b, nir_imm_int(b, F32_EXP_MASK), nir_iand_imm(b, x, ~F32_SIGN));
 }
 
+/* Positive subnormal x as m * 2^(2k) with m in [1, 4). */
+static void
+unpack_even(nir_builder *b, nir_def *x, nir_def **m, nir_def **k)
+{
+   nir_def *e;
+   unpack(b, x, m, &e);
+   *m = nir_bcsel(b, nir_ine_imm(b, nir_iand_imm(b, e, 1), 0),
+                  nir_fmul_imm(b, *m, 2.0), *m);
+   *k = nir_ishr_imm(b, e, 1);
+}
+
 static nir_def *
 build_slow(nir_builder *b, nir_alu_instr *alu, nir_def **src)
 {
    switch (alu->op) {
+   case nir_op_frcp: {
+      nir_def *m, *e;
+      unpack(b, src[0], &m, &e);
+      return pack(b, nir_frcp(b, m), nir_ineg(b, e), nir_imm_float(b, 0.0));
+   }
+   case nir_op_fsqrt:
+   case nir_op_frsq: {
+      nir_def *m, *k;
+      unpack_even(b, src[0], &m, &k);
+      return alu->op == nir_op_fsqrt
+                ? pack(b, nir_fsqrt(b, m), k, nir_imm_float(b, 0.0))
+                : pack(b, nir_frsq(b, m), nir_ineg(b, k), nir_imm_float(b, 0.0));
+   }
+   case nir_op_flog2: {
+      nir_def *m, *e;
+      unpack(b, src[0], &m, &e);
+      return nir_fadd(b, nir_flog2(b, m), nir_i2f32(b, e));
+   }
+   case nir_op_fexp2:
+      /* exp2(x) = exp2(x + 64) * 2^-64, rounded once more into the
+       * subnormal range. */
+      return pack(b, nir_fexp2(b, nir_fadd_imm(b, src[0], 64.0)),
+                  nir_imm_int(b, -64), nir_imm_float(b, 0.0));
    case nir_op_fadd:
       return soft_add(b, src[0], src[1]);
    case nir_op_fsub:
@@ -372,6 +406,18 @@ needs_slow(nir_builder *b, nir_alu_instr *alu, nir_def **src, nir_def *native)
       /* With a NaN operand the native selection already returns the other
        * operand's bits. */
       return nir_iand(b, any_sub, nir_inot(b, any_nan));
+   case nir_op_frcp:
+      return any_sub;
+   case nir_op_fsqrt:
+   case nir_op_frsq:
+   case nir_op_flog2:
+      /* Negative inputs have no defined result; keep the native one. */
+      return nir_ult(b, nir_iadd_imm(b, src[0], -1), nir_imm_int(b, F32_MAN_MASK));
+   case nir_op_fexp2:
+      /* Results in the subnormal range; the native result is flushed. A
+       * subnormal input natively gives exp2(0) = 1, the correct rounding. */
+      return nir_iand(b, nir_flt(b, src[0], nir_imm_float(b, -126.0)),
+                      nir_fge(b, src[0], nir_imm_float(b, -151.0)));
    default:
       return any_sub;
    }
@@ -394,6 +440,11 @@ preserve_op(const nir_alu_instr *alu)
    case nir_op_fsat:
    case nir_op_fmin:
    case nir_op_fmax:
+   case nir_op_frcp:
+   case nir_op_fsqrt:
+   case nir_op_frsq:
+   case nir_op_flog2:
+   case nir_op_fexp2:
       return alu->def.bit_size == 32;
    case nir_op_flt:
    case nir_op_fge:
