@@ -1055,6 +1055,8 @@ struct apple9_dag_lower {
    struct agx_apple9_block *system_block;
    uint32_t zero_vreg;
    struct agx_apple9_block *zero_block;
+   /* A zero defined in the entry block dominates every use. */
+   uint32_t entry_zero;
    struct agx_apple9_block *binding_pointer_block;
    uint32_t binding_pointer[AGX_APPLE9_MAX_GRAPHICS_BUFFERS];
    uint32_t perspective_reciprocal;
@@ -1148,8 +1150,14 @@ apple9_dag_imm(struct apple9_dag_lower *lower, uint32_t value)
 static uint32_t
 apple9_dag_zero(struct apple9_dag_lower *lower)
 {
-   /* Reuse the zero only within its block, which need not dominate later
-    * blocks. */
+   /* One zero from the entry block serves every block. Rematerializing a
+    * zero per block made each constant memory index rewrite the register a
+    * preceding store or load was still reading, costing a wait. */
+   if (lower->entry_zero != AGX_APPLE9_VREG_INVALID &&
+       !getenv("AGX_APPLE9_BLOCK_ZERO"))
+      return lower->entry_zero;
+   /* Otherwise reuse the zero only within its block, which need not dominate
+    * later blocks. */
    if (lower->zero_vreg == AGX_APPLE9_VREG_INVALID ||
        lower->zero_block != lower->program.current_block) {
       lower->zero_vreg = apple9_dag_imm(lower, 0);
@@ -1976,7 +1984,8 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
       constant = nir_scalar_as_uint(scalar);
       if (scalar.def->bit_size < 32)
          constant &= BITFIELD_MASK(scalar.def->bit_size);
-      value = apple9_dag_imm(lower, constant);
+      value = constant == 0 && lower->entry_zero != AGX_APPLE9_VREG_INVALID
+                 ? apple9_dag_zero(lower) : apple9_dag_imm(lower, constant);
    } else if (nir_def_instr_type(scalar.def) == nir_instr_type_tex) {
       nir_tex_instr *tex = nir_instr_as_tex(nir_def_instr(scalar.def));
       if (!apple9_texture_supported(tex)) {
@@ -5640,6 +5649,7 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
       .sampler_mask = sampler_mask,
       .varyings = varyings,
       .zero_vreg = AGX_APPLE9_VREG_INVALID,
+      .entry_zero = AGX_APPLE9_VREG_INVALID,
       .loads = loads.data,
       .load_count =
          util_dynarray_num_elements(&loads, struct apple9_scalar_load),
@@ -5691,6 +5701,8 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
       *reason = "could not initialize Apple9 control-flow zero";
       goto fail;
    }
+   if (lower.structured_cf)
+      lower.entry_zero = lower.zero_vreg;
    /* System values are cached by selector across the whole shader. Read them
     * before divergent control flow so a first use in one arm cannot leave
     * lanes in another arm with an undefined cached value. This also applies
@@ -6581,6 +6593,8 @@ struct apple9_uniform_hoist {
    uint8_t *state;
    nir_cursor cursor;
    struct hash_table *original_blocks;
+   /* Whether apple9_preamble_safe_read reads may leave their branches. */
+   bool safe_reads;
 };
 
 static bool
@@ -6610,6 +6624,33 @@ apple9_is_bounds_limit(nir_instr *instr)
    return false;
 }
 
+/* Pressure gating (AGX_APPLE9_GATED) compiles with and without LICM and the
+ * preamble-only reads; -1 defers to the environment. */
+static _Thread_local int apple9_safe_reads_override = -1;
+
+/* Reads that are always safe once per dispatch at a uniform address, but
+ * that must not be generally speculatable: if-conversion or code motion
+ * would then run them for every thread on paths that skipped them.
+ * Driver UBOs (app UBOs are global by now), descriptor memory in the USC
+ * aperture and reads the driver marks ACCESS_UNIFORM_SAFE_AGX qualify. */
+static bool
+apple9_preamble_safe_read(nir_instr *instr)
+{
+   if (instr->type != nir_instr_type_intrinsic)
+      return false;
+   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+   if (intr->intrinsic == nir_intrinsic_load_ubo)
+      return nir_src_is_const(intr->src[0]) && nir_src_is_const(intr->src[1]);
+   if (intr->intrinsic != nir_intrinsic_load_global_2x32 ||
+       !(nir_intrinsic_access(intr) & ACCESS_CAN_REORDER))
+      return false;
+   if (nir_intrinsic_access(intr) & ACCESS_UNIFORM_SAFE_AGX)
+      return true;
+   nir_scalar hi = nir_scalar_chase_movs(nir_get_scalar(intr->src[0].ssa, 1));
+   return nir_scalar_is_const(hi) &&
+          nir_scalar_as_uint(hi) == (AGX_APPLE9_USC_BASE >> 32);
+}
+
 static bool
 apple9_can_hoist_uniform(nir_src *src, void *data)
 {
@@ -6619,7 +6660,8 @@ apple9_can_hoist_uniform(nir_src *src, void *data)
    if (*state)
       return *state == 2;
    *state = 1;
-   if (instr->block != s->entry && !nir_instr_can_speculate(instr))
+   if (instr->block != s->entry && !nir_instr_can_speculate(instr) &&
+       !(s->safe_reads && apple9_preamble_safe_read(instr)))
       return false;
    if (instr->type == nir_instr_type_intrinsic) {
       nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
@@ -6658,9 +6700,19 @@ apple9_hoist_uniform_reads(nir_shader *nir, struct hash_table *original_blocks,
 {
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
    nir_index_ssa_defs(impl);
+   /* Preamble-only reads stay off by default: hoisting them raised register
+    * pressure in a large fragment shader and coincided with game crashes.
+    * AGX_APPLE9_SAFE_HOIST_STAGES=compute or =all enables them. */
+   const char *stages = apple9_safe_reads_override > 0 ? "all"
+                        : apple9_safe_reads_override == 0 ? NULL
+                        : getenv("AGX_APPLE9_SAFE_HOIST_STAGES");
+   bool compute = nir->info.stage == MESA_SHADER_COMPUTE ||
+                  nir->info.stage == MESA_SHADER_KERNEL;
    struct apple9_uniform_hoist s = {
       .entry = nir_start_block(impl),
       .original_blocks = original_blocks,
+      .safe_reads = stages && (!strcmp(stages, "all") ||
+                               (!strcmp(stages, "compute") && compute)),
       .state = calloc(MAX2(impl->ssa_alloc, 1), 1),
       .cursor = nir_after_block_before_jump(nir_start_block(impl)),
    };
@@ -6762,8 +6814,11 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
       ralloc_free(main);
       return false;
    }
-   if (apple9_hoist_uniform_reads(main,
-                                  hoist_addresses ? original_blocks : NULL,
+   /* Remember where every hoisted read came from, in either trial, so a read
+    * the preamble does not take returns to the branch that needed it rather
+    * than running unconditionally for every thread. */
+   bool restore = hoist_addresses || !getenv("AGX_APPLE9_KEEP_UNSELECTED_HOISTS");
+   if (apple9_hoist_uniform_reads(main, restore ? original_blocks : NULL,
                                   hoist_addresses))
       nir_opt_cse(main);
    nir_function_impl *main_impl = nir_shader_get_entrypoint(main);
@@ -6792,7 +6847,7 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
    const char *candidate_reason = NULL;
    nir_shader *preamble = NULL;
    if (main && nir_opt_preamble(main, &options, sizes)) {
-      if (hoist_addresses)
+      if (restore)
          apple9_restore_unselected_hoists(main, original_blocks);
       nir_function_impl *impl = nir_shader_get_preamble(main);
       /* Setup currently admits ordinary linear ALU/UBO work. Masked setup and
@@ -6921,11 +6976,24 @@ apple9_licm_filter(nir_instr *instr, nir_loop *loop, bool dominates_exit)
       return true;
    case nir_instr_type_intrinsic:
    case nir_instr_type_tex:
-      return dominates_exit || nir_instr_can_speculate(instr);
+      /* Hoisting memory or texture work out of a branch runs it on every
+       * iteration of every thread, which costs far more than it saves in
+       * per-pixel loops (Lethal Company lighting). Hoist only from blocks
+       * every iteration executes; AGX_APPLE9_LICM_SPECULATE allows leaving
+       * branches for speculatable accesses. */
+      return dominates_exit ||
+             (nir_instr_can_speculate(instr) &&
+              getenv("AGX_APPLE9_LICM_SPECULATE"));
    default:
       return false;
    }
 }
+
+static bool
+apple9_compile_dag_tail(nir_shader *nir, struct agx_shader_part *out,
+                        struct agx_apple9_compute_profile *profile,
+                        const struct agx_apple9_varying_layout *varyings,
+                        struct apple9_dag_cost *chosen_cost, const char **reason);
 
 static bool
 apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
@@ -6967,11 +7035,72 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    /* Loads and samples cost far more than the registers that hold their
     * loop-invariant results. Hoist them, and their address math, out of
     * loops before preamble selection, which can then also take uniform
-    * ones. Leaving a branch requires the access to be speculatable. */
-   if (!getenv("AGX_APPLE9_NO_LICM") && nir_opt_licm(nir, apple9_licm_filter)) {
+    * ones. */
+   /* LICM keeps hoisted values live across the whole loop. In shaders at
+    * the register limit that costs far more than it saves (Lethal Company's
+    * hot fragment shader quintupled its spills), so it is opt-in until it
+    * has a register-pressure model. AGX_APPLE9_LICM=1 enables it. */
+   if (getenv("AGX_APPLE9_GATED")) {
+      /* Compile the aggressive variant (LICM and preamble-only reads) and the
+       * plain one, and keep the cheaper allocation: both raise register
+       * pressure, which can spill shaders already at the limit. */
+      nir_shader *plain = nir_shader_clone(NULL, nir);
+      struct agx_shader_part aggressive_out = {0}, plain_out = {0};
+      struct agx_apple9_compute_profile aggressive_profile = {0}, plain_profile = {0};
+      struct apple9_dag_cost aggressive_cost = {0}, plain_cost = {0};
+      bool licm = nir_opt_licm(nir, apple9_licm_filter);
+      if (licm) {
+         nir_opt_cse(nir);
+         nir_opt_dce(nir);
+      }
+      apple9_safe_reads_override = 1;
+      bool aggressive_ok = apple9_compile_dag_tail(
+         nir, &aggressive_out, profile ? &aggressive_profile : NULL, varyings,
+         &aggressive_cost, reason);
+      apple9_safe_reads_override = 0;
+      bool plain_ok = apple9_compile_dag_tail(
+         plain, &plain_out, profile ? &plain_profile : NULL, varyings,
+         &plain_cost, reason);
+      apple9_safe_reads_override = -1;
+      ralloc_free(plain);
+      /* Loop-weighted spills decide: spills outside loops are cheaper than
+       * the loads and instructions hoisting removes inside them. */
+      bool use_plain = plain_ok &&
+         (!aggressive_ok || apple9_dag_cost_less(&plain_cost, &aggressive_cost));
+      if (agx_apple9_trace_enabled())
+         fprintf(stderr, "APPLE9_GATED chose=%s aggressive=%llu/%u plain=%llu/%u\n",
+                 use_plain ? "plain" : "aggressive",
+                 (unsigned long long)aggressive_cost.weighted_spills, aggressive_cost.spills,
+                 (unsigned long long)plain_cost.weighted_spills, plain_cost.spills);
+      if (use_plain) {
+         free(aggressive_out.binary);
+         *out = plain_out;
+         if (profile)
+            *profile = plain_profile;
+         return true;
+      }
+      free(plain_out.binary);
+      if (!aggressive_ok)
+         return false;
+      *out = aggressive_out;
+      if (profile)
+         *profile = aggressive_profile;
+      return true;
+   }
+   if (getenv("AGX_APPLE9_LICM") && nir_opt_licm(nir, apple9_licm_filter)) {
       nir_opt_cse(nir);
       nir_opt_dce(nir);
    }
+   struct apple9_dag_cost cost = {0};
+   return apple9_compile_dag_tail(nir, out, profile, varyings, &cost, reason);
+}
+
+static bool
+apple9_compile_dag_tail(nir_shader *nir, struct agx_shader_part *out,
+                        struct agx_apple9_compute_profile *profile,
+                        const struct agx_apple9_varying_layout *varyings,
+                        struct apple9_dag_cost *chosen_cost, const char **reason)
+{
    struct apple9_buffer_map resources = {0};
    if (!apple9_collect_buffer_map(nir, &resources, reason))
       return false;
@@ -7008,6 +7137,7 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
          free(original.binary);
       }
    }
+   *chosen_cost = use_original ? original_cost : address_cost;
    const char *log = use_original ? original_log : address_log;
    size_t size = use_original ? original_size : address_size;
    if (log && size)

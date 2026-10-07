@@ -914,6 +914,7 @@ print_access(enum gl_access_qualifier access, print_state *state, const char *se
       { ACCESS_SPARSE, "sparse" },
       { ACCESS_ISTREAM_PAN, "istream-pan" },
       { ACCESS_ESTREAM_PAN, "estream-pan" },
+      { ACCESS_UNIFORM_SAFE_AGX, "uniform-safe-agx" },
    };
 
    bool first = true;
