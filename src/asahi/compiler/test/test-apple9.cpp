@@ -6249,7 +6249,7 @@ TEST(Apple9Compiler, TrigonometryLowersFromOrdinaryNir)
             EXPECT_EQ(p[6], 0x90); /* The multiply still needs its phase. */
          }
       }
-      EXPECT_EQ(factors, 4u); /* Sine and complement for each reduction. */
+      EXPECT_EQ(factors, 2u); /* One factor for each reduction. */
       free(compiled.binary);
       ralloc_free(b.shader);
    }
