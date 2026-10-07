@@ -59,7 +59,7 @@ hk_descriptor_stride_align_for_type(
       if (pdev->dev.chip == AGX_CHIP_G16G &&
           type != VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER) {
          *stride = sizeof(struct hk_apple9_storage_descriptor);
-         *alignment = 8;
+         *alignment = AGX_APPLE9_TEXTURE_TABLE_STRIDE;
          break;
       }
       *stride = sizeof(struct hk_storage_image_descriptor);

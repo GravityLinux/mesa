@@ -6697,12 +6697,13 @@ apple9_hoist_uniform_reads(nir_shader *nir, struct hash_table *original_blocks,
 {
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
    nir_index_ssa_defs(impl);
-   /* Preamble-only reads stay off by default: hoisting them raised register
-    * pressure in a large fragment shader and coincided with game crashes.
-    * AGX_APPLE9_SAFE_HOIST_STAGES=compute or =all enables them. */
+   /* Preamble-only reads are on for compute by default. In a large fragment
+    * shader they raised register pressure. AGX_APPLE9_SAFE_HOIST_STAGES
+    * selects =compute, =all or =none; hk chooses which reads qualify. */
+   const char *env = getenv("AGX_APPLE9_SAFE_HOIST_STAGES");
    const char *stages = apple9_safe_reads_override > 0 ? "all"
                         : apple9_safe_reads_override == 0 ? NULL
-                        : getenv("AGX_APPLE9_SAFE_HOIST_STAGES");
+                        : env ? env : "compute";
    bool compute = nir->info.stage == MESA_SHADER_COMPUTE ||
                   nir->info.stage == MESA_SHADER_KERNEL;
    struct apple9_uniform_hoist s = {
