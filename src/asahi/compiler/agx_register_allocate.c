@@ -1384,7 +1384,26 @@ place_constrained_value(struct ra_ctx *rctx, agx_index value,
 
    unsigned chosen = ~0;
    struct placement_cost best = {.moves = ~0u};
+   /* Per-field lower bounds of the ranked cost. Once the best candidate meets
+    * all of them, no later register can be strictly cheaper, and ties keep
+    * the lower register, so the search can stop without changing the result.
+    */
+   cache_phi_preferences(rctx, ssa);
+   uint64_t max_edge = 0, max_dead = 0, max_affinity = 0;
+   util_dynarray_foreach(rctx->reg_preferences, struct phi_reg_preference, p) {
+      max_edge = MAX2(max_edge, p->edge);
+      max_dead = MAX2(max_dead, p->dead);
+      max_affinity = MAX2(max_affinity, p->affinity);
+   }
+   const uint64_t edge_floor = rctx->edge_total - max_edge;
+   const uint64_t dead_floor = rctx->dead_total - max_dead;
+   const uint64_t affinity_floor = rctx->affinity_total - max_affinity;
    for (unsigned reg = first; reg <= last; reg += align) {
+      if (chosen != ~0u && !best.moves && best.edge == edge_floor &&
+          best.dead == dead_floor && best.affinity == affinity_floor &&
+          !best.collect && !best.preference && !best.materialization &&
+          !best.growth && !best.scarcity)
+         break;
       if (BITSET_TEST_COUNT(rctx->pinned, reg, count))
          continue;
       struct placement_cost cost = placement_cost(rctx, ssa, reg, count);
