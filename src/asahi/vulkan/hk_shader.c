@@ -745,7 +745,8 @@ lower_load_global_bounded(nir_builder *b, nir_intrinsic_instr *intr,
     * read-only access at a uniform address is safe once per dispatch: let
     * the preamble take it. This is not general speculation; if-conversion
     * and code motion must not run it on paths that skipped it. */
-   if (access & ACCESS_CAN_REORDER)
+   if ((access & ACCESS_CAN_REORDER) &&
+       !getenv("HK_APPLE9_NO_UNIFORM_SAFE_BOUNDED"))
       access |= ACCESS_UNIFORM_SAFE_AGX;
 
    nir_def *val = nir_load_global(
