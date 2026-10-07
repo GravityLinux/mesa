@@ -741,6 +741,13 @@ lower_load_global_bounded(nir_builder *b, nir_intrinsic_instr *intr,
       access |= ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER;
    }
 
+   /* The bounds check redirects out-of-range reads to the zero page, so a
+    * read-only access at a uniform address is safe once per dispatch: let
+    * the preamble take it. This is not general speculation; if-conversion
+    * and code motion must not run it on paths that skipped it. */
+   if (access & ACCESS_CAN_REORDER)
+      access |= ACCESS_UNIFORM_SAFE_AGX;
+
    nir_def *val = nir_load_global(
       b, intr->def.num_components, intr->def.bit_size,
       nir_iadd(b, base, nir_u2u64(b, offset)),
