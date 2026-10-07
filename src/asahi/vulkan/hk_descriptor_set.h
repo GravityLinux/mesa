@@ -118,7 +118,9 @@ struct hk_apple9_storage_descriptor {
    struct hk_apple9_texel_metadata metadata;
    /* Nonzero when texture holds a valid native entry. */
    uint32_t native_ok;
-   uint32_t pad;
+   /* enum hk_apple9_store_encode: how a store without a shader format can
+    * encode the texel, chosen on the host from the view format. */
+   uint32_t store_encode;
    uint8_t texture[AGX_APPLE9_TEXTURE_TABLE_STRIDE];
 };
 static_assert(sizeof(struct hk_apple9_storage_descriptor) == 128,
@@ -130,6 +132,23 @@ static_assert(offsetof(struct hk_apple9_storage_descriptor, texture) ==
 
 void hk_apple9_texel_layout(enum pipe_format format,
                             struct hk_apple9_texel_metadata *metadata);
+
+/* Encodings for stores to storage images without a shader format. A
+ * canonical format packs its N channels in order, each W bits wide from bit
+ * 0, so stores can encode it with constant shifts instead of decoding the
+ * per-component layout. Everything else uses the layout (GENERIC).
+ */
+enum hk_apple9_store_encode {
+   HK_STORE_ENCODE_GENERIC = 0,
+   /* 32-bit channels: the texel's bits as they are (float, uint, sint). */
+   HK_STORE_ENCODE_RAW32,
+   /* 8-bit unsigned normalized channels. */
+   HK_STORE_ENCODE_UNORM8,
+   /* 16-bit float channels. */
+   HK_STORE_ENCODE_FLOAT16,
+};
+
+enum hk_apple9_store_encode hk_apple9_store_encode(enum pipe_format format);
 
 /* G16 image and sampler descriptors extend the common layout with native
  * state that shaders can address directly. Descriptor memory lives in the

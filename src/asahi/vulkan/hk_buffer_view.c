@@ -105,6 +105,34 @@ hk_apple9_texel_layout(enum pipe_format format,
    }
 }
 
+enum hk_apple9_store_encode
+hk_apple9_store_encode(enum pipe_format format)
+{
+   const struct util_format_description *desc = util_format_description(format);
+   if (desc->layout != UTIL_FORMAT_LAYOUT_PLAIN ||
+       desc->colorspace != UTIL_FORMAT_COLORSPACE_RGB || !desc->nr_channels)
+      return HK_STORE_ENCODE_GENERIC;
+   const struct util_format_channel_description *first = &desc->channel[0];
+   unsigned w = first->size;
+   for (unsigned c = 0; c < desc->nr_channels; ++c) {
+      const struct util_format_channel_description *chan = &desc->channel[c];
+      if (desc->swizzle[c] != c || chan->size != w || chan->shift != c * w ||
+          chan->type != first->type || chan->normalized != first->normalized ||
+          chan->pure_integer != first->pure_integer)
+         return HK_STORE_ENCODE_GENERIC;
+   }
+   if (w == 32 && !first->normalized &&
+       (first->type == UTIL_FORMAT_TYPE_FLOAT ||
+        first->type == UTIL_FORMAT_TYPE_UNSIGNED ||
+        first->type == UTIL_FORMAT_TYPE_SIGNED))
+      return HK_STORE_ENCODE_RAW32;
+   if (w == 8 && first->normalized && first->type == UTIL_FORMAT_TYPE_UNSIGNED)
+      return HK_STORE_ENCODE_UNORM8;
+   if (w == 16 && first->type == UTIL_FORMAT_TYPE_FLOAT)
+      return HK_STORE_ENCODE_FLOAT16;
+   return HK_STORE_ENCODE_GENERIC;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 hk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
                     const VkAllocationCallbacks *pAllocator,
