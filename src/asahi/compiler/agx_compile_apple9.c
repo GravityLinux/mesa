@@ -5546,6 +5546,161 @@ agx_nir_hoist_apple9_samples(nir_shader *nir)
 
 /* Compiler dumps for the compile in progress. Trial compiles write to a
  * buffer, so only the result that is kept is dumped. */
+/* Derivatives read every lane of the quad, including lanes that have left
+ * divergent control flow: D3D runs returned lanes on as helpers, and Vulkan
+ * leaves the result undefined. A lane computes a value only where it executes,
+ * so a coordinate interpolated after an early return holds stale data in the
+ * returned lanes. Compute the input-derived operands of derivatives and
+ * implicit-LOD samples in divergent control flow in the start block, which
+ * every lane executes.
+ */
+#define APPLE9_DERIVATIVE_HOIST_MAX 32
+
+static bool
+apple9_derivative_hoist_src(nir_src *src, void *data);
+
+static bool
+apple9_derivative_hoistable(nir_instr *instr, nir_block *start, unsigned *budget)
+{
+   if (instr->block == start || (instr->pass_flags & 1))
+      return true;
+   bool ok = *budget > 0;
+   if (ok) {
+      --*budget;
+      switch (instr->type) {
+      case nir_instr_type_alu:
+      case nir_instr_type_load_const:
+      case nir_instr_type_undef:
+         break;
+      case nir_instr_type_intrinsic:
+         /* Fragment inputs and uniform state. Memory loads stay where
+          * their control flow may guard their addresses. */
+         switch (nir_instr_as_intrinsic(instr)->intrinsic) {
+         case nir_intrinsic_load_interpolated_input:
+         case nir_intrinsic_load_input:
+         case nir_intrinsic_load_coefficients_agx:
+         case nir_intrinsic_load_barycentric_pixel:
+         case nir_intrinsic_load_barycentric_centroid:
+         case nir_intrinsic_load_barycentric_sample:
+         case nir_intrinsic_load_frag_coord:
+         case nir_intrinsic_load_frag_coord_z:
+         case nir_intrinsic_load_frag_coord_w:
+         case nir_intrinsic_load_pixel_coord:
+         case nir_intrinsic_load_point_coord:
+         case nir_intrinsic_load_preamble:
+            break;
+         default:
+            ok = false;
+         }
+         break;
+      default:
+         ok = false;
+      }
+   }
+   ok = ok && nir_foreach_src(instr, apple9_derivative_hoist_src, budget);
+   if (!ok)
+      return false;
+   /* Sources are marked first, so the marked order is a valid move order. */
+   instr->pass_flags |= 1;
+   return true;
+}
+
+static bool
+apple9_derivative_hoist_src(nir_src *src, void *data)
+{
+   unsigned *budget = data;
+   nir_instr *parent = nir_def_instr(src->ssa);
+   nir_function_impl *impl = nir_cf_node_get_function(&parent->block->cf_node);
+   return apple9_derivative_hoistable(parent, nir_start_block(impl), budget);
+}
+
+static bool
+apple9_in_divergent_cf(nir_block *block)
+{
+   for (nir_cf_node *node = block->cf_node.parent; node; node = node->parent) {
+      if (node->type == nir_cf_node_if &&
+          nir_src_is_divergent(&nir_cf_node_as_if(node)->condition))
+         return true;
+      if (node->type == nir_cf_node_loop &&
+          nir_loop_is_divergent(nir_cf_node_as_loop(node)))
+         return true;
+   }
+   return false;
+}
+
+static nir_src *
+apple9_derivative_operand(nir_instr *instr)
+{
+   if (instr->type == nir_instr_type_intrinsic) {
+      nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+      switch (intr->intrinsic) {
+      case nir_intrinsic_ddx:
+      case nir_intrinsic_ddy:
+      case nir_intrinsic_ddx_fine:
+      case nir_intrinsic_ddy_fine:
+      case nir_intrinsic_ddx_coarse:
+      case nir_intrinsic_ddy_coarse:
+         return &intr->src[0];
+      default:
+         return NULL;
+      }
+   }
+   if (instr->type == nir_instr_type_tex) {
+      nir_tex_instr *tex = nir_instr_as_tex(instr);
+      int coord = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+      if (coord >= 0 && nir_tex_instr_has_implicit_derivative(tex))
+         return &tex->src[coord].src;
+   }
+   return NULL;
+}
+
+bool
+agx_nir_hoist_apple9_derivative_sources(nir_shader *nir)
+{
+   if (nir->info.stage != MESA_SHADER_FRAGMENT)
+      return false;
+
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   nir_divergence_analysis(nir);
+   nir_block *start = nir_start_block(impl);
+   bool progress = false;
+
+   nir_foreach_block(block, impl) {
+      if (block == start || !apple9_in_divergent_cf(block))
+         continue;
+      nir_foreach_instr(instr, block) {
+         nir_src *src = apple9_derivative_operand(instr);
+         if (!src)
+            continue;
+
+         nir_instr *parent = nir_def_instr(src->ssa);
+         if (parent->block == start)
+            continue;
+
+         /* Mark the operand's dependency slice, then move it in order. */
+         nir_shader_clear_pass_flags(nir);
+         unsigned budget = APPLE9_DERIVATIVE_HOIST_MAX;
+         if (!apple9_derivative_hoistable(parent, start, &budget))
+            continue;
+
+         nir_cursor cursor = nir_after_block_before_jump(start);
+         nir_foreach_block(b, impl) {
+            if (b == start)
+               continue;
+            nir_foreach_instr_safe(i, b) {
+               if (i->pass_flags & 1) {
+                  nir_instr_move(cursor, i);
+                  cursor = nir_after_instr(i);
+                  progress = true;
+               }
+            }
+         }
+      }
+   }
+
+   return nir_progress(progress, impl, nir_metadata_control_flow);
+}
+
 static _Thread_local FILE *apple9_log_stream;
 
 static FILE *
@@ -5597,6 +5752,7 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
                            nir_move_load_ssbo | nir_move_alu;
    nir_opt_sink(nir, move);
    nir_opt_move(nir, move);
+   agx_nir_hoist_apple9_derivative_sources(nir);
    if (hoist)
       agx_nir_hoist_apple9_samples(nir);
    if (getenv("AGX_APPLE9_TRACE_FINAL_NIR") != NULL)

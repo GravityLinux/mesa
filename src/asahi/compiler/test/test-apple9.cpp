@@ -8189,6 +8189,51 @@ TEST(Apple9Scheduling, HoistsSamplesOnlyWhenWordPressureDoesNotGrow)
    }
 }
 
+TEST(Apple9Scheduling, HoistsDerivativeInputsOutOfDivergentControlFlow)
+{
+   /* 0: input-derived operand in divergent control flow moves to the start
+    * block. 1: uniform control flow stays. 2: a memory load stays. */
+   for (unsigned variant = 0; variant < 3; ++variant) {
+      SCOPED_TRACE(variant);
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "derivative_hoist");
+      nir_def *cond =
+         variant == 1
+            ? nir_ieq_imm(&b, nir_load_preamble(&b, 1, 32, .base = 0), 0)
+            : nir_flt_imm(&b, nir_channel(&b, nir_load_frag_coord(&b), 0),
+                          1.0);
+      nir_push_if(&b, cond);
+      nir_def *value;
+      if (variant == 2) {
+         value = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 0),
+                               nir_imm_int(&b, 0), .access = ACCESS_CAN_REORDER);
+      } else {
+         nir_def *bary = nir_load_barycentric_pixel(
+            &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+         value = nir_load_interpolated_input(
+            &b, 1, 32, bary, nir_imm_int(&b, 0),
+            .io_semantics = {.location = VARYING_SLOT_VAR0, .num_slots = 1});
+      }
+      nir_def *scaled = nir_fmul_imm(&b, value, 2.0);
+      nir_def *d = nir_ddx_fine(&b, scaled);
+      nir_store_output(&b, nir_vec4(&b, d, d, d, d), nir_imm_int(&b, 0),
+                       .write_mask = 15, .src_type = nir_type_float32,
+                       .io_semantics = {.location = FRAG_RESULT_DATA0,
+                                        .num_slots = 1});
+      nir_pop_if(&b, NULL);
+      nir_validate_shader(b.shader, "before derivative hoisting");
+
+      nir_block *start =
+         nir_start_block(nir_shader_get_entrypoint(b.shader));
+      EXPECT_EQ(agx_nir_hoist_apple9_derivative_sources(b.shader),
+                variant == 0);
+      EXPECT_EQ(nir_def_instr(scaled)->block == start, variant == 0);
+      EXPECT_NE(nir_def_instr(d)->block, start);
+      nir_validate_shader(b.shader, "after derivative hoisting");
+      ralloc_free(b.shader);
+   }
+}
+
 TEST(Apple9Compiler, TextureCoordinatesAndResultUseAllocatedRegisters)
 {
    nir_builder b = nir_builder_init_simple_shader(
