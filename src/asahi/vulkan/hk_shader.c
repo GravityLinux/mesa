@@ -642,8 +642,24 @@ check_in_bounds(nir_builder *b, nir_intrinsic_instr *intr)
    return check_in_bounds_size(b, intr, bit_size / 8 * intr->num_components);
 }
 
+/* An amul whose scale is not a shift of 0..4. */
+static bool
+hk_unencodable_scale(nir_scalar s)
+{
+   if (!is_op(s, nir_op_amul))
+      return false;
+   for (unsigned i = 0; i < 2; ++i) {
+      nir_scalar k = nir_scalar_chase_alu_src(s, i);
+      if (nir_scalar_is_const(k))
+         return !util_is_power_of_two_nonzero(nir_scalar_as_uint(k)) ||
+                nir_scalar_as_uint(k) > 16;
+   }
+   return true;
+}
+
 static nir_def *
-bound_offset(nir_builder *b, nir_def *valid, nir_scalar offset)
+bound_offset(nir_builder *b, nir_def *valid, nir_scalar offset,
+             bool shift_only_scale)
 {
    /* If we can, clamp the source of an amul instead of the result, to remain
     * compatible with the hardware address mode.
@@ -654,6 +670,14 @@ bound_offset(nir_builder *b, nir_def *valid, nir_scalar offset)
          nir_scalar_chase_alu_src(offset, 1),
       };
       unsigned i = nir_scalar_is_const(srcs[0]) ? 1 : 0;
+      /* Apple9 scales an index only by a shift of 0..4. Any other scale
+       * would multiply again after the select; selecting the product, which
+       * the bounds check already computed, saves that multiply. */
+      if (shift_only_scale &&
+          !(nir_scalar_is_const(srcs[1 - i]) &&
+            util_is_power_of_two_nonzero(nir_scalar_as_uint(srcs[1 - i])) &&
+            nir_scalar_as_uint(srcs[1 - i]) <= 16))
+         return nir_bcsel(b, valid, nir_mov_scalar(b, offset), nir_imm_int(b, 0));
       nir_def *x = nir_mov_scalar(b, srcs[i]);
       nir_def *y = nir_mov_scalar(b, srcs[1 - i]);
 
@@ -665,9 +689,15 @@ bound_offset(nir_builder *b, nir_def *valid, nir_scalar offset)
       nir_scalar x = nir_scalar_chase_alu_src(offset, 0);
       nir_scalar y = nir_scalar_chase_alu_src(offset, 1);
 
+      /* With an Apple9 scale the index cannot encode, select the complete
+       * offset the bounds check computed rather than each term. */
+      if (shift_only_scale &&
+          (hk_unencodable_scale(x) || hk_unencodable_scale(y)))
+         return nir_bcsel(b, valid, nir_mov_scalar(b, offset), nir_imm_int(b, 0));
+
       if (is_op(x, nir_op_amul) || is_op(y, nir_op_amul)) {
-         return nir_iadd(b, bound_offset(b, valid, x),
-                         bound_offset(b, valid, y));
+         return nir_iadd(b, bound_offset(b, valid, x, shift_only_scale),
+                         bound_offset(b, valid, y, shift_only_scale));
       }
    }
 
@@ -702,7 +732,8 @@ lower_load_global_bounded(nir_builder *b, nir_intrinsic_instr *intr,
    nir_def *valid = per_component ? check_in_bounds_size(b, intr, byte_size)
                                   : check_in_bounds(b, intr);
    base = nir_bcsel(b, valid, base, nir_imm_int64(b, AGX_ZERO_PAGE_ADDRESS));
-   offset = bound_offset(b, valid, nir_scalar_resolved(offset, 0));
+   offset = bound_offset(b, valid, nir_scalar_resolved(offset, 0),
+                         per_component_bounds);
 
    enum gl_access_qualifier access = nir_intrinsic_access(intr);
 
@@ -788,13 +819,13 @@ hk_apple9_vectorize_cb(unsigned align_mul, unsigned align_offset,
    }
    bool bounded = low->intrinsic == nir_intrinsic_load_global_bounded ||
                   low->intrinsic == nir_intrinsic_load_global_constant_bounded;
-   /* Pairs keep loop bodies shorter without extra spills in shaders at the
-    * register limit; wider robust merges add spills there (Lethal Company
-    * light loops). HK_APPLE9_ROBUST_MERGE_BYTES overrides the size. */
+   /* Robust merges of fields whose first uses are adjacent shorten Lethal
+    * Company's light loops without extra spills at the register limit.
+    * HK_APPLE9_ROBUST_MERGE_BYTES caps the merged size. */
    static int robust_bytes = -1;
    if (robust_bytes < 0) {
       const char *env = getenv("HK_APPLE9_ROBUST_MERGE_BYTES");
-      robust_bytes = env ? atoi(env) : 8;
+      robust_bytes = env ? atoi(env) : 16;
    }
    if (bounded && num_components * bit_size / 8 > (unsigned)robust_bytes)
       return false;
@@ -1253,7 +1284,7 @@ hk_apple9_lower_texel_buffer(nir_builder *b, nir_tex_instr *tex, UNUSED void *da
    ptr = nir_iadd_imm(b, ptr, offsetof(struct hk_apple9_texel_descriptor, metadata));
    nir_def *count = nir_load_global_constant(b, 1, 32,
       nir_iadd_imm(b, ptr, offsetof(struct hk_apple9_texel_metadata, elements)),
-      .align_mul = 4);
+      .align_mul = 4, .access = ACCESS_CAN_SPECULATE);
    if (tex->op == nir_texop_txs) {
       nir_def_replace(&tex->def, count);
       return true;
@@ -1265,10 +1296,10 @@ hk_apple9_lower_texel_buffer(nir_builder *b, nir_tex_instr *tex, UNUSED void *da
    nir_push_if(b, nir_ult(b, coord, count));
    nir_def *base = nir_load_global_constant(b, 1, 64,
       nir_iadd_imm(b, ptr, offsetof(struct hk_apple9_texel_metadata, base)),
-      .align_mul = 8);
+      .align_mul = 8, .access = ACCESS_CAN_SPECULATE);
    nir_def *size = nir_load_global_constant(b, 1, 32,
       nir_iadd_imm(b, ptr, offsetof(struct hk_apple9_texel_metadata, size_B)),
-      .align_mul = 4);
+      .align_mul = 4, .access = ACCESS_CAN_SPECULATE);
    nir_push_if(b, nir_ieq_imm(b, size, 12));
    nir_def *xyz = nir_load_global(b, 3, 32,
       nir_iadd(b, base, nir_u2u64(b, nir_imul_imm(b, coord, 12))), .align_mul = 4);
@@ -1310,7 +1341,7 @@ hk_apple9_lower_texel_buffer(nir_builder *b, nir_tex_instr *tex, UNUSED void *da
    if (tex->def.num_components == 4) {
       nir_def *alpha_kind = nir_ushr_imm(b, nir_load_global_constant(b, 1, 32,
          nir_iadd_imm(b, ptr, offsetof(struct hk_apple9_texel_metadata, component[3])),
-         .align_mul = 4), 18);
+         .align_mul = 4, .access = ACCESS_CAN_SPECULATE), 18);
       nir_def *one = floating ? nir_imm_float(b, 1.0) : nir_imm_int(b, 1);
       zero = nir_vector_insert_imm(b, zero,
          nir_bcsel(b, nir_ieq_imm(b, alpha_kind, HK_TEXEL_ONE), one,
@@ -1493,6 +1524,8 @@ hk_apple9_encode_texel(nir_builder *b, nir_def *value, nir_def *layout,
 
 /* The storage texel metadata carries the full address, including the view's
  * byte offset. The legacy PBE prefix is retained only for image queries.
+ * Metadata is part of the descriptor, which is always readable, so its
+ * reads may speculate (out of loops, into the preamble).
  */
 static nir_def *
 hk_apple9_buffer_texel_address(nir_builder *b, nir_def *meta, nir_def *coord,
@@ -1500,7 +1533,7 @@ hk_apple9_buffer_texel_address(nir_builder *b, nir_def *meta, nir_def *coord,
 {
    nir_def *base = nir_load_global_constant(b, 1, 64,
       nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, base)),
-      .align_mul = 8);
+      .align_mul = 8, .access = ACCESS_CAN_SPECULATE);
    nir_def *offset = nir_imul(b, nir_channel(b, coord, 0), size_B);
    return nir_iadd(b, base, nir_u2u64(b, offset));
 }
@@ -1582,10 +1615,10 @@ hk_apple9_lower_formatless_storage(nir_builder *b, nir_intrinsic_instr *intr,
       offsetof(struct hk_apple9_storage_descriptor, metadata));
    nir_def *size_B = nir_load_global_constant(b, 1, 32,
       nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, size_B)),
-      .align_mul = 4);
+      .align_mul = 4, .access = ACCESS_CAN_SPECULATE);
    nir_def *layout = nir_load_global_constant(b, 4, 32,
       nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, component)),
-      .align_mul = 4);
+      .align_mul = 4, .access = ACCESS_CAN_SPECULATE);
 
    /* Honeykrisp's storage cube descriptors are 2D arrays of faces. */
    nir_def *size = nir_bindless_image_size(b, dimensions, 32, tex, nir_imm_int(b, 0),
@@ -1692,14 +1725,14 @@ hk_apple9_buffer_residency_code(nir_builder *b, nir_def *meta, nir_def *x)
 {
    nir_def *table = nir_load_global_constant(b, 1, 64,
       nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, residency)),
-      .align_mul = 8);
+      .align_mul = 8, .access = ACCESS_CAN_SPECULATE);
    nir_def *code;
    nir_push_if(b, nir_ine_imm(b, table, 0));
    {
       nir_def *base = nir_load_global_constant(b, 1, 64, meta, .align_mul = 8);
       nir_def *fields = nir_load_global_constant(b, 2, 32,
          nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, elements)),
-         .align_mul = 8);
+         .align_mul = 8, .access = ACCESS_CAN_SPECULATE);
       nir_def *elements = nir_channel(b, fields, 0);
       nir_def *size_B = nir_channel(b, fields, 1);
       x = nir_umin(b, x, nir_iadd_imm(b, nir_umax_imm(b, elements, 1), -1));
@@ -1866,7 +1899,7 @@ hk_apple9_lower_sparse_intrinsic(nir_builder *b, nir_intrinsic_instr *intr,
       nir_def *table = nir_load_global_constant(b, 1, 64, meta, .align_mul = 8);
       nir_def *base = nir_load_global_constant(b, 1, 32,
          nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, elements)),
-         .align_mul = 4);
+         .align_mul = 4, .access = ACCESS_CAN_SPECULATE);
       nir_def *coord = nir_u2u32(b, intr->src[1].ssa);
       bool layered = nir_intrinsic_image_array(intr) || dim == GLSL_SAMPLER_DIM_CUBE;
       code = hk_apple9_residency_code(b, table, base, nir_imm_int(b, 0),
