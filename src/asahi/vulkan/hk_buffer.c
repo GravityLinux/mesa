@@ -133,9 +133,12 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
         (VK_BUFFER_CREATE_SPARSE_BINDING_BIT |
          VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT)))) {
 
-      const uint32_t alignment = hk_get_buffer_alignment(
+      uint32_t alignment = hk_get_buffer_alignment(
          hk_device_physical(dev), buffer->vk.usage, buffer->vk.create_flags);
       assert(alignment >= 16384);
+      /* As for device memory, align large buffers to 64 KiB. */
+      if (buffer->vk.size >= 65536)
+         alignment = MAX2(alignment, 65536);
       uint64_t vma_size_B = align64(buffer->vk.size, alignment);
 
       const bool bda_capture_replay =
