@@ -102,6 +102,15 @@ struct hk_device {
       struct hash_table *ht;
    } apple9_variants;
 
+   /* Apple9 shader code BOs shared by byte-identical bodies, see
+    * hk_upload_shader. */
+   struct {
+      simple_mtx_t lock;
+      struct hash_table *ht;
+      struct list_head lru;
+      unsigned count;
+   } apple9_bodies;
+
    /* Apple9 tile load and store programs, keyed by their tile buffer key. */
    struct {
       simple_mtx_t lock;
