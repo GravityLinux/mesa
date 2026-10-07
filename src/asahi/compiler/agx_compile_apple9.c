@@ -6774,8 +6774,11 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
       ralloc_free(main);
       return false;
    }
-   if (apple9_hoist_uniform_reads(main,
-                                  hoist_addresses ? original_blocks : NULL,
+   /* Remember where every hoisted read came from, in either trial, so a read
+    * the preamble does not take returns to the branch that needed it rather
+    * than running unconditionally for every thread. */
+   bool restore = hoist_addresses || !getenv("AGX_APPLE9_KEEP_UNSELECTED_HOISTS");
+   if (apple9_hoist_uniform_reads(main, restore ? original_blocks : NULL,
                                   hoist_addresses))
       nir_opt_cse(main);
    nir_function_impl *main_impl = nir_shader_get_entrypoint(main);
@@ -6804,7 +6807,7 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
    const char *candidate_reason = NULL;
    nir_shader *preamble = NULL;
    if (main && nir_opt_preamble(main, &options, sizes)) {
-      if (hoist_addresses)
+      if (restore)
          apple9_restore_unselected_hoists(main, original_blocks);
       nir_function_impl *impl = nir_shader_get_preamble(main);
       /* Setup currently admits ordinary linear ALU/UBO work. Masked setup and
