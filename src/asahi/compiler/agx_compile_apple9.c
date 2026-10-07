@@ -6622,6 +6622,27 @@ apple9_is_bounds_limit(nir_instr *instr)
    return false;
 }
 
+/* Reads that are always safe once per dispatch at a uniform address, but
+ * that must not be generally speculatable: if-conversion or code motion
+ * would then run them for every thread on paths that skipped them.
+ * Driver UBOs (app UBOs are global by now) and descriptor memory in the
+ * USC aperture qualify. */
+static bool
+apple9_preamble_safe_read(nir_instr *instr)
+{
+   if (instr->type != nir_instr_type_intrinsic)
+      return false;
+   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+   if (intr->intrinsic == nir_intrinsic_load_ubo)
+      return nir_src_is_const(intr->src[0]) && nir_src_is_const(intr->src[1]);
+   if (intr->intrinsic != nir_intrinsic_load_global_2x32 ||
+       !(nir_intrinsic_access(intr) & ACCESS_CAN_REORDER))
+      return false;
+   nir_scalar hi = nir_scalar_chase_movs(nir_get_scalar(intr->src[0].ssa, 1));
+   return nir_scalar_is_const(hi) &&
+          nir_scalar_as_uint(hi) == (AGX_APPLE9_USC_BASE >> 32);
+}
+
 static bool
 apple9_can_hoist_uniform(nir_src *src, void *data)
 {
@@ -6631,7 +6652,8 @@ apple9_can_hoist_uniform(nir_src *src, void *data)
    if (*state)
       return *state == 2;
    *state = 1;
-   if (instr->block != s->entry && !nir_instr_can_speculate(instr))
+   if (instr->block != s->entry && !nir_instr_can_speculate(instr) &&
+       !apple9_preamble_safe_read(instr))
       return false;
    if (instr->type == nir_instr_type_intrinsic) {
       nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
