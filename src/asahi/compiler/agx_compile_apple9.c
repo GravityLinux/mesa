@@ -6696,16 +6696,17 @@ apple9_hoist_uniform_reads(nir_shader *nir, struct hash_table *original_blocks,
 {
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
    nir_index_ssa_defs(impl);
-   /* AGX_APPLE9_SAFE_HOIST_STAGES limits the preamble-only reads to compute
-    * ("compute", the default for this experiment) or allows every stage
-    * ("all"). */
+   /* Preamble-only reads stay off by default: hoisting them raised register
+    * pressure in a large fragment shader and coincided with game crashes.
+    * AGX_APPLE9_SAFE_HOIST_STAGES=compute or =all enables them. */
    const char *stages = getenv("AGX_APPLE9_SAFE_HOIST_STAGES");
    bool compute = nir->info.stage == MESA_SHADER_COMPUTE ||
                   nir->info.stage == MESA_SHADER_KERNEL;
    struct apple9_uniform_hoist s = {
       .entry = nir_start_block(impl),
       .original_blocks = original_blocks,
-      .safe_reads = (stages && !strcmp(stages, "all")) || compute,
+      .safe_reads = stages && (!strcmp(stages, "all") ||
+                               (!strcmp(stages, "compute") && compute)),
       .state = calloc(MAX2(impl->ssa_alloc, 1), 1),
       .cursor = nir_after_block_before_jump(nir_start_block(impl)),
    };
