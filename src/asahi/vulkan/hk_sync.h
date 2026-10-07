@@ -17,18 +17,23 @@ unsigned hk_sync_ordered_stages(unsigned src, unsigned dst,
                                 VkAccessFlags2 dst_access);
 
 /* Logical execution domains, independent of the engine used to execute them.
- * A render command currently completes vertex and fragment work together.
+ * A render command runs its pre-rasterization stages (tiling) and fragment
+ * stages as separate firmware stages, so the two are tracked separately.
  * Transfers and indirect reads can run on either engine.
  */
 enum hk_sync_stage {
-   HK_SYNC_GRAPHICS = 1 << 0,
+   HK_SYNC_PRE_RASTER = 1 << 0,
    HK_SYNC_COMPUTE = 1 << 1,
    HK_SYNC_TRANSFER = 1 << 2,
    HK_SYNC_DRAW_INDIRECT = 1 << 3,
    HK_SYNC_DISPATCH_INDIRECT = 1 << 4,
+   HK_SYNC_FRAGMENT = 1 << 5,
+   HK_SYNC_GRAPHICS = HK_SYNC_PRE_RASTER | HK_SYNC_FRAGMENT,
    HK_SYNC_INDIRECT = HK_SYNC_DRAW_INDIRECT | HK_SYNC_DISPATCH_INDIRECT,
-   HK_SYNC_ALL = (1 << 5) - 1,
-   HK_SYNC_STAGE_COUNT = 5,
+   /* Domains a render command's tiling stage executes or reads. */
+   HK_SYNC_TILING = HK_SYNC_PRE_RASTER | HK_SYNC_DRAW_INDIRECT,
+   HK_SYNC_ALL = (1 << 6) - 1,
+   HK_SYNC_STAGE_COUNT = 6,
 };
 
 enum hk_sync_engine {
@@ -60,6 +65,10 @@ struct hk_sync_event {
 
 struct hk_sync_stream {
    struct hk_sync_dep wait;
+   /* The subset of wait needed before a render command's tiling stage. The
+    * rest may be deferred to its fragment stage.
+    */
+   struct hk_sync_dep wait_tiling;
    uint32_t before[HK_SYNC_ENGINE_COUNT];
    uint32_t index;
    enum hk_sync_engine engine;
@@ -115,6 +124,21 @@ hk_sync_barrier(struct hk_sync_state *state, unsigned src, unsigned dst)
       if (dst & (1u << s))
          hk_sync_join(&state->pending[s], dep);
    }
+}
+
+/* Dependency of work in the given stages, without recording that work. */
+static inline struct hk_sync_dep
+hk_sync_pending(const struct hk_sync_state *state, unsigned stages,
+                enum hk_sync_engine engine, uint32_t index)
+{
+   struct hk_sync_dep dep = hk_sync_empty();
+   for (unsigned s = 0; s < HK_SYNC_STAGE_COUNT; ++s) {
+      if (stages & (1u << s))
+         hk_sync_join(&dep, state->pending[s]);
+   }
+   if (dep.engine[engine] == index)
+      dep.engine[engine] = HK_SYNC_NONE;
+   return dep;
 }
 
 static inline struct hk_sync_dep
