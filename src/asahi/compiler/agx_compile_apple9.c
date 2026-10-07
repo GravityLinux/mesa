@@ -9459,9 +9459,24 @@ apple9_lower_min_lod(nir_builder *b, nir_instr *instr, UNUSED void *data)
    return true;
 }
 
+/* External (EGLImage) textures are ordinary 2D views, as on Apple8. */
+static bool
+apple9_lower_external(nir_builder *b, nir_instr *instr, UNUSED void *data)
+{
+   if (instr->type != nir_instr_type_tex)
+      return false;
+   nir_tex_instr *tex = nir_instr_as_tex(instr);
+   if (tex->sampler_dim != GLSL_SAMPLER_DIM_EXTERNAL)
+      return false;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   return true;
+}
+
 static void
 apple9_lower_textures(nir_shader *nir)
 {
+   nir_shader_instructions_pass(nir, apple9_lower_external,
+                                nir_metadata_all, NULL);
    nir_lower_samplers(nir);
    nir_shader_instructions_pass(nir, apple9_lower_fetch_min_lod,
                                 nir_metadata_control_flow, NULL);
