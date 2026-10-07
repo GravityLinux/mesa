@@ -6593,6 +6593,8 @@ struct apple9_uniform_hoist {
    uint8_t *state;
    nir_cursor cursor;
    struct hash_table *original_blocks;
+   /* Whether apple9_preamble_safe_read reads may leave their branches. */
+   bool safe_reads;
 };
 
 static bool
@@ -6655,7 +6657,7 @@ apple9_can_hoist_uniform(nir_src *src, void *data)
       return *state == 2;
    *state = 1;
    if (instr->block != s->entry && !nir_instr_can_speculate(instr) &&
-       !apple9_preamble_safe_read(instr))
+       !(s->safe_reads && apple9_preamble_safe_read(instr)))
       return false;
    if (instr->type == nir_instr_type_intrinsic) {
       nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
@@ -6694,9 +6696,16 @@ apple9_hoist_uniform_reads(nir_shader *nir, struct hash_table *original_blocks,
 {
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
    nir_index_ssa_defs(impl);
+   /* AGX_APPLE9_SAFE_HOIST_STAGES limits the preamble-only reads to compute
+    * ("compute", the default for this experiment) or allows every stage
+    * ("all"). */
+   const char *stages = getenv("AGX_APPLE9_SAFE_HOIST_STAGES");
+   bool compute = nir->info.stage == MESA_SHADER_COMPUTE ||
+                  nir->info.stage == MESA_SHADER_KERNEL;
    struct apple9_uniform_hoist s = {
       .entry = nir_start_block(impl),
       .original_blocks = original_blocks,
+      .safe_reads = (stages && !strcmp(stages, "all")) || compute,
       .state = calloc(MAX2(impl->ssa_alloc, 1), 1),
       .cursor = nir_after_block_before_jump(nir_start_block(impl)),
    };
