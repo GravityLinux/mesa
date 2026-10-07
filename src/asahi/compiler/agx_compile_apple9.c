@@ -6624,6 +6624,10 @@ apple9_is_bounds_limit(nir_instr *instr)
    return false;
 }
 
+/* Pressure gating (AGX_APPLE9_GATED) compiles with and without LICM and the
+ * preamble-only reads; -1 defers to the environment. */
+static _Thread_local int apple9_safe_reads_override = -1;
+
 /* Reads that are always safe once per dispatch at a uniform address, but
  * that must not be generally speculatable: if-conversion or code motion
  * would then run them for every thread on paths that skipped them.
@@ -6699,7 +6703,9 @@ apple9_hoist_uniform_reads(nir_shader *nir, struct hash_table *original_blocks,
    /* Preamble-only reads stay off by default: hoisting them raised register
     * pressure in a large fragment shader and coincided with game crashes.
     * AGX_APPLE9_SAFE_HOIST_STAGES=compute or =all enables them. */
-   const char *stages = getenv("AGX_APPLE9_SAFE_HOIST_STAGES");
+   const char *stages = apple9_safe_reads_override > 0 ? "all"
+                        : apple9_safe_reads_override == 0 ? NULL
+                        : getenv("AGX_APPLE9_SAFE_HOIST_STAGES");
    bool compute = nir->info.stage == MESA_SHADER_COMPUTE ||
                   nir->info.stage == MESA_SHADER_KERNEL;
    struct apple9_uniform_hoist s = {
@@ -6984,6 +6990,12 @@ apple9_licm_filter(nir_instr *instr, nir_loop *loop, bool dominates_exit)
 }
 
 static bool
+apple9_compile_dag_tail(nir_shader *nir, struct agx_shader_part *out,
+                        struct agx_apple9_compute_profile *profile,
+                        const struct agx_apple9_varying_layout *varyings,
+                        struct apple9_dag_cost *chosen_cost, const char **reason);
+
+static bool
 apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
                   struct agx_apple9_compute_profile *profile,
                   const struct agx_apple9_varying_layout *varyings,
@@ -7028,10 +7040,67 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
     * the register limit that costs far more than it saves (Lethal Company's
     * hot fragment shader quintupled its spills), so it is opt-in until it
     * has a register-pressure model. AGX_APPLE9_LICM=1 enables it. */
+   if (getenv("AGX_APPLE9_GATED")) {
+      /* Compile the aggressive variant (LICM and preamble-only reads) and the
+       * plain one, and keep the cheaper allocation: both raise register
+       * pressure, which can spill shaders already at the limit. */
+      nir_shader *plain = nir_shader_clone(NULL, nir);
+      struct agx_shader_part aggressive_out = {0}, plain_out = {0};
+      struct agx_apple9_compute_profile aggressive_profile = {0}, plain_profile = {0};
+      struct apple9_dag_cost aggressive_cost = {0}, plain_cost = {0};
+      bool licm = nir_opt_licm(nir, apple9_licm_filter);
+      if (licm) {
+         nir_opt_cse(nir);
+         nir_opt_dce(nir);
+      }
+      apple9_safe_reads_override = 1;
+      bool aggressive_ok = apple9_compile_dag_tail(
+         nir, &aggressive_out, profile ? &aggressive_profile : NULL, varyings,
+         &aggressive_cost, reason);
+      apple9_safe_reads_override = 0;
+      bool plain_ok = apple9_compile_dag_tail(
+         plain, &plain_out, profile ? &plain_profile : NULL, varyings,
+         &plain_cost, reason);
+      apple9_safe_reads_override = -1;
+      ralloc_free(plain);
+      /* Loop-weighted spills decide: spills outside loops are cheaper than
+       * the loads and instructions hoisting removes inside them. */
+      bool use_plain = plain_ok &&
+         (!aggressive_ok || apple9_dag_cost_less(&plain_cost, &aggressive_cost));
+      if (agx_apple9_trace_enabled())
+         fprintf(stderr, "APPLE9_GATED chose=%s aggressive=%llu/%u plain=%llu/%u\n",
+                 use_plain ? "plain" : "aggressive",
+                 (unsigned long long)aggressive_cost.weighted_spills, aggressive_cost.spills,
+                 (unsigned long long)plain_cost.weighted_spills, plain_cost.spills);
+      if (use_plain) {
+         free(aggressive_out.binary);
+         *out = plain_out;
+         if (profile)
+            *profile = plain_profile;
+         return true;
+      }
+      free(plain_out.binary);
+      if (!aggressive_ok)
+         return false;
+      *out = aggressive_out;
+      if (profile)
+         *profile = aggressive_profile;
+      return true;
+   }
    if (getenv("AGX_APPLE9_LICM") && nir_opt_licm(nir, apple9_licm_filter)) {
       nir_opt_cse(nir);
       nir_opt_dce(nir);
    }
+   struct apple9_dag_cost cost = {0};
+   return apple9_compile_dag_tail(nir, out, profile, varyings, &cost, reason);
+}
+
+static bool
+apple9_compile_dag_tail(nir_shader *nir, struct agx_shader_part *out,
+                        struct agx_apple9_compute_profile *profile,
+                        const struct agx_apple9_varying_layout *varyings,
+                        struct apple9_dag_cost *chosen_cost, const char **reason)
+{
    struct apple9_buffer_map resources = {0};
    if (!apple9_collect_buffer_map(nir, &resources, reason))
       return false;
@@ -7068,6 +7137,7 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
          free(original.binary);
       }
    }
+   *chosen_cost = use_original ? original_cost : address_cost;
    const char *log = use_original ? original_log : address_log;
    size_t size = use_original ? original_size : address_size;
    if (log && size)
