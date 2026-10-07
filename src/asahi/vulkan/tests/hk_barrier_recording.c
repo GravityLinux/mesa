@@ -69,7 +69,7 @@ main(void)
    const struct hk_sync_event *event =
       util_dynarray_top_ptr(&cmd->sync_events, struct hk_sync_event);
    CHECK(event->src == (HK_SYNC_COMPUTE | HK_SYNC_DISPATCH_INDIRECT));
-   CHECK(event->dst == HK_SYNC_GRAPHICS);
+   CHECK(event->dst == HK_SYNC_FRAGMENT);
 
    /* A state-induced render split has an implicit store -> load dependency. */
    struct hk_cs resumed = {.cmd = cmd, .type = HK_CS_VDM, .sync_id = 7};
@@ -78,8 +78,9 @@ main(void)
    CHECK(util_dynarray_num_elements(&cmd->sync_events, struct hk_sync_event) == before + 2);
    event = util_dynarray_element(&cmd->sync_events, struct hk_sync_event, before);
    CHECK(event->stream == HK_SYNC_NONE);
-   CHECK(event->src & HK_SYNC_GRAPHICS);
-   CHECK(event->dst == HK_SYNC_GRAPHICS);
+   CHECK(event->src & HK_SYNC_FRAGMENT);
+   /* Attachment loads happen in the fragment stage; tiling need not wait. */
+   CHECK(event->dst == HK_SYNC_FRAGMENT);
    CHECK(!cmd->sync_render_continuation);
 
    util_dynarray_fini(&cmd->sync_events);
