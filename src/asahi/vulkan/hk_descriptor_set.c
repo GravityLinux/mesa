@@ -310,9 +310,56 @@ hk_UpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount,
                         uint32_t descriptorCopyCount,
                         const VkCopyDescriptorSet *pDescriptorCopies)
 {
+   VK_FROM_HANDLE(hk_device, dev, device);
+
    for (uint32_t w = 0; w < descriptorWriteCount; w++) {
       const VkWriteDescriptorSet *write = &pDescriptorWrites[w];
       VK_FROM_HANDLE(hk_descriptor_set, set, write->dstSet);
+
+      /* vkd3d-proton writes null descriptors of one type into every mutable
+       * binding of its heap, including bindings whose type list holds only
+       * buffers. An Apple9 image descriptor is larger than those slots and
+       * would overwrite the following descriptors, so make such slots null
+       * buffers instead.
+       */
+      const struct hk_descriptor_set_binding_layout *binding_layout =
+         &set->layout->binding[write->dstBinding];
+      if (binding_layout->type == VK_DESCRIPTOR_TYPE_MUTABLE_EXT) {
+         uint32_t stride, alignment;
+         hk_descriptor_stride_align_for_type(hk_device_physical(dev),
+                                             write->descriptorType, NULL,
+                                             &stride, &alignment);
+         if (stride > binding_layout->stride) {
+            const VkDescriptorBufferInfo null_info = {.range = VK_WHOLE_SIZE};
+            for (uint32_t j = 0; j < write->descriptorCount; j++) {
+               write_buffer_desc(set, &null_info, write->dstBinding,
+                                 write->dstArrayElement + j, false);
+            }
+            continue;
+         }
+
+         /* A smaller descriptor leaves the rest of the slot to whatever was
+          * written before, such as an image's size and levels. D3D12 allows
+          * reading a descriptor as another type, and translation layers
+          * write null descriptors of one type for all of them. Clear the
+          * slot to a null image first, so the trailing fields read as null.
+          */
+         uint32_t image_stride, image_alignment;
+         hk_descriptor_stride_align_for_type(hk_device_physical(dev),
+                                             VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                                             NULL, &image_stride,
+                                             &image_alignment);
+         if (stride < binding_layout->stride &&
+             image_stride <= binding_layout->stride) {
+            const VkDescriptorImageInfo null_image = {0};
+            for (uint32_t j = 0; j < write->descriptorCount; j++) {
+               write_sampled_image_view_desc(set, &null_image,
+                                             write->dstBinding,
+                                             write->dstArrayElement + j,
+                                             VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
+            }
+         }
+      }
 
       switch (write->descriptorType) {
       case VK_DESCRIPTOR_TYPE_SAMPLER:

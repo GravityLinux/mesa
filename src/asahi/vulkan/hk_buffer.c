@@ -120,16 +120,25 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
    if (!buffer)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   buffer->apple9_index_va = dev->dev.chip == AGX_CHIP_G16G &&
+   /* Sparse buffers keep the read-only zero mirror of the main heap. Their
+    * indices, like those of any buffer outside the 4-GiB USC aperture, are
+    * copied into it at draw time.
+    */
+   const bool sparse =
+      buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT;
+   buffer->apple9_index_va = dev->dev.chip == AGX_CHIP_G16G && !sparse &&
       (buffer->vk.usage & VK_BUFFER_USAGE_2_INDEX_BUFFER_BIT);
    if (buffer->vk.size > 0 &&
        (buffer->apple9_index_va || (buffer->vk.create_flags &
         (VK_BUFFER_CREATE_SPARSE_BINDING_BIT |
          VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT)))) {
 
-      const uint32_t alignment = hk_get_buffer_alignment(
+      uint32_t alignment = hk_get_buffer_alignment(
          hk_device_physical(dev), buffer->vk.usage, buffer->vk.create_flags);
       assert(alignment >= 16384);
+      /* As for device memory, align large buffers to 64 KiB. */
+      if (buffer->vk.size >= 65536)
+         alignment = MAX2(alignment, 65536);
       uint64_t vma_size_B = align64(buffer->vk.size, alignment);
 
       const bool bda_capture_replay =
@@ -145,6 +154,19 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
 
       buffer->va =
          agx_va_alloc(&dev->dev, vma_size_B, alignment, flags, bda_fixed_addr);
+
+      /* The USC aperture is shared with shaders. When it is full, place the
+       * buffer like any other and copy its indices at draw time.
+       */
+      if (!buffer->va && buffer->apple9_index_va && !bda_fixed_addr) {
+         buffer->apple9_index_va = false;
+         flags &= ~AGX_VA_USC;
+         if (bda_capture_replay)
+            buffer->va = agx_va_alloc(&dev->dev, vma_size_B, alignment, flags,
+                                      0);
+         else
+            goto done;
+      }
 
       if (!buffer->va) {
          vk_buffer_destroy(&dev->vk, pAllocator, &buffer->vk);
@@ -174,6 +196,7 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
       }
    }
 
+done:
    *pBuffer = hk_buffer_to_handle(buffer);
 
    return VK_SUCCESS;

@@ -213,7 +213,13 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
       if (type->propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
          flags |= AGX_BO_WRITEBACK;
 
-      mem->bo = agx_bo_create(&dev->dev, aligned_size, 0, flags, "App memory");
+      /* D3D12 places resources in heaps at 64-KiB granularity and
+       * guarantees the alignment of their GPU addresses. Translation layers
+       * derive those addresses from the memory's, so align large ones.
+       */
+      unsigned va_align = aligned_size >= 65536 ? 65536 : 0;
+      mem->bo = agx_bo_create(&dev->dev, aligned_size, va_align, flags,
+                              "App memory");
       if (!mem->bo) {
          result = vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
          goto fail_alloc;
