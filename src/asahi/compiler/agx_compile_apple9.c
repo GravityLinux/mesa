@@ -446,6 +446,17 @@ apple9_match_global_address(nir_scalar lo, nir_scalar hi, unsigned depth,
          pair[0] = previous;
          pair[1] = previous_hi;
          *offset = nir_scalar_chase_alu_src(lo, 1 - l);
+         /* An unsigned sum overflows exactly when it is below either addend,
+          * so a carry against the constant addend (as 64-bit add lowering
+          * emits for base + zext(k)) equally names the other addend as the
+          * base word. Keep the constant as the offset, which the memory
+          * instruction encodes directly, and the pointer as the base pair. */
+         uint32_t k;
+         if (apple9_const_u32(previous, &k) &&
+             !apple9_const_u32(*offset, value)) {
+            pair[0] = apple9_chase_trivial(*offset);
+            *offset = previous;
+         }
          *constant = apple9_const_u32(*offset, value);
          return true;
       }

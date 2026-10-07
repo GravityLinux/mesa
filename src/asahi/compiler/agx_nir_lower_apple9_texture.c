@@ -80,14 +80,17 @@ agx_nir_lower_apple9_texture_lod(nir_shader *shader)
  * wrapping and filtering. Express that contract with ordinary NIR fetches;
  * the backend supplies its private nearest sampler for those fetches. */
 /* A handle-addressed descriptor carries the records otherwise published in
- * the per-draw sysvals. */
+ * the per-draw sysvals. The words live in the descriptor itself, which is
+ * always-readable descriptor memory (as for hk's descriptor loads), so they
+ * may be speculated out of control flow and into the preamble. */
 static nir_def *
 descriptor_word(nir_builder *b, nir_def *handle, unsigned offset)
 {
    nir_def *address = nir_pack_64_2x32_split(
       b, nir_iadd_imm(b, handle, offset),
       nir_imm_int(b, AGX_APPLE9_USC_BASE >> 32));
-   return nir_load_global_constant(b, 1, 32, address, .align_mul = 4);
+   return nir_load_global_constant(b, 1, 32, address, .align_mul = 4,
+                                   .access = ACCESS_CAN_SPECULATE);
 }
 
 nir_def *
