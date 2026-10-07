@@ -1796,7 +1796,9 @@ hk_apple9_lower_formatless_storage(nir_builder *b, nir_intrinsic_instr *intr,
          .image_dim = dim, .image_array = array);
       inside = nir_iand(b, inside, nir_ult(b, nir_u2u32(b, intr->src[2].ssa), samples));
    }
-   nir_push_if(b, inside);
+   /* The address is arithmetic on the descriptor, valid for any coordinate,
+    * so compute it ahead of the bounds check: its uniform part can then
+    * move to the preamble. Only the access below depends on the check. */
    nir_def *pbe_addr = nir_load_from_texture_handle_agx(b, pbe);
    nir_def *addr;
    if (dim == GLSL_SAMPLER_DIM_BUF) {
@@ -1810,6 +1812,7 @@ hk_apple9_lower_formatless_storage(nir_builder *b, nir_intrinsic_instr *intr,
          nir_imm_bool(b, dim == GLSL_SAMPLER_DIM_MS), nir_imm_bool(b, layered),
          nir_imm_bool(b, false));
    }
+   nir_push_if(b, inside);
    nir_def *value = NULL;
    if (load) {
       bool floating = nir_alu_type_get_base_type(nir_intrinsic_dest_type(intr)) ==
@@ -2149,10 +2152,11 @@ hk_apple9_lower_storage_image(nir_builder *b, nir_intrinsic_instr *intr,
          .image_dim = dim, .image_array = array);
       inside = nir_iand(b, inside, nir_ult(b, nir_u2u32(b, intr->src[2].ssa), samples));
    }
-   nir_push_if(b, inside);
+   /* See hk_apple9_lower_formatless_storage: address ahead of the check. */
    nir_def *addr = nir_bindless_image_texel_address(b, 64, pbe, coord,
       intr->src[2].ssa, .image_dim = dim,
       .image_array = array, .format = format, .access = nir_intrinsic_access(intr));
+   nir_push_if(b, inside);
    nir_def *value = NULL;
    if (load) {
       nir_def *raw = nir_load_global(b, DIV_ROUND_UP(size_B, 4), MIN2(32, size_B * 8),
