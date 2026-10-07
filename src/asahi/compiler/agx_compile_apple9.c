@@ -1055,6 +1055,8 @@ struct apple9_dag_lower {
    struct agx_apple9_block *system_block;
    uint32_t zero_vreg;
    struct agx_apple9_block *zero_block;
+   /* A zero defined in the entry block dominates every use. */
+   uint32_t entry_zero;
    struct agx_apple9_block *binding_pointer_block;
    uint32_t binding_pointer[AGX_APPLE9_MAX_GRAPHICS_BUFFERS];
    uint32_t perspective_reciprocal;
@@ -1148,8 +1150,14 @@ apple9_dag_imm(struct apple9_dag_lower *lower, uint32_t value)
 static uint32_t
 apple9_dag_zero(struct apple9_dag_lower *lower)
 {
-   /* Reuse the zero only within its block, which need not dominate later
-    * blocks. */
+   /* One zero from the entry block serves every block. Rematerializing a
+    * zero per block made each constant memory index rewrite the register a
+    * preceding store or load was still reading, costing a wait. */
+   if (lower->entry_zero != AGX_APPLE9_VREG_INVALID &&
+       !getenv("AGX_APPLE9_BLOCK_ZERO"))
+      return lower->entry_zero;
+   /* Otherwise reuse the zero only within its block, which need not dominate
+    * later blocks. */
    if (lower->zero_vreg == AGX_APPLE9_VREG_INVALID ||
        lower->zero_block != lower->program.current_block) {
       lower->zero_vreg = apple9_dag_imm(lower, 0);
@@ -1976,7 +1984,8 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
       constant = nir_scalar_as_uint(scalar);
       if (scalar.def->bit_size < 32)
          constant &= BITFIELD_MASK(scalar.def->bit_size);
-      value = apple9_dag_imm(lower, constant);
+      value = constant == 0 && lower->entry_zero != AGX_APPLE9_VREG_INVALID
+                 ? apple9_dag_zero(lower) : apple9_dag_imm(lower, constant);
    } else if (nir_def_instr_type(scalar.def) == nir_instr_type_tex) {
       nir_tex_instr *tex = nir_instr_as_tex(nir_def_instr(scalar.def));
       if (!apple9_texture_supported(tex)) {
@@ -5640,6 +5649,7 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
       .sampler_mask = sampler_mask,
       .varyings = varyings,
       .zero_vreg = AGX_APPLE9_VREG_INVALID,
+      .entry_zero = AGX_APPLE9_VREG_INVALID,
       .loads = loads.data,
       .load_count =
          util_dynarray_num_elements(&loads, struct apple9_scalar_load),
@@ -5691,6 +5701,8 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
       *reason = "could not initialize Apple9 control-flow zero";
       goto fail;
    }
+   if (lower.structured_cf)
+      lower.entry_zero = lower.zero_vreg;
    /* System values are cached by selector across the whole shader. Read them
     * before divergent control flow so a first use in one arm cannot leave
     * lanes in another arm with an undefined cached value. This also applies
