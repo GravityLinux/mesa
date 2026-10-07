@@ -642,8 +642,24 @@ check_in_bounds(nir_builder *b, nir_intrinsic_instr *intr)
    return check_in_bounds_size(b, intr, bit_size / 8 * intr->num_components);
 }
 
+/* An amul whose scale is not a shift of 0..4. */
+static bool
+hk_unencodable_scale(nir_scalar s)
+{
+   if (!is_op(s, nir_op_amul))
+      return false;
+   for (unsigned i = 0; i < 2; ++i) {
+      nir_scalar k = nir_scalar_chase_alu_src(s, i);
+      if (nir_scalar_is_const(k))
+         return !util_is_power_of_two_nonzero(nir_scalar_as_uint(k)) ||
+                nir_scalar_as_uint(k) > 16;
+   }
+   return true;
+}
+
 static nir_def *
-bound_offset(nir_builder *b, nir_def *valid, nir_scalar offset)
+bound_offset(nir_builder *b, nir_def *valid, nir_scalar offset,
+             bool shift_only_scale)
 {
    /* If we can, clamp the source of an amul instead of the result, to remain
     * compatible with the hardware address mode.
@@ -654,6 +670,14 @@ bound_offset(nir_builder *b, nir_def *valid, nir_scalar offset)
          nir_scalar_chase_alu_src(offset, 1),
       };
       unsigned i = nir_scalar_is_const(srcs[0]) ? 1 : 0;
+      /* Apple9 scales an index only by a shift of 0..4. Any other scale
+       * would multiply again after the select; selecting the product, which
+       * the bounds check already computed, saves that multiply. */
+      if (shift_only_scale &&
+          !(nir_scalar_is_const(srcs[1 - i]) &&
+            util_is_power_of_two_nonzero(nir_scalar_as_uint(srcs[1 - i])) &&
+            nir_scalar_as_uint(srcs[1 - i]) <= 16))
+         return nir_bcsel(b, valid, nir_mov_scalar(b, offset), nir_imm_int(b, 0));
       nir_def *x = nir_mov_scalar(b, srcs[i]);
       nir_def *y = nir_mov_scalar(b, srcs[1 - i]);
 
@@ -665,9 +689,15 @@ bound_offset(nir_builder *b, nir_def *valid, nir_scalar offset)
       nir_scalar x = nir_scalar_chase_alu_src(offset, 0);
       nir_scalar y = nir_scalar_chase_alu_src(offset, 1);
 
+      /* With an Apple9 scale the index cannot encode, select the complete
+       * offset the bounds check computed rather than each term. */
+      if (shift_only_scale &&
+          (hk_unencodable_scale(x) || hk_unencodable_scale(y)))
+         return nir_bcsel(b, valid, nir_mov_scalar(b, offset), nir_imm_int(b, 0));
+
       if (is_op(x, nir_op_amul) || is_op(y, nir_op_amul)) {
-         return nir_iadd(b, bound_offset(b, valid, x),
-                         bound_offset(b, valid, y));
+         return nir_iadd(b, bound_offset(b, valid, x, shift_only_scale),
+                         bound_offset(b, valid, y, shift_only_scale));
       }
    }
 
@@ -702,7 +732,8 @@ lower_load_global_bounded(nir_builder *b, nir_intrinsic_instr *intr,
    nir_def *valid = per_component ? check_in_bounds_size(b, intr, byte_size)
                                   : check_in_bounds(b, intr);
    base = nir_bcsel(b, valid, base, nir_imm_int64(b, AGX_ZERO_PAGE_ADDRESS));
-   offset = bound_offset(b, valid, nir_scalar_resolved(offset, 0));
+   offset = bound_offset(b, valid, nir_scalar_resolved(offset, 0),
+                         per_component_bounds);
 
    enum gl_access_qualifier access = nir_intrinsic_access(intr);
 
