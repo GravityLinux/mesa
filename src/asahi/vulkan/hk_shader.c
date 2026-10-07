@@ -742,6 +742,24 @@ lower_load_global_bounded(nir_builder *b, nir_intrinsic_instr *intr,
  * register limit then need more copies and swaps, so only merge accesses that
  * are close together. HK_APPLE9_VECTORIZE_WINDOW overrides the distance.
  */
+/* Index of the first use in the load's own block, or -1 if a use is in
+ * another block or not an instruction. The vectorizer numbers each block's
+ * instructions in order before calling back. */
+static int64_t
+hk_first_use_index(nir_intrinsic_instr *load)
+{
+   int64_t first = INT64_MAX;
+   nir_foreach_use_including_if(use, &load->def) {
+      if (nir_src_is_if(use))
+         return -1;
+      nir_instr *user = nir_src_use_instr(use);
+      if (user->block != load->instr.block)
+         return -1;
+      first = MIN2(first, (int64_t)user->index);
+   }
+   return first == INT64_MAX ? -1 : first;
+}
+
 static bool
 hk_apple9_vectorize_cb(unsigned align_mul, unsigned align_offset,
                        unsigned bit_size, unsigned num_components,
@@ -759,11 +777,27 @@ hk_apple9_vectorize_cb(unsigned align_mul, unsigned align_offset,
    int64_t distance = (int64_t)high->instr.index - (int64_t)low->instr.index;
    if (llabs(distance) > window)
       return false;
+   /* A merged load issues every field where the first one was. In shaders
+    * near the register limit that keeps later fields live much longer, so
+    * only merge robust fields whose first uses are close as well.
+    * HK_APPLE9_VECTORIZE_USE_WINDOW overrides the distance. */
+   static int use_window = -1;
+   if (use_window < 0) {
+      const char *env = getenv("HK_APPLE9_VECTORIZE_USE_WINDOW");
+      use_window = env ? atoi(env) : 16;
+   }
+   bool bounded = low->intrinsic == nir_intrinsic_load_global_bounded ||
+                  low->intrinsic == nir_intrinsic_load_global_constant_bounded;
+   if (bounded) {
+      int64_t low_use = hk_first_use_index(low), high_use = hk_first_use_index(high);
+      if (low_use < 0 || high_use < 0 || llabs(high_use - low_use) > use_window)
+         return false;
+   }
+
    /* A merged bounded load may read past the end of its buffer when only
     * its first components are in bounds. Natural alignment keeps that read
     * inside one aligned block, so it cannot cross into another page. */
-   if (low->intrinsic == nir_intrinsic_load_global_bounded ||
-       low->intrinsic == nir_intrinsic_load_global_constant_bounded) {
+   if (bounded) {
       unsigned bytes = util_next_power_of_two(num_components * bit_size / 8);
       if (hole_size > 0 || align_mul < bytes || align_offset % bytes)
          return false;
