@@ -1815,16 +1815,24 @@ hk_apple9_draw_without_adj(struct hk_cmd_buffer *cmd, struct agx_draw draw)
                                     dev->heap->size, AGX_INDEX_SIZE_U32, false);
 }
 
-/* The Apple9 index fetch is bounded in whole words. When robustness requires
- * zeroes past a binding that ends inside a word, fetch from a copy instead.
+/* The Apple9 index fetch reads only from the USC aperture and is bounded in
+ * whole words. Fetch from a copy for index buffers placed outside the
+ * aperture, and when robustness requires zeroes past a binding that ends
+ * inside a word.
  */
 static bool
 hk_apple9_needs_index_copy(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
-   if (!draw.indexed || draw.index_buffer_range_B == 0 ||
-       !((draw.index_buffer + draw.index_buffer_range_B) & 3))
+   if (!draw.indexed || draw.index_buffer_range_B == 0)
+      return false;
+
+   if (draw.index_buffer < dev->dev.shader_base ||
+       draw.index_buffer >= dev->dev.shader_base + (1ull << 32))
+      return true;
+
+   if (!((draw.index_buffer + draw.index_buffer_range_B) & 3))
       return false;
 
    if (!(dev->vk.enabled_features.robustBufferAccess ||
