@@ -2523,6 +2523,7 @@ hk_apple9_lower_tex_2d_as_array(nir_builder *b, nir_tex_instr *tex, void *data)
       tex->coord_components++;
    }
    tex->is_array = true;
+   tex->backend_flags |= AGX_TEXTURE_FLAG_ARRAYED_2D;
 
    if (tex->op == nir_texop_txs) {
       /* Array sizes report the layer count too; return the 2D size. */
