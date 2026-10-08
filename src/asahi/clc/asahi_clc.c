@@ -173,7 +173,8 @@ compile(void *memctx, const uint32_t *spirv, size_t spirv_size)
    NIR_PASS(_, nir, nir_opt_if, 0);
    NIR_PASS(_, nir, nir_opt_idiv_const, 16);
 
-   NIR_PASS(_, nir, agx_nir_lower_texture_early, false /* support_lod_bias */);
+   NIR_PASS(_, nir, agx_nir_lower_texture_early, false /* support_lod_bias */,
+            false /* software_buffer_bounds */);
    NIR_PASS(_, nir, agx_nir_lower_texture);
    NIR_PASS(_, nir, agx_nir_lower_multisampled_image_store);
 

@@ -2595,7 +2595,10 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    /* We must do early lowering before hk_nir_lower_descriptors, since this will
     * create lod_bias instructions.
     */
-   NIR_PASS(_, nir, agx_nir_lower_texture_early, true /* support_lod_bias */);
+   /* Apple9 bounds-checks buffer images in software against their element
+    * count (hk_apple9_lower_storage_image). */
+   NIR_PASS(_, nir, agx_nir_lower_texture_early, true /* support_lod_bias */,
+            dev->dev.chip == AGX_CHIP_G16G);
    if (hk_device_physical(dev)->apple9_layered_2d)
       NIR_PASS(_, nir, nir_shader_tex_pass, hk_apple9_lower_tex_2d_as_array,
                nir_metadata_control_flow, NULL);
