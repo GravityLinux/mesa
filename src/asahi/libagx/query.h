@@ -23,4 +23,11 @@ struct libagx_imm_write {
 };
 static_assert(sizeof(struct libagx_imm_write) == 16, "query write array stride");
 
+/* Adds one render's occlusion segment counter into a query report. */
+struct libagx_occlusion_accum {
+   DEVICE(uint64_t) src;
+   DEVICE(uint64_t) dst;
+};
+static_assert(sizeof(struct libagx_occlusion_accum) == 16, "occlusion accumulate stride");
+
 #define LIBAGX_QUERY_UNAVAILABLE (uint64_t)((int64_t)-1)

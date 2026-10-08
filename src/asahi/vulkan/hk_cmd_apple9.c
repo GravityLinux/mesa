@@ -553,6 +553,9 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    struct hk_cs *cs = hk_cmd_buffer_get_cs(cmd, false);
    if (!cs)
       return;
+   cs = hk_occlusion_prepare_draw(cmd, cs);
+   if (!cs)
+      return;
    cs->tib = gfx->render.tilebuffer;
    const struct vk_dynamic_graphics_state *ms_dyn = &cmd->vk.dynamic_graphics_state;
    gfx->apple9_sample_positions =

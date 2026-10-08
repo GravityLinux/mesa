@@ -39,6 +39,10 @@
 
 #include <stdio.h>
 
+/* Occlusion queries active at once, and segment slots per control stream. */
+#define HK_MAX_ACTIVE_OCCLUSION_QUERIES 64
+#define HK_OCCLUSION_SEGMENTS           512
+
 struct hk_buffer;
 struct hk_cmd_bo;
 struct hk_cmd_pool;
@@ -321,13 +325,25 @@ struct hk_graphics_state {
    uint8_t provoking;
 
    struct {
+      /* Mode and hardware index the next draws use. */
       enum agx_visibility_mode mode;
-
-      /* Visibility result window and the active query's hardware index.
-       * There can only be one active occlusion query at a time.
-       */
-      uint64_t base;
       uint16_t index;
+
+      /* Several occlusion queries may be active at once (vkd3d-proton's
+       * virtual queries rely on it), but a draw counts into one visibility
+       * slot. Draws therefore count into a per-render segment slot, and each
+       * segment is added into every query active while it counted (see
+       * hk_occlusion_prepare_draw). A new segment starts whenever the active
+       * set changes or a new control stream begins.
+       */
+      bool segment_dirty;
+      bool paused;
+      enum agx_visibility_mode segment_mode;
+      unsigned active_count;
+      struct {
+         uint64_t report;
+         bool precise;
+      } active[HK_MAX_ACTIVE_OCCLUSION_QUERIES];
    } occlusion;
 
    /* Fast linked shader data structures */
@@ -418,8 +434,10 @@ struct hk_cs {
    /* Size of the root allocation, retained when continuation blocks are added. */
    size_t root_size;
 
-   /* Visibility result window for this graphics control stream. */
+   /* Occlusion segment slots for this graphics control stream, allocated on
+    * the first counting draw, and the number used so far. */
    uint64_t occlusion_base;
+   uint32_t occlusion_segments;
 
    /* Current pointer within the control stream */
    void *current;
@@ -607,6 +625,10 @@ struct hk_cmd_buffer {
     * than splitting rendering with a compute dispatch after every render
     * pass. See hk_flush_query_writes. */
    struct util_dynarray query_adds, query_writes;
+
+   /* Occlusion segment accumulations (struct libagx_occlusion_accum), applied
+    * with the query writes. */
+   struct util_dynarray occlusion_accum;
 
    /* Owned large BOs */
    struct util_dynarray large_bos;
@@ -985,6 +1007,7 @@ hk_get_descriptors_state(struct hk_cmd_buffer *cmd,
 
 void hk_flush_ia_stats(struct hk_cmd_buffer *cmd);
 void hk_flush_query_writes(struct hk_cmd_buffer *cmd);
+struct hk_cs *hk_occlusion_prepare_draw(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
 
 void hk_cmd_buffer_flush_push_descriptors(struct hk_cmd_buffer *cmd,
                                           struct hk_descriptor_state *desc);

@@ -89,7 +89,7 @@ struct hk_meta_save {
    struct hk_addr_range vb0;
    struct hk_descriptor_set *desc0;
    bool has_push_desc0;
-   enum agx_visibility_mode occlusion;
+   bool occlusion;
    struct hk_push_descriptor_set push_desc0;
    VkQueryPipelineStatisticFlags pipeline_stats_flags;
    uint8_t push[HK_MAX_PUSH_SIZE];
@@ -112,9 +112,8 @@ hk_meta_begin(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
              sizeof(save->apple9_api));
 
       /* Pause queries */
-      save->occlusion = cmd->state.gfx.occlusion.mode;
-      cmd->state.gfx.occlusion.mode = AGX_VISIBILITY_MODE_NONE;
-      cmd->state.gfx.dirty |= HK_DIRTY_OCCLUSION;
+      save->occlusion = cmd->state.gfx.occlusion.paused;
+      cmd->state.gfx.occlusion.paused = true;
 
       save->pipeline_stats_flags = desc->root.draw.pipeline_stats_flags;
       desc->root.draw.pipeline_stats_flags = 0;
@@ -195,8 +194,7 @@ hk_meta_end(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
       hk_cmd_bind_vertex_buffer(cmd, 0, save->vb0);
 
       /* Restore queries */
-      cmd->state.gfx.occlusion.mode = save->occlusion;
-      cmd->state.gfx.dirty |= HK_DIRTY_OCCLUSION;
+      cmd->state.gfx.occlusion.paused = save->occlusion;
 
       desc->root.draw.pipeline_stats_flags = save->pipeline_stats_flags;
       desc->root_dirty = true;
