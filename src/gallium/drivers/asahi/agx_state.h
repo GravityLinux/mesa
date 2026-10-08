@@ -760,7 +760,17 @@ struct agx_context {
    struct hash_table *generic_meta;
    struct agx_bg_eot_cache bg_eot;
 
+   /* Set when work of this context failed on the GPU (its fence completed
+    * with an error) or a submission was rejected (lost or banned queue).
+    * Reported through get_device_reset_status. */
    bool any_faults;
+   /* Reset status to report once any_faults is set: guilty if our own work
+    * failed, innocent if the kernel cancelled it as collateral of another
+    * client's hang (ECANCELED), unknown if it refused our submission. */
+   enum pipe_reset_status reset_status;
+   /* Created with PIPE_CONTEXT_LOSE_CONTEXT_ON_RESET: check each completed
+    * batch's fence error. Other contexts skip that per-batch query. */
+   bool check_fence_errors;
 
    uint32_t syncobj;
    uint32_t dummy_syncobj;

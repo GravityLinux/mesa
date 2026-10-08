@@ -263,6 +263,17 @@ agx_batch_cleanup(struct agx_context *ctx, struct agx_batch *batch, bool reset)
          agx_bo_unreference(dev, agx_lookup_bo(dev, handle));
       }
    } else {
+      if (ctx->check_fence_errors && !ctx->any_faults) {
+         int err = agx_syncobj_error(dev, batch->syncobj);
+         if (err < 0) {
+            mesa_loge("asahi: GPU work of this context failed (%s); context lost",
+                      strerror(-err));
+            ctx->any_faults = true;
+            ctx->reset_status = err == -ECANCELED ? PIPE_INNOCENT_CONTEXT_RESET
+                                                  : PIPE_GUILTY_CONTEXT_RESET;
+         }
+      }
+
       int handle;
       AGX_BATCH_FOREACH_BO_HANDLE(batch, handle) {
          struct agx_bo *bo = agx_lookup_bo(dev, handle);
@@ -1006,12 +1017,25 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
             c->layers, c->samples);
       }
 
-      /* A failed submit has not published the timeline point allocated for
-       * this batch. Continuing would attach an unsignaled, fabricated seqid
-       * to BOs and let fixed-USC ownership advance past work that never
-       * existed. There is no initialized-batch discard path, so fail closed
-       * in release builds as well as debug builds. */
-      abort();
+      /* The kernel refused the work (device lost, queue banned after a GPU
+       * timeout, or an invalid command). Discard the batch: publish its
+       * out-fences as signalled ourselves, so nothing waits on work that
+       * never existed and the seqid and BO writer tracking below stay
+       * consistent, and mark the context lost so robust clients see a reset.
+       */
+      int sret = drmSyncobjSignal(dev->fd, &batch->syncobj, 1);
+      uint64_t point = seqid;
+      int tret = drmSyncobjTimelineSignal(dev->fd, &screen->flush_syncobj, &point, 1);
+      if (sret || tret) {
+         fprintf(stderr, "asahi: cannot discard failed batch (%d/%d); aborting\n",
+                 sret, tret);
+         abort();
+      }
+      if (!ctx->any_faults) {
+         mesa_loge("asahi: submission rejected; context lost");
+         ctx->reset_status = PIPE_UNKNOWN_CONTEXT_RESET;
+      }
+      ctx->any_faults = true;
    }
 
    /* Now stash our batch fence into any shared BOs. */

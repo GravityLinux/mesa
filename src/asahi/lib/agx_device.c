@@ -1,3 +1,5 @@
+#include <sys/ioctl.h>
+#include <linux/sync_file.h>
 /*
  * Copyright 2021 Alyssa Rosenzweig
  * Copyright 2019 Collabora, Ltd.
@@ -936,6 +938,26 @@ agx_import_sync_file(struct agx_device *dev, struct agx_bo *bo, int fd)
    assert(ret >= 0);
 
    return ret;
+}
+
+/* Error status of a signalled binary syncobj's fence: negative errno if the
+ * work it tracks failed (GPU fault, timeout, or a banned queue), 0 otherwise.
+ * The kernel completes failed work's fences with an error rather than leaving
+ * them pending, so waits return; this is how a client learns about it.
+ */
+int
+agx_syncobj_error(struct agx_device *dev, uint32_t syncobj)
+{
+   int fd = -1;
+   if (drmSyncobjExportSyncFile(dev->fd, syncobj, &fd) || fd < 0)
+      return 0;
+
+   struct sync_file_info info = {0};
+   int status = 0;
+   if (ioctl(fd, SYNC_IOC_FILE_INFO, &info) == 0 && info.status < 0)
+      status = info.status;
+   close(fd);
+   return status;
 }
 
 int
