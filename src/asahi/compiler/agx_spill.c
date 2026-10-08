@@ -1315,6 +1315,13 @@ compute_s_entry(struct spill_ctx *ctx)
    assert(sb->nS_entry == nS);
 }
 
+static int
+cmp_unsigned(const void *a, const void *b)
+{
+   unsigned x = *(const unsigned *)a, y = *(const unsigned *)b;
+   return x < y ? -1 : x > y;
+}
+
 static ATTRIBUTE_NOINLINE void
 global_next_use_distances(agx_context *ctx, void *memctx,
                           struct spill_block *blocks, const unsigned *loop_end)
@@ -1335,9 +1342,85 @@ global_next_use_distances(agx_context *ctx, void *memctx,
       agx_worklist_push_head(&worklist, block);
    }
 
-   /* Definitions that have been seen */
-   BITSET_WORD *defined =
-      malloc(BITSET_WORDS(ctx->alloc) * sizeof(BITSET_WORD));
+   /* A block's upward-exposed uses and its definitions do not change while
+    * the dataflow iterates, so gather them once: the uses in first-use order
+    * with their distance from the block entry, and the definitions in
+    * ascending order. Each visit then applies the same updates as a rescan,
+    * in the same order, without touching every variable of the shader.
+    */
+   struct block_facts {
+      unsigned *gen_node;
+      uint32_t *gen_dist;
+      unsigned *kill;
+      unsigned gen_count, kill_count;
+   } *facts = rzalloc_array(memctx, struct block_facts, ctx->num_blocks);
+   BITSET_WORD *defined = calloc(BITSET_WORDS(ctx->alloc), sizeof(BITSET_WORD));
+   BITSET_WORD *used = calloc(BITSET_WORDS(ctx->alloc), sizeof(BITSET_WORD));
+   struct util_dynarray gen_node, gen_dist, kill;
+   util_dynarray_init(&gen_node, NULL);
+   util_dynarray_init(&gen_dist, NULL);
+   util_dynarray_init(&kill, NULL);
+
+   agx_foreach_block(ctx, blk) {
+      struct block_facts *f = &facts[blk->index];
+      util_dynarray_clear(&gen_node);
+      util_dynarray_clear(&gen_dist);
+      util_dynarray_clear(&kill);
+      uint32_t cycle = 0;
+
+      agx_foreach_instr_in_block(blk, I) {
+         if (I->op == AGX_OPCODE_PHI) {
+            cycle++;
+            continue;
+         }
+
+         /* Record first use before def. Phi sources are handled when
+          * propagating, because they logically happen in the predecessor.
+          */
+         agx_foreach_ssa_src(I, s) {
+            unsigned v = I->src[s].value;
+            assert(v < ctx->alloc);
+            if (BITSET_TEST(defined, v) || BITSET_TEST(used, v))
+               continue;
+            BITSET_SET(used, v);
+            util_dynarray_append(&gen_node, v);
+            util_dynarray_append(&gen_dist, cycle);
+         }
+
+         /* Record defs */
+         agx_foreach_ssa_dest(I, d) {
+            unsigned v = I->dest[d].value;
+            assert(v < ctx->alloc);
+            if (!BITSET_TEST(defined, v)) {
+               BITSET_SET(defined, v);
+               util_dynarray_append(&kill, v);
+            }
+         }
+
+         cycle += instr_cycles(I);
+      }
+
+      f->gen_count = util_dynarray_num_elements(&gen_node, unsigned);
+      f->kill_count = util_dynarray_num_elements(&kill, unsigned);
+      f->gen_node = ralloc_array(memctx, unsigned, MAX2(f->gen_count, 1));
+      f->gen_dist = ralloc_array(memctx, uint32_t, MAX2(f->gen_count, 1));
+      f->kill = ralloc_array(memctx, unsigned, MAX2(f->kill_count, 1));
+      memcpy(f->gen_node, gen_node.data, f->gen_count * sizeof(unsigned));
+      memcpy(f->gen_dist, gen_dist.data, f->gen_count * sizeof(uint32_t));
+      memcpy(f->kill, kill.data, f->kill_count * sizeof(unsigned));
+      qsort(f->kill, f->kill_count, sizeof(unsigned), cmp_unsigned);
+
+      for (unsigned i = 0; i < f->gen_count; ++i)
+         BITSET_CLEAR(used, f->gen_node[i]);
+      for (unsigned i = 0; i < f->kill_count; ++i)
+         BITSET_CLEAR(defined, f->kill[i]);
+   }
+
+   free(defined);
+   free(used);
+   util_dynarray_fini(&gen_node);
+   util_dynarray_fini(&gen_dist);
+   util_dynarray_fini(&kill);
 
    struct next_uses dists, far;
    init_next_uses(&dists, NULL);
@@ -1347,44 +1430,14 @@ global_next_use_distances(agx_context *ctx, void *memctx,
    while (!u_worklist_is_empty(&worklist)) {
       agx_block *blk = agx_worklist_pop_head(&worklist);
       struct spill_block *sb = &blocks[blk->index];
-
-      /* Definitions that have been seen */
-      memset(defined, 0, BITSET_WORDS(ctx->alloc) * sizeof(BITSET_WORD));
+      const struct block_facts *f = &facts[blk->index];
 
       /* Initialize all distances to infinity */
       clear_next_uses(&dists);
 
-      uint32_t cycle = 0;
-
       /* Calculate dists. Phis are handled separately. */
-      agx_foreach_instr_in_block(blk, I) {
-         if (I->op == AGX_OPCODE_PHI) {
-            cycle++;
-            continue;
-         }
-
-         /* Record first use before def. Phi sources are handled
-          * above, because they logically happen in the
-          * predecessor.
-          */
-         agx_foreach_ssa_src(I, s) {
-            if (BITSET_TEST(defined, I->src[s].value))
-               continue;
-            if (search_next_uses(&dists, I->src[s].value) < DIST_INFINITY)
-               continue;
-
-            assert(I->src[s].value < ctx->alloc);
-            set_next_use(&dists, I->src[s].value, cycle);
-         }
-
-         /* Record defs */
-         agx_foreach_ssa_dest(I, d) {
-            assert(I->dest[d].value < ctx->alloc);
-            BITSET_SET(defined, I->dest[d].value);
-         }
-
-         cycle += instr_cycles(I);
-      }
+      for (unsigned i = 0; i < f->gen_count; ++i)
+         set_next_use(&dists, f->gen_node[i], f->gen_dist[i]);
 
       /* Apply transfer function to get our entry state. */
       foreach_next_use(&sb->next_use_out, node, dist) {
@@ -1395,10 +1448,8 @@ global_next_use_distances(agx_context *ctx, void *memctx,
          set_next_use(&sb->next_use_in, node, dist);
       }
 
-      int i;
-      BITSET_FOREACH_SET(i, defined, ctx->alloc) {
-         set_next_use(&sb->next_use_in, i, DIST_INFINITY);
-      }
+      for (unsigned i = 0; i < f->kill_count; ++i)
+         set_next_use(&sb->next_use_in, f->kill[i], DIST_INFINITY);
 
       /* Propagate the live in of the successor (blk) to the live out of
        * predecessors.
@@ -1440,7 +1491,6 @@ global_next_use_distances(agx_context *ctx, void *memctx,
       }
    }
 
-   free(defined);
    u_worklist_fini(&worklist);
    destroy_next_uses(&dists);
    destroy_next_uses(&far);
