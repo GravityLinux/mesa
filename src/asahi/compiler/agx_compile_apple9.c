@@ -9960,8 +9960,14 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
        * shader has no explicit tile load. Use ordered tile access, as for
        * blending, to preserve those attachments. */
       for (unsigned rt = 0; rt < nr_targets; ++rt) {
-         if (blend && blend[rt].color_attachment_unused)
+         /* With VK_EXT_dynamic_rendering_unused_attachments, a pipeline can
+          * leave an attachment of the render undeclared. The attachment is
+          * still bound and holds earlier draws' values, so preserve it.
+          * Only a target with no attachment needs nothing. */
+         if (blend && blend[rt].color_attachment_unused) {
+            preserves_color |= blend[rt].format != PIPE_FORMAT_NONE;
             continue;
+         }
          bool written = nir->info.outputs_written &
                         BITFIELD64_BIT(FRAG_RESULT_DATA0 + rt);
          preserves_color |= !written ||
