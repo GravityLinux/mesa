@@ -1,3 +1,4 @@
+#include "util/u_debug.h"
 /*
  * Copyright 2024 Valve Corporation
  * Copyright 2024 Alyssa Rosenzweig
@@ -1634,6 +1635,16 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
       .maintenance10 = true,
    };
 #undef KEEP
+
+   /* HK_APPLE9_MESH_SHADER=1 exposes EXT_mesh_shader on the existing compute
+    * path (task and mesh workgroups run as compute kernels, then a draw of
+    * their output records); for testing until a native mesh launch exists.
+    * Mesh-shader queries and multiview stay off. */
+   if (debug_get_bool_option("HK_APPLE9_MESH_SHADER", false)) {
+      ext->EXT_mesh_shader = true;
+      feat->meshShader = true;
+      feat->taskShader = true;
+   }
 
    props->apiVersion = VK_MAKE_API_VERSION(0, 1, 4, VK_HEADER_VERSION);
    props->conformanceVersion = (VkConformanceVersion){0};
