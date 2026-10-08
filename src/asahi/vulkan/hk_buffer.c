@@ -105,6 +105,20 @@ hk_bind_scratch(struct hk_device *dev, struct agx_va *va, unsigned offset_B,
    return VK_SUCCESS;
 }
 
+/* Release a buffer's own VA. agx_va_free unbinds only the read-write range;
+ * the read-only shadow (bound by hk_bind_scratch and buffer memory binds) must
+ * be unbound too, or it keeps pointing at the old pages after the VA is reused.
+ */
+static void
+hk_buffer_free_va(struct hk_device *dev, struct hk_buffer *buffer)
+{
+   if (!buffer->apple9_index_va)
+      agx_bo_bind(&dev->dev, NULL, buffer->va->addr + dev->dev.sparse_ro_offset,
+                  buffer->va->size_B, 0, DRM_ASAHI_BIND_UNBIND);
+   agx_va_free(&dev->dev, buffer->va, true);
+   buffer->va = NULL;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
                 const VkAllocationCallbacks *pAllocator, VkBuffer *pBuffer)
@@ -176,8 +190,12 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
       buffer->vk.device_address = buffer->va->addr;
 
       /* Bind scratch pages to make read/write across the VA valid */
-      if (!buffer->apple9_index_va)
-         hk_bind_scratch(dev, buffer->va, 0, vma_size_B);
+      if (!buffer->apple9_index_va &&
+          hk_bind_scratch(dev, buffer->va, 0, vma_size_B) != VK_SUCCESS) {
+         hk_buffer_free_va(dev, buffer);
+         vk_buffer_destroy(&dev->vk, pAllocator, &buffer->vk);
+         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      }
 
       /* Apple9 texel fetches report no residency, so shaders read it from
        * a table of the buffer's pages, all unbound initially.
@@ -188,7 +206,7 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
          buffer->apple9_residency =
             agx_bo_create(&dev->dev, pages, 0, 0, "Apple9 buffer residency");
          if (!buffer->apple9_residency) {
-            agx_va_free(&dev->dev, buffer->va, true);
+            hk_buffer_free_va(dev, buffer);
             vk_buffer_destroy(&dev->vk, pAllocator, &buffer->vk);
             return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
          }
@@ -212,9 +230,8 @@ hk_DestroyBuffer(VkDevice device, VkBuffer _buffer,
    if (!buffer)
       return;
 
-   if (buffer->va) {
-      agx_va_free(&dev->dev, buffer->va, true);
-   }
+   if (buffer->va)
+      hk_buffer_free_va(dev, buffer);
 
    if (buffer->apple9_residency)
       agx_bo_unreference(&dev->dev, buffer->apple9_residency);
