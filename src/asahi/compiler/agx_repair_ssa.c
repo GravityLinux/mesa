@@ -259,6 +259,24 @@ agx_repair_ssa(agx_context *ctx)
    struct hash_table_u64 *homes = getenv("AGX_SPILL_COALESCE")
       ? _mesa_hash_table_u64_create(blocks) : NULL;
 
+   /* Spilling breaks SSA only for the variables it reloads or
+    * rematerializes, which now have several definitions. A variable with one
+    * definition is still in SSA form: reading it through the reconstruction
+    * below only builds trivial phis that are removed again. Repair just the
+    * redefined variables, which the final reindex makes indistinguishable.
+    */
+   BITSET_WORD *defined = rzalloc_array(blocks, BITSET_WORD, BITSET_WORDS(n));
+   BITSET_WORD *redefined = rzalloc_array(blocks, BITSET_WORD, BITSET_WORDS(n));
+   agx_foreach_instr_global(ctx, I) {
+      agx_foreach_ssa_dest(I, d) {
+         unsigned v = I->dest[d].value;
+         assert(v < n);
+         if (BITSET_TEST(defined, v))
+            BITSET_SET(redefined, v);
+         BITSET_SET(defined, v);
+      }
+   }
+
    agx_foreach_block(ctx, block) {
       struct repair_ctx rctx = {
          .shader = ctx,
@@ -273,7 +291,8 @@ agx_repair_ssa(agx_context *ctx)
          if (I->op != AGX_OPCODE_PHI) {
             agx_foreach_ssa_src(I, s) {
                assert(I->src[s].value < n);
-               agx_replace_src(I, s, resolve_read(&rctx, block, I->src[s]));
+               if (BITSET_TEST(redefined, I->src[s].value))
+                  agx_replace_src(I, s, resolve_read(&rctx, block, I->src[s]));
             }
          }
 
@@ -283,6 +302,13 @@ agx_repair_ssa(agx_context *ctx)
             /* Skip phis that we just created when processing loops */
             if (handle >= n) {
                assert(I->op == AGX_OPCODE_PHI);
+               continue;
+            }
+
+            if (!BITSET_TEST(redefined, handle)) {
+               if (homes && I->dest[d].memory)
+                  _mesa_hash_table_u64_insert(homes, handle,
+                                              (void *)(uintptr_t)(handle + 1));
                continue;
             }
 
@@ -325,6 +351,8 @@ agx_repair_ssa(agx_context *ctx)
                *util_dynarray_element(&block->predecessors, agx_block *, s);
 
             assert(phi->src[s].value < n);
+            if (!BITSET_TEST(redefined, phi->src[s].value))
+               continue;
 
             struct repair_ctx rctx = {
                .shader = ctx,
