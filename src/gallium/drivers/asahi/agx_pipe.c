@@ -1946,7 +1946,10 @@ asahi_get_device_reset_status(struct pipe_context *pipe)
 {
    struct agx_context *ctx = agx_context(pipe);
 
-   return ctx->any_faults ? PIPE_GUILTY_CONTEXT_RESET : PIPE_NO_RESET;
+   if (!ctx->any_faults)
+      return PIPE_NO_RESET;
+   return ctx->faults_guilty ? PIPE_GUILTY_CONTEXT_RESET
+                             : PIPE_UNKNOWN_CONTEXT_RESET;
 }
 
 static void
@@ -2488,8 +2491,10 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
       /* Point size is carried by the vertex output interface. */
       caps->point_size_fixed = PIPE_POINT_SIZE_LOWER_ALWAYS;
       caps->robust_buffer_access_behavior = false;
-      /* EGL robustness context creation requires a contract we cannot provide. */
-      caps->device_reset_status_query = false;
+      /* Lost-context reporting (EGL_EXT_create_context_robustness, reset
+       * status queries) works: failed work and rejected submissions mark the
+       * context lost instead of aborting. Robust buffer access stays off. */
+      caps->device_reset_status_query = true;
       /* External textures are sampled as 2D views. */
       caps->texture_external = true;
       /* Cull distances still need primitive rejection lowering. */

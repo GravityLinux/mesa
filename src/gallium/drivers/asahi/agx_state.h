@@ -760,7 +760,13 @@ struct agx_context {
    struct hash_table *generic_meta;
    struct agx_bg_eot_cache bg_eot;
 
+   /* Set when work of this context failed on the GPU (its fence completed
+    * with an error) or a submission was rejected (lost or banned queue).
+    * Reported through get_device_reset_status. */
    bool any_faults;
+   /* Reset status to report: guilty if our own work faulted, unknown if
+    * the kernel refused our submission (device lost). */
+   bool faults_guilty;
 
    uint32_t syncobj;
    uint32_t dummy_syncobj;

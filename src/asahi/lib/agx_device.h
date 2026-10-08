@@ -297,6 +297,7 @@ uint32_t agx_create_command_queue(struct agx_device *dev,
 int agx_destroy_command_queue(struct agx_device *dev, uint32_t queue_id);
 
 int agx_import_sync_file(struct agx_device *dev, struct agx_bo *bo, int fd);
+int agx_syncobj_error(struct agx_device *dev, uint32_t syncobj);
 int agx_export_sync_file(struct agx_device *dev, struct agx_bo *bo);
 
 void agx_debug_fault(struct agx_device *dev, uint64_t addr);
