@@ -3417,12 +3417,23 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
 
    assert(nir->info.io_lowered);
    if (dev->dev.chip == AGX_CHIP_G16G) {
-      /* An empty compute entrypoint has no GPU work. Keep the common Asahi
-       * empty-shader marker so cached and freshly compiled shaders agree.
+      /* A compute entrypoint without side effects has no GPU work, even
+       * when loads and arithmetic remain, for example once optimization has
+       * proved every store unreachable. Keep the common Asahi empty-shader
+       * marker so cached and freshly compiled shaders agree.
        */
       bool empty = sw_stage == MESA_SHADER_COMPUTE;
-      nir_foreach_block(block, nir_shader_get_entrypoint(nir))
-         empty &= exec_list_is_empty(&block->instr_list);
+      nir_foreach_block(block, nir_shader_get_entrypoint(nir)) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_barrier &&
+                !(nir_intrinsic_infos[intr->intrinsic].flags &
+                  NIR_INTRINSIC_CAN_ELIMINATE))
+               empty = false;
+         }
+      }
 
       const char *reason = NULL;
       if (empty) {
