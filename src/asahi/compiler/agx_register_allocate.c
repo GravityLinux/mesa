@@ -291,6 +291,12 @@ struct ra_ctx {
 
    /* Operand placements committed for the current constrained instruction. */
    BITSET_WORD *pinned;
+   /* While a constrained instruction is placed: the original register of
+    * each value live before it that has since moved, in first-move order. */
+   struct ra_move {
+      unsigned ssa, reg;
+   } *moved;
+   unsigned nr_moved;
 
    /* Registers of the current instruction's dying sources that its
     * destination may take over, and the sources it took over. */
@@ -791,6 +797,36 @@ placement_cost(struct ra_ctx *rctx, unsigned ssa, unsigned reg, unsigned count)
    return cost;
 }
 
+/* A lower bound of placement_cost for every register from reg upwards, given
+ * per-field floors over the phi preferences and the highest preferred GPR.
+ * Each field it raises only grows with the register: the tuple affinity is
+ * one register, the preferred window ends at its maximum, and immediate
+ * encodability and footprint growth are thresholds on the register's end. */
+static struct placement_cost
+placement_floor(struct ra_ctx *rctx, unsigned ssa, unsigned reg, unsigned count,
+                const struct placement_cost *floors, unsigned last_preference)
+{
+   struct placement_cost cost = *floors;
+   cost.reg = reg;
+   if (reg > last_preference || last_preference == ~0u) {
+      cost.dead = rctx->dead_total;
+      cost.edge = rctx->edge_total;
+      cost.affinity = rctx->affinity_total;
+   }
+   cost.collect = rctx->affinity_reg != ~0u && rctx->affinity_reg < reg;
+   if (!rctx->preferred)
+      return cost;
+   struct agx_reg_constraint c = rctx->preferred[ssa];
+   cost.preference = c.min <= c.max && reg > c.max;
+   unsigned immediate_regs = rctx->shader->ra_target.mov_imm_registers;
+   if (immediate_regs && rctx->instr->op == AGX_OPCODE_MOV_IMM &&
+       rctx->instr->dest[0].value == ssa)
+      cost.materialization = reg + count > immediate_regs;
+   unsigned limit = MAX2(rctx->demand, *rctx->count[RA_GPR]);
+   cost.growth = reg + count > limit ? reg + count - limit : 0;
+   return cost;
+}
+
 static bool
 placement_cheaper(struct placement_cost a, struct placement_cost b)
 {
@@ -921,6 +957,20 @@ set_ssa_to_reg(struct ra_ctx *rctx, unsigned ssa, unsigned reg)
    enum ra_class cls = rctx->classes[ssa];
    *(rctx->count[cls]) = MAX2(*(rctx->count[cls]), reg + rctx->ncomps[ssa]);
 
+   if (rctx->moved && cls == RA_GPR) {
+      /* Log values live before the instruction (not its destinations)
+       * above the reserved prefix, the values copied back afterwards. */
+      bool record = rctx->ssa_to_reg[ssa] >= reserved_size(rctx->shader);
+      agx_foreach_ssa_dest(rctx->instr, d)
+         record &= rctx->instr->dest[d].value != ssa;
+      for (unsigned i = 0; record && i < rctx->nr_moved; ++i)
+         record = rctx->moved[i].ssa != ssa;
+      if (record) {
+         assert(rctx->nr_moved < AGX_NUM_REGS);
+         rctx->moved[rctx->nr_moved++] =
+            (struct ra_move){ssa, rctx->ssa_to_reg[ssa]};
+      }
+   }
    rctx->ssa_to_reg[ssa] = reg;
    rctx->last_reg[ssa] = reg;
    rctx->affinity_ssa = ~0u;
@@ -1366,48 +1416,63 @@ place_constrained_value(struct ra_ctx *rctx, agx_index value,
    /* Unlike unconstrained splitting, the legal bank may be completely full.
     * Choose a legal region, then move its occupants to the rest of the file.
     * Only this instruction's already-placed operands are pinned. */
-   /* Record the base of the tuple occupying each register once, so each
-    * candidate inspects only its own registers. */
+   /* The base of the tuple occupying each register, recorded once and only
+    * when an occupied candidate is costed, so each candidate inspects only
+    * its own registers. */
    unsigned tuple_base[AGX_NUM_REGS];
-   if (rctx->preferred) {
-      for (unsigned h = reserved_size(rctx->shader); h < rctx->bound[RA_GPR];) {
-         if (!BITSET_TEST(rctx->used_regs[RA_GPR], h)) {
-            ++h;
-            continue;
-         }
-         unsigned width = rctx->ncomps[rctx->reg_to_ssa[h]];
-         for (unsigned k = 0; k < width; ++k)
-            tuple_base[h + k] = h;
-         h += width;
-      }
-   }
+   bool have_tuple_base = false;
 
    unsigned chosen = ~0;
    struct placement_cost best = {.moves = ~0u};
-   /* Per-field lower bounds of the ranked cost. Once the best candidate meets
-    * all of them, no later register can be strictly cheaper, and ties keep
-    * the lower register, so the search can stop without changing the result.
-    */
+   /* Per-field lower bounds of the ranked cost. Once the best candidate is
+    * cheaper than the bound for every remaining register, none of them can
+    * win (ties keep the lower register), so the search stops without
+    * changing the result. Phi preferences lower the first three fields only
+    * up to the highest preferred register. */
    cache_phi_preferences(rctx, ssa);
    uint64_t max_edge = 0, max_dead = 0, max_affinity = 0;
+   unsigned last_preference = ~0u;
    util_dynarray_foreach(rctx->reg_preferences, struct phi_reg_preference, p) {
       max_edge = MAX2(max_edge, p->edge);
       max_dead = MAX2(max_dead, p->dead);
       max_affinity = MAX2(max_affinity, p->affinity);
+      if (p->reg < AGX_NUM_REGS &&
+          (last_preference == ~0u || p->reg > last_preference))
+         last_preference = p->reg;
    }
-   const uint64_t edge_floor = rctx->edge_total - max_edge;
-   const uint64_t dead_floor = rctx->dead_total - max_dead;
-   const uint64_t affinity_floor = rctx->affinity_total - max_affinity;
+   const struct placement_cost floors = {
+      .edge = rctx->edge_total - max_edge,
+      .dead = rctx->dead_total - max_dead,
+      .affinity = rctx->affinity_total - max_affinity,
+   };
    for (unsigned reg = first; reg <= last; reg += align) {
-      if (chosen != ~0u && !best.moves && best.edge == edge_floor &&
-          best.dead == dead_floor && best.affinity == affinity_floor &&
-          !best.collect && !best.preference && !best.materialization &&
-          !best.growth && !best.scarcity)
+      if (chosen != ~0u &&
+          placement_cheaper(best, placement_floor(rctx, ssa, reg, count, &floors,
+                                                  last_preference)))
          break;
       if (BITSET_TEST_COUNT(rctx->pinned, reg, count))
          continue;
+      /* Moves rank first, so an occupied region never beats a free one. */
+      bool occupied = BITSET_TEST_COUNT(rctx->used_regs[RA_GPR], reg, count);
+      if (occupied && chosen != ~0u && !best.moves)
+         continue;
       struct placement_cost cost = placement_cost(rctx, ssa, reg, count);
-      if (rctx->preferred) {
+      if (occupied && rctx->preferred && !have_tuple_base) {
+         for (unsigned h = reserved_size(rctx->shader); h < rctx->bound[RA_GPR];) {
+            if (!BITSET_TEST(rctx->used_regs[RA_GPR], h)) {
+               ++h;
+               continue;
+            }
+            unsigned width = rctx->ncomps[rctx->reg_to_ssa[h]];
+            for (unsigned k = 0; k < width; ++k)
+               tuple_base[h + k] = h;
+            h += width;
+         }
+         have_tuple_base = true;
+      }
+      if (!occupied) {
+         /* No register to move. */
+      } else if (rctx->preferred) {
          /* Even a one-half overlap evicts the complete tuple. Counting only
           * the overlapping halves can prefer a much more expensive move. */
          unsigned previous = ~0u;
@@ -1432,8 +1497,9 @@ place_constrained_value(struct ra_ctx *rctx, agx_index value,
       return ~0u;
    }
 
+   /* A free region has no occupants to move. */
    unsigned victims[16], nr_victims = 0;
-   for (unsigned reg = reserved_size(rctx->shader);
+   for (unsigned reg = best.moves ? reserved_size(rctx->shader) : rctx->bound[RA_GPR];
         reg < rctx->bound[RA_GPR];) {
       if (!BITSET_TEST(rctx->used_regs[RA_GPR], reg)) {
          ++reg;
@@ -1489,19 +1555,11 @@ assign_constrained_operands(struct ra_ctx *rctx, agx_instr *I)
 {
    BITSET_DECLARE(pinned, AGX_NUM_REGS) = {0};
    rctx->pinned = pinned;
-   unsigned old_owner[AGX_NUM_REGS];
-   for (unsigned reg = 0; reg < ARRAY_SIZE(old_owner); ++reg)
-      old_owner[reg] = ~0;
-   for (unsigned reg = reserved_size(rctx->shader);
-        reg < rctx->bound[RA_GPR];) {
-      if (!BITSET_TEST(rctx->used_regs[RA_GPR], reg)) {
-         ++reg;
-         continue;
-      }
-      unsigned ssa = rctx->reg_to_ssa[reg];
-      old_owner[reg] = ssa;
-      reg += rctx->ncomps[ssa];
-   }
+   /* Values usually stay put, so log the original register of those that
+    * move instead of recording every owner up front. */
+   struct ra_move moved[AGX_NUM_REGS];
+   rctx->moved = moved;
+   rctx->nr_moved = 0;
 
    agx_foreach_ssa_src(I, s) {
       struct agx_reg_constraint c = I->reg_constraints[I->nr_dests + s];
@@ -1528,8 +1586,10 @@ assign_constrained_operands(struct ra_ctx *rctx, agx_instr *I)
           c.max >= rctx->bound[RA_GPR] - rctx->ncomps[I->src[s].value] &&
           c.align <= rctx->ncomps[I->src[s].value])
          continue;
-      if (place_constrained_value(rctx, I->src[s], c, true) == ~0u)
+      if (place_constrained_value(rctx, I->src[s], c, true) == ~0u) {
+         rctx->moved = NULL;
          return false;
+      }
    }
    /* Sources dying here, other than destroyed or fixed-register copies,
     * whose tuple fits the destination's aligned window. */
@@ -1552,8 +1612,10 @@ assign_constrained_operands(struct ra_ctx *rctx, agx_instr *I)
    agx_foreach_ssa_dest(I, d) {
       unsigned reg =
          place_constrained_value(rctx, I->dest[d], I->reg_constraints[d], false);
-      if (reg == ~0u)
+      if (reg == ~0u) {
+         rctx->moved = NULL;
          return false;
+      }
       agx_foreach_ssa_src(I, s) {
          unsigned base = rctx->ssa_to_reg[I->src[s].value];
          if (reuse && I->src[s].kill && BITSET_TEST(reusable, base) &&
@@ -1564,11 +1626,20 @@ assign_constrained_operands(struct ra_ctx *rctx, agx_instr *I)
       }
    }
    rctx->reusable = NULL;
+   rctx->moved = NULL;
 
+   /* Copy moved values in order of their original registers. */
+   for (unsigned i = 1; i < rctx->nr_moved; ++i) {
+      struct ra_move m = moved[i];
+      unsigned j = i;
+      for (; j && moved[j - 1].reg > m.reg; --j)
+         moved[j] = moved[j - 1];
+      moved[j] = m;
+   }
    struct util_dynarray copies = UTIL_DYNARRAY_INIT;
-   for (unsigned reg = 0; reg < rctx->bound[RA_GPR]; ++reg) {
-      unsigned ssa = old_owner[reg];
-      if (ssa == ~0 || rctx->ssa_to_reg[ssa] == reg)
+   for (unsigned i = 0; i < rctx->nr_moved; ++i) {
+      unsigned ssa = moved[i].ssa, reg = moved[i].reg;
+      if (rctx->ssa_to_reg[ssa] == reg)
          continue;
       unsigned width = agx_size_align_16(rctx->sizes[ssa]);
       for (unsigned c = 0; c < rctx->ncomps_unrounded[ssa]; c += width) {
@@ -1583,10 +1654,12 @@ assign_constrained_operands(struct ra_ctx *rctx, agx_instr *I)
       struct agx_reg_constraint c = I->reg_constraints[I->nr_dests + s];
       if (c.min != c.max || c.max >= reserved_size(rctx->shader))
          continue;
-      unsigned old = 0;
-      while (old < rctx->bound[RA_GPR] && old_owner[old] != I->src[s].value)
-         ++old;
-      assert(old < rctx->bound[RA_GPR]);
+      unsigned old = rctx->ssa_to_reg[I->src[s].value];
+      for (unsigned i = 0; i < rctx->nr_moved; ++i) {
+         if (moved[i].ssa == I->src[s].value)
+            old = moved[i].reg;
+      }
+      assert(old >= reserved_size(rctx->shader) && old < rctx->bound[RA_GPR]);
       struct agx_copy copy = {
          .dest = c.min,
          .src = agx_register(old, I->src[s].size),
