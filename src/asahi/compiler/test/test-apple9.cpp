@@ -10363,11 +10363,14 @@ TEST(Apple9Compiler, MultisampleOutputLoopsOnlyForDestinationDependentResults)
 
 TEST(Apple9Compiler, OmittedAndDisabledTargetsPreserveEarlierFragments)
 {
-   for (unsigned variant = 0; variant < 4; ++variant) {
+   /* 0: rt0 not written; 1: rt1 colormask 0; 2: all written; 3: rt0 unused
+    * by the pipeline but bound, so it keeps earlier draws' values; 4: rt0
+    * unused with no attachment, which needs nothing. */
+   for (unsigned variant = 0; variant < 5; ++variant) {
       nir_builder b = nir_builder_init_simple_shader(
          MESA_SHADER_FRAGMENT, &agx_nir_options, "attachment_preservation");
       for (unsigned rt = 0; rt < 2; ++rt) {
-         if (rt == 0 && (variant == 0 || variant == 3))
+         if (rt == 0 && (variant == 0 || variant >= 3))
             continue;
          nir_store_output(&b, nir_imm_vec4(&b, .25, .5, .75, 1),
             nir_imm_int(&b, 0), .write_mask = 15, .src_type = nir_type_float32,
@@ -10384,13 +10387,16 @@ TEST(Apple9Compiler, OmittedAndDisabledTargetsPreserveEarlierFragments)
       }
       if (variant == 1)
          blend[1].colormask = 0;
-      if (variant == 3)
+      if (variant >= 3)
          blend[0].color_attachment_unused = true;
+      if (variant == 4)
+         blend[0].format = PIPE_FORMAT_NONE;
       agx_shader_part compiled = {};
       const char *reason = nullptr;
       ASSERT_TRUE(agx_compile_apple9_fragment_mrt(b.shader, nullptr, blend, 2,
                                                 &compiled, &reason)) << reason;
-      EXPECT_EQ(compiled.info.apple9_reads_tile, variant < 2) << variant;
+      EXPECT_EQ(compiled.info.apple9_reads_tile, variant < 2 || variant == 3)
+         << variant;
       free(compiled.binary);
       ralloc_free(b.shader);
    }
