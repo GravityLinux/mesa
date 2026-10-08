@@ -35,6 +35,10 @@ bool agx_nir_hoist_apple9_derivative_sources(nir_shader *shader);
  * word rather than the original floating-point LOD or integer fetch level. */
 bool agx_nir_lower_apple9_texture_lod(nir_shader *shader);
 
+/* agx_compile_apple9_tiny's reason when a compute program has no observable
+ * effect; the caller may run nothing for it instead of failing. */
+extern const char agx_apple9_compute_without_effects[];
+
 /*
  * Compile compute NIR through Apple9's semantic instruction selection and
  * register allocator. Arithmetic, memory operations, and structured control

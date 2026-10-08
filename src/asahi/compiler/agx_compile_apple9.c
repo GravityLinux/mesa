@@ -34,6 +34,11 @@ struct apple9_emitter {
    unsigned instructions;
 };
 
+/* The backend proved a compute program has no observable effect: callers
+ * may run nothing for it instead of failing the pipeline. */
+const char agx_apple9_compute_without_effects[] =
+   "Apple9 compute program has no stores or other side effects";
+
 static bool
 apple9_emit_packed(struct apple9_emitter *emitter,
                    const struct agx_apple9_packed_instruction *packed);
@@ -3180,7 +3185,7 @@ apple9_collect_buffer_map(nir_shader *nir, struct apple9_buffer_map *map,
    for (unsigned i = 0; i < map->count; ++i)
       has_store |= map->resource[i].write;
    if (!has_store && nir->info.stage == MESA_SHADER_COMPUTE) {
-      *reason = "Apple9 buffer compiler requires at least one SSBO store";
+      *reason = agx_apple9_compute_without_effects;
       return false;
    }
 
