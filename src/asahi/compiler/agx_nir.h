@@ -25,7 +25,8 @@ bool agx_nir_lower_subgroups(struct nir_shader *s);
 bool agx_nir_lower_fminmax(struct nir_shader *s);
 bool agx_nir_lower_accurate_frcp(struct nir_shader *s);
 
-bool agx_nir_lower_texture_early(struct nir_shader *s, bool support_lod_bias);
+bool agx_nir_lower_texture_early(struct nir_shader *s, bool support_lod_bias,
+                                 bool software_buffer_bounds);
 bool agx_nir_lower_texture(struct nir_shader *s);
 bool agx_nir_lower_images(struct nir_shader *s);
 bool agx_nir_lower_texture_queries(struct nir_shader *s);

@@ -615,7 +615,7 @@ lower_images(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
  * cheap robustness2.
  */
 static bool
-lower_robustness(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
+lower_robustness(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
    b->cursor = nir_before_instr(&intr->instr);
 
@@ -663,9 +663,16 @@ lower_robustness(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
     * This ensures the resulting hardware coordinate is definitely
     * out-of-bounds, giving hardware-level robustness2 behaviour.
     */
+   /* A buffer coordinate indexes elements, and a view can have more than
+    * 0xFFF0 of them. Where buffer images are bounds-checked in software
+    * against the element count, as on Apple9, use the largest index instead.
+    */
+   const bool *software_buffer_bounds = data;
    unsigned c = size_components - 1;
+   unsigned oob_coord =
+      dim == GLSL_SAMPLER_DIM_BUF && *software_buffer_bounds ? 0xFFFFFFFF : 0xFFF0;
    nir_def *r =
-      nir_bcsel(b, oob, nir_imm_int(b, 0xFFF0), nir_channel(b, coord, c));
+      nir_bcsel(b, oob, nir_imm_int(b, oob_coord), nir_channel(b, coord, c));
 
    nir_src_rewrite(&intr->src[1], nir_vector_insert_imm(b, coord, r, c));
    return true;
@@ -679,12 +686,13 @@ lower_robustness(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
  * the full agx_nir_lower_texture.
  */
 bool
-agx_nir_lower_texture_early(nir_shader *s, bool support_lod_bias)
+agx_nir_lower_texture_early(nir_shader *s, bool support_lod_bias,
+                            bool software_buffer_bounds)
 {
    bool progress = false;
 
    NIR_PASS(progress, s, nir_shader_intrinsics_pass, lower_robustness,
-            nir_metadata_control_flow, NULL);
+            nir_metadata_control_flow, &software_buffer_bounds);
 
    nir_lower_tex_options lower_tex_options = {
       .lower_txp = ~0,
