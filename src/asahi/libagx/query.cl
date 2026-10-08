@@ -146,6 +146,16 @@ libagx_add_u32s(constant struct libagx_imm_write *p, uint32_t count)
       *(p[i].address) += p[i].value;
 }
 
+/* Occlusion segment counters, added in order by one thread since several
+ * entries may name the same query. */
+KERNEL(1)
+libagx_accumulate_occlusion(constant struct libagx_occlusion_accum *p,
+                            uint32_t count)
+{
+   for (uint i = 0; i < count; ++i)
+      *(p[i].dst) += *(p[i].src);
+}
+
 /*
  * We set the source as volatile since the caching situation around timestamps
  * is a bit unclear. It might not be necessary but - absent hardware/firmware

@@ -88,6 +88,7 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd)
    util_dynarray_clear(&cmd->large_bos);
    util_dynarray_clear(&cmd->query_adds);
    util_dynarray_clear(&cmd->query_writes);
+   util_dynarray_clear(&cmd->occlusion_accum);
    util_dynarray_clear(&cmd->sync_events);
    util_dynarray_clear(&cmd->sync_remap);
 }
@@ -130,6 +131,7 @@ hk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
    util_dynarray_fini(&cmd->large_bos);
    util_dynarray_fini(&cmd->query_adds);
    util_dynarray_fini(&cmd->query_writes);
+   util_dynarray_fini(&cmd->occlusion_accum);
    util_dynarray_fini(&cmd->sync_events);
    util_dynarray_fini(&cmd->sync_remap);
    vk_command_buffer_finish(&cmd->vk);
@@ -166,6 +168,7 @@ hk_create_cmd_buffer(struct vk_command_pool *vk_pool,
    cmd->large_bos = UTIL_DYNARRAY_INIT;
    cmd->query_adds = UTIL_DYNARRAY_INIT;
    cmd->query_writes = UTIL_DYNARRAY_INIT;
+   cmd->occlusion_accum = UTIL_DYNARRAY_INIT;
    cmd->sync_events = UTIL_DYNARRAY_INIT;
    cmd->sync_remap = UTIL_DYNARRAY_INIT;
 
@@ -1094,7 +1097,12 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    uint8_t *map = cs->current;
 
    cs->tib = render->tilebuffer;
-   cs->occlusion_base = cmd->state.gfx.occlusion.base;
+   /* Segment slots are per control stream; active queries continue in a new
+    * segment here. */
+   cs->occlusion_base = 0;
+   cs->occlusion_segments = 0;
+   if (cmd->state.gfx.occlusion.active_count)
+      cmd->state.gfx.occlusion.segment_dirty = true;
 
    /* Assume this is not the first control stream of the render pass, so
     * initially use the partial background/EOT program and ZLS control.

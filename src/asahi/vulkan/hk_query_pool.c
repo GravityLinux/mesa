@@ -177,6 +177,21 @@ hk_queue_write(struct hk_cmd_buffer *cmd, uint64_t address, uint32_t value,
 void
 hk_flush_query_writes(struct hk_cmd_buffer *cmd)
 {
+   unsigned accums = util_dynarray_num_elements(&cmd->occlusion_accum,
+                                                struct libagx_occlusion_accum);
+   if (accums) {
+      struct hk_cs *cs =
+         hk_cmd_buffer_get_cs_general(cmd, &cmd->current_cs.cs, true, HK_SYNC_ALL);
+      if (cs) {
+         /* The segments were written by rendering that has to complete. */
+         hk_cdm_cache_flush(hk_cmd_buffer_device(cmd), cs);
+         uint64_t params = hk_pool_upload(cmd, cmd->occlusion_accum.data,
+                                          cmd->occlusion_accum.size, 16);
+         libagx_accumulate_occlusion(cmd, agx_1d(1), AGX_BARRIER_ALL, params,
+                                     accums);
+      }
+   }
+
    unsigned adds =
       util_dynarray_num_elements(&cmd->query_adds, struct libagx_imm_write);
    unsigned writes =
@@ -201,8 +216,72 @@ hk_flush_query_writes(struct hk_cmd_buffer *cmd)
       }
    }
 
+   util_dynarray_clear(&cmd->occlusion_accum);
    util_dynarray_clear(&cmd->query_adds);
    util_dynarray_clear(&cmd->query_writes);
+}
+
+/* Select the visibility slot for the next draw. Each control stream counts
+ * into its own segment slots; a segment is added into every occlusion query
+ * that was active while it counted when the queries are next observed. A
+ * counting segment also serves non-precise queries, which only need a nonzero
+ * result. Returns the control stream, which changes if this one ran out of
+ * segment slots.
+ */
+struct hk_cs *
+hk_occlusion_prepare_draw(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+
+   if (gfx->occlusion.segment_dirty) {
+      gfx->occlusion.segment_dirty = false;
+      gfx->occlusion.segment_mode = AGX_VISIBILITY_MODE_NONE;
+
+      if (gfx->occlusion.active_count) {
+         if (cs->occlusion_segments == HK_OCCLUSION_SEGMENTS) {
+            perf_debug(cmd, "Splitting control stream for occlusion segments");
+            hk_cmd_buffer_end_graphics(cmd);
+            cs = hk_cmd_buffer_get_cs(cmd, false /* compute */);
+            if (!cs)
+               return NULL;
+            gfx->occlusion.segment_dirty = false;
+         }
+
+         if (!cs->occlusion_base) {
+            size_t size = HK_OCCLUSION_SEGMENTS * sizeof(uint64_t);
+            struct agx_ptr slots = hk_pool_alloc(cmd, size, 64);
+            if (!slots.cpu)
+               return cs;
+            memset(slots.cpu, 0, size);
+            cs->occlusion_base = slots.gpu;
+         }
+
+         unsigned segment = cs->occlusion_segments++;
+         bool precise = false;
+         for (unsigned i = 0; i < gfx->occlusion.active_count; ++i) {
+            struct libagx_occlusion_accum accum = {
+               .src = cs->occlusion_base + segment * sizeof(uint64_t),
+               .dst = gfx->occlusion.active[i].report,
+            };
+            util_dynarray_append(&cmd->occlusion_accum, accum);
+            precise |= gfx->occlusion.active[i].precise;
+         }
+
+         gfx->occlusion.index = segment;
+         gfx->occlusion.segment_mode = precise ? AGX_VISIBILITY_MODE_COUNTING
+                                               : AGX_VISIBILITY_MODE_BOOLEAN;
+         gfx->dirty |= HK_DIRTY_OCCLUSION;
+      }
+   }
+
+   enum agx_visibility_mode mode =
+      gfx->occlusion.paused ? AGX_VISIBILITY_MODE_NONE
+                            : gfx->occlusion.segment_mode;
+   if (mode != gfx->occlusion.mode) {
+      gfx->occlusion.mode = mode;
+      gfx->dirty |= HK_DIRTY_OCCLUSION;
+   }
+   return cs;
 }
 
 static void
@@ -444,37 +523,29 @@ hk_cmd_begin_end_query(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
    switch (pool->vk.query_type) {
    case VK_QUERY_TYPE_OCCLUSION: {
       assert(query < pool->vk.query_count);
+      struct hk_graphics_state *gfx = &cmd->state.gfx;
+      uint64_t report = hk_query_report_addr(pool, query);
 
       if (end) {
-         cmd->state.gfx.occlusion.mode = AGX_VISIBILITY_MODE_NONE;
+         for (unsigned i = 0; i < gfx->occlusion.active_count; ++i) {
+            if (gfx->occlusion.active[i].report == report) {
+               gfx->occlusion.active[i] =
+                  gfx->occlusion.active[--gfx->occlusion.active_count];
+               break;
+            }
+         }
       } else {
-         cmd->state.gfx.occlusion.mode = flags & VK_QUERY_CONTROL_PRECISE_BIT
-                                            ? AGX_VISIBILITY_MODE_COUNTING
-                                            : AGX_VISIBILITY_MODE_BOOLEAN;
-      }
-
-      /* The hardware index is relative to the render command's visibility
-       * buffer. Keep each pool independent, and window larger pools through
-       * that base instead of reserving device-global hardware slots.
-       */
-      unsigned window = query / AGX_MAX_OCCLUSION_QUERIES;
-      uint64_t base = hk_query_report_addr(
-         pool, window * AGX_MAX_OCCLUSION_QUERIES);
-      struct hk_cs *cs = cmd->current_cs.gfx;
-      if (!end && cs) {
-         if (cs->occlusion_base && cs->occlusion_base != base) {
-            /* A hardware render command has only one visibility base.
-             * Resume with load/store state when changing pools or windows.
-             */
-            hk_cmd_buffer_end_graphics(cmd);
-         } else {
-            cs->occlusion_base = base;
+         assert(gfx->occlusion.active_count < HK_MAX_ACTIVE_OCCLUSION_QUERIES);
+         if (gfx->occlusion.active_count < HK_MAX_ACTIVE_OCCLUSION_QUERIES) {
+            unsigned i = gfx->occlusion.active_count++;
+            gfx->occlusion.active[i].report = report;
+            gfx->occlusion.active[i].precise =
+               flags & VK_QUERY_CONTROL_PRECISE_BIT;
          }
       }
 
-      cmd->state.gfx.occlusion.base = base;
-      cmd->state.gfx.occlusion.index = query % AGX_MAX_OCCLUSION_QUERIES;
-      cmd->state.gfx.dirty |= HK_DIRTY_OCCLUSION;
+      /* Draws after this count into a new segment of the active set. */
+      gfx->occlusion.segment_dirty = true;
       graphics = true;
       break;
    }

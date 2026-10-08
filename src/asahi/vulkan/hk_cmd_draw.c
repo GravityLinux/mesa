@@ -3880,6 +3880,10 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       }
    }
 
+   cs = hk_occlusion_prepare_draw(cmd, cs);
+   if (!cs)
+      return NULL;
+
    hk_ensure_cs_has_space(cmd, cs, 0x2000 /* TODO */);
 
 #ifndef NDEBUG
