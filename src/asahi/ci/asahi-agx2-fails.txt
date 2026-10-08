@@ -1,6 +1,11 @@
 # In current VKCTS 1.4.4.0
 dEQP-VK.reconvergence.terminate_invocation.bit_count,Fail
 
+# CTS bug since VK-GL-CTS 3b3ec6e55051: the Workgroup array became an explicitly
+# laid out Block, so SPV_KHR_workgroup_memory_explicit_layout's OpPtrAccessChain
+# rule applies the test's ArrayStride 8, which the test expects to be ignored.
+dEQP-VK.spirv_assembly.instruction.compute.ptr_access_chain.workgroup_bad_stride,Fail
+
 dEQP-VK.sparse_resources.buffer.misc.null_address_read,Fail
 dEQP-VK.sparse_resources.buffer.misc.null_address_read_descriptors,Fail
 dEQP-VK.sparse_resources.buffer.misc.null_address_read_local_inv_idx,Fail
