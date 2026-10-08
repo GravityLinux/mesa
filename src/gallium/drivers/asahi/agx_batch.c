@@ -263,7 +263,7 @@ agx_batch_cleanup(struct agx_context *ctx, struct agx_batch *batch, bool reset)
          agx_bo_unreference(dev, agx_lookup_bo(dev, handle));
       }
    } else {
-      if (!ctx->any_faults) {
+      if (ctx->check_fence_errors && !ctx->any_faults) {
          int err = agx_syncobj_error(dev, batch->syncobj);
          if (err < 0) {
             mesa_loge("asahi: GPU work of this context failed (%s); context lost",

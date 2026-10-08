@@ -767,6 +767,9 @@ struct agx_context {
    /* Reset status to report: guilty if our own work faulted, unknown if
     * the kernel refused our submission (device lost). */
    bool faults_guilty;
+   /* Created with PIPE_CONTEXT_LOSE_CONTEXT_ON_RESET: check each completed
+    * batch's fence error. Other contexts skip that per-batch query. */
+   bool check_fence_errors;
 
    uint32_t syncobj;
    uint32_t dummy_syncobj;

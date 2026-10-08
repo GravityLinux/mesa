@@ -2002,6 +2002,10 @@ agx_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    if (!ctx)
       return NULL;
 
+   /* Robust (lose-context-on-reset) contexts poll for failed GPU work; other
+    * contexts only learn about failures from rejected submissions. */
+   ctx->check_fence_errors = flags & PIPE_CONTEXT_LOSE_CONTEXT_ON_RESET;
+
    pctx->screen = screen;
    pctx->priv = priv;
 
