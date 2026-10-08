@@ -1826,6 +1826,10 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
    if (result != VK_SUCCESS)
       goto fail_agx_device;
 
+   /* Set by driconf for vkd3d-proton, see hk_apple9_arrayed_2d_views. */
+   pdev->apple9_layered_2d = pdev->dev.chip == AGX_CHIP_G16G &&
+      instance->drirc.misc.apple9_arrayed_2d_views;
+
    hk_physical_device_init_pipeline_cache(pdev);
 
    const char *hk_sysmem = os_get_option("HK_SYSMEM");

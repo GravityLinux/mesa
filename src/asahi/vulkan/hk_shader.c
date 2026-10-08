@@ -111,7 +111,7 @@ uint64_t
 hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
 {
    /* This could be optimized but it doesn't matter */
-   return pdev->dev.debug;
+   return pdev->dev.debug | ((uint64_t)pdev->apple9_layered_2d << 63);
 }
 
 const nir_shader_compiler_options *
@@ -2494,11 +2494,12 @@ hk_lower_per_primitive_input(nir_builder *b, nir_intrinsic_instr *intr,
    return true;
 }
 
-/* Sampled 1D and 2D views are one-layer 2D arrays on Apple9 (see
- * pack_texture), since its texture instructions must match the descriptor's
- * arrayness. Sample every non-array 2D texture, 1D having been lowered to 2D,
- * as layer 0 of an array. Layer 0 of a one-layer view is the view itself, and
- * an array declaration bound to a 2D view now honours its layer and level.
+/* With hk_apple9_arrayed_2d_views (driconf, set for vkd3d-proton), sampled
+ * 1D and 2D views are one-layer 2D arrays on Apple9 (see pack_texture), since
+ * its texture instructions must match the descriptor's arrayness. Sample
+ * every non-array 2D texture, 1D having been lowered to 2D, as layer 0 of an
+ * array. Layer 0 of a one-layer view is the view itself, and an array
+ * declaration bound to a 2D view now honours its layer and level.
  */
 static bool
 hk_apple9_lower_tex_2d_as_array(nir_builder *b, nir_tex_instr *tex, void *data)
@@ -2594,7 +2595,7 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
     * create lod_bias instructions.
     */
    NIR_PASS(_, nir, agx_nir_lower_texture_early, true /* support_lod_bias */);
-   if (dev->dev.chip == AGX_CHIP_G16G)
+   if (hk_device_physical(dev)->apple9_layered_2d)
       NIR_PASS(_, nir, nir_shader_tex_pass, hk_apple9_lower_tex_2d_as_array,
                nir_metadata_control_flow, NULL);
 

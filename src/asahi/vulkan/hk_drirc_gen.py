@@ -30,6 +30,9 @@ def declare_options():
         B("hk_enable_vertex_pipeline_stores_atomics", False,
           "Enable vertexPipelineStoresAndAtomics",
           c_name="enable_vertex_pipeline_stores_atomics"),
+        B("hk_apple9_arrayed_2d_views", False,
+          "Apple9: sample 1D/2D views as one-layer arrays, so 2D and array declarations can share views (breaks unnormalized coordinates)",
+          c_name="apple9_arrayed_2d_views"),
     ]
 
     debug_options = []
