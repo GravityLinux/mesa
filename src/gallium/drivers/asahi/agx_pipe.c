@@ -1948,8 +1948,7 @@ asahi_get_device_reset_status(struct pipe_context *pipe)
 
    if (!ctx->any_faults)
       return PIPE_NO_RESET;
-   return ctx->faults_guilty ? PIPE_GUILTY_CONTEXT_RESET
-                             : PIPE_UNKNOWN_CONTEXT_RESET;
+   return ctx->reset_status;
 }
 
 static void

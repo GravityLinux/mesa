@@ -269,7 +269,8 @@ agx_batch_cleanup(struct agx_context *ctx, struct agx_batch *batch, bool reset)
             mesa_loge("asahi: GPU work of this context failed (%s); context lost",
                       strerror(-err));
             ctx->any_faults = true;
-            ctx->faults_guilty = true;
+            ctx->reset_status = err == -ECANCELED ? PIPE_INNOCENT_CONTEXT_RESET
+                                                  : PIPE_GUILTY_CONTEXT_RESET;
          }
       }
 
@@ -1030,8 +1031,10 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
                  sret, tret);
          abort();
       }
-      if (!ctx->any_faults)
+      if (!ctx->any_faults) {
          mesa_loge("asahi: submission rejected; context lost");
+         ctx->reset_status = PIPE_UNKNOWN_CONTEXT_RESET;
+      }
       ctx->any_faults = true;
    }
 
