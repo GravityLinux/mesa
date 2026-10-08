@@ -1071,6 +1071,25 @@ build_buffer_to_image_fs(const struct vk_meta_device *meta,
 
    coords = nir_isub(b, coords, img_offs);
 
+   /* Fragments outside the copied rectangle still run, as helper lanes of
+    * quads straddling its edges, and their loads are issued. Left of or above
+    * the rectangle the 32-bit buffer offset wraps, so the zero-extended
+    * address lands 4 GiB past the buffer. Point those lanes at the first
+    * texel of the region instead; their results are never written. The
+    * unsigned compare against the extent catches both edges.
+    */
+   nir_def *in_rect = nir_iand(b,
+      nir_ult(b, nir_channel(b, coords, 0),
+              load_info(b, struct vk_meta_copy_buffer_image_info,
+                        copy_id_range.end.x)),
+      nir_ult(b, nir_channel(b, coords, 1),
+              load_info(b, struct vk_meta_copy_buffer_image_info,
+                        copy_id_range.end.y)));
+   coords = nir_vec3(b,
+      nir_bcsel(b, in_rect, nir_channel(b, coords, 0), nir_imm_int(b, 0)),
+      nir_bcsel(b, in_rect, nir_channel(b, coords, 1), nir_imm_int(b, 0)),
+      nir_channel(b, coords, 2));
+
    nir_def *texel = nir_load_global(b,
       comp_count, comp_sz, copy_img_buf_addr(b, buf_pfmt, coords),
       .align_mul = 1 << (ffs(blk_sz) - 1));
@@ -1242,6 +1261,14 @@ copy_buffer_image_prepare_gfx_push_const(
          .y = region->imageOffset.y,
          /* See the commnet in build_buffer_to_image_fs for why this is zero */
          .z = 0,
+      },
+      /* The fragment shader keeps lanes outside this rectangle in bounds.
+       * 1D arrays carry the layer in the second coordinate.
+       */
+      .copy_id_range.end = {
+         .x = region->imageExtent.width,
+         .y = key->img.view.type == VK_IMAGE_VIEW_TYPE_1D_ARRAY
+                 ? UINT32_MAX : region->imageExtent.height,
       },
    };
 
