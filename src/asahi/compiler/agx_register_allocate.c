@@ -291,6 +291,12 @@ struct ra_ctx {
 
    /* Operand placements committed for the current constrained instruction. */
    BITSET_WORD *pinned;
+   /* While a constrained instruction is placed: the original register of
+    * each value live before it that has since moved, in first-move order. */
+   struct ra_move {
+      unsigned ssa, reg;
+   } *moved;
+   unsigned nr_moved;
 
    /* Registers of the current instruction's dying sources that its
     * destination may take over, and the sources it took over. */
@@ -951,6 +957,20 @@ set_ssa_to_reg(struct ra_ctx *rctx, unsigned ssa, unsigned reg)
    enum ra_class cls = rctx->classes[ssa];
    *(rctx->count[cls]) = MAX2(*(rctx->count[cls]), reg + rctx->ncomps[ssa]);
 
+   if (rctx->moved && cls == RA_GPR) {
+      /* Log values live before the instruction (not its destinations)
+       * above the reserved prefix, the values copied back afterwards. */
+      bool record = rctx->ssa_to_reg[ssa] >= reserved_size(rctx->shader);
+      agx_foreach_ssa_dest(rctx->instr, d)
+         record &= rctx->instr->dest[d].value != ssa;
+      for (unsigned i = 0; record && i < rctx->nr_moved; ++i)
+         record = rctx->moved[i].ssa != ssa;
+      if (record) {
+         assert(rctx->nr_moved < AGX_NUM_REGS);
+         rctx->moved[rctx->nr_moved++] =
+            (struct ra_move){ssa, rctx->ssa_to_reg[ssa]};
+      }
+   }
    rctx->ssa_to_reg[ssa] = reg;
    rctx->last_reg[ssa] = reg;
    rctx->affinity_ssa = ~0u;
@@ -1535,19 +1555,11 @@ assign_constrained_operands(struct ra_ctx *rctx, agx_instr *I)
 {
    BITSET_DECLARE(pinned, AGX_NUM_REGS) = {0};
    rctx->pinned = pinned;
-   unsigned old_owner[AGX_NUM_REGS];
-   for (unsigned reg = 0; reg < ARRAY_SIZE(old_owner); ++reg)
-      old_owner[reg] = ~0;
-   for (unsigned reg = reserved_size(rctx->shader);
-        reg < rctx->bound[RA_GPR];) {
-      if (!BITSET_TEST(rctx->used_regs[RA_GPR], reg)) {
-         ++reg;
-         continue;
-      }
-      unsigned ssa = rctx->reg_to_ssa[reg];
-      old_owner[reg] = ssa;
-      reg += rctx->ncomps[ssa];
-   }
+   /* Values usually stay put, so log the original register of those that
+    * move instead of recording every owner up front. */
+   struct ra_move moved[AGX_NUM_REGS];
+   rctx->moved = moved;
+   rctx->nr_moved = 0;
 
    agx_foreach_ssa_src(I, s) {
       struct agx_reg_constraint c = I->reg_constraints[I->nr_dests + s];
@@ -1574,8 +1586,10 @@ assign_constrained_operands(struct ra_ctx *rctx, agx_instr *I)
           c.max >= rctx->bound[RA_GPR] - rctx->ncomps[I->src[s].value] &&
           c.align <= rctx->ncomps[I->src[s].value])
          continue;
-      if (place_constrained_value(rctx, I->src[s], c, true) == ~0u)
+      if (place_constrained_value(rctx, I->src[s], c, true) == ~0u) {
+         rctx->moved = NULL;
          return false;
+      }
    }
    /* Sources dying here, other than destroyed or fixed-register copies,
     * whose tuple fits the destination's aligned window. */
@@ -1598,8 +1612,10 @@ assign_constrained_operands(struct ra_ctx *rctx, agx_instr *I)
    agx_foreach_ssa_dest(I, d) {
       unsigned reg =
          place_constrained_value(rctx, I->dest[d], I->reg_constraints[d], false);
-      if (reg == ~0u)
+      if (reg == ~0u) {
+         rctx->moved = NULL;
          return false;
+      }
       agx_foreach_ssa_src(I, s) {
          unsigned base = rctx->ssa_to_reg[I->src[s].value];
          if (reuse && I->src[s].kill && BITSET_TEST(reusable, base) &&
@@ -1610,11 +1626,20 @@ assign_constrained_operands(struct ra_ctx *rctx, agx_instr *I)
       }
    }
    rctx->reusable = NULL;
+   rctx->moved = NULL;
 
+   /* Copy moved values in order of their original registers. */
+   for (unsigned i = 1; i < rctx->nr_moved; ++i) {
+      struct ra_move m = moved[i];
+      unsigned j = i;
+      for (; j && moved[j - 1].reg > m.reg; --j)
+         moved[j] = moved[j - 1];
+      moved[j] = m;
+   }
    struct util_dynarray copies = UTIL_DYNARRAY_INIT;
-   for (unsigned reg = 0; reg < rctx->bound[RA_GPR]; ++reg) {
-      unsigned ssa = old_owner[reg];
-      if (ssa == ~0 || rctx->ssa_to_reg[ssa] == reg)
+   for (unsigned i = 0; i < rctx->nr_moved; ++i) {
+      unsigned ssa = moved[i].ssa, reg = moved[i].reg;
+      if (rctx->ssa_to_reg[ssa] == reg)
          continue;
       unsigned width = agx_size_align_16(rctx->sizes[ssa]);
       for (unsigned c = 0; c < rctx->ncomps_unrounded[ssa]; c += width) {
@@ -1629,10 +1654,12 @@ assign_constrained_operands(struct ra_ctx *rctx, agx_instr *I)
       struct agx_reg_constraint c = I->reg_constraints[I->nr_dests + s];
       if (c.min != c.max || c.max >= reserved_size(rctx->shader))
          continue;
-      unsigned old = 0;
-      while (old < rctx->bound[RA_GPR] && old_owner[old] != I->src[s].value)
-         ++old;
-      assert(old < rctx->bound[RA_GPR]);
+      unsigned old = rctx->ssa_to_reg[I->src[s].value];
+      for (unsigned i = 0; i < rctx->nr_moved; ++i) {
+         if (moved[i].ssa == I->src[s].value)
+            old = moved[i].reg;
+      }
+      assert(old >= reserved_size(rctx->shader) && old < rctx->bound[RA_GPR]);
       struct agx_copy copy = {
          .dest = c.min,
          .src = agx_register(old, I->src[s].size),
