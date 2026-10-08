@@ -2494,6 +2494,46 @@ hk_lower_per_primitive_input(nir_builder *b, nir_intrinsic_instr *intr,
    return true;
 }
 
+/* Sampled 1D and 2D views are one-layer 2D arrays on Apple9 (see
+ * pack_texture), since its texture instructions must match the descriptor's
+ * arrayness. Sample every non-array 2D texture, 1D having been lowered to 2D,
+ * as layer 0 of an array. Layer 0 of a one-layer view is the view itself, and
+ * an array declaration bound to a 2D view now honours its layer and level.
+ */
+static bool
+hk_apple9_lower_tex_2d_as_array(nir_builder *b, nir_tex_instr *tex, void *data)
+{
+   if (tex->is_array || (tex->sampler_dim != GLSL_SAMPLER_DIM_2D &&
+                         tex->sampler_dim != GLSL_SAMPLER_DIM_MS))
+      return false;
+
+   b->cursor = nir_before_instr(&tex->instr);
+   int c = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+   if (c >= 0) {
+      nir_def *coord = tex->src[c].src.ssa;
+      nir_def *layer = nir_tex_instr_src_type(tex, c) == nir_type_float
+                          ? nir_imm_floatN_t(b, 0.0, coord->bit_size)
+                          : nir_imm_intN_t(b, 0, coord->bit_size);
+      nir_def *comps[NIR_MAX_VEC_COMPONENTS];
+      for (unsigned i = 0; i < coord->num_components; ++i)
+         comps[i] = nir_channel(b, coord, i);
+      comps[coord->num_components] = layer;
+      nir_src_rewrite(&tex->src[c].src, nir_vec(b, comps, coord->num_components + 1));
+      tex->coord_components++;
+   }
+   tex->is_array = true;
+
+   if (tex->op == nir_texop_txs) {
+      /* Array sizes report the layer count too; return the 2D size. */
+      unsigned old = tex->def.num_components;
+      tex->def.num_components++;
+      b->cursor = nir_after_instr(&tex->instr);
+      nir_def *size = nir_trim_vector(b, &tex->def, old);
+      nir_def_rewrite_uses_after(&tex->def, size);
+   }
+   return true;
+}
+
 static void
 hk_lower_nir(struct hk_device *dev, nir_shader *nir,
              const struct vk_pipeline_robustness_state *rs, bool is_multiview,
@@ -2554,6 +2594,9 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
     * create lod_bias instructions.
     */
    NIR_PASS(_, nir, agx_nir_lower_texture_early, true /* support_lod_bias */);
+   if (dev->dev.chip == AGX_CHIP_G16G)
+      NIR_PASS(_, nir, nir_shader_tex_pass, hk_apple9_lower_tex_2d_as_array,
+               nir_metadata_control_flow, NULL);
 
    struct hk_instance *instance = hk_physical_device_instance(
       (struct hk_physical_device *)dev->vk.physical);
