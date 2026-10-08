@@ -3438,8 +3438,16 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
       const char *reason = NULL;
       if (empty) {
          shader->b.info.stats.instrs = 1;
-      } else if (sw_stage != MESA_SHADER_COMPUTE ||
-          !agx_compile_apple9_tiny(nir, &shader->b, &shader->info.apple9, &reason)) {
+      } else if (sw_stage == MESA_SHADER_COMPUTE &&
+                 agx_compile_apple9_tiny(nir, &shader->b, &shader->info.apple9,
+                                         &reason)) {
+         /* Compiled. */
+      } else if (reason == agx_apple9_compute_without_effects) {
+         /* Optimization removed every store: there is nothing to run. */
+         memset(&shader->b, 0, sizeof(shader->b));
+         memset(&shader->info.apple9, 0, sizeof(shader->info.apple9));
+         shader->b.info.stats.instrs = 1;
+      } else {
          if (agx_get_compiler_debug())
             fprintf(stderr, "Apple9 compute compilation failed: %s\n",
                     reason ?: "unsupported stage");
