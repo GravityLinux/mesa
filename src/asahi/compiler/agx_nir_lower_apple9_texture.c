@@ -1,6 +1,7 @@
 /* Copyright 2026 The Asahi Linux Contributors
  * SPDX-License-Identifier: MIT
  */
+#include "agx_nir_texture.h"
 #include "compiler/nir/nir_builder.h"
 #include "gallium/include/pipe/p_defines.h"
 #include "agx_compile_apple9.h"
@@ -179,8 +180,10 @@ normalize_runtime_coordinates(nir_builder *b, nir_tex_instr *tex,
                               UNUSED void *data)
 {
    /* Unnormalized samplers are restricted to single-level 1D/2D views.
-    * The frontend has already expanded 1D to 2D with unit height. */
-   if (tex->sampler_dim != GLSL_SAMPLER_DIM_2D || tex->is_array ||
+    * The frontend has already expanded 1D to 2D with unit height, and may
+    * have rewritten 2D as layer 0 of a one-layer array. */
+   if (tex->sampler_dim != GLSL_SAMPLER_DIM_2D ||
+       (tex->is_array && !(tex->backend_flags & AGX_TEXTURE_FLAG_ARRAYED_2D)) ||
        nir_tex_instr_is_query(tex) || tex->op == nir_texop_txf)
       return false;
    int src = nir_tex_instr_src_index(tex, nir_tex_src_coord);
@@ -190,14 +193,15 @@ normalize_runtime_coordinates(nir_builder *b, nir_tex_instr *tex,
    nir_def *pixel =
       agx_apple9_sampler_field(b, tex, AGX_APPLE9_SAMP_PIXEL_COORDS);
    nir_def *coord = tex->src[src].src.ssa;
-   nir_def *normalized[2];
-   for (unsigned c = 0; c < 2; ++c)
-      normalized[c] =
-         nir_fdiv(b, nir_channel(b, coord, c),
-                  nir_u2f32(b, agx_apple9_texture_info(b, tex, c)));
+   nir_def *normalized[NIR_MAX_VEC_COMPONENTS];
+   for (unsigned c = 0; c < coord->num_components; ++c)
+      normalized[c] = c < 2 ? nir_fdiv(b, nir_channel(b, coord, c),
+                                       nir_u2f32(b, agx_apple9_texture_info(b, tex, c)))
+                            : nir_channel(b, coord, c);
    nir_src_rewrite(
       &tex->src[src].src,
-      nir_bcsel(b, nir_ine_imm(b, pixel, 0), nir_vec(b, normalized, 2), coord));
+      nir_bcsel(b, nir_ine_imm(b, pixel, 0),
+                nir_vec(b, normalized, coord->num_components), coord));
    return true;
 }
 

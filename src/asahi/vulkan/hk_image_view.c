@@ -261,6 +261,21 @@ pack_texture(struct hk_image_view *view, unsigned view_plane,
    agx_pack(out, TEXTURE, cfg) {
       cfg.dimension = translate_image_view_type(
          view->vk.view_type, view->vk.image->samples > 1, layers > 1, usage);
+      /* Apple9 texture instructions must match the descriptor's arrayness:
+       * a mismatch drops the layer and level coordinates. D3D12 binds 2D
+       * views to array declarations and the reverse, so with the
+       * hk_apple9_arrayed_2d_views driconf option sampled 1D/2D views are
+       * one-layer arrays, and hk_apple9_lower_tex_2d_as_array samples every
+       * 2D texture as one. */
+      struct hk_device *dev =
+         container_of(view->vk.base.device, struct hk_device, vk);
+      if (hk_device_physical(dev)->apple9_layered_2d &&
+          usage == HK_DESC_USAGE_SAMPLED) {
+         if (cfg.dimension == AGX_TEXTURE_DIMENSION_2D)
+            cfg.dimension = AGX_TEXTURE_DIMENSION_2D_ARRAY;
+         else if (cfg.dimension == AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED)
+            cfg.dimension = AGX_TEXTURE_DIMENSION_2D_ARRAY_MULTISAMPLED;
+      }
       cfg.layout = agx_translate_layout(layout->tiling);
       cfg.channels = ail_pixel_format[p_format].channels;
       cfg.type = ail_pixel_format[p_format].type;

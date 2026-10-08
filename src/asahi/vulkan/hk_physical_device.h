@@ -33,6 +33,11 @@ extern uint64_t hk_process_heap_used[VK_MAX_MEMORY_HEAPS];
 
 struct hk_physical_device {
    struct vk_physical_device vk;
+
+   /* Apple9 with hk_apple9_arrayed_2d_views (driconf, vkd3d-proton): sampled
+    * 1D/2D views are one-layer arrays and 2D textures are sampled as arrays
+    * (see pack_texture). */
+   bool apple9_layered_2d;
    dev_t render_dev;
    int master_fd;
 
