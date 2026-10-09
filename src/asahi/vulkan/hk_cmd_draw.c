@@ -2173,8 +2173,6 @@ hk_apple9_launch_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
       grid_gs.count[0] = u_decomposed_prims_for_vertices(mode, draw.b.count[0]);
    }
 
-   hk_apple9_dispatch_prerast(cmd, vs, grid_vs, &bindings);
-
    /* Transform feedback and geometry statistics need the count and pre-GS
     * programs.
     */
@@ -2188,6 +2186,26 @@ hk_apple9_launch_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    for (unsigned i = 0; i < ARRAY_SIZE(gfx->pg_query); ++i)
       xfb_or_queries |= gfx->pg_query[i] || gfx->xfb_query[i];
 
+   /* Without transform feedback or queries, a small direct draw is just the
+    * VS and GS passes over its own allocations: record them into the first
+    * two batch lanes (as for tessellation) so consecutive draws overlap.
+    * HK_APPLE9_GS_BATCH=0 turns this off.
+    */
+   static int gs_batch_env = -1;
+   if (gs_batch_env < 0) {
+      const char *env = getenv("HK_APPLE9_GS_BATCH");
+      gs_batch_env = !env || strcmp(env, "0") != 0;
+   }
+   const unsigned max_batch_prims = 2048;
+   bool batch = gs_batch_env && !agx_is_indirect(draw.b) && !xfb_or_queries &&
+                grid_gs.count[0] * grid_gs.count[1] <= max_batch_prims;
+   if (!batch)
+      hk_tess_batch_flush(cmd);
+
+   cmd->tess_batch.capture = batch ? &cmd->tess_batch.lane[0] : NULL;
+   hk_apple9_dispatch_prerast(cmd, vs, grid_vs, &bindings);
+   cmd->tess_batch.capture = NULL;
+
    if (xfb_or_queries) {
       if (count->info.gs.count_words)
          hk_apple9_dispatch_prerast(cmd, count, grid_gs, &bindings);
@@ -2200,7 +2218,11 @@ hk_apple9_launch_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
       hk_apple9_dispatch_prerast(cmd, pre_gs, agx_1d(1), &bindings);
    }
 
+   cmd->tess_batch.capture = batch ? &cmd->tess_batch.lane[1] : NULL;
    hk_apple9_dispatch_prerast(cmd, main, grid_gs, &bindings);
+   cmd->tess_batch.capture = NULL;
+   if (batch)
+      cmd->tess_batch.draws++;
 
    if (poly_gs_indexed(count->info.gs.shape)) {
       enum agx_index_size index_size =
