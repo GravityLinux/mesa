@@ -475,6 +475,159 @@ hk_apple9_lower_api_vertex_order(nir_shader *nir)
    return nir_progress(progress, nir_shader_get_entrypoint(nir), nir_metadata_control_flow);
 }
 
+/* Per-vertex inputs are read as flat copies: the stage feeding the
+ * rasterizer writes the values of the primitive's three API vertices to every
+ * vertex. Flat varyings keep the provoking vertex's values when the
+ * rasterizer clips at its guard band, so this is exact for clipped
+ * primitives, where the raw-vertex coefficients hold the clipper's vertices.
+ * Likewise the hardware barycentrics are relative to the clipped piece, so
+ * barycentrics interpolate one-hot weights of the API vertices instead. The
+ * copies take three consecutive VAR slots and the weights one VAR slot per
+ * interpolation mode, which neither the producer writes nor the fragment
+ * shader reads.
+ */
+static bool
+hk_is_barycentric_coord(nir_intrinsic_op op)
+{
+   return op == nir_intrinsic_load_barycentric_coord_pixel ||
+          op == nir_intrinsic_load_barycentric_coord_centroid ||
+          op == nir_intrinsic_load_barycentric_coord_sample ||
+          op == nir_intrinsic_load_barycentric_coord_at_sample ||
+          op == nir_intrinsic_load_barycentric_coord_at_offset;
+}
+
+static nir_def *
+hk_barycentric_for_coord(nir_builder *b, nir_intrinsic_instr *intr)
+{
+   enum glsl_interp_mode mode = nir_intrinsic_interp_mode(intr);
+   switch (intr->intrinsic) {
+   case nir_intrinsic_load_barycentric_coord_pixel:
+      return nir_load_barycentric_pixel(b, 32, .interp_mode = mode);
+   case nir_intrinsic_load_barycentric_coord_centroid:
+      return nir_load_barycentric_centroid(b, 32, .interp_mode = mode);
+   case nir_intrinsic_load_barycentric_coord_sample:
+      return nir_load_barycentric_sample(b, 32, .interp_mode = mode);
+   case nir_intrinsic_load_barycentric_coord_at_sample:
+      return nir_load_barycentric_at_sample(b, 32, intr->src[0].ssa,
+                                            .interp_mode = mode);
+   case nir_intrinsic_load_barycentric_coord_at_offset:
+      return nir_load_barycentric_at_offset(b, 32, intr->src[0].ssa,
+                                            .interp_mode = mode);
+   default:
+      UNREACHABLE("not a barycentric coordinate");
+   }
+}
+
+static bool
+hk_apple9_lower_per_vertex_copies(nir_shader *fs, uint64_t producer_outputs,
+                                  struct hk_per_vertex_copies *map)
+{
+   memset(map, 0, sizeof(*map));
+   nir_function_impl *impl = nir_shader_get_entrypoint(fs);
+   uint64_t used = fs->info.inputs_read | producer_outputs;
+   bool bary[2] = {false, false};
+
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (hk_is_barycentric_coord(intr->intrinsic)) {
+            bary[nir_intrinsic_interp_mode(intr) ==
+                 INTERP_MODE_NOPERSPECTIVE] = true;
+            continue;
+         }
+         if (intr->intrinsic != nir_intrinsic_load_input_vertex)
+            continue;
+         if (!nir_src_is_const(intr->src[0]) || !nir_src_is_const(intr->src[1]))
+            return false;
+         unsigned location = nir_intrinsic_io_semantics(intr).location +
+                             nir_src_as_uint(intr->src[1]);
+         if (location < VARYING_SLOT_VAR0 || location >= VARYING_SLOT_VAR0 + 32)
+            return false;
+         uint8_t var = location - VARYING_SLOT_VAR0;
+         unsigned j;
+         for (j = 0; j < map->count && map->location[j] != var; ++j);
+         if (j == map->count) {
+            if (map->count == HK_MAX_PER_VERTEX_COPIES)
+               return false;
+            map->location[map->count++] = var;
+         }
+      }
+   }
+   if (!map->count && !bary[0] && !bary[1])
+      return false;
+
+   /* Allocate from the top of the VAR range. */
+   int next = 31;
+   for (unsigned j = 0; j < map->count; ++j) {
+      while (next >= 2 &&
+             (used & BITFIELD64_RANGE(VARYING_SLOT_VAR0 + next - 2, 3)))
+         --next;
+      if (next < 2)
+         return false;
+      map->copy_base[j] = next - 2;
+      used |= BITFIELD64_RANGE(VARYING_SLOT_VAR0 + next - 2, 3);
+      next -= 3;
+   }
+   for (unsigned m = 0; m < 2; ++m) {
+      if (!bary[m])
+         continue;
+      while (next >= 0 && (used & BITFIELD64_BIT(VARYING_SLOT_VAR0 + next)))
+         --next;
+      if (next < 0)
+         return false;
+      map->bary[m] = next + 1;
+      used |= BITFIELD64_BIT(VARYING_SLOT_VAR0 + next);
+      --next;
+   }
+
+   nir_builder b = nir_builder_create(impl);
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr_safe(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         b.cursor = nir_before_instr(&intr->instr);
+
+         if (hk_is_barycentric_coord(intr->intrinsic)) {
+            unsigned m = nir_intrinsic_interp_mode(intr) ==
+                         INTERP_MODE_NOPERSPECTIVE;
+            nir_def *weights = nir_load_interpolated_input(
+               &b, 3, 32, hk_barycentric_for_coord(&b, intr),
+               nir_imm_int(&b, 0), .dest_type = nir_type_float32,
+               .io_semantics = {
+                  .location = VARYING_SLOT_VAR0 + map->bary[m] - 1,
+                  .num_slots = 1,
+               });
+            nir_def_replace(&intr->def, weights);
+            continue;
+         }
+
+         if (intr->intrinsic != nir_intrinsic_load_input_vertex)
+            continue;
+         unsigned location = nir_intrinsic_io_semantics(intr).location +
+                             nir_src_as_uint(intr->src[1]);
+         unsigned j;
+         for (j = 0; map->location[j] != location - VARYING_SLOT_VAR0; ++j);
+         unsigned vertex = nir_src_as_uint(intr->src[0]);
+
+         nir_def *flat = nir_load_input(
+            &b, intr->def.num_components, intr->def.bit_size, nir_imm_int(&b, 0),
+            .component = nir_intrinsic_component(intr),
+            .dest_type = nir_intrinsic_dest_type(intr),
+            .io_semantics = {
+               .location = VARYING_SLOT_VAR0 + map->copy_base[j] + vertex,
+               .num_slots = 1,
+            });
+         nir_def_replace(&intr->def, flat);
+      }
+   }
+   nir_progress(true, impl, nir_metadata_control_flow);
+   nir_shader_gather_info(fs, impl);
+   return true;
+}
+
 static void
 hk_apple9_graphics_key(struct hk_apple9_graphics_key *key,
                        const struct vk_graphics_pipeline_state *state)
@@ -4254,6 +4407,7 @@ static VkResult
 hk_apple9_compile_mesh(struct hk_device *dev, nir_shader *nir,
                        const struct agx_apple9_vertex_layout *vertex,
                        bool clip_negative_one_to_one,
+                       const struct hk_per_vertex_copies *copies,
                        struct hk_api_shader *obj, const char **reason)
 {
    struct hk_shader *main = &obj->variants[HK_MESH_VARIANT_MAIN];
@@ -4267,7 +4421,7 @@ hk_apple9_compile_mesh(struct hk_device *dev, nir_shader *nir,
       variant->info.set_count = main->info.set_count;
    }
 
-   nir_shader *rast_nir = hk_nir_mesh_rast(nir, &info);
+   nir_shader *rast_nir = hk_nir_mesh_rast(nir, &info, copies);
 
    hk_nir_lower_mesh_main(nir, &info);
    nir->info.stage = MESA_SHADER_COMPUTE;
@@ -4350,6 +4504,32 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
       simple_mtx_lock(lock);
 
    memset(out, 0, count * sizeof(*out));
+
+   /* Per-vertex inputs are read as flat copies, written by the passthrough
+    * geometry shader of vertex-shader pipelines, or by the vertex shader
+    * rasterizing mesh records.
+    */
+   struct hk_per_vertex_copies per_vertex = {0};
+   bool copies_from_gs = false;
+   {
+      nir_shader *pre_nir = NULL, *fs_nir = NULL;
+      bool other = false;
+      for (unsigned i = 0; i < count; ++i) {
+         if (infos[i].stage == MESA_SHADER_VERTEX ||
+             infos[i].stage == MESA_SHADER_MESH)
+            pre_nir = infos[i].nir;
+         else if (infos[i].stage == MESA_SHADER_FRAGMENT)
+            fs_nir = infos[i].nir;
+         else if (infos[i].stage != MESA_SHADER_TASK)
+            other = true;
+      }
+      if (pre_nir && fs_nir && !other &&
+          hk_apple9_lower_per_vertex_copies(fs_nir,
+                                            pre_nir->info.outputs_written,
+                                            &per_vertex))
+         copies_from_gs = pre_nir->info.stage == MESA_SHADER_VERTEX;
+   }
+
    if (fs_interp) {
       key.vertex.outputs_flat = fs_interp[0];
       key.vertex.outputs_linear = fs_interp[1];
@@ -4469,13 +4649,14 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
                   }
                }
             }
-            /* Transform feedback is layered on a passthrough geometry
-             * shader, which consumes the software vertex shader.
+            /* Transform feedback and flat copies of per-vertex inputs are
+             * layered on a passthrough geometry shader, which consumes the
+             * software vertex shader.
              */
             if ((infos[i].next_stage_mask &
                  (VK_SHADER_STAGE_GEOMETRY_BIT |
                   VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT)) ||
-                nir->xfb_info) {
+                nir->xfb_info || hk_per_vertex_copies_used(&per_vertex)) {
                struct hk_shader *sw = &obj->variants[HK_VS_VARIANT_SW];
                sw->info.apple9_bindings = shader->info.apple9_bindings;
                sw->info.set_count = shader->info.set_count;
@@ -4530,8 +4711,8 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
             continue;
          } else if (stage == MESA_SHADER_MESH) {
             result = hk_apple9_compile_mesh(dev, nir, &key.vertex,
-                                            key.clip_negative_one_to_one, obj,
-                                            &reason);
+                                            key.clip_negative_one_to_one,
+                                            &per_vertex, obj, &reason);
             if (result != VK_SUCCESS)
                goto done;
             varyings = obj->variants[HK_MESH_VARIANT_RAST].b.info.apple9_varyings;
@@ -4539,6 +4720,15 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
          } else {
             shader->info.fs.interp.linear = key.vertex.outputs_linear;
             shader->info.fs.interp.flat = key.vertex.outputs_flat;
+            if (copies_from_gs) {
+               shader->info.fs.per_vertex_copies = per_vertex.count;
+               memcpy(shader->info.fs.per_vertex_bary, per_vertex.bary,
+                      sizeof(per_vertex.bary));
+            }
+            memcpy(shader->info.fs.per_vertex_location, per_vertex.location,
+                   sizeof(per_vertex.location));
+            memcpy(shader->info.fs.per_vertex_copy_base, per_vertex.copy_base,
+                   sizeof(per_vertex.copy_base));
             /* The statistics counter is the only memory write or wave-wide
              * operation of many shaders, but it runs only while a query is
              * active and counts correctly in merged waves. Keep triangle
@@ -4567,6 +4757,37 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
             }
             NIR_PASS(_, nir, hk_apple9_lower_api_vertex_order);
             hk_apple9_remap_fs_outputs(nir, key.color_map);
+            /* The passthrough geometry shader produces the flat copies, and
+             * per-vertex inputs read only through copies are not rasterized.
+             * The mesh rasterization shader's layout already has the copies.
+             */
+            for (unsigned j = 0; copies_from_gs && j < per_vertex.count; ++j) {
+               unsigned source = VARYING_SLOT_VAR0 + per_vertex.location[j];
+               if (!(nir->info.inputs_read & BITFIELD64_BIT(source)) &&
+                   varyings.mask[source]) {
+                  varyings.count -= util_bitcount(varyings.mask[source]);
+                  varyings.mask[source] = 0;
+                  varyings.group[source] = 0;
+               }
+            }
+            for (unsigned j = 0; copies_from_gs && j < per_vertex.count; ++j) {
+               for (unsigned k = 0; k < 3; ++k) {
+                  unsigned slot = VARYING_SLOT_VAR0 + per_vertex.copy_base[j] + k;
+                  if (!varyings.mask[slot]) {
+                     varyings.mask[slot] = 0xf;
+                     varyings.group[slot] = 1;
+                     varyings.count += 4;
+                  }
+               }
+            }
+            for (unsigned m = 0; copies_from_gs && m < 2; ++m) {
+               unsigned slot = VARYING_SLOT_VAR0 + per_vertex.bary[m] - 1;
+               if (per_vertex.bary[m] && !varyings.mask[slot]) {
+                  varyings.mask[slot] = 0x7;
+                  varyings.group[slot] = m ? 2 : 0;
+                  varyings.count += 3;
+               }
+            }
             if (!agx_compile_apple9_fragment_mrt(nir, &varyings, key.blend,
                                                  key.targets, &shader->b,
                                                  &reason)) {

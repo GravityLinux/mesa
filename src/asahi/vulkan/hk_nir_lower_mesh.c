@@ -481,7 +481,8 @@ hk_nir_lower_task_main(nir_shader *nir)
 
 /* The hardware vertex shader rasterizing mesh records. */
 nir_shader *
-hk_nir_mesh_rast(const nir_shader *mesh, const struct hk_mesh_info *info)
+hk_nir_mesh_rast(const nir_shader *mesh, const struct hk_mesh_info *info,
+                 const struct hk_per_vertex_copies *copies)
 {
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_VERTEX, &agx_nir_options, "%s rast",
@@ -581,6 +582,55 @@ hk_nir_mesh_rast(const nir_shader *mesh, const struct hk_mesh_info *info)
                        .src_type = integer ? nir_type_int32 : nir_type_float32,
                        .io_semantics.location = slot,
                        .io_semantics.num_slots = 1);
+   }
+
+   /* Every vertex of the primitive carries flat copies of the per-vertex
+    * fragment inputs of its corners, in API vertex order. Points and lines
+    * repeat their last vertex.
+    */
+   for (unsigned j = 0; copies && j < copies->count; ++j) {
+      unsigned slot = VARYING_SLOT_VAR0 + copies->location[j];
+      for (unsigned k = 0; k < 3; ++k) {
+         nir_def *value = nir_imm_zero(&b, 4, 32);
+         if (info->vertex_slots & BITFIELD64_BIT(slot)) {
+            nir_def *corner_index = nir_load_global(
+               &b, 1, 32,
+               nir_iadd_imm(&b,
+                            hk_mesh_slot(&b, info, group, true, p,
+                                         VARYING_SLOT_PRIMITIVE_INDICES, NULL),
+                            4 * MIN2(k, vpp - 1)),
+               .align_mul = 4);
+            corner_index = nir_umin_imm(&b, corner_index,
+                                        MAX2(info->max_vertices, 1) - 1);
+            value = nir_load_global(
+               &b, hk_mesh_slot_words(info, slot), 32,
+               hk_mesh_slot(&b, info, group, false, corner_index, slot, NULL),
+               .align_mul = 4);
+            value = nir_pad_vector_imm_int(&b, value, 0, 4);
+         }
+
+         unsigned copy = VARYING_SLOT_VAR0 + copies->copy_base[j] + k;
+         nir_store_output(&b, value, nir_imm_int(&b, 0), .write_mask = 0xf,
+                          .src_type = nir_type_float32,
+                          .io_semantics.location = copy,
+                          .io_semantics.num_slots = 1);
+         outputs |= BITFIELD64_BIT(copy);
+      }
+   }
+
+   /* Barycentrics interpolate one-hot weights of the API vertices. */
+   for (unsigned m = 0; copies && m < 2; ++m) {
+      if (!copies->bary[m])
+         continue;
+      unsigned slot = VARYING_SLOT_VAR0 + copies->bary[m] - 1;
+      nir_def *weights = nir_vec3(&b, nir_b2f32(&b, nir_ieq_imm(&b, corner, 0)),
+                                  nir_b2f32(&b, nir_ieq_imm(&b, corner, 1)),
+                                  nir_b2f32(&b, nir_ieq_imm(&b, corner, 2)));
+      nir_store_output(&b, weights, nir_imm_int(&b, 0), .write_mask = 0x7,
+                       .src_type = nir_type_float32,
+                       .io_semantics.location = slot,
+                       .io_semantics.num_slots = 1);
+      outputs |= BITFIELD64_BIT(slot);
    }
 
    if (memory) {

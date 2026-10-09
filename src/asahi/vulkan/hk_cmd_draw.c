@@ -1406,7 +1406,77 @@ hk_upload_tess_params(struct hk_cmd_buffer *cmd, struct poly_tess_params *out,
 struct hk_apple9_passthrough_suffix {
    uint64_t fs_interp[2];
    uint8_t components[64];
+   /* Flat copies of per-vertex inputs, as in the fragment shader's info. */
+   uint8_t per_vertex_copies;
+   uint8_t per_vertex_location[HK_MAX_PER_VERTEX_COPIES];
+   uint8_t per_vertex_copy_base[HK_MAX_PER_VERTEX_COPIES];
+   uint8_t per_vertex_bary[2];
+   uint8_t _pad[5];
 };
+
+/* Before every emitted vertex, write the per-vertex values of the input
+ * primitive's API vertices 0, 1 and 2 to their flat copies, and the emitted
+ * API vertex's one-hot barycentric weights. Points repeat their vertex and
+ * lines their second vertex. The passthrough GS emits API vertex i as its
+ * i-th vertex.
+ */
+static void
+hk_apple9_write_per_vertex_copies(nir_shader *s,
+                                  const struct hk_apple9_passthrough_suffix *suffix)
+{
+   enum mesa_prim prim = s->info.gs.input_primitive;
+   unsigned start = prim == MESA_PRIM_LINES_ADJACENCY ? 1 : 0;
+   unsigned step = prim == MESA_PRIM_TRIANGLES_ADJACENCY ? 2 : 1;
+   unsigned vertices = mesa_vertices_per_prim(u_decomposed_prim(u_reduced_prim(prim)));
+   nir_function_impl *impl = nir_shader_get_entrypoint(s);
+   nir_builder b = nir_builder_create(impl);
+   unsigned emitted = 0;
+
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr_safe(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic ||
+             nir_instr_as_intrinsic(instr)->intrinsic != nir_intrinsic_emit_vertex)
+            continue;
+         b.cursor = nir_before_instr(instr);
+         for (unsigned m = 0; m < 2; ++m) {
+            if (!suffix->per_vertex_bary[m])
+               continue;
+            unsigned slot = VARYING_SLOT_VAR0 + suffix->per_vertex_bary[m] - 1;
+            for (unsigned c = 0; c < 3; ++c) {
+               nir_store_output(&b, nir_imm_float(&b, c == emitted ? 1.0 : 0.0),
+                                nir_imm_int(&b, 0),
+                                .io_semantics = {.location = slot, .num_slots = 1},
+                                .component = c, .src_type = nir_type_float32,
+                                .write_mask = 1);
+            }
+            s->info.outputs_written |= BITFIELD64_BIT(slot);
+         }
+         ++emitted;
+         for (unsigned j = 0; j < suffix->per_vertex_copies; ++j) {
+            for (unsigned k = 0; k < 3; ++k) {
+               unsigned api_vertex = MIN2(k, vertices - 1);
+               nir_def *value = nir_load_per_vertex_input(
+                  &b, 4, 32, nir_imm_int(&b, start + api_vertex * step),
+                  nir_imm_int(&b, 0),
+                  .io_semantics = {
+                     .location = VARYING_SLOT_VAR0 + suffix->per_vertex_location[j],
+                     .num_slots = 1,
+                  },
+                  .dest_type = nir_type_uint32);
+               unsigned copy = VARYING_SLOT_VAR0 + suffix->per_vertex_copy_base[j] + k;
+               for (unsigned c = 0; c < 4; ++c) {
+                  nir_store_output(&b, nir_channel(&b, value, c), nir_imm_int(&b, 0),
+                                   .io_semantics = {.location = copy, .num_slots = 1},
+                                   .component = c, .src_type = nir_type_uint32,
+                                   .write_mask = 1);
+               }
+               s->info.outputs_written |= BITFIELD64_BIT(copy);
+            }
+         }
+      }
+   }
+   nir_progress(true, impl, nir_metadata_control_flow);
+}
 
 static bool
 hk_apple9_trim_passthrough_output(nir_builder *b, nir_intrinsic_instr *intr,
@@ -1434,6 +1504,9 @@ hk_apple9_passthrough_gs(struct nir_builder *b, const void *key)
       poly_passthrough_gs_key_size(common->xfb_info.output_count);
    struct hk_apple9_passthrough_suffix suffix;
    memcpy(&suffix, (const uint8_t *)key + key_size, sizeof(suffix));
+   if (suffix.per_vertex_copies || suffix.per_vertex_bary[0] ||
+       suffix.per_vertex_bary[1])
+      hk_apple9_write_per_vertex_copies(b->shader, &suffix);
    nir_shader_intrinsics_pass(b->shader, hk_apple9_trim_passthrough_output,
                               nir_metadata_control_flow, suffix.components);
 }
@@ -3741,7 +3814,8 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct hk_api_shader *gs = gfx->shaders[MESA_SHADER_GEOMETRY];
 
-   if (!IS_SHADER_DIRTY(VERTEX) && !IS_SHADER_DIRTY(GEOMETRY))
+   if (!IS_SHADER_DIRTY(VERTEX) && !IS_SHADER_DIRTY(GEOMETRY) &&
+       !IS_SHADER_DIRTY(FRAGMENT))
       return;
 
    /* If there's an application geometry shader, there's nothing to un/bind */
@@ -3755,6 +3829,14 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    for (unsigned i = 0; i < ARRAY_SIZE(gfx->pg_query); ++i)
       needs_gs |= gfx->pg_query[i] != 0;
 
+   /* ...or to give the fragment shader flat copies of per-vertex inputs */
+   struct hk_api_shader *fs_api_copies = gfx->shaders[MESA_SHADER_FRAGMENT];
+   if (hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G && fs_api_copies) {
+      const struct hk_shader *fs_copies = hk_only_variant(fs_api_copies);
+      needs_gs |= fs_copies->info.fs.per_vertex_copies ||
+                  fs_copies->info.fs.per_vertex_bary[0] ||
+                  fs_copies->info.fs.per_vertex_bary[1];
+   }
 
    /* If we don't need a GS but we do have a passthrough, unbind it */
    if (!needs_gs) {
@@ -3814,7 +3896,16 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
             fs ? fs->info.fs.interp.flat : 0,
             fs ? fs->info.fs.interp.linear : 0,
          },
+         .per_vertex_copies = fs ? fs->info.fs.per_vertex_copies : 0,
       };
+      if (fs) {
+         memcpy(suffix.per_vertex_location, fs->info.fs.per_vertex_location,
+                sizeof(suffix.per_vertex_location));
+         memcpy(suffix.per_vertex_copy_base, fs->info.fs.per_vertex_copy_base,
+                sizeof(suffix.per_vertex_copy_base));
+         memcpy(suffix.per_vertex_bary, fs->info.fs.per_vertex_bary,
+                sizeof(suffix.per_vertex_bary));
+      }
       /* Without a fragment shader, the rasterized layout is unconstrained. */
       if (fs && fs != hk_only_variant(dev->null_fs))
          memcpy(suffix.components, fs->b.info.apple9_varyings.mask,
