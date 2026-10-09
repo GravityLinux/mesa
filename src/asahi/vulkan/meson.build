@@ -25,6 +25,7 @@ hk_files = files(
   'hk_descriptor_table.c',
   'hk_descriptor_table.h',
   'hk_device.c',
+  'hk_cpu_timing.c',
   'hk_device.h',
   'hk_device_memory.c',
   'hk_device_memory.h',

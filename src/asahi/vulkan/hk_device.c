@@ -381,6 +381,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    dev->vk.shader_ops = &hk_device_shader_ops;
    dev->vk.command_dispatch_table = &dev->cmd_dispatch;
+   hk_cpu_timing_install(&dev->vk.dispatch_table);
 
    drmDevicePtr drm_device = NULL;
    int ret = drmGetDeviceFromDevId(pdev->render_dev, 0, &drm_device);

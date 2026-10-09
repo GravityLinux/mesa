@@ -219,3 +219,6 @@ hk_sparse_unbound_unmapped(const struct agx_device *dev)
    return dev->chip == AGX_CHIP_G16G && agx_has_soft_fault((struct agx_device *)dev) &&
           !getenv("HK_APPLE9_SPARSE_SCRATCH");
 }
+/* Debug only: HK_CPU_TIMING, see hk_cpu_timing.c */
+struct vk_device_dispatch_table;
+void hk_cpu_timing_install(struct vk_device_dispatch_table *table);
