@@ -702,3 +702,8 @@ dEQP-VK.image.subresource_layout.2d.1_level.b10g11r11_ufloat_pack32,Fail
 dEQP-VK.image.subresource_layout.2d.1_level.b10g11r11_ufloat_pack32_offset,Fail
 dEQP-VK.image.subresource_layout.2d.1_level.e5b9g9r9_ufloat_pack32,Fail
 dEQP-VK.image.subresource_layout.2d.1_level.e5b9g9r9_ufloat_pack32_offset,Fail
+
+# G16 breaks the endpoint ties of y-major lines one row away from the ideal
+# diamond-exit rule, a one-pixel deviation primsrast permits; plain vertex
+# shader line lists do the same.
+dEQP-VK.mesh_shader.ext.misc.max_lines,Fail
