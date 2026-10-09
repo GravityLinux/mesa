@@ -600,6 +600,13 @@ agx_apple9_compute_enabled(const struct agx_device *dev)
    return dev->chip == AGX_CHIP_G16G;
 }
 
+void
+agx_apple9_set_compute_barrier(void *record, unsigned record_size)
+{
+   uint8_t *tail = (uint8_t *)record + record_size - 4;
+   apple9_put_u32(tail, 0x60000160);
+}
+
 bool
 agx_apple9_emit_direct_dispatch(
    void *out, uint64_t launch, const uint32_t global[3],
