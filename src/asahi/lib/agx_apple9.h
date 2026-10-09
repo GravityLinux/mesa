@@ -306,6 +306,14 @@ bool agx_apple9_emit_indirect_dispatch(
    bool indirect_local, const struct agx_apple9_compute_profile *profile,
    bool barrier);
 
+/* Replace the trailing barrier of a dispatch record emitted with one by the
+ * compute-only barrier (0x160 in the barrier bits): it orders the following
+ * dispatches and makes this one's writes visible to them, but doesn't drain.
+ * Consumers outside compute, and indirect grid fetches, still need the full
+ * barrier before them.
+ */
+void agx_apple9_set_compute_barrier(void *record, unsigned record_size);
+
 /* Translate common image/sampler state to native Apple9 table records. */
 struct agx_texture_packed;
 struct agx_sampler_packed;

@@ -42,5 +42,12 @@ TEST(Apple9CDM, OptionalBarrierKeepsLaunchAndOutputBounds)
       EXPECT_EQ(unfenced[size / 4 - 1], 0xdeadbeefu);
       EXPECT_EQ(fenced[size / 4], 0xdeadbeefu);
       EXPECT_EQ(unfenced[size / 4], 0xdeadbeefu);
+
+      /* The compute-only barrier replaces just the trailing word. */
+      agx_apple9_set_compute_barrier(fenced, size);
+      for (unsigned i = 0; i + 1 < size / 4; ++i)
+         EXPECT_EQ(fenced[i], unfenced[i]);
+      EXPECT_EQ(fenced[size / 4 - 1], 0x60000160u);
+      EXPECT_EQ(fenced[size / 4], 0xdeadbeefu);
    }
 }

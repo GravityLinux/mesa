@@ -54,6 +54,7 @@ hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
    cs->current = agx_cdm_barrier(cs->current, dev->dev.chip);
    cs->stats.flushes++;
    cs->cdm_dirty = false;
+   cs->cdm_compute_barrier = false;
 }
 
 void
@@ -396,8 +397,16 @@ hk_apple9_dispatch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       indirect_local ? AGX_APPLE9_COMPUTE_INDIRECT_LOCAL_CDM_RECORD_SIZE
       : agx_is_indirect(grid) ? AGX_APPLE9_COMPUTE_INDIRECT_CDM_RECORD_SIZE
                              : AGX_APPLE9_COMPUTE_CDM_RECORD_SIZE;
+   /* Driver-internal dispatches (helpers and pre-rasterization stages) end
+    * with a barrier for whatever runs next in the stream; API dispatches
+    * leave it to the next dependency barrier. The compute-only barrier
+    * suffices for compute after compute. After it, an indirect dispatch
+    * still flushes first, since its grid is fetched by the CDM itself.
+    */
    bool barrier = !cmd->api_dispatch;
-   bool flush_before = barrier && cs->cdm_dirty;
+   bool flush_before =
+      cs->cdm_dirty &&
+      (cs->cdm_compute_barrier ? agx_is_indirect(grid) : barrier);
    if (!barrier)
       record_size -= AGX_CDM_BARRIER_LENGTH;
 
@@ -418,8 +427,11 @@ hk_apple9_dispatch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
    }
+   if (barrier)
+      agx_apple9_set_compute_barrier(cs->current, record_size);
    cs->current += record_size;
-   cs->cdm_dirty = !barrier;
+   cs->cdm_dirty = true;
+   cs->cdm_compute_barrier = barrier;
    cs->stats.flushes += barrier;
    cs->stats.cmds++;
    cs->stats.calls++;

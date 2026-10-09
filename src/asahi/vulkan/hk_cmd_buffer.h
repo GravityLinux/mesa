@@ -422,6 +422,13 @@ struct hk_cs {
    unsigned sync_stages;
    bool cdm_dirty;
 
+   /* The last dispatch ended with the compute-only barrier: later compute
+    * dispatches are ordered after it, but anything else (indirect grid
+    * fetches, the stream end, non-Apple9 launches) needs a full flush first.
+    * cdm_dirty stays set so those paths flush.
+    */
+   bool cdm_compute_barrier;
+
    /* Address of the root control stream for the job */
    uint64_t addr;
 
