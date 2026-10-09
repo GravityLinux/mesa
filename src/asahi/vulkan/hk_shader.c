@@ -1146,6 +1146,91 @@ DEBUG_GET_ONCE_NUM_OPTION(hk_apple9_vectorize_use_window,
 DEBUG_GET_ONCE_NUM_OPTION(hk_apple9_robust_merge_bytes,
                           "HK_APPLE9_ROBUST_MERGE_BYTES", 16)
 
+/* Peak number of live 32-bit words in a shader, from NIR liveness: a
+ * backward walk of each block from its live-out set. 16-bit values count as
+ * half a word; constants and undefs are free (immediates).
+ */
+static unsigned
+hk_def_halves(const nir_def *def)
+{
+   nir_instr *instr = nir_def_instr((nir_def *)def);
+   if (instr->type == nir_instr_type_load_const ||
+       instr->type == nir_instr_type_undef)
+      return 0;
+   return def->num_components * MAX2(def->bit_size, 16) / 16;
+}
+
+static bool
+hk_index_def(nir_def *def, void *data)
+{
+   ((nir_def **)data)[def->index] = def;
+   return true;
+}
+
+struct hk_live_walk {
+   bool *live;
+   unsigned *halves;
+};
+
+static bool
+hk_add_live_src(nir_src *src, void *data)
+{
+   struct hk_live_walk *walk = data;
+   if (!walk->live[src->ssa->index]) {
+      walk->live[src->ssa->index] = true;
+      *walk->halves += hk_def_halves(src->ssa);
+   }
+   return true;
+}
+
+static unsigned
+hk_apple9_peak_live_words(nir_shader *nir)
+{
+   unsigned peak = 0;
+   nir_foreach_function_impl(impl, nir) {
+      nir_metadata_require(impl, nir_metadata_live_defs);
+      nir_def **defs = calloc(impl->ssa_alloc, sizeof(*defs));
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block)
+            nir_foreach_def(instr, hk_index_def, defs);
+      }
+      bool *live = calloc(impl->ssa_alloc, sizeof(*live));
+      nir_foreach_block(block, impl) {
+         memset(live, 0, impl->ssa_alloc * sizeof(*live));
+         unsigned halves = 0;
+         U_SPARSE_BITSET_FOREACH_SET(&block->live_out, i) {
+            live[i] = true;
+            if (defs[i])
+               halves += hk_def_halves(defs[i]);
+         }
+         peak = MAX2(peak, halves);
+         nir_foreach_instr_reverse(instr, block) {
+            if (instr->type == nir_instr_type_phi)
+               break;
+            nir_def *def = nir_instr_def(instr);
+            if (def && live[def->index]) {
+               live[def->index] = false;
+               halves -= hk_def_halves(def);
+            }
+            struct hk_live_walk walk = {live, &halves};
+            nir_foreach_src(instr, hk_add_live_src, &walk);
+            peak = MAX2(peak, halves);
+         }
+      }
+      free(live);
+      free(defs);
+   }
+   return DIV_ROUND_UP(peak, 2);
+}
+
+struct hk_vectorize_policy {
+   /* Apply the issue and first-use windows below. */
+   bool windowed;
+};
+
+DEBUG_GET_ONCE_NUM_OPTION(hk_apple9_vectorize_pressure_budget,
+                          "HK_APPLE9_VECTORIZE_PRESSURE_BUDGET", 0)
+
 static bool
 hk_apple9_vectorize_cb(unsigned align_mul, unsigned align_offset,
                        unsigned bit_size, unsigned num_components,
@@ -1153,9 +1238,11 @@ hk_apple9_vectorize_cb(unsigned align_mul, unsigned align_offset,
                        nir_intrinsic_instr *high, void *data)
 {
    if (!agx_mem_vectorize_cb(align_mul, align_offset, bit_size, num_components,
-                             hole_size, low, high, data))
+                             hole_size, low, high, NULL))
       return false;
-   int64_t window = debug_get_option_hk_apple9_vectorize_window();
+   const struct hk_vectorize_policy *policy = data;
+   int64_t window = policy->windowed ? debug_get_option_hk_apple9_vectorize_window()
+                                     : INT64_MAX;
    int64_t distance = (int64_t)high->instr.index - (int64_t)low->instr.index;
    if (llabs(distance) > window)
       return false;
@@ -1172,7 +1259,7 @@ hk_apple9_vectorize_cb(unsigned align_mul, unsigned align_offset,
    int64_t robust_bytes = debug_get_option_hk_apple9_robust_merge_bytes();
    if (bounded && num_components * bit_size / 8 > robust_bytes)
       return false;
-   if (bounded) {
+   if (bounded && policy->windowed) {
       int64_t low_use = hk_first_use_index(low), high_use = hk_first_use_index(high);
       if (low_use < 0 || high_use < 0 || llabs(high_use - low_use) > use_window)
          return false;
@@ -2998,11 +3085,20 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       if (getenv("HK_APPLE9_TRACE_VECTORIZE") &&
           nir->info.stage == MESA_SHADER_FRAGMENT)
          nir_print_shader(nir, stderr);
+      /* Below the pressure budget, merge without windows. */
+      unsigned budget = debug_get_option_hk_apple9_vectorize_pressure_budget();
+      unsigned peak = budget ? hk_apple9_peak_live_words(nir) : 0;
+      struct hk_vectorize_policy policy = {.windowed = !budget || peak > budget};
+      if (getenv("HK_APPLE9_PRESSURE_STATS"))
+         fprintf(stderr, "HK_PRESSURE stage=%u peak=%u windowed=%u\n",
+                 nir->info.stage, budget ? peak : hk_apple9_peak_live_words(nir),
+                 policy.windowed);
       NIR_PASS(_, nir, nir_opt_load_store_vectorize,
                &(const nir_load_store_vectorize_options){
                   .modes = nir_var_mem_global,
                   .bounds_checked_modes = nir_var_mem_global,
                   .callback = hk_apple9_vectorize_cb,
+                  .cb_data = &policy,
                });
    }
 
