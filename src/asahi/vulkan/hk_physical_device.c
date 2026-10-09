@@ -1646,14 +1646,12 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
       feat->taskShader = true;
    }
 
-   /* Barycentrics and per-vertex inputs are coefficient bindings. Primitives
-    * clipped at the 1.5w guard band read the clipper's vertices per vertex,
-    * so the extension stays hidden unless HK_APPLE9_BARYCENTRIC=1.
+   /* Per-vertex inputs and barycentrics of vertex and mesh pipelines are
+    * written by the stage feeding the rasterizer, exact for primitives clipped
+    * at the 1.5w guard band.
     */
-   if (debug_get_bool_option("HK_APPLE9_BARYCENTRIC", false)) {
-      ext->KHR_fragment_shader_barycentric = true;
-      feat->fragmentShaderBarycentric = true;
-   }
+   ext->KHR_fragment_shader_barycentric = true;
+   feat->fragmentShaderBarycentric = true;
 
    props->apiVersion = VK_MAKE_API_VERSION(0, 1, 4, VK_HEADER_VERSION);
    props->conformanceVersion = (VkConformanceVersion){0};
