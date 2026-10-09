@@ -1654,11 +1654,12 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
    feat->fragmentShaderBarycentric = true;
 
    /* Predicated draws, dispatches and attachment clears read zeroed indirect
-    * arguments when the predicate fails. Secondary command buffers do not
-    * inherit the predicate.
+    * arguments when the predicate fails. Secondary command buffers are
+    * replayed into the primary, so they inherit its predicate.
     */
    ext->EXT_conditional_rendering = true;
    feat->conditionalRendering = true;
+   feat->inheritedConditionalRendering = true;
 
    /* Primitives generated queries count in the passthrough geometry shader,
     * which runs before rasterizer discard and sees every vertex stream.
