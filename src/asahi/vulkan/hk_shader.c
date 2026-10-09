@@ -370,20 +370,19 @@ static bool
 hk_apple9_lower_bary_to_sample(nir_builder *b, nir_intrinsic_instr *intr,
                                UNUSED void *data)
 {
-   const enum glsl_interp_mode mode = nir_intrinsic_interp_mode(intr);
    nir_def *sample;
    b->cursor = nir_before_instr(&intr->instr);
 
    switch (intr->intrinsic) {
    case nir_intrinsic_load_barycentric_pixel:
    case nir_intrinsic_load_barycentric_centroid:
-      sample = nir_load_barycentric_sample(b, intr->def.bit_size,
-                                           .interp_mode = mode);
+      sample = nir_load_barycentric_sample(
+         b, intr->def.bit_size, .interp_mode = nir_intrinsic_interp_mode(intr));
       break;
    case nir_intrinsic_load_barycentric_coord_pixel:
    case nir_intrinsic_load_barycentric_coord_centroid:
-      sample = nir_load_barycentric_coord_sample(b, intr->def.bit_size,
-                                                 .interp_mode = mode);
+      sample = nir_load_barycentric_coord_sample(
+         b, intr->def.bit_size, .interp_mode = nir_intrinsic_interp_mode(intr));
       break;
    default:
       return false;
