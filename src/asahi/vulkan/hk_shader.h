@@ -158,8 +158,30 @@ hk_mesh_primitives_offset_B(const struct hk_mesh_info *info)
 void hk_mesh_gather_info(const nir_shader *nir, struct hk_mesh_info *info);
 void hk_nir_lower_mesh_main(nir_shader *nir, const struct hk_mesh_info *info);
 void hk_nir_lower_task_main(nir_shader *nir);
+#define HK_MAX_PER_VERTEX_COPIES 4
+
+/* Per-vertex fragment inputs read as flat copies: the VAR slot of each input,
+ * and the first of the three consecutive VAR slots holding its values for API
+ * vertices 0, 1 and 2. Barycentrics are read by interpolating the one-hot
+ * weights of the API vertices from bary[0] (perspective) and bary[1]
+ * (linear), as VAR index + 1 or 0 if unused.
+ */
+struct hk_per_vertex_copies {
+   unsigned count;
+   uint8_t location[HK_MAX_PER_VERTEX_COPIES];
+   uint8_t copy_base[HK_MAX_PER_VERTEX_COPIES];
+   uint8_t bary[2];
+};
+
+static inline bool
+hk_per_vertex_copies_used(const struct hk_per_vertex_copies *map)
+{
+   return map->count || map->bary[0] || map->bary[1];
+}
+
 nir_shader *hk_nir_mesh_rast(const nir_shader *mesh,
-                             const struct hk_mesh_info *info);
+                             const struct hk_mesh_info *info,
+                             const struct hk_per_vertex_copies *copies);
 
 struct hk_shader_info {
    uint8_t apple9_render_targets;
@@ -183,7 +205,12 @@ struct hk_shader_info {
          bool early_fragment_tests;
          bool writes_memory;
 
-         uint8_t _pad[7];
+         /* Per-vertex inputs and barycentrics written by the passthrough
+          * GS, as in struct hk_per_vertex_copies. */
+         uint8_t per_vertex_copies;
+         uint8_t per_vertex_location[HK_MAX_PER_VERTEX_COPIES];
+         uint8_t per_vertex_copy_base[HK_MAX_PER_VERTEX_COPIES];
+         uint8_t per_vertex_bary[2];
       } fs;
 
       struct {
