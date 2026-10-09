@@ -1964,6 +1964,8 @@ hk_apple9_merge_tess_info(struct hk_cmd_buffer *cmd)
 static struct agx_draw
 hk_apple9_launch_tess(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 {
+   /* Largest direct draw, in patches x instances, that is batched. */
+   const unsigned max_batch_patches = 2048;
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct hk_descriptor_state *desc = &gfx->descriptors;
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
@@ -2032,9 +2034,6 @@ hk_apple9_launch_tess(struct hk_cmd_buffer *cmd, struct agx_draw draw)
       }
    }
 
-   hk_apple9_dispatch_prerast(cmd, vs, grid_vs, &bindings);
-   hk_apple9_dispatch_prerast(cmd, tcs, grid_tcs, &bindings);
-
    /* Without a geometry shader, the tessellated primitives are the clipper
     * input.
     */
@@ -2046,13 +2045,56 @@ hk_apple9_launch_tess(struct hk_cmd_buffer *cmd, struct agx_draw draw)
          cmd, VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT);
    }
 
+   /* A direct draw without statistics or transform feedback touches only
+    * its own allocations here, so its passes can run alongside those of the
+    * neighbouring tessellated draws: record them into the stage lanes (see
+    * hk_tess_batch_flush). The stage order within each draw is kept by the
+    * barrier after every lane.
+    */
+   /* HK_APPLE9_TESS_BATCH=0 turns batching off. */
+   static int batch_env = -1;
+   if (batch_env < 0) {
+      const char *env = getenv("HK_APPLE9_TESS_BATCH");
+      batch_env = !env || strcmp(env, "0") != 0;
+   }
+   /* Only small draws are latency-bound enough to gain from overlapping;
+    * a large one fills the GPU on its own and is kept inline, which also
+    * keeps its passes out of the stream-end lanes.
+    */
+   unsigned batch_patches =
+      agx_is_indirect(draw.b) ? 0
+                              : (draw.b.count[0] / input_patch_size) *
+                                   draw.b.count[1];
+   bool batch = batch_env && !agx_is_indirect(draw.b) &&
+                batch_patches <= max_batch_patches &&
+                !hk_stat_enabled(hk_pipeline_stat_addr(
+                   cmd, VK_QUERY_PIPELINE_STATISTIC_TESSELLATION_CONTROL_SHADER_PATCHES_BIT)) &&
+                !hk_stat_enabled(c_prims) && !hk_stat_enabled(c_inv) &&
+                !gfx->xfb_enabled;
+   if (!batch)
+      hk_tess_batch_flush(cmd);
+
+#define HK_TESS_LANE(l) cmd->tess_batch.capture = batch ? &cmd->tess_batch.lane[l] : NULL
+
+   HK_TESS_LANE(0);
+   hk_apple9_dispatch_prerast(cmd, vs, grid_vs, &bindings);
+   HK_TESS_LANE(1);
+   hk_apple9_dispatch_prerast(cmd, tcs, grid_tcs, &bindings);
+
    /* First generate counts, then prefix sum them, and then tessellate. */
+   HK_TESS_LANE(2);
    libagx_tessellate(cmd, grid_tess, AGX_BARRIER_ALL | AGX_PREGFX,
                      gfx->tess.info.mode, POLY_TESS_MODE_COUNT, state);
+   HK_TESS_LANE(3);
    libagx_prefix_sum_tess(cmd, agx_1d(1024), AGX_BARRIER_ALL | AGX_PREGFX,
                           state, c_prims, c_inv, c_prims || c_inv);
+   HK_TESS_LANE(4);
    libagx_tessellate(cmd, grid_tess, AGX_BARRIER_ALL | AGX_PREGFX,
                      gfx->tess.info.mode, POLY_TESS_MODE_WITH_COUNTS, state);
+   cmd->tess_batch.capture = NULL;
+#undef HK_TESS_LANE
+   if (batch)
+      cmd->tess_batch.draws++;
 
    return agx_draw_indexed_indirect(gfx->tess.out_draws, dev->heap->va->addr,
                                     dev->heap->size, AGX_INDEX_SIZE_U32, false);

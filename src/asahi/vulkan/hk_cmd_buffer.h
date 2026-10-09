@@ -561,6 +561,8 @@ struct hk_uploader {
    struct hk_upload_chunk chunks[HK_UPLOAD_CHUNKS];
 };
 
+#define HK_TESS_BATCH_LANES 5
+
 struct hk_cmd_buffer {
    struct vk_command_buffer vk;
 
@@ -614,6 +616,19 @@ struct hk_cmd_buffer {
        */
       struct hk_cs *post_gfx;
    } current_cs;
+
+   /* Pre-rasterization dispatch records of batched tessellated draws, one
+    * lane per stage (VS, TCS, count, prefix sum, emit). The draws are
+    * independent, so each lane's records run without barriers between them
+    * and the lanes are emitted in order into the pre-gfx stream with one
+    * compute barrier after each (hk_tess_batch_flush). capture, if set,
+    * redirects hk_apple9_dispatch into a lane.
+    */
+   struct {
+      struct util_dynarray lane[HK_TESS_BATCH_LANES];
+      struct util_dynarray *capture;
+      unsigned draws;
+   } tess_batch;
 
    /* Are we currently inside a vk_meta operation? This alters sample location
     * behaviour.
@@ -879,6 +894,7 @@ hk_cs_destroy(struct hk_cs *cs)
 }
 
 void hk_dispatch_imm_writes(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
+void hk_tess_batch_flush(struct hk_cmd_buffer *cmd);
 
 static void
 hk_cmd_buffer_end_compute_internal(struct hk_cmd_buffer *cmd,
@@ -942,6 +958,7 @@ hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
 
    cmd->current_cs.gfx = NULL;
 
+   hk_tess_batch_flush(cmd);
    hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.pre_gfx);
    hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.post_gfx);
 
