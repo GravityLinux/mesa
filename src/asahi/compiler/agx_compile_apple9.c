@@ -982,6 +982,10 @@ apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
            op == nir_intrinsic_load_barycentric_pixel ||
            op == nir_intrinsic_load_barycentric_centroid ||
            op == nir_intrinsic_load_barycentric_at_sample ||
+           op == nir_intrinsic_load_barycentric_coord_pixel ||
+           op == nir_intrinsic_load_barycentric_coord_centroid ||
+           op == nir_intrinsic_load_barycentric_coord_at_sample ||
+           op == nir_intrinsic_load_input_vertex ||
            op == nir_intrinsic_load_interpolated_input ||
            op == nir_intrinsic_load_input ||
            op == nir_intrinsic_load_coefficients_agx ||
@@ -1079,6 +1083,11 @@ struct apple9_dag_lower {
    bool zs_export;
    bool reads_point_coord;
    bool reads_primitive_id;
+   /* Barycentric weights (bit 0 perspective, bit 1 linear) and the varying
+    * scalars read per vertex, which own one raw-vertex coefficient each. */
+   uint8_t barycentric_mask;
+   uint8_t per_vertex_count;
+   uint8_t per_vertex[AGX_APPLE9_MAX_PER_VERTEX];
    const struct agx_apple9_varying_layout *varyings;
    unsigned position_mask;
    bool color_stores;
@@ -1882,6 +1891,78 @@ apple9_lower_coefficients(struct apple9_dag_lower *lower, nir_scalar scalar)
    return base + scalar.comp;
 }
 
+static bool
+apple9_is_barycentric_coord(nir_intrinsic_op op)
+{
+   return op == nir_intrinsic_load_barycentric_coord_pixel ||
+          op == nir_intrinsic_load_barycentric_coord_centroid ||
+          op == nir_intrinsic_load_barycentric_coord_sample ||
+          op == nir_intrinsic_load_barycentric_coord_at_sample ||
+          op == nir_intrinsic_load_barycentric_coord_at_offset;
+}
+
+/* Coefficients after 1/W, the varyings, primitive ID, depth and the point
+ * coordinates: two perspective and then two linear barycentric weights, as
+ * used, followed by one raw-vertex coefficient per per-vertex scalar.
+ */
+static unsigned
+apple9_extra_coefficient_base(const struct apple9_dag_lower *lower)
+{
+   return 1 + lower->varyings->count + lower->reads_primitive_id +
+          lower->reads_z + 2 * lower->reads_point_coord;
+}
+
+static int
+apple9_per_vertex_slot(const struct apple9_dag_lower *lower, int index)
+{
+   for (unsigned i = 0; i < lower->per_vertex_count; ++i) {
+      if (lower->per_vertex[i] == index)
+         return i;
+   }
+   return -1;
+}
+
+/* Interpolate one coefficient at the pixel centre, or at `position` when it
+ * is valid, perspective-correct unless `linear`. */
+static uint32_t
+apple9_emit_interpolation(struct apple9_dag_lower *lower, unsigned coefficient,
+                          uint32_t position, bool linear)
+{
+   bool at_position = position != AGX_APPLE9_VREG_INVALID;
+   enum agx_apple9_encoding encoding = at_position ? AGX_APPLE9_ENC_ITER_COORD
+                                               : AGX_APPLE9_ENC_ITER;
+   if (linear) {
+      return apple9_dag_emit(lower, AGX_APPLE9_VIR_ITER, encoding,
+                             at_position ? &position : NULL, at_position,
+                             coefficient);
+   }
+   uint32_t reciprocal;
+   /* A reciprocal first emitted in one arm does not dominate sibling arms.
+    * Reuse it only within the block where it was computed. */
+   if (at_position || lower->perspective_block != lower->program.current_block) {
+      uint32_t denominator = apple9_dag_emit(
+         lower, AGX_APPLE9_VIR_ITER, encoding,
+         at_position ? &position : NULL, at_position, 0);
+      reciprocal = apple9_dag_emit(lower, AGX_APPLE9_VIR_FRCP,
+         AGX_APPLE9_ENC_FLOAT_SPECIAL, &denominator, 1, 3);
+      if (!at_position) {
+         lower->perspective_reciprocal = reciprocal;
+         lower->perspective_block = lower->program.current_block;
+      }
+   } else {
+      reciprocal = lower->perspective_reciprocal;
+   }
+   uint32_t value = apple9_dag_emit(
+      lower, AGX_APPLE9_VIR_ITER, encoding,
+      at_position ? &position : NULL, at_position, coefficient);
+   /* Keep raw varyings available to homogeneous clipping. Native shade-7
+    * coefficients pair with a coefficient-aware projective multiply, which
+    * handles the rasterizer's primitive-constant representation. */
+   uint32_t src[] = {value, reciprocal};
+   return apple9_dag_emit(lower, AGX_APPLE9_VIR_FMUL_PROJECT,
+                          AGX_APPLE9_ENC_FLOAT2_PROJECT, src, 2, coefficient);
+}
+
 static uint32_t
 apple9_lower_interpolated_input(struct apple9_dag_lower *lower,
                                 nir_scalar scalar)
@@ -1926,38 +2007,82 @@ apple9_lower_interpolated_input(struct apple9_dag_lower *lower,
    }
    uint32_t position = at_position ? apple9_lower_dag_scalar(
       lower, nir_get_scalar(&bary->def, 0)) : AGX_APPLE9_VREG_INVALID;
-   enum agx_apple9_encoding encoding = at_position ? AGX_APPLE9_ENC_ITER_COORD
-                                               : AGX_APPLE9_ENC_ITER;
-   if (linear) {
+   if (linear)
       agx_apple9_interp_mask_set(&lower->linear_mask, index);
-      return apple9_dag_emit(lower, AGX_APPLE9_VIR_ITER, encoding,
-                             at_position ? &position : NULL, at_position, index + 1);
-   }
-   uint32_t reciprocal;
-   /* A reciprocal first emitted in one arm does not dominate sibling arms.
-    * Reuse it only within the block where it was computed. */
-   if (at_position || lower->perspective_block != lower->program.current_block) {
-      uint32_t denominator = apple9_dag_emit(
-         lower, AGX_APPLE9_VIR_ITER, encoding,
-         at_position ? &position : NULL, at_position, 0);
-      reciprocal = apple9_dag_emit(lower, AGX_APPLE9_VIR_FRCP,
-         AGX_APPLE9_ENC_FLOAT_SPECIAL, &denominator, 1, 3);
-      if (!at_position) {
-         lower->perspective_reciprocal = reciprocal;
-         lower->perspective_block = lower->program.current_block;
-      }
+   return apple9_emit_interpolation(lower, index + 1, position, linear);
+}
+
+/* Interpolation position for centroid and per-sample interpolation. */
+static uint32_t
+apple9_interpolation_position(struct apple9_dag_lower *lower,
+                              nir_intrinsic_instr *bary, bool at_sample)
+{
+   uint32_t coverage;
+   if (at_sample) {
+      coverage = apple9_lower_dag_scalar(lower,
+                                         nir_get_scalar(bary->src[0].ssa, 0));
    } else {
-      reciprocal = lower->perspective_reciprocal;
+      coverage = apple9_dag_emit(lower, AGX_APPLE9_VIR_GET_SR,
+                                 AGX_APPLE9_ENC_GET_COVERAGE, NULL, 0, 0x10c2);
    }
-   uint32_t coefficient = apple9_dag_emit(
-      lower, AGX_APPLE9_VIR_ITER, encoding,
-      at_position ? &position : NULL, at_position, index + 1);
-   /* Keep raw varyings available to homogeneous clipping. Native shade-7
-    * coefficients pair with a coefficient-aware projective multiply, which
-    * handles the rasterizer's primitive-constant representation. */
-   uint32_t src[] = {coefficient, reciprocal};
-   return apple9_dag_emit(lower, AGX_APPLE9_VIR_FMUL_PROJECT,
-                          AGX_APPLE9_ENC_FLOAT2_PROJECT, src, 2, index + 1);
+   return apple9_dag_emit(lower, AGX_APPLE9_VIR_INTERPOLATION_POSITION,
+                          AGX_APPLE9_ENC_INTERPOLATION_POSITION, &coverage, 1,
+                          at_sample);
+}
+
+/* The first two barycentric weights come from the rasterizer's barycentric
+ * coefficients; the third is computed in NIR. */
+static uint32_t
+apple9_lower_barycentric_weight(struct apple9_dag_lower *lower,
+                                nir_scalar scalar)
+{
+   nir_intrinsic_instr *intr = nir_def_as_intrinsic(scalar.def);
+   bool linear = nir_intrinsic_interp_mode(intr) == INTERP_MODE_NOPERSPECTIVE;
+   if (!lower->varyings || scalar.def->bit_size != 32 || scalar.comp >= 2 ||
+       !(lower->barycentric_mask & (linear ? 2 : 1))) {
+      lower->reason = "Apple9 barycentric weights take two 32-bit components";
+      return AGX_APPLE9_VREG_INVALID;
+   }
+   unsigned coefficient = apple9_extra_coefficient_base(lower) + scalar.comp +
+      (linear && (lower->barycentric_mask & 1) ? 2 : 0);
+   uint32_t position = AGX_APPLE9_VREG_INVALID;
+   if (intr->intrinsic == nir_intrinsic_load_barycentric_coord_centroid ||
+       intr->intrinsic == nir_intrinsic_load_barycentric_coord_at_sample) {
+      position = apple9_interpolation_position(
+         lower, intr,
+         intr->intrinsic == nir_intrinsic_load_barycentric_coord_at_sample);
+   }
+   return apple9_emit_interpolation(lower, coefficient, position, linear);
+}
+
+/* A per-vertex scalar's coefficient holds the raw values of vertices 0, 1
+ * and 2 as its plane terms. */
+static uint32_t
+apple9_lower_input_vertex(struct apple9_dag_lower *lower, nir_scalar scalar)
+{
+   nir_intrinsic_instr *intr = nir_def_as_intrinsic(scalar.def);
+   if (!lower->varyings || scalar.def->bit_size != 32 ||
+       !nir_src_is_const(intr->src[0]) || !nir_src_is_const(intr->src[1]) ||
+       nir_src_as_uint(intr->src[0]) > 2) {
+      lower->reason =
+         "Apple9 per-vertex inputs need constant vertices and 32-bit scalars";
+      return AGX_APPLE9_VREG_INVALID;
+   }
+   unsigned location = nir_intrinsic_io_semantics(intr).location +
+                       nir_src_as_uint(intr->src[1]);
+   int index = apple9_varying_index(lower->varyings, location,
+                                    nir_intrinsic_component(intr) + scalar.comp);
+   int slot = index < 0 ? -1 : apple9_per_vertex_slot(lower, index);
+   if (slot < 0) {
+      lower->reason = "Apple9 per-vertex input is not written by the vertex stage";
+      return AGX_APPLE9_VREG_INVALID;
+   }
+   unsigned coefficient = apple9_extra_coefficient_base(lower) +
+      2 * util_bitcount(lower->barycentric_mask) + slot;
+   uint32_t base = agx_apple9_vir_emit_coefficients(&lower->program, coefficient);
+   if (base == AGX_APPLE9_VREG_INVALID)
+      return base;
+   return base + nir_src_as_uint(intr->src[0]);
 }
 
 static uint32_t
@@ -2304,6 +2429,14 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                  nir_def_as_intrinsic(scalar.def)->intrinsic == nir_intrinsic_load_coefficients_agx) {
          value = apple9_lower_coefficients(lower, scalar);
       } else if (nir_def_instr_type(scalar.def) == nir_instr_type_intrinsic &&
+                 apple9_is_barycentric_coord(
+                    nir_def_as_intrinsic(scalar.def)->intrinsic)) {
+         value = apple9_lower_barycentric_weight(lower, scalar);
+      } else if (nir_def_instr_type(scalar.def) == nir_instr_type_intrinsic &&
+                 nir_def_as_intrinsic(scalar.def)->intrinsic ==
+                    nir_intrinsic_load_input_vertex) {
+         value = apple9_lower_input_vertex(lower, scalar);
+      } else if (nir_def_instr_type(scalar.def) == nir_instr_type_intrinsic &&
           (nir_def_as_intrinsic(scalar.def)->intrinsic ==
               nir_intrinsic_load_interpolated_input ||
            nir_def_as_intrinsic(scalar.def)->intrinsic ==
@@ -2355,16 +2488,8 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                   nir_def_as_intrinsic(scalar.def)->intrinsic ==
                      nir_intrinsic_load_barycentric_at_sample)) {
          nir_intrinsic_instr *bary = nir_def_as_intrinsic(scalar.def);
-         uint32_t coverage;
-         if (bary->intrinsic == nir_intrinsic_load_barycentric_at_sample) {
-            coverage = apple9_lower_dag_scalar(
-               lower, nir_get_scalar(bary->src[0].ssa, 0));
-         } else {
-            coverage = apple9_dag_emit(lower, AGX_APPLE9_VIR_GET_SR,
-               AGX_APPLE9_ENC_GET_COVERAGE, NULL, 0, 0x10c2);
-         }
-         value = apple9_dag_emit(lower, AGX_APPLE9_VIR_INTERPOLATION_POSITION,
-            AGX_APPLE9_ENC_INTERPOLATION_POSITION, &coverage, 1,
+         value = apple9_interpolation_position(
+            lower, bary,
             bary->intrinsic == nir_intrinsic_load_barycentric_at_sample);
       } else if (nir_def_instr_type(scalar.def) == nir_instr_type_intrinsic &&
                  (nir_def_as_intrinsic(scalar.def)->intrinsic ==
@@ -5841,6 +5966,31 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
              nir_intrinsic_io_semantics(intr).location == VARYING_SLOT_PRIMITIVE_ID &&
              !varyings->mask[VARYING_SLOT_PRIMITIVE_ID])
             lower.reads_primitive_id = true;
+         if (nir->info.stage != MESA_SHADER_FRAGMENT || !varyings)
+            continue;
+         /* Coefficients after the point coordinates depend on it. */
+         if (intr->intrinsic == nir_intrinsic_load_point_coord)
+            lower.reads_point_coord = true;
+         if (apple9_is_barycentric_coord(intr->intrinsic)) {
+            lower.barycentric_mask |=
+               nir_intrinsic_interp_mode(intr) == INTERP_MODE_NOPERSPECTIVE ? 2 : 1;
+         }
+         if (intr->intrinsic == nir_intrinsic_load_input_vertex &&
+             nir_src_is_const(intr->src[1])) {
+            unsigned location = nir_intrinsic_io_semantics(intr).location +
+                                nir_src_as_uint(intr->src[1]);
+            for (unsigned c = 0; c < intr->def.num_components; ++c) {
+               int index = apple9_varying_index(
+                  varyings, location, nir_intrinsic_component(intr) + c);
+               if (index < 0 || apple9_per_vertex_slot(&lower, index) >= 0)
+                  continue;
+               if (lower.per_vertex_count == AGX_APPLE9_MAX_PER_VERTEX) {
+                  *reason = "too many Apple9 per-vertex fragment inputs";
+                  goto fail;
+               }
+               lower.per_vertex[lower.per_vertex_count++] = index;
+            }
+         }
       }
    }
    for (unsigned i = 0; i < ARRAY_SIZE(lower.system_vreg); ++i)
@@ -6248,6 +6398,10 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
    out->info.depth_layout = lower.writes_z ? FRAG_DEPTH_LAYOUT_ANY
                                           : FRAG_DEPTH_LAYOUT_UNCHANGED;
    out->info.apple9_reads_point_coord = lower.reads_point_coord;
+   out->info.apple9_barycentric_mask = lower.barycentric_mask;
+   out->info.apple9_per_vertex_count = lower.per_vertex_count;
+   memcpy(out->info.apple9_per_vertex, lower.per_vertex,
+          sizeof(out->info.apple9_per_vertex));
    out->info.apple9_writes_point_size = nir->info.stage == MESA_SHADER_VERTEX &&
       (nir->info.outputs_written & BITFIELD64_BIT(VARYING_SLOT_PSIZ));
    out->info.writes_layer_viewport = nir->info.stage == MESA_SHADER_VERTEX &&
@@ -6283,7 +6437,9 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
       out->info.apple9_varyings = *varyings;
    if (!preamble && nir->info.stage == MESA_SHADER_FRAGMENT)
       out->info.varyings.fs.nr_cf = varyings->count + 1 + lower.reads_z +
-                                  lower.reads_primitive_id + 2 * lower.reads_point_coord;
+                                  lower.reads_primitive_id + 2 * lower.reads_point_coord +
+                                  2 * util_bitcount(lower.barycentric_mask) +
+                                  lower.per_vertex_count;
    out->info.main_size = emitter.bytes.size;
    out->info.binary_size = emitter.bytes.size;
    if (getenv("AGX_APPLE9_DUMP_BINARY") != NULL) {
@@ -7711,6 +7867,70 @@ apple9_lower_interp_at_offset(nir_builder *b, nir_intrinsic_instr *intr,
                               nir_ffma(b, nir_ddx_fine(b, value),
                                        nir_channel(b, offset, 0), value));
    nir_def_rewrite_uses_after(value, result);
+   return true;
+}
+
+/* Barycentric coordinates use the same interpolation positions as varyings.
+ * Single-sampled shaders interpolate at the pixel centre, sample
+ * interpolation becomes interpolation at the sample ID, and offsets step
+ * along the screen-space derivatives as for varyings. Only the first two
+ * weights are interpolated; the third is the remainder.
+ */
+static bool
+apple9_lower_barycentric_coord(nir_builder *b, nir_intrinsic_instr *intr,
+                               void *data)
+{
+   if (!apple9_is_barycentric_coord(intr->intrinsic))
+      return false;
+
+   const bool single_sampled = *(const bool *)data;
+   const enum glsl_interp_mode mode = nir_intrinsic_interp_mode(intr);
+   b->cursor = nir_before_instr(&intr->instr);
+
+   nir_def *coord;
+   switch (intr->intrinsic) {
+   case nir_intrinsic_load_barycentric_coord_at_offset: {
+      nir_def *offset = intr->src[0].ssa;
+      nir_def *center =
+         nir_load_barycentric_coord_pixel(b, 32, .interp_mode = mode);
+      coord = nir_ffma(b, nir_ddy_fine(b, center), nir_channel(b, offset, 1),
+                       nir_ffma(b, nir_ddx_fine(b, center),
+                                nir_channel(b, offset, 0), center));
+      break;
+   }
+   case nir_intrinsic_load_barycentric_coord_centroid:
+   case nir_intrinsic_load_barycentric_coord_sample:
+   case nir_intrinsic_load_barycentric_coord_at_sample:
+      if (single_sampled) {
+         coord = nir_load_barycentric_coord_pixel(b, 32, .interp_mode = mode);
+      } else if (intr->intrinsic == nir_intrinsic_load_barycentric_coord_sample) {
+         coord = nir_load_barycentric_coord_at_sample(
+            b, 32, nir_load_sample_id(b), .interp_mode = mode);
+      } else {
+         return false;
+      }
+      break;
+   default:
+      return false;
+   }
+   nir_def_replace(&intr->def, coord);
+   return true;
+}
+
+static bool
+apple9_expand_barycentric_coord(nir_builder *b, nir_intrinsic_instr *intr,
+                                UNUSED void *data)
+{
+   if (!apple9_is_barycentric_coord(intr->intrinsic) ||
+       intr->def.num_components != 3)
+      return false;
+
+   b->cursor = nir_after_instr(&intr->instr);
+   nir_def *x = nir_channel(b, &intr->def, 0);
+   nir_def *y = nir_channel(b, &intr->def, 1);
+   nir_def *z = nir_fsub_imm(b, 1.0, nir_fadd(b, x, y));
+   nir_def *vec = nir_vec3(b, x, y, z);
+   nir_def_rewrite_uses_after(&intr->def, vec);
    return true;
 }
 
@@ -10005,11 +10225,17 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       unsigned samples = blend ? MAX2(blend[0].samples, 1) : 1;
-      if (samples == 1 || (blend && blend[0].multisample_disabled)) {
+      bool single_sampled =
+         samples == 1 || (blend && blend[0].multisample_disabled);
+      if (single_sampled) {
          const nir_lower_single_sampled_options options = {0};
          nir_lower_single_sampled(nir, &options);
          nir->info.fs.uses_sample_shading = false;
       }
+      nir_shader_intrinsics_pass(nir, apple9_lower_barycentric_coord,
+                                 nir_metadata_control_flow, &single_sampled);
+      nir_shader_intrinsics_pass(nir, apple9_expand_barycentric_coord,
+                                 nir_metadata_control_flow, NULL);
       nir_shader_intrinsics_pass(nir, apple9_lower_interp_at_offset,
                                  nir_metadata_control_flow, NULL);
       agx_nir_lower_sample_intrinsics(nir,

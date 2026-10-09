@@ -85,6 +85,8 @@ struct agx_rodata {
  * hardware varying limit. Semantic locations are compacted independently of
  * declaration order and never encoded directly as hardware slot numbers. */
 #define AGX_APPLE9_MAX_VARYING_COMPONENTS 96
+/* Varying scalars a fragment shader may read per vertex. */
+#define AGX_APPLE9_MAX_PER_VERTEX 32
 /* Interpolation modes are indexed by compacted scalar, independent of API
  * locations. Two words cover the complete publication-addressing namespace. */
 struct agx_apple9_interp_mask {
@@ -164,6 +166,13 @@ struct agx_shader_info {
    bool apple9_writes_point_size;
    uint8_t apple9_clip_distance_count;
    bool apple9_reads_point_coord;
+   /* Barycentric weights (bit 0 perspective, bit 1 linear) and the varying
+    * scalars read per vertex, in the order of their coefficients. Both follow
+    * the point coordinates.
+    */
+   uint8_t apple9_barycentric_mask;
+   uint8_t apple9_per_vertex_count;
+   uint8_t apple9_per_vertex[AGX_APPLE9_MAX_PER_VERTEX];
    /* Ordered graphics table entries: API UBOs 0..31, vertex bindings 32..63. */
    uint32_t apple9_resource_ssbo_mask, apple9_resource_write_mask;
    uint8_t apple9_resource_count;

@@ -287,6 +287,8 @@ hk_apple9_stage(struct hk_shader *s, bool fragment)
       .apple9_reads_z = i->apple9_reads_z,
       .reads_primitive_id = i->apple9_reads_primitive_id,
       .reads_point_coord = i->apple9_reads_point_coord,
+      .barycentric_mask = i->apple9_barycentric_mask,
+      .per_vertex_count = i->apple9_per_vertex_count,
       .writes_point_size = i->apple9_writes_point_size,
       .writes_layer_viewport = i->writes_layer_viewport,
       .clip_distance_count = i->apple9_clip_distance_count,
@@ -302,6 +304,7 @@ hk_apple9_stage(struct hk_shader *s, bool fragment)
    };
    memcpy(stage.resource_binding, i->apple9_resource_binding,
           sizeof(stage.resource_binding));
+   memcpy(stage.per_vertex, i->apple9_per_vertex, sizeof(stage.per_vertex));
    return stage;
 }
 
