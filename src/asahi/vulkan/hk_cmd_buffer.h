@@ -277,6 +277,9 @@ struct hk_graphics_state {
 
    /* The current draw is a last-provoking fan unrolled to triangles. */
    bool apple9_fan_unrolled;
+   /* The bound vertex shader writes barycentric weights for this draw, a
+    * non-indexed triangle list, without the passthrough geometry shader. */
+   bool apple9_weights_by_vs;
 
    /* Vertex buffers */
    struct hk_addr_range vb[AGX_MAX_VBUFS];

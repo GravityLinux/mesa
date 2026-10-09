@@ -3814,9 +3814,16 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct hk_api_shader *gs = gfx->shaders[MESA_SHADER_GEOMETRY];
 
+   struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
+   bool weights_by_vs =
+      !draw.indexed &&
+      dyn->ia.primitive_topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
    if (!IS_SHADER_DIRTY(VERTEX) && !IS_SHADER_DIRTY(GEOMETRY) &&
-       !IS_SHADER_DIRTY(FRAGMENT))
+       !IS_SHADER_DIRTY(FRAGMENT) &&
+       weights_by_vs == gfx->apple9_weights_by_vs)
       return;
+   gfx->apple9_weights_by_vs = weights_by_vs;
 
    /* If there's an application geometry shader, there's nothing to un/bind */
    if (gs && !gs->is_passthrough)
@@ -3833,9 +3840,12 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    struct hk_api_shader *fs_api_copies = gfx->shaders[MESA_SHADER_FRAGMENT];
    if (hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G && fs_api_copies) {
       const struct hk_shader *fs_copies = hk_only_variant(fs_api_copies);
+      /* The vertex shader writes the barycentric weights of non-indexed
+       * triangle lists when there are no per-vertex inputs. */
       needs_gs |= fs_copies->info.fs.per_vertex_copies ||
-                  fs_copies->info.fs.per_vertex_bary[0] ||
-                  fs_copies->info.fs.per_vertex_bary[1];
+                  ((fs_copies->info.fs.per_vertex_bary[0] ||
+                    fs_copies->info.fs.per_vertex_bary[1]) &&
+                   !weights_by_vs);
    }
 
    /* If we don't need a GS but we do have a passthrough, unbind it */
