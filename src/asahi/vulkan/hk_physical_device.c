@@ -1637,13 +1637,16 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
 #undef KEEP
 
    /* EXT_mesh_shader runs on the compute path: task and mesh workgroups run
-    * as compute kernels, then a draw of their output records. Mesh-shader
-    * queries and multiview stay off. HK_APPLE9_MESH_SHADER=0 hides it.
+    * as compute kernels, then a draw of their output records. Multiview
+    * repeats both per view with the view index in the root table, and the
+    * rasterization shader writes the view's layer. Mesh-shader queries stay
+    * off. HK_APPLE9_MESH_SHADER=0 hides it.
     */
    if (debug_get_bool_option("HK_APPLE9_MESH_SHADER", true)) {
       ext->EXT_mesh_shader = true;
       feat->meshShader = true;
       feat->taskShader = true;
+      feat->multiviewMeshShader = true;
    }
 
    /* Per-vertex inputs and barycentrics of vertex and mesh pipelines are
@@ -1715,7 +1718,11 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
    props->maxMeshOutputVertices = 256;
    props->maxMeshOutputPrimitives = 256;
    props->maxMeshOutputLayers = 8;
-   props->maxMeshMultiviewViewCount = props->maxMultiviewViewCount;
+   /* Mesh multiview repeats the task and mesh work per view. 16 views cover
+    * D3D12 view instancing (4) with margin; a 32-view limit also trips the
+    * CTS's 32-bit view-mask shift (cts-mesh-max-view-index-20261009).
+    */
+   props->maxMeshMultiviewViewCount = MIN2(props->maxMultiviewViewCount, 16);
    props->meshOutputPerVertexGranularity = 1;
    props->meshOutputPerPrimitiveGranularity = 1;
    props->maxPreferredTaskWorkGroupInvocations = 32;
