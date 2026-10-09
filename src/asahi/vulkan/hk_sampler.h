@@ -23,6 +23,7 @@ struct hk_sampler {
 
    uint8_t plane_count;
    uint16_t lod_bias_fp16;
+   uint16_t txl_nudge_fp16;
 
    struct {
       struct hk_rc_sampler *hw;

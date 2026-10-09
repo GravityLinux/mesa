@@ -638,7 +638,9 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
     */
    if (tex->op == nir_texop_lod_bias) {
       unsigned offs =
-         offsetof(struct hk_sampled_image_descriptor, lod_bias_fp16);
+         (tex->backend_flags & HK_TEX_TXL_NUDGE)
+            ? offsetof(struct hk_sampled_image_descriptor, txl_nudge_fp16)
+            : offsetof(struct hk_sampled_image_descriptor, lod_bias_fp16);
 
       nir_def *bias = load_resource_deref_desc(
          b, 1, 16, nir_src_as_deref(nir_src_for_ssa(sampler)),

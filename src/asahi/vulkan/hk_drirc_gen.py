@@ -33,6 +33,9 @@ def declare_options():
         B("hk_apple9_arrayed_2d_views", False,
           "Apple9: sample 1D/2D views as one-layer arrays, so 2D and array declarations can share views (breaks unnormalized coordinates)",
           c_name="apple9_arrayed_2d_views"),
+        B("hk_apple9_d3d_mip_rounding", False,
+          "Apple9: round explicit-LOD nearest mip selection half up, as D3D does",
+          c_name="apple9_d3d_mip_rounding"),
     ]
 
     debug_options = []

@@ -80,6 +80,10 @@ struct hk_apple9_texture_binding {
  * partially bound, must read them at execution time on G16. */
 #define HK_APPLE9_TEX_DESCRIPTOR_HANDLE (1u << 30)
 
+/* On a nir_texop_lod_bias query: load the sampler's explicit-LOD nudge
+ * instead of its LOD bias, see hk_lower_d3d_txl_rounding. */
+#define HK_TEX_TXL_NUDGE (1u << 29)
+
 struct hk_apple9_texture_bindings {
    uint8_t texture_count, sampler_count;
    /* Textures (and samplers) are addressed through their descriptors, and the

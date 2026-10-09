@@ -2808,6 +2808,32 @@ hk_lower_per_primitive_input(nir_builder *b, nir_intrinsic_instr *intr,
    return true;
 }
 
+/* With hk_apple9_d3d_mip_rounding (driconf, set for vkd3d-proton), add the
+ * sampler's nudge to explicit LODs, so a NEAREST mip selection exactly
+ * halfway between levels rounds up as in D3D. The nudge is zero for other
+ * mipmap modes, see hk_CreateSampler.
+ */
+static bool
+hk_lower_d3d_txl_rounding(nir_builder *b, nir_tex_instr *tex, void *data)
+{
+   if (tex->op != nir_texop_txl || !nir_tex_instr_need_sampler(tex))
+      return false;
+
+   int lod_idx = nir_tex_instr_src_index(tex, nir_tex_src_lod);
+   if (lod_idx < 0)
+      return false;
+
+   b->cursor = nir_before_instr(&tex->instr);
+   nir_def *nudge = nir_build_texture_query(b, tex, nir_texop_lod_bias, 1,
+                                            nir_type_float16, false, false);
+   nir_def_as_tex(nudge)->backend_flags |= HK_TEX_TXL_NUDGE;
+
+   nir_def *lod = tex->src[lod_idx].src.ssa;
+   nir_src_rewrite(&tex->src[lod_idx].src,
+                   nir_fadd(b, lod, nir_f2fN(b, nudge, lod->bit_size)));
+   return true;
+}
+
 /* With hk_apple9_arrayed_2d_views (driconf, set for vkd3d-proton), sampled
  * 1D and 2D views are one-layer 2D arrays on Apple9 (see pack_texture), since
  * its texture instructions must match the descriptor's arrayness. Sample
@@ -2913,6 +2939,9 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
     * count (hk_apple9_lower_storage_image). */
    NIR_PASS(_, nir, agx_nir_lower_texture_early, true /* support_lod_bias */,
             dev->dev.chip == AGX_CHIP_G16G);
+   if (hk_device_physical(dev)->apple9_d3d_mip_rounding)
+      NIR_PASS(_, nir, nir_shader_tex_pass, hk_lower_d3d_txl_rounding,
+               nir_metadata_control_flow, NULL);
    if (hk_device_physical(dev)->apple9_layered_2d)
       NIR_PASS(_, nir, nir_shader_tex_pass, hk_apple9_lower_tex_2d_as_array,
                nir_metadata_control_flow, NULL);
