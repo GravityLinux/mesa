@@ -1730,6 +1730,12 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
    props->prefersLocalInvocationVertexOutput = false;
    props->prefersLocalInvocationPrimitiveOutput = false;
    props->prefersCompactVertexOutput = true;
+
+   /* VK_KHR_compute_shader_derivatives: task and mesh workgroups run as
+    * compute kernels with the API's linear invocation order, so linear
+    * derivative groups lower as in compute shaders.
+    */
+   props->meshAndTaskShaderDerivatives = true;
    props->prefersCompactPrimitiveOutput = true;
    /* Unbound sparse ranges map scratch pages, which reads observe. */
    props->sparseResidencyNonResidentStrict = false;
