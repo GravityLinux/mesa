@@ -1,4 +1,7 @@
 # In current VKCTS 1.4.4.0
+# The oversized triangle is split at the viewport. On the seam, the hardware
+# retires helper-only quads once their non-helper invocations terminate (allowed
+# by the Vulkan shader termination rules), so the test's ballot identity fails.
 dEQP-VK.reconvergence.terminate_invocation.bit_count,Fail
 
 # CTS bug since VK-GL-CTS 3b3ec6e55051: the Workgroup array became an explicitly
