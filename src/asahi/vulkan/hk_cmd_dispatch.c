@@ -403,6 +403,32 @@ hk_apple9_dispatch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     * suffices for compute after compute. After it, an indirect dispatch
     * still flushes first, since its grid is fetched by the CDM itself.
     */
+   /* Batched tessellated draws record into a lane instead, without a
+    * trailing barrier: hk_tess_batch_flush adds one per lane. Anything else
+    * entering the pre-gfx stream first emits the pending lanes, keeping
+    * stream order for everything outside the batch.
+    */
+   if (cmd->tess_batch.capture) {
+      uint8_t rec[AGX_APPLE9_COMPUTE_CDM_RECORD_SIZE];
+      unsigned size = record_size - AGX_CDM_BARRIER_LENGTH;
+      bool ok = agx_is_indirect(grid)
+         ? agx_apple9_emit_indirect_dispatch(rec, launch, grid.ptr,
+                                            geometry.local, indirect_local, p,
+                                            false)
+         : agx_apple9_emit_direct_dispatch(rec, launch, geometry.threads,
+                                          geometry.local, p, false);
+      if (!ok) {
+         fprintf(stderr, "Apple9 dispatch failed (6)\n");
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+         return;
+      }
+      util_dynarray_append(cmd->tess_batch.capture, (uint8_t)size);
+      util_dynarray_append_array(cmd->tess_batch.capture, uint8_t, rec, size);
+      return;
+   }
+   if (cs == cmd->current_cs.pre_gfx && cmd->tess_batch.draws)
+      hk_tess_batch_flush(cmd);
+
    bool barrier = !cmd->api_dispatch;
    bool flush_before =
       cs->cdm_dirty &&
@@ -560,4 +586,55 @@ hk_CmdDispatchIndirect(VkCommandBuffer commandBuffer, VkBuffer _buffer,
 
    desc->root.cs.group_count_addr = dispatch_addr;
    dispatch(cmd, agx_grid_indirect(dispatch_addr));
+}
+
+/* Emit the batched tessellation lanes into the pre-gfx stream: each lane's
+ * records back to back, then the compute-only barrier, so stage N of every
+ * batched draw finishes before stage N+1 of any starts. The stream stays
+ * dirty so its end still gets the full flush before the render Work.
+ */
+void
+hk_tess_batch_flush(struct hk_cmd_buffer *cmd)
+{
+   if (!cmd->tess_batch.draws)
+      return;
+
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   struct hk_cs *cs = cmd->current_cs.pre_gfx;
+   cmd->tess_batch.draws = 0;
+   if (!cs) {
+      for (unsigned i = 0; i < HK_TESS_BATCH_LANES; ++i)
+         util_dynarray_clear(&cmd->tess_batch.lane[i]);
+      return;
+   }
+
+   for (unsigned l = 0; l < HK_TESS_BATCH_LANES; ++l) {
+      struct util_dynarray *lane = &cmd->tess_batch.lane[l];
+      if (!lane->size)
+         continue;
+
+      uint8_t *data = lane->data, *end = data + lane->size;
+      bool first = true;
+      while (data < end) {
+         unsigned size = *data++;
+         hk_ensure_cs_has_space(cmd, cs, size + 2 * AGX_CDM_BARRIER_LENGTH);
+         /* Whatever came before the batch must be complete. */
+         if (first && cs->cdm_dirty && !cs->cdm_compute_barrier)
+            hk_cdm_cache_flush(dev, cs);
+         first = false;
+         memcpy(cs->current, data, size);
+         cs->current += size;
+         cs->stats.cmds++;
+         cs->stats.calls++;
+         data += size;
+      }
+
+      uint32_t *barrier = (uint32_t *)cs->current;
+      cs->current = agx_cdm_barrier(cs->current, dev->dev.chip);
+      *barrier = 0x60000160;
+      cs->stats.flushes++;
+      cs->cdm_dirty = true;
+      cs->cdm_compute_barrier = true;
+      util_dynarray_clear(lane);
+   }
 }

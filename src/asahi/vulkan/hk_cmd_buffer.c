@@ -133,6 +133,8 @@ hk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
    util_dynarray_fini(&cmd->query_writes);
    util_dynarray_fini(&cmd->occlusion_accum);
    util_dynarray_fini(&cmd->sync_events);
+   for (unsigned i = 0; i < HK_TESS_BATCH_LANES; ++i)
+      util_dynarray_fini(&cmd->tess_batch.lane[i]);
    util_dynarray_fini(&cmd->sync_remap);
    vk_command_buffer_finish(&cmd->vk);
    vk_free(&pool->vk.alloc, cmd);
@@ -171,6 +173,8 @@ hk_create_cmd_buffer(struct vk_command_pool *vk_pool,
    cmd->occlusion_accum = UTIL_DYNARRAY_INIT;
    cmd->sync_events = UTIL_DYNARRAY_INIT;
    cmd->sync_remap = UTIL_DYNARRAY_INIT;
+   for (unsigned i = 0; i < HK_TESS_BATCH_LANES; ++i)
+      cmd->tess_batch.lane[i] = UTIL_DYNARRAY_INIT;
 
    cmd->vk.dynamic_graphics_state.vi = &cmd->state.gfx._dynamic_vi;
    cmd->vk.dynamic_graphics_state.ms.sample_locations =
@@ -203,6 +207,11 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    cmd->current_cs.cs = NULL;
    cmd->current_cs.post_gfx = NULL;
    cmd->current_cs.pre_gfx = NULL;
+
+   for (unsigned i = 0; i < HK_TESS_BATCH_LANES; ++i)
+      util_dynarray_clear(&cmd->tess_batch.lane[i]);
+   cmd->tess_batch.capture = NULL;
+   cmd->tess_batch.draws = 0;
 
    assert(!cmd->in_meta);
    cmd->geom_index_buffer = 0;
