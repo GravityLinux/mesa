@@ -1653,6 +1653,14 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
    ext->KHR_fragment_shader_barycentric = true;
    feat->fragmentShaderBarycentric = true;
 
+   /* Primitives generated queries count in the passthrough geometry shader,
+    * which runs before rasterizer discard and sees every vertex stream.
+    */
+   ext->EXT_primitives_generated_query = true;
+   feat->primitivesGeneratedQuery = true;
+   feat->primitivesGeneratedQueryWithRasterizerDiscard = true;
+   feat->primitivesGeneratedQueryWithNonZeroStreams = feat->geometryStreams;
+
    props->apiVersion = VK_MAKE_API_VERSION(0, 1, 4, VK_HEADER_VERSION);
    props->conformanceVersion = (VkConformanceVersion){0};
 
