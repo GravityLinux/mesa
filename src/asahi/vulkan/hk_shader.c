@@ -628,6 +628,42 @@ hk_apple9_lower_per_vertex_copies(nir_shader *fs, uint64_t producer_outputs,
    return true;
 }
 
+/* Triangle merging shades a pixel's samples from adjacent strip or fan
+ * triangles together, interpolated on one triangle's plane. That is exact at
+ * the pixel centre but not at the other triangle's samples, so per-sample
+ * shading and centroid, sample or offset interpolation keep the triangles
+ * apart.
+ */
+static bool
+hk_apple9_interpolates_off_center(nir_shader *nir)
+{
+   if (nir->info.fs.uses_sample_shading)
+      return true;
+
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            switch (nir_instr_as_intrinsic(instr)->intrinsic) {
+            case nir_intrinsic_load_barycentric_centroid:
+            case nir_intrinsic_load_barycentric_sample:
+            case nir_intrinsic_load_barycentric_at_sample:
+            case nir_intrinsic_load_barycentric_at_offset:
+            case nir_intrinsic_load_barycentric_coord_centroid:
+            case nir_intrinsic_load_barycentric_coord_sample:
+            case nir_intrinsic_load_barycentric_coord_at_sample:
+            case nir_intrinsic_load_barycentric_coord_at_offset:
+               return true;
+            default:
+               break;
+            }
+         }
+      }
+   }
+   return false;
+}
+
 static void
 hk_apple9_graphics_key(struct hk_apple9_graphics_key *key,
                        const struct vk_graphics_pipeline_state *state)
@@ -4740,7 +4776,9 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
                nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
                tri_merging = !nir->info.uses_wide_subgroup_intrinsics &&
                              !nir->info.fs.needs_coarse_quad_helper_invocations &&
-                             !nir->info.writes_memory;
+                             !nir->info.writes_memory &&
+                             !key.sample_shading &&
+                             !hk_apple9_interpolates_off_center(nir);
                hk_apple9_lower_fs_statistics(nir);
                NIR_PASS(_, nir, nir_shader_intrinsics_pass,
                         hk_apple9_clamp_depth_export,
