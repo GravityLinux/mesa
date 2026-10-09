@@ -1653,6 +1653,13 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
    ext->KHR_fragment_shader_barycentric = true;
    feat->fragmentShaderBarycentric = true;
 
+   /* Predicated draws, dispatches and attachment clears read zeroed indirect
+    * arguments when the predicate fails. Secondary command buffers do not
+    * inherit the predicate.
+    */
+   ext->EXT_conditional_rendering = true;
+   feat->conditionalRendering = true;
+
    props->apiVersion = VK_MAKE_API_VERSION(0, 1, 4, VK_HEADER_VERSION);
    props->conformanceVersion = (VkConformanceVersion){0};
 
