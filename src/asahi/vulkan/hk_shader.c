@@ -1223,13 +1223,19 @@ hk_apple9_peak_live_words(nir_shader *nir)
    return DIV_ROUND_UP(peak, 2);
 }
 
+/* The issue and first-use windows in hk_apple9_vectorize_cb protect shaders
+ * near the register limit, where a merged load keeps later fields live from
+ * the first one's issue. Across DXVK they also leave most robust fields of
+ * a vector or matrix as separate loads with their own bounds checks and
+ * waits. So apply them only when the shader's estimated peak of live words
+ * exceeds HK_APPLE9_VECTORIZE_PRESSURE_BUDGET (0 always applies them).
+ */
 struct hk_vectorize_policy {
-   /* Apply the issue and first-use windows below. */
    bool windowed;
 };
 
 DEBUG_GET_ONCE_NUM_OPTION(hk_apple9_vectorize_pressure_budget,
-                          "HK_APPLE9_VECTORIZE_PRESSURE_BUDGET", 0)
+                          "HK_APPLE9_VECTORIZE_PRESSURE_BUDGET", 96)
 
 static bool
 hk_apple9_vectorize_cb(unsigned align_mul, unsigned align_offset,
