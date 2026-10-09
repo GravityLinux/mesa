@@ -103,7 +103,10 @@ struct hk_root_descriptor_table {
          uint16_t force_never_in_shader;
          uint16_t _pad3;
          uint16_t provoking;
-         uint16_t _pad4;
+         /* Rasterized primitive class for per-vertex fragment inputs:
+          * 0 triangles, 1 lines, 2 points; bit 2 if the rasterizer's vertex
+          * order is the API order rotated (first-provoking fans). */
+         uint16_t rasterized_prim;
 
          /* True if there is an API geometry shader. If false, there may still
           * be a geometry shader in use (notably for transform feedback) but it

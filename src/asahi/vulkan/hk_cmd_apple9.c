@@ -773,6 +773,12 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    record.disable_tri_merging = pipeline.fragment.disable_tri_merging;
    record.flatshade_first = pipeline.flatshade_first;
    gfx->descriptors.root.draw.api_sample_mask = dyn->ms.sample_mask;
+   gfx->descriptors.root.draw.rasterized_prim =
+      (points ? 2 : lines ? 1 : 0) |
+      (!emulated &&
+       dyn->ia.primitive_topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN &&
+       dyn->rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT
+          ? 4 : 0);
    gfx->descriptors.root.draw.draw_id = draw_id;
    gfx->descriptors.root_dirty = true;
    hk_cmd_buffer_flush_push_descriptors(cmd, &gfx->descriptors);
