@@ -70,6 +70,11 @@ struct agx_apple9_render_stage {
    bool writes_layer_viewport;
    uint8_t clip_distance_count;
    bool reads_point_coord;
+   /* Coefficients after the point coordinates: barycentric weights (bit 0
+    * perspective, bit 1 linear) and the varying scalars read per vertex. */
+   uint8_t barycentric_mask;
+   uint8_t per_vertex_count;
+   uint8_t per_vertex[AGX_APPLE9_MAX_PER_VERTEX];
    uint8_t render_targets;
 };
 

@@ -363,7 +363,8 @@ emit_load(struct lower_io_state *state,
    case nir_var_shader_in:
       if (nir->info.stage == MESA_SHADER_FRAGMENT &&
           state->options & nir_lower_io_use_interpolated_input_intrinsics &&
-          var->data.interpolation != INTERP_MODE_FLAT &&
+          (var->data.interpolation != INTERP_MODE_FLAT ||
+           var->data.per_vertex) &&
           !var->data.per_primitive) {
          if (var->data.interpolation == INTERP_MODE_EXPLICIT ||
              var->data.per_vertex) {

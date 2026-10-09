@@ -73,7 +73,7 @@ libagx_draw_without_adj(global VkDrawIndirectCommand *out,
  * index in the adjacency topology, as in the VS prolog lowering.
  */
 static uint
-libagx_map_from_adj(uint id, enum mesa_prim prim)
+libagx_map_from_adj(uint id, enum mesa_prim prim, bool flatshade_first)
 {
    if (prim == MESA_PRIM_LINES_ADJACENCY) {
       /* (1, 2), (5, 6), (9, 10), ... */
@@ -82,11 +82,18 @@ libagx_map_from_adj(uint id, enum mesa_prim prim)
       /* (1, 2), (2, 3), (3, 4), ... */
       return (id / 2) + (id & 1) + 1;
    } else if (prim == MESA_PRIM_TRIANGLE_STRIP_ADJACENCY) {
-      /* (0, 2, 4), (2, 6, 4), (4, 6, 8), (6, 10, 8), ... */
+      /* (0, 2, 4), (2, 6, 4), (4, 6, 8), (6, 10, 8), ... with the first
+       * vertex provoking. With the last vertex provoking, odd triangles are
+       * (2, 0, 4), (6, 4, 8), ... so that vertex 2 + 2 * tri stays last.
+       */
       uint tri = id / 3;
       uint vtx = id % 3;
-      if ((tri % 2) == 1 && vtx != 0)
-         vtx = 3 - vtx;
+      if ((tri % 2) == 1) {
+         if (flatshade_first)
+            vtx = vtx == 0 ? 0 : 3 - vtx;
+         else
+            vtx = vtx == 2 ? 2 : 1 - vtx;
+      }
       return 2 * (tri + vtx);
    } else {
       /* (0, 2, 4), (6, 8, 10), ... */
@@ -104,7 +111,7 @@ KERNEL(1)
 libagx_unroll_adjacency(global uint32_t *out_draw, global struct poly_heap *heap,
                         constant uint32_t *in_draw, uint64_t index_buffer,
                         uint32_t index_buffer_range_el, uint32_t index_size_B,
-                        uint32_t prim)
+                        uint32_t prim, uint32_t flatshade_first)
 {
    bool indexed = index_size_B != 0;
    uint count = libagx_remap_adj_count(in_draw[0], prim);
@@ -121,7 +128,7 @@ libagx_unroll_adjacency(global uint32_t *out_draw, global struct poly_heap *heap
    }
 
    for (uint i = 0; i < count; ++i) {
-      uint raw = libagx_map_from_adj(i, prim);
+      uint raw = libagx_map_from_adj(i, prim, flatshade_first);
       out[i] = indexed ? poly_load_index(in_indices, in_range_el, raw,
                                          index_size_B)
                        : in_draw[2] + raw;

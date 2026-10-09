@@ -1809,7 +1809,8 @@ hk_apple9_draw_without_adj(struct hk_cmd_buffer *cmd, struct agx_draw draw)
       cmd, agx_1d(1), AGX_BARRIER_ALL | AGX_PREGFX, out_draw, heap, in_draw,
       draw.indexed ? draw.index_buffer : 0,
       draw.indexed ? draw.index_buffer_range_B >> draw.index_size : 0,
-      draw.indexed ? agx_index_size_to_B(draw.index_size) : 0, prim);
+      draw.indexed ? agx_index_size_to_B(draw.index_size) : 0, prim,
+      dyn->rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT);
 
    return agx_draw_indexed_indirect(out_draw, dev->heap->va->addr,
                                     dev->heap->size, AGX_INDEX_SIZE_U32, false);

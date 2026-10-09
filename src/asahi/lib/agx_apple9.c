@@ -986,7 +986,8 @@ apple9_build_cf_bindings(uint8_t *table, unsigned components,
                          struct agx_apple9_interp_mask linear_mask,
                          struct agx_apple9_interp_mask flat_mask,
                          unsigned provoking_vertex, bool reads_z, bool reads_point_coord,
-                         bool reads_primitive_id)
+                         bool reads_primitive_id,
+                         const struct agx_apple9_render_stage *fragment)
 {
    const enum agx_shade_model flat_shade =
       provoking_vertex == 1 ? AGX_SHADE_MODEL_FLAT_VERTEX_1
@@ -994,7 +995,10 @@ apple9_build_cf_bindings(uint8_t *table, unsigned components,
                               : AGX_SHADE_MODEL_FLAT_VERTEX_2;
    assert(components <= AGX_APPLE9_MAX_VARYING_COMPONENTS);
    memset(table, 0, APPLE9_CF_BINDINGS_SIZE);
-   unsigned slots = components + 1 + reads_z + 2 * reads_point_coord + reads_primitive_id;
+   unsigned extra = 2 * util_bitcount(fragment->barycentric_mask) +
+                    fragment->per_vertex_count;
+   unsigned slots = components + 1 + reads_z + 2 * reads_point_coord +
+                    reads_primitive_id + extra;
    apple9_put_u32(table, slots | (slots << 8));
    /* Coefficient zero is 1/W. Keep stable scalar indices across all modes. */
    apple9_put_u32(table + 4, 0x0c);
@@ -1036,6 +1040,25 @@ apple9_build_cf_bindings(uint8_t *table, unsigned components,
       apple9_put_u32(table + 4 + binding++ * 4,
                      0x4d | ((components + 1 + reads_primitive_id + reads_z) << 16));
    }
+   unsigned coefficient = components + 1 + reads_primitive_id + reads_z +
+                          2 * reads_point_coord;
+   /* Barycentric weights of vertices 0 and 1: source 5 with the perspective
+    * (7) or linear (3) shade model. */
+   for (unsigned linear = 0; linear < 2; ++linear) {
+      if (!(fragment->barycentric_mask & BITFIELD_BIT(linear)))
+         continue;
+      apple9_put_u32(table + 4 + binding++ * 4,
+                     1 | ((linear ? 3 : 7) << 2) | (5 << 5) | (coefficient << 16));
+      coefficient += 2;
+   }
+   /* Shade model 6 sets a scalar's plane terms to the raw values of vertices
+    * 0, 1 and 2. */
+   for (unsigned i = 0; i < fragment->per_vertex_count; ++i) {
+      unsigned source = fragment->per_vertex[i] + 1 + reads_z;
+      apple9_put_u32(table + 4 + binding++ * 4,
+                     (6 << 2) | (source << 8) | (coefficient++ << 16));
+   }
+   assert(4 + 4 * binding <= APPLE9_CF_BINDINGS_SIZE);
    return binding;
 }
 
@@ -1265,7 +1288,8 @@ agx_apple9_prepare_draw_alloc(
          pipeline->fragment.apple9_linear_mask,
          pipeline->fragment.apple9_flat_mask, draw->provoking_vertex,
          pipeline->fragment.apple9_reads_z,
-         pipeline->fragment.reads_point_coord, pipeline->fragment.reads_primitive_id);
+         pipeline->fragment.reads_point_coord, pipeline->fragment.reads_primitive_id,
+         &pipeline->fragment);
       bool is_new = true;
       struct agx_ptr cf = cached_alloc
          ? cached_alloc(usc_allocator, AGX_APPLE9_STATE_COEFFICIENTS,

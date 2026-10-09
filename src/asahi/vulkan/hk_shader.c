@@ -370,16 +370,110 @@ static bool
 hk_apple9_lower_bary_to_sample(nir_builder *b, nir_intrinsic_instr *intr,
                                UNUSED void *data)
 {
-   if (intr->intrinsic != nir_intrinsic_load_barycentric_pixel &&
-       intr->intrinsic != nir_intrinsic_load_barycentric_centroid)
-      return false;
-
+   const enum glsl_interp_mode mode = nir_intrinsic_interp_mode(intr);
+   nir_def *sample;
    b->cursor = nir_before_instr(&intr->instr);
-   nir_def *sample = nir_load_barycentric_sample(
-      b, intr->def.bit_size,
-      .interp_mode = nir_intrinsic_interp_mode(intr));
+
+   switch (intr->intrinsic) {
+   case nir_intrinsic_load_barycentric_pixel:
+   case nir_intrinsic_load_barycentric_centroid:
+      sample = nir_load_barycentric_sample(b, intr->def.bit_size,
+                                           .interp_mode = mode);
+      break;
+   case nir_intrinsic_load_barycentric_coord_pixel:
+   case nir_intrinsic_load_barycentric_coord_centroid:
+      sample = nir_load_barycentric_coord_sample(b, intr->def.bit_size,
+                                                 .interp_mode = mode);
+      break;
+   default:
+      return false;
+   }
+
    nir_def_replace(&intr->def, sample);
    return true;
+}
+
+/* Per-vertex inputs and barycentrics follow the API vertex order. Points read
+ * their one vertex for every index and lines read their second vertex as the
+ * third. The rasterizer orders a first-provoking triangle fan's vertices
+ * (centre, then the rim), a rotation of the API order (rim, centre). The
+ * primitive class (bits 0-1) and the rotation (bit 2) are draw state, so
+ * select at run time from the root table.
+ */
+static nir_def *
+hk_apple9_rasterized_prim(nir_builder *b)
+{
+   const unsigned offset = hk_root_descriptor_offset(draw.rasterized_prim);
+   return nir_load_ubo(b, 1, 16, nir_imm_int(b, 0), nir_imm_int(b, offset),
+                       .align_mul = 2, .range_base = offset, .range = 2);
+}
+
+static nir_def *
+hk_apple9_load_vertex(nir_builder *b, nir_intrinsic_instr *intr,
+                      unsigned vertex)
+{
+   nir_intrinsic_instr *load =
+      nir_instr_as_intrinsic(nir_instr_clone(b->shader, &intr->instr));
+   nir_def *index = nir_imm_int(b, vertex);
+   nir_builder_instr_insert(b, &load->instr);
+   nir_src_rewrite(&load->src[0], index);
+   return &load->def;
+}
+
+static bool
+hk_apple9_lower_api_vertex_order(nir_shader *nir)
+{
+   struct util_dynarray loads;
+   util_dynarray_init(&loads, NULL);
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if ((intr->intrinsic == nir_intrinsic_load_input_vertex &&
+                 nir_src_is_const(intr->src[0])) ||
+                intr->intrinsic == nir_intrinsic_load_barycentric_coord_pixel ||
+                intr->intrinsic == nir_intrinsic_load_barycentric_coord_centroid ||
+                intr->intrinsic == nir_intrinsic_load_barycentric_coord_sample ||
+                intr->intrinsic == nir_intrinsic_load_barycentric_coord_at_sample ||
+                intr->intrinsic == nir_intrinsic_load_barycentric_coord_at_offset)
+               util_dynarray_append(&loads, intr);
+         }
+      }
+   }
+
+   util_dynarray_foreach(&loads, nir_intrinsic_instr *, it) {
+      nir_intrinsic_instr *intr = *it;
+      nir_builder b = nir_builder_at(nir_after_instr(&intr->instr));
+      nir_def *prim = hk_apple9_rasterized_prim(&b);
+      nir_def *rotate = nir_ine_imm(&b, nir_iand_imm(&b, prim, 4), 0);
+      nir_def *result;
+
+      if (intr->intrinsic != nir_intrinsic_load_input_vertex) {
+         /* API weights (w0, w1, w2) are the rasterizer's (w1, w2, w0). */
+         nir_def *w = &intr->def;
+         nir_def *rotated = nir_vec3(&b, nir_channel(&b, w, 1),
+                                     nir_channel(&b, w, 2), nir_channel(&b, w, 0));
+         result = nir_bcsel(&b, rotate, rotated, w);
+      } else {
+         unsigned k = nir_src_as_uint(intr->src[0]);
+         nir_def *class = nir_iand_imm(&b, prim, 3);
+         nir_def *v[3];
+         for (unsigned i = 0; i < 3; ++i)
+            v[i] = i == k ? &intr->def : hk_apple9_load_vertex(&b, intr, i);
+         result = nir_bcsel(&b, rotate, v[(k + 1) % 3], v[k]);
+         if (k == 2)
+            result = nir_bcsel(&b, nir_ieq_imm(&b, class, 1), v[1], result);
+         if (k != 0)
+            result = nir_bcsel(&b, nir_ieq_imm(&b, class, 2), v[0], result);
+      }
+      nir_def_rewrite_uses_after(&intr->def, result);
+   }
+
+   bool progress = loads.size != 0;
+   util_dynarray_fini(&loads);
+   return nir_progress(progress, nir_shader_get_entrypoint(nir), nir_metadata_control_flow);
 }
 
 static void
@@ -4472,6 +4566,7 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
                         hk_apple9_lower_bary_to_sample,
                         nir_metadata_control_flow, NULL);
             }
+            NIR_PASS(_, nir, hk_apple9_lower_api_vertex_order);
             hk_apple9_remap_fs_outputs(nir, key.color_map);
             if (!agx_compile_apple9_fragment_mrt(nir, &varyings, key.blend,
                                                  key.targets, &shader->b,
