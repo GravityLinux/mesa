@@ -39,7 +39,9 @@ struct hk_sampled_image_descriptor {
 
    /* This is only used for txf, it can be separate from the other stuff */
    uint16_t min_lod_uint16;
-   uint16_t pad;
+
+   /* Added to explicit LODs, see hk_lower_d3d_txl_rounding */
+   uint16_t txl_nudge_fp16;
    union {
       /* TODO: This should probably be a heap! */
       uint32_t border[4];

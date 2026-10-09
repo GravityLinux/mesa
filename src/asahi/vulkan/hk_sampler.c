@@ -219,6 +219,16 @@ hk_CreateSampler(VkDevice device,
    /* LOD bias passed in the descriptor set */
    sampler->lod_bias_fp16 = _mesa_float_to_half(info->mipLodBias);
 
+   /* Vulkan rounds a NEAREST mip selection exactly halfway between levels
+    * down, D3D up. The sampler resolves the LOD in 1/64 steps, so one step
+    * added to explicit LODs rounds exact halves up, see
+    * hk_lower_d3d_txl_rounding. Computed LODs are left alone: the hardware's
+    * estimate is not exact to a step, and a step there moves real results.
+    */
+   if (pdev->apple9_d3d_mip_rounding &&
+       info->mipmapMode == VK_SAMPLER_MIPMAP_MODE_NEAREST)
+      sampler->txl_nudge_fp16 = _mesa_float_to_half(1.0f / 64.0f);
+
    result =
       hk_sampler_heap_add(dev, samp, &sampler->planes[sampler->plane_count].hw);
    if (result != VK_SUCCESS) {

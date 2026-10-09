@@ -38,6 +38,8 @@ struct hk_physical_device {
     * 1D/2D views are one-layer arrays and 2D textures are sampled as arrays
     * (see pack_texture). */
    bool apple9_layered_2d;
+   /* Apple9 with hk_apple9_d3d_mip_rounding (driconf, vkd3d-proton). */
+   bool apple9_d3d_mip_rounding;
    dev_t render_dev;
    int master_fd;
 
