@@ -1234,6 +1234,33 @@ struct hk_vectorize_policy {
    bool windowed;
 };
 
+DEBUG_GET_ONCE_NUM_OPTION(hk_apple9_vectorize_peak_slack,
+                          "HK_APPLE9_VECTORIZE_PEAK_SLACK", 0)
+
+static bool hk_apple9_vectorize_cb(unsigned align_mul, unsigned align_offset,
+                                   unsigned bit_size, unsigned num_components,
+                                   int64_t hole_size, nir_intrinsic_instr *low,
+                                   nir_intrinsic_instr *high, void *data);
+
+/* Peak of live words after vectorizing a copy of the shader with or
+ * without the windows. */
+static unsigned
+hk_apple9_vectorized_peak(const nir_shader *nir, bool windowed)
+{
+   nir_shader *clone = nir_shader_clone(NULL, nir);
+   struct hk_vectorize_policy policy = {.windowed = windowed};
+   nir_opt_load_store_vectorize(clone,
+                                &(const nir_load_store_vectorize_options){
+                                   .modes = nir_var_mem_global,
+                                   .bounds_checked_modes = nir_var_mem_global,
+                                   .callback = hk_apple9_vectorize_cb,
+                                   .cb_data = &policy,
+                                });
+   unsigned peak = hk_apple9_peak_live_words(clone);
+   ralloc_free(clone);
+   return peak;
+}
+
 DEBUG_GET_ONCE_NUM_OPTION(hk_apple9_vectorize_pressure_budget,
                           "HK_APPLE9_VECTORIZE_PRESSURE_BUDGET", 96)
 
@@ -3091,14 +3118,25 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       if (getenv("HK_APPLE9_TRACE_VECTORIZE") &&
           nir->info.stage == MESA_SHADER_FRAGMENT)
          nir_print_shader(nir, stderr);
-      /* Below the pressure budget, merge without windows. */
+      /* Below the pressure budget, merge without windows, unless that
+       * raises the shader's peak of live words over windowed merging.
+       */
       unsigned budget = debug_get_option_hk_apple9_vectorize_pressure_budget();
       unsigned peak = budget ? hk_apple9_peak_live_words(nir) : 0;
       struct hk_vectorize_policy policy = {.windowed = !budget || peak > budget};
+      unsigned peak_windowed = 0, peak_free = 0;
+      if (!policy.windowed) {
+         peak_windowed = hk_apple9_vectorized_peak(nir, true);
+         peak_free = hk_apple9_vectorized_peak(nir, false);
+         policy.windowed =
+            peak_free > peak_windowed +
+                           debug_get_option_hk_apple9_vectorize_peak_slack();
+      }
       if (getenv("HK_APPLE9_PRESSURE_STATS"))
-         fprintf(stderr, "HK_PRESSURE stage=%u peak=%u windowed=%u\n",
+         fprintf(stderr,
+                 "HK_PRESSURE stage=%u peak=%u windowed=%u merged_peaks=%u/%u\n",
                  nir->info.stage, budget ? peak : hk_apple9_peak_live_words(nir),
-                 policy.windowed);
+                 policy.windowed, peak_windowed, peak_free);
       NIR_PASS(_, nir, nir_opt_load_store_vectorize,
                &(const nir_load_store_vectorize_options){
                   .modes = nir_var_mem_global,
