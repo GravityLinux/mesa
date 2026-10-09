@@ -664,6 +664,38 @@ hk_apple9_interpolates_off_center(nir_shader *nir)
    return false;
 }
 
+/* The one-hot barycentric weights of a vertex of a non-indexed triangle list:
+ * its corner is its index within the draw, modulo 3.
+ */
+static void
+hk_apple9_write_vertex_weights(nir_shader *vs,
+                               const struct hk_per_vertex_copies *map)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(vs);
+   nir_builder b = nir_builder_at(nir_after_impl(impl));
+   /* The draw parameters hold the first vertex, as for load_first_vertex,
+    * which the root lowering has already replaced. */
+   nir_def *first = nir_load_ubo(
+      &b, 1, 32, nir_imm_int(&b, HK_APPLE9_DRAW_PARAMS_BINDING),
+      nir_imm_int(&b, 0), .align_mul = 4, .range_base = 0, .range = 4);
+   nir_def *corner =
+      nir_umod_imm(&b, nir_isub(&b, nir_load_vertex_id(&b), first), 3);
+   nir_def *weights = nir_vec3(&b, nir_b2f32(&b, nir_ieq_imm(&b, corner, 0)),
+                               nir_b2f32(&b, nir_ieq_imm(&b, corner, 1)),
+                               nir_b2f32(&b, nir_ieq_imm(&b, corner, 2)));
+   for (unsigned m = 0; m < 2; ++m) {
+      if (!map->bary[m])
+         continue;
+      unsigned slot = VARYING_SLOT_VAR0 + map->bary[m] - 1;
+      nir_store_output(&b, weights, nir_imm_int(&b, 0), .write_mask = 0x7,
+                       .src_type = nir_type_float32,
+                       .io_semantics.location = slot,
+                       .io_semantics.num_slots = 1);
+      vs->info.outputs_written |= BITFIELD64_BIT(slot);
+   }
+   nir_progress(true, impl, nir_metadata_control_flow);
+}
+
 static void
 hk_apple9_graphics_key(struct hk_apple9_graphics_key *key,
                        const struct vk_graphics_pipeline_state *state)
@@ -4714,6 +4746,11 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
                if (result != VK_SUCCESS)
                   goto done;
             }
+            /* Without per-vertex inputs, the hardware vertex shader writes
+             * the one-hot barycentric weights itself, so non-indexed
+             * triangle lists need no passthrough geometry shader. */
+            if (!per_vertex.count && hk_per_vertex_copies_used(&per_vertex))
+               hk_apple9_write_vertex_weights(nir, &per_vertex);
             if (!agx_compile_apple9_vertex_inputs(nir, &key.vertex, &shader->b,
                                                   &reason)) {
                reason = reason ?: "unsupported vertex NIR";
