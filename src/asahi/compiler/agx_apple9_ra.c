@@ -1525,25 +1525,41 @@ apple9_seen_schedule(agx_context *ctx, struct util_dynarray *seen,
                      bool cost_constraints, bool copy_register,
                      bool uniform_remat)
 {
+   /* Fingerprint the scheduled IR from its fields rather than its printed
+    * form: operands, register constraints and every instruction field from
+    * the opcode on. Branch targets are blocks of this candidate's own context,
+    * so they enter as block indices. */
    struct mesa_blake3 sha;
    _mesa_blake3_init(&sha);
    const uint8_t flags[] = {cost_constraints, copy_register, uniform_remat};
    _mesa_blake3_update(&sha, flags, sizeof(flags));
-   char *text = NULL;
-   size_t size = 0;
-   FILE *stream = open_memstream(&text, &size);
-   if (!stream)
+   struct hash_table *blocks = _mesa_pointer_hash_table_create(NULL);
+   if (!blocks)
       return false;
+   agx_foreach_block(ctx, block)
+      _mesa_hash_table_insert(blocks, block, (void *)(uintptr_t)(block->index + 1));
    agx_foreach_block(ctx, block) {
-      fprintf(stream, "block %u\n", block->index);
+      uint32_t index = block->index;
+      _mesa_blake3_update(&sha, &index, sizeof(index));
       agx_foreach_instr_in_block(block, I) {
-         agx_print_instr(I, stream);
-         fprintf(stream, "%p\n", (const void *)I->apple9);
+         _mesa_blake3_update(&sha, I->dest, sizeof(agx_index) * I->nr_dests);
+         _mesa_blake3_update(&sha, I->src, sizeof(agx_index) * I->nr_srcs);
+         const uint8_t constrained = I->reg_constraints != NULL;
+         _mesa_blake3_update(&sha, &constrained, 1);
+         if (constrained) {
+            _mesa_blake3_update(&sha, I->reg_constraints,
+                                sizeof(struct agx_reg_constraint) *
+                                   (I->nr_dests + I->nr_srcs));
+         }
+         agx_instr copy = *I;
+         struct hash_entry *target = _mesa_hash_table_search(blocks, copy.target);
+         if (target)
+            copy.imm = (uintptr_t)target->data | (1ull << 63);
+         _mesa_blake3_update(&sha, &copy.op,
+                             sizeof(agx_instr) - offsetof(agx_instr, op));
       }
    }
-   fclose(stream);
-   _mesa_blake3_update(&sha, text, size);
-   free(text);
+   _mesa_hash_table_destroy(blocks, NULL);
    blake3_hash digest;
    _mesa_blake3_final(&sha, digest);
    for (unsigned off = 0; off + BLAKE3_OUT_LEN <= seen->size;
