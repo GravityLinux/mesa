@@ -3570,6 +3570,8 @@ hk_apple9_texture_bindings(nir_shader *nir, struct hk_apple9_texture_bindings *m
          }
       }
    }
+   /* Handle loads were added and sources removed: liveness is stale. */
+   nir_progress(true, nir_shader_get_entrypoint(nir), nir_metadata_control_flow);
    nir_opt_dce(nir);
    return true;
 }
