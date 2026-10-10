@@ -152,6 +152,20 @@ struct hk_descriptor_state {
    bool root_dirty;
    struct hk_root_descriptor_table root;
 
+   /* Last uploaded root (self-address normalized to 0) and its GPU address.
+    * An identical root reuses the upload instead of hashing into the
+    * per-command-buffer upload cache. Zeroed with the rest of the state on
+    * reset, i.e. whenever the upload pool is. */
+   bool root_last_valid;
+   uint64_t root_last_gpu;
+   struct hk_root_descriptor_table root_last;
+
+   /* Last direct-dispatch group count upload, reused for identical counts so
+    * the root (which holds its address) stays comparable across dispatches. */
+   bool group_count_last_valid;
+   uint32_t group_count_last[3];
+   uint64_t group_count_last_addr;
+
    uint32_t set_sizes[HK_MAX_SETS];
    struct hk_descriptor_set *sets[HK_MAX_SETS];
    uint32_t sets_dirty;

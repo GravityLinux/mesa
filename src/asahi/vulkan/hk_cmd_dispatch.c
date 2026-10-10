@@ -583,8 +583,14 @@ hk_CmdDispatchBase(VkCommandBuffer commandBuffer, uint32_t baseGroupX,
       .z = groupCountZ,
    };
 
-   desc->root.cs.group_count_addr =
-      hk_pool_upload(cmd, &group_count, sizeof(group_count), 8);
+   if (!desc->group_count_last_valid ||
+       memcmp(desc->group_count_last, &group_count, sizeof(group_count))) {
+      desc->group_count_last_addr =
+         hk_pool_upload(cmd, &group_count, sizeof(group_count), 8);
+      memcpy(desc->group_count_last, &group_count, sizeof(group_count));
+      desc->group_count_last_valid = desc->group_count_last_addr != 0;
+   }
+   desc->root.cs.group_count_addr = desc->group_count_last_addr;
 
    dispatch(cmd, agx_3d(groupCountX, groupCountY, groupCountZ));
 }
