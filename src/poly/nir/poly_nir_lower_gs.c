@@ -1135,11 +1135,12 @@ evaluate_topology(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    if (intr->intrinsic != nir_intrinsic_emit_primitive_poly)
       return false;
 
-   /* All emit-primitives must execute exactly once. That happens if everything
-    * is in the start block. Strictly we could relax this (to handle
-    * if-statements interleaved with other stuff).
+   /* All emit-primitives must execute exactly once. That happens if they are
+    * in the function's top-level control flow, outside any if or loop: a GS has
+    * no early returns by now, so every top-level block runs once. Control flow
+    * elsewhere (say, input vertex index math ahead of the emits) is fine.
     */
-   if (intr->instr.block != nir_start_block(b->impl)) {
+   if (intr->instr.block->cf_node.parent != &b->impl->cf_node) {
       info->shape = POLY_GS_SHAPE_DYNAMIC_INDEXED;
       return false;
    }
@@ -1225,6 +1226,19 @@ optimize_static_topology(struct poly_gs_info *info, nir_shader *gs)
 {
    struct topology_ctx ctx = {.info = info};
    bool has_restart = info->mode != MESA_PRIM_POINTS;
+
+   /* Top-level blocks run exactly once only without early exits. */
+   nir_foreach_block(block, nir_shader_get_entrypoint(gs)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_jump &&
+             (nir_instr_as_jump(instr)->type == nir_jump_return ||
+              nir_instr_as_jump(instr)->type == nir_jump_halt)) {
+            info->shape = POLY_GS_SHAPE_DYNAMIC_INDEXED;
+            return;
+         }
+      }
+   }
+
    nir_shader_intrinsics_pass(gs, evaluate_topology, nir_metadata_all, &ctx);
    if (info->shape == POLY_GS_SHAPE_DYNAMIC_INDEXED)
       return;
