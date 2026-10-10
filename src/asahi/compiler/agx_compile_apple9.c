@@ -7008,7 +7008,7 @@ apple9_hoist_uniform_source(nir_src *src, void *data)
 
 static bool
 apple9_hoist_uniform_reads(nir_shader *nir, struct hash_table *original_blocks,
-                            bool addresses)
+                            bool addresses, unsigned *address_hoists)
 {
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
    nir_index_ssa_defs(impl);
@@ -7055,6 +7055,8 @@ apple9_hoist_uniform_reads(nir_shader *nir, struct hash_table *original_blocks,
                 apple9_can_hoist_uniform(address, &s)) {
                apple9_hoist_uniform_source(address, &s);
                progress = true;
+               if (address_hoists)
+                  ++*address_hoists;
             }
          }
       }
@@ -7066,7 +7068,7 @@ apple9_hoist_uniform_reads(nir_shader *nir, struct hash_table *original_blocks,
 bool
 agx_nir_hoist_apple9_uniform_reads(nir_shader *nir)
 {
-   return apple9_hoist_uniform_reads(nir, NULL, true);
+   return apple9_hoist_uniform_reads(nir, NULL, true, NULL);
 }
 
 /* Exposing an address to preamble extraction must not leave every unselected
@@ -7110,7 +7112,8 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
                    const struct apple9_buffer_map *resources,
                    unsigned uniform_budget, bool promote_constants,
                    bool hoist_addresses, struct apple9_dag_cost *cost,
-                   unsigned *preamble_bytes, unsigned *preamble_words)
+                   unsigned *preamble_bytes, unsigned *preamble_words,
+                   unsigned *address_hoists)
 {
    nir_shader *main = nir_shader_clone(NULL, nir);
    if (!main)
@@ -7132,7 +7135,7 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
     * than running unconditionally for every thread. */
    bool restore = hoist_addresses || !getenv("AGX_APPLE9_KEEP_UNSELECTED_HOISTS");
    if (apple9_hoist_uniform_reads(main, restore ? original_blocks : NULL,
-                                  hoist_addresses))
+                                  hoist_addresses, address_hoists))
       nir_opt_cse(main);
    nir_function_impl *main_impl = nir_shader_get_entrypoint(main);
    nir_index_ssa_defs(main_impl);
@@ -7236,7 +7239,7 @@ apple9_preamble_trial(nir_shader *nir, struct agx_shader_part *out,
                      const struct agx_apple9_varying_layout *varyings,
                      const struct apple9_buffer_map *resources,
                      bool hoist_addresses, struct apple9_dag_cost *cost,
-                     char **log, size_t *log_size)
+                     char **log, size_t *log_size, unsigned *address_hoists)
 {
    FILE *stream = open_memstream(log, log_size);
    FILE *previous = apple9_log_stream;
@@ -7256,7 +7259,8 @@ apple9_preamble_trial(nir_shader *nir, struct agx_shader_part *out,
    for (unsigned attempt = 0; attempt < 4 && budget; ++attempt) {
       unsigned bytes = 0, words = 0;
       if (apple9_try_preamble(nir, out, profile, varyings, resources, budget,
-                             promote_constants, hoist_addresses, cost, &bytes, &words)) {
+                             promote_constants, hoist_addresses, cost, &bytes, &words,
+                             address_hoists)) {
          ok = true;
          break;
       }
@@ -7421,21 +7425,25 @@ apple9_compile_dag_tail(nir_shader *nir, struct agx_shader_part *out,
    struct apple9_dag_cost address_cost = {0}, original_cost = {0};
    char *address_log = NULL, *original_log = NULL;
    size_t address_size = 0, original_size = 0;
+   unsigned address_hoists = 0;
    bool ok = apple9_preamble_trial(nir, out, profile, varyings, &resources,
-                                   true, &address_cost, &address_log, &address_size);
+                                   true, &address_cost, &address_log, &address_size,
+                                   &address_hoists);
    bool use_original = false;
    /* Moving uniform addresses competes with descriptor values and constants
     * for preamble storage. If the resulting main spills, compare the old
     * placement using the same loop-weighted allocation cost as sample
     * hoisting, while also rejecting any static spill increase. Preserve a
     * usable original preamble if new setup does
-    * not fit. The common no-spill case needs only one search. */
-   if (!ok || address_cost.spills) {
+    * not fit. The common no-spill case needs only one search. Without any
+    * address hoist the original placement prepares the same main program,
+    * so its search could only repeat this one. */
+   if (!ok || (address_cost.spills && address_hoists)) {
       struct agx_shader_part original = {0};
       struct agx_apple9_compute_profile original_profile = {0};
       bool original_ok = apple9_preamble_trial(
          nir, &original, profile ? &original_profile : NULL, varyings, &resources,
-         false, &original_cost, &original_log, &original_size);
+         false, &original_cost, &original_log, &original_size, NULL);
       use_original = original_ok &&
                      (!ok || address_cost.spills > original_cost.spills ||
                       apple9_dag_cost_less(&original_cost, &address_cost));
