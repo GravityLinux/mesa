@@ -91,10 +91,10 @@ encode_frame(uint8_t out[10], const struct agx_apple9_launch_parameters *params)
    write16(out + 7, params->frame_extent_b);
 }
 
-bool
-agx_apple9_launch_build(uint8_t *out, size_t capacity,
-                        enum agx_apple9_launch_stage stage,
-                        const struct agx_apple9_launch_parameters *params)
+static bool
+launch_build(uint8_t *out, size_t capacity, enum agx_apple9_launch_stage stage,
+             const struct agx_apple9_launch_parameters *params,
+             struct agx_apple9_launch_template *tmpl)
 {
    if (!out || !params || (unsigned)stage > AGX_APPLE9_LAUNCH_COMPUTE)
       return false;
@@ -134,6 +134,8 @@ agx_apple9_launch_build(uint8_t *out, size_t capacity,
    }
    encode_allocation(program + at, stage, params);
    at += 8;
+   if (tmpl)
+      tmpl->target_at = at;
    encode_target(program + at, params->entry_offset);
    at += 10;
    encode_frame(program + at, params);
@@ -158,6 +160,8 @@ agx_apple9_launch_build(uint8_t *out, size_t capacity,
          (int64_t)(params->launch_address - params->shader_base + at);
       if (!agx_apple9_encode_branch(program + at, true, displacement))
          return false;
+      if (tmpl)
+         tmpl->branch_at = at;
       at += 10;
    }
    /* The preamble's STOP, or this STOP when no setup remains, completes the
@@ -166,7 +170,74 @@ agx_apple9_launch_build(uint8_t *out, size_t capacity,
    at += 4;
    if (at > size)
       return false;
+   if (tmpl)
+      tmpl->length = at;
    memcpy(out, program, at);
    memset(out + at, 0, capacity - at);
+   return true;
+}
+
+bool
+agx_apple9_launch_build(uint8_t *out, size_t capacity,
+                        enum agx_apple9_launch_stage stage,
+                        const struct agx_apple9_launch_parameters *params)
+{
+   return launch_build(out, capacity, stage, params, NULL);
+}
+
+bool
+agx_apple9_launch_template_init(struct agx_apple9_launch_template *tmpl,
+                                size_t capacity,
+                                enum agx_apple9_launch_stage stage,
+                                const struct agx_apple9_launch_parameters *params)
+{
+   memset(tmpl, 0, sizeof(*tmpl));
+   if (!params || capacity > sizeof(tmpl->program))
+      return false;
+   /* Placeholders for the per-launch fields: a valid even entry, and a
+    * program address that keeps the preamble branch encodable. */
+   struct agx_apple9_launch_parameters p = *params;
+   p.resource_table = 0;
+   p.entry_offset = 0;
+   p.launch_address = p.preamble_address ? p.shader_base : 0;
+   if (!launch_build(tmpl->program, capacity, stage, &p, tmpl))
+      return false;
+   tmpl->shader_base = p.shader_base;
+   tmpl->preamble_address = p.preamble_address;
+   tmpl->capacity = capacity;
+   tmpl->valid = true;
+   return true;
+}
+
+bool
+agx_apple9_launch_template_emit(
+   uint8_t *out, const struct agx_apple9_launch_template *tmpl,
+   uint64_t resource_table, uint32_t entry_offset, uint64_t launch_address)
+{
+   if (!tmpl->valid || entry_offset > AGX_APPLE9_ENTRY_MAX_OFFSET ||
+       (entry_offset & 1))
+      return false;
+   uint8_t head[16], target[10], branch[10];
+   const unsigned root = 2;
+   agx_apple9_encode_literal32(head, root, resource_table);
+   agx_apple9_encode_literal32(head + 8, root + 1, resource_table >> 32);
+   encode_target(target, entry_offset);
+   if (tmpl->branch_at) {
+      /* As launch_build: the displacement is relative to the branch. */
+      uint64_t base = tmpl->shader_base;
+      if ((launch_address & 1) || launch_address < base ||
+          launch_address - base > UINT32_MAX - tmpl->branch_at)
+         return false;
+      int64_t displacement = (int64_t)(tmpl->preamble_address - base) -
+                             (int64_t)(launch_address - base + tmpl->branch_at);
+      if (!agx_apple9_encode_branch(branch, true, displacement))
+         return false;
+   }
+   memcpy(out, tmpl->program, tmpl->length);
+   memcpy(out, head, sizeof(head));
+   memcpy(out + tmpl->target_at, target, sizeof(target));
+   if (tmpl->branch_at)
+      memcpy(out + tmpl->branch_at, branch, sizeof(branch));
+   memset(out + tmpl->length, 0, tmpl->capacity - tmpl->length);
    return true;
 }
