@@ -1749,8 +1749,13 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
     * hk_sparse_unbound_unmapped leaves them unmapped (set by the caller).
     */
    props->sparseResidencyNonResidentStrict = false;
-   /* With early fragment tests, occlusion counting precedes the sample
-    * mask test. */
+   /* With early fragment tests, the depth/stencil test, and with it occlusion
+    * counting, runs at shader entry (agx_nir_lower_sample_mask). A sample the
+    * entry test counted cannot be discarded afterwards, so a gl_SampleMask
+    * write only masks color. Counting after the mask would mean deferring the
+    * test past the mask's computation, which early-test semantics forbid once
+    * side effects or attachment reads come first. The early_fragment
+    * sample_count QualityWarning reflects this spec-permitted order. */
    props->earlyFragmentSampleMaskTestBeforeSampleCounting = false;
    /* FP32 arithmetic flushes natively. The Apple9 compiler canonicalizes
     * raw-result operations for explicit FTZ, including min/max, sign-bit
