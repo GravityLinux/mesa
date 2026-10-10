@@ -90,6 +90,10 @@ hk_bind_scratch(struct hk_device *dev, struct agx_va *va, unsigned offset_B,
    uint64_t addr = va->addr + offset_B;
    uint32_t flags = DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_SINGLE_PAGE;
 
+   /* Unbound ranges stay unmapped, see hk_sparse_unbound_unmapped. */
+   if (hk_sparse_unbound_unmapped(&dev->dev))
+      return VK_SUCCESS;
+
    /* Map read-write scratch to the primary (bottom half) VA range */
    int ret = agx_bo_bind(&dev->dev, dev->dev.scratch_bo, addr, size_B, 0,
                          flags | DRM_ASAHI_BIND_WRITE);

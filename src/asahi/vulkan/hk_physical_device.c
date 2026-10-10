@@ -1737,7 +1737,9 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
     */
    props->meshAndTaskShaderDerivatives = true;
    props->prefersCompactPrimitiveOutput = true;
-   /* Unbound sparse ranges map scratch pages, which reads observe. */
+   /* Unbound sparse ranges map scratch pages, which reads observe, unless
+    * hk_sparse_unbound_unmapped leaves them unmapped (set by the caller).
+    */
    props->sparseResidencyNonResidentStrict = false;
    /* With early fragment tests, occlusion counting precedes the sample
     * mask test. */
@@ -1858,9 +1860,13 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
    struct vk_properties properties;
    hk_get_device_properties(&pdev->dev, instance, &properties);
 
-   if (pdev->dev.chip == AGX_CHIP_G16G)
+   if (pdev->dev.chip == AGX_CHIP_G16G) {
       hk_apple9_restrict_caps(&supported_extensions, &supported_features,
                               &properties);
+      /* Unmapped with soft faults: unbound reads are zero, writes dropped. */
+      properties.sparseResidencyNonResidentStrict =
+         hk_sparse_unbound_unmapped(&pdev->dev);
+   }
 
 
    properties.drmHasRender = true;

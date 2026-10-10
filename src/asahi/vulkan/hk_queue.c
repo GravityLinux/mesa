@@ -566,7 +566,18 @@ hk_flush_bind(struct hk_bind_builder *b)
     * so we don't leave a gap.
     */
    struct drm_asahi_gem_bind_op op;
-   if (!b->mem) {
+   if (!b->mem && hk_sparse_unbound_unmapped(&b->dev->dev)) {
+      /* Leave both views unmapped, see hk_sparse_unbound_unmapped. */
+      op = (struct drm_asahi_gem_bind_op){
+         .flags = DRM_ASAHI_BIND_UNBIND,
+         .addr = b->va->addr + b->resourceOffset,
+         .range = b->size,
+      };
+      util_dynarray_append(&b->binds, op);
+      op.addr = agx_rw_addr_to_ro(&b->dev->dev, op.addr);
+      util_dynarray_append(&b->binds, op);
+      return VK_SUCCESS;
+   } else if (!b->mem) {
       op = (struct drm_asahi_gem_bind_op){
          .handle = b->dev->dev.scratch_bo->uapi_handle,
          .flags = DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE |
