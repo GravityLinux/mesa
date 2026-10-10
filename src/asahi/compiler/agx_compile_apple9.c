@@ -8214,8 +8214,15 @@ apple9_lower_texture_lod_query(nir_builder *b, nir_instr *instr, void *data)
    }
    tex->is_shadow = false;
    tex->is_new_style_shadow = false;
-   tex->op = nir_tex_instr_src_index(tex, nir_tex_src_bias) >= 0
-                ? nir_texop_txb : nir_texop_tex;
+   /* Always query in the biased form, with a zero bias if there is none:
+    * table-addressed samplers get their state bias added this way, and a
+    * descriptor-addressed query in the unbiased form returns a different
+    * LOD (glsl.texture_functions textureclamp *_bias, cube-array bias). */
+   if (nir_tex_instr_src_index(tex, nir_tex_src_bias) < 0) {
+      b->cursor = nir_before_instr(instr);
+      nir_tex_instr_add_src(tex, nir_tex_src_bias, nir_imm_float(b, 0));
+   }
+   tex->op = nir_texop_txb;
    tex->backend_flags |= AGX_APPLE9_TEXTURE_LOD_QUERY;
    /* As a sample, the instruction has a sample's destination size; the
     * query result is its first two components. Leaving the two-component
