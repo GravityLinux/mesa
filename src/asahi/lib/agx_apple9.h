@@ -13,6 +13,7 @@ struct agx_ptr;
 #include "util/format/u_formats.h"
 
 #include "asahi/lib/agx_apple9_layout.h"
+#include "asahi/lib/agx_apple9_launch.h"
 #include "asahi/compiler/agx_apple9_profile.h"
 #include "asahi/compiler/agx_compile.h"
 #include "asahi/compiler/agx_compile_apple9.h"
@@ -289,6 +290,25 @@ bool agx_apple9_prepare_compute_dispatch_alloc(
    unsigned resource_count, uint64_t textures, uint64_t samplers,
    const struct agx_apple9_compute_geometry *geometry,
    uint64_t preamble_address, uint64_t *launch_address);
+
+/* As agx_apple9_prepare_compute_dispatch_alloc, emitting the launch program
+ * from tmpl (agx_apple9_compute_launch_template of the same profile and
+ * preamble) when it is non-NULL and valid. HK_APPLE9_LAUNCH_CHECK=1 compares
+ * every templated program with a full build. */
+bool agx_apple9_prepare_compute_dispatch_alloc_tmpl(
+   struct agx_device *dev, void *allocator,
+   struct agx_ptr (*alloc)(void *, size_t, size_t), struct agx_bo *body,
+   const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
+   unsigned resource_count, uint64_t textures, uint64_t samplers,
+   const struct agx_apple9_compute_geometry *geometry,
+   uint64_t preamble_address, const struct agx_apple9_launch_template *tmpl,
+   uint64_t *launch_address);
+
+/* Build a compute pipeline's launch template, once at pipeline creation. */
+bool agx_apple9_compute_launch_template(
+   struct agx_apple9_launch_template *tmpl,
+   const struct agx_apple9_compute_profile *profile, uint64_t usc_exec_base,
+   uint64_t preamble_address);
 
 bool agx_apple9_prepare_compute_dispatch(
    struct agx_device *dev, struct agx_pool *usc_pool, struct agx_bo *body,

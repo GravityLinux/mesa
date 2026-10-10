@@ -18,6 +18,7 @@
 #include "util/compress.h"
 #include "util/list.h"
 #include "util/u_call_once.h"
+#include "util/u_debug.h"
 #include "util/u_math.h"
 #include "agx_device.h"
 #include "agx_pack.h"
@@ -271,26 +272,23 @@ apple9_build_sentinel_constant_program(uint8_t *out, unsigned slots)
       apple9_put_u16(out + 4 + index * 2, 0x0006);
 }
 
+/* Launch parameters of a compute profile; the caller sets the per-launch
+ * entry, resource table and program address. */
 static bool
-apple9_build_compute_launch(uint8_t *out, uint64_t usc_exec_base,
-                            uint64_t launch_address, uint64_t resource_address,
-                            uint32_t main_offset,
-                            const struct agx_apple9_compute_profile *profile,
-                            uint64_t preamble_address)
+apple9_compute_launch_params(struct agx_apple9_launch_parameters *out,
+                             uint64_t usc_exec_base,
+                             const struct agx_apple9_compute_profile *profile,
+                             uint64_t preamble_address)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   if (!abi || !apple9_compute_profile_valid(profile, abi) ||
-       main_offset < AGX_APPLE9_ENTRY_HEADER_SIZE + AGX_APPLE9_ENTRY_CODE_OFFSET)
+   if (!abi || !apple9_compute_profile_valid(profile, abi))
       return false;
 
    struct agx_apple9_launch_parameters params = {
-      .entry_offset = main_offset,
       .publication_count = profile->publication_count,
       .preamble_address = preamble_address,
-      .launch_address = launch_address,
    };
    params.shader_base = usc_exec_base;
-   params.resource_table = resource_address;
    params.resource_count =
       profile->abi == AGX_APPLE9_COMPUTE_ABI_DESCRIPTOR_TABLES
          ? AGX_APPLE9_GRAPHICS_ROOT_WORDS / 2 - 1
@@ -301,8 +299,42 @@ apple9_build_compute_launch(uint8_t *out, uint64_t usc_exec_base,
       params.frame_extent_b = profile->scratch_size;
    }
    params.frame_extent_a = MAX2(params.frame_extent_a, profile->atomic_frame_size);
+   *out = params;
+   return true;
+}
+
+static bool
+apple9_build_compute_launch(uint8_t *out, uint64_t usc_exec_base,
+                            uint64_t launch_address, uint64_t resource_address,
+                            uint32_t main_offset,
+                            const struct agx_apple9_compute_profile *profile,
+                            uint64_t preamble_address)
+{
+   struct agx_apple9_launch_parameters params;
+   if (main_offset < AGX_APPLE9_ENTRY_HEADER_SIZE + AGX_APPLE9_ENTRY_CODE_OFFSET ||
+       !apple9_compute_launch_params(&params, usc_exec_base, profile,
+                                     preamble_address))
+      return false;
+   params.entry_offset = main_offset;
+   params.resource_table = resource_address;
+   params.launch_address = launch_address;
    return agx_apple9_launch_build(
       out, agx_apple9_compute_launch_size(profile), AGX_APPLE9_LAUNCH_COMPUTE, &params);
+}
+
+bool
+agx_apple9_compute_launch_template(struct agx_apple9_launch_template *tmpl,
+                                   const struct agx_apple9_compute_profile *profile,
+                                   uint64_t usc_exec_base,
+                                   uint64_t preamble_address)
+{
+   struct agx_apple9_launch_parameters params;
+   memset(tmpl, 0, sizeof(*tmpl));
+   return apple9_compute_launch_params(&params, usc_exec_base, profile,
+                                       preamble_address) &&
+          agx_apple9_launch_template_init(
+             tmpl, agx_apple9_compute_launch_size(profile),
+             AGX_APPLE9_LAUNCH_COMPUTE, &params);
 }
 
 size_t
@@ -526,6 +558,23 @@ agx_apple9_prepare_compute_dispatch_alloc(
    const struct agx_apple9_compute_geometry *geometry,
    uint64_t preamble_address, uint64_t *launch_address)
 {
+   return agx_apple9_prepare_compute_dispatch_alloc_tmpl(
+      dev, allocator, alloc, body, profile, resources, resource_count, textures,
+      samplers, geometry, preamble_address, NULL, launch_address);
+}
+
+DEBUG_GET_ONCE_BOOL_OPTION(apple9_launch_check, "HK_APPLE9_LAUNCH_CHECK", false)
+
+bool
+agx_apple9_prepare_compute_dispatch_alloc_tmpl(
+   struct agx_device *dev, void *allocator,
+   struct agx_ptr (*alloc)(void *, size_t, size_t), struct agx_bo *body,
+   const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
+   unsigned resource_count, uint64_t textures, uint64_t samplers,
+   const struct agx_apple9_compute_geometry *geometry,
+   uint64_t preamble_address, const struct agx_apple9_launch_template *tmpl,
+   uint64_t *launch_address)
+{
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
    if (!abi || !resources || !geometry || !launch_address ||
        !apple9_compute_profile_valid(profile, abi) ||
@@ -566,9 +615,31 @@ agx_apple9_prepare_compute_dispatch_alloc(
    struct agx_ptr launch = alloc(allocator, agx_apple9_compute_launch_size(profile), 64);
    if (!launch.cpu)
       return false;
-   if (!apple9_build_compute_launch(launch.cpu, dev->shader_base, launch.gpu,
-                                    record.gpu, entry, profile, preamble_address))
+   if (tmpl && tmpl->valid) {
+      /* The template was built from this profile and preamble; only the
+       * record, entry and program address differ per dispatch. */
+      assert(tmpl->preamble_address == preamble_address &&
+             tmpl->shader_base == dev->shader_base);
+      if (entry < AGX_APPLE9_ENTRY_HEADER_SIZE + AGX_APPLE9_ENTRY_CODE_OFFSET ||
+          !agx_apple9_launch_template_emit(launch.cpu, tmpl, record.gpu, entry,
+                                           launch.gpu))
+         return false;
+      if (debug_get_option_apple9_launch_check()) {
+         uint8_t ref[AGX_APPLE9_COMPUTE_LAUNCH_SIZE];
+         size_t size = agx_apple9_compute_launch_size(profile);
+         if (!apple9_build_compute_launch(ref, dev->shader_base, launch.gpu,
+                                          record.gpu, entry, profile,
+                                          preamble_address) ||
+             memcmp(ref, launch.cpu, size)) {
+            fprintf(stderr, "HK_APPLE9_LAUNCH_CHECK: template launch differs\n");
+            abort();
+         }
+      }
+   } else if (!apple9_build_compute_launch(launch.cpu, dev->shader_base,
+                                           launch.gpu, record.gpu, entry,
+                                           profile, preamble_address)) {
       return false;
+   }
    *launch_address = launch.gpu;
    return true;
 }

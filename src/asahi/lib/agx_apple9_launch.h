@@ -54,4 +54,38 @@ bool agx_apple9_launch_build(uint8_t *out, size_t capacity,
                              enum agx_apple9_launch_stage stage,
                              const struct agx_apple9_launch_parameters *params);
 
+/* A launch program built once, at pipeline creation, for repeated emission.
+ * Only the resource table address, the entry offset and the program's own
+ * address (which positions the preamble branch) vary between launches of a
+ * pipeline; agx_apple9_launch_template_emit patches exactly those fields.
+ * A plain value: it holds no pointers.
+ */
+struct agx_apple9_launch_template {
+   uint8_t program[AGX_APPLE9_COMPUTE_LAUNCH_SIZE];
+   uint64_t shader_base;
+   uint64_t preamble_address;
+   /* Encoded length of the program; emission zero-fills to capacity. */
+   uint16_t length;
+   uint16_t capacity;
+   uint16_t target_at;
+   /* Offset of the preamble branch, or 0 without a preamble. */
+   uint16_t branch_at;
+   bool valid;
+};
+
+/* Build a template from stage parameters. resource_table, entry_offset and
+ * launch_address are per-launch and ignored. Returns false (and leaves the
+ * template invalid) when agx_apple9_launch_build would reject the stage
+ * parameters. */
+bool agx_apple9_launch_template_init(struct agx_apple9_launch_template *tmpl,
+                                     size_t capacity,
+                                     enum agx_apple9_launch_stage stage,
+                                     const struct agx_apple9_launch_parameters *params);
+
+/* Emit the program for one launch: the same bytes agx_apple9_launch_build
+ * produces with the template's parameters and these per-launch fields. */
+bool agx_apple9_launch_template_emit(
+   uint8_t *out, const struct agx_apple9_launch_template *tmpl,
+   uint64_t resource_table, uint32_t entry_offset, uint64_t launch_address);
+
 #endif

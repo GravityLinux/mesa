@@ -79,6 +79,7 @@ if with_tests
       files(
         'tests/test-packing.cpp',
         'tests/test-apple9-cdm.cpp',
+        'tests/test-apple9-launch-template.cpp',
         'tests/test-tilebuffer.cpp',
         'tests/test-primitive-count.cpp',
       ),
