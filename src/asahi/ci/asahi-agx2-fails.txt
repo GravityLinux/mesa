@@ -13,7 +13,14 @@ dEQP-VK.sparse_resources.buffer.misc.null_address_read,Fail
 dEQP-VK.sparse_resources.buffer.misc.null_address_read_descriptors,Fail
 dEQP-VK.sparse_resources.buffer.misc.null_address_read_local_inv_idx,Fail
 dEQP-VK.sparse_resources.buffer.misc.null_address_read_local_inv_idx_descriptors,Fail
+
+# G16 (Apple9) hardware: a store to an unbound sparse page is dropped, but a
+# reload of the same address in the same invocation still returns the stored
+# value, through volatile, memoryBarrierBuffer and coherent alike. Copies and
+# later dispatches read zero, so only this store-then-reload case fails, and
+# only in the unbound chunk.
 dEQP-VK.sparse_resources.buffer.ssbo.read_write.sparse_residency_non_resident_strict,Fail
+
 dEQP-VK.sparse_resources.buffer.ssbo.sparse_residency.non_resident_buffer_strict_copy_dest_alloc_none_1024,Fail
 dEQP-VK.sparse_resources.buffer.ssbo.sparse_residency.non_resident_buffer_strict_copy_dest_alloc_none_16777216,Fail
 dEQP-VK.sparse_resources.buffer.ssbo.sparse_residency.non_resident_buffer_strict_copy_dest_alloc_none_65536,Fail
