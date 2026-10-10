@@ -2086,8 +2086,38 @@ hk_apple9_launch_tess(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    libagx_tessellate(cmd, grid_tess, AGX_BARRIER_ALL | AGX_PREGFX,
                      gfx->tess.info.mode, POLY_TESS_MODE_COUNT, state);
    HK_TESS_LANE(3);
-   libagx_prefix_sum_tess(cmd, agx_1d(1024), AGX_BARRIER_ALL | AGX_PREGFX,
-                          state, c_prims, c_inv, c_prims || c_inv);
+   /* One workgroup walking every patch takes milliseconds for large draws,
+    * so direct draws past a few blocks scan blocks in parallel instead.
+    */
+   /* HK_APPLE9_TESS_SCAN_BLOCK=<n> sets the block size, so that tests with
+    * small draws reach the blocked path too.
+    */
+   static unsigned block_patches = 0;
+   if (!block_patches) {
+      const char *env = getenv("HK_APPLE9_TESS_SCAN_BLOCK");
+      block_patches = env ? MAX2(strtoul(env, NULL, 0), 1) : 8192;
+   }
+   unsigned nr_patches =
+      agx_is_indirect(draw.b) ? 0
+                              : ((struct poly_tess_params *)tess_args.cpu)->nr_patches;
+   if (nr_patches > 2 * block_patches) {
+      uint64_t counts = ((struct poly_tess_params *)tess_args.cpu)->counts;
+      unsigned nr_blocks = DIV_ROUND_UP(nr_patches, block_patches);
+      uint64_t block_sums = hk_pool_alloc(cmd, nr_blocks * 4, 4).gpu;
+      libagx_prefix_sum_tess_blocks(cmd, agx_1d(1024 * nr_blocks),
+                                    AGX_BARRIER_ALL | AGX_PREGFX, counts,
+                                    block_sums, nr_patches, block_patches);
+      libagx_prefix_sum_tess_offsets(cmd, agx_1d(1024),
+                                     AGX_BARRIER_ALL | AGX_PREGFX, state,
+                                     block_sums, nr_blocks, c_prims, c_inv,
+                                     c_prims || c_inv);
+      libagx_prefix_sum_tess_add(cmd, agx_1d(nr_patches - block_patches),
+                                 AGX_BARRIER_ALL | AGX_PREGFX, counts,
+                                 block_sums, nr_patches, block_patches);
+   } else {
+      libagx_prefix_sum_tess(cmd, agx_1d(1024), AGX_BARRIER_ALL | AGX_PREGFX,
+                             state, c_prims, c_inv, c_prims || c_inv);
+   }
    HK_TESS_LANE(4);
    libagx_tessellate(cmd, grid_tess, AGX_BARRIER_ALL | AGX_PREGFX,
                      gfx->tess.info.mode, POLY_TESS_MODE_WITH_COUNTS, state);
