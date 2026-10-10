@@ -1138,5 +1138,5 @@ void hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
 struct hk_apple9_prerast_bindings
 hk_apple9_draw_bindings(struct hk_cmd_buffer *cmd, struct agx_draw draw);
 bool hk_apple9_upload_textures(struct hk_cmd_buffer *cmd,
-   const struct hk_descriptor_state *desc, const struct hk_shader *shader,
-   const float *blend, bool first_fan, uint64_t *textures, uint64_t *samplers, uint64_t *sysvals);
+   const struct hk_shader *shader, const float *blend, bool first_fan,
+   uint64_t *textures, uint64_t *samplers, uint64_t *sysvals);

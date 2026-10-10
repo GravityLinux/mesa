@@ -66,16 +66,6 @@ hk_tess_info_merge(struct hk_tess_info a, struct hk_tess_info b)
    return out;
 }
 
-/* Static core descriptor bindings, resolved to table contents at recording. */
-struct hk_apple9_texture_binding {
-   uint32_t set;
-   uint32_t offset_B;
-   /* Samplers used with cube arrays, which sample the faces as a 2D array:
-    * cube sampling ignores the address modes and clamps to the edge.
-    */
-   uint32_t clamp_to_edge;
-};
-
 /* Texture operations whose descriptors may change after binding, or be
  * partially bound, must read them at execution time on G16. */
 #define HK_APPLE9_TEX_DESCRIPTOR_HANDLE (1u << 30)
@@ -83,15 +73,6 @@ struct hk_apple9_texture_binding {
 /* On a nir_texop_lod_bias query: load the sampler's explicit-LOD nudge
  * instead of its LOD bias, see hk_lower_d3d_txl_rounding. */
 #define HK_TEX_TXL_NUDGE (1u << 29)
-
-struct hk_apple9_texture_bindings {
-   uint8_t texture_count, sampler_count;
-   /* Textures (and samplers) are addressed through their descriptors, and the
-    * stage's table pointers name the USC aperture. */
-   bool bindless_textures, bindless_samplers;
-   struct hk_apple9_texture_binding textures[AGX_APPLE9_GRAPHICS_MAX_TEXTURES];
-   struct hk_apple9_texture_binding samplers[AGX_APPLE9_GRAPHICS_MAX_SAMPLERS - 1];
-};
 
 /* Mesh shaders run as compute kernels. Each workgroup writes a record of
  * group_stride_B bytes: its vertex and primitive counts, padded to 16 bytes,
@@ -189,7 +170,6 @@ nir_shader *hk_nir_mesh_rast(const nir_shader *mesh,
 
 struct hk_shader_info {
    uint8_t apple9_render_targets;
-   struct hk_apple9_texture_bindings apple9_bindings;
    struct agx_apple9_compute_profile apple9;
    union {
       struct {
