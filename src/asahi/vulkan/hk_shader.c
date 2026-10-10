@@ -901,10 +901,12 @@ hk_hash_graphics_state(struct vk_physical_device *device,
    _mesa_blake3_final(&blake3_ctx, blake3_out);
 }
 
+/* Apple9 has no bounds_agx; it selects with a generic comparison. */
 static nir_def *
-bounds_check(nir_builder *b, nir_def *data, nir_def *offs, nir_def *bound)
+bounds_check(nir_builder *b, nir_def *data, nir_def *offs, nir_def *bound,
+             bool apple9)
 {
-   if (data->bit_size == 32 && data->num_components == 1) {
+   if (!apple9 && data->bit_size == 32 && data->num_components == 1) {
       return nir_bounds_agx(b, data, offs, bound);
    } else {
       /* TODO: Optimize */
@@ -1311,6 +1313,7 @@ hk_apple9_vectorize_cb(unsigned align_mul, unsigned align_offset,
 
 struct hk_bounded_lowering {
    bool soft_fault;
+   bool apple9;
    /* Merged vector loads are checked per component (bounds_checked_modes). */
    bool per_component;
 };
@@ -1372,36 +1375,16 @@ lower_load_global_constant_offset_instr(nir_builder *b,
          /* Calculate last byte loaded */
          unsigned offs_imm = nir_scalar_as_uint(offs) + load_size;
 
-         /* Simplify the bounds check. Uniform buffers are bounds checked at
-          * 64B granularity, so `bound` is a multiple of K = 64. Then
-          *
-          * offs_imm < bound <==> round_down(offs_imm, K) < bound. Proof:
-          *
-          * "=>" round_down(offs_imm, K) <= offs_imm < bound.
-          *
-          * "<=" Let a, b be integer s.t. offs_imm = K a + b with b < K.
-          *      Note round_down(offs_imm, K) = Ka.
-          *
-          *      Let c be integer s.t. bound = Kc.
-          *      We have Ka < Kc => a < c.
-          *      b < K => Ka + b < K(a + 1).
-          *
-          *      a < c with integers => a + 1 <= c.
-          *      offs_imm < K(a + 1) <= Kc = bound.
-          *      Hence offs_imm < bound.
+         /* Compare the last byte loaded against the bound exactly. Bounds
+          * are the descriptor's exact range, not rounded to 64 B, so rounding
+          * the offset down would let loads past a short range through
+          * (robustness2 uniform_buffer len_4..len_60).
           */
-         assert(align_mul == 64);
-         offs_imm &= ~(align_mul - 1);
-
-         /* Bounds checks are `offset > bound ? 0 : val` so if offset = 0,
-          * the bounds check is useless.
-          */
-         if (offs_imm) {
-            val = bounds_check(b, val, nir_imm_int(b, offs_imm), bound);
-         }
+         val = bounds_check(b, val, nir_imm_int(b, offs_imm), bound,
+                            opts->apple9);
       } else {
          offset = nir_iadd_imm(b, offset, load_size);
-         val = bounds_check(b, val, offset, bound);
+         val = bounds_check(b, val, offset, bound, opts->apple9);
       }
    }
 
@@ -3152,6 +3135,7 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
 
    struct hk_bounded_lowering bounded = {
       .soft_fault = agx_has_soft_fault(&dev->dev),
+      .apple9 = dev->dev.chip == AGX_CHIP_G16G,
       .per_component = dev->dev.chip == AGX_CHIP_G16G,
    };
    NIR_PASS(_, nir, nir_shader_intrinsics_pass,

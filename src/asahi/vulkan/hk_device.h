@@ -194,3 +194,15 @@ hk_device_alloc_scratch(struct hk_device *dev, mesa_shader_stage stage,
    agx_scratch_alloc(hk_device_scratch_locked(dev, stage), size, 0);
    simple_mtx_unlock(&dev->scratch.lock);
 }
+
+/* With soft faults, accesses to unmapped GPU pages read zero and drop
+ * writes, which is strict sparse residency. Apple9 then leaves unbound
+ * sparse ranges unmapped instead of mapping the shared scratch page, whose
+ * contents reads would observe. HK_APPLE9_SPARSE_SCRATCH=1 restores scratch.
+ */
+static inline bool
+hk_sparse_unbound_unmapped(const struct agx_device *dev)
+{
+   return dev->chip == AGX_CHIP_G16G && agx_has_soft_fault((struct agx_device *)dev) &&
+          !getenv("HK_APPLE9_SPARSE_SCRATCH");
+}
