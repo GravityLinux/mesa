@@ -3210,8 +3210,9 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
                nir_metadata_none, NULL);
       NIR_PASS(_, nir, nir_shader_intrinsics_pass,
                hk_apple9_lower_sparse_intrinsic, nir_metadata_none, NULL);
+      /* Texel-buffer bounds and RGB32 checks add control flow. */
       NIR_PASS(_, nir, nir_shader_tex_pass, hk_apple9_lower_texel_buffer,
-               nir_metadata_control_flow, NULL);
+               nir_metadata_none, NULL);
       struct set *texture_loads = _mesa_pointer_set_create(NULL);
       hk_apple9_texture_route_loads(nir, texture_loads);
       NIR_PASS(_, nir, nir_shader_intrinsics_pass, hk_apple9_lower_storage_image,
@@ -3569,6 +3570,8 @@ hk_apple9_texture_bindings(nir_shader *nir, struct hk_apple9_texture_bindings *m
          }
       }
    }
+   /* Handle loads were added and sources removed: liveness is stale. */
+   nir_progress(true, nir_shader_get_entrypoint(nir), nir_metadata_control_flow);
    nir_opt_dce(nir);
    return true;
 }
