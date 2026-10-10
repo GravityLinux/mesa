@@ -901,10 +901,12 @@ hk_hash_graphics_state(struct vk_physical_device *device,
    _mesa_blake3_final(&blake3_ctx, blake3_out);
 }
 
+/* Apple9 has no bounds_agx; it selects with a generic comparison. */
 static nir_def *
-bounds_check(nir_builder *b, nir_def *data, nir_def *offs, nir_def *bound)
+bounds_check(nir_builder *b, nir_def *data, nir_def *offs, nir_def *bound,
+             bool apple9)
 {
-   if (data->bit_size == 32 && data->num_components == 1) {
+   if (!apple9 && data->bit_size == 32 && data->num_components == 1) {
       return nir_bounds_agx(b, data, offs, bound);
    } else {
       /* TODO: Optimize */
@@ -1311,6 +1313,7 @@ hk_apple9_vectorize_cb(unsigned align_mul, unsigned align_offset,
 
 struct hk_bounded_lowering {
    bool soft_fault;
+   bool apple9;
    /* Merged vector loads are checked per component (bounds_checked_modes). */
    bool per_component;
 };
@@ -1377,10 +1380,11 @@ lower_load_global_constant_offset_instr(nir_builder *b,
           * the offset down would let loads past a short range through
           * (robustness2 uniform_buffer len_4..len_60).
           */
-         val = bounds_check(b, val, nir_imm_int(b, offs_imm), bound);
+         val = bounds_check(b, val, nir_imm_int(b, offs_imm), bound,
+                            opts->apple9);
       } else {
          offset = nir_iadd_imm(b, offset, load_size);
-         val = bounds_check(b, val, offset, bound);
+         val = bounds_check(b, val, offset, bound, opts->apple9);
       }
    }
 
@@ -3131,6 +3135,7 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
 
    struct hk_bounded_lowering bounded = {
       .soft_fault = agx_has_soft_fault(&dev->dev),
+      .apple9 = dev->dev.chip == AGX_CHIP_G16G,
       .per_component = dev->dev.chip == AGX_CHIP_G16G,
    };
    NIR_PASS(_, nir, nir_shader_intrinsics_pass,
