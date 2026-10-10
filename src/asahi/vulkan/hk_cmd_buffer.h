@@ -334,6 +334,11 @@ struct hk_graphics_state {
 
    /* Apple9 packed sample positions of the current draw. */
    uint32_t apple9_sample_positions;
+   /* The runtime sysval block of the last draw and the per-draw inputs it
+    * was built from, see hk_apple9_upload_textures. */
+   uint64_t apple9_sysvals;
+   uint32_t apple9_sysvals_positions;
+   bool apple9_sysvals_first_fan;
 
    struct hk_index_buffer_state index;
    enum agx_primitive topology;
@@ -1137,6 +1142,7 @@ void hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
                     struct agx_draw draw);
 struct hk_apple9_prerast_bindings
 hk_apple9_draw_bindings(struct hk_cmd_buffer *cmd, struct agx_draw draw);
+void hk_apple9_compute_sysvals(struct hk_device *dev, void *out);
 bool hk_apple9_upload_textures(struct hk_cmd_buffer *cmd,
-   const struct hk_shader *shader, const float *blend, bool first_fan,
+   const struct hk_shader *shader, bool graphics, bool first_fan,
    uint64_t *textures, uint64_t *samplers, uint64_t *sysvals);

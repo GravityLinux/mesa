@@ -204,9 +204,19 @@ hk_apple9_native_sampler(void *out, const struct agx_sampler_packed *state,
    return true;
 }
 
+void
+hk_apple9_compute_sysvals(struct hk_device *dev, void *out)
+{
+   memset(out, 0, AGX_APPLE9_RUNTIME_SYSVAL_SIZE);
+   uint32_t fetch = (dev->apple9_fetch_sampler->va->addr -
+                     dev->dev.shader_base) / AGX_APPLE9_SAMPLER_TABLE_STRIDE;
+   memcpy((uint8_t *)out + AGX_APPLE9_FETCH_SAMPLER_INDEX_OFFSET,
+          &fetch, sizeof(fetch));
+}
+
 bool
 hk_apple9_upload_textures(struct hk_cmd_buffer *cmd,
-                          const struct hk_shader *shader, const float *blend,
+                          const struct hk_shader *shader, bool graphics,
                           bool first_fan, uint64_t *textures,
                           uint64_t *samplers, uint64_t *sysvals)
 {
@@ -215,28 +225,49 @@ hk_apple9_upload_textures(struct hk_cmd_buffer *cmd,
     * aperture, and only per-draw state goes in the sysval block. */
    if (shader->b.info.apple9_texture_mask || shader->b.info.apple9_sampler_mask)
       return false;
-   _Alignas(64) uint8_t info[AGX_APPLE9_RUNTIME_SYSVAL_SIZE] = {0};
-   if (blend) {
-      memcpy(info, blend, 4 * sizeof(float));
-      uint32_t enables = cmd->vk.dynamic_graphics_state.cb.color_write_enables;
-      memcpy((uint8_t *)info + AGX_APPLE9_COLOR_WRITE_ENABLE_OFFSET,
-             &enables, sizeof(enables));
-      memcpy((uint8_t *)info + AGX_APPLE9_SAMPLE_POSITIONS_OFFSET,
-             &cmd->state.gfx.apple9_sample_positions, sizeof(uint32_t));
-   }
-   uint32_t fan = first_fan;
-   memcpy((uint8_t *)info + AGX_APPLE9_FIRST_FAN_OFFSET, &fan, sizeof(fan));
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   uint32_t fetch = (dev->apple9_fetch_sampler->va->addr -
-                     dev->dev.shader_base) / AGX_APPLE9_SAMPLER_TABLE_STRIDE;
-   memcpy((uint8_t *)info + AGX_APPLE9_FETCH_SAMPLER_INDEX_OFFSET,
-          &fetch, sizeof(fetch));
-   *sysvals = hk_pool_upload_cached(cmd, info, sizeof(info), 64, HK_UPLOAD_RUNTIME);
    *textures = *samplers = dev->dev.shader_base;
    /* A stage without sampler handles names the compiler-private fetch
     * sampler as immediate slot 0 of its sampler table. */
    if (shader->b.info.apple9_uses_texel_fetch)
       *samplers = dev->apple9_fetch_sampler->va->addr;
+   if (!graphics) {
+      /* Kernels read only the fixed part, built at device creation. */
+      *sysvals = dev->apple9_compute_sysvals->va->addr;
+      return true;
+   }
+
+   /* The graphics block holds command buffer state only: rebuild it when
+    * the blend constants or write enables are set, or when the draw's
+    * sample positions or fan-ness differ from the last build. */
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+   struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
+   if (gfx->apple9_sysvals &&
+       !BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_CB_BLEND_CONSTANTS) &&
+       !BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES) &&
+       gfx->apple9_sysvals_positions == gfx->apple9_sample_positions &&
+       gfx->apple9_sysvals_first_fan == first_fan) {
+      *sysvals = gfx->apple9_sysvals;
+      return true;
+   }
+   _Alignas(64) uint8_t info[AGX_APPLE9_RUNTIME_SYSVAL_SIZE];
+   hk_apple9_compute_sysvals(dev, info);
+   memcpy(info, dyn->cb.blend_constants, 4 * sizeof(float));
+   uint32_t enables = dyn->cb.color_write_enables;
+   memcpy((uint8_t *)info + AGX_APPLE9_COLOR_WRITE_ENABLE_OFFSET,
+          &enables, sizeof(enables));
+   memcpy((uint8_t *)info + AGX_APPLE9_SAMPLE_POSITIONS_OFFSET,
+          &gfx->apple9_sample_positions, sizeof(uint32_t));
+   uint32_t fan = first_fan;
+   memcpy((uint8_t *)info + AGX_APPLE9_FIRST_FAN_OFFSET, &fan, sizeof(fan));
+   gfx->apple9_sysvals = hk_pool_upload(cmd, info, sizeof(info), 64);
+   gfx->apple9_sysvals_positions = gfx->apple9_sample_positions;
+   gfx->apple9_sysvals_first_fan = first_fan;
+   /* Nothing else consumes these bits on G16, whose draws do not clear the
+    * dynamic state's dirty set. */
+   BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_CB_BLEND_CONSTANTS);
+   BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES);
+   *sysvals = gfx->apple9_sysvals;
    return *sysvals != 0;
 }
 
@@ -261,7 +292,7 @@ hk_apple9_dispatch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    uint64_t textures = 0, samplers = 0, sysvals = 0;
    if (shader &&
-       !hk_apple9_upload_textures(cmd, shader, NULL, false, &textures,
+       !hk_apple9_upload_textures(cmd, shader, false, false, &textures,
                                   &samplers, &sysvals)) {
       fprintf(stderr, "Apple9 dispatch failed (2)\n");
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);

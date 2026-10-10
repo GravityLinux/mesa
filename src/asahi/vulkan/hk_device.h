@@ -71,6 +71,8 @@ struct hk_device {
    /* G16 private texel-fetch sampler, addressable as a native table entry
     * relative to the USC aperture. */
    struct agx_bo *apple9_fetch_sampler;
+   /* Runtime sysval block of every kernel, see hk_apple9_upload_textures. */
+   struct agx_bo *apple9_compute_sysvals;
 
    /* G16 residency table of every image without sparse residency: all of
     * its levels and layers resolve to a single resident page. */
