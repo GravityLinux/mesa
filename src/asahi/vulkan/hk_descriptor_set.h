@@ -173,8 +173,9 @@ static_assert(offsetof(struct hk_apple9_image_descriptor, sampler) % 32 == 0,
 void hk_apple9_texture_info(uint32_t *data, const struct agx_texture_packed *state);
 bool hk_apple9_runtime_sampler(uint32_t *data, const struct agx_sampler_packed *state,
                                bool clamp_to_edge);
+/* A custom border sampler takes its packed colour from border. */
 bool hk_apple9_native_sampler(void *out, const struct agx_sampler_packed *state,
-                              bool clamp_to_edge);
+                              bool clamp_to_edge, const uint32_t *border);
 
 /* This has to match nir_address_format_64bit_bounded_global */
 struct hk_buffer_address {

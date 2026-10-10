@@ -67,6 +67,7 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
 
    uint8_t plane_count = 1;
    bool ia = (descriptor_type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT);
+   const uint32_t *border = NULL;
 
    if (descriptor_type != VK_DESCRIPTOR_TYPE_SAMPLER && info &&
        info->imageView != VK_NULL_HANDLE) {
@@ -95,6 +96,8 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
       } else {
          sampler = hk_sampler_from_handle(info->sampler);
       }
+
+      border = sampler->apple9_border;
 
       if (sampler->has_border)
          assert(plane_count == 1);
@@ -160,7 +163,7 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
          if (descriptor_type == VK_DESCRIPTOR_TYPE_SAMPLER ||
              descriptor_type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
             hk_apple9_native_sampler(ext[plane].sampler, &desc[plane].sampler,
-                                     false);
+                                     false, border);
             hk_apple9_runtime_sampler(ext[plane].runtime_sampler,
                                       &desc[plane].sampler, false);
          }

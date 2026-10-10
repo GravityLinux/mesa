@@ -21,6 +21,11 @@ struct hk_sampler {
    VkClearColorValue custom_border;
    bool has_border;
 
+   /* G16 samples custom border colours natively: the sampler record's custom
+    * border mode reads this colour, packed for the sampler's border format,
+    * from the 16 bytes after the record. */
+   uint32_t apple9_border[4];
+
    uint8_t plane_count;
    uint16_t lod_bias_fp16;
    uint16_t txl_nudge_fp16;

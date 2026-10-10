@@ -15,6 +15,7 @@
 #include "vk_sampler.h"
 
 #include "asahi/genxml/agx_pack.h"
+#include "asahi/lib/agx_helpers.h"
 
 static inline uint32_t
 translate_address_mode(VkSamplerAddressMode addr_mode)
@@ -136,7 +137,8 @@ translate_border_color(VkBorderColor color, bool custom_to_1,
 static void
 pack_sampler(const struct hk_physical_device *pdev,
              const struct VkSamplerCreateInfo *info, bool custom_to_1,
-             bool workaround_rgba4, struct agx_sampler_packed *out)
+             bool workaround_rgba4, bool native_custom,
+             struct agx_sampler_packed *out)
 {
    agx_pack(out, SAMPLER, cfg) {
       cfg.minimum_lod = info->minLod;
@@ -169,8 +171,10 @@ pack_sampler(const struct hk_physical_device *pdev,
       }
 
       if (uses_border(info)) {
-         cfg.border_colour = translate_border_color(
-            info->borderColor, custom_to_1, workaround_rgba4);
+         cfg.border_colour =
+            native_custom ? AGX_BORDER_COLOUR_CUSTOM
+                          : translate_border_color(info->borderColor,
+                                                   custom_to_1, workaround_rgba4);
       }
    }
 }
@@ -189,10 +193,16 @@ hk_CreateSampler(VkDevice device,
    if (!sampler)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   bool workaround_rgba4 = dev->vk.enabled_features.customBorderColors;
+   /* G16 samples custom border colours natively, with the border format the
+    * application provides (customBorderColorWithoutFormat is not exposed).
+    * Its opaque black needs no RGBA4 workaround through that path. */
+   const bool g16 = pdev->dev.chip == AGX_CHIP_G16G;
+   bool workaround_rgba4 = !g16 && dev->vk.enabled_features.customBorderColors;
    bool custom_border =
       uses_border(info) &&
       is_border_color_custom(info->borderColor, workaround_rgba4);
+   bool native_custom =
+      g16 && custom_border && sampler->vk.format != VK_FORMAT_UNDEFINED;
 
    /* Sanity check the noborder setting. There's no way to recover from it being
     * wrong but at least we can make noise to lint for errors in the driconf.
@@ -213,8 +223,25 @@ hk_CreateSampler(VkDevice device,
       warned_custom_border = true;
    }
 
+   if (native_custom) {
+      VkClearColorValue bc = sampler->vk.border_color_value;
+      const VkSamplerBorderColorComponentMappingCreateInfoEXT *swiz_info =
+         vk_find_struct_const(
+            info->pNext,
+            SAMPLER_BORDER_COLOR_COMPONENT_MAPPING_CREATE_INFO_EXT);
+      if (swiz_info) {
+         bc = vk_swizzle_color_value(bc, swiz_info->components,
+                                     vk_border_color_is_int(info->borderColor));
+      }
+      static_assert(sizeof(sampler->apple9_border) ==
+                       sizeof(struct agx_border_packed),
+                    "G13 border layout");
+      agx_pack_border((struct agx_border_packed *)sampler->apple9_border,
+                      bc.uint32, vk_format_to_pipe_format(sampler->vk.format));
+   }
+
    struct agx_sampler_packed samp;
-   pack_sampler(pdev, info, true, workaround_rgba4, &samp);
+   pack_sampler(pdev, info, true, workaround_rgba4, native_custom, &samp);
 
    /* LOD bias passed in the descriptor set */
    sampler->lod_bias_fp16 = _mesa_float_to_half(info->mipLodBias);
@@ -259,7 +286,7 @@ hk_CreateSampler(VkDevice device,
          plane2_info.magFilter = chroma_filter;
          plane2_info.minFilter = chroma_filter;
 
-         pack_sampler(pdev, &plane2_info, false, workaround_rgba4, &samp);
+         pack_sampler(pdev, &plane2_info, false, workaround_rgba4, false, &samp);
          result = hk_sampler_heap_add(
             dev, samp, &sampler->planes[sampler->plane_count].hw);
 
@@ -271,11 +298,11 @@ hk_CreateSampler(VkDevice device,
 
          sampler->plane_count++;
       }
-   } else if (custom_border) {
+   } else if (custom_border && !g16) {
       /* If the sampler uses custom border colours, we need both clamp-to-1
        * and clamp-to-0 variants. We treat these as planes.
        */
-      pack_sampler(pdev, info, false, workaround_rgba4, &samp);
+      pack_sampler(pdev, info, false, workaround_rgba4, false, &samp);
       result = hk_sampler_heap_add(dev, samp,
                                    &sampler->planes[sampler->plane_count].hw);
 

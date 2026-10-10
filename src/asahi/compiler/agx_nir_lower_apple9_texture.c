@@ -205,6 +205,49 @@ normalize_runtime_coordinates(nir_builder *b, nir_tex_instr *tex,
    return true;
 }
 
+/* Explicit-LOD sample of tex's view and sampler outside the image on every
+ * axis (keeping an array layer), as a 32-bit vec4. */
+static nir_def *
+sample_border(nir_builder *b, nir_tex_instr *tex, nir_def *coord, unsigned dims)
+{
+   static const nir_tex_src_type copied[] = {
+      nir_tex_src_texture_deref, nir_tex_src_sampler_deref,
+      nir_tex_src_texture_offset, nir_tex_src_sampler_offset,
+      nir_tex_src_texture_handle, nir_tex_src_sampler_handle,
+   };
+   unsigned count = 2;
+   for (unsigned i = 0; i < ARRAY_SIZE(copied); ++i)
+      count += nir_tex_instr_src_index(tex, copied[i]) >= 0;
+   nir_tex_instr *bt = nir_tex_instr_create(b->shader, count);
+   bt->op = nir_texop_txl;
+   bt->sampler_dim = tex->sampler_dim;
+   bt->is_array = tex->is_array;
+   bt->coord_components = coord->num_components;
+   bt->dest_type = nir_alu_type_get_base_type(tex->dest_type) | 32;
+   bt->texture_index = tex->texture_index;
+   bt->sampler_index = tex->sampler_index;
+   bt->backend_flags = tex->backend_flags;
+   bt->can_speculate = tex->can_speculate;
+   nir_def *comps[4];
+   for (unsigned c = 0; c < coord->num_components; ++c)
+      comps[c] = c < dims ? nir_imm_float(b, -16.0f) : nir_channel(b, coord, c);
+   unsigned n = 0;
+   bt->src[n++] = (nir_tex_src){
+      .src_type = nir_tex_src_coord,
+      .src = nir_src_for_ssa(nir_vec(b, comps, coord->num_components))};
+   bt->src[n++] = (nir_tex_src){.src_type = nir_tex_src_lod,
+                                .src = nir_src_for_ssa(nir_imm_float(b, 0))};
+   for (unsigned i = 0; i < ARRAY_SIZE(copied); ++i) {
+      int src = nir_tex_instr_src_index(tex, copied[i]);
+      if (src >= 0)
+         bt->src[n++] = (nir_tex_src){.src_type = copied[i],
+                                      .src = nir_src_for_ssa(tex->src[src].src.ssa)};
+   }
+   nir_def_init(&bt->instr, &bt->def, 4, 32);
+   nir_builder_instr_insert(b, &bt->instr);
+   return &bt->def;
+}
+
 static nir_def *
 wrap_dynamic(nir_builder *b, nir_def *i, nir_def *size, nir_def *wrap)
 {
@@ -528,6 +571,16 @@ agx_nir_lower_apple9_texture_offsets(nir_shader *nir,
                                     nir_imm_int(&b, 0), value);
             }
             s.border = nir_vec(&b, rgba, 4);
+            /* A custom border colour (preset 3) is known only to the native
+             * sampler record, in the view's encoding. Take it from the
+             * hardware: an explicit-LOD sample outside the image on every
+             * axis returns the swizzled border. */
+            if (!tex->is_shadow) {
+               nir_push_if(&b, nir_ieq_imm(&b, preset, 3));
+               nir_def *custom = sample_border(&b, tex, s.coord, s.dims);
+               nir_pop_if(&b, NULL);
+               s.border = nir_if_phi(&b, custom, s.border);
+            }
          }
          for (unsigned c = 0; c < s.dims; ++c)
             s.base_size[c] = agx_apple9_texture_info(&b, tex, c);
