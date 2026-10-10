@@ -2132,6 +2132,51 @@ hk_apple9_encode_texel(nir_builder *b, nir_def *value, nir_def *layout,
       : hk_apple9_encode_texel_kind(b, value, layout, false, -1);
 }
 
+/* Encode with the constant shifts of a canonical format when the descriptor
+ * names one (enum hk_apple9_store_encode), otherwise from the per-component
+ * layout. The branches are uniform, and each fast arm computes exactly what
+ * hk_apple9_encode_texel computes for those formats.
+ */
+/* HK_APPLE9_NO_STORE_ENCODE=1 keeps every store on the layout encoder (A/B). */
+DEBUG_GET_ONCE_BOOL_OPTION(hk_apple9_no_store_encode, "HK_APPLE9_NO_STORE_ENCODE", false)
+
+static nir_def *
+hk_apple9_encode_texel_fast(nir_builder *b, nir_def *value, nir_def *layout,
+                            bool floating, nir_def *encode)
+{
+   nir_push_if(b, nir_ieq_imm(b, encode, HK_STORE_ENCODE_RAW32));
+   nir_def *raw = value;
+   nir_push_else(b, NULL);
+   nir_def *rest;
+   if (floating) {
+      nir_push_if(b, nir_ieq_imm(b, encode, HK_STORE_ENCODE_UNORM8));
+      nir_def *word = nir_imm_int(b, 0);
+      for (unsigned c = 0; c < 4; ++c) {
+         nir_def *u = nir_f2u32(b, nir_fround_even(b,
+            nir_fmul_imm(b, nir_fsat(b, nir_channel(b, value, c)), 255.0)));
+         word = nir_ior(b, word, nir_ishl_imm(b, u, 8 * c));
+      }
+      nir_def *unorm8 = nir_vec4(b, word, nir_imm_int(b, 0), nir_imm_int(b, 0),
+                                 nir_imm_int(b, 0));
+      nir_push_else(b, NULL);
+      nir_push_if(b, nir_ieq_imm(b, encode, HK_STORE_ENCODE_FLOAT16));
+      nir_def *float16 = nir_vec4(b,
+         nir_pack_half_2x16_split(b, nir_channel(b, value, 0), nir_channel(b, value, 1)),
+         nir_pack_half_2x16_split(b, nir_channel(b, value, 2), nir_channel(b, value, 3)),
+         nir_imm_int(b, 0), nir_imm_int(b, 0));
+      nir_push_else(b, NULL);
+      nir_def *generic = hk_apple9_encode_texel(b, value, layout, true);
+      nir_pop_if(b, NULL);
+      nir_def *half_or_generic = nir_if_phi(b, float16, generic);
+      nir_pop_if(b, NULL);
+      rest = nir_if_phi(b, unorm8, half_or_generic);
+   } else {
+      rest = hk_apple9_encode_texel(b, value, layout, false);
+   }
+   nir_pop_if(b, NULL);
+   return nir_if_phi(b, raw, rest);
+}
+
 /* The storage texel metadata carries the full address, including the view's
  * byte offset. The legacy PBE prefix is retained only for image queries.
  */
@@ -2353,6 +2398,14 @@ hk_apple9_lower_formatless_storage(nir_builder *b, nir_intrinsic_instr *intr,
    nir_def *layout = nir_load_global_constant(b, 4, 32,
       nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, component)),
       .align_mul = 4, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META));
+   /* Storage image descriptors also name a canonical store encoding. */
+   nir_def *encode = NULL;
+   if (!load && dim != GLSL_SAMPLER_DIM_BUF && !debug_get_option_hk_apple9_no_store_encode()) {
+      encode = nir_load_global_constant(b, 1, 32,
+         nir_iadd_imm(b, nir_load_from_texture_handle_agx(b, tex),
+                      offsetof(struct hk_apple9_storage_descriptor, store_encode)),
+         .align_mul = 4, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META));
+   }
 
    /* Honeykrisp's storage cube descriptors are 2D arrays of faces. */
    nir_def *size = nir_bindless_image_size(b, dimensions, 32, tex, nir_imm_int(b, 0),
@@ -2412,7 +2465,9 @@ hk_apple9_lower_formatless_storage(nir_builder *b, nir_intrinsic_instr *intr,
       bool floating = nir_alu_type_get_base_type(nir_intrinsic_src_type(intr)) ==
                       nir_type_float;
       nir_def *texel = nir_pad_vector_imm_int(b, intr->src[3].ssa, 0, 4);
-      nir_def *words = hk_apple9_encode_texel(b, texel, layout, floating);
+      nir_def *words = encode
+         ? hk_apple9_encode_texel_fast(b, texel, layout, floating, encode)
+         : hk_apple9_encode_texel(b, texel, layout, floating);
       hk_apple9_store_texel_words(b, addr, size_B, words, access);
    }
    nir_def *zero = NULL;

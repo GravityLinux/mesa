@@ -199,8 +199,9 @@ write_storage_image_view_desc(struct hk_descriptor_set *set,
       ext.metadata.base = dev->apple9_resident->va->addr;
       if (info && info->imageView != VK_NULL_HANDLE) {
          VK_FROM_HANDLE(hk_image_view, view, info->imageView);
-         hk_apple9_texel_layout(vk_format_to_pipe_format(view->vk.format),
-                                &ext.metadata);
+         enum pipe_format pformat = vk_format_to_pipe_format(view->vk.format);
+         hk_apple9_texel_layout(pformat, &ext.metadata);
+         ext.store_encode = hk_apple9_store_encode(pformat);
          ext.metadata.base = hk_apple9_view_residency(dev, view, 0);
          ext.metadata.elements =
             view->vk.base_mip_level | (view->vk.base_array_layer << 16);
