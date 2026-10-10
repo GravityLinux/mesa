@@ -885,12 +885,21 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
    bool is_new = true;
    struct agx_ptr root_ptr;
    if (hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G) {
-      /* Normalize only the self-address; all descriptor and draw bytes remain
-       * in the key. A hit already has its own correct self-reference.
-       */
+      /* Normalize only the self-address and compare the whole root against
+       * the last upload for this bind point: identical roots reuse it, any
+       * difference uploads a fresh copy. No hashing on this per-draw path. */
       root->root_desc_addr = 0;
-      root_ptr = hk_pool_alloc_cached(cmd, HK_CMD_POOL_MAIN, HK_UPLOAD_ROOT,
-                                     root, sizeof(*root), 8, &is_new);
+      if (desc->root_last_valid &&
+          !memcmp(root, &desc->root_last, sizeof(*root))) {
+         root->root_desc_addr = desc->root_last_gpu;
+         return desc->root_last_gpu;
+      }
+      root_ptr = hk_pool_alloc(cmd, sizeof(*root), 8);
+      if (root_ptr.gpu) {
+         memcpy(&desc->root_last, root, sizeof(*root));
+         desc->root_last_gpu = root_ptr.gpu;
+         desc->root_last_valid = true;
+      }
    } else {
       root_ptr = hk_pool_alloc(cmd, sizeof(*root), 8);
    }

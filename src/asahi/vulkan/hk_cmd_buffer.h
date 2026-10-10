@@ -152,6 +152,20 @@ struct hk_descriptor_state {
    bool root_dirty;
    struct hk_root_descriptor_table root;
 
+   /* Last uploaded root (self-address normalized to 0) and its GPU address.
+    * An identical root reuses the upload instead of hashing into the
+    * per-command-buffer upload cache. Zeroed with the rest of the state on
+    * reset, i.e. whenever the upload pool is. */
+   bool root_last_valid;
+   uint64_t root_last_gpu;
+   struct hk_root_descriptor_table root_last;
+
+   /* Last direct-dispatch group count upload, reused for identical counts so
+    * the root (which holds its address) stays comparable across dispatches. */
+   bool group_count_last_valid;
+   uint32_t group_count_last[3];
+   uint64_t group_count_last_addr;
+
    uint32_t set_sizes[HK_MAX_SETS];
    struct hk_descriptor_set *sets[HK_MAX_SETS];
    uint32_t sets_dirty;
@@ -320,6 +334,11 @@ struct hk_graphics_state {
 
    /* Apple9 packed sample positions of the current draw. */
    uint32_t apple9_sample_positions;
+   /* The runtime sysval block of the last draw and the per-draw inputs it
+    * was built from, see hk_apple9_upload_textures. */
+   uint64_t apple9_sysvals;
+   uint32_t apple9_sysvals_positions;
+   bool apple9_sysvals_first_fan;
 
    struct hk_index_buffer_state index;
    enum agx_primitive topology;
@@ -1123,6 +1142,7 @@ void hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
                     struct agx_draw draw);
 struct hk_apple9_prerast_bindings
 hk_apple9_draw_bindings(struct hk_cmd_buffer *cmd, struct agx_draw draw);
+void hk_apple9_compute_sysvals(struct hk_device *dev, void *out);
 bool hk_apple9_upload_textures(struct hk_cmd_buffer *cmd,
-   const struct hk_descriptor_state *desc, const struct hk_shader *shader,
-   const float *blend, bool first_fan, uint64_t *textures, uint64_t *samplers, uint64_t *sysvals);
+   const struct hk_shader *shader, bool graphics, bool first_fan,
+   uint64_t *textures, uint64_t *samplers, uint64_t *sysvals);

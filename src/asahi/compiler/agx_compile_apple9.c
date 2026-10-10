@@ -6907,6 +6907,10 @@ struct apple9_uniform_hoist {
    struct hash_table *original_blocks;
    /* Whether apple9_preamble_safe_read reads may leave their branches. */
    bool safe_reads;
+   /* Whether descriptor memory reads alone may (stages without safe_reads),
+    * with the constant driver-UBO reads that form their handles. */
+   bool descriptor_reads;
+   bool descriptor_chain;
 };
 
 static bool
@@ -6945,6 +6949,22 @@ static _Thread_local int apple9_safe_reads_override = -1;
  * would then run them for every thread on paths that skipped them.
  * Driver UBOs (app UBOs are global by now), descriptor memory in the USC
  * aperture and reads the driver marks ACCESS_UNIFORM_SAFE_AGX qualify. */
+/* Reads of descriptor memory: constant, read-only records in the USC
+ * aperture, at a uniform address. */
+static bool
+apple9_descriptor_read(nir_instr *instr)
+{
+   if (instr->type != nir_instr_type_intrinsic)
+      return false;
+   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+   if (intr->intrinsic != nir_intrinsic_load_global_2x32 ||
+       !(nir_intrinsic_access(intr) & ACCESS_CAN_REORDER))
+      return false;
+   nir_scalar hi = nir_scalar_chase_movs(nir_get_scalar(intr->src[0].ssa, 1));
+   return nir_scalar_is_const(hi) &&
+          nir_scalar_as_uint(hi) == (AGX_APPLE9_USC_BASE >> 32);
+}
+
 static bool
 apple9_preamble_safe_read(nir_instr *instr)
 {
@@ -6973,7 +6993,10 @@ apple9_can_hoist_uniform(nir_src *src, void *data)
       return *state == 2;
    *state = 1;
    if (instr->block != s->entry && !nir_instr_can_speculate(instr) &&
-       !(s->safe_reads && apple9_preamble_safe_read(instr)))
+       !(s->safe_reads && apple9_preamble_safe_read(instr)) &&
+       !(s->descriptor_reads && apple9_descriptor_read(instr)) &&
+       !(s->descriptor_chain && apple9_preamble_safe_read(instr) &&
+         nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_ubo))
       return false;
    if (instr->type == nir_instr_type_intrinsic) {
       nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
@@ -7026,6 +7049,10 @@ apple9_hoist_uniform_reads(nir_shader *nir, struct hash_table *original_blocks,
       .original_blocks = original_blocks,
       .safe_reads = stages && (!strcmp(stages, "all") ||
                                (!strcmp(stages, "compute") && compute)),
+      /* Descriptor records read through handles (texture info, runtime
+       * sampler state) are hoisted in every stage: unlike buffer reads,
+       * leaving them in their branches did not save registers. */
+      .descriptor_reads = !getenv("AGX_APPLE9_NO_DESCRIPTOR_HOIST"),
       .state = calloc(MAX2(impl->ssa_alloc, 1), 1),
       .cursor = nir_after_block_before_jump(nir_start_block(impl)),
    };
@@ -7041,7 +7068,10 @@ apple9_hoist_uniform_reads(nir_shader *nir, struct hash_table *original_blocks,
                nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_global_2x32))
             continue;
          nir_src src = nir_src_for_ssa(nir_instr_def(instr));
-         if (apple9_can_hoist_uniform(&src, &s)) {
+         s.descriptor_chain = s.descriptor_reads && apple9_descriptor_read(instr);
+         bool hoist = apple9_can_hoist_uniform(&src, &s);
+         s.descriptor_chain = false;
+         if (hoist) {
             apple9_hoist_uniform_source(&src, &s);
             progress = true;
          } else if (addresses && instr->type == nir_instr_type_intrinsic &&
@@ -8184,8 +8214,15 @@ apple9_lower_texture_lod_query(nir_builder *b, nir_instr *instr, void *data)
    }
    tex->is_shadow = false;
    tex->is_new_style_shadow = false;
-   tex->op = nir_tex_instr_src_index(tex, nir_tex_src_bias) >= 0
-                ? nir_texop_txb : nir_texop_tex;
+   /* Always query in the biased form, with a zero bias if there is none:
+    * table-addressed samplers get their state bias added this way, and a
+    * descriptor-addressed query in the unbiased form returns a different
+    * LOD (glsl.texture_functions textureclamp *_bias, cube-array bias). */
+   if (nir_tex_instr_src_index(tex, nir_tex_src_bias) < 0) {
+      b->cursor = nir_before_instr(instr);
+      nir_tex_instr_add_src(tex, nir_tex_src_bias, nir_imm_float(b, 0));
+   }
+   tex->op = nir_texop_txb;
    tex->backend_flags |= AGX_APPLE9_TEXTURE_LOD_QUERY;
    /* As a sample, the instruction has a sample's destination size; the
     * query result is its first two components. Leaving the two-component
@@ -8680,6 +8717,27 @@ apple9_lower_sampler_bias(nir_builder *b, nir_instr *instr, void *data)
       nir_src_rewrite(&tex->src[idx].src,
          nir_fadd(b, tex->src[idx].src.ssa, bias));
    }
+   return true;
+}
+
+/* Selection encodes an implicit sample only in its two-coordinate form; the
+ * volume, cube, array and comparison operands exist on the explicit forms.
+ * Table-addressed samplers became txb in apple9_lower_sampler_bias; give
+ * descriptor-addressed ones, and late implicit queries, the same zero-bias
+ * form. */
+static bool
+apple9_lower_implicit_volume_tex(nir_builder *b, nir_instr *instr,
+                                 UNUSED void *data)
+{
+   if (instr->type != nir_instr_type_tex)
+      return false;
+   nir_tex_instr *tex = nir_instr_as_tex(instr);
+   if (tex->op != nir_texop_tex ||
+       (tex->coord_components < 3 && !tex->is_array && !tex->is_shadow))
+      return false;
+   b->cursor = nir_before_instr(instr);
+   tex->op = nir_texop_txb;
+   nir_tex_instr_add_src(tex, nir_tex_src_bias, nir_imm_float(b, 0));
    return true;
 }
 
@@ -9906,6 +9964,8 @@ apple9_lower_textures(nir_shader *nir)
    nir_shader_instructions_pass(nir, apple9_lower_texture_lod_query,
                                 nir_metadata_control_flow, NULL);
    nir_shader_instructions_pass(nir, apple9_lower_sampler_bias,
+                                nir_metadata_control_flow, NULL);
+   nir_shader_instructions_pass(nir, apple9_lower_implicit_volume_tex,
                                 nir_metadata_control_flow, NULL);
    agx_nir_lower_apple9_texture_lod(nir);
 }

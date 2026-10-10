@@ -791,8 +791,7 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       const struct agx_apple9_render_stage *s =
          stage ? &pipeline.fragment : &pipeline.vertex;
       uint64_t sysvals = 0;
-      if (!hk_apple9_upload_textures(cmd, &gfx->descriptors, shaders[stage],
-                                     dyn->cb.blend_constants,
+      if (!hk_apple9_upload_textures(cmd, shaders[stage], true,
                                      pipeline.primitive == AGX_PRIMITIVE_TRIANGLE_FAN,
                                      &record.texture_table[stage],
                                      &record.sampler_table[stage], &sysvals))

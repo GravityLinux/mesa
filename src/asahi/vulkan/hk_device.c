@@ -455,6 +455,15 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
              AGX_APPLE9_SAMPLER_TABLE_STRIDE);
       agx_apple9_pack_fetch_sampler(agx_bo_map(dev->apple9_fetch_sampler));
 
+      dev->apple9_compute_sysvals =
+         agx_bo_create(&dev->dev, AGX_APPLE9_RUNTIME_SYSVAL_SIZE, 0, 0,
+                       "Apple9 compute sysvals");
+      if (!dev->apple9_compute_sysvals) {
+         result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+         goto fail_samplers;
+      }
+      hk_apple9_compute_sysvals(dev, agx_bo_map(dev->apple9_compute_sysvals));
+
       dev->apple9_resident =
          agx_bo_create(&dev->dev, sizeof(struct hk_apple9_residency) + 4, 0, 0,
                        "Apple9 resident table");
@@ -573,6 +582,8 @@ fail_rodata:
 fail_samplers:
    if (dev->apple9_fetch_sampler)
       agx_bo_unreference(&dev->dev, dev->apple9_fetch_sampler);
+   if (dev->apple9_compute_sysvals)
+      agx_bo_unreference(&dev->dev, dev->apple9_compute_sysvals);
    if (dev->apple9_resident)
       agx_bo_unreference(&dev->dev, dev->apple9_resident);
    hk_destroy_sampler_heap(dev, &dev->samplers);
@@ -631,6 +642,8 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
 
    if (dev->apple9_fetch_sampler)
       agx_bo_unreference(&dev->dev, dev->apple9_fetch_sampler);
+   if (dev->apple9_compute_sysvals)
+      agx_bo_unreference(&dev->dev, dev->apple9_compute_sysvals);
    if (dev->apple9_resident)
       agx_bo_unreference(&dev->dev, dev->apple9_resident);
    hk_destroy_sampler_heap(dev, &dev->samplers);

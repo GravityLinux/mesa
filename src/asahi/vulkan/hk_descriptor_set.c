@@ -621,9 +621,12 @@ hk_CreateDescriptorPool(VkDevice _device,
 
    if (bo_size) {
       /* G16 shaders address image descriptors as native table entries
-       * relative to the USC aperture. */
+       * relative to the USC aperture. Map it write-back (coherent on G16, as
+       * the USC command pool): vkUpdateDescriptorSets copies read descriptor
+       * memory, and reads from a write-combined mapping are uncached. */
       pool->bo = agx_bo_create(&dev->dev, bo_size, 0,
-                               dev->dev.chip == AGX_CHIP_G16G ? AGX_BO_LOW_VA : 0,
+                               dev->dev.chip == AGX_CHIP_G16G
+                                  ? AGX_BO_LOW_VA | AGX_BO_WRITEBACK : 0,
                                "Descriptor pool");
       if (!pool->bo) {
          hk_destroy_descriptor_pool(dev, pAllocator, pool);

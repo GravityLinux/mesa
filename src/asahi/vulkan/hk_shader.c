@@ -3421,6 +3421,17 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
       shader->bo = hk_apple9_body_bo(dev, shader->code_ptr, shader->code_size);
       if (!shader->bo)
          return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      if (shader->info.stage == MESA_SHADER_COMPUTE) {
+         const struct agx_apple9_compute_profile *p = &shader->info.apple9;
+         struct agx_apple9_launch_template *t = malloc(sizeof(*t));
+         if (t && agx_apple9_compute_launch_template(
+                     t, p, dev->dev.shader_base,
+                     p->preamble_size ? shader->bo->va->addr + p->preamble_offset
+                                      : 0))
+            shader->apple9_launch = t;
+         else
+            free(t);
+      }
       return VK_SUCCESS;
    }
    if (shader->b.info.has_preamble || shader->b.info.rodata.size_16) {
@@ -3516,52 +3527,13 @@ hk_apple9_use_descriptor_handle(nir_builder *b, nir_tex_instr *tex,
 }
 
 static bool
-hk_apple9_texture_bindings(nir_shader *nir, struct hk_apple9_texture_bindings *map)
+hk_apple9_texture_bindings(nir_shader *nir)
 {
-   /* Dynamically indexed or late-bound descriptors are read through their
-    * memory, as are all descriptors of a stage exceeding the per-draw
-    * tables. A register sampler index requires a register texture index. */
-   struct {
-      unsigned count;
-      uint64_t keys[AGX_APPLE9_GRAPHICS_MAX_TEXTURES + 1];
-   } distinct[2] = {0};
-   nir_foreach_block(block, nir_shader_get_entrypoint(nir)) {
-      nir_foreach_instr(instr, block) {
-         if (instr->type != nir_instr_type_tex)
-            continue;
-         nir_tex_instr *tex = nir_instr_as_tex(instr);
-         for (unsigned sampler = 0; sampler < 2; ++sampler) {
-            int src = nir_tex_instr_src_index(tex, sampler
-               ? nir_tex_src_sampler_handle : nir_tex_src_texture_handle);
-            if (src < 0)
-               continue;
-            nir_intrinsic_instr *handle = hk_apple9_handle_intrinsic(tex, sampler);
-            if (!handle)
-               return false;
-            if (!nir_src_is_const(handle->src[0]) ||
-                (tex->backend_flags & HK_APPLE9_TEX_DESCRIPTOR_HANDLE)) {
-               map->bindless_textures = true;
-               map->bindless_samplers |= sampler;
-               continue;
-            }
-            uint64_t key = ((uint64_t)nir_intrinsic_desc_set(handle) << 32) |
-                           nir_src_as_uint(handle->src[0]);
-            unsigned limit = sampler ? AGX_APPLE9_GRAPHICS_MAX_SAMPLERS - 1
-                                     : AGX_APPLE9_GRAPHICS_MAX_TEXTURES;
-            unsigned k = 0;
-            while (k < distinct[sampler].count && distinct[sampler].keys[k] != key)
-               ++k;
-            if (k == distinct[sampler].count) {
-               if (k == limit) {
-                  map->bindless_textures = true;
-                  map->bindless_samplers |= sampler;
-               } else {
-                  distinct[sampler].keys[distinct[sampler].count++] = key;
-               }
-            }
-         }
-      }
-   }
+   /* Every sampled descriptor is read through its memory (a descriptor
+    * handle): native records live in set memory, written at update time, so
+    * draws and dispatches build no texture/sampler tables and update-after-
+    * bind needs nothing extra. The handle and the descriptor-record reads are
+    * uniform and hoisted to the preamble. */
    nir_builder b = nir_builder_create(nir_shader_get_entrypoint(nir));
    nir_foreach_block(block, nir_shader_get_entrypoint(nir)) {
       nir_foreach_instr(instr, block) {
@@ -3570,58 +3542,12 @@ hk_apple9_texture_bindings(nir_shader *nir, struct hk_apple9_texture_bindings *m
          nir_tex_instr *tex = nir_instr_as_tex(instr);
          for (unsigned sampler = 0; sampler < 2; ++sampler) {
             tex->backend_flags &= ~HK_APPLE9_TEX_DESCRIPTOR_HANDLE;
-            if (sampler ? map->bindless_samplers : map->bindless_textures) {
-               if (nir_tex_instr_src_index(tex, sampler
-                      ? nir_tex_src_sampler_handle : nir_tex_src_texture_handle) >= 0)
-                  hk_apple9_use_descriptor_handle(&b, tex, sampler);
+            if (nir_tex_instr_src_index(tex, sampler
+                   ? nir_tex_src_sampler_handle : nir_tex_src_texture_handle) < 0)
                continue;
-            }
-            int src = nir_tex_instr_src_index(tex, sampler
-               ? nir_tex_src_sampler_handle : nir_tex_src_texture_handle);
-            if (src < 0)
-               continue;
-            nir_instr *handle_instr = nir_def_instr(tex->src[src].src.ssa);
-            if (handle_instr->type != nir_instr_type_intrinsic ||
-                nir_instr_as_intrinsic(handle_instr)->intrinsic !=
-                   (sampler ? nir_intrinsic_bindless_sampler_agx
-                            : nir_intrinsic_bindless_image_agx) ||
-                !nir_src_is_const(nir_instr_as_intrinsic(handle_instr)->src[0])) {
-               if (agx_get_compiler_debug()) {
-                  fprintf(stderr, "Apple9 texture binding: ");
-                  nir_print_instr(&tex->instr, stderr);
-                  fprintf(stderr, "\n  handle: ");
-                  nir_print_instr(handle_instr, stderr);
-                  fprintf(stderr, "\n");
-               }
+            if (!hk_apple9_handle_intrinsic(tex, sampler))
                return false;
-            }
-            nir_intrinsic_instr *handle = nir_instr_as_intrinsic(handle_instr);
-            struct hk_apple9_texture_binding binding = {
-               .set = nir_intrinsic_desc_set(handle),
-               .offset_B = nir_src_as_uint(handle->src[0]),
-               .clamp_to_edge = sampler && tex->is_array &&
-                                tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE,
-            };
-            struct hk_apple9_texture_binding *bindings = sampler
-               ? map->samplers : map->textures;
-            uint8_t *count = sampler ? &map->sampler_count : &map->texture_count;
-            unsigned index = 0;
-            for (; index < *count; ++index) {
-               if (bindings[index].set == binding.set &&
-                   bindings[index].offset_B == binding.offset_B &&
-                   bindings[index].clamp_to_edge == binding.clamp_to_edge)
-                  break;
-            }
-            if (index == *count) {
-               if (index >= AGX_APPLE9_GRAPHICS_MAX_TEXTURES)
-                  return false;
-               bindings[(*count)++] = binding;
-            }
-            if (sampler)
-               tex->sampler_index = index;
-            else
-               tex->texture_index = index;
-            nir_tex_instr_remove_src(tex, src);
+            hk_apple9_use_descriptor_handle(&b, tex, sampler);
          }
       }
    }
@@ -3930,10 +3856,10 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    }
 
    if (dev->dev.chip == AGX_CHIP_G16G &&
-       !hk_apple9_texture_bindings(nir, &shader->info.apple9_bindings)) {
+       !hk_apple9_texture_bindings(nir)) {
       ralloc_free(nir);
       return vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
-                       "Apple9 requires static sampled-image descriptor indices");
+                       "Apple9 texture operation without a descriptor handle");
    }
 
    if (dev->dev.chip == AGX_CHIP_G16G) {
@@ -4103,6 +4029,8 @@ hk_shader_destroy(struct hk_device *dev, struct hk_shader *s)
    free((void *)s->code_ptr);
    free((void *)s->data_ptr);
    agx_bo_unreference(&dev->dev, s->bo);
+   free(s->apple9_launch);
+   s->apple9_launch = NULL;
 
    simple_mtx_destroy(&s->linked.lock);
 
@@ -4596,7 +4524,6 @@ hk_apple9_compile_tes(struct hk_device *dev, nir_shader *nir,
    struct hk_shader *sw = &obj->variants[HK_VS_VARIANT_SW];
    hk_apple9_gather_tess_info(hw, nir);
    hk_apple9_gather_tess_info(sw, nir);
-   sw->info.apple9_bindings = hw->info.apple9_bindings;
    sw->info.set_count = hw->info.set_count;
    sw->info.clip_distance_array_size = nir->info.clip_distance_array_size;
    sw->info.cull_distance_array_size = nir->info.cull_distance_array_size;
@@ -4647,7 +4574,6 @@ hk_apple9_compile_gs(struct hk_device *dev, nir_shader *nir,
 
    hk_foreach_variant(obj, variant) {
       variant->info.gs = info;
-      variant->info.apple9_bindings = rast_shader->info.apple9_bindings;
       variant->info.set_count = rast_shader->info.set_count;
    }
 
@@ -4696,7 +4622,6 @@ hk_apple9_compile_mesh(struct hk_device *dev, nir_shader *nir,
 
    hk_foreach_variant(obj, variant) {
       variant->info.mesh = info;
-      variant->info.apple9_bindings = main->info.apple9_bindings;
       variant->info.set_count = main->info.set_count;
    }
 
@@ -4892,9 +4817,9 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
          nir_shader *nir = infos[i].nir;
          shader->info.set_count = infos[i].set_layout_count;
          shader->info.apple9_render_targets = key.targets;
-         if (!hk_apple9_texture_bindings(nir, &shader->info.apple9_bindings) ||
+         if (!hk_apple9_texture_bindings(nir) ||
              !agx_nir_lower_apple9_runtime_sampler_state(nir, &reason)) {
-            reason = reason ?: "dynamic or excess texture bindings";
+            reason = reason ?: "texture operation without a descriptor handle";
             result = vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
                                "Apple9 graphics textures: %s", reason);
             goto done;
@@ -4937,7 +4862,6 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
                   VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT)) ||
                 nir->xfb_info || hk_per_vertex_copies_used(&per_vertex)) {
                struct hk_shader *sw = &obj->variants[HK_VS_VARIANT_SW];
-               sw->info.apple9_bindings = shader->info.apple9_bindings;
                sw->info.set_count = shader->info.set_count;
                sw->info.clip_distance_array_size =
                   nir->info.clip_distance_array_size;
