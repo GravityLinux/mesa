@@ -402,10 +402,11 @@ hk_apple9_dispatch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       geometry.group_counts = grid.ptr;
 
    uint64_t launch;
-   if (!root || !agx_apple9_prepare_compute_dispatch_alloc(
+   if (!root || !agx_apple9_prepare_compute_dispatch_alloc_tmpl(
           &dev->dev, cmd, hk_apple9_alloc, body, p, resources,
           p->resource_binding_count, textures, samplers, &geometry,
-          p->preamble_size ? body->va->addr + p->preamble_offset : 0, &launch)) {
+          p->preamble_size ? body->va->addr + p->preamble_offset : 0,
+          shader && shader->bo == body ? shader->apple9_launch : NULL, &launch)) {
       fprintf(stderr, "Apple9 dispatch failed (5)\n");
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       return;

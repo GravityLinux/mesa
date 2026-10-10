@@ -3421,6 +3421,17 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
       shader->bo = hk_apple9_body_bo(dev, shader->code_ptr, shader->code_size);
       if (!shader->bo)
          return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      if (shader->info.stage == MESA_SHADER_COMPUTE) {
+         const struct agx_apple9_compute_profile *p = &shader->info.apple9;
+         struct agx_apple9_launch_template *t = malloc(sizeof(*t));
+         if (t && agx_apple9_compute_launch_template(
+                     t, p, dev->dev.shader_base,
+                     p->preamble_size ? shader->bo->va->addr + p->preamble_offset
+                                      : 0))
+            shader->apple9_launch = t;
+         else
+            free(t);
+      }
       return VK_SUCCESS;
    }
    if (shader->b.info.has_preamble || shader->b.info.rodata.size_16) {
@@ -4103,6 +4114,8 @@ hk_shader_destroy(struct hk_device *dev, struct hk_shader *s)
    free((void *)s->code_ptr);
    free((void *)s->data_ptr);
    agx_bo_unreference(&dev->dev, s->bo);
+   free(s->apple9_launch);
+   s->apple9_launch = NULL;
 
    simple_mtx_destroy(&s->linked.lock);
 

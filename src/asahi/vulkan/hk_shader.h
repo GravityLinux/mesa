@@ -286,6 +286,11 @@ struct hk_shader {
    /* BO for any uploaded shader part */
    struct agx_bo *bo;
 
+   /* G16 compute: launch program template, built once at upload from the
+    * profile and preamble address and patched per dispatch. NULL falls back
+    * to building the program every dispatch. */
+   struct agx_apple9_launch_template *apple9_launch;
+
    /* Cache of fast linked variants */
    struct {
       simple_mtx_t lock;
