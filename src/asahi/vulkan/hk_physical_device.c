@@ -1320,6 +1320,12 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
       .EXT_depth_bias_control = true,
       .EXT_depth_clip_control = true,
       .EXT_image_2d_view_of_3d = true,
+      /* Native custom border colours need the border format: the sampler
+       * record holds the colour in the format's encoding. Without
+       * customBorderColorWithoutFormat, DXVK passes the view format and
+       * vkd3d-proton keeps the standard colours. */
+      .EXT_custom_border_color = true,
+      .EXT_border_color_swizzle = true,
       .EXT_primitive_topology_list_restart = true,
       .EXT_provoking_vertex = true,
       .EXT_mutable_descriptor_type = true,
@@ -1558,6 +1564,8 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
       KEEP(depthBiasExact),
       KEEP(image2DViewOf3D),
       KEEP(sampler2DViewOf3D),
+      KEEP(customBorderColors),
+      KEEP(borderColorSwizzle),
       KEEP(primitiveTopologyListRestart),
       KEEP(provokingVertexLast),
       KEEP(transformFeedbackPreservesProvokingVertex),

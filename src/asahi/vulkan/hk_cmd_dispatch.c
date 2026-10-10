@@ -189,7 +189,7 @@ hk_apple9_runtime_sampler(uint32_t *data, const struct agx_sampler_packed *state
 
 bool
 hk_apple9_native_sampler(void *out, const struct agx_sampler_packed *state,
-                         bool clamp_to_edge)
+                         bool clamp_to_edge, const uint32_t *border)
 {
    agx_unpack(stderr, state, SAMPLER, sampler);
    /* Shader lowering normalizes coordinates using per-view dimensions. */
@@ -199,8 +199,23 @@ hk_apple9_native_sampler(void *out, const struct agx_sampler_packed *state,
       sampler.wrap_t = AGX_WRAP_CLAMP_TO_EDGE;
       sampler.wrap_r = AGX_WRAP_CLAMP_TO_EDGE;
    }
+   bool custom = sampler.border_colour == AGX_BORDER_COLOUR_CUSTOM;
+   if (custom)
+      sampler.border_colour = AGX_BORDER_COLOUR_TRANSPARENT_BLACK;
    memset(out, 0, AGX_APPLE9_SAMPLER_TABLE_STRIDE);
-   return agx_apple9_pack_sampler_state(out, &sampler);
+   if (!agx_apple9_pack_sampler_state(out, &sampler))
+      return false;
+   if (custom) {
+      /* Custom border mode, with the packed colour after the 8-byte record
+       * as in G13 extended samplers. */
+      uint32_t modes;
+      memcpy(&modes, (uint8_t *)out + 4, 4);
+      modes |= (uint32_t)AGX_BORDER_COLOUR_CUSTOM << 29;
+      memcpy((uint8_t *)out + 4, &modes, 4);
+      if (border)
+         memcpy((uint8_t *)out + 8, border, 4 * sizeof(uint32_t));
+   }
+   return true;
 }
 
 bool
@@ -278,9 +293,16 @@ hk_apple9_upload_textures(struct hk_cmd_buffer *cmd, const struct hk_descriptor_
          desc, bindings->samplers[i], sizeof(*state));
       if (!state)
          return false;
+      /* A custom border colour lives only in the descriptor's native record;
+       * hk_apple9_native_sampler reads it for custom border samplers only. */
+      struct hk_apple9_texture_binding at = bindings->samplers[i];
+      at.offset_B -= offsetof(struct hk_sampled_image_descriptor, sampler);
+      const struct hk_apple9_image_descriptor *d =
+         hk_apple9_descriptor(desc, at, sizeof(*d));
+      const uint32_t *border = d ? (const uint32_t *)(d->sampler + 8) : NULL;
       if (!hk_apple9_native_sampler((uint8_t *)samp +
             slot++ * AGX_APPLE9_SAMPLER_TABLE_STRIDE, state,
-            bindings->samplers[i].clamp_to_edge))
+            bindings->samplers[i].clamp_to_edge, border))
          return false;
    }
    if (shader->b.info.apple9_uses_texel_fetch) {
