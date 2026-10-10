@@ -27,6 +27,16 @@
  *          <cat>_wall_ns=... <cat>_cpu_ns=... <cat>_calls=... (per category)
  *
  * Difference two lines to get per-frame values for a measurement window.
+ *
+ * Geometry-shader draws are counted at recording time, per poly output shape
+ * (dyn = DYNAMIC_INDEXED, idx = STATIC_INDEXED, prim = STATIC_PER_PRIM,
+ * inst = STATIC_PER_INSTANCE):
+ *
+ *   gs_<shape>_draws=...  draws recorded with that shape
+ *   gs_<shape>_prims=...  input primitives x instances of the direct draws
+ *   gs_<shape>_slots=...  prims x the GS's output index slots (max_indices),
+ *                         an upper bound on rasterized vertices
+ *   gs_indirect_draws=... indirect GS draws (no counts known on the CPU)
  */
 
 #include <stdatomic.h>
@@ -59,6 +69,9 @@ static _Atomic uint64_t hk_cpu_calls[HK_CPU_CAT_COUNT];
 static _Atomic uint64_t hk_cpu_frames;
 static _Atomic uint64_t hk_cpu_last_report;
 static int hk_cpu_level;
+static _Atomic uint64_t hk_cpu_gs_draws[4], hk_cpu_gs_prims[4], hk_cpu_gs_slots[4];
+static _Atomic uint64_t hk_cpu_gs_indirect;
+static const char *hk_cpu_gs_shape_name[4] = {"dyn", "idx", "prim", "inst"};
 static FILE *hk_cpu_out;
 
 static inline uint64_t
@@ -108,7 +121,7 @@ hk_cpu_report(bool force)
                                                   now)))
       return;
 
-   char line[1024];
+   char line[2048];
    int n = snprintf(line, sizeof(line), "HK_CPU cpu_ns=%" PRIu64 " frames=%" PRIu64,
                     now, atomic_load(&hk_cpu_frames));
    for (unsigned c = 0; c < HK_CPU_CAT_COUNT && n < (int)sizeof(line); ++c) {
@@ -117,6 +130,17 @@ hk_cpu_report(bool force)
                     hk_cpu_cat_name[c], atomic_load(&hk_cpu_wall[c]),
                     hk_cpu_cat_name[c], atomic_load(&hk_cpu_thread[c]),
                     hk_cpu_cat_name[c], atomic_load(&hk_cpu_calls[c]));
+   }
+   for (unsigned i = 0; i < 4 && n < (int)sizeof(line); ++i) {
+      n += snprintf(line + n, sizeof(line) - n,
+                    " gs_%s_draws=%" PRIu64 " gs_%s_prims=%" PRIu64 " gs_%s_slots=%" PRIu64,
+                    hk_cpu_gs_shape_name[i], atomic_load(&hk_cpu_gs_draws[i]),
+                    hk_cpu_gs_shape_name[i], atomic_load(&hk_cpu_gs_prims[i]),
+                    hk_cpu_gs_shape_name[i], atomic_load(&hk_cpu_gs_slots[i]));
+   }
+   if (n < (int)sizeof(line)) {
+      snprintf(line + n, sizeof(line) - n, " gs_indirect_draws=%" PRIu64,
+               atomic_load(&hk_cpu_gs_indirect));
    }
    fprintf(hk_cpu_out, "%s\n", line);
    fflush(hk_cpu_out);
@@ -321,4 +345,22 @@ hk_cpu_timing_install(struct vk_device_dispatch_table *t)
    HK_INSTALL(CmdPushConstants);
    HK_INSTALL(CmdBindVertexBuffers2);
    HK_INSTALL(CmdBindIndexBuffer);
+}
+
+void
+hk_cpu_timing_note_gs(unsigned shape, bool indirect, uint64_t prims,
+                      unsigned max_indices)
+{
+   if (!hk_cpu_level || shape >= 4)
+      return;
+
+   atomic_fetch_add_explicit(&hk_cpu_gs_draws[shape], 1, memory_order_relaxed);
+   if (indirect) {
+      atomic_fetch_add_explicit(&hk_cpu_gs_indirect, 1, memory_order_relaxed);
+      return;
+   }
+   atomic_fetch_add_explicit(&hk_cpu_gs_prims[shape], prims,
+                             memory_order_relaxed);
+   atomic_fetch_add_explicit(&hk_cpu_gs_slots[shape], prims * max_indices,
+                             memory_order_relaxed);
 }

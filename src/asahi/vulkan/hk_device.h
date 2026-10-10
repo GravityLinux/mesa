@@ -222,3 +222,5 @@ hk_sparse_unbound_unmapped(const struct agx_device *dev)
 /* Debug only: HK_CPU_TIMING, see hk_cpu_timing.c */
 struct vk_device_dispatch_table;
 void hk_cpu_timing_install(struct vk_device_dispatch_table *table);
+void hk_cpu_timing_note_gs(unsigned shape, bool indirect, uint64_t prims,
+                           unsigned max_indices);

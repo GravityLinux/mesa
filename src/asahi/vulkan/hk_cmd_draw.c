@@ -2229,6 +2229,10 @@ hk_apple9_launch_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
       grid_gs.count[0] = u_decomposed_prims_for_vertices(mode, draw.b.count[0]);
    }
 
+   hk_cpu_timing_note_gs(count->info.gs.shape, agx_is_indirect(draw.b),
+                         (uint64_t)grid_gs.count[0] * grid_gs.count[1],
+                         count->info.gs.max_indices);
+
    /* Transform feedback and geometry statistics need the count and pre-GS
     * programs.
     */
