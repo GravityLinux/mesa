@@ -8720,6 +8720,27 @@ apple9_lower_sampler_bias(nir_builder *b, nir_instr *instr, void *data)
    return true;
 }
 
+/* Selection encodes an implicit sample only in its two-coordinate form; the
+ * volume, cube, array and comparison operands exist on the explicit forms.
+ * Table-addressed samplers became txb in apple9_lower_sampler_bias; give
+ * descriptor-addressed ones, and late implicit queries, the same zero-bias
+ * form. */
+static bool
+apple9_lower_implicit_volume_tex(nir_builder *b, nir_instr *instr,
+                                 UNUSED void *data)
+{
+   if (instr->type != nir_instr_type_tex)
+      return false;
+   nir_tex_instr *tex = nir_instr_as_tex(instr);
+   if (tex->op != nir_texop_tex ||
+       (tex->coord_components < 3 && !tex->is_array && !tex->is_shadow))
+      return false;
+   b->cursor = nir_before_instr(instr);
+   tex->op = nir_texop_txb;
+   nir_tex_instr_add_src(tex, nir_tex_src_bias, nir_imm_float(b, 0));
+   return true;
+}
+
 static bool
 apple9_blend_factor_supported(unsigned factor)
 {
@@ -9943,6 +9964,8 @@ apple9_lower_textures(nir_shader *nir)
    nir_shader_instructions_pass(nir, apple9_lower_texture_lod_query,
                                 nir_metadata_control_flow, NULL);
    nir_shader_instructions_pass(nir, apple9_lower_sampler_bias,
+                                nir_metadata_control_flow, NULL);
+   nir_shader_instructions_pass(nir, apple9_lower_implicit_volume_tex,
                                 nir_metadata_control_flow, NULL);
    agx_nir_lower_apple9_texture_lod(nir);
 }
