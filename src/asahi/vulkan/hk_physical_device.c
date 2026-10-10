@@ -665,9 +665,7 @@ hk_get_device_properties(const struct agx_device *dev,
 {
    /* Note: update nir_shader_compiler_options.max_samples when changing this. */
    const VkSampleCountFlagBits sample_counts =
-      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT |
-      /* Native Apple9 texture/tilebuffer paths currently implement 1x/4x. */
-      (dev->params.gpu_generation >= 16 ? 0 : VK_SAMPLE_COUNT_2_BIT);
+      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
 
    uint64_t os_page_size = 16384;
    os_get_page_size(&os_page_size);

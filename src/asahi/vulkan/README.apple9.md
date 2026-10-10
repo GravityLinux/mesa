@@ -192,8 +192,8 @@ are relative to that aperture. Command-stream continuations use render-context
 offsets. Indirect draws use GPU-resident arguments. Pipelines without a fragment
 shader use a native empty fragment shader, and zero-color-target linking supports
 depth-only rendering. Its runtime sample mask also controls depth writes and
-occlusion when no API fragment shader is bound. Native multisampling currently exposes 1x and 4x; the
-unimplemented 2x mode is excluded from device and image-format queries.
+occlusion when no API fragment shader is bound. Native multisampling exposes 1x, 2x and 4x. Two-sample renders use 32x32
+tiles, four-sample renders 32x16.
 Graphics remains incomplete; broader attachment, robustness, query, and
 presentation need broader validation and further work. Native shared integer
 atomics pass the basic compute and GLSL atomic-operation CTS selections. Nonuniform

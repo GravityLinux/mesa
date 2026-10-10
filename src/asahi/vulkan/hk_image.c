@@ -486,8 +486,7 @@ hk_GetPhysicalDeviceImageFormatProperties2(
        !(pImageFormatInfo->flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT)) {
 
       sampleCounts =
-         VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT |
-         (pdev->dev.params.gpu_generation >= 16 ? 0 : VK_SAMPLE_COUNT_2_BIT);
+         VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
    }
 
    /* From the Vulkan 1.2.199 spec:
