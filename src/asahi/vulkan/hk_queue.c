@@ -567,9 +567,13 @@ hk_flush_bind(struct hk_bind_builder *b)
     */
    struct drm_asahi_gem_bind_op op;
    if (!b->mem && hk_sparse_unbound_unmapped(&b->dev->dev)) {
-      /* Leave both views unmapped, see hk_sparse_unbound_unmapped. */
+      /* Map the zero page read-only in both views (or leave them
+       * unmapped), see hk_bind_scratch and hk_sparse_unbound_unmapped. */
+      bool raw = getenv("HK_APPLE9_SPARSE_UNMAPPED_RAW") != NULL;
       op = (struct drm_asahi_gem_bind_op){
-         .flags = DRM_ASAHI_BIND_UNBIND,
+         .handle = raw ? 0 : b->dev->dev.zero_bo->uapi_handle,
+         .flags = raw ? DRM_ASAHI_BIND_UNBIND
+                      : DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_SINGLE_PAGE,
          .addr = b->va->addr + b->resourceOffset,
          .range = b->size,
       };

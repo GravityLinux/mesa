@@ -90,9 +90,20 @@ hk_bind_scratch(struct hk_device *dev, struct agx_va *va, unsigned offset_B,
    uint64_t addr = va->addr + offset_B;
    uint32_t flags = DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_SINGLE_PAGE;
 
-   /* Unbound ranges stay unmapped, see hk_sparse_unbound_unmapped. */
-   if (hk_sparse_unbound_unmapped(&dev->dev))
+   /* Strict residency: unbound ranges map the zero page read-only in both
+    * views, so reads are zero and soft faults drop writes, see
+    * hk_sparse_unbound_unmapped. HK_APPLE9_SPARSE_UNMAPPED_RAW=1 leaves
+    * them unmapped instead (soft-faulted reads, about 10x slower).
+    */
+   if (hk_sparse_unbound_unmapped(&dev->dev)) {
+      if (getenv("HK_APPLE9_SPARSE_UNMAPPED_RAW"))
+         return VK_SUCCESS;
+      if (agx_bo_bind(&dev->dev, dev->dev.zero_bo, addr, size_B, 0, flags) ||
+          agx_bo_bind(&dev->dev, dev->dev.zero_bo,
+                      addr + dev->dev.sparse_ro_offset, size_B, 0, flags))
+         return VK_ERROR_UNKNOWN;
       return VK_SUCCESS;
+   }
 
    /* Map read-write scratch to the primary (bottom half) VA range */
    int ret = agx_bo_bind(&dev->dev, dev->dev.scratch_bo, addr, size_B, 0,
