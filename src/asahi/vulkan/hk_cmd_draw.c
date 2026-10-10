@@ -2100,7 +2100,10 @@ hk_apple9_launch_tess(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    unsigned nr_patches =
       agx_is_indirect(draw.b) ? 0
                               : ((struct poly_tess_params *)tess_args.cpu)->nr_patches;
-   if (nr_patches > 2 * block_patches) {
+   /* The three passes depend on each other, so they cannot share a stage
+    * lane with other draws' passes: batched draws keep the single scan.
+    */
+   if (!batch && nr_patches > 2 * block_patches) {
       uint64_t counts = ((struct poly_tess_params *)tess_args.cpu)->counts;
       unsigned nr_blocks = DIV_ROUND_UP(nr_patches, block_patches);
       uint64_t block_sums = hk_pool_alloc(cmd, nr_blocks * 4, 4).gpu;
