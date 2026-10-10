@@ -1372,33 +1372,12 @@ lower_load_global_constant_offset_instr(nir_builder *b,
          /* Calculate last byte loaded */
          unsigned offs_imm = nir_scalar_as_uint(offs) + load_size;
 
-         /* Simplify the bounds check. Uniform buffers are bounds checked at
-          * 64B granularity, so `bound` is a multiple of K = 64. Then
-          *
-          * offs_imm < bound <==> round_down(offs_imm, K) < bound. Proof:
-          *
-          * "=>" round_down(offs_imm, K) <= offs_imm < bound.
-          *
-          * "<=" Let a, b be integer s.t. offs_imm = K a + b with b < K.
-          *      Note round_down(offs_imm, K) = Ka.
-          *
-          *      Let c be integer s.t. bound = Kc.
-          *      We have Ka < Kc => a < c.
-          *      b < K => Ka + b < K(a + 1).
-          *
-          *      a < c with integers => a + 1 <= c.
-          *      offs_imm < K(a + 1) <= Kc = bound.
-          *      Hence offs_imm < bound.
+         /* Compare the last byte loaded against the bound exactly. Bounds
+          * are the descriptor's exact range, not rounded to 64 B, so rounding
+          * the offset down would let loads past a short range through
+          * (robustness2 uniform_buffer len_4..len_60).
           */
-         assert(align_mul == 64);
-         offs_imm &= ~(align_mul - 1);
-
-         /* Bounds checks are `offset > bound ? 0 : val` so if offset = 0,
-          * the bounds check is useless.
-          */
-         if (offs_imm) {
-            val = bounds_check(b, val, nir_imm_int(b, offs_imm), bound);
-         }
+         val = bounds_check(b, val, nir_imm_int(b, offs_imm), bound);
       } else {
          offset = nir_iadd_imm(b, offset, load_size);
          val = bounds_check(b, val, offset, bound);
