@@ -802,7 +802,6 @@ apple9_texture_supported(const nir_tex_instr *tex)
    bool explicit_lod = tex->op == nir_texop_txl || tex->op == nir_texop_txb ||
                        tex->op == nir_texop_txf;
    bool gradient = tex->op == nir_texop_txd;
-   bool query = tex->backend_flags & AGX_APPLE9_TEXTURE_LOD_QUERY;
    bool array = tex->is_array && tex->sampler_dim == GLSL_SAMPLER_DIM_2D;
    bool cube_array = tex->is_array && tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE;
    bool volume = array || tex->sampler_dim == GLSL_SAMPLER_DIM_3D ||
@@ -816,8 +815,7 @@ apple9_texture_supported(const nir_tex_instr *tex)
        (tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE && gradient) ||
        tex->coord_components != (cube_array ? 4 : volume ? 3 : 2) ||
        tex->def.bit_size != 32 ||
-       (tex->def.num_components != 4 && !(tex->is_shadow && tex->def.num_components == 1) &&
-        !(query && tex->def.num_components == 2)) ||
+       (tex->def.num_components != 4 && !(tex->is_shadow && tex->def.num_components == 1)) ||
        (tex->dest_type != nir_type_float32 && tex->dest_type != nir_type_int32 &&
         tex->dest_type != nir_type_uint32) ||
        tex->num_srcs != (gradient ? 3 : explicit_lod ? 2 : 1) + tex->is_shadow +
@@ -8181,17 +8179,21 @@ apple9_lower_texture_lod_query(nir_builder *b, nir_instr *instr, void *data)
    tex->op = nir_tex_instr_src_index(tex, nir_tex_src_bias) >= 0
                 ? nir_texop_txb : nir_texop_tex;
    tex->backend_flags |= AGX_APPLE9_TEXTURE_LOD_QUERY;
+   /* As a sample, the instruction has a sample's destination size; the
+    * query result is its first two components. Leaving the two-component
+    * destination fails NIR validation after the next pass with progress. */
+   b->cursor = nir_after_instr(instr);
+   tex->def.num_components = nir_tex_instr_dest_size(tex);
+   nir_def *level = nir_channel(b, &tex->def, 0);
    if (data && tex->sampler_index < 32) {
       const struct agx_apple9_sampler_key *key = data;
-      b->cursor = nir_after_instr(instr);
-      nir_def *level = nir_channel(b, &tex->def, 0);
       if (key[tex->sampler_index].mip_filter == PIPE_TEX_MIPFILTER_NONE)
          level = nir_imm_float(b, 0);
       else if (key[tex->sampler_index].mip_filter == PIPE_TEX_MIPFILTER_NEAREST)
          level = nir_fadd_imm(b, nir_fceil(b, nir_fadd_imm(b, level, 0.5)), -1.0);
-      nir_def *result = nir_vec2(b, level, nir_channel(b, &tex->def, 1));
-      nir_def_rewrite_uses_after(&tex->def, result);
    }
+   nir_def *result = nir_vec2(b, level, nir_channel(b, &tex->def, 1));
+   nir_def_rewrite_uses_after(&tex->def, result);
    return true;
 }
 
