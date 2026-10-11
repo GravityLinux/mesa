@@ -307,6 +307,11 @@ apple9_shared_block(struct apple9_shared_ra *ra, struct agx_apple9_block *block)
 static bool apple9_async(const struct agx_apple9_vir_instr *ins);
 static bool apple9_reads_sources_at_issue(const struct agx_apple9_vir_instr *ins);
 
+/* Set while a candidate runs as one of a parallel pair (see
+ * apple9_candidate_jobs_run): such candidates must not write the shared
+ * program. */
+static _Thread_local bool apple9_in_candidate_job;
+
 static bool
 apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
                        const char **reason)
@@ -559,6 +564,9 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
                /* Every candidate derives the same bits; the first (serial)
                 * one sets them, so parallel candidates only read them. */
                const uint32_t retain = BITFIELD_RANGE(s, width);
+               /* A parallel candidate deriving new bits would race. */
+               assert(!apple9_in_candidate_job ||
+                      (ins->retain_mask & retain) == retain);
                if ((ins->retain_mask & retain) != retain)
                   ins->retain_mask |= retain;
             }
@@ -1928,6 +1936,7 @@ static int
 apple9_candidate_job_run(void *data)
 {
    struct apple9_candidate_job *job = data;
+   apple9_in_candidate_job = true;
    agx_apple9_vir_init(&job->result);
    job->reason = NULL;
    job->increase = UINT_MAX;
@@ -1945,6 +1954,7 @@ apple9_candidate_job_run(void *data)
          true, job->uniform_remat, &job->result, &job->reason, NULL, NULL,
          &job->seen);
    }
+   apple9_in_candidate_job = false;
    return 0;
 }
 
