@@ -1948,6 +1948,13 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
    unsigned long_dependencies = 0;
    for (unsigned i = 0; i < program->instruction_count; ++i)
       long_dependencies += apple9_dependency_delay(program->instructions[i]) > 1;
+   /* Study knob (A/B of compile time against GPU time): keep the first
+    * allocation of non-spilling programs, skipping the latency schedules. */
+   static int first_only = -1;
+   if (unlikely(first_only < 0))
+      first_only = getenv("AGX_APPLE9_FIRST_CANDIDATE") != NULL;
+   if (first_only && !cost.spills)
+      long_dependencies = 0;
    if (long_dependencies > 1) {
       /* Overlapping independent long-latency operations needs registers;
        * also offer schedules that may raise a block's peak pressure by eight
