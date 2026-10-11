@@ -1883,7 +1883,11 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
    /* Bank-cost allocations pay off when the plain allocation spills: they
     * then remove copies and spill traffic. Without spills they almost never
     * beat it (ELDEN RING's 758 shaders: 16 wins in 1,889 allocations, 0.2%
-    * of their instructions) yet cost a full allocation each. */
+    * of their instructions) yet cost a full allocation each. Conversely,
+    * once the plain allocation spills, the later alternatives without bank
+    * costs never beat the best bank-cost one there (0 spills, 24 of 107,659
+    * instructions), so each family of alternatives is tried only where it
+    * can win. */
    const bool bank_candidates = cost.spills != 0;
    if (bank_candidates) {
       /* Bank hints can conflict with later tuples and phi reconciliation.
@@ -1914,7 +1918,7 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
       unsigned rejected[2] = {UINT_MAX, UINT_MAX};
       for (unsigned c = 0; c < 2 * ARRAY_SIZE(slacks); ++c) {
          const unsigned banks = c & 1, slack = slacks[c >> 1];
-         if (banks && !bank_candidates)
+         if (!!banks != bank_candidates)
             continue;
          if (slack && rejected[banks] <= slacks[(c >> 1) - 1])
             continue;
@@ -1945,6 +1949,8 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
    if (cost.spills) {
       for (unsigned latency = 0; latency <= (long_dependencies > 1); ++latency) {
          for (unsigned banks = 0; banks < 2; ++banks) {
+            if (bank_candidates && !banks)
+               continue;
             if (remat_known[latency][banks] && !remat_used[latency][banks])
                continue;
             agx_apple9_vir_init(&alternative);
