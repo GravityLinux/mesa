@@ -99,8 +99,9 @@ hk_bind_scratch(struct hk_device *dev, struct agx_va *va, unsigned offset_B,
       if (getenv("HK_APPLE9_SPARSE_UNMAPPED_RAW"))
          return VK_SUCCESS;
       if (agx_bo_bind(&dev->dev, dev->dev.zero_bo, addr, size_B, 0, flags) ||
-          agx_bo_bind(&dev->dev, dev->dev.zero_bo,
-                      addr + dev->dev.sparse_ro_offset, size_B, 0, flags))
+          (hk_va_has_ro_shadow(dev, addr) &&
+           agx_bo_bind(&dev->dev, dev->dev.zero_bo,
+                       addr + dev->dev.sparse_ro_offset, size_B, 0, flags)))
          return VK_ERROR_UNKNOWN;
       return VK_SUCCESS;
    }
@@ -112,6 +113,8 @@ hk_bind_scratch(struct hk_device *dev, struct agx_va *va, unsigned offset_B,
       return VK_ERROR_UNKNOWN;
 
    /* Map read-only scratch to the secondary (top half) VA range */
+   if (!hk_va_has_ro_shadow(dev, addr))
+      return VK_SUCCESS;
    ret = agx_bo_bind(&dev->dev, dev->dev.zero_bo,
                      addr + dev->dev.sparse_ro_offset, size_B, 0, flags);
    if (ret)
@@ -127,7 +130,7 @@ hk_bind_scratch(struct hk_device *dev, struct agx_va *va, unsigned offset_B,
 static void
 hk_buffer_free_va(struct hk_device *dev, struct hk_buffer *buffer)
 {
-   if (!buffer->apple9_index_va)
+   if (!buffer->apple9_index_va && hk_va_has_ro_shadow(dev, buffer->va->addr))
       agx_bo_bind(&dev->dev, NULL, buffer->va->addr + dev->dev.sparse_ro_offset,
                   buffer->va->size_B, 0, DRM_ASAHI_BIND_UNBIND);
    agx_va_free(&dev->dev, buffer->va, true);
@@ -175,6 +178,13 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
          VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT;
 
       enum agx_va_flags flags = buffer->apple9_index_va ? AGX_VA_USC : 0;
+      /* Shaders address descriptor records in the USC aperture. */
+      if (dev->dev.chip == AGX_CHIP_G16G &&
+          (buffer->vk.usage &
+           (VK_BUFFER_USAGE_2_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT |
+            VK_BUFFER_USAGE_2_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT |
+            VK_BUFFER_USAGE_2_PUSH_DESCRIPTORS_DESCRIPTOR_BUFFER_BIT_EXT)))
+         flags |= AGX_VA_USC;
       uint64_t bda_fixed_addr = 0;
       if (bda_capture_replay) {
          bda_fixed_addr = hk_get_bda_replay_addr(pCreateInfo);
@@ -371,8 +381,10 @@ hk_BindBufferMemory2(VkDevice device, uint32_t bindInfoCount,
          if (ret)
             return VK_ERROR_UNKNOWN;
 
-         /* Apple9 index aliases need only one read-write mapping. */
-         if (!buffer->apple9_index_va) {
+         /* Apple9 index aliases and USC-aperture buffers need only one
+          * read-write mapping. */
+         if (!buffer->apple9_index_va &&
+             hk_va_has_ro_shadow(dev, buffer->vk.device_address)) {
             /* Upper mapping: read-only */
             ret =
                agx_bo_bind(&dev->dev, mem->bo,
@@ -417,7 +429,8 @@ hk_buffer_address(const struct hk_buffer *buffer, uint64_t offset,
     * is NULL, the buffer is not sparse resident, so we don't need the fix up...
     * and indeed, there may not be a shadow map available.
     */
-   if (read_only && buffer->va && !buffer->apple9_index_va) {
+   if (read_only && buffer->va && !buffer->apple9_index_va &&
+       hk_va_has_ro_shadow(dev, addr)) {
       addr = agx_rw_addr_to_ro(&dev->dev, addr);
    }
 
