@@ -224,15 +224,10 @@ hk_CreateSampler(VkDevice device,
    }
 
    if (native_custom) {
+      /* The hardware applies the image view's swizzle to the native border
+       * colour itself, so the border colour component mapping hint must not
+       * be applied again here (it is for the emulated path below). */
       VkClearColorValue bc = sampler->vk.border_color_value;
-      const VkSamplerBorderColorComponentMappingCreateInfoEXT *swiz_info =
-         vk_find_struct_const(
-            info->pNext,
-            SAMPLER_BORDER_COLOR_COMPONENT_MAPPING_CREATE_INFO_EXT);
-      if (swiz_info) {
-         bc = vk_swizzle_color_value(bc, swiz_info->components,
-                                     vk_border_color_is_int(info->borderColor));
-      }
       static_assert(sizeof(sampler->apple9_border) ==
                        sizeof(struct agx_border_packed),
                     "G13 border layout");
