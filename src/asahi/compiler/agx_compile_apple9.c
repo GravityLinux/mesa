@@ -6884,12 +6884,41 @@ apple9_promote_constants(nir_shader *shader, nir_function_impl *preamble,
    util_dynarray_fini(&list);
 }
 
+/* A value left in the main program holds a register from its definition to
+ * its last use. When the uniform words run out, that span, not only the
+ * instructions it takes to compute, is what a uniform word saves: long-lived
+ * buffer bases and invariant values otherwise occupy GPRs across the whole
+ * program and force spills. */
+static unsigned
+apple9_main_span(nir_instr *instr)
+{
+   nir_def *def = nir_instr_def(instr);
+   if (!def)
+      return 0;
+   unsigned last = instr->index;
+   nir_foreach_use_including_if(src, def) {
+      if (nir_src_is_if(src))
+         continue;
+      last = MAX2(last, nir_src_use_instr(src)->index);
+   }
+   return last - instr->index;
+}
+
 static float
 apple9_preamble_cost(nir_instr *instr, const void *data)
 {
    if (!apple9_preamble_instruction(instr, data))
       return 0;
-   return instr->type == nir_instr_type_intrinsic ? 8 : 1;
+   float cost = instr->type == nir_instr_type_intrinsic ? 8 : 1;
+   /* One cost unit per 25 main-program instructions of span; measured on
+    * ER's draw-time fragments (spills 4,349 -> 1,396). The
+    * AGX_APPLE9_PREAMBLE_SPAN divisor overrides it, 0 disables. */
+   static int span_div = -1;
+   if (unlikely(span_div < 0))
+      span_div = getenv("AGX_APPLE9_PREAMBLE_SPAN") ? atoi(getenv("AGX_APPLE9_PREAMBLE_SPAN")) : 25;
+   if (span_div > 0)
+      cost += (float)apple9_main_span(instr) / span_div;
+   return cost;
 }
 
 static float
@@ -7351,6 +7380,8 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
    struct agx_apple9_compute_profile candidate_profile = {0};
    const char *candidate_reason = NULL;
    nir_shader *preamble = NULL;
+   if (main)
+      nir_index_instrs(nir_shader_get_entrypoint(main));
    if (main && nir_opt_preamble(main, &options, sizes)) {
       if (restore)
          apple9_restore_unselected_hoists(main, original_blocks);
