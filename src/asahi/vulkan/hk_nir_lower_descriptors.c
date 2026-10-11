@@ -643,29 +643,42 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
       (const struct hk_device *)tex_layout->vk.base.device;
    /* Planes are consecutive descriptors. On G16 each plane is a whole
     * record: an image part, followed by a sampler part in combined image
-    * samplers. The sampler of a combined binding is its plane's sampler
-    * part. */
+    * samplers. A texture and sampler taken from one variable (a combined
+    * image sampler, including one stored in a mutable binding) read the
+    * plane's sampler part. Separate texture and sampler variables read
+    * separate records, even when they alias one mutable binding. */
    const bool g16 = dev->dev.chip == AGX_CHIP_G16G;
    if (g16 && tex->sampler_dim != GLSL_SAMPLER_DIM_BUF &&
        (tex->op == nir_texop_txs || tex->op == nir_texop_query_levels ||
         tex->op == nir_texop_texture_samples))
       tex->backend_flags |= AGX_TEXTURE_FLAG_METADATA_QUERY;
    uint64_t plane_size_B = sizeof(struct hk_sampled_image_descriptor);
+   bool combined = false;
+   uint32_t s_set = 0, s_binding = 0;
+   if (sampler) {
+      nir_def *s_index;
+      get_resource_deref_binding(b, nir_src_as_deref(nir_src_for_ssa(sampler)),
+                                 &s_set, &s_binding, &s_index);
+      /* Resource derefs are variable-rooted (get_resource_deref_binding). */
+      nir_variable *s_var = nir_deref_instr_get_variable(
+         nir_src_as_deref(nir_src_for_ssa(sampler)));
+      nir_variable *t_var = nir_deref_instr_get_variable(
+         nir_src_as_deref(nir_src_for_ssa(texture)));
+      assert(s_var && t_var);
+      combined = s_var == t_var;
+   }
    if (g16) {
       plane_size_B = apple9_record_size(
-         get_binding_layout(tex_set, tex_binding, ctx)->type);
+         combined ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+                  : get_binding_layout(tex_set, tex_binding, ctx)->type);
    }
    const uint64_t plane_offset_B = plane * plane_size_B;
    uint64_t sampler_part_B = plane_offset_B;
    if (g16 && sampler) {
-      uint32_t s_set, s_binding;
-      nir_def *s_index;
-      get_resource_deref_binding(b, nir_src_as_deref(nir_src_for_ssa(sampler)),
-                                 &s_set, &s_binding, &s_index);
-      VkDescriptorType type = get_binding_layout(s_set, s_binding, ctx)->type;
-      sampler_part_B = plane * apple9_record_size(type) +
-         (type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
-             ? sizeof(struct hk_apple9_image_part) : 0);
+      sampler_part_B =
+         combined ? plane_offset_B + sizeof(struct hk_apple9_image_part)
+                  : plane * apple9_record_size(
+                               get_binding_layout(s_set, s_binding, ctx)->type);
    }
 
    /* LOD bias is passed in the descriptor set, rather than embedded into
