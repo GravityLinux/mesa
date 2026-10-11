@@ -269,8 +269,19 @@ hk_GetDeviceBufferMemoryRequirements(
    pMemoryRequirements->memoryRequirements = (VkMemoryRequirements){
       .size = align64(pInfo->pCreateInfo->size, alignment),
       .alignment = alignment,
-      .memoryTypeBits = BITFIELD_MASK(pdev->mem_type_count),
+      .memoryTypeBits = hk_general_memory_types(pdev),
    };
+
+   /* Descriptor buffers live in the USC aperture with descriptor pools. */
+   const VkBufferUsageFlags2KHR descriptor_usage =
+      VK_BUFFER_USAGE_2_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT |
+      VK_BUFFER_USAGE_2_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT |
+      VK_BUFFER_USAGE_2_PUSH_DESCRIPTORS_DESCRIPTOR_BUFFER_BIT_EXT;
+   if (pdev->apple9_descriptor_mem_type != UINT8_MAX &&
+       (vk_buffer_usage_flags(pInfo->pCreateInfo) & descriptor_usage)) {
+      pMemoryRequirements->memoryRequirements.memoryTypeBits =
+         BITFIELD_BIT(pdev->apple9_descriptor_mem_type);
+   }
 
    vk_foreach_struct_const(ext, pMemoryRequirements->pNext) {
       switch (ext->sType) {

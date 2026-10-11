@@ -143,14 +143,14 @@ hk_GetMemoryFdPropertiesKHR(VkDevice device,
    }
 
    uint32_t type_bits = 0;
-   for (unsigned t = 0; t < ARRAY_SIZE(pdev->mem_types); t++) {
+   for (unsigned t = 0; t < pdev->mem_type_count; t++) {
       const unsigned flags =
          hk_memory_type_flags(&pdev->mem_types[t], handleType);
       if (!(flags & ~bo->flags))
          type_bits |= (1 << t);
    }
 
-   pMemoryFdProperties->memoryTypeBits = type_bits;
+   pMemoryFdProperties->memoryTypeBits = type_bits & hk_general_memory_types(pdev);
 
    agx_bo_unreference(&dev->dev, bo);
 
@@ -212,6 +212,8 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
          flags |= AGX_BO_SHAREABLE;
       if (type->propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
          flags |= AGX_BO_WRITEBACK;
+      if (pAllocateInfo->memoryTypeIndex == pdev->apple9_descriptor_mem_type)
+         flags |= AGX_BO_LOW_VA;
 
       /* D3D12 places resources in heaps at 64-KiB granularity and
        * guarantees the alignment of their GPU addresses. Translation layers
@@ -230,7 +232,8 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
     * without sparse residency never access it; in particular, rebinding a
     * cached BO's shadow is rejected by the experimental Apple9 kernel.
     */
-   if (pdev->vk.supported_features.sparseResidencyBuffer) {
+   if (pdev->vk.supported_features.sparseResidencyBuffer &&
+       !(mem->bo->flags & AGX_BO_LOW_VA)) {
       int ret = agx_bo_bind(&dev->dev, mem->bo,
                          agx_rw_addr_to_ro(&dev->dev, mem->bo->va->addr),
                          mem->bo->size, 0, DRM_ASAHI_BIND_READ);
