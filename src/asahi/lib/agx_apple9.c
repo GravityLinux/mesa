@@ -1035,10 +1035,12 @@ agx_apple9_pack_nearest_sampler(void *out)
  * own slots on the following pages so mixed interpolation can use one
  * descriptor per scalar without overwriting the next draw's roots. */
 #define APPLE9_CF_BINDINGS 0x203d00u
-#define APPLE9_CF_BINDINGS_SIZE 0x220u
-static_assert(4 + 4 * (AGX_APPLE9_MAX_VARYING_COMPONENTS + 4) <=
-                 APPLE9_CF_BINDINGS_SIZE,
-              "coefficient table must fit one binding per scalar plus 1/W and Z");
+#define APPLE9_CF_BINDINGS_SIZE 0x2a0u
+/* One binding per user scalar in the worst case, then 1/W, primitive ID,
+ * Z, point coordinates, two barycentric pairs and the per-vertex inputs. */
+static_assert(4 + 4 * (AGX_APPLE9_MAX_VARYING_COMPONENTS + 1 + 1 + 1 + 1 + 2 +
+                       AGX_APPLE9_MAX_PER_VERTEX) <= APPLE9_CF_BINDINGS_SIZE,
+              "coefficient table must fit its worst-case bindings");
 
 static unsigned
 apple9_cf_binding_count(unsigned components)

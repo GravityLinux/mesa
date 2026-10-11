@@ -80,11 +80,14 @@ struct agx_rodata {
    uint16_t size_16;
 };
 
-/* The current export publication bank retains position plus user scalars
- * through completion. This is a validated compiler capacity, not an API or
- * hardware varying limit. Semantic locations are compacted independently of
- * declaration order and never encoded directly as hardware slot numbers. */
-#define AGX_APPLE9_MAX_VARYING_COMPONENTS 96
+/* User scalars of the cross-stage interface: 31 vectors, as Metal's on these
+ * GPUs, which with position is D3D's 32-register interface. Semantic
+ * locations are compacted independently of declaration order and never
+ * encoded directly as hardware slot numbers. */
+#define AGX_APPLE9_MAX_VARYING_COMPONENTS 124
+/* UVS slots: position, user scalars, point size, the layer/viewport word and
+ * eight clip distances. */
+#define AGX_APPLE9_MAX_UVS_SLOTS (4 + AGX_APPLE9_MAX_VARYING_COMPONENTS + 10)
 /* Varying scalars a fragment shader may read per vertex. */
 #define AGX_APPLE9_MAX_PER_VERTEX 32
 /* Interpolation modes are indexed by compacted scalar, independent of API
