@@ -30,6 +30,7 @@
 
 #include "util/os_file.h"
 #include "util/set.h"
+#include "util/timespec.h"
 #include "util/u_memory.h"
 
 #ifdef _WIN32
@@ -139,22 +140,15 @@ fence_wait_submit(struct zink_batch_state *bs, uint64_t timeout_ns, int64_t abs_
    if (!timeout_ns)
       return false;
    if (timeout_ns == OS_TIMEOUT_INFINITE) {
-      cnd_wait(&bs->usage.flush, &bs->usage.mtx);
+      u_cnd_monotonic_wait(&bs->usage.flush, &bs->usage.mtx);
       return true;
    }
-   const int64_t remaining = abs_timeout - os_time_get_nano();
-   if (remaining <= 0)
+   if (abs_timeout <= os_time_get_nano())
       return false;
-   /* cnd_timedwait takes an absolute wall-clock time */
+   /* u_cnd_monotonic_timedwait takes an absolute monotonic time */
    struct timespec ts;
-   timespec_get(&ts, TIME_UTC);
-   ts.tv_sec += remaining / 1000000000;
-   ts.tv_nsec += remaining % 1000000000;
-   if (ts.tv_nsec >= 1000000000) {
-      ts.tv_sec++;
-      ts.tv_nsec -= 1000000000;
-   }
-   cnd_timedwait(&bs->usage.flush, &bs->usage.mtx, &ts);
+   timespec_from_nsec(&ts, abs_timeout);
+   u_cnd_monotonic_timedwait(&bs->usage.flush, &bs->usage.mtx, &ts);
    return true;
 }
 
