@@ -3589,6 +3589,51 @@ hk_apple9_use_descriptor_handle(nir_builder *b, nir_tex_instr *tex,
    nir_src_rewrite(&tex->src[src].src, nir_iadd(b, base, offset));
 }
 
+/* Debug: HK_APPLE9_DUMP_FRAGMENT_DIR saves each draw-time fragment compile's
+ * input (serialized NIR, varying layout, blend states) as
+ * <binary hash>-<size>.a9frag, named like the GPU pass log's shader hashes.
+ * agx_apple9_fragment_replay recompiles it on the host. */
+#define HK_APPLE9_FRAGMENT_DUMP_MAGIC "A9FRAG01"
+
+static bool
+hk_apple9_fragment_dump_begin(const nir_shader *nir, struct blob *blob)
+{
+   if (!getenv("HK_APPLE9_DUMP_FRAGMENT_DIR"))
+      return false;
+   blob_init(blob);
+   nir_serialize(blob, nir, false);
+   return !blob->out_of_memory;
+}
+
+static void
+hk_apple9_fragment_dump_end(struct blob *nir_blob, bool compiled,
+                            const struct agx_apple9_varying_layout *varyings,
+                            const struct agx_apple9_blend *blend,
+                            unsigned targets, const struct agx_shader_part *part)
+{
+   const char *dir = getenv("HK_APPLE9_DUMP_FRAGMENT_DIR");
+   if (compiled && dir) {
+      const unsigned blends = MAX2(targets, 1);
+      const uint32_t header[] = {
+         sizeof(*varyings), sizeof(*blend), targets, blends, nir_blob->size,
+      };
+      char path[512];
+      snprintf(path, sizeof(path), "%s/%08x-%u.a9frag", dir,
+               _mesa_hash_data(part->binary, part->info.binary_size),
+               part->info.binary_size);
+      FILE *f = fopen(path, "wbx");
+      if (f) {
+         fwrite(HK_APPLE9_FRAGMENT_DUMP_MAGIC, 1, 8, f);
+         fwrite(header, sizeof(header), 1, f);
+         fwrite(varyings, sizeof(*varyings), 1, f);
+         fwrite(blend, sizeof(*blend), blends, f);
+         fwrite(nir_blob->data, 1, nir_blob->size, f);
+         fclose(f);
+      }
+   }
+   blob_finish(nir_blob);
+}
+
 static bool
 hk_apple9_texture_bindings(nir_shader *nir)
 {
@@ -5066,9 +5111,14 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
                   varyings.count += 3;
                }
             }
-            if (!agx_compile_apple9_fragment_mrt(nir, &varyings, key.blend,
-                                                 key.targets, &shader->b,
-                                                 &reason)) {
+            struct blob dump_nir;
+            const bool dump = hk_apple9_fragment_dump_begin(nir, &dump_nir);
+            const bool compiled = agx_compile_apple9_fragment_mrt(
+               nir, &varyings, key.blend, key.targets, &shader->b, &reason);
+            if (dump)
+               hk_apple9_fragment_dump_end(&dump_nir, compiled, &varyings,
+                                           key.blend, key.targets, &shader->b);
+            if (!compiled) {
                reason = reason ?: "unsupported fragment NIR";
                result = vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
                                   "Apple9 fragment: %s", reason);
