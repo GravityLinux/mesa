@@ -137,12 +137,17 @@ struct hk_root_descriptor_table {
    /* Client push constants */
    uint8_t push[HK_MAX_PUSH_SIZE];
 
-   /* Dynamic buffer bindings */
-   struct hk_buffer_address dynamic_buffers[HK_MAX_DYNAMIC_BUFFERS];
-
    /* Start index in dynamic_buffers where each set starts */
    uint8_t set_dynamic_buffer_start[HK_MAX_SETS];
+
+   /* Dynamic buffer bindings. Last, so that a root upload can stop after the
+    * slots in use, see hk_cmd_buffer_upload_root. */
+   struct hk_buffer_address dynamic_buffers[HK_MAX_DYNAMIC_BUFFERS];
 };
+
+/* Bumped whenever hk_root_descriptor_table offsets change: compiled shaders
+ * bake them, so pipeline and disk cache keys include it. */
+#define HK_ROOT_LAYOUT_VERSION 2
 
 /* helper macro for computing root descriptor byte offsets */
 #define hk_root_descriptor_offset(member)                                      \
@@ -163,7 +168,12 @@ struct hk_descriptor_state {
     * An identical root reuses the upload instead of hashing into the
     * per-command-buffer upload cache. Zeroed with the rest of the state on
     * reset, i.e. whenever the upload pool is. */
+   /* Dynamic buffer slots bound since the last reset: roots are uploaded up
+    * to the end of these. */
+   uint32_t root_dynamic_count;
+
    bool root_last_valid;
+   uint32_t root_last_size;
    uint64_t root_last_gpu;
    struct hk_root_descriptor_table root_last;
 

@@ -774,6 +774,7 @@ hk_bind_descriptor_sets(UNUSED struct hk_cmd_buffer *cmd,
    }
    assert(dyn_buffer_start <= HK_MAX_DYNAMIC_BUFFERS);
    assert(next_dyn_offset <= info->dynamicOffsetCount);
+   desc->root_dynamic_count = MAX2(desc->root_dynamic_count, dyn_buffer_start);
 
    desc->root_dirty = true;
 }
@@ -1009,31 +1010,37 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
 
    bool is_new = true;
    struct agx_ptr root_ptr;
+   size_t size = sizeof(*root);
    if (hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G) {
-      /* Normalize only the self-address and compare the whole root against
-       * the last upload for this bind point: identical roots reuse it, any
-       * difference uploads a fresh copy. No hashing on this per-draw path. */
+      /* Normalize only the self-address and compare the root against the
+       * last upload for this bind point: identical roots reuse it, any
+       * difference uploads a fresh copy. No hashing on this per-draw path.
+       * Roots end after the dynamic buffer slots bound so far: the 64-entry
+       * table is most of the root, and layouts use a few. */
       root->root_desc_addr = 0;
-      if (desc->root_last_valid &&
-          !memcmp(root, &desc->root_last, sizeof(*root))) {
+      size = hk_root_descriptor_offset(dynamic_buffers) +
+             desc->root_dynamic_count * sizeof(struct hk_buffer_address);
+      if (desc->root_last_valid && desc->root_last_size == size &&
+          !memcmp(root, &desc->root_last, size)) {
          root->root_desc_addr = desc->root_last_gpu;
          return desc->root_last_gpu;
       }
-      root_ptr = hk_pool_alloc(cmd, sizeof(*root), 8);
+      root_ptr = hk_pool_alloc(cmd, size, 8);
       if (root_ptr.gpu) {
-         memcpy(&desc->root_last, root, sizeof(*root));
+         memcpy(&desc->root_last, root, size);
+         desc->root_last_size = size;
          desc->root_last_gpu = root_ptr.gpu;
          desc->root_last_valid = true;
       }
    } else {
-      root_ptr = hk_pool_alloc(cmd, sizeof(*root), 8);
+      root_ptr = hk_pool_alloc(cmd, size, 8);
    }
    if (!root_ptr.gpu)
       return 0;
 
    root->root_desc_addr = root_ptr.gpu;
    if (is_new)
-      memcpy(root_ptr.cpu, root, sizeof(*root));
+      memcpy(root_ptr.cpu, root, size);
    return root_ptr.gpu;
 }
 
