@@ -555,6 +555,19 @@ bool agx_apple9_optimize_vir_with_constants(
    const struct agx_apple9_uniform_constants *constants);
 bool agx_apple9_optimize_vir(struct agx_apple9_vir_program *program);
 bool agx_apple9_encode_float_immediate(uint32_t value, uint8_t *encoded);
+bool agx_apple9_encode_float_immediate_wide(uint32_t value, uint8_t *encoded,
+                                            bool *low);
+
+/* AGX_APPLE9_NO_FLOAT_IMM=1 keeps floating min/max literals and those that
+ * need the fourth mantissa bit in registers and uniform words. */
+static inline bool
+agx_apple9_float_immediates_disabled(void)
+{
+   static int disabled = -1;
+   if (disabled < 0)
+      disabled = getenv("AGX_APPLE9_NO_FLOAT_IMM") != NULL;
+   return disabled;
+}
 
 /* Integer add/multiply-add, logic and select source descriptors hold an
  * 8-bit zero-extended literal; the float forms hold a packed float. */
@@ -578,14 +591,30 @@ agx_apple9_integer_immediates_disabled(void)
    return disabled;
 }
 
+/* Floating min/max operand B and the FMA addend have a fourth mantissa
+ * bit beside the minifloat byte; FMA operand B does not. */
+static inline bool
+agx_apple9_wide_float_immediate_slot(enum agx_apple9_encoding encoding,
+                                     unsigned slot)
+{
+   return (encoding == AGX_APPLE9_ENC_MINMAX_COMPACT && slot == 1) ||
+          (slot == 2 && (encoding == AGX_APPLE9_ENC_FLOAT3_EXTENDED ||
+                         encoding == AGX_APPLE9_ENC_FLOAT3_COMPACT ||
+                         encoding == AGX_APPLE9_ENC_FLOAT3_MODIFIER_EXTENDED ||
+                         encoding == AGX_APPLE9_ENC_FLOAT3_SATURATE_EXTENDED));
+}
+
 static inline bool
 agx_apple9_source_immediate_encodable(enum agx_apple9_encoding encoding,
-                                      uint32_t value)
+                                      unsigned slot, uint32_t value)
 {
    uint8_t encoded;
-   return agx_apple9_integer_immediate_encoding(encoding)
-             ? value <= UINT8_MAX
-             : agx_apple9_encode_float_immediate(value, &encoded);
+   bool low;
+   if (agx_apple9_integer_immediate_encoding(encoding))
+      return value <= UINT8_MAX;
+   if (agx_apple9_wide_float_immediate_slot(encoding, slot))
+      return agx_apple9_encode_float_immediate_wide(value, &encoded, &low);
+   return agx_apple9_encode_float_immediate(value, &encoded);
 }
 
 uint32_t agx_apple9_vir_emit(struct agx_apple9_vir_program *program,

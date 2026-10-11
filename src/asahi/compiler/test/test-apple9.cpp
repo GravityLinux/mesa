@@ -1953,6 +1953,102 @@ TEST(Apple9Packer, PointerLoadsMatchOwnMslEncodings)
    }
 }
 
+/* Floating literals, against Metal's encodings of our own kernels
+ * (msl-encodings-20261011/fimm). Every source is a last use.
+ * Dependency fields and the producer-state bit 21 (ours describes an
+ * ALU-fed operand, Metal's are load-fed) are masked. */
+TEST(Apple9Packer, FloatImmediatesMatchOwnMslEncodings)
+{
+   auto f = [](float x) { uint32_t u; memcpy(&u, &x, 4); return u; };
+   struct {
+      const char *name;
+      enum agx_apple9_vir_opcode op;
+      enum agx_apple9_encoding encoding;
+      uint8_t nr_srcs, immediate_mask;
+      uint8_t phys[3];
+      uint32_t value, immediate;
+      std::vector<uint8_t> metal;
+      std::vector<uint8_t> mask;
+   } cases[] = {
+      {"max_x1", AGX_APPLE9_VIR_FMAX, AGX_APPLE9_ENC_MINMAX_COMPACT, 1, 2,
+       {1, 1}, f(1.0f), 0, {0x12, 0x03, 0x0a, 0xb1, 0x00, 0xc2},
+       {0, 0, 0x20, 0, 0, 0xe0}},
+      {"max_x0", AGX_APPLE9_VIR_FMAX, AGX_APPLE9_ENC_MINMAX_COMPACT, 1, 2,
+       {1, 1}, f(0.0f), 0, {0x12, 0x03, 0x0a, 0x81, 0x00, 0xc2},
+       {0, 0, 0x20, 0, 0, 0xe0}},
+      {"max_xm1", AGX_APPLE9_VIR_FMAX, AGX_APPLE9_ENC_MINMAX_COMPACT, 1, 2,
+       {1, 1}, f(-1.0f), 0, {0x12, 0x03, 0x1a, 0xb1, 0x00, 0xc2},
+       {0, 0, 0x20, 0, 0, 0xe0}},
+      {"min_xm05", AGX_APPLE9_VIR_FMIN, AGX_APPLE9_ENC_MINMAX_COMPACT, 1, 2,
+       {1, 1}, f(-0.5f), 0, {0x12, 0x03, 0x1a, 0xa1, 0x01, 0xc2},
+       {0, 0, 0x20, 0, 0, 0xe0}},
+      {"max_x31", AGX_APPLE9_VIR_FMAX, AGX_APPLE9_ENC_MINMAX_COMPACT, 1, 2,
+       {1, 1}, f(31.0f), 0, {0x12, 0x03, 0x0a, 0xff, 0x10, 0xc2},
+       {0, 0, 0x20, 0, 0, 0xe0}},
+      {"max_x2p125", AGX_APPLE9_VIR_FMAX, AGX_APPLE9_ENC_MINMAX_COMPACT, 1, 2,
+       {1, 1}, f(2.125f), 0, {0x12, 0x03, 0x0a, 0xc1, 0x10, 0xc2},
+       {0, 0, 0x20, 0, 0, 0xe0}},
+      {"mul_x17", AGX_APPLE9_VIR_FMUL_IMM, AGX_APPLE9_ENC_FLOAT2_IMMEDIATE_COMPACT, 1, 0,
+       {0, 0}, 0, f(17.0f), {0x09, 0xf1, 0x15, 0x01, 0x88, 0xc0},
+       {0, 0, 0x20, 0, 0, 0xe0}},
+      {"mul_x2p125", AGX_APPLE9_VIR_FMUL_IMM, AGX_APPLE9_ENC_FLOAT2_IMMEDIATE_COMPACT, 1, 0,
+       {0, 0}, 0, f(2.125f), {0x09, 0xc1, 0x15, 0x01, 0x88, 0xc0},
+       {0, 0, 0x20, 0, 0, 0xe0}},
+      {"add_x31", AGX_APPLE9_VIR_FADD_IMM, AGX_APPLE9_ENC_FLOAT2_IMMEDIATE_COMPACT, 1, 0,
+       {0, 0}, 0, f(31.0f), {0x09, 0xff, 0x14, 0x01, 0x88, 0xc0},
+       {0, 0, 0x20, 0, 0, 0xe0}},
+      {"fma_xy31", AGX_APPLE9_VIR_FMA, AGX_APPLE9_ENC_FLOAT3_EXTENDED, 2, 4,
+       {0, 0, 2}, f(31.0f), 0, {0x09, 0x01, 0x1e, 0x05, 0x21, 0xff, 0x02, 0xc0},
+       {0, 0, 0x20, 0, 0, 0, 0, 0xe0}},
+      {"fma_xy2p125", AGX_APPLE9_VIR_FMA, AGX_APPLE9_ENC_FLOAT3_EXTENDED, 2, 4,
+       {0, 0, 2}, f(2.125f), 0, {0x09, 0x01, 0x1e, 0x05, 0x21, 0xc1, 0x02, 0xc0},
+       {0, 0, 0x20, 0, 0, 0, 0, 0xe0}},
+      {"fma_xy1", AGX_APPLE9_VIR_FMA, AGX_APPLE9_ENC_FLOAT3_EXTENDED, 2, 4,
+       {0, 0, 2}, f(1.0f), 0, {0x09, 0x01, 0x1e, 0x05, 0x21, 0xb0, 0x02, 0xc0},
+       {0, 0, 0x20, 0, 0, 0, 0, 0xe0}},
+   };
+   for (const auto &test : cases) {
+      agx_apple9_vir_instr I = {
+         .op = test.op,
+         .encoding = test.encoding,
+         .dest = 0,
+         .src = {1, 2},
+         .immediate = test.immediate,
+         .nr_srcs = test.nr_srcs,
+         .alu_src_immediate_mask = test.immediate_mask,
+      };
+      for (unsigned s = 0; s < 3; ++s)
+         if (test.immediate_mask & (1u << s))
+            I.alu_src_value[s] = test.value;
+      agx_apple9_packed_instruction packed = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_pack_vir_instruction(&I, test.phys, &packed, &reason))
+         << test.name << ": " << (reason ? reason : "");
+      ASSERT_EQ(packed.length, test.metal.size()) << test.name;
+      for (unsigned i = 0; i < test.metal.size(); ++i)
+         EXPECT_EQ(packed.bytes[i] & ~test.mask[i], test.metal[i] & ~test.mask[i])
+            << test.name << " byte=" << i;
+   }
+
+   /* 0.3 has no minifloat; integer min/max has no float literal. */
+   uint8_t phys[] = {1, 1};
+   agx_apple9_vir_instr max = {
+      .op = AGX_APPLE9_VIR_FMAX,
+      .encoding = AGX_APPLE9_ENC_MINMAX_COMPACT,
+      .dest = 0,
+      .src = {1},
+      .nr_srcs = 1,
+      .alu_src_immediate_mask = 2,
+      .alu_src_value = {0, f(0.3f)},
+   };
+   agx_apple9_packed_instruction packed = {};
+   const char *reason = nullptr;
+   EXPECT_FALSE(agx_apple9_pack_vir_instruction(&max, phys, &packed, &reason));
+   max.alu_src_value[1] = f(1.0f);
+   max.op = AGX_APPLE9_VIR_UMAX;
+   EXPECT_FALSE(agx_apple9_pack_vir_instruction(&max, phys, &packed, &reason));
+}
+
 TEST(Apple9Packer, RegisterFormsMatchValidatedProbeTemplates)
 {
    uint8_t phys[] = {64, 2, 95, 5};
