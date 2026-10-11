@@ -1222,7 +1222,7 @@ compute_w_entry(struct spill_ctx *ctx)
    }
 
    agx_foreach_phi_in_block(ctx->block, I) {
-      bool all_found = true;
+      bool all_found = true, any_found = false;
 
       agx_foreach_predecessor(ctx->block, pred) {
          struct spill_block *sp = spill_block(ctx, *pred);
@@ -1241,13 +1241,16 @@ compute_w_entry(struct spill_ctx *ctx)
          }
 
          all_found &= found;
+         any_found |= found;
       }
 
       /* Heuristic: if any phi source is spilled, spill the whole phi. This is
        * suboptimal, but it massively reduces pointless fill/spill chains with
-       * massive phi webs.
+       * massive phi webs. A target may instead keep a phi whose source some
+       * predecessor still holds; coupling code reloads it on the other edges.
        */
-      if (!all_found)
+      if (!(ctx->shader->ra_target.spill_partial_phi_sources ? any_found
+                                                              : all_found))
          continue;
 
       candidates[j++] = (struct candidate){

@@ -2522,10 +2522,21 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
          if (scalar.def->bit_size != 32 ||
              word >= AGX_APPLE9_UNIFORM_COUNT - lower->preamble_base)
             return AGX_APPLE9_VREG_INVALID;
-         uint32_t zero = apple9_dag_zero(lower);
-         value = apple9_dag_emit(lower, AGX_APPLE9_VIR_IOR_UNIFORM,
-            AGX_APPLE9_ENC_LOGIC_UNIFORM, &zero, 1,
-            lower->preamble_base + word);
+         /* A uniform move reads the word without a zero register
+          * (AGX_APPLE9_NO_UNIFORM_MOVE=1 keeps the zero-sourced OR). */
+         static int no_move = -1;
+         if (no_move < 0)
+            no_move = getenv("AGX_APPLE9_NO_UNIFORM_MOVE") != NULL;
+         if (no_move) {
+            uint32_t zero = apple9_dag_zero(lower);
+            value = apple9_dag_emit(lower, AGX_APPLE9_VIR_IOR_UNIFORM,
+               AGX_APPLE9_ENC_LOGIC_UNIFORM, &zero, 1,
+               lower->preamble_base + word);
+         } else {
+            value = apple9_dag_emit(lower, AGX_APPLE9_VIR_IOR_UNIFORM,
+               AGX_APPLE9_ENC_UNIFORM_MOVE, NULL, 0,
+               lower->preamble_base + word);
+         }
       } else if (subgroup_size) {
          /* Native Metal materializes the architectural SIMD width. */
          value = apple9_dag_imm(lower, 32);

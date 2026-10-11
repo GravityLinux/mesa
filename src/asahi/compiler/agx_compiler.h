@@ -520,6 +520,10 @@ struct agx_ra_target {
     * model. Targets without measured breakpoints can retain real spilling
     * while declining this optional code-size/occupancy tradeoff. */
    bool disable_occupancy_rematerialization;
+   /* At a join, keep a phi in registers when any predecessor holds its
+    * source in a register; the others reload it on their edge. Otherwise a
+    * single evicted source spills the whole phi. */
+   bool spill_partial_phi_sources;
    bool cost_register_constraints;
    bool disable_uniform_rematerialization;
    /* Number of half-registers directly addressable by MOV_IMM, or zero when

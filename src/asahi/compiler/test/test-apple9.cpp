@@ -2122,6 +2122,49 @@ TEST(Apple9Packer, CompareLiteralsMatchOwnMslEncodings)
    }
 }
 
+/* Four-byte uniform moves, against Metal's encodings of our own kernels
+ * (msl-encodings-20261011/umov). */
+TEST(Apple9Packer, UniformMovesMatchOwnMslEncodings)
+{
+   static const struct {
+      uint8_t dst;
+      uint16_t uniform;
+      uint8_t bytes[4];
+   } cases[] = {
+      {1, 4, {0x1b, 0x08, 0x01, 0x08}},
+      {36, 4, {0x4b, 0x08, 0x81, 0x08}},
+      {19, 66, {0x3b, 0x04, 0x49, 0x08}},
+      {3, 130, {0x3b, 0x04, 0x01, 0x18}},
+      {28, 20, {0xcb, 0x28, 0x41, 0x08}},
+   };
+   for (const auto &test : cases) {
+      uint8_t phys[] = {test.dst};
+      agx_apple9_vir_instr move = {
+         .op = AGX_APPLE9_VIR_IOR_UNIFORM,
+         .encoding = AGX_APPLE9_ENC_UNIFORM_MOVE,
+         .dest = 0,
+         .immediate = test.uniform,
+      };
+      agx_apple9_packed_instruction packed = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_pack_vir_instruction(&move, phys, &packed, &reason))
+         << (reason ? reason : "");
+      ASSERT_EQ(packed.length, 4u);
+      EXPECT_EQ(memcmp(packed.bytes, test.bytes, 4), 0)
+         << "dst=" << unsigned(test.dst) << " u=" << test.uniform;
+   }
+   uint8_t high[] = {64};
+   agx_apple9_vir_instr move = {
+      .op = AGX_APPLE9_VIR_IOR_UNIFORM,
+      .encoding = AGX_APPLE9_ENC_UNIFORM_MOVE,
+      .dest = 0,
+      .immediate = 4,
+   };
+   agx_apple9_packed_instruction packed = {};
+   const char *reason = nullptr;
+   EXPECT_FALSE(agx_apple9_pack_vir_instruction(&move, high, &packed, &reason));
+}
+
 TEST(Apple9Packer, RegisterFormsMatchValidatedProbeTemplates)
 {
    uint8_t phys[] = {64, 2, 95, 5};
@@ -5651,7 +5694,7 @@ TEST(Apple9Compiler, SimpleIfElseUsesNativeMaskTransition)
    unsigned predicates = 0;
    for (unsigned i = 0; i + 6 <= compiled.info.binary_size; ++i) {
       /* Operand B is a register, or the literal 16 (0x80 | 8 << 1 with
-       * the B file bit) under AGX_APPLE9_COMPARE_LITERAL=1. */
+       * the B file bit) by default (AGX_APPLE9_NO_COMPARE_LITERAL=1 keeps a register). */
       const bool literal = (binary[i + 5] & 0x1f) == 0x02 && binary[i + 3] == 0x90;
       if (binary[i] != 0x0a || (binary[i + 2] & ~0x18) != 0x22 ||
           binary[i + 4] != AGX_APPLE9_PREDICATE_ULT ||
@@ -5701,7 +5744,7 @@ TEST(Apple9Compiler, DirectConditionsUseProvenPredicateFamilies)
             binary[i] == expected_opcode &&
             (binary[i + 2] & ~0x18) == (test.extended ? 0x23 : 0x22);
          /* Operand B is a register, or the literal 16 (0x90, or minifloat
-          * 0xf1 for 16.0) with the B file bit under AGX_APPLE9_COMPARE_LITERAL=1. */
+          * 0xf1 for 16.0) with the B file bit by default (AGX_APPLE9_NO_COMPARE_LITERAL=1 keeps a register). */
          const bool is_float = test.op == nir_op_feq || test.op == nir_op_fneu ||
                                test.op == nir_op_flt || test.op == nir_op_fge;
          const uint8_t file = binary[i + (test.extended ? 7 : 5)] & 0x1f;
@@ -5871,7 +5914,7 @@ TEST(Apple9Compiler, ArbitraryPureBooleansMaterializeThenCompareWithZero)
       unsigned integer_equal = 0;
       for (unsigned i = 0; i + 10 <= compiled.info.binary_size; ++i) {
          /* A register zero, or the literal zero (byte 3 = 0x80, B file
-          * bit) under AGX_APPLE9_COMPARE_LITERAL=1, as Metal encodes it. */
+          * bit) by default (AGX_APPLE9_NO_COMPARE_LITERAL=1 keeps a register), as Metal encodes it. */
          const uint8_t file = binary[i + 7] & 0x1f;
          integer_equal += binary[i] == 0x0a &&
                           (binary[i + 2] & ~0x18) == 0x23 &&
