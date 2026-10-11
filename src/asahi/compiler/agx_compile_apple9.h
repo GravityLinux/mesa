@@ -33,6 +33,9 @@ uint16_t agx_apple9_texture_mode(bool explicit_lod, bool gradient, bool bias,
                                  unsigned dimension, bool shadow, bool min_lod);
 bool agx_apple9_texture_offset_mode(uint16_t mode, uint16_t *offset_mode);
 
+/* Draw-time compiles: allow one helper thread for independent RA candidates. */
+void agx_apple9_set_parallel_ra(bool enable);
+
 bool agx_nir_hoist_apple9_uniform_reads(nir_shader *shader);
 bool agx_nir_lower_apple9_math(nir_shader *shader);
 bool agx_nir_opt_apple9_bounds(nir_shader *shader);

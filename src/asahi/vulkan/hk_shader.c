@@ -74,6 +74,10 @@
 #include "util/u_debug.h"
 #include "vulkan/vulkan_core.h"
 
+
+/* Set while a pipeline-time eager variant compiles on this thread. */
+static _Thread_local bool hk_apple9_eager_compile;
+
 struct hk_fs_key {
    bool zs_self_dep;
 
@@ -5507,8 +5511,10 @@ hk_apple9_eager_variant(struct hk_device *dev, uint32_t count,
    BITSET_SET(state.dynamic, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES);
 
    struct hk_api_shader *variant[HK_APPLE9_GFX_STAGES];
+   hk_apple9_eager_compile = true;
    if (hk_apple9_resolve_graphics(dev, api, &state, variant) != VK_SUCCESS)
       fprintf(stderr, "HK_APPLE9_EAGER_VARIANTS: variant compile failed\n");
+   hk_apple9_eager_compile = false;
    if (stub)
       hk_api_shader_destroy(&dev->vk, &stub->vk, NULL);
 }
@@ -5722,8 +5728,13 @@ hk_apple9_resolve_graphics(struct hk_device *dev,
    if (result == VK_SUCCESS) {
       struct hk_cpu_compile_scope scope;
       hk_cpu_timing_compile_begin(&scope);
+      /* A draw-time compile stalls the recording thread: let its register
+       * allocation use one helper thread. Eager (pipeline-time) variants
+       * stay serial so bulk compiles don't oversubscribe the CPU. */
+      agx_apple9_set_parallel_ra(!hk_apple9_eager_compile);
       result = hk_apple9_compile_graphics(dev, count, infos, NULL, &search.key,
                                           NULL, NULL, compiled);
+      agx_apple9_set_parallel_ra(false);
       hk_cpu_timing_compile_end(&scope, true);
    } else {
       for (unsigned i = 0; i < count; ++i)

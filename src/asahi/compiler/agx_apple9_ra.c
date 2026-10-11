@@ -1,3 +1,5 @@
+#include "c11/threads.h"
+#include "agx_compile_apple9.h"
 /*
  * Copyright 2026 The Asahi Linux Contributors
  * SPDX-License-Identifier: MIT
@@ -1881,6 +1883,153 @@ apple9_latency_cheaper(struct apple9_allocation_cost a,
           4 * b.instructions + b.dependency_gaps;
 }
 
+/* Draw-time compiles may run independent allocation candidates on a helper
+ * thread (at most one extra), so the recording thread waits for about four
+ * allocations instead of six on spilling programs. Each job deduplicates
+ * against a private copy of the schedules seen so far; their new
+ * fingerprints are merged in the serial order afterwards, and every result is
+ * compared in that order, so the outcome equals the serial search. */
+static _Thread_local bool apple9_parallel_ra;
+
+void
+agx_apple9_set_parallel_ra(bool enable)
+{
+   apple9_parallel_ra = enable;
+}
+
+static bool
+apple9_parallel_ra_enabled(void)
+{
+   static int forced = -1;
+   if (unlikely(forced < 0))
+      forced = getenv("AGX_APPLE9_PARALLEL_RA") ? atoi(getenv("AGX_APPLE9_PARALLEL_RA")) : 2;
+   return forced == 2 ? apple9_parallel_ra : forced != 0;
+}
+
+struct apple9_candidate_job {
+   struct agx_apple9_vir_program *program;
+   nir_shader *nir;
+   bool cost_constraints, latency, copy_register, uniform_remat, retry_copy;
+   unsigned slack;
+   /* Results. */
+   bool valid, ok, remat_used;
+   unsigned increase;
+   const char *reason;
+   struct agx_apple9_vir_program result;
+   struct util_dynarray seen;
+   unsigned seen_start;
+};
+
+static int
+apple9_candidate_job_run(void *data)
+{
+   struct apple9_candidate_job *job = data;
+   agx_apple9_vir_init(&job->result);
+   job->reason = NULL;
+   job->increase = UINT_MAX;
+   job->remat_used = false;
+   job->ok = apple9_allocate_candidate(
+      job->program, job->nir, job->cost_constraints, job->latency, job->slack,
+      job->copy_register, job->uniform_remat, &job->result, &job->reason,
+      &job->remat_used, &job->increase, &job->seen);
+   if (!job->ok && job->retry_copy && !job->copy_register &&
+       job->reason == apple9_copy_register_reason) {
+      agx_apple9_vir_finish(&job->result);
+      agx_apple9_vir_init(&job->result);
+      job->ok = apple9_allocate_candidate(
+         job->program, job->nir, job->cost_constraints, job->latency, job->slack,
+         true, job->uniform_remat, &job->result, &job->reason, NULL, NULL,
+         &job->seen);
+   }
+   return 0;
+}
+
+static void
+apple9_candidate_job_init(struct apple9_candidate_job *job,
+                          struct agx_apple9_vir_program *program, nir_shader *nir,
+                          const struct util_dynarray *seen, bool cost_constraints,
+                          bool latency, unsigned slack, bool copy_register,
+                          bool uniform_remat, bool retry_copy)
+{
+   *job = (struct apple9_candidate_job){
+      .program = program, .nir = nir, .cost_constraints = cost_constraints,
+      .latency = latency, .slack = slack, .copy_register = copy_register,
+      .uniform_remat = uniform_remat, .retry_copy = retry_copy, .valid = true,
+   };
+   util_dynarray_init(&job->seen, NULL);
+   util_dynarray_append_array(&job->seen, uint8_t, seen->data, seen->size);
+   job->seen_start = seen->size;
+}
+
+/* Run two jobs, the second on a helper thread when possible, and merge their
+ * new schedule fingerprints into seen in serial order. */
+static void
+apple9_candidate_jobs_run(struct apple9_candidate_job jobs[2],
+                          struct util_dynarray *seen)
+{
+   thrd_t thread;
+   bool threaded = thrd_create(&thread, apple9_candidate_job_run, &jobs[1]) ==
+                   thrd_success;
+   apple9_candidate_job_run(&jobs[0]);
+   if (threaded)
+      thrd_join(thread, NULL);
+   else
+      apple9_candidate_job_run(&jobs[1]);
+   const uint8_t *first = (const uint8_t *)jobs[0].seen.data + jobs[0].seen_start;
+   const unsigned first_size = jobs[0].seen.size - jobs[0].seen_start;
+   const uint8_t *second = (const uint8_t *)jobs[1].seen.data + jobs[1].seen_start;
+   const unsigned second_size = jobs[1].seen.size - jobs[1].seen_start;
+   /* The second candidate repeats the first's schedule: in serial order it
+    * would have been rejected as a duplicate. */
+   for (unsigned a = 0; jobs[1].ok && a < second_size; a += BLAKE3_OUT_LEN) {
+      for (unsigned b = 0; b < first_size; b += BLAKE3_OUT_LEN) {
+         if (!memcmp(second + a, first + b, BLAKE3_OUT_LEN)) {
+            agx_apple9_vir_finish(&jobs[1].result);
+            agx_apple9_vir_init(&jobs[1].result);
+            jobs[1].ok = false;
+            jobs[1].reason = apple9_duplicate_candidate_reason;
+            break;
+         }
+      }
+   }
+   util_dynarray_append_array(seen, uint8_t, first, first_size);
+   util_dynarray_append_array(seen, uint8_t, second, second_size);
+   util_dynarray_fini(&jobs[0].seen);
+   util_dynarray_fini(&jobs[1].seen);
+}
+
+/* Take a prefetched candidate matching these parameters, or allocate it. */
+static bool
+apple9_take_candidate(struct apple9_candidate_job *prefetched, unsigned count,
+                      struct agx_apple9_vir_program *program, nir_shader *nir,
+                      bool cost_constraints, bool latency, unsigned slack,
+                      bool copy_register, bool uniform_remat,
+                      struct agx_apple9_vir_program *result, const char **reason,
+                      bool *remat_used, unsigned *increase,
+                      struct util_dynarray *seen)
+{
+   for (unsigned i = 0; i < count; ++i) {
+      struct apple9_candidate_job *job = &prefetched[i];
+      if (!job->valid || job->cost_constraints != cost_constraints ||
+          job->latency != latency || job->slack != slack ||
+          job->copy_register != copy_register ||
+          job->uniform_remat != uniform_remat)
+         continue;
+      job->valid = false;
+      agx_apple9_vir_finish(result);
+      *result = job->result;
+      *reason = job->reason;
+      if (remat_used)
+         *remat_used = job->remat_used;
+      if (increase)
+         *increase = job->increase;
+      return job->ok;
+   }
+   return apple9_allocate_candidate(program, nir, cost_constraints, latency,
+                                    slack, copy_register, uniform_remat, result,
+                                    reason, remat_used, increase, seen);
+}
+
 bool
 agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
                            nir_shader *nir, const char **reason)
@@ -1930,14 +2079,26 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
     * instructions), so each family of alternatives is tried only where it
     * can win. */
    const bool bank_candidates = cost.spills != 0;
+   unsigned long_dependencies = 0;
+   for (unsigned i = 0; i < program->instruction_count; ++i)
+      long_dependencies += apple9_dependency_delay(program->instructions[i]) > 1;
+   struct apple9_candidate_job prefetched[2] = {0};
+   const bool parallel = apple9_parallel_ra_enabled();
+   if (parallel && bank_candidates && long_dependencies > 1) {
+      apple9_candidate_job_init(&prefetched[0], program, nir, &seen, true, false,
+                                0, copy_register, true, false);
+      apple9_candidate_job_init(&prefetched[1], program, nir, &seen, true, true,
+                                0, copy_register, true, false);
+      apple9_candidate_jobs_run(prefetched, &seen);
+   }
    if (bank_candidates) {
       /* Bank hints can conflict with later tuples and phi reconciliation.
        * Compare completed allocations so those costs are paid by the policy
        * which caused them, including rematerialization and spill lowering. */
       const char *unused_reason = NULL;
-      bool built = apple9_allocate_candidate(program, nir, true, false, 0,
-                                             copy_register, true, &alternative,
-                                             &unused_reason, &remat_used[0][1], NULL, &seen);
+      bool built = apple9_take_candidate(prefetched, 2, program, nir, true, false, 0,
+                                         copy_register, true, &alternative,
+                                         &unused_reason, &remat_used[0][1], NULL, &seen);
       remat_known[0][1] = built;
       if (built &&
           apple9_allocation_cheaper(apple9_allocation_cost(&alternative), cost))
@@ -1945,9 +2106,6 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
    }
    agx_apple9_vir_finish(&alternative);
    cost = apple9_allocation_cost(&best);
-   unsigned long_dependencies = 0;
-   for (unsigned i = 0; i < program->instruction_count; ++i)
-      long_dependencies += apple9_dependency_delay(program->instructions[i]) > 1;
    /* Study knob (A/B of compile time against GPU time): keep the first
     * allocation of non-spilling programs, skipping the latency schedules. */
    static int first_only = -1;
@@ -1974,7 +2132,7 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
          const char *unused_reason = NULL;
          bool used = false;
          unsigned increase = UINT_MAX;
-         bool built = apple9_allocate_candidate(program, nir, banks, true, slack,
+         bool built = apple9_take_candidate(prefetched, 2, program, nir, banks, true, slack,
                                         copy_register, true, &alternative,
                                         &unused_reason, &used, &increase, &seen);
          rejected[banks] = built ? increase : UINT_MAX;
@@ -1994,6 +2152,34 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
     * the fully allocated alternatives when scratch remains, so reserving those
     * temporaries never wins merely by saving cheap moves while adding spills.
     * Keep invariant-store placement in both policies. */
+   /* Unconsumed prefetches (a candidate the serial rules then skipped). */
+   for (unsigned i = 0; i < 2; ++i) {
+      if (prefetched[i].valid)
+         agx_apple9_vir_finish(&prefetched[i].result);
+      prefetched[i].valid = false;
+   }
+   if (cost.spills && parallel) {
+      unsigned n = 0;
+      for (unsigned latency = 0; latency <= (long_dependencies > 1); ++latency) {
+         for (unsigned banks = 0; banks < 2; ++banks) {
+            if ((bank_candidates && !banks) ||
+                (remat_known[latency][banks] && !remat_used[latency][banks]))
+               continue;
+            if (n < 2)
+               apple9_candidate_job_init(&prefetched[n], program, nir, &seen, banks,
+                                         latency, 0, copy_register, false, true);
+            ++n;
+         }
+      }
+      if (n == 2)
+         apple9_candidate_jobs_run(prefetched, &seen);
+      else
+         for (unsigned i = 0; i < 2; ++i) {
+            if (prefetched[i].valid)
+               util_dynarray_fini(&prefetched[i].seen);
+            prefetched[i].valid = false;
+         }
+   }
    if (cost.spills) {
       for (unsigned latency = 0; latency <= (long_dependencies > 1); ++latency) {
          for (unsigned banks = 0; banks < 2; ++banks) {
@@ -2003,7 +2189,7 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
                continue;
             agx_apple9_vir_init(&alternative);
             const char *unused_reason = NULL;
-            bool ok = apple9_allocate_candidate(
+            bool ok = apple9_take_candidate(prefetched, 2,
                program, nir, banks, latency, 0, copy_register, false,
                &alternative, &unused_reason, NULL, NULL, &seen);
             if (!ok && !copy_register &&
@@ -2022,6 +2208,10 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
             agx_apple9_vir_finish(&alternative);
          }
       }
+   }
+   for (unsigned i = 0; i < 2; ++i) {
+      if (prefetched[i].valid)
+         agx_apple9_vir_finish(&prefetched[i].result);
    }
    util_dynarray_fini(&seen);
    agx_apple9_vir_finish(program);
