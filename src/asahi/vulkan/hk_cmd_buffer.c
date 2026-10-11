@@ -59,6 +59,8 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd)
 
    ralloc_free(cmd->upload_cache);
    cmd->upload_cache = NULL;
+   for (unsigned i = 0; i < HK_UPLOAD_LAST_COUNT; ++i)
+      cmd->upload_last[i].gpu = 0;
    hk_descriptor_state_fini(cmd, &cmd->state.gfx.descriptors);
    hk_descriptor_state_fini(cmd, &cmd->state.cs.descriptors);
 
@@ -407,6 +409,30 @@ hk_pool_upload_cached(struct hk_cmd_buffer *cmd, const void *data,
    return ptr.gpu;
 }
 
+/* Upload a per-draw table, reusing the previous upload of the same kind when
+ * the contents are unchanged. Unlike the content cache this keeps one entry
+ * per kind: these tables carry the root address, so they rarely repeat
+ * except consecutively, and hashing each into a growing table costs more
+ * than it saves. */
+uint64_t
+hk_pool_upload_last(struct hk_cmd_buffer *cmd, enum hk_upload_last slot,
+                    const void *data, uint32_t size, uint32_t alignment)
+{
+   struct hk_upload_last_entry *last = &cmd->upload_last[slot];
+   assert(size <= sizeof(last->data));
+   if (last->gpu && last->size == size && !memcmp(last->data, data, size))
+      return last->gpu;
+
+   struct agx_ptr ptr = hk_pool_alloc(cmd, size, alignment);
+   if (!ptr.cpu)
+      return 0;
+   memcpy(ptr.cpu, data, size);
+   memcpy(last->data, data, size);
+   last->size = size;
+   last->gpu = ptr.gpu;
+   return ptr.gpu;
+}
+
 struct agx_ptr
 hk_apple9_state_cache_alloc(void *allocator, enum agx_apple9_state_type type,
                              const void *contents, size_t size,
@@ -505,6 +531,13 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
     * uploads until reset, but do not retain duplicate CPU copies in executable
     * command buffers.
     */
+   if (cmd->upload_cache && debug_get_bool_option("HK_UPLOAD_STATS", false)) {
+      size_t bytes = 0;
+      hash_table_foreach(cmd->upload_cache, entry)
+         bytes += ((const struct hk_upload_key *)entry->key)->size;
+      fprintf(stderr, "HK_UPLOAD_STATS cache entries=%u bytes=%zu\n",
+              cmd->upload_cache->entries, bytes);
+   }
    ralloc_free(cmd->upload_cache);
    cmd->upload_cache = NULL;
 

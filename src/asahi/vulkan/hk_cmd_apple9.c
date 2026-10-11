@@ -326,7 +326,8 @@ hk_apple9_draw_bindings(struct hk_cmd_buffer *cmd, struct agx_draw draw)
               (draw.indexed
                   ? offsetof(VkDrawIndexedIndirectCommand, vertexOffset)
                   : offsetof(VkDrawIndirectCommand, firstVertex))
-         : hk_pool_upload_cached(cmd, params, sizeof(params), 4, HK_UPLOAD_TABLE);
+         : hk_pool_upload_last(cmd, HK_UPLOAD_LAST_DRAW_PARAMS, params,
+                               sizeof(params), 4);
    uint64_t vertex_buffers[ARRAY_SIZE(gfx->vb)][4] = {0};
    for (unsigned i = 0; i < ARRAY_SIZE(gfx->vb); ++i) {
       vertex_buffers[i][0] = gfx->vb[i].addr;
@@ -336,8 +337,8 @@ hk_apple9_draw_bindings(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    return (struct hk_apple9_prerast_bindings){
       .draw_params = draw_params,
       .vertex_buffers =
-         hk_pool_upload_cached(cmd, vertex_buffers, sizeof(vertex_buffers), 16,
-                               HK_UPLOAD_TABLE),
+         hk_pool_upload_last(cmd, HK_UPLOAD_LAST_VERTEX_BUFFERS, vertex_buffers,
+                             sizeof(vertex_buffers), 16),
    };
 }
 
@@ -814,9 +815,9 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
             UNSUPPORTED();
          record.buffers[stage][slot] = address;
       }
-      uint64_t table = hk_pool_upload_cached(cmd, record.buffers[stage],
-                                      s->resource_count * sizeof(uint64_t), 64,
-                                      HK_UPLOAD_TABLE);
+      uint64_t table = hk_pool_upload_last(
+         cmd, stage ? HK_UPLOAD_LAST_FRAGMENT_TABLE : HK_UPLOAD_LAST_VERTEX_TABLE,
+         record.buffers[stage], s->resource_count * sizeof(uint64_t), 64);
       if (stage)
          record.fragment_table = table;
       else
