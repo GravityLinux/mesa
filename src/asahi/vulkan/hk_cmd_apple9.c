@@ -839,6 +839,8 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
                                    draw.b.count[1]));
    }
    cs->stats.cmds++;
+   if (!cs->pass_count++)
+      cs->pass_code = shaders[1]->bo ? shaders[1]->bo->va->addr : 0;
    return;
 unsupported:
    fprintf(

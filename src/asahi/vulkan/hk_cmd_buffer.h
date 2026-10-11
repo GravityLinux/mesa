@@ -454,6 +454,11 @@ enum hk_cs_type {
 struct hk_cs {
    struct list_head node;
 
+   /* GPU pass attribution (diagnostic): first shader, its grid, and count. */
+   uint64_t pass_code;
+   uint32_t pass_grid[3];
+   uint32_t pass_count;
+
    /* Parent command buffer. Convenience. */
    struct hk_cmd_buffer *cmd;
 

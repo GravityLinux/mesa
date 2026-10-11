@@ -7,6 +7,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_shader.h"
+#include "hk_gpu_busy.h"
 #include "util/u_queue.h"
 
 #include "poly/nir/poly_nir.h"
@@ -3481,6 +3482,8 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
       shader->bo = hk_apple9_body_bo(dev, shader->code_ptr, shader->code_size);
       if (!shader->bo)
          return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      hk_gpu_busy_shader(shader->bo, shader->code_ptr, shader->code_size,
+                         shader->info.stage);
       if (shader->info.stage == MESA_SHADER_COMPUTE) {
          const struct agx_apple9_compute_profile *p = &shader->info.apple9;
          struct agx_apple9_launch_template *t = malloc(sizeof(*t));
@@ -4075,6 +4078,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
 
    shader->code_ptr = shader->b.binary;
    shader->code_size = shader->b.info.binary_size;
+   hk_gpu_busy_shader_source(shader->code_ptr, shader->code_size, nir->info.name,
+                             nir->info.source_blake3, sw_stage);
 
    shader->info.stage = sw_stage;
    shader->info.clip_distance_array_size = nir->info.clip_distance_array_size;
@@ -5131,6 +5136,8 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
          }
          shader->code_ptr = shader->b.binary;
          shader->code_size = shader->b.info.binary_size;
+         hk_gpu_busy_shader_source(shader->code_ptr, shader->code_size, nir->info.name,
+                                   nir->info.source_blake3, nir->info.stage);
          shader->info.clip_distance_array_size =
             nir->info.clip_distance_array_size;
          shader->info.cull_distance_array_size =

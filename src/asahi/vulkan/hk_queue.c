@@ -1058,6 +1058,7 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
 
             struct drm_asahi_cmd_compute cmd;
             asahi_fill_cdm_command(dev, cs, &cmd);
+            hk_gpu_busy_set_pass(queue, cs->pass_code, cs->pass_grid, cs->pass_count);
             hk_gpu_busy_compute(queue, &cmd);
             util_dynarray_append(&payload, cmd);
             nr_cdm++;
@@ -1072,6 +1073,8 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
             asahi_fill_vdm_command(dev, cs, &cmd);
             if (hk_defer_render_wait(dev, &streams[cs->sync_id]))
                cmd.flags |= DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT;
+            /* Render keys omit the per-frame draw count, which varies. */
+            hk_gpu_busy_set_pass(queue, cs->pass_code, cs->pass_grid, 0);
             hk_gpu_busy_render(queue, &cmd);
             util_dynarray_append(&payload, cmd);
             nr_vdm++;
