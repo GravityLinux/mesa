@@ -1661,11 +1661,11 @@ apple9_publication_end(const struct agx_apple9_vir_program *program,
                        unsigned producer)
 {
    const struct agx_apple9_vir_instr *pub = program->instructions[producer];
+   unsigned end = producer;
    if (pub->op != AGX_APPLE9_VIR_PUBLICATION_TUPLE &&
        pub->encoding != AGX_APPLE9_ENC_LOGIC_EXPORT)
       return program->instruction_count;
 
-   unsigned end = producer;
    for (unsigned c = 0; c < pub->dest_components; ++c) {
       for (const struct agx_apple9_use *use = agx_apple9_uses(program, pub->dest + c);
            use; use = use->next) {
@@ -6380,7 +6380,7 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
    }
    case AGX_APPLE9_VIR_VARY_STORE: {
       if (instruction->encoding != AGX_APPLE9_ENC_VARY_STORE ||
-          instruction->nr_srcs != 1 || instruction->immediate >= AGX_APPLE9_MAX_VARYING_COMPONENTS + 5 ||
+          instruction->nr_srcs != 1 || instruction->immediate >= AGX_APPLE9_MAX_UVS_SLOTS ||
           phys[instruction->src[0]] >= AGX_APPLE9_PUBLICATION_COUNT)
          return false;
       unsigned slot = instruction->immediate;

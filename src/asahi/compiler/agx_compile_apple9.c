@@ -1055,8 +1055,20 @@ struct apple9_loop_context {
    unsigned mask_depth;
 };
 
+/* Varying exports of the current block, by exported value. */
+#define APPLE9_EXPORT_MEMO 16
+struct apple9_export_memo {
+   uint32_t value, export;
+   bool raw;
+};
+
 struct apple9_dag_lower {
    struct agx_apple9_vir_program program;
+   /* Set when one export per varying store would exceed the bank. */
+   bool share_exports;
+   struct apple9_export_memo export_memo[APPLE9_EXPORT_MEMO];
+   unsigned export_memo_count;
+   nir_block *export_memo_block;
    nir_shader *nir;
    uint32_t *ssa_to_vreg;
    struct agx_apple9_block **nir_blocks;
@@ -4037,14 +4049,37 @@ apple9_emit_graphics_output(struct apple9_dag_lower *lower,
        * bits without FP arithmetic: multiplying an integer payload by float
        * one would quiet NaNs and flush subnormals. The UVS transport is untyped. */
       bool raw = integer || (location != VARYING_SLOT_POS && location != VARYING_SLOT_PSIZ);
-      uint32_t scale = apple9_dag_imm(lower, raw ? 0 : fui(1.0f));
-      uint32_t sources[] = {value, scale};
-      if (value == AGX_APPLE9_VREG_INVALID || scale == AGX_APPLE9_VREG_INVALID)
+      if (value == AGX_APPLE9_VREG_INVALID)
          return false;
-      value = apple9_dag_emit(
-         lower, raw ? AGX_APPLE9_VIR_IXOR : AGX_APPLE9_VIR_FMUL,
-         raw ? AGX_APPLE9_ENC_LOGIC_EXPORT : AGX_APPLE9_ENC_FLOAT2_EXPORT,
-         sources, 2, 0);
+      /* Export publications stay live until completion, so a value stored to
+       * several UVS slots (a clip distance's varying and rasterizer copies)
+       * publishes once. */
+      if (lower->share_exports &&
+          lower->export_memo_block != lower->active_load_block) {
+         lower->export_memo_block = lower->active_load_block;
+         lower->export_memo_count = 0;
+      }
+      uint32_t exported = AGX_APPLE9_VREG_INVALID;
+      for (unsigned m = 0; lower->share_exports && m < lower->export_memo_count; ++m) {
+         if (lower->export_memo[m].value == value && lower->export_memo[m].raw == raw)
+            exported = lower->export_memo[m].export;
+      }
+      if (exported == AGX_APPLE9_VREG_INVALID) {
+         uint32_t scale = apple9_dag_imm(lower, raw ? 0 : fui(1.0f));
+         uint32_t sources[] = {value, scale};
+         if (scale == AGX_APPLE9_VREG_INVALID)
+            return false;
+         exported = apple9_dag_emit(
+            lower, raw ? AGX_APPLE9_VIR_IXOR : AGX_APPLE9_VIR_FMUL,
+            raw ? AGX_APPLE9_ENC_LOGIC_EXPORT : AGX_APPLE9_ENC_FLOAT2_EXPORT,
+            sources, 2, 0);
+         if (lower->share_exports && exported != AGX_APPLE9_VREG_INVALID &&
+             lower->export_memo_count < APPLE9_EXPORT_MEMO) {
+            lower->export_memo[lower->export_memo_count++] =
+               (struct apple9_export_memo){value, exported, raw};
+         }
+      }
+      value = exported;
       /* The allocator retains this publication independently of GPR liveness. */
       if (value == AGX_APPLE9_VREG_INVALID ||
           !agx_apple9_vir_emit_side_effect(
@@ -5923,7 +5958,25 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
          }
       }
    }
+   /* Every varying store exports its value, and exports stay published
+    * until completion. Only when that would exceed the publication bank are
+    * values stored to several slots exported once. */
+   unsigned varying_exports = 0;
+   if (nir->info.stage == MESA_SHADER_VERTEX) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *store = nir_instr_as_intrinsic(instr);
+            if (store->intrinsic == nir_intrinsic_store_output)
+               varying_exports += util_bitcount(nir_intrinsic_write_mask(store));
+            else if (store->intrinsic == nir_intrinsic_store_uvs_agx)
+               varying_exports += store->src[0].ssa->num_components;
+         }
+      }
+   }
    struct apple9_dag_lower lower = {
+      .share_exports = varying_exports > AGX_APPLE9_PUBLICATION_COUNT,
       .nir = nir,
       .texture_mask = texture_mask,
       .image_mask = image_mask,
@@ -9687,7 +9740,7 @@ apple9_collect_varyings(nir_shader *nir,
       count += util_bitcount(layout->mask[i]);
    }
    if (layout->count != count || count > AGX_APPLE9_MAX_VARYING_COMPONENTS) {
-      *reason = "Apple9 export publication currently supports 96 user scalars";
+      *reason = "Apple9 graphics supports at most 124 user varying scalars";
       return false;
    }
    return true;

@@ -7699,7 +7699,7 @@ TEST(Apple9Compiler, ClipperInterpolationGroupsPreserveSemanticLinkage)
 
 TEST(Apple9Compiler, VaryingPublicationCapacityIsCheckedBeforeAllocation)
 {
-   for (unsigned count : {0u, 12u, 16u, 24u, 32u, 33u, 47u, 48u, 49u, 63u, 64u, 65u, 95u, 96u, 97u}) {
+   for (unsigned count : {0u, 12u, 16u, 24u, 32u, 33u, 47u, 48u, 49u, 63u, 64u, 65u, 95u, 96u, 97u, 123u, 124u, 125u}) {
       nir_builder b = nir_builder_init_simple_shader(
          MESA_SHADER_VERTEX, &agx_nir_options, "varying_capacity");
       nir_store_output(&b, nir_imm_vec4(&b, 0, 0, .5, 1), nir_imm_int(&b, 0),
@@ -7722,7 +7722,7 @@ TEST(Apple9Compiler, VaryingPublicationCapacityIsCheckedBeforeAllocation)
       } else {
          EXPECT_FALSE(ok);
          EXPECT_EQ(compiled.binary, nullptr);
-         EXPECT_NE(strstr(reason, "96 user"), nullptr);
+         EXPECT_NE(strstr(reason, "124 user"), nullptr);
       }
       ralloc_free(b.shader);
    }
@@ -11675,7 +11675,7 @@ TEST(Apple9Compiler, ClipVertexUsesOrdinaryVaryingExport)
 
 TEST(Apple9Compiler, ClipVertexSharesVaryingPublicationCapacity)
 {
-   for (unsigned count : {92u, 93u, 96u}) {
+   for (unsigned count : {92u, 93u, 96u, 120u, 121u}) {
       nir_builder b = nir_builder_init_simple_shader(
          MESA_SHADER_VERTEX, &agx_nir_options, "clip_vertex_capacity");
       nir_def *zero = nir_imm_int(&b, 0);
@@ -11704,9 +11704,112 @@ TEST(Apple9Compiler, ClipVertexSharesVaryingPublicationCapacity)
          EXPECT_FALSE(ok);
          EXPECT_EQ(out.binary, nullptr);
          ASSERT_NE(reason, nullptr);
-         EXPECT_NE(strstr(reason, "96 user"), nullptr);
+         EXPECT_NE(strstr(reason, "124 user"), nullptr);
       }
       ralloc_free(b.shader);
+   }
+}
+
+/* All raster outputs together: position, user scalars, point size, the
+ * layer/viewport word and eight clip distances. 96 user scalars with clip
+ * distances once needed UVS slots beyond the encoder's bound. Clip distances
+ * also remain ordinary varyings, so they count against the user scalars, as
+ * in D3D's register interface; their rasterizer copies share those exports.
+ * Export publications stay live until completion, so position, user scalars,
+ * point size and the layer word must fit the 128-entry bank: at most 114 user
+ * scalars beside all eight clip distances. */
+TEST(Apple9Compiler, FullRasterInterfaceFitsUvsAndPublications)
+{
+   for (unsigned count : {64u, 96u, 114u, 115u}) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_VERTEX, &agx_nir_options, "full_raster_interface");
+      b.shader->info.clip_distance_array_size = 8;
+      nir_def *zero = nir_imm_int(&b, 0);
+      nir_store_output(&b, nir_imm_vec4(&b, 0, 0, .5, 1), zero,
+         .write_mask = 15, .src_type = nir_type_float32,
+         .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+      nir_store_output(&b, nir_imm_float(&b, 4), zero,
+         .write_mask = 1, .src_type = nir_type_float32,
+         .io_semantics = {.location = VARYING_SLOT_PSIZ, .num_slots = 1});
+      nir_store_output(&b, nir_imm_int(&b, 1), zero,
+         .write_mask = 1, .src_type = nir_type_uint32,
+         .io_semantics = {.location = VARYING_SLOT_LAYER, .num_slots = 1});
+      for (unsigned d = 0; d < 2; ++d) {
+         nir_store_output(&b, nir_imm_vec4(&b, d, .5, 1, 2), zero,
+            .write_mask = 15, .src_type = nir_type_float32,
+            .io_semantics = {.location = (uint8_t)(VARYING_SLOT_CLIP_DIST0 + d),
+                             .num_slots = 1});
+      }
+      for (unsigned i = 0; i < count; ++i) {
+         nir_store_output(&b, nir_imm_float(&b, i * .0625), zero,
+            .write_mask = 1, .component = i % 4, .src_type = nir_type_float32,
+            .io_semantics = {.location = (uint8_t)(VARYING_SLOT_VAR0 + i / 4),
+                             .num_slots = 1});
+      }
+      b.shader->info.io_lowered = true;
+      agx_shader_part out = {};
+      const char *reason = nullptr;
+      bool ok = agx_compile_apple9_vertex(b.shader, &out, &reason);
+      if (4 + count + 8 + 2 > AGX_APPLE9_PUBLICATION_COUNT) {
+         EXPECT_FALSE(ok);
+         ralloc_free(b.shader);
+         continue;
+      }
+      ASSERT_TRUE(ok) << count << ": " << (reason ?: "");
+      EXPECT_EQ(out.info.apple9_varyings.count, count + 8);
+      EXPECT_EQ(out.info.apple9_clip_distance_count, 8u);
+      EXPECT_LE(out.info.apple9_publication_count, 128u);
+      free(out.binary);
+      ralloc_free(b.shader);
+   }
+}
+
+TEST(Apple9Compiler, FragmentReadsFullVaryingInterface)
+{
+   /* 124 user scalars: coefficient indices 1..124 plus Z, within the
+    * iterator's seven-bit coefficient field. */
+   for (bool reads_z : {false, true}) {
+      const unsigned count = AGX_APPLE9_MAX_VARYING_COMPONENTS;
+      nir_builder vs = nir_builder_init_simple_shader(
+         MESA_SHADER_VERTEX, &agx_nir_options, "full_interface_vertex");
+      nir_store_output(&vs, nir_imm_vec4(&vs, 0, 0, .5, 1), nir_imm_int(&vs, 0),
+         .write_mask = 15, .src_type = nir_type_float32,
+         .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+      for (unsigned i = 0; i < count; ++i) {
+         nir_store_output(&vs, nir_imm_float(&vs, i * .0625), nir_imm_int(&vs, 0),
+            .write_mask = 1, .component = i % 4, .src_type = nir_type_float32,
+            .io_semantics = {.location = (uint8_t)(VARYING_SLOT_VAR0 + i / 4),
+                             .num_slots = 1});
+      }
+      vs.shader->info.io_lowered = true;
+      agx_shader_part vertex = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_vertex(vs.shader, &vertex, &reason)) << reason;
+      ASSERT_EQ(vertex.info.apple9_varyings.count, count);
+
+      nir_builder fs = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "full_interface_fragment");
+      nir_def *sum = reads_z ? nir_load_frag_coord_z(&fs) : nir_imm_float(&fs, 0);
+      nir_def *bary = nir_load_barycentric_pixel(&fs, 32,
+         .interp_mode = INTERP_MODE_SMOOTH);
+      for (unsigned i = 0; i < count; ++i) {
+         sum = nir_fadd(&fs, sum, nir_load_interpolated_input(&fs, 1, 32, bary,
+            nir_imm_int(&fs, 0), .component = i % 4, .dest_type = nir_type_float32,
+            .io_semantics = {.location = (gl_varying_slot)(VARYING_SLOT_VAR0 + i / 4),
+                             .num_slots = 1}));
+      }
+      nir_store_output(&fs, nir_vec4(&fs, sum, sum, sum, sum), nir_imm_int(&fs, 0),
+         .write_mask = 15, .src_type = nir_type_float32,
+         .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+      fs.shader->info.io_lowered = true;
+      agx_shader_part fragment = {};
+      ASSERT_TRUE(agx_compile_apple9_fragment_inputs(
+         fs.shader, &vertex.info.apple9_varyings, &fragment, &reason))
+         << reads_z << ": " << (reason ?: "");
+      free(vertex.binary);
+      free(fragment.binary);
+      ralloc_free(vs.shader);
+      ralloc_free(fs.shader);
    }
 }
 
