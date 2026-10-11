@@ -51,6 +51,25 @@ agx_bo_cache_remove_locked(struct agx_device *dev, struct agx_bo *bo)
  * cache. If it fails, it returns NULL signaling the caller to allocate a new
  * BO. */
 
+typedef int (*reused_fn)(int, uint32_t);
+
+/* The m1n1 shim's reuse hook, looked up once. The pointer itself is the
+ * published value, so a racing reader sees either "unresolved" or the hook. */
+#define AGX_BO_REUSED_UNRESOLVED ((reused_fn)(uintptr_t)1)
+
+static reused_fn
+agx_bo_reused_hook(void)
+{
+   static reused_fn hook = AGX_BO_REUSED_UNRESOLVED;
+
+   reused_fn fn = p_atomic_read(&hook);
+   if (fn == AGX_BO_REUSED_UNRESOLVED) {
+      fn = (reused_fn)dlsym(RTLD_DEFAULT, "asahi_m1n1_bo_reused");
+      p_atomic_set(&hook, fn);
+   }
+   return fn;
+}
+
 struct agx_bo *
 agx_bo_cache_fetch(struct agx_device *dev, size_t size, size_t align,
                    uint32_t flags, const bool dontwait)
@@ -59,8 +78,10 @@ agx_bo_cache_fetch(struct agx_device *dev, size_t size, size_t align,
    struct list_head *bucket = agx_bucket(dev, size);
    struct agx_bo *bo = NULL;
 
-   /* Iterate the bucket looking for something suitable */
-   list_for_each_entry_safe(struct agx_bo, entry, bucket, bucket_link) {
+   /* Iterate the bucket looking for something suitable, most recently freed
+    * first. Reusing the oldest entry would cycle a steady workload through
+    * every cached BO, so that none ever ages out of the cache. */
+   list_for_each_entry_rev(struct agx_bo, entry, bucket, bucket_link) {
       if (entry->size < size || entry->flags != flags)
          continue;
 
@@ -82,9 +103,7 @@ agx_bo_cache_fetch(struct agx_device *dev, size_t size, size_t align,
       /* A cached allocation has a new owner. The remote copy may contain
        * writes by the previous GPU user even where the host bytes did not
        * change. Start a new upload baseline before exposing it for CPU use. */
-      typedef int (*reused_fn)(int, uint32_t);
-      reused_fn reused =
-         (reused_fn)dlsym(RTLD_DEFAULT, "asahi_m1n1_bo_reused");
+      reused_fn reused = agx_bo_reused_hook();
       if (reused && reused(dev->fd, bo->uapi_handle)) {
          agx_bo_free(dev, bo);
          bo = NULL;
