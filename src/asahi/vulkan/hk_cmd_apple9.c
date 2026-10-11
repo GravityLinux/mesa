@@ -346,6 +346,7 @@ hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd)
       /* The existing partial-render background, EOT and ZLS state stores and
        * reloads attachments. Only the final stream uses the API store ops.
        */
+      hk_cs_end_hint(cmd, HK_CS_END_RENDER_SPLIT);
       hk_cmd_buffer_end_graphics(cmd);
       cs = hk_cmd_buffer_get_cs(cmd, false);
       if (!cs)

@@ -495,8 +495,10 @@ dispatch(struct hk_cmd_buffer *cmd, struct agx_grid grid)
       static int split = -1;
       if (split < 0)
          split = getenv("HK_GPU_PASS_SPLIT") != NULL;
-      if (split && !cmd->in_meta)
+      if (split && !cmd->in_meta) {
+         hk_cs_end_hint(cmd, HK_CS_END_PASS_SPLIT);
          hk_cmd_buffer_end_compute(cmd);
+      }
       return;
    }
    struct hk_cs *cs = hk_cmd_buffer_get_cs(cmd, true /* compute */);

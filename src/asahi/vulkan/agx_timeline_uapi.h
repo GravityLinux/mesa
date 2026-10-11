@@ -9,7 +9,8 @@ static inline uint64_t tl_timestamp_key(struct drm_asahi_timestamp t)
 { return ((uint64_t)t.handle << 32) | t.offset; }
 static inline void
 agx_timeline_submit(unsigned kind, uint64_t id, int fd,
-                    const struct drm_asahi_submit *s, uint64_t parent)
+                    const struct drm_asahi_submit *s, uint64_t parent,
+                    const uint16_t *reasons)
 {
  if (!id) return;
  const unsigned char *p=(const void *)(uintptr_t)s->cmdbuf;
@@ -30,7 +31,9 @@ agx_timeline_submit(unsigned kind, uint64_t id, int fd,
    first=tl_timestamp_key(c->ts.start);flags=c->flags;
   }
   agx_timeline_emit(TL_IOCTL_CMD,h->cmd_type,id,s->queue_id,index,first,second,
-    h->vdm_barrier | ((uint64_t)h->cdm_barrier<<32),flags,0);
+    h->vdm_barrier | ((uint64_t)h->cdm_barrier<<32),flags,
+    /* g: why the command ended (enum hk_cs_end) | meta << 8, 0 if unknown */
+    reasons ? reasons[index] : 0);
   off+=bytes;
  }
 }

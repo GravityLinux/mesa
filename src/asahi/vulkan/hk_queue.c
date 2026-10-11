@@ -347,6 +347,10 @@ max_commands_per_submit(struct hk_device *dev)
 struct hk_extres {
    uint32_t count;
    struct asahi_ccmd_submit_res *res;
+
+   /* HK_TIMELINE_FILE: per command, enum hk_cs_end | (meta << 8), or NULL
+    * when the timeline is not recording. */
+   const uint16_t *reasons;
 };
 
 static VkResult
@@ -380,7 +384,8 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
 #endif
    /* HK_TIMELINE_FILE: ioctl begin/end records around the submit. */
    uint64_t trace_id = agx_timeline_enabled() ? agx_timeline_id() : 0;
-   agx_timeline_submit(TL_IOCTL_BEGIN, trace_id, dev->dev.fd, submit, 0);
+   agx_timeline_submit(TL_IOCTL_BEGIN, trace_id, dev->dev.fd, submit, 0,
+                       extres->reasons);
    int ret = dev->dev.ops.submit(&dev->dev, submit, &virt);
    agx_timeline_emit(TL_IOCTL_END, 0, trace_id, (uint64_t)(int64_t)ret,
                      errno, 0, 0, 0, 0, 0);
@@ -454,7 +459,11 @@ queue_submit_looped(struct hk_device *dev, struct drm_asahi_submit *submit,
 
       /* Each slice lists the external resources: the first waits for the
        * compositor, the last hands its fence to it. */
-      VkResult result = queue_submit_single(dev, &submit_ioctl, ring_idx, extres);
+      struct hk_extres slice_extres = *extres;
+      if (slice_extres.reasons)
+         slice_extres.reasons += command_count - commands_remaining - count;
+      VkResult result =
+         queue_submit_single(dev, &submit_ioctl, ring_idx, &slice_extres);
       if (result != VK_SUCCESS)
          return result;
 
@@ -1129,10 +1138,22 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
          }
       }
    }
+   uint16_t *reasons = NULL;
+   if (agx_timeline_enabled()) {
+      reasons = malloc(command_count * sizeof(*reasons));
+      unsigned r = 0;
+      for (unsigned i = 0; reasons && i < submit->command_buffer_count; ++i) {
+         struct hk_cmd_buffer *cmdbuf =
+            (struct hk_cmd_buffer *)submit->command_buffers[i];
+         list_for_each_entry(struct hk_cs, cs, &cmdbuf->control_streams, node)
+            reasons[r++] = cs->end_reason | (cs->meta << 8);
+      }
+   }
    const struct hk_extres extres = {
       .count = util_dynarray_num_elements(&extres_list,
                                           struct asahi_ccmd_submit_res),
       .res = util_dynarray_begin(&extres_list),
+      .reasons = reasons,
    };
 
    VkResult result;
@@ -1144,6 +1165,7 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
                                    queue->drm.virt_ring_idx, &extres);
    }
 
+   free(reasons);
    util_dynarray_fini(&extres_list);
    util_dynarray_fini(&payload);
    if (result == VK_SUCCESS) {
