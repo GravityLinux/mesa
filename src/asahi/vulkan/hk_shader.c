@@ -111,11 +111,62 @@ shared_var_info(const struct glsl_type *type, unsigned *size, unsigned *align)
    *size = comp_size * length, *align = comp_size;
 }
 
+/* AGX_* and HK_APPLE9_* environment knobs change generated code, so they key
+ * the shader caches: a warm cache must not hand one setting's shaders to
+ * another. Zero when none is set, which keeps existing caches valid.
+ */
+static uint64_t hk_compiler_env_hash_value;
+static once_flag hk_compiler_env_hash_once = ONCE_FLAG_INIT;
+
+static int
+hk_compare_env(const void *a, const void *b)
+{
+   return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+static void
+hk_compiler_env_hash_init(void)
+{
+   extern char **environ;
+   unsigned count = 0;
+   for (char **e = environ; e && *e; ++e)
+      count += !strncmp(*e, "AGX_", 4) || !strncmp(*e, "HK_APPLE9_", 10);
+   if (!count)
+      return;
+
+   const char **vars = malloc(count * sizeof(*vars));
+   if (!vars) {
+      hk_compiler_env_hash_value = ~0ull;
+      return;
+   }
+   unsigned n = 0;
+   for (char **e = environ; e && *e && n < count; ++e) {
+      if (!strncmp(*e, "AGX_", 4) || !strncmp(*e, "HK_APPLE9_", 10))
+         vars[n++] = *e;
+   }
+   qsort(vars, n, sizeof(*vars), hk_compare_env);
+
+   struct mesa_blake3 ctx;
+   _mesa_blake3_init(&ctx);
+   for (unsigned i = 0; i < n; ++i)
+      _mesa_blake3_update(&ctx, vars[i], strlen(vars[i]) + 1);
+   blake3_hash hash;
+   _mesa_blake3_final(&ctx, hash);
+   memcpy(&hk_compiler_env_hash_value, hash, sizeof(hk_compiler_env_hash_value));
+   free(vars);
+}
+
 uint64_t
 hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
 {
-   /* This could be optimized but it doesn't matter */
-   return pdev->dev.debug | ((uint64_t)pdev->apple9_layered_2d << 63);
+   call_once(&hk_compiler_env_hash_once, hk_compiler_env_hash_init);
+   /* Soft faults follow a kernel parameter, so they can change between
+    * boots with the same cache. */
+   uint64_t flags = pdev->dev.debug |
+                    ((uint64_t)pdev->apple9_layered_2d << 63) |
+                    ((uint64_t)agx_has_soft_fault((struct agx_device *)&pdev->dev) << 62) |
+                    ((uint64_t)pdev->apple9_d3d_mip_rounding << 61);
+   return flags ^ hk_compiler_env_hash_value;
 }
 
 const nir_shader_compiler_options *
@@ -295,12 +346,15 @@ hk_populate_fs_key(struct hk_fs_key *key,
 
 enum hk_feature_key {
    HK_FEAT_CUSTOM_BORDER = BITFIELD_BIT(0),
+   /* Apple9 lowers the image view min LOD clamp only when it is enabled. */
+   HK_FEAT_MIN_LOD = BITFIELD_BIT(1),
 };
 
 static enum hk_feature_key
 hk_make_feature_key(const struct vk_features *feats)
 {
-   return (!feats || feats->customBorderColors) ? HK_FEAT_CUSTOM_BORDER : 0;
+   return ((!feats || feats->customBorderColors) ? HK_FEAT_CUSTOM_BORDER : 0) |
+          ((!feats || feats->minLod) ? HK_FEAT_MIN_LOD : 0);
 }
 
 /* Core pipelines specialize immutable vertex and attachment state. Descriptor
