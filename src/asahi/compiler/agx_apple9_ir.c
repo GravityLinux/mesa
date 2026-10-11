@@ -4722,6 +4722,24 @@ pack_integer_source(uint8_t *bytes, unsigned source, bool uniform, bool live,
    set_bits(bytes, file_bit, 1, !uniform);
 }
 
+/* An 8-bit literal starts one bit below the register field and covers its
+ * bank bit. The register-file and discard bits are clear, as is a per-source
+ * descriptor bit beside the lifetime fields. Only zero extension is defined:
+ * Metal selects another operand form from 256 up and subtracts negative
+ * addends. */
+static void
+pack_integer_immediate(uint8_t *bytes, uint32_t value, unsigned value_bit,
+                       unsigned discard_bit, unsigned file_bit,
+                       unsigned descriptor_bit)
+{
+   assert(value <= UINT8_MAX);
+   set_bits(bytes, value_bit - 1, 8, value);
+   set_bits(bytes, value_bit + 7, 1, 0);
+   set_bits(bytes, discard_bit, 1, 0);
+   set_bits(bytes, file_bit, 1, 0);
+   set_bits(bytes, descriptor_bit, 1, 0);
+}
+
 /* Load and store share byte addressing but place the fields two bits apart. */
 static bool
 pack_memory_address(const struct agx_apple9_vir_instr *I,
@@ -4745,7 +4763,6 @@ pack_iadd(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    uint32_t source[3];
    uint8_t live;
    if (instruction->encoding != AGX_APPLE9_ENC_INT_ADD_EXTENDED ||
-       instruction->alu_src_immediate_mask ||
        !apple9_alu_sources(instruction, phys, 2, source, &live))
       return false;
    uint8_t bytes[10] = {0x9f, 0x01, 0x54, 0x00, 0x02,
@@ -4753,9 +4770,15 @@ pack_iadd(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    if (instruction->op == AGX_APPLE9_VIR_ISUB)
       bytes[0] = 0x1f;
    set_bits(bytes, 25, 7, phys[instruction->dest]);
-   for (unsigned s = 0; s < 2; ++s)
-      pack_integer_source(bytes, source[s], instruction->alu_src_uniform_mask & (1u << s),
-                          live & (1u << s), 42 + 9 * s, 65 + s, 72 + 2 * s);
+   for (unsigned s = 0; s < 2; ++s) {
+      if (instruction->alu_src_immediate_mask & (1u << s)) {
+         pack_integer_immediate(bytes, source[s], 42 + 9 * s, 65 + s,
+                                72 + 2 * s, 61 + 2 * s);
+      } else {
+         pack_integer_source(bytes, source[s], instruction->alu_src_uniform_mask & (1u << s),
+                             live & (1u << s), 42 + 9 * s, 65 + s, 72 + 2 * s);
+      }
+   }
    packed_init(packed, bytes, sizeof(bytes));
    return true;
 }
@@ -4789,15 +4812,21 @@ pack_imad(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    uint32_t source[3];
    uint8_t live;
    if (instruction->encoding != AGX_APPLE9_ENC_INT_MAD_EXTENDED ||
-       instruction->immediate || instruction->alu_src_immediate_mask ||
+       instruction->immediate || (instruction->alu_src_immediate_mask & 1) ||
        !apple9_alu_sources(instruction, phys, 3, source, &live))
       return false;
    uint8_t bytes[12] = {0x9f, 0x00, 0x54, 0x00, 0x02, 0x00,
                         0x00, 0x00, 0xd0, 0x2f, 0x2a, 0x00};
    set_bits(bytes, 25, 7, phys[instruction->dest]);
-   for (unsigned s = 0; s < 3; ++s)
-      pack_integer_source(bytes, source[s], instruction->alu_src_uniform_mask & (1u << s),
-                          live & (1u << s), 42 + 9 * s, 73 + s, 81 + 2 * s);
+   for (unsigned s = 0; s < 3; ++s) {
+      if (instruction->alu_src_immediate_mask & (1u << s)) {
+         pack_integer_immediate(bytes, source[s], 42 + 9 * s, 73 + s,
+                                81 + 2 * s, 70 + s);
+      } else {
+         pack_integer_source(bytes, source[s], instruction->alu_src_uniform_mask & (1u << s),
+                             live & (1u << s), 42 + 9 * s, 73 + s, 81 + 2 * s);
+      }
+   }
    packed_init(packed, bytes, sizeof(bytes));
    return true;
 }
@@ -4879,8 +4908,8 @@ apple9_alu_sources(const struct agx_apple9_vir_instr *I, const uint8_t *phys,
             return false;
          values[s] = I->alu_src_value[s];
       } else if (file == AGX_APPLE9_FILE_IMMEDIATE) {
-         uint8_t encoded;
-         if (!agx_apple9_encode_float_immediate(I->alu_src_value[s], &encoded))
+         if (!agx_apple9_source_immediate_encodable(I->encoding,
+                                                    I->alu_src_value[s]))
             return false;
          values[s] = I->alu_src_value[s];
       } else {
@@ -5347,11 +5376,13 @@ pack_logic(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    uint32_t source[3];
    uint8_t live;
    if (!apple9_alu_sources(instruction, phys, 2, source, &live) ||
-       instruction->alu_src_immediate_mask || instruction->alu_src_uniform_mask == 3)
+       (instruction->alu_src_immediate_mask & 1) ||
+       (instruction->alu_src_uniform_mask | instruction->alu_src_immediate_mask) == 3)
       return false;
    if ((instruction->encoding != AGX_APPLE9_ENC_LOGIC_EXTENDED &&
         instruction->encoding != AGX_APPLE9_ENC_LOGIC_EXPORT) ||
-       instruction->nr_srcs + util_bitcount(instruction->alu_src_uniform_mask) != 2)
+       instruction->nr_srcs + util_bitcount(instruction->alu_src_uniform_mask |
+                                            instruction->alu_src_immediate_mask) != 2)
       return false;
 
    if (instruction->encoding == AGX_APPLE9_ENC_LOGIC_EXPORT &&
@@ -5401,7 +5432,8 @@ pack_logic(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    }
    if (!pack_compact_binary_gprs(bytes, phys[instruction->dest],
                                  instruction->alu_src_uniform_mask & 1 ? 0 : source[0],
-                                 instruction->alu_src_uniform_mask & 2 ? 0 : source[1],
+                                 (instruction->alu_src_uniform_mask |
+                                  instruction->alu_src_immediate_mask) & 2 ? 0 : source[1],
                                  (instruction->encoding == AGX_APPLE9_ENC_LOGIC_EXPORT ? AGX_APPLE9_PUBLICATION_COUNT : AGX_APPLE9_GPR_COUNT)))
       return false;
    if (instruction->encoding == AGX_APPLE9_ENC_LOGIC_EXPORT) {
@@ -5413,6 +5445,20 @@ pack_logic(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
          set_bits(bytes, 58, 3, instruction->producer_scoreboard_slot - 1);
    }
    pack_binary_uniforms(bytes, instruction, source);
+   if (instruction->alu_src_immediate_mask & 2) {
+      /* Operand B literal: bit 0 at 36, bits 1..6 in the B register field,
+       * bit 7 at 20; the descriptor marks a non-register operand. */
+      uint32_t value = source[1];
+      assert(value <= UINT8_MAX);
+      set_bits(bytes, 24, 1, 1);
+      set_bits(bytes, 25, 6, (value >> 1) & 0x3f);
+      set_bits(bytes, 31, 1, 1);
+      set_bits(bytes, 20, 1, value >> 7);
+      set_bits(bytes, 21, 1, 0);
+      set_bits(bytes, 36, 1, value & 1);
+      set_bits(bytes, 41, 1, 1);
+      set_bits(bytes, 42, 1, 0);
+   }
    packed_init(packed, bytes, sizeof(bytes));
    return true;
 }
@@ -5584,7 +5630,11 @@ pack_select(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    bool half = instruction->encoding == AGX_APPLE9_ENC_HALF_COMPARE_SELECT;
    bool extended = instruction->encoding == AGX_APPLE9_ENC_SELECT_MODIFIER_EXTENDED;
    if ((instruction->encoding != AGX_APPLE9_ENC_SELECT_GPR_WIDE && !extended && !half) ||
-       instruction->alu_src_immediate_mask ||
+       (instruction->alu_src_immediate_mask & 3) ||
+       ((instruction->alu_src_immediate_mask & 12) &&
+        instruction->encoding != AGX_APPLE9_ENC_SELECT_GPR_WIDE) ||
+       ((instruction->src_abs_mask | instruction->src_neg_mask) &
+        instruction->alu_src_immediate_mask) ||
        ((instruction->src_abs_mask | instruction->src_neg_mask) & ~15u) ||
        (instruction->src_neg_mask & 1) ||
        ((instruction->src_abs_mask & 3) && !extended))
@@ -5679,6 +5729,17 @@ pack_select(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
          set_bits(bytes, cache[s], 1, 0);
          set_bits(bytes, discard[s], 1, (source[s] >> 6) & 1);
          set_bits(bytes, high[s], 1, source[s] >> 7);
+         set_bits(bytes, file[s], 1, 1);
+      } else if (instruction->alu_src_immediate_mask & BITFIELD_BIT(s)) {
+         /* A selected-value literal keeps the cache bit set; bit 0 sits
+          * below the register field and bit 7 in the discard bit. */
+         unsigned value_bit = s == 2 ? 41 : 73;
+         assert(source[s] <= UINT8_MAX);
+         set_bits(bytes, value_bit - 1, 1, source[s] & 1);
+         set_bits(bytes, value_bit, 6, (source[s] >> 1) & 0x3f);
+         set_bits(bytes, cache[s], 1, 1);
+         set_bits(bytes, discard[s], 1, source[s] >> 7);
+         set_bits(bytes, high[s], 1, 0);
          set_bits(bytes, file[s], 1, 1);
       }
    }

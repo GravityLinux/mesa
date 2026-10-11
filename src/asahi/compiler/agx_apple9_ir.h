@@ -8,6 +8,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include "util/bitset.h"
 #include "util/list.h"
 
@@ -551,6 +552,38 @@ bool agx_apple9_optimize_vir_with_constants(
    const struct agx_apple9_uniform_constants *constants);
 bool agx_apple9_optimize_vir(struct agx_apple9_vir_program *program);
 bool agx_apple9_encode_float_immediate(uint32_t value, uint8_t *encoded);
+
+/* Integer add/multiply-add, logic and select source descriptors hold an
+ * 8-bit zero-extended literal; the float forms hold a packed float. */
+static inline bool
+agx_apple9_integer_immediate_encoding(enum agx_apple9_encoding encoding)
+{
+   return encoding == AGX_APPLE9_ENC_INT_ADD_EXTENDED ||
+          encoding == AGX_APPLE9_ENC_INT_MAD_EXTENDED ||
+          encoding == AGX_APPLE9_ENC_LOGIC_EXTENDED ||
+          encoding == AGX_APPLE9_ENC_SELECT_GPR_WIDE;
+}
+
+/* AGX_APPLE9_NO_INT_IMM=1 keeps integer literals in registers and uniform
+ * words, as before 8-bit literal operands were selected. */
+static inline bool
+agx_apple9_integer_immediates_disabled(void)
+{
+   static int disabled = -1;
+   if (disabled < 0)
+      disabled = getenv("AGX_APPLE9_NO_INT_IMM") != NULL;
+   return disabled;
+}
+
+static inline bool
+agx_apple9_source_immediate_encodable(enum agx_apple9_encoding encoding,
+                                      uint32_t value)
+{
+   uint8_t encoded;
+   return agx_apple9_integer_immediate_encoding(encoding)
+             ? value <= UINT8_MAX
+             : agx_apple9_encode_float_immediate(value, &encoded);
+}
 
 uint32_t agx_apple9_vir_emit(struct agx_apple9_vir_program *program,
                              enum agx_apple9_vir_opcode op,

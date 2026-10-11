@@ -263,21 +263,33 @@ fold_select_xor(struct agx_apple9_vir_instr *I,
       if (!constant[I->src[c]])
          continue;
       const struct agx_apple9_vir_instr *S = definitions[I->src[1 - c]];
-      if (!S || S->op != AGX_APPLE9_VIR_SELECT || S->nr_srcs < 2 ||
+      if (!S || S->op != AGX_APPLE9_VIR_SELECT ||
           S->encoding == AGX_APPLE9_ENC_HALF_COMPARE_SELECT ||
           !agx_apple9_instr_is_pure_alu(S) ||
           agx_apple9_instr_block(S) != agx_apple9_instr_block(I) ||
-          ((S->alu_src_uniform_mask | S->alu_src_immediate_mask |
-            S->src_abs_mask | S->src_neg_mask) & 0xc) ||
+          ((S->alu_src_uniform_mask | S->src_abs_mask | S->src_neg_mask) & 0xc) ||
           (uniform_writes && S->alu_src_uniform_mask))
          continue;
 
-      /* The selected arms are the final two compact GPR sources. Swapping
-       * them implements XOR only when they are complements under this mask;
-       * an arbitrary Boolean-valued select need not have opposite arms. */
-      unsigned a = S->nr_srcs - 2, b = S->nr_srcs - 1;
-      if (!constant[S->src[a]] || !constant[S->src[b]] ||
-          (values[S->src[a]] ^ values[S->src[b]]) != values[I->src[c]])
+      /* The selected arms are the last two operand slots, each a literal
+       * or one of the final compact GPR sources. Swapping them implements
+       * XOR only when they are complements under this mask; an arbitrary
+       * Boolean-valued select need not have opposite arms. */
+      unsigned literals = S->alu_src_immediate_mask & 0xc;
+      unsigned registers = 2 - util_bitcount(literals);
+      if (S->nr_srcs < registers)
+         continue;
+      uint32_t arm[2];
+      bool known = true;
+      for (unsigned k = 0, r = S->nr_srcs - registers; k < 2; ++k) {
+         if (literals & BITFIELD_BIT(2 + k)) {
+            arm[k] = S->alu_src_value[2 + k];
+         } else {
+            known &= constant[S->src[r]];
+            arm[k] = values[S->src[r++]];
+         }
+      }
+      if (!known || (arm[0] ^ arm[1]) != values[I->src[c]])
          continue;
 
       /* Copy the expression into this definition, keeping the original for
@@ -292,8 +304,19 @@ fold_select_xor(struct agx_apple9_vir_instr *I,
       I->alu_src_immediate_mask = S->alu_src_immediate_mask;
       memcpy(I->alu_src_value, S->alu_src_value, sizeof(I->alu_src_value));
       memcpy(I->src, S->src, S->nr_srcs * sizeof(I->src[0]));
-      I->src[a] = S->src[b];
-      I->src[b] = S->src[a];
+      if (literals == 0xc) {
+         I->alu_src_value[2] = S->alu_src_value[3];
+         I->alu_src_value[3] = S->alu_src_value[2];
+      } else if (literals) {
+         /* One literal arm: its slot changes, the register stays last. */
+         I->alu_src_immediate_mask ^= 0xc;
+         I->alu_src_value[literals == 4 ? 3 : 2] =
+            S->alu_src_value[literals == 4 ? 2 : 3];
+      } else {
+         unsigned a = S->nr_srcs - 2, b = S->nr_srcs - 1;
+         I->src[a] = S->src[b];
+         I->src[b] = S->src[a];
+      }
       return;
    }
 }
@@ -422,6 +445,105 @@ select_float_sources(struct agx_apple9_vir_instr *I,
                                 : AGX_APPLE9_ENC_FLOAT2_COMPACT;
    }
    select_saturated_encoding(I);
+}
+
+/* Integer add/subtract, multiply-add, logic and select operand descriptors
+ * hold an 8-bit zero-extended literal. Give a constant register operand that
+ * form when its slot admits it, commuting it there or negating an add when
+ * that is exact. Remaining constants may still select uniform words. */
+static void
+inline_integer_immediates(struct agx_apple9_vir_instr *I, const bool *constant,
+                          const uint32_t *values)
+{
+   bool add = I->op == AGX_APPLE9_VIR_IADD || I->op == AGX_APPLE9_VIR_ISUB;
+   bool mad = I->op == AGX_APPLE9_VIR_IMAD && !I->immediate;
+   bool logic = I->op == AGX_APPLE9_VIR_IAND || I->op == AGX_APPLE9_VIR_IOR ||
+                I->op == AGX_APPLE9_VIR_IXOR;
+   bool select = I->op == AGX_APPLE9_VIR_SELECT;
+   unsigned arity = select ? 4 : mad ? 3 : 2;
+   if (!(add || mad || logic || select) ||
+       !agx_apple9_integer_immediate_encoding(I->encoding) ||
+       agx_apple9_integer_immediates_disabled() ||
+       I->alu_src_uniform_mask || I->alu_src_immediate_mask ||
+       I->nr_srcs != arity || I->dest_components != 1)
+      return;
+
+   /* Operand values, with the literal each would take inline. Every source
+    * of these encodings is one 32-bit register; there is no pair form, and
+    * 64-bit integer arithmetic reaches VIR split into 32-bit halves, so a
+    * constant low word is itself an exact 32-bit operand. */
+   uint32_t literal[4];
+   bool fits[4];
+   for (unsigned s = 0; s < arity; ++s) {
+      ASSERTED const struct agx_apple9_operand_constraint *constraint =
+         agx_apple9_find_operand(I->encoding, AGX_APPLE9_OPERAND_SRC0 + s);
+      assert(constraint && !(constraint->widths & AGX_APPLE9_WIDTH_64));
+      literal[s] = values[I->src[s]];
+      fits[s] = constant[I->src[s]] && literal[s] <= UINT8_MAX;
+   }
+
+   if (add) {
+      /* An exact negation moves a small negative addend into the
+       * subtrahend: x + (-c) is x - c, and x - (-c) is x + c. */
+      bool sub = I->op == AGX_APPLE9_VIR_ISUB;
+      if (!sub && !fits[1] && fits[0]) {
+         uint32_t src = I->src[0];
+         I->src[0] = I->src[1]; I->src[1] = src;
+         literal[1] = literal[0]; fits[1] = true;
+         fits[0] = constant[I->src[0]] && values[I->src[0]] <= UINT8_MAX;
+         literal[0] = values[I->src[0]];
+      }
+      if (!fits[1] && constant[I->src[1]] && -literal[1] <= UINT8_MAX &&
+          (sub || !fits[0])) {
+         I->op = sub ? AGX_APPLE9_VIR_IADD : AGX_APPLE9_VIR_ISUB;
+         literal[1] = -literal[1];
+         fits[1] = true;
+      } else if (!fits[1] && !sub && constant[I->src[0]] &&
+                 -values[I->src[0]] <= UINT8_MAX) {
+         uint32_t src = I->src[0];
+         I->src[0] = I->src[1]; I->src[1] = src;
+         I->op = AGX_APPLE9_VIR_ISUB;
+         literal[1] = -values[src];
+         fits[1] = true;
+      }
+   } else if (mad) {
+      /* The multiplicands commute; A has no literal form. */
+      if (fits[0] && !fits[1]) {
+         uint32_t src = I->src[0];
+         I->src[0] = I->src[1]; I->src[1] = src;
+         fits[1] = true; fits[0] = false;
+         literal[1] = literal[0];
+      }
+      fits[0] = false;
+   } else if (logic) {
+      if (fits[0] && !fits[1]) {
+         uint32_t src = I->src[0];
+         I->src[0] = I->src[1]; I->src[1] = src;
+         fits[1] = true;
+         literal[1] = literal[0];
+      }
+      fits[0] = false;
+   } else {
+      /* Comparison operands keep registers; the selected values do not
+       * take float modifiers in literal form. */
+      fits[0] = fits[1] = false;
+      for (unsigned s = 2; s < 4; ++s)
+         fits[s] &= !((I->src_abs_mask | I->src_neg_mask) & BITFIELD_BIT(s));
+   }
+   /* Both add operands constant were folded already; keep one register. */
+   if (add && fits[0] && fits[1])
+      fits[0] = false;
+
+   unsigned source = 0;
+   for (unsigned s = 0; s < arity; ++s) {
+      if (fits[s]) {
+         I->alu_src_immediate_mask |= BITFIELD_BIT(s);
+         I->alu_src_value[s] = literal[s];
+      } else {
+         I->src[source++] = I->src[s];
+      }
+   }
+   I->nr_srcs = source;
 }
 
 static void
@@ -808,6 +930,7 @@ agx_apple9_optimize_vir_with_constants(
       fold_integer(I, constant, values);
       fold_select_xor(I, definitions, constant, values, uniform_writes);
       select_float_sources(I, definitions, constant, values);
+      inline_integer_immediates(I, constant, values);
       inline_alu_sources(I, uniform_read, constant, values);
       for (unsigned c = 0; c < I->dest_components; ++c)
          definitions[I->dest + c] = I;

@@ -43,6 +43,11 @@
 
 #define REGISTER_SOURCE(...)                                                 \
    ALU_SOURCE(AGX_APPLE9_FILE_GPR | AGX_APPLE9_FILE_UNIFORM, AGX_APPLE9_UNIFORM_COUNT - 1, __VA_ARGS__)
+/* Integer sources whose descriptor also holds a zero-extended 8-bit literal
+ * (register-file bit and discard bit clear). */
+#define INT_IMM_SOURCE(...)                                                  \
+   ALU_SOURCE(AGX_APPLE9_FILE_GPR | AGX_APPLE9_FILE_UNIFORM |                \
+              AGX_APPLE9_FILE_IMMEDIATE, AGX_APPLE9_UNIFORM_COUNT - 1, __VA_ARGS__)
 #define FMA_SOURCE(...)                                                   \
    ALU_SOURCE(AGX_APPLE9_FILE_GPR | AGX_APPLE9_FILE_UNIFORM |                \
               AGX_APPLE9_FILE_IMMEDIATE, AGX_APPLE9_UNIFORM_COUNT - 1, __VA_ARGS__)
@@ -872,11 +877,11 @@ static const struct agx_apple9_encoding_info encodings[] = {
                    AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32,
                    95, 1, AGX_APPLE9_OPERAND_ALLOCATABLE,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
-               REGISTER_SOURCE(AGX_APPLE9_OPERAND_SRC0,
+               INT_IMM_SOURCE(AGX_APPLE9_OPERAND_SRC0,
                    AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32,
                    95, 1, AGX_APPLE9_OPERAND_ALLOCATABLE,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
-               REGISTER_SOURCE(
+               INT_IMM_SOURCE(
                   AGX_APPLE9_OPERAND_SRC1,
                   AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32, 95,
                   1, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_UNIFORM_ALTERNATIVE,
@@ -922,10 +927,10 @@ static const struct agx_apple9_encoding_info encodings[] = {
                REGISTER_SOURCE(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
                    95, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
-               REGISTER_SOURCE(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32,
+               INT_IMM_SOURCE(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32,
                    95, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
-               REGISTER_SOURCE(AGX_APPLE9_OPERAND_SRC2, AGX_APPLE9_WIDTH_32,
+               INT_IMM_SOURCE(AGX_APPLE9_OPERAND_SRC2, AGX_APPLE9_WIDTH_32,
                    95, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
             },
@@ -1028,11 +1033,11 @@ static const struct agx_apple9_encoding_info encodings[] = {
                   AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32, 95,
                   2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED,
                   AGX_APPLE9_EVIDENCE_HARDWARE),
-               REGISTER_SOURCE(
+               INT_IMM_SOURCE(
                   AGX_APPLE9_OPERAND_SRC2, AGX_APPLE9_WIDTH_32, 95,
                   2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED,
                   AGX_APPLE9_EVIDENCE_HARDWARE),
-               REGISTER_SOURCE(
+               INT_IMM_SOURCE(
                   AGX_APPLE9_OPERAND_SRC3, AGX_APPLE9_WIDTH_32, 95,
                   2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED,
                   AGX_APPLE9_EVIDENCE_HARDWARE),
@@ -1088,7 +1093,7 @@ static const struct agx_apple9_encoding_info encodings[] = {
                   AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 95,
                   2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED,
                   AGX_APPLE9_EVIDENCE_HARDWARE),
-               REGISTER_SOURCE(
+               INT_IMM_SOURCE(
                   AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32, 95,
                   2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED,
                   AGX_APPLE9_EVIDENCE_HARDWARE),
