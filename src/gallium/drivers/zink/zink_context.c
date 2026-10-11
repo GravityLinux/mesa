@@ -4593,8 +4593,8 @@ zink_flush(struct pipe_context *pctx,
           */
          mtx_lock(&bs->usage.mtx);
          mfence->submit_count = bs->usage.submit_count - (bs->fence.submitted ? 1 : 0);
-         mtx_unlock(&bs->usage.mtx);
          util_dynarray_append(&bs->fence.mfences, mfence);
+         mtx_unlock(&bs->usage.mtx);
       }
       if (export_sem) {
          pipe_reference(NULL, &mfence->reference);
