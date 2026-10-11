@@ -477,6 +477,66 @@ sample_lod(nir_builder *b, const struct offset_sample *s)
    return nir_fclamp(b, lod, min_lod, s->max_lod);
 }
 
+/* A native explicit-LOD sample of one mip level, with the texel offset applied
+ * as a coordinate shift. Vulkan adds offsets to integer texel coordinates
+ * before wrapping and filtering, so at a single level the offset equals
+ * offset / level_size in normalised coordinates; the shift's rounding error
+ * (about one ulp of the coordinate) is far below the sub-texel precision.
+ */
+static nir_def *
+native_offset_level(nir_builder *b, const struct offset_sample *s,
+                    nir_def *level)
+{
+   nir_tex_instr *tex = s->tex;
+   static const nir_tex_src_type copied[] = {
+      nir_tex_src_texture_deref, nir_tex_src_sampler_deref,
+      nir_tex_src_texture_offset, nir_tex_src_sampler_offset,
+      nir_tex_src_texture_handle, nir_tex_src_sampler_handle,
+      nir_tex_src_comparator,
+   };
+   unsigned count = 2;
+   for (unsigned i = 0; i < ARRAY_SIZE(copied); ++i)
+      count += nir_tex_instr_src_index(tex, copied[i]) >= 0;
+   nir_def *comps[4];
+   for (unsigned c = 0; c < s->coord->num_components; ++c) {
+      comps[c] = nir_channel(b, s->coord, c);
+      if (c < s->dims) {
+         nir_def *size =
+            nir_umax(b, nir_ushr(b, s->base_size[c], level), nir_imm_int(b, 1));
+         nir_def *shift = nir_fmul(b, nir_i2f32(b, nir_channel(b, s->offset, c)),
+                                   nir_frcp(b, nir_u2f32(b, size)));
+         comps[c] = nir_fadd(b, comps[c], shift);
+      }
+   }
+   nir_tex_instr *nt = nir_tex_instr_create(b->shader, count);
+   nt->op = nir_texop_txl;
+   nt->sampler_dim = tex->sampler_dim;
+   nt->is_array = tex->is_array;
+   nt->is_shadow = tex->is_shadow;
+   nt->is_new_style_shadow = tex->is_new_style_shadow;
+   nt->coord_components = s->coord->num_components;
+   nt->dest_type = tex->dest_type;
+   nt->texture_index = tex->texture_index;
+   nt->sampler_index = tex->sampler_index;
+   nt->backend_flags = tex->backend_flags;
+   nt->can_speculate = tex->can_speculate;
+   unsigned n = 0;
+   nt->src[n++] = (nir_tex_src){
+      .src_type = nir_tex_src_coord,
+      .src = nir_src_for_ssa(nir_vec(b, comps, s->coord->num_components))};
+   nt->src[n++] = (nir_tex_src){.src_type = nir_tex_src_lod,
+                                .src = nir_src_for_ssa(nir_i2f32(b, level))};
+   for (unsigned i = 0; i < ARRAY_SIZE(copied); ++i) {
+      int src = nir_tex_instr_src_index(tex, copied[i]);
+      if (src >= 0)
+         nt->src[n++] = (nir_tex_src){.src_type = copied[i],
+                                      .src = nir_src_for_ssa(tex->src[src].src.ssa)};
+   }
+   nir_def_init(&nt->instr, &nt->def, tex->def.num_components, tex->def.bit_size);
+   nir_builder_instr_insert(b, &nt->instr);
+   return &nt->def;
+}
+
 bool
 agx_nir_lower_apple9_texture_offsets(nir_shader *nir,
                                      const struct agx_apple9_sampler_key key[32],
@@ -632,9 +692,41 @@ agx_nir_lower_apple9_texture_offsets(nir_shader *nir,
                              -1),
                           nir_imm_int(&b, 0))
                : nir_f2i32(&b, nir_ffloor(&b, level));
-         nir_def *value = first_level(&b, &s, lod, lambda);
          bool floating = tex->is_shadow || nir_alu_type_get_base_type(
                                               tex->dest_type) == nir_type_float;
+         /* Runtime sampler state: let the hardware filter each level when
+          * an explicit integer LOD selects exactly the level(s) the
+          * software path would filter. That holds unless level 0 is
+          * minified with differing min/mag filters (an explicit LOD of 0
+          * selects the magnification filter), or the sampler's LOD clamp
+          * would move the explicit LOD off the integer level.
+          */
+         nir_def *native = NULL;
+         nir_def *fast = NULL;
+         if (!s.state) {
+            nir_def *next = nir_imin(&b, nir_iadd_imm(&b, lod, 1), last);
+            nir_def *linear = nir_ieq_imm(&b, s.mip, PIPE_TEX_MIPFILTER_LINEAR);
+            fast = nir_iand(
+               &b,
+               nir_ior(&b, nir_ieq(&b, s.min, s.mag),
+                       nir_ior(&b, nir_fge(&b, nir_imm_float(&b, 0), lambda),
+                               nir_ige_imm(&b, lod, 1))),
+               nir_iand(&b, nir_fge(&b, nir_i2f32(&b, lod), s.min_lod),
+                        nir_ior(&b, nir_inot(&b, linear),
+                                nir_fge(&b, s.max_lod, nir_i2f32(&b, next)))));
+            nir_push_if(&b, fast);
+            native = native_offset_level(&b, &s, lod);
+            if (floating) {
+               nir_push_if(&b, linear);
+               nir_def *second = native_offset_level(&b, &s, next);
+               nir_def *mixed =
+                  nir_flrp(&b, native, second, nir_ffract(&b, level));
+               nir_pop_if(&b, NULL);
+               native = nir_if_phi(&b, mixed, native);
+            }
+            nir_push_else(&b, NULL);
+         }
+         nir_def *value = first_level(&b, &s, lod, lambda);
          if (!s.state && floating) {
             nir_push_if(&b, nir_ieq_imm(&b, s.mip, PIPE_TEX_MIPFILTER_LINEAR));
             nir_def *next = nir_imin(&b, nir_iadd_imm(&b, lod, 1), last);
@@ -648,6 +740,10 @@ agx_nir_lower_apple9_texture_offsets(nir_shader *nir,
             nir_def *second = filter_level(
                &b, &s, next, s.state->min_filter == PIPE_TEX_FILTER_LINEAR);
             value = nir_flrp(&b, value, second, nir_ffract(&b, level));
+         }
+         if (fast) {
+            nir_pop_if(&b, NULL);
+            value = nir_if_phi(&b, native, value);
          }
          nir_def_rewrite_uses(&tex->def, value);
          nir_instr_remove(instr);
