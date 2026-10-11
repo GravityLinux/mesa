@@ -675,10 +675,14 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
    const uint64_t plane_offset_B = plane * plane_size_B;
    uint64_t sampler_part_B = plane_offset_B;
    if (g16 && sampler) {
+      /* A sampler variable on a combined image sampler binding still reads
+       * the binding's sampler part, after the image part. */
+      const VkDescriptorType s_type = get_binding_layout(s_set, s_binding, ctx)->type;
       sampler_part_B =
          combined ? plane_offset_B + sizeof(struct hk_apple9_image_part)
-                  : plane * apple9_record_size(
-                               get_binding_layout(s_set, s_binding, ctx)->type);
+                  : plane * apple9_record_size(s_type) +
+                       (s_type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+                           ? sizeof(struct hk_apple9_image_part) : 0);
    }
 
    /* LOD bias is passed in the descriptor set, rather than embedded into
