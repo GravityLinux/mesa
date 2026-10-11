@@ -2122,6 +2122,49 @@ TEST(Apple9Packer, CompareLiteralsMatchOwnMslEncodings)
    }
 }
 
+/* Four-byte uniform moves, against Metal's encodings of our own kernels
+ * (msl-encodings-20261011/umov). */
+TEST(Apple9Packer, UniformMovesMatchOwnMslEncodings)
+{
+   static const struct {
+      uint8_t dst;
+      uint16_t uniform;
+      uint8_t bytes[4];
+   } cases[] = {
+      {1, 4, {0x1b, 0x08, 0x01, 0x08}},
+      {36, 4, {0x4b, 0x08, 0x81, 0x08}},
+      {19, 66, {0x3b, 0x04, 0x49, 0x08}},
+      {3, 130, {0x3b, 0x04, 0x01, 0x18}},
+      {28, 20, {0xcb, 0x28, 0x41, 0x08}},
+   };
+   for (const auto &test : cases) {
+      uint8_t phys[] = {test.dst};
+      agx_apple9_vir_instr move = {
+         .op = AGX_APPLE9_VIR_IOR_UNIFORM,
+         .encoding = AGX_APPLE9_ENC_UNIFORM_MOVE,
+         .dest = 0,
+         .immediate = test.uniform,
+      };
+      agx_apple9_packed_instruction packed = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_pack_vir_instruction(&move, phys, &packed, &reason))
+         << (reason ? reason : "");
+      ASSERT_EQ(packed.length, 4u);
+      EXPECT_EQ(memcmp(packed.bytes, test.bytes, 4), 0)
+         << "dst=" << unsigned(test.dst) << " u=" << test.uniform;
+   }
+   uint8_t high[] = {64};
+   agx_apple9_vir_instr move = {
+      .op = AGX_APPLE9_VIR_IOR_UNIFORM,
+      .encoding = AGX_APPLE9_ENC_UNIFORM_MOVE,
+      .dest = 0,
+      .immediate = 4,
+   };
+   agx_apple9_packed_instruction packed = {};
+   const char *reason = nullptr;
+   EXPECT_FALSE(agx_apple9_pack_vir_instruction(&move, high, &packed, &reason));
+}
+
 TEST(Apple9Packer, RegisterFormsMatchValidatedProbeTemplates)
 {
    uint8_t phys[] = {64, 2, 95, 5};

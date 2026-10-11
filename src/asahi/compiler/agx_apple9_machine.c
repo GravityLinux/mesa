@@ -1112,6 +1112,18 @@ static const struct agx_apple9_encoding_info encodings[] = {
              AGX_APPLE9_EVIDENCE_HARDWARE),
       },
    },
+   /* Metal's four-byte uniform-to-register move (our own kernels): no
+    * register source; the destination field reaches r63. */
+   [AGX_APPLE9_ENC_UNIFORM_MOVE] = {
+      .name = "uniform_move", .length = 4, .operand_count = 1,
+      .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_BYTE_DIFF,
+      .dependency_layout = AGX_APPLE9_DEPENDENCY_NONE,
+      .operands = {
+         GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 63, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED,
+             AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+      },
+   },
    /* Uniform stores use the long integer destination file, independently of GPRs. */
    [AGX_APPLE9_ENC_STORE_UNIFORM] = {
       .name = "store_uniform", .length = 10, .operand_count = 2,

@@ -1064,8 +1064,10 @@ agx_apple9_optimize_vir_with_constants(
          uniform_read[I->dest] = (uintptr_t)_mesa_hash_table_u64_search(
             constant_words, I->immediate);
       }
-      if (I->op == AGX_APPLE9_VIR_IOR_UNIFORM && I->nr_srcs == 1 &&
-          I->immediate < AGX_APPLE9_UNIFORM_COUNT && constant[I->src[0]] && !values[I->src[0]])
+      if (I->op == AGX_APPLE9_VIR_IOR_UNIFORM &&
+          I->immediate < AGX_APPLE9_UNIFORM_COUNT &&
+          (I->nr_srcs == 0 ||
+           (I->nr_srcs == 1 && constant[I->src[0]] && !values[I->src[0]])))
          uniform_read[I->dest] = I->immediate + 1;
       struct expression *key = &keys[I->dest];
       *key = (struct expression){

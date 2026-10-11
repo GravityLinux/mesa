@@ -5599,6 +5599,23 @@ pack_uniform(const struct agx_apple9_vir_instr *ins, const uint8_t *phys,
 {
    if (ins->op == AGX_APPLE9_VIR_STORE_UNIFORM)
       return pack_uniform_store(ins, phys, packed);
+   if (ins->encoding == AGX_APPLE9_ENC_UNIFORM_MOVE) {
+      /* Byte 0: destination bits 0..3 over 0xb; byte 1: uniform bits 0..5
+       * at 9..14 (bit 8 clear names the uniform file); bit 19: uniform bit
+       * 6; bits 22..23: destination bits 4..5; bit 28: uniform bit 7. */
+      const unsigned dst = phys[ins->dest];
+      if (ins->nr_srcs != 0 || ins->immediate >= AGX_APPLE9_UNIFORM_COUNT ||
+          dst >= 64)
+         return false;
+      uint8_t bytes[4] = {0x0b, 0x00, 0x01, 0x08};
+      set_bits(bytes, 4, 4, dst & 15);
+      set_bits(bytes, 9, 6, ins->immediate & 63);
+      set_bits(bytes, 19, 1, (ins->immediate >> 6) & 1);
+      set_bits(bytes, 22, 2, (dst >> 4) & 3);
+      set_bits(bytes, 28, 1, ins->immediate >> 7);
+      packed_init(packed, bytes, sizeof(bytes));
+      return true;
+   }
    if (ins->nr_srcs != 1 || ins->immediate >= AGX_APPLE9_UNIFORM_COUNT)
       return false;
    unsigned src = phys[ins->src[0]];
