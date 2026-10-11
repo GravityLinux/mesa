@@ -551,4 +551,5 @@ struct hk_api_shader *hk_meta_shader(struct hk_device *dev,
                                      size_t data_size);
 
 VkResult hk_apple9_create_null_fs(struct hk_device *dev,
-   const VkAllocationCallbacks *alloc, struct hk_api_shader **out);
+   const VkAllocationCallbacks *alloc, bool sample_mask,
+   struct hk_api_shader **out);

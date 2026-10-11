@@ -5171,10 +5171,14 @@ done:
  * pipeline state by reading the normal draw root table.
  */
 static nir_shader *
-hk_apple9_null_fs_nir(void)
+hk_apple9_null_fs_nir(bool sample_mask)
 {
    nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT,
                                                  &agx_nir_options, "empty FS");
+   /* With a full API sample mask the program has no work at all: no
+    * coverage, no root reads, as Metal's empty fragment program. */
+   if (!sample_mask)
+      return b.shader;
    const unsigned mask_offset = hk_root_descriptor_offset(draw.api_sample_mask);
    nir_def *mask = nir_load_ubo(&b, 1, 16, nir_imm_int(&b, 0),
       nir_imm_int(&b, mask_offset), .align_mul = 2,
@@ -5185,11 +5189,11 @@ hk_apple9_null_fs_nir(void)
 
 VkResult
 hk_apple9_create_null_fs(struct hk_device *dev,
-                         const VkAllocationCallbacks *alloc,
+                         const VkAllocationCallbacks *alloc, bool sample_mask,
                          struct hk_api_shader **out)
 {
    struct vk_shader_compile_info info = {
-      .nir = hk_apple9_null_fs_nir(),
+      .nir = hk_apple9_null_fs_nir(sample_mask),
       .robustness = &vk_robustness_disabled,
       .stage = MESA_SHADER_FRAGMENT,
    };
@@ -5603,7 +5607,7 @@ hk_apple9_resolve_graphics(struct hk_device *dev,
        infos[count - 1].nir->info.cull_distance_array_size) {
       infos[count] = (struct vk_shader_compile_info){
          .stage = MESA_SHADER_FRAGMENT,
-         .nir = hk_apple9_null_fs_nir(),
+         .nir = hk_apple9_null_fs_nir(true),
          .robustness = &vk_robustness_disabled,
       };
       stages[count++] = MESA_SHADER_FRAGMENT;

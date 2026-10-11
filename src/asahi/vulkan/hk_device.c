@@ -533,7 +533,10 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
     * Regardless, compiling this shader should be fast.
     */
    if (dev->dev.chip == AGX_CHIP_G16G) {
-      result = hk_apple9_create_null_fs(dev, pAllocator, &dev->null_fs);
+      result = hk_apple9_create_null_fs(dev, pAllocator, true, &dev->null_fs);
+      if (result == VK_SUCCESS)
+         result = hk_apple9_create_null_fs(dev, pAllocator, false,
+                                           &dev->null_fs_trivial);
       if (result != VK_SUCCESS)
          goto fail_meta;
    } else {
@@ -634,6 +637,8 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    if (dev->null_fs) {
       hk_api_shader_destroy(&dev->vk, &dev->null_fs->vk, pAllocator);
    }
+   if (dev->null_fs_trivial)
+      hk_api_shader_destroy(&dev->vk, &dev->null_fs_trivial->vk, pAllocator);
    simple_mtx_destroy(&dev->apple9_variants.lock);
    simple_mtx_destroy(&dev->apple9_bodies.lock);
    simple_mtx_destroy(&dev->apple9_tile_helpers.lock);

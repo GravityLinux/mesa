@@ -98,6 +98,8 @@ struct hk_device {
    struct hk_internal_shaders prolog_epilog;
    struct hk_internal_shaders kernels;
    struct hk_api_shader *null_fs;
+   /* Apple9: the null fragment program for a full API sample mask. */
+   struct hk_api_shader *null_fs_trivial;
 
    /* Apple9 draw-time variants of deferred graphics shaders, keyed by the
     * bound shader objects and the resolved graphics key. */
