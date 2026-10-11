@@ -679,6 +679,7 @@ struct hk_cmd_buffer {
     * for the vertex program apple9_null_fs_vertex_id. */
    struct agx_apple9_render_stage apple9_null_fs;
    uint64_t apple9_null_fs_vertex_id;
+   bool apple9_null_fs_trivial;
 
    /* List of all recorded control streams */
    struct list_head control_streams;

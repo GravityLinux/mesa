@@ -394,12 +394,23 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    struct hk_api_shader *tes = gfx->shaders[MESA_SHADER_TESS_EVAL];
    /* Mesh shaders have written their records as compute. */
    struct hk_api_shader *mesh = gfx->shaders[MESA_SHADER_MESH];
+   /* Without an API fragment shader, the null program only applies the API
+    * sample mask. A full mask needs no fragment work at all. */
+   const bool null_fs = !gfx->shaders[MESA_SHADER_FRAGMENT] ||
+                        gfx->shaders[MESA_SHADER_FRAGMENT] == dev->null_fs;
+   const unsigned null_samples = MAX2(gfx->render.tilebuffer.nr_samples ?:
+                                      dyn->ms.rasterization_samples, 1);
+   const bool null_trivial =
+      null_fs && dev->null_fs_trivial &&
+      (dyn->ms.sample_mask & BITFIELD_MASK(null_samples)) ==
+         BITFIELD_MASK(null_samples);
    struct hk_shader *shaders[] = {
       mesh  ? &mesh->variants[HK_MESH_VARIANT_RAST]
       : gs  ? &gs->variants[HK_GS_VARIANT_RAST]
       : tes ? &tes->variants[HK_VS_VARIANT_HW]
             : hk_any_variant(gfx->shaders[MESA_SHADER_VERTEX]),
-      hk_any_variant(gfx->shaders[MESA_SHADER_FRAGMENT] ?: dev->null_fs),
+      hk_any_variant(null_trivial ? dev->null_fs_trivial
+                     : gfx->shaders[MESA_SHADER_FRAGMENT] ?: dev->null_fs),
    };
    /* Geometry and tessellation have already run as compute, and draw their
     * own output topology. Adjacency primitives without a geometry shader
@@ -434,12 +445,13 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
                          VK_PRIMITIVE_TOPOLOGY_LINE_STRIP);
    const struct agx_apple9_render_stage *vertex = &shaders[0]->apple9_stage;
    const struct agx_apple9_render_stage *fragment = &shaders[1]->apple9_stage;
-   if (!gfx->shaders[MESA_SHADER_FRAGMENT] ||
-       gfx->shaders[MESA_SHADER_FRAGMENT] == dev->null_fs) {
+   if (null_fs) {
       /* The empty fragment program reads no varyings. Retain the producer's
        * layout for the native interface linker, independent of its contents. */
       if (!vertex->program_id ||
-          cmd->apple9_null_fs_vertex_id != vertex->program_id) {
+          cmd->apple9_null_fs_vertex_id != vertex->program_id ||
+          cmd->apple9_null_fs_trivial != null_trivial) {
+         cmd->apple9_null_fs_trivial = null_trivial;
          cmd->apple9_null_fs = *fragment;
          cmd->apple9_null_fs.varyings = vertex->varyings;
          cmd->apple9_null_fs.varying_components = vertex->varying_components;
