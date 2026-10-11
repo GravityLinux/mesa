@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include "hk_descriptor_memory.h"
 #include "hk_private.h"
 
 #include "hk_device.h"
@@ -225,9 +226,7 @@ struct hk_descriptor_pool {
 
    struct list_head sets;
 
-   struct agx_bo *bo;
-   uint8_t *mapped_ptr;
-   struct util_vma_heap heap;
+   struct hk_descriptor_memory mem;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(hk_descriptor_pool, base, VkDescriptorPool,
@@ -243,6 +242,7 @@ struct hk_descriptor_set {
    void *mapped_ptr;
    uint64_t addr;
    uint32_t size;
+   struct hk_descriptor_allocation alloc;
 
    struct hk_buffer_address dynamic_buffers[];
 };
