@@ -245,6 +245,9 @@ bool agx_bo_sync_cpu_read(struct agx_bo *bo);
  * covers the whole BO, possibly larger than requested when it came from the BO
  * cache, and survives the BO's return to the cache.
  */
+/* Exclude a new BO CPU mapping from fork children, see agx_device.c. */
+void agx_bo_mapping_dontfork(void *map, size_t size);
+
 static inline void *
 agx_bo_map_range(struct agx_bo *bo, void *fixed_addr, size_t size)
 {
