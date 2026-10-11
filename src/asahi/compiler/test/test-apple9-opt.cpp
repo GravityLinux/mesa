@@ -1275,6 +1275,31 @@ TEST_F(Apple9Optimization, MinMaxCommutesOnlyNonzeroLiteralsIntoOperandB)
    }
 }
 
+TEST_F(Apple9Optimization, CompareLiteralKeepsUniformOperandInRegister)
+{
+   /* A predicate comparing a uniform word with zero takes the literal zero
+    * in operand B; operand A must then stay a register (the hardware does
+    * not compare a uniform against a literal). */
+   auto zero = imm(0);
+   auto uniform = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IOR_UNIFORM,
+      AGX_APPLE9_ENC_LOGIC_UNIFORM, &zero, 1, 10);
+   uint32_t sources[] = {uniform, imm(0)};
+   agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_PREDICATE_COMPARE,
+      AGX_APPLE9_ENC_PREDICATE_COMPARE_EXTENDED, sources, 2,
+      AGX_APPLE9_PREDICATE_EXT_IEQ);
+   struct agx_apple9_uniform_constants constants = {};
+   ASSERT_TRUE(agx_apple9_optimize_vir_with_constants(&p, &constants));
+   const agx_apple9_vir_instr *P = nullptr;
+   for (unsigned i = 0; i < p.instruction_count; ++i) {
+      if (p.instructions[i]->op == AGX_APPLE9_VIR_PREDICATE_COMPARE)
+         P = p.instructions[i];
+   }
+   ASSERT_NE(P, nullptr);
+   if (P->alu_src_immediate_mask & 2)
+      EXPECT_EQ(P->alu_src_uniform_mask & 1, 0u);
+   EXPECT_FALSE((P->alu_src_uniform_mask & 1) && (P->alu_src_immediate_mask & 2));
+}
+
 TEST_F(Apple9Optimization, SelectXorKeepsNoncomplementaryArms)
 {
    auto input = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_GET_GLOBAL_ID,

@@ -728,6 +728,12 @@ inline_alu_sources(struct agx_apple9_vir_instr *I, const uint16_t *uniform_read,
       if (!shift && !predicate && !select && !fma && !float2 && !integer &&
           (filled & 3) && (file[0] || file[1]))
          file[0] = file[1] = 0;
+      /* A compare whose operand B is a literal keeps operand A in a
+       * register: with a uniform A beside the literal, T8132 compared
+       * wrongly (dEQP-VK.subgroups.builtin_mask_var.framebuffer.
+       * subgroupeqmask_geometry, an extended predicate u10 == 0). */
+      if ((predicate || select) && (I->alu_src_immediate_mask & 2))
+         file[0] = 0;
       unsigned source = 0;
       for (unsigned s = 0; s < arity; ++s) {
          if (filled & BITFIELD_BIT(s))
