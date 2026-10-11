@@ -151,7 +151,7 @@ apple9_compute_profile_valid(const struct agx_apple9_compute_profile *profile,
        !agx_apple9_launch_threadgroup_memory_supported(
           profile->required_threadgroup_memory_bytes) ||
        (profile->atomic_frame_size != 0 && profile->atomic_frame_size != 4) ||
-       profile->preamble_size > AGX_APPLE9_MAX_PREAMBLE_BYTES ||
+       profile->preamble_size > AGX_APPLE9_MAX_COMPUTE_PREAMBLE_BYTES ||
        profile->scratch_size > AGX_APPLE9_MAX_SCRATCH_BYTES ||
        profile->publication_count > 1022 ||
        (profile->scratch_size & 15))
@@ -1295,7 +1295,7 @@ agx_apple9_prepare_graphics_stage(
    unsigned entry = apple9_shader_entry(dev, allocator, shader->bo, false);
    if (!entry)
       return false;
-   if (shader->preamble_size > AGX_APPLE9_MAX_PREAMBLE_BYTES ||
+   if (shader->preamble_size > AGX_APPLE9_MAX_GRAPHICS_PREAMBLE_BYTES ||
        shader->preamble_offset > shader->binary_size ||
        shader->preamble_size > shader->binary_size - shader->preamble_offset) {
       fprintf(stderr, "Apple9 draw: stage %u invalid preamble offset %u size %u in binary %zu\n",

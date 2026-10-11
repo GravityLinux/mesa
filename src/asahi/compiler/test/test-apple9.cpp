@@ -12236,7 +12236,7 @@ TEST(Apple9Compiler, ConstantPromotionUsesMoreThanSixtyFourFreeWords)
    ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason))
       << (reason ?: "");
    ASSERT_GT(compiled.info.apple9_preamble_size, 0u);
-   EXPECT_LE(compiled.info.apple9_preamble_size, AGX_APPLE9_MAX_PREAMBLE_BYTES);
+   EXPECT_LE(compiled.info.apple9_preamble_size, AGX_APPLE9_MAX_COMPUTE_PREAMBLE_BYTES);
 
    /* These repeated constants feed varying ALU operations, so their values
     * must survive in main. Count distinct setup destinations rather than
@@ -12283,7 +12283,7 @@ TEST(Apple9Compiler, OversizedPreambleKeepsBoundedUniformWork)
       ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason))
          << (reason ?: "");
       EXPECT_GT(compiled.info.apple9_preamble_size, 0u);
-      EXPECT_LE(compiled.info.apple9_preamble_size, AGX_APPLE9_MAX_PREAMBLE_BYTES);
+      EXPECT_LE(compiled.info.apple9_preamble_size, AGX_APPLE9_MAX_COMPUTE_PREAMBLE_BYTES);
       EXPECT_EQ(compiled.info.apple9_preamble_offset, compiled.info.main_size);
       EXPECT_EQ(compiled.info.binary_size,
                 compiled.info.main_size + compiled.info.apple9_preamble_size);
