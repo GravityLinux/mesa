@@ -2049,6 +2049,79 @@ TEST(Apple9Packer, FloatImmediatesMatchOwnMslEncodings)
    EXPECT_FALSE(agx_apple9_pack_vir_instruction(&max, phys, &packed, &reason));
 }
 
+/* Compare operand B literals, against Metal's encodings of our own selects
+ * and branches (msl-encodings-20261011/cmp). Every register source
+ * is a last use; dependency fields are masked. */
+TEST(Apple9Packer, CompareLiteralsMatchOwnMslEncodings)
+{
+   auto f = [](float x) { uint32_t u; memcpy(&u, &x, 4); return u; };
+   struct {
+      const char *name;
+      enum agx_apple9_vir_opcode op;
+      enum agx_apple9_encoding encoding;
+      uint32_t condition, literal;
+      std::vector<uint8_t> metal, mask;
+   } cases[] = {
+      /* (x OP k) ? y : z with x = r0, y = r2, z = r4, dest r0. */
+      {"sel_x5", AGX_APPLE9_VIR_SELECT, AGX_APPLE9_ENC_SELECT_GPR_WIDE, AGX_APPLE9_SELECT_UGT, 5,
+       {0x02, 0x01, 0x0f, 0x84, 0x82, 0x04, 0x14, 0xc2, 0x80, 0x08}, {0, 0, 0, 0, 0, 0, 0, 0xe0, 0, 0}},
+      {"sel_x200", AGX_APPLE9_VIR_SELECT, AGX_APPLE9_ENC_SELECT_GPR_WIDE, AGX_APPLE9_SELECT_ULT, 200,
+       {0x02, 0x01, 0x1f, 0xc8, 0x82, 0x04, 0x05, 0xc2, 0x80, 0x08}, {0, 0, 0, 0, 0, 0, 0, 0xe0, 0, 0}},
+      {"sel_x129", AGX_APPLE9_VIR_SELECT, AGX_APPLE9_ENC_SELECT_GPR_WIDE, AGX_APPLE9_SELECT_UGT, 129,
+       {0x02, 0x01, 0x1f, 0x80, 0x82, 0x04, 0x14, 0xc2, 0x80, 0x08}, {0, 0, 0, 0, 0, 0, 0, 0xe0, 0, 0}},
+      {"sel_x255", AGX_APPLE9_VIR_SELECT, AGX_APPLE9_ENC_SELECT_GPR_WIDE, AGX_APPLE9_SELECT_ULT, 255,
+       {0x02, 0x01, 0x1f, 0xfe, 0x82, 0x04, 0x15, 0xc2, 0x80, 0x08}, {0, 0, 0, 0, 0, 0, 0, 0xe0, 0, 0}},
+      {"sel_sx7", AGX_APPLE9_VIR_SELECT, AGX_APPLE9_ENC_SELECT_GPR_WIDE, AGX_APPLE9_SELECT_ILT, 7,
+       {0x02, 0x01, 0x0f, 0x86, 0x82, 0x04, 0x17, 0xc2, 0x80, 0x08}, {0, 0, 0, 0, 0, 0, 0, 0xe0, 0, 0}},
+      {"sel_f1", AGX_APPLE9_VIR_SELECT, AGX_APPLE9_ENC_SELECT_GPR_WIDE, AGX_APPLE9_SELECT_FLT, f(1.0f),
+       {0x02, 0x01, 0x0f, 0xb1, 0x82, 0x04, 0x03, 0xc2, 0x80, 0x08}, {0, 0, 0, 0, 0, 0, 0, 0xe0, 0, 0}},
+      {"sel_fm1", AGX_APPLE9_VIR_SELECT, AGX_APPLE9_ENC_SELECT_GPR_WIDE, AGX_APPLE9_SELECT_FGT, f(-1.0f),
+       {0x02, 0x01, 0x1f, 0xb1, 0x82, 0x04, 0x02, 0xc2, 0x80, 0x08}, {0, 0, 0, 0, 0, 0, 0, 0xe0, 0, 0}},
+      {"sel_f2125", AGX_APPLE9_VIR_SELECT, AGX_APPLE9_ENC_SELECT_GPR_WIDE, AGX_APPLE9_SELECT_FLT, f(2.125f),
+       {0x02, 0x01, 0x0f, 0xc1, 0x82, 0x04, 0x13, 0xc2, 0x80, 0x08}, {0, 0, 0, 0, 0, 0, 0, 0xe0, 0, 0}},
+      /* if (x OP k) with x = r2. */
+      {"if_x5", AGX_APPLE9_VIR_PREDICATE_COMPARE, AGX_APPLE9_ENC_PREDICATE_COMPARE_SHORT,
+       AGX_APPLE9_PREDICATE_UGT, 5, {0x0a, 0x05, 0x2a, 0x84, 0x14, 0xc2}, {0, 0, 0, 0, 0, 0xe0}},
+      {"if_x129", AGX_APPLE9_VIR_PREDICATE_COMPARE, AGX_APPLE9_ENC_PREDICATE_COMPARE_SHORT,
+       AGX_APPLE9_PREDICATE_UGT, 129, {0x0a, 0x05, 0x3a, 0x80, 0x14, 0xc2}, {0, 0, 0, 0, 0, 0xe0}},
+      {"if_sx7", AGX_APPLE9_VIR_PREDICATE_COMPARE, AGX_APPLE9_ENC_PREDICATE_COMPARE_SHORT,
+       AGX_APPLE9_PREDICATE_ILT, 7, {0x0a, 0x05, 0x2a, 0x86, 0x17, 0xc2}, {0, 0, 0, 0, 0, 0xe0}},
+      {"if_f0", AGX_APPLE9_VIR_PREDICATE_COMPARE, AGX_APPLE9_ENC_PREDICATE_COMPARE_SHORT,
+       AGX_APPLE9_PREDICATE_FGT, f(0.0f), {0x0a, 0x05, 0x2a, 0x81, 0x02, 0xc2}, {0, 0, 0, 0, 0, 0xe0}},
+      {"if_fm1", AGX_APPLE9_VIR_PREDICATE_COMPARE, AGX_APPLE9_ENC_PREDICATE_COMPARE_SHORT,
+       AGX_APPLE9_PREDICATE_FGT, f(-1.0f), {0x0a, 0x05, 0x3a, 0xb1, 0x02, 0xc2}, {0, 0, 0, 0, 0, 0xe0}},
+      {"if_x7eq", AGX_APPLE9_VIR_PREDICATE_COMPARE, AGX_APPLE9_ENC_PREDICATE_COMPARE_EXTENDED,
+       AGX_APPLE9_PREDICATE_EXT_IEQ, 7, {0x0a, 0x05, 0x2b, 0x86, 0x06, 0x00, 0x17, 0xc2, 0x00, 0x00},
+       {0, 0, 0, 0, 0, 0, 0, 0xe0, 0, 0}},
+      {"if_x0", AGX_APPLE9_VIR_PREDICATE_COMPARE, AGX_APPLE9_ENC_PREDICATE_COMPARE_EXTENDED,
+       AGX_APPLE9_PREDICATE_EXT_IEQ, 0, {0x0a, 0x05, 0x2b, 0x80, 0x06, 0x00, 0x07, 0xc2, 0x00, 0x00},
+       {0, 0, 0, 0, 0, 0, 0, 0xe0, 0, 0}},
+   };
+   for (const auto &test : cases) {
+      const bool select = test.op == AGX_APPLE9_VIR_SELECT;
+      /* phys[0] is the destination; sources follow in operand order. */
+      uint8_t phys[] = {0, (uint8_t)(select ? 0 : 2), 2, 4};
+      agx_apple9_vir_instr I = {
+         .op = test.op,
+         .encoding = test.encoding,
+         .dest = select ? 0u : AGX_APPLE9_VREG_INVALID,
+         .src = {1, 2, 3},
+         .immediate = test.condition,
+         .nr_srcs = (uint8_t)(select ? 3 : 1),
+         .alu_src_immediate_mask = 2,
+      };
+      I.alu_src_value[1] = test.literal;
+      agx_apple9_packed_instruction packed = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_pack_vir_instruction(&I, phys, &packed, &reason))
+         << test.name << ": " << (reason ? reason : "");
+      ASSERT_EQ(packed.length, test.metal.size()) << test.name;
+      for (unsigned i = 0; i < test.metal.size(); ++i)
+         EXPECT_EQ(packed.bytes[i] & ~test.mask[i], test.metal[i] & ~test.mask[i])
+            << test.name << " byte=" << i;
+   }
+}
+
 TEST(Apple9Packer, RegisterFormsMatchValidatedProbeTemplates)
 {
    uint8_t phys[] = {64, 2, 95, 5};
@@ -5577,8 +5650,12 @@ TEST(Apple9Compiler, SimpleIfElseUsesNativeMaskTransition)
    const uint8_t *binary = (const uint8_t *)compiled.binary;
    unsigned predicates = 0;
    for (unsigned i = 0; i + 6 <= compiled.info.binary_size; ++i) {
+      /* Operand B is a register, or the literal 16 (0x80 | 8 << 1 with
+       * the B file bit) under AGX_APPLE9_COMPARE_LITERAL=1. */
+      const bool literal = (binary[i + 5] & 0x1f) == 0x02 && binary[i + 3] == 0x90;
       if (binary[i] != 0x0a || (binary[i + 2] & ~0x18) != 0x22 ||
-          binary[i + 4] != AGX_APPLE9_PREDICATE_ULT || (binary[i + 5] & 0x1f) != 0)
+          binary[i + 4] != AGX_APPLE9_PREDICATE_ULT ||
+          ((binary[i + 5] & 0x1f) != 0 && !literal))
          continue;
       predicates++;
    }
@@ -5623,11 +5700,18 @@ TEST(Apple9Compiler, DirectConditionsUseProvenPredicateFamilies)
          const bool header =
             binary[i] == expected_opcode &&
             (binary[i + 2] & ~0x18) == (test.extended ? 0x23 : 0x22);
-         const bool tail =
-            test.extended
+         /* Operand B is a register, or the literal 16 (0x90, or minifloat
+          * 0xf1 for 16.0) with the B file bit under AGX_APPLE9_COMPARE_LITERAL=1. */
+         const bool is_float = test.op == nir_op_feq || test.op == nir_op_fneu ||
+                               test.op == nir_op_flt || test.op == nir_op_fge;
+         const uint8_t file = binary[i + (test.extended ? 7 : 5)] & 0x1f;
+         const bool b_ok = file == 0 ||
+            (file == 0x02 && binary[i + 3] == (is_float ? 0xf1 : 0x90));
+         const bool tail = b_ok &&
+            (test.extended
                ? binary[i + 4] == 0x06 && binary[i + 5] == 0 &&
-                    binary[i + 6] == test.condition && (binary[i + 7] & 0x1f) == 0
-               : binary[i + 4] == test.condition && (binary[i + 5] & 0x1f) == 0;
+                    binary[i + 6] == test.condition
+               : binary[i + 4] == test.condition);
          found += header && tail;
       }
       EXPECT_EQ(found, 1u) << "op=" << test.op;
@@ -5786,11 +5870,14 @@ TEST(Apple9Compiler, ArbitraryPureBooleansMaterializeThenCompareWithZero)
       const uint8_t *binary = (const uint8_t *)compiled.binary;
       unsigned integer_equal = 0;
       for (unsigned i = 0; i + 10 <= compiled.info.binary_size; ++i) {
+         /* A register zero, or the literal zero (byte 3 = 0x80, B file
+          * bit) under AGX_APPLE9_COMPARE_LITERAL=1, as Metal encodes it. */
+         const uint8_t file = binary[i + 7] & 0x1f;
          integer_equal += binary[i] == 0x0a &&
                           (binary[i + 2] & ~0x18) == 0x23 &&
                           binary[i + 4] == 0x06 && binary[i + 5] == 0 &&
                           binary[i + 6] == AGX_APPLE9_PREDICATE_EXT_IEQ &&
-                          (binary[i + 7] & 0x1f) == 0;
+                          (file == 0 || (file == 0x02 && binary[i + 3] == 0x80));
       }
       EXPECT_EQ(integer_equal, 1u);
       const uint8_t inverted_push[] = {0x0f, 0x05, 0x54, 0x21};

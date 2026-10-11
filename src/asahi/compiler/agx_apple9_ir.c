@@ -4760,6 +4760,34 @@ pack_integer_immediate(uint8_t *bytes, uint32_t value, unsigned value_bit,
    set_bits(bytes, descriptor_bit, 1, 0);
 }
 
+/* Compare operand B literal (Metal's encodings of our own compares): the
+ * uniform-index byte holds a minifloat, or 0x80 | integer bits 1..6. Bit 20
+ * holds the float sign or integer bit 7; bit 4 of the condition byte holds
+ * the fourth mantissa bit or integer bit 0. */
+static bool
+pack_compare_literal(uint8_t *bytes, const struct agx_apple9_vir_instr *I,
+                     uint32_t value, unsigned condition_bit, unsigned file_bit)
+{
+   if (agx_apple9_compare_is_float(I)) {
+      uint8_t encoded;
+      bool low;
+      if (!agx_apple9_encode_float_immediate_wide(value, &encoded, &low))
+         return false;
+      bytes[3] = encoded;
+      set_bits(bytes, 20, 1, value >> 31);
+      set_bits(bytes, condition_bit, 1, low);
+   } else {
+      if (value > UINT8_MAX)
+         return false;
+      bytes[3] = 0x80 | (((value >> 1) & 0x3f) << 1);
+      set_bits(bytes, 20, 1, value >> 7);
+      set_bits(bytes, condition_bit, 1, value & 1);
+   }
+   set_bits(bytes, file_bit, 1, 1);
+   set_bits(bytes, file_bit + 1, 1, 0);
+   return true;
+}
+
 /* Load and store share byte addressing but place the fields two bits apart. */
 static bool
 pack_memory_address(const struct agx_apple9_vir_instr *I,
@@ -4928,8 +4956,10 @@ apple9_alu_sources(const struct agx_apple9_vir_instr *I, const uint8_t *phys,
             return false;
          values[s] = I->alu_src_value[s];
       } else if (file == AGX_APPLE9_FILE_IMMEDIATE) {
-         if (!agx_apple9_source_immediate_encodable(I->encoding, s,
-                                                    I->alu_src_value[s]))
+         if (agx_apple9_compare_literal_slot(I, s)
+                ? !agx_apple9_compare_literal_encodable(I, I->alu_src_value[s])
+                : !agx_apple9_source_immediate_encodable(I->encoding, s,
+                                                         I->alu_src_value[s]))
             return false;
          values[s] = I->alu_src_value[s];
       } else {
@@ -5706,8 +5736,8 @@ pack_select(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    bool half = instruction->encoding == AGX_APPLE9_ENC_HALF_COMPARE_SELECT;
    bool extended = instruction->encoding == AGX_APPLE9_ENC_SELECT_MODIFIER_EXTENDED;
    if ((instruction->encoding != AGX_APPLE9_ENC_SELECT_GPR_WIDE && !extended && !half) ||
-       (instruction->alu_src_immediate_mask & 3) ||
-       ((instruction->alu_src_immediate_mask & 12) &&
+       (instruction->alu_src_immediate_mask & 1) ||
+       ((instruction->alu_src_immediate_mask & 14) &&
         instruction->encoding != AGX_APPLE9_ENC_SELECT_GPR_WIDE) ||
        ((instruction->src_abs_mask | instruction->src_neg_mask) &
         instruction->alu_src_immediate_mask) ||
@@ -5806,6 +5836,10 @@ pack_select(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
          set_bits(bytes, discard[s], 1, (source[s] >> 6) & 1);
          set_bits(bytes, high[s], 1, source[s] >> 7);
          set_bits(bytes, file[s], 1, 1);
+      } else if (s == 1 && (instruction->alu_src_immediate_mask & 2)) {
+         set_bits(bytes, cache[s], 1, 1);
+         if (!pack_compare_literal(bytes, instruction, source[1], 52, 57))
+            return false;
       } else if (instruction->alu_src_immediate_mask & BITFIELD_BIT(s)) {
          /* A selected-value literal keeps the cache bit set; bit 0 sits
           * below the register field and bit 7 in the discard bit. */
@@ -5856,7 +5890,8 @@ pack_predicate_compare(const struct agx_apple9_vir_instr *instruction,
    const bool loop_form =
       instruction->encoding == AGX_APPLE9_ENC_PREDICATE_COMPARE_LOOP;
    if ((!short_form && !extended_form && !loop_form) ||
-       instruction->alu_src_immediate_mask ||
+       (instruction->alu_src_immediate_mask & ~2u) ||
+       (instruction->alu_src_immediate_mask && (half || loop_form)) ||
        (instruction->immediate & ~(0xffu | AGX_APPLE9_PREDICATE_INVERT |
                                    AGX_APPLE9_PREDICATE_BANK_MASK)) != 0)
       return false;
@@ -5921,6 +5956,9 @@ pack_predicate_compare(const struct agx_apple9_vir_instr *instruction,
          bytes[3] &= ~1u;
       }
       pack_binary_uniforms(bytes, instruction, source);
+      if ((instruction->alu_src_immediate_mask & 2) &&
+          !pack_compare_literal(bytes, instruction, source[1], 36, 41))
+         return false;
       packed_init(packed, bytes, sizeof(bytes));
    } else {
       uint8_t bytes[10] = {
@@ -5944,6 +5982,9 @@ pack_predicate_compare(const struct agx_apple9_vir_instr *instruction,
             set_bits(bytes, s ? 57 : 55, 1, 1);
          }
       }
+      if ((instruction->alu_src_immediate_mask & 2) &&
+          !pack_compare_literal(bytes, instruction, source[1], 52, 57))
+         return false;
       packed_init(packed, bytes, sizeof(bytes));
    }
    return true;
