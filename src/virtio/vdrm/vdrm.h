@@ -51,6 +51,8 @@ struct vdrm_device_funcs {
    void (*close)(struct vdrm_device *vdev);
 };
 
+void vdrm_mapping_dontfork(void *map, size_t size);
+
 struct vdrm_device {
    const struct vdrm_device_funcs *funcs;
 

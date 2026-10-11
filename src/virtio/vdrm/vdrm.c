@@ -7,10 +7,32 @@
 #include "util/u_math.h"
 #include "util/perf/cpu_trace.h"
 
+#include <errno.h>
+#include <string.h>
+#include <sys/mman.h>
+
+#include "util/log.h"
 #include "vdrm.h"
 
 struct vdrm_device * vdrm_virtgpu_connect(int fd, uint32_t context_type);
 struct vdrm_device * vdrm_vpipe_connect(uint32_t context_type);
+
+/* Shared memory with the host renderer (the ccmd request/response area) and
+ * GPU buffer mappings are MAP_SHARED. A forked child inherits them but none
+ * of the state that owns them, so a write it makes there (through its copy
+ * of the parent's heap pointers, or an allocator reusing the range) lands in
+ * memory the parent and the host are still using. Leave them out of fork().
+ * A failure only loses this protection.
+ */
+void
+vdrm_mapping_dontfork(void *map, size_t size)
+{
+#ifdef MADV_DONTFORK
+   if (madvise(map, size, MADV_DONTFORK))
+      mesa_logw_once("madvise(MADV_DONTFORK) on a vdrm mapping failed: %s",
+                     strerror(errno));
+#endif
+}
 
 struct vdrm_device *
 vdrm_device_connect(int fd, uint32_t context_type)
