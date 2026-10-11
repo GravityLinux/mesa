@@ -115,9 +115,6 @@ struct hk_device {
       unsigned count;
    } apple9_bodies;
 
-   /* Command BOs held on the free lists of all command pools, against
-    * HK_CMD_POOL_FREE_BUDGET. Atomic. */
-   uint32_t cmd_pool_free_bos;
 
    /* Apple9 tile load and store programs, keyed by their tile buffer key. */
    struct {
