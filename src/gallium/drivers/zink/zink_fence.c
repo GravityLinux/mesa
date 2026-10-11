@@ -126,6 +126,34 @@ tc_fence_finish(struct zink_context *ctx, struct zink_tc_fence *mfence, uint64_t
    return true;
 }
 
+/* wait for the batch to be submitted or reset; the usage mutex must be held
+ * returns false if the timeout has expired, true if the caller should recheck
+ */
+static bool
+fence_wait_submit(struct zink_batch_state *bs, uint64_t timeout_ns, int64_t abs_timeout)
+{
+   if (!timeout_ns)
+      return false;
+   if (timeout_ns == OS_TIMEOUT_INFINITE) {
+      cnd_wait(&bs->usage.flush, &bs->usage.mtx);
+      return true;
+   }
+   const int64_t remaining = abs_timeout - os_time_get_nano();
+   if (remaining <= 0)
+      return false;
+   /* cnd_timedwait takes an absolute wall-clock time */
+   struct timespec ts;
+   timespec_get(&ts, TIME_UTC);
+   ts.tv_sec += remaining / 1000000000;
+   ts.tv_nsec += remaining % 1000000000;
+   if (ts.tv_nsec >= 1000000000) {
+      ts.tv_sec++;
+      ts.tv_nsec -= 1000000000;
+   }
+   cnd_timedwait(&bs->usage.flush, &bs->usage.mtx, &ts);
+   return true;
+}
+
 static bool
 zink_fence_finish(struct zink_screen *screen, struct pipe_context *pctx, struct zink_tc_fence *mfence,
                   uint64_t timeout_ns)
@@ -160,11 +188,14 @@ zink_fence_finish(struct zink_screen *screen, struct pipe_context *pctx, struct 
    const int64_t abs_timeout = os_time_get_absolute_timeout(timeout_ns);
 
    mtx_lock(&bs->usage.mtx);
-   if (screen->threaded_submit && bs->usage.submit_count == mfence->submit_count && !fence->submitted) {
-      mtx_unlock(&bs->usage.mtx);
-      if (!util_queue_fence_wait_timeout(&bs->flush_completed, abs_timeout))
+   /* the batch has not been submitted since this tc fence was created:
+    * wait for the submit thread
+    */
+   while (bs->usage.submit_count == mfence->submit_count && !fence->submitted) {
+      if (!fence_wait_submit(bs, timeout_ns, abs_timeout)) {
+         mtx_unlock(&bs->usage.mtx);
          return false;
-      mtx_lock(&bs->usage.mtx);
+      }
    }
    const uint32_t submit_diff = bs->usage.submit_count - mfence->submit_count;
    const bool submitted = fence->submitted;

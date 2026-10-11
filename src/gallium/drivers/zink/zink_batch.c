@@ -856,12 +856,14 @@ end:
    post_submit(bs, screen);
 
    /* submit_count and submitted must change together and only after post_submit,
-    * otherwise a fence waiter could see this batch as already reset
+    * otherwise a fence waiter could see this batch as already reset;
+    * the broadcast wakes fence waiters
     */
    mtx_lock(&bs->usage.mtx);
    if (count_submit)
       bs->usage.submit_count++;
    p_atomic_set(&bs->fence.submitted, true);
+   cnd_broadcast(&bs->usage.flush);
    mtx_unlock(&bs->usage.mtx);
 
    simple_mtx_lock(&screen->active_batch_states_lock);
