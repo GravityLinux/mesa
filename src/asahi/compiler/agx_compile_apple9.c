@@ -6889,6 +6889,31 @@ apple9_promote_constants(nir_shader *shader, nir_function_impl *preamble,
  * instructions it takes to compute, is what a uniform word saves: long-lived
  * buffer bases and invariant values otherwise occupy GPRs across the whole
  * program and force spills. */
+/* Index of the last instruction of a loop (instructions are indexed in
+ * program order, so it is the largest in the loop). */
+static unsigned
+apple9_loop_end_index(nir_loop *loop)
+{
+   unsigned last = 0;
+   nir_foreach_block_in_cf_node(block, &loop->cf_node) {
+      nir_instr *instr = nir_block_last_instr(block);
+      if (instr)
+         last = MAX2(last, instr->index);
+   }
+   return last;
+}
+
+/* Whether a CF node lies inside the loop. */
+static bool
+apple9_cf_inside(nir_cf_node *node, nir_loop *loop)
+{
+   for (; node; node = node->parent) {
+      if (node == &loop->cf_node)
+         return true;
+   }
+   return false;
+}
+
 static unsigned
 apple9_main_span(nir_instr *instr)
 {
@@ -6899,7 +6924,18 @@ apple9_main_span(nir_instr *instr)
    nir_foreach_use_including_if(src, def) {
       if (nir_src_is_if(src))
          continue;
-      last = MAX2(last, nir_src_use_instr(src)->index);
+      nir_instr *use = nir_src_use_instr(src);
+      last = MAX2(last, use->index);
+      /* A use inside a loop that does not contain the definition keeps the
+       * value live to the end of that (outermost such) loop. */
+      for (nir_cf_node *node = use->block->cf_node.parent; node;
+           node = node->parent) {
+         if (node->type != nir_cf_node_loop)
+            continue;
+         nir_loop *loop = nir_cf_node_as_loop(node);
+         if (!apple9_cf_inside(&instr->block->cf_node, loop))
+            last = MAX2(last, apple9_loop_end_index(loop));
+      }
    }
    return last - instr->index;
 }
