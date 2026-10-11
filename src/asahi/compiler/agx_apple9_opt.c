@@ -546,6 +546,30 @@ inline_integer_immediates(struct agx_apple9_vir_instr *I, const bool *constant,
    I->nr_srcs = source;
 }
 
+/* A pointer-pair load whose element index is zero has an index-free form:
+ * the pair and the byte displacement alone form the address. */
+static void
+drop_zero_load_index(struct agx_apple9_vir_instr *I, const bool *constant,
+                     const uint32_t *values)
+{
+   if (I->op != AGX_APPLE9_VIR_DEVICE_LOAD ||
+       I->encoding != AGX_APPLE9_ENC_DEVICE_LOAD_INDIRECT || I->nr_srcs != 3 ||
+       !constant[I->src[0]] || values[I->src[0]] != 0)
+      return;
+   /* AGX_APPLE9_NO_POINTER_LOAD=1 keeps the materialized zero index. */
+   static int disabled = -1;
+   if (disabled < 0)
+      disabled = getenv("AGX_APPLE9_NO_POINTER_LOAD") != NULL;
+   if (disabled)
+      return;
+   I->encoding = AGX_APPLE9_ENC_DEVICE_LOAD_POINTER;
+   I->src[0] = I->src[1];
+   I->src[1] = I->src[2];
+   I->nr_srcs = 2;
+   I->memory_index_shift = 0;
+   I->device_load_index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_NONE;
+}
+
 static void
 inline_alu_sources(struct agx_apple9_vir_instr *I, const uint16_t *uniform_read,
                       const bool *constant, const uint32_t *values)
@@ -917,6 +941,7 @@ agx_apple9_optimize_vir_with_constants(
           * value, but its explicit operands may still read uniforms. */
          if (I->op == AGX_APPLE9_VIR_PREDICATE_COMPARE)
             inline_alu_sources(I, uniform_read, constant, values);
+         drop_zero_load_index(I, constant, values);
          continue;
       }
       /* Fixed interface values are not interchangeable with ordinary SSA. */

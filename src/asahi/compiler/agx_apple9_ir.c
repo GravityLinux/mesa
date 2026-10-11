@@ -1573,7 +1573,10 @@ apple9_finalize_dependencies(struct agx_apple9_vir_program *program)
       return false;
    for (unsigned i = 0; i < program->instruction_count; ++i) {
       struct agx_apple9_vir_instr *ins = program->instructions[i];
-      if (ins->op == AGX_APPLE9_VIR_DEVICE_LOAD) {
+      if (ins->op == AGX_APPLE9_VIR_DEVICE_LOAD &&
+          ins->encoding == AGX_APPLE9_ENC_DEVICE_LOAD_POINTER) {
+         ins->device_load_index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_NONE;
+      } else if (ins->op == AGX_APPLE9_VIR_DEVICE_LOAD) {
          ins->device_load_index_kind = (ins->live_after_mask & 1)
             ? AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR
             : AGX_APPLE9_DEVICE_LOAD_INDEX_LAST_USE_GPR;
@@ -2295,7 +2298,16 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
          return false;
       }
 
-      if (instruction->op == AGX_APPLE9_VIR_DEVICE_LOAD) {
+      if (instruction->op == AGX_APPLE9_VIR_DEVICE_LOAD &&
+          instruction->encoding == AGX_APPLE9_ENC_DEVICE_LOAD_POINTER) {
+         if (instruction->nr_srcs != 2 ||
+             program->phys[instruction->src[1]] != program->phys[instruction->src[0]] + 1 ||
+             instruction->device_load_index_kind != AGX_APPLE9_DEVICE_LOAD_INDEX_NONE) {
+            if (reason)
+               *reason = "Apple9 pointer load must name an adjacent pair";
+            return false;
+         }
+      } else if (instruction->op == AGX_APPLE9_VIR_DEVICE_LOAD) {
          const bool indirect =
             instruction->encoding == AGX_APPLE9_ENC_DEVICE_LOAD_INDIRECT;
          if (instruction->nr_srcs != (indirect ? 3 : 1) ||
@@ -3711,14 +3723,17 @@ apple9_collect_memory_source_tuples(struct agx_apple9_vir_program *program,
 {
    for (unsigned i = 0; i < program->instruction_count; ++i) {
       struct agx_apple9_vir_instr *store = program->instructions[i];
+      const bool load_pointer =
+         store->encoding == AGX_APPLE9_ENC_DEVICE_LOAD_POINTER;
       const bool load_indirect =
-         store->encoding == AGX_APPLE9_ENC_DEVICE_LOAD_INDIRECT;
+         store->encoding == AGX_APPLE9_ENC_DEVICE_LOAD_INDIRECT || load_pointer;
       const bool store_indirect =
          store->encoding == AGX_APPLE9_ENC_DEVICE_STORE_INDIRECT;
       for (unsigned tuple_index = 0; tuple_index < (store_indirect ? 2 : 1);
            ++tuple_index) {
          const bool indirect = load_indirect || tuple_index == 1;
-         const unsigned first = load_indirect ? 1
+         const unsigned first = load_pointer ? 0
+                                : load_indirect ? 1
                                 : tuple_index == 1
                                    ? store->memory_components + 1
                                    : 0;
@@ -4541,6 +4556,9 @@ agx_apple9_pack_device_load_vector_u32_raw(
          return false;
       encoded_index = 0x80 | index;
       break;
+   case AGX_APPLE9_DEVICE_LOAD_INDEX_NONE:
+      encoded_index = 0;
+      break;
    default:
       return false;
    }
@@ -4557,6 +4575,8 @@ agx_apple9_pack_device_load_vector_u32_raw(
    bytes[3] = dst << 1;
    bytes[4] = binding;
    bytes[5] = encoded_index;
+   if (index_kind == AGX_APPLE9_DEVICE_LOAD_INDEX_NONE)
+      bytes[6] &= ~0x20;
    static const uint8_t width_token_bits[] = {0x00, 0x08, 0x0c, 0x06};
    static const uint8_t width_tail[] = {0x46, 0x48, 0x40, 0x40};
    bytes[8] = (raw_token >> 8) | width_token_bits[components - 1];
@@ -6089,20 +6109,27 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
           instruction->device_load_raw_token != expected_token)
          break;
 
-      if ((instruction->device_load_index_kind !=
-              AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR &&
-           instruction->device_load_index_kind !=
-              AGX_APPLE9_DEVICE_LOAD_INDEX_LAST_USE_GPR) ||
-          (instruction->encoding != AGX_APPLE9_ENC_DEVICE_LOAD &&
-           instruction->encoding != AGX_APPLE9_ENC_DEVICE_LOAD_INDIRECT) ||
-          (instruction->nr_srcs != 1 && instruction->nr_srcs != 3))
+      const bool pointer =
+         instruction->encoding == AGX_APPLE9_ENC_DEVICE_LOAD_POINTER;
+      if (pointer
+             ? (instruction->device_load_index_kind !=
+                   AGX_APPLE9_DEVICE_LOAD_INDEX_NONE ||
+                instruction->nr_srcs != 2 || instruction->memory_index_shift)
+             : ((instruction->device_load_index_kind !=
+                    AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR &&
+                 instruction->device_load_index_kind !=
+                    AGX_APPLE9_DEVICE_LOAD_INDEX_LAST_USE_GPR) ||
+                (instruction->encoding != AGX_APPLE9_ENC_DEVICE_LOAD &&
+                 instruction->encoding != AGX_APPLE9_ENC_DEVICE_LOAD_INDIRECT) ||
+                (instruction->nr_srcs != 1 && instruction->nr_srcs != 3)))
          break;
-      unsigned index = phys[instruction->src[0]];
+      unsigned index = pointer ? 0 : phys[instruction->src[0]];
 
       /* The raw packer takes an explicit lifetime assertion for byte-oracle
        * tests. VIR code derives it from SSA liveness. */
       enum agx_apple9_device_load_index_kind index_lifetime =
-         (instruction->live_after_mask & 1u)
+         pointer ? AGX_APPLE9_DEVICE_LOAD_INDEX_NONE
+         : (instruction->live_after_mask & 1u)
             ? AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR
             : AGX_APPLE9_DEVICE_LOAD_INDEX_LAST_USE_GPR;
 
@@ -6124,7 +6151,19 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
                  instruction->device_load_raw_token, packed);
       if (!ok)
          return false;
-      if (instruction->encoding == AGX_APPLE9_ENC_DEVICE_LOAD_INDIRECT) {
+      if (pointer) {
+         /* Metal's index-free pointer loads (p[k], struct members): the pair
+          * in byte 4, no index (bits 53 and 102 clear, unlike every indexed
+          * form), byte scale; bit 74 releases the pair. */
+         const unsigned address = phys[instruction->src[0]];
+         if (address >= AGX_APPLE9_GPR_COUNT - 1 ||
+             phys[instruction->src[1]] != address + 1)
+            return false;
+         packed->bytes[4] = address;
+         packed->bytes[12] = (packed->bytes[12] & ~0x40) | 0x20;
+         if (!(instruction->live_after_mask & 3))
+            packed->bytes[9] |= 4;
+      } else if (instruction->encoding == AGX_APPLE9_ENC_DEVICE_LOAD_INDIRECT) {
          const unsigned address = phys[instruction->src[1]];
          if (address >= AGX_APPLE9_GPR_COUNT - 1 ||
              phys[instruction->src[2]] != address + 1)

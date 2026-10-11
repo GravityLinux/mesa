@@ -181,7 +181,8 @@ apple9_source_width(const struct agx_apple9_vir_instr *ins, unsigned source)
         ins->encoding == AGX_APPLE9_ENC_DEVICE_ATOMIC_INDIRECT) &&
        source == ins->memory_components + 1)
       return 2;
-   if (ins->encoding == AGX_APPLE9_ENC_DEVICE_LOAD_INDIRECT && source == 1)
+   if ((ins->encoding == AGX_APPLE9_ENC_DEVICE_LOAD_INDIRECT && source == 1) ||
+       (ins->encoding == AGX_APPLE9_ENC_DEVICE_LOAD_POINTER && source == 0))
       return 2;
    return 1;
 }
@@ -521,7 +522,8 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
              * (EXP-M4-63 validates retained pointer pairs). */
             const struct agx_apple9_operand_constraint *operand =
                apple9_source_constraint(ins, s);
-            const bool load = ins->encoding == AGX_APPLE9_ENC_DEVICE_LOAD_INDIRECT;
+            const bool load = ins->encoding == AGX_APPLE9_ENC_DEVICE_LOAD_INDIRECT ||
+                              ins->encoding == AGX_APPLE9_ENC_DEVICE_LOAD_POINTER;
             agx_index vector = ra->vectors[ins->src[s]];
             bool tuple = !(operand && (operand->flags & AGX_APPLE9_OPERAND_CLOBBER)) &&
                          (load ? agx_channels(vector) >= width
@@ -865,9 +867,11 @@ apple9_physical_selected(struct apple9_shared_ra *ra,
    ins.phi_block = NULL;
    ins.phi_edge = ins.completion_consumer = NULL;
    ins.scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_NONE;
-   ins.device_load_index_kind = (ins.live_after_mask & 1)
-                                   ? AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR
-                                   : AGX_APPLE9_DEVICE_LOAD_INDEX_LAST_USE_GPR;
+   ins.device_load_index_kind =
+      ins.encoding == AGX_APPLE9_ENC_DEVICE_LOAD_POINTER
+         ? AGX_APPLE9_DEVICE_LOAD_INDEX_NONE
+      : (ins.live_after_mask & 1) ? AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR
+                                  : AGX_APPLE9_DEVICE_LOAD_INDEX_LAST_USE_GPR;
 
    if (!apple9_emit_physical(out, &ins))
       return false;
@@ -1040,6 +1044,7 @@ apple9_retaining_consumer(enum agx_apple9_encoding encoding)
    case AGX_APPLE9_ENC_LOGIC_EXPORT:
    case AGX_APPLE9_ENC_DEVICE_LOAD:
    case AGX_APPLE9_ENC_DEVICE_LOAD_INDIRECT:
+   case AGX_APPLE9_ENC_DEVICE_LOAD_POINTER:
    case AGX_APPLE9_ENC_INT_ADD_EXTENDED:
    case AGX_APPLE9_ENC_INT_MAD_EXTENDED:
    case AGX_APPLE9_ENC_INT_MUL_WIDE:

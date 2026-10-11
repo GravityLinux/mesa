@@ -1900,6 +1900,59 @@ TEST(Apple9Packer, IntegerImmediatesMatchOwnMslEncodings)
    EXPECT_FALSE(agx_apple9_pack_vir_instruction(&add, phys, &packed, &reason));
 }
 
+/* Index-free pointer-pair loads, against Metal's p[k] loads of our own
+ * kernels (msl-encodings-20261011/loads). Bit 53 is clear and the
+ * index byte is zero; the byte displacement starts at bit 77. Dependency
+ * bits 12..17 are masked. */
+TEST(Apple9Packer, PointerLoadsMatchOwnMslEncodings)
+{
+   static const struct {
+      uint16_t offset;
+      uint8_t components, bits;
+      uint8_t bytes[14];
+   } cases[] = {
+      {0, 1, 32, {0x67, 0x00, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x51, 0x05, 0x00, 0x40, 0x22, 0x00}},
+      {4, 1, 32, {0x67, 0x00, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x51, 0x85, 0x00, 0x40, 0x22, 0x00}},
+      {1020, 1, 32, {0x67, 0x00, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x51, 0x85, 0x7f, 0x40, 0x22, 0x00}},
+      {16384, 1, 32, {0x67, 0x00, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x51, 0x05, 0x00, 0x48, 0x22, 0x00}},
+      {0, 2, 32, {0x67, 0x00, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x59, 0x05, 0x00, 0x40, 0x22, 0x00}},
+      {0, 4, 32, {0x67, 0x00, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x57, 0x05, 0x00, 0x40, 0x22, 0x00}},
+      {16, 4, 32, {0x67, 0x00, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x57, 0x05, 0x02, 0x40, 0x22, 0x00}},
+      {3, 1, 8, {0x67, 0x00, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x61, 0x65, 0x00, 0x40, 0x22, 0x00}},
+      {6, 1, 16, {0x67, 0x00, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x41, 0xc5, 0x00, 0x40, 0x22, 0x00}},
+   };
+   /* Destination tuple r0.., pointer pair r0:r1 as in Metal's kernels. */
+   uint8_t phys[] = {0, 1, 2, 3, 0, 1};
+   for (const auto &test : cases) {
+      agx_apple9_vir_instr load = {
+         .op = AGX_APPLE9_VIR_DEVICE_LOAD,
+         .encoding = AGX_APPLE9_ENC_DEVICE_LOAD_POINTER,
+         .dest = 0,
+         .dest_components = test.components,
+         .src = {4, 5},
+         .nr_srcs = 2,
+      };
+      load.device_load_index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_NONE;
+      load.device_load_raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101;
+      load.producer_scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_6;
+      load.memory_bits = test.bits;
+      load.memory_global = true;
+      load.memory_offset = test.offset;
+      agx_apple9_packed_instruction packed = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_pack_vir_instruction(&load, phys, &packed, &reason))
+         << test.offset << ": " << (reason ? reason : "");
+      ASSERT_EQ(packed.length, sizeof(test.bytes));
+      SCOPED_TRACE(testing::Message() << "components=" << unsigned(test.components)
+                                      << " bits=" << unsigned(test.bits));
+      for (unsigned i = 0; i < sizeof(test.bytes); ++i) {
+         uint8_t mask = i == 1 ? 0xf0 : i == 2 ? 0x03 : 0;
+         EXPECT_EQ(packed.bytes[i] & ~mask, test.bytes[i] & ~mask)
+            << "offset=" << test.offset << " byte=" << i;
+      }
+   }
+}
+
 TEST(Apple9Packer, RegisterFormsMatchValidatedProbeTemplates)
 {
    uint8_t phys[] = {64, 2, 95, 5};
