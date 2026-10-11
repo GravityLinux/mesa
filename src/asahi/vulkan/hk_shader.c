@@ -5603,8 +5603,11 @@ hk_apple9_resolve_graphics(struct hk_device *dev,
 
    struct vk_shader *compiled[HK_APPLE9_GFX_STAGES] = {NULL};
    if (result == VK_SUCCESS) {
+      struct hk_cpu_compile_scope scope;
+      hk_cpu_timing_compile_begin(&scope);
       result = hk_apple9_compile_graphics(dev, count, infos, NULL, &search.key,
                                           NULL, NULL, compiled);
+      hk_cpu_timing_compile_end(&scope, true);
    } else {
       for (unsigned i = 0; i < count; ++i)
          ralloc_free(infos[i].nir);
@@ -5661,7 +5664,7 @@ hk_apple9_variants_finish(struct hk_device *dev)
 }
 
 static VkResult
-hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
+hk_compile_shaders_timed(struct vk_device *vk_dev, uint32_t shader_count,
                    struct vk_shader_compile_info *infos,
                    const struct vk_graphics_pipeline_state *state,
                    const struct vk_features *features,
@@ -5743,6 +5746,23 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
    }
 
    return VK_SUCCESS;
+}
+
+static VkResult
+hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
+                   struct vk_shader_compile_info *infos,
+                   const struct vk_graphics_pipeline_state *state,
+                   const struct vk_features *features,
+                   const VkAllocationCallbacks *pAllocator,
+                   struct vk_shader **shaders_out)
+{
+   struct hk_cpu_compile_scope scope;
+   hk_cpu_timing_compile_begin(&scope);
+   VkResult result = hk_compile_shaders_timed(vk_dev, shader_count, infos,
+                                              state, features, pAllocator,
+                                              shaders_out);
+   hk_cpu_timing_compile_end(&scope, false);
+   return result;
 }
 
 static VkResult

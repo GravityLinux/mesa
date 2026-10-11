@@ -37,6 +37,13 @@
  *   gs_<shape>_slots=...  prims x the GS's output index slots (max_indices),
  *                         an upper bound on rasterized vertices
  *   gs_indirect_draws=... indirect GS draws (no counts known on the CPU)
+ *
+ * Shader compiles are timed where hk compiles, per kind (api = vkCreate*
+ * pipelines and shader objects, draw = Apple9 variants resolved while
+ * recording a draw):
+ *
+ *   compile_<kind>_wall_ns=... compile_<kind>_cpu_ns=... compile_<kind>_calls=...
+ *   compile_<kind>_max_ns=...  the longest single compile (a stutter bound)
  */
 
 #include <stdatomic.h>
@@ -72,6 +79,9 @@ static int hk_cpu_level;
 static _Atomic uint64_t hk_cpu_gs_draws[4], hk_cpu_gs_prims[4], hk_cpu_gs_slots[4];
 static _Atomic uint64_t hk_cpu_gs_indirect;
 static const char *hk_cpu_gs_shape_name[4] = {"dyn", "idx", "prim", "inst"};
+static _Atomic uint64_t hk_cpu_compile_wall[2], hk_cpu_compile_thread[2];
+static _Atomic uint64_t hk_cpu_compile_calls[2], hk_cpu_compile_max[2];
+static const char *hk_cpu_compile_name[2] = {"api", "draw"};
 static FILE *hk_cpu_out;
 
 static inline uint64_t
@@ -139,8 +149,18 @@ hk_cpu_report(bool force)
                     hk_cpu_gs_shape_name[i], atomic_load(&hk_cpu_gs_slots[i]));
    }
    if (n < (int)sizeof(line)) {
-      snprintf(line + n, sizeof(line) - n, " gs_indirect_draws=%" PRIu64,
-               atomic_load(&hk_cpu_gs_indirect));
+      n += snprintf(line + n, sizeof(line) - n, " gs_indirect_draws=%" PRIu64,
+                    atomic_load(&hk_cpu_gs_indirect));
+   }
+   for (unsigned i = 0; i < 2 && n < (int)sizeof(line); ++i) {
+      const char *k = hk_cpu_compile_name[i];
+      n += snprintf(line + n, sizeof(line) - n,
+                    " compile_%s_wall_ns=%" PRIu64 " compile_%s_cpu_ns=%" PRIu64
+                    " compile_%s_calls=%" PRIu64 " compile_%s_max_ns=%" PRIu64,
+                    k, atomic_load(&hk_cpu_compile_wall[i]),
+                    k, atomic_load(&hk_cpu_compile_thread[i]),
+                    k, atomic_load(&hk_cpu_compile_calls[i]),
+                    k, atomic_load(&hk_cpu_compile_max[i]));
    }
    fprintf(hk_cpu_out, "%s\n", line);
    fflush(hk_cpu_out);
@@ -363,4 +383,33 @@ hk_cpu_timing_note_gs(unsigned shape, bool indirect, uint64_t prims,
                              memory_order_relaxed);
    atomic_fetch_add_explicit(&hk_cpu_gs_slots[shape], prims * max_indices,
                              memory_order_relaxed);
+}
+
+void
+hk_cpu_timing_compile_begin(struct hk_cpu_compile_scope *s)
+{
+   s->active = hk_cpu_level != 0;
+   if (!s->active)
+      return;
+   s->cpu = hk_cpu_clock(CLOCK_THREAD_CPUTIME_ID);
+   s->wall = hk_cpu_clock(CLOCK_MONOTONIC);
+}
+
+void
+hk_cpu_timing_compile_end(const struct hk_cpu_compile_scope *s, bool draw_time)
+{
+   if (!s->active)
+      return;
+
+   const unsigned k = draw_time;
+   const uint64_t wall = hk_cpu_clock(CLOCK_MONOTONIC) - s->wall;
+   atomic_fetch_add_explicit(&hk_cpu_compile_wall[k], wall, memory_order_relaxed);
+   atomic_fetch_add_explicit(&hk_cpu_compile_thread[k],
+                             hk_cpu_clock(CLOCK_THREAD_CPUTIME_ID) - s->cpu,
+                             memory_order_relaxed);
+   atomic_fetch_add_explicit(&hk_cpu_compile_calls[k], 1, memory_order_relaxed);
+   uint64_t max = atomic_load_explicit(&hk_cpu_compile_max[k], memory_order_relaxed);
+   while (wall > max &&
+          !atomic_compare_exchange_weak(&hk_cpu_compile_max[k], &max, wall))
+      ;
 }

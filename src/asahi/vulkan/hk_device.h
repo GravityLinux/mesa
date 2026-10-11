@@ -224,3 +224,10 @@ struct vk_device_dispatch_table;
 void hk_cpu_timing_install(struct vk_device_dispatch_table *table);
 void hk_cpu_timing_note_gs(unsigned shape, bool indirect, uint64_t prims,
                            unsigned max_indices);
+struct hk_cpu_compile_scope {
+   bool active;
+   uint64_t wall, cpu;
+};
+void hk_cpu_timing_compile_begin(struct hk_cpu_compile_scope *s);
+void hk_cpu_timing_compile_end(const struct hk_cpu_compile_scope *s,
+                               bool draw_time);
