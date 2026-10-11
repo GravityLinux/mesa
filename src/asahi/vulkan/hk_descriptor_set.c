@@ -639,8 +639,18 @@ hk_descriptor_bo_create(void *data, uint64_t size, uint64_t reserve,
                        DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_SINGLE_PAGE)) {
          out->addr = va->addr;
          out->va = va;
-      } else if (va) {
-         agx_va_free(&dev->dev, va, true);
+      } else {
+         /* Out of USC aperture: keep the count-sized mapping. With soft
+          * faults a hoisted read past the count then reads zero. */
+         if (va)
+            agx_va_free(&dev->dev, va, true);
+         static bool warned;
+         if (!warned) {
+            warned = true;
+            mesa_logw("hk: no USC VA for a %" PRIu64 " MiB descriptor-set "
+                      "reservation; using the set's own mapping",
+                      reserve >> 20);
+         }
       }
    }
    return true;
