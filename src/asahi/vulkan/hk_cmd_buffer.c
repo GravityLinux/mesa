@@ -52,7 +52,7 @@ hk_descriptor_state_fini(struct hk_cmd_buffer *cmd,
 }
 
 static void
-hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd)
+hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd, bool release)
 {
    struct hk_cmd_pool *pool = hk_cmd_buffer_pool(cmd);
    struct hk_device *dev = hk_cmd_pool_device(pool);
@@ -66,7 +66,7 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd)
    hk_descriptor_state_fini(cmd, &cmd->state.cs.descriptors);
 
    for (unsigned i = 0; i < HK_CMD_POOL_COUNT; ++i)
-      hk_cmd_pool_free_bo_list(pool, i, &cmd->uploader[i].bos);
+      hk_cmd_pool_free_bo_list(pool, i, &cmd->uploader[i].bos, release);
 
    list_for_each_entry_safe(struct hk_cs, it, &cmd->control_streams, node) {
       list_del(&it->node);
@@ -129,7 +129,7 @@ hk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
       container_of(vk_cmd_buffer, struct hk_cmd_buffer, vk);
    struct hk_cmd_pool *pool = hk_cmd_buffer_pool(cmd);
 
-   hk_free_resettable_cmd_buffer(cmd);
+   hk_free_resettable_cmd_buffer(cmd, false);
    _mesa_set_destroy(cmd->apple9_pinned, NULL);
    util_dynarray_fini(&cmd->large_bos);
    util_dynarray_fini(&cmd->query_adds);
@@ -194,13 +194,14 @@ hk_create_cmd_buffer(struct vk_command_pool *vk_pool,
 
 static void
 hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
-                    UNUSED VkCommandBufferResetFlags flags)
+                    VkCommandBufferResetFlags flags)
 {
    struct hk_cmd_buffer *cmd =
       container_of(vk_cmd_buffer, struct hk_cmd_buffer, vk);
 
    vk_command_buffer_reset(&cmd->vk);
-   hk_free_resettable_cmd_buffer(cmd);
+   hk_free_resettable_cmd_buffer(
+      cmd, flags & VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
 
    for (unsigned i = 0; i < HK_CMD_POOL_COUNT; ++i) {
       memset(cmd->uploader[i].chunks, 0, sizeof(cmd->uploader[i].chunks));

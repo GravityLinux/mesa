@@ -189,6 +189,10 @@ struct agx_device {
 
       /* Number of hits/misses for the BO cache */
       uint64_t hits, misses;
+
+      /* CLOCK_MONOTONIC second at which agx_bo_cache_evict_stale next looks
+       * at the LRU. Read without the lock. */
+      int64_t next_evict_sec;
    } bo_cache;
 
    struct agxdecode_ctx *agxdecode;

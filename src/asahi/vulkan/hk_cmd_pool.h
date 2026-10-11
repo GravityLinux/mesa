@@ -15,6 +15,12 @@
 #define HK_CMD_BO_SIZE     1024 * 128
 #define HK_CMD_POOL_BO_MAX 32
 
+/* Free command BOs kept across all of a device's command pools (64 MiB).
+ * Applications such as vkd3d-proton create a pool per command allocator, so
+ * a per-pool bound alone lets every pool keep its peak. Beyond the budget,
+ * freed BOs go back to the BO cache, which ages them out. */
+#define HK_CMD_POOL_FREE_BUDGET 512
+
 enum hk_cmd_pool_kind {
    HK_CMD_POOL_MAIN,
    HK_CMD_POOL_USC,
@@ -58,4 +64,4 @@ VkResult hk_cmd_pool_alloc_bo(struct hk_cmd_pool *pool,
 
 void hk_cmd_pool_free_bo_list(struct hk_cmd_pool *pool,
                               enum hk_cmd_pool_kind kind,
-                              struct list_head *bos);
+                              struct list_head *bos, bool release);

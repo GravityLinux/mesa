@@ -161,3 +161,4 @@ struct agx_bo *agx_bo_cache_fetch(struct agx_device *dev, size_t size,
                                   size_t align, uint32_t flags,
                                   const bool dontwait);
 void agx_bo_cache_evict_all(struct agx_device *dev);
+void agx_bo_cache_evict_stale(struct agx_device *dev);

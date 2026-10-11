@@ -10,6 +10,7 @@
 #include "hk_device.h"
 #include "hk_entrypoints.h"
 #include "hk_physical_device.h"
+#include "vk_common_entrypoints.h"
 
 enum agx_bo_flags
 hk_cmd_pool_bo_flags(const struct hk_device *dev, enum hk_cmd_pool_kind kind)
@@ -98,10 +99,13 @@ hk_CreateCommandPool(VkDevice _device,
 static void
 hk_cmd_pool_destroy_bos(struct hk_cmd_pool *pool)
 {
+   struct hk_device *dev = hk_cmd_pool_device(pool);
+
    for (unsigned i = 0; i < HK_CMD_POOL_COUNT; ++i) {
       list_for_each_entry_safe(struct hk_cmd_bo, bo, &pool->free_bos[i], link)
          hk_cmd_bo_destroy(pool, bo);
       list_inithead(&pool->free_bos[i]);
+      p_atomic_add(&dev->cmd_pool_free_bos, -(int)pool->num_free_bos[i]);
       pool->num_free_bos[i] = 0;
    }
 }
@@ -115,6 +119,7 @@ hk_cmd_pool_alloc_bo(struct hk_cmd_pool *pool, enum hk_cmd_pool_kind kind,
          list_first_entry(&pool->free_bos[kind], struct hk_cmd_bo, link);
       list_del(&bo->link);
       pool->num_free_bos[kind]--;
+      p_atomic_dec(&hk_cmd_pool_device(pool)->cmd_pool_free_bos);
       *bo_out = bo;
       return VK_SUCCESS;
    }
@@ -122,17 +127,24 @@ hk_cmd_pool_alloc_bo(struct hk_cmd_pool *pool, enum hk_cmd_pool_kind kind,
    return hk_cmd_bo_create(pool, kind, bo_out);
 }
 
+/* Return a command buffer's BOs to the pool, or with release (a reset with
+ * RELEASE_RESOURCES) to the device. */
 void
 hk_cmd_pool_free_bo_list(struct hk_cmd_pool *pool, enum hk_cmd_pool_kind kind,
-                         struct list_head *bos)
+                         struct list_head *bos, bool release)
 {
+   struct hk_device *dev = hk_cmd_pool_device(pool);
+
    list_for_each_entry_safe(struct hk_cmd_bo, bo, bos, link) {
       list_del(&bo->link);
-      if (pool->num_free_bos[kind] >= HK_CMD_POOL_BO_MAX) {
+      if (release || pool->num_free_bos[kind] >= HK_CMD_POOL_BO_MAX ||
+          p_atomic_read_relaxed(&dev->cmd_pool_free_bos) >=
+             HK_CMD_POOL_FREE_BUDGET) {
          hk_cmd_bo_destroy(pool, bo);
       } else {
          list_addtail(&bo->link, &pool->free_bos[kind]);
          pool->num_free_bos[kind]++;
+         p_atomic_inc(&dev->cmd_pool_free_bos);
       }
    }
 }
@@ -150,6 +162,18 @@ hk_DestroyCommandPool(VkDevice _device, VkCommandPool commandPool,
    vk_command_pool_finish(&pool->vk);
    hk_cmd_pool_destroy_bos(pool);
    vk_free2(&device->vk.alloc, pAllocator, pool);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+hk_ResetCommandPool(VkDevice device, VkCommandPool commandPool,
+                    VkCommandPoolResetFlags flags)
+{
+   VK_FROM_HANDLE(hk_cmd_pool, pool, commandPool);
+
+   VkResult result = vk_common_ResetCommandPool(device, commandPool, flags);
+   if (flags & VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT)
+      hk_cmd_pool_destroy_bos(pool);
+   return result;
 }
 
 VKAPI_ATTR void VKAPI_CALL
