@@ -7161,6 +7161,48 @@ apple9_hoist_uniform_reads(nir_shader *nir, struct hash_table *original_blocks,
    if (!s.state)
       return false;
    bool progress = false;
+   /* Sampler state of conditionally executed samples (packed LOD/bias words,
+    * descriptor handles) is uniform: offer its whole chain, including the
+    * conversions and packing, to preamble extraction. Unselected
+    * instructions are restored. Like address hoists, this placement is
+    * compared against the original one when it spills or its setup does not
+    * fit. */
+   const bool alu_seeds = addresses && original_blocks &&
+                          !getenv("AGX_APPLE9_NO_SAMPLER_HOIST");
+   if (alu_seeds) {
+      nir_foreach_block(block, impl) {
+         if (block == s.entry)
+            continue;
+         nir_foreach_instr_safe(instr, block) {
+            if (instr->type != nir_instr_type_tex)
+               continue;
+            nir_tex_instr *tex = nir_instr_as_tex(instr);
+            for (unsigned i = 0; i < tex->num_srcs; ++i) {
+               switch (tex->src[i].src_type) {
+               case nir_tex_src_coord: case nir_tex_src_ddx: case nir_tex_src_ddy:
+               case nir_tex_src_comparator: case nir_tex_src_projector:
+                  continue;
+               default:
+                  break;
+               }
+               nir_instr *source = nir_def_instr(tex->src[i].src.ssa);
+               if (source->block == s.entry || source->type != nir_instr_type_alu)
+                  continue;
+               /* Constant driver-UBO reads (descriptor-set and root
+                * pointers) may leave their branches with it. */
+               s.descriptor_chain = s.descriptor_reads;
+               bool hoist = apple9_can_hoist_uniform(&tex->src[i].src, &s);
+               s.descriptor_chain = false;
+               if (hoist) {
+                  apple9_hoist_uniform_source(&tex->src[i].src, &s);
+                  progress = true;
+                  if (address_hoists)
+                     ++*address_hoists;
+               }
+            }
+         }
+      }
+   }
    nir_foreach_block(block, impl) {
       if (block == s.entry)
          continue;
