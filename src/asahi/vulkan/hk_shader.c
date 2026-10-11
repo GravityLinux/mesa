@@ -4190,6 +4190,43 @@ hk_api_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
 
 struct hk_apple9_graphics_key;
 
+/* Without a fragment stage nothing reads the rasterized varyings: keep only
+ * the outputs the fixed-function rasterizer consumes, as other drivers do when
+ * linking a position-only pre-rasterization stage. */
+static bool
+hk_apple9_strip_unread_output(nir_builder *b, nir_intrinsic_instr *intr,
+                              UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_store_output)
+      return false;
+   switch (nir_intrinsic_io_semantics(intr).location) {
+   case VARYING_SLOT_POS:
+   case VARYING_SLOT_PSIZ:
+   case VARYING_SLOT_CLIP_DIST0:
+   case VARYING_SLOT_CLIP_DIST1:
+   case VARYING_SLOT_CULL_DIST0:
+   case VARYING_SLOT_CULL_DIST1:
+   case VARYING_SLOT_LAYER:
+   case VARYING_SLOT_VIEWPORT:
+   case VARYING_SLOT_PRIMITIVE_SHADING_RATE:
+      return false;
+   default:
+      nir_instr_remove(&intr->instr);
+      return true;
+   }
+}
+
+static void
+hk_apple9_strip_unread_outputs(nir_shader *nir)
+{
+   if (!nir_shader_intrinsics_pass(nir, hk_apple9_strip_unread_output,
+                                   nir_metadata_control_flow, NULL))
+      return;
+   nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+   NIR_PASS(_, nir, nir_opt_dce);
+   NIR_PASS(_, nir, nir_opt_dead_cf);
+}
+
 static VkResult
 hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
                            struct vk_shader_compile_info *infos,
@@ -4897,6 +4934,10 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
          tes_nir->info.tess._primitive_mode = tcs_nir->info.tess._primitive_mode;
    }
 
+   bool has_fragment = false;
+   for (unsigned i = 0; i < count; ++i)
+      has_fragment |= infos[i].stage == MESA_SHADER_FRAGMENT;
+
    /* The last pre-rasterization stage maps [-w, w] depth to [0, w]. */
    mesa_shader_stage last_prerast = MESA_SHADER_NONE;
    for (unsigned i = 0; i < count; ++i) {
@@ -4952,6 +4993,16 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
                      hk_apple9_lower_clip_z_coeff, nir_metadata_control_flow,
                      NULL);
          }
+         /* Shadow and depth-prepass draws: a vertex shader rasterized without
+          * a fragment stage computes only what the rasterizer reads. */
+         if (stage == MESA_SHADER_VERTEX && stage == last_prerast &&
+             !has_fragment && !nir->xfb_info &&
+             !(infos[i].next_stage_mask &
+               (VK_SHADER_STAGE_GEOMETRY_BIT |
+                VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT)) &&
+             !hk_per_vertex_copies_used(&per_vertex) &&
+             !getenv("HK_APPLE9_KEEP_UNREAD_OUTPUTS"))
+            hk_apple9_strip_unread_outputs(nir);
 
          if (getenv("AGX_APPLE9_TRACE_NIR") != NULL)
             nir_print_shader(nir, stderr);
