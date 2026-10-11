@@ -604,16 +604,14 @@ agx_apple9_wide_float_immediate_slot(enum agx_apple9_encoding encoding,
                          encoding == AGX_APPLE9_ENC_FLOAT3_SATURATE_EXTENDED));
 }
 
-/* Compare literals are opt-in (AGX_APPLE9_COMPARE_LITERAL=1): they shrink
- * preambles and main programs across the corpora but shift the spiller's
- * choices in ELDEN RING's register-exhausted fragment family (+677 spills
- * over 21 programs), pending timing and a spill-choice fix. */
+/* AGX_APPLE9_NO_COMPARE_LITERAL=1 keeps compare operands in registers and
+ * uniform words. */
 static inline bool
 agx_apple9_compare_literals_disabled(void)
 {
    static int disabled = -1;
    if (disabled < 0)
-      disabled = getenv("AGX_APPLE9_COMPARE_LITERAL") == NULL;
+      disabled = getenv("AGX_APPLE9_NO_COMPARE_LITERAL") != NULL;
    return disabled;
 }
 

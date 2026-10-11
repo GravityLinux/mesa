@@ -5694,7 +5694,7 @@ TEST(Apple9Compiler, SimpleIfElseUsesNativeMaskTransition)
    unsigned predicates = 0;
    for (unsigned i = 0; i + 6 <= compiled.info.binary_size; ++i) {
       /* Operand B is a register, or the literal 16 (0x80 | 8 << 1 with
-       * the B file bit) under AGX_APPLE9_COMPARE_LITERAL=1. */
+       * the B file bit) by default (AGX_APPLE9_NO_COMPARE_LITERAL=1 keeps a register). */
       const bool literal = (binary[i + 5] & 0x1f) == 0x02 && binary[i + 3] == 0x90;
       if (binary[i] != 0x0a || (binary[i + 2] & ~0x18) != 0x22 ||
           binary[i + 4] != AGX_APPLE9_PREDICATE_ULT ||
@@ -5744,7 +5744,7 @@ TEST(Apple9Compiler, DirectConditionsUseProvenPredicateFamilies)
             binary[i] == expected_opcode &&
             (binary[i + 2] & ~0x18) == (test.extended ? 0x23 : 0x22);
          /* Operand B is a register, or the literal 16 (0x90, or minifloat
-          * 0xf1 for 16.0) with the B file bit under AGX_APPLE9_COMPARE_LITERAL=1. */
+          * 0xf1 for 16.0) with the B file bit by default (AGX_APPLE9_NO_COMPARE_LITERAL=1 keeps a register). */
          const bool is_float = test.op == nir_op_feq || test.op == nir_op_fneu ||
                                test.op == nir_op_flt || test.op == nir_op_fge;
          const uint8_t file = binary[i + (test.extended ? 7 : 5)] & 0x1f;
@@ -5914,7 +5914,7 @@ TEST(Apple9Compiler, ArbitraryPureBooleansMaterializeThenCompareWithZero)
       unsigned integer_equal = 0;
       for (unsigned i = 0; i + 10 <= compiled.info.binary_size; ++i) {
          /* A register zero, or the literal zero (byte 3 = 0x80, B file
-          * bit) under AGX_APPLE9_COMPARE_LITERAL=1, as Metal encodes it. */
+          * bit) by default (AGX_APPLE9_NO_COMPARE_LITERAL=1 keeps a register), as Metal encodes it. */
          const uint8_t file = binary[i + 7] & 0x1f;
          integer_equal += binary[i] == 0x0a &&
                           (binary[i + 2] & ~0x18) == 0x23 &&
