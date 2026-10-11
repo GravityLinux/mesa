@@ -48,7 +48,22 @@ main(void)
                        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 0, 0);
    CHECK(cmd->current_cs.cs == &compute && cmd->current_cs.gfx == &render);
    CHECK(compute.current == compute_bytes + AGX_CDM_BARRIER_LENGTH);
-   CHECK(!compute.cdm_dirty && compute.stats.flushes == 1);
+   /* G16 orders shader-to-shader dependencies with the compute-only mask and
+    * leaves the full flush to consumers outside the shader core. */
+   CHECK(*(uint32_t *)compute_bytes == 0x60000160);
+   CHECK(compute.cdm_dirty && compute.cdm_compute_barrier &&
+         compute.stats.flushes == 1);
+
+   /* Indirect grids are fetched by the CDM itself: full flush. */
+   hk_cmd_sync_barrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                       VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+                       VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                       VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT);
+   CHECK(!compute.cdm_dirty && !compute.cdm_compute_barrier);
+   CHECK(*(uint32_t *)(compute_bytes + AGX_CDM_BARRIER_LENGTH) != 0x60000160);
+   compute.current = compute_bytes + AGX_CDM_BARRIER_LENGTH;
+   compute.stats.flushes = 1;
+   cmd->current_cs.cs = &compute;
 
    hk_cmd_sync_barrier(cmd, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
