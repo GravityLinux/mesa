@@ -1985,6 +1985,31 @@ static const struct agx_apple9_encoding_info encodings[] = {
                    AGX_APPLE9_EVIDENCE_BYTE_DIFF),
             },
       },
+   /* A pointer-pair load without an index operand; the pair alone forms the
+    * address, plus the byte displacement. */
+   [AGX_APPLE9_ENC_DEVICE_LOAD_POINTER] =
+      {
+         .name = "device_load_pointer",
+         .length = 14,
+         .operand_count = 3,
+         .allocator_safe = true,
+         .dependency_layout = AGX_APPLE9_DEPENDENCY_MASK_12_17,
+         .evidence = AGX_APPLE9_EVIDENCE_BYTE_DIFF,
+         .operands =
+            {
+               GPR(AGX_APPLE9_OPERAND_DEST,
+                   AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32 |
+                      AGX_APPLE9_WIDTH_64,
+                   95, 1, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                   AGX_APPLE9_EVIDENCE_HARDWARE),
+               GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32,
+                   94, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                   AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+               GPR(AGX_APPLE9_OPERAND_SRC2, AGX_APPLE9_WIDTH_32,
+                   95, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                   AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+            },
+      },
    [AGX_APPLE9_ENC_DEVICE_STORE] =
       {
          .name = "device_store",
