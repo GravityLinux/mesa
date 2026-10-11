@@ -170,6 +170,50 @@ static_assert(offsetof(struct hk_apple9_image_descriptor, texture) % 32 == 0,
 static_assert(offsetof(struct hk_apple9_image_descriptor, sampler) % 32 == 0,
               "native sampler entry is table aligned");
 
+/* G16 descriptor records, 128 bytes each so translation layers can copy
+ * them with their 128-byte paths: an image part and a sampler part. A
+ * combined image sampler is the image part followed by the sampler part.
+ * Shaders address each part through its own handle; the native entries keep
+ * the table slots AGX_APPLE9_DESCRIPTOR_TEXTURE_ENTRY and
+ * AGX_APPLE9_DESCRIPTOR_SAMPLER_ENTRY past their part's base, as the texel
+ * and storage descriptors do.
+ */
+struct hk_apple9_image_part {
+   /* Same layout as the per-draw texture info record. */
+   uint32_t texture_info[AGX_APPLE9_TEXTURE_INFO_STRIDE / 4];
+   /* Sparse residency table and the view's base level and layer. */
+   uint32_t residency_lo, residency_hi;
+   uint16_t base_level, base_layer;
+   uint16_t min_lod_fp16, min_lod_uint16;
+   uint8_t pad0[16];
+   uint8_t texture[AGX_APPLE9_TEXTURE_TABLE_STRIDE];
+   uint8_t pad1[32];
+};
+static_assert(sizeof(struct hk_apple9_image_part) == 128, "128-byte record");
+static_assert(offsetof(struct hk_apple9_image_part, texture_info) ==
+                 AGX_APPLE9_DESCRIPTOR_TEXTURE_INFO,
+              "texture info where shaders read it");
+static_assert(offsetof(struct hk_apple9_image_part, texture) ==
+                 AGX_APPLE9_DESCRIPTOR_TEXTURE_ENTRY *
+                    AGX_APPLE9_TEXTURE_TABLE_STRIDE,
+              "native texture entry is where register indices expect it");
+
+struct hk_apple9_sampler_part {
+   /* Same layout as the per-draw runtime sampler record. */
+   uint32_t runtime_sampler[AGX_APPLE9_RUNTIME_SAMPLER_STRIDE / 4];
+   uint16_t lod_bias_fp16, txl_nudge_fp16;
+   uint8_t pad0[28];
+   uint8_t sampler[AGX_APPLE9_SAMPLER_TABLE_STRIDE];
+};
+static_assert(sizeof(struct hk_apple9_sampler_part) == 128, "128-byte record");
+static_assert(offsetof(struct hk_apple9_sampler_part, runtime_sampler) ==
+                 AGX_APPLE9_DESCRIPTOR_RUNTIME_SAMPLER,
+              "runtime sampler where shaders read it");
+static_assert(offsetof(struct hk_apple9_sampler_part, sampler) ==
+                 AGX_APPLE9_DESCRIPTOR_SAMPLER_ENTRY *
+                    AGX_APPLE9_SAMPLER_TABLE_STRIDE,
+              "native sampler entry is where register indices expect it");
+
 void hk_apple9_texture_info(uint32_t *data, const struct agx_texture_packed *state);
 bool hk_apple9_runtime_sampler(uint32_t *data, const struct agx_sampler_packed *state,
                                bool clamp_to_edge);
