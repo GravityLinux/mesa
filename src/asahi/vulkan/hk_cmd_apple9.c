@@ -293,6 +293,7 @@ hk_apple9_stage(struct hk_shader *s, bool fragment)
       .writes_layer_viewport = i->writes_layer_viewport,
       .clip_distance_count = i->apple9_clip_distance_count,
       .render_targets = s->info.apple9_render_targets,
+      .launch_cache = s->apple9_stage_launch,
       .texture_mask = i->apple9_texture_mask,
       .sampler_mask = i->apple9_sampler_mask,
       .image_mask = i->apple9_image_mask,
