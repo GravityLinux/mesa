@@ -3434,6 +3434,11 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
             shader->apple9_launch = t;
          else
             free(t);
+      } else {
+         shader->apple9_stage_launch =
+            malloc(sizeof(*shader->apple9_stage_launch));
+         if (shader->apple9_stage_launch)
+            agx_apple9_stage_launch_cache_init(shader->apple9_stage_launch);
       }
       return VK_SUCCESS;
    }
@@ -4034,6 +4039,11 @@ hk_shader_destroy(struct hk_device *dev, struct hk_shader *s)
    agx_bo_unreference(&dev->dev, s->bo);
    free(s->apple9_launch);
    s->apple9_launch = NULL;
+   if (s->apple9_stage_launch) {
+      agx_apple9_stage_launch_cache_finish(s->apple9_stage_launch);
+      free(s->apple9_stage_launch);
+      s->apple9_stage_launch = NULL;
+   }
 
    simple_mtx_destroy(&s->linked.lock);
 

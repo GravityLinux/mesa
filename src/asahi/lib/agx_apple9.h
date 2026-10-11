@@ -11,6 +11,7 @@
 #include <stdint.h>
 struct agx_ptr;
 #include "util/format/u_formats.h"
+#include "util/simple_mtx.h"
 
 #include "asahi/lib/agx_apple9_layout.h"
 #include "asahi/lib/agx_apple9_launch.h"
@@ -35,6 +36,24 @@ struct agx_device;
 struct agx_bo;
 struct agx_pool;
 struct agx_apple9_graphics;
+
+/* Graphics launch programs of one compiled stage, built on first use for each
+ * fragment tile allocation and sample count (vertex stages use 0/0) and then
+ * patched per launch. Entries are immutable once published; owned by the
+ * compiled shader alongside its BO. */
+#define AGX_APPLE9_STAGE_LAUNCH_TEMPLATES 4
+struct agx_apple9_stage_launch_cache {
+   simple_mtx_t lock;
+   /* Published entries; written with release ordering under the lock. */
+   unsigned count;
+   struct {
+      uint8_t tile_bytes, samples;
+      struct agx_apple9_launch_template tmpl;
+   } entry[AGX_APPLE9_STAGE_LAUNCH_TEMPLATES];
+};
+
+void agx_apple9_stage_launch_cache_init(struct agx_apple9_stage_launch_cache *c);
+void agx_apple9_stage_launch_cache_finish(struct agx_apple9_stage_launch_cache *c);
 
 struct agx_apple9_render_stage {
    /* Stable compiled-object identity; zero for externally supplied stages. */
@@ -77,6 +96,8 @@ struct agx_apple9_render_stage {
    uint8_t per_vertex_count;
    uint8_t per_vertex[AGX_APPLE9_MAX_PER_VERTEX];
    uint8_t render_targets;
+   /* Optional per-shader launch templates; NULL builds every launch. */
+   struct agx_apple9_stage_launch_cache *launch_cache;
 };
 
 struct agx_apple9_render_pipeline {

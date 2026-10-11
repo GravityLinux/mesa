@@ -270,6 +270,9 @@ struct hk_shader {
     * profile and preamble address and patched per dispatch. NULL falls back
     * to building the program every dispatch. */
    struct agx_apple9_launch_template *apple9_launch;
+   /* G16 graphics: launch templates per tile allocation and sample count,
+    * built on first use. NULL builds every launch. */
+   struct agx_apple9_stage_launch_cache *apple9_stage_launch;
 
    /* Cache of fast linked variants */
    struct {

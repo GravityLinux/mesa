@@ -1196,6 +1196,89 @@ apple9_build_body_entry(uint8_t *out, uint64_t entry, uint64_t body)
    return true;
 }
 
+void
+agx_apple9_stage_launch_cache_init(struct agx_apple9_stage_launch_cache *c)
+{
+   memset(c, 0, sizeof(*c));
+   simple_mtx_init(&c->lock, mtx_plain);
+}
+
+void
+agx_apple9_stage_launch_cache_finish(struct agx_apple9_stage_launch_cache *c)
+{
+   simple_mtx_destroy(&c->lock);
+}
+
+static void
+apple9_graphics_launch_params(struct agx_apple9_launch_parameters *params,
+                              const struct agx_device *dev,
+                              const struct agx_apple9_render_stage *shader,
+                              bool fragment, unsigned tile_bytes,
+                              unsigned samples)
+{
+   *params = (struct agx_apple9_launch_parameters){
+      .preamble_address = shader->preamble_size
+         ? shader->bo->va->addr + shader->preamble_offset : 0,
+      .shader_base = dev->shader_base,
+      .publication_count = shader->publication_count,
+      .frame_extent_a = MAX2(shader->scratch_size, shader->atomic_frame_size),
+      .frame_extent_b = shader->scratch_size,
+      .tile_bytes = fragment ? tile_bytes : 0,
+      .samples = fragment ? samples : 0,
+   };
+}
+
+/* Linear search of the first count published templates. */
+static const struct agx_apple9_launch_template *
+apple9_stage_launch_find(struct agx_apple9_stage_launch_cache *c,
+                         unsigned count, unsigned tile_bytes, unsigned samples)
+{
+   for (unsigned i = 0; i < count; ++i) {
+      if (c->entry[i].tile_bytes == tile_bytes &&
+          c->entry[i].samples == samples)
+         return &c->entry[i].tmpl;
+   }
+   return NULL;
+}
+
+/* The stage's template for this tile allocation and sample count, building
+ * it on first use; NULL if the cache is full or the parameters are rejected.
+ * Published entries are immutable: lookups read the count with acquire
+ * ordering and take no lock; only building locks. */
+static const struct agx_apple9_launch_template *
+apple9_stage_launch_template(const struct agx_device *dev,
+                             const struct agx_apple9_render_stage *shader,
+                             bool fragment, unsigned tile_bytes,
+                             unsigned samples)
+{
+   struct agx_apple9_stage_launch_cache *c = shader->launch_cache;
+   if (!fragment)
+      tile_bytes = samples = 0;
+   const struct agx_apple9_launch_template *found = apple9_stage_launch_find(
+      c, __atomic_load_n(&c->count, __ATOMIC_ACQUIRE), tile_bytes, samples);
+   if (found)
+      return found;
+   simple_mtx_lock(&c->lock);
+   unsigned i = c->count;
+   found = apple9_stage_launch_find(c, i, tile_bytes, samples);
+   if (!found && i < AGX_APPLE9_STAGE_LAUNCH_TEMPLATES) {
+      struct agx_apple9_launch_parameters params;
+      apple9_graphics_launch_params(&params, dev, shader, fragment,
+                                    tile_bytes, samples);
+      if (agx_apple9_launch_template_init(
+             &c->entry[i].tmpl, AGX_APPLE9_GRAPHICS_LAUNCH_SIZE,
+             fragment ? AGX_APPLE9_LAUNCH_FRAGMENT : AGX_APPLE9_LAUNCH_VERTEX,
+             &params)) {
+         c->entry[i].tile_bytes = tile_bytes;
+         c->entry[i].samples = samples;
+         found = &c->entry[i].tmpl;
+         __atomic_store_n(&c->count, i + 1, __ATOMIC_RELEASE);
+      }
+   }
+   simple_mtx_unlock(&c->lock);
+   return found;
+}
+
 bool
 agx_apple9_prepare_graphics_stage(
    struct agx_device *dev, void *allocator,
@@ -1205,7 +1288,6 @@ agx_apple9_prepare_graphics_stage(
    unsigned tile_bytes, unsigned samples, uint32_t *launch,
    agx_apple9_cached_alloc cached_alloc)
 {
-   unsigned stage = fragment;
    if (!shader->bo || !shader->publication_count_valid)
       return false;
    unsigned entry = apple9_shader_entry(dev, allocator, shader->bo, false);
@@ -1215,35 +1297,66 @@ agx_apple9_prepare_graphics_stage(
        shader->preamble_offset > shader->binary_size ||
        shader->preamble_size > shader->binary_size - shader->preamble_offset) {
       fprintf(stderr, "Apple9 draw: stage %u invalid preamble offset %u size %u in binary %zu\n",
-              stage, shader->preamble_offset, shader->preamble_size,
+              fragment, shader->preamble_offset, shader->preamble_size,
               (size_t)shader->binary_size);
       return false;
    }
    const unsigned launch_size = AGX_APPLE9_GRAPHICS_LAUNCH_SIZE;
+   struct agx_apple9_launch_parameters params;
+   apple9_graphics_launch_params(&params, dev, shader, fragment, tile_bytes,
+                                 samples);
+   params.entry_offset = entry;
+
+   /* With a template, only the roots address, entry and program address are
+    * per launch: emit the program next to fresh roots, without encoding it
+    * or hashing it into the upload cache. */
+   const struct agx_apple9_launch_template *tmpl =
+      shader->launch_cache
+         ? apple9_stage_launch_template(dev, shader, fragment, tile_bytes,
+                                        samples)
+         : NULL;
+   if (tmpl) {
+      struct agx_ptr state = alloc(allocator, 0x100 + launch_size, 64);
+      if (!state.cpu)
+         return false;
+      uint8_t *roots = state.cpu;
+      memset(roots, 0, 0x100);
+      apple9_put_u64(roots, textures);
+      apple9_put_u64(roots + 8, samplers);
+      apple9_put_u64(roots + 0x10, table);
+      if (!agx_apple9_launch_template_emit(roots + 0x100, tmpl, state.gpu,
+                                           entry, state.gpu + 0x100))
+         return false;
+      if (debug_get_option_apple9_launch_check()) {
+         uint8_t ref[AGX_APPLE9_GRAPHICS_LAUNCH_SIZE];
+         params.resource_table = state.gpu;
+         params.launch_address = state.gpu + 0x100;
+         if (!agx_apple9_launch_build(
+                ref, launch_size,
+                fragment ? AGX_APPLE9_LAUNCH_FRAGMENT : AGX_APPLE9_LAUNCH_VERTEX,
+                &params) ||
+             memcmp(ref, roots + 0x100, launch_size)) {
+            fprintf(stderr, "HK_APPLE9_LAUNCH_CHECK: graphics template launch differs\n");
+            abort();
+         }
+      }
+      *launch = agx_usc_addr(dev, state.gpu + 0x100);
+      return true;
+   }
+
    uint8_t canonical[0x100 + AGX_APPLE9_GRAPHICS_LAUNCH_SIZE] = {0};
    uint8_t *roots = canonical;
    apple9_put_u64(roots, textures);
    apple9_put_u64(roots + 8, samplers);
    apple9_put_u64(roots + 0x10, table);
-   struct agx_apple9_launch_parameters params = {
-      .preamble_address = shader->preamble_size
-         ? shader->bo->va->addr + shader->preamble_offset : 0,
-      .launch_address = dev->shader_base + 0x100,
-      .shader_base = dev->shader_base,
-      .resource_table = dev->shader_base,
-      .entry_offset = entry,
-      .publication_count = shader->publication_count,
-      .frame_extent_a = MAX2(shader->scratch_size, shader->atomic_frame_size),
-      .frame_extent_b = shader->scratch_size,
-      .tile_bytes = stage ? tile_bytes : 0,
-      .samples = stage ? samples : 0,
-   };
+   params.launch_address = dev->shader_base + 0x100;
+   params.resource_table = dev->shader_base;
    bool is_new = true;
    struct agx_ptr state;
    if (cached_alloc) {
       if (!agx_apple9_launch_build(
              canonical + 0x100, launch_size,
-             stage ? AGX_APPLE9_LAUNCH_FRAGMENT : AGX_APPLE9_LAUNCH_VERTEX,
+             fragment ? AGX_APPLE9_LAUNCH_FRAGMENT : AGX_APPLE9_LAUNCH_VERTEX,
              &params))
          return false;
       state = cached_alloc(allocator, AGX_APPLE9_STATE_LAUNCH, canonical,
@@ -1263,13 +1376,13 @@ agx_apple9_prepare_graphics_stage(
    params.resource_table = state.gpu;
    if (!agx_apple9_launch_build(
           roots + 0x100, launch_size,
-          stage ? AGX_APPLE9_LAUNCH_FRAGMENT : AGX_APPLE9_LAUNCH_VERTEX,
+          fragment ? AGX_APPLE9_LAUNCH_FRAGMENT : AGX_APPLE9_LAUNCH_VERTEX,
           &params)) {
       fprintf(stderr,
               "Apple9 draw: stage %u launch rejected: entry=0x%x "
               "base=0x%llx roots=0x%llx launch=0x%llx preamble=0x%llx "
               "publications=%u scratch=%u tile=%u samples=%u\n",
-              stage, params.entry_offset,
+              fragment, params.entry_offset,
               (unsigned long long)params.shader_base,
               (unsigned long long)params.resource_table,
               (unsigned long long)params.launch_address,
