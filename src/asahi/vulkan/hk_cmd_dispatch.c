@@ -44,6 +44,26 @@ hk_cmd_bind_compute_shader(struct hk_cmd_buffer *cmd,
    cmd->state.cs.shader = shader;
 }
 
+/* The compute-only barrier: Metal's 0x160 mask orders later dispatches after
+ * earlier ones and makes their shader writes visible to them. Consumers
+ * outside the shader core (indirect grid fetches, queries, the stream end)
+ * still need the full flush, so cdm_dirty stays set.
+ */
+void
+hk_cdm_compute_barrier(struct hk_device *dev, struct hk_cs *cs)
+{
+   assert(cs->type == HK_CS_CDM);
+   assert(cs->current + AGX_CDM_BARRIER_LENGTH < cs->end &&
+          "caller must ensure space");
+
+   uint32_t *barrier = (uint32_t *)cs->current;
+   cs->current = agx_cdm_barrier(cs->current, dev->dev.chip);
+   *barrier = 0x60000160;
+   cs->stats.flushes++;
+   cs->cdm_dirty = true;
+   cs->cdm_compute_barrier = true;
+}
+
 void
 hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
 {
@@ -598,12 +618,7 @@ hk_tess_batch_flush(struct hk_cmd_buffer *cmd)
          data += size;
       }
 
-      uint32_t *barrier = (uint32_t *)cs->current;
-      cs->current = agx_cdm_barrier(cs->current, dev->dev.chip);
-      *barrier = 0x60000160;
-      cs->stats.flushes++;
-      cs->cdm_dirty = true;
-      cs->cdm_compute_barrier = true;
+      hk_cdm_compute_barrier(dev, cs);
       util_dynarray_clear(lane);
    }
 }

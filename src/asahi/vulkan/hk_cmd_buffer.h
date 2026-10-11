@@ -852,6 +852,7 @@ void hk_cmd_sync_barrier(struct hk_cmd_buffer *cmd,
                          VkPipelineStageFlags2 src, VkPipelineStageFlags2 dst,
                          VkAccessFlags2 src_access, VkAccessFlags2 dst_access);
 void hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs);
+void hk_cdm_compute_barrier(struct hk_device *dev, struct hk_cs *cs);
 uint32_t hk_default_sample_positions(unsigned nr_samples);
 struct vk_sample_locations_state;
 uint32_t hk_pack_ppp_multisamplectrl(const struct vk_sample_locations_state *sl);

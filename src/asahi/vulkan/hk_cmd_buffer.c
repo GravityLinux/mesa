@@ -634,9 +634,21 @@ hk_cmd_sync_barrier(struct hk_cmd_buffer *cmd,
        !(cs->sync_stages & ~compute)) {
       /* The cache barrier is also an execution barrier. Keep compute-only
        * dependencies in one CDM stream; no firmware command boundary is needed.
+       * Shader-to-shader dependencies take the compute-only barrier on G16;
+       * indirect grids are fetched by the CDM itself and need the full flush.
        */
+      struct hk_device *dev = hk_cmd_buffer_device(cmd);
       hk_ensure_cs_has_space(cmd, cs, AGX_CDM_BARRIER_LENGTH);
-      hk_cdm_cache_flush(hk_cmd_buffer_device(cmd), cs);
+      /* HK_APPLE9_FULL_CDM_BARRIER=1 restores the full flush, for A/B runs
+       * and bisection. */
+      static int full_barrier = -1;
+      if (full_barrier < 0)
+         full_barrier = debug_get_bool_option("HK_APPLE9_FULL_CDM_BARRIER", false);
+      if (dev->dev.chip == AGX_CHIP_G16G && !full_barrier &&
+          !(dst_stages & HK_SYNC_DISPATCH_INDIRECT))
+         hk_cdm_compute_barrier(dev, cs);
+      else
+         hk_cdm_cache_flush(dev, cs);
    } else if (cmd->sync_fallback ||
        (cmd->current_cs.cs && (cmd->current_cs.cs->sync_stages & ordered)))
       hk_cmd_buffer_end_compute(cmd);
