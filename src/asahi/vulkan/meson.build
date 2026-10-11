@@ -18,6 +18,7 @@ hk_files = files(
   'hk_cmd_pool.c',
   'hk_cmd_pool.h',
   'hk_descriptor_set.h',
+  'hk_descriptor_memory.c',
   'hk_descriptor_set.c',
   'hk_descriptor_set_layout.c',
   'hk_descriptor_set_layout.h',
@@ -193,6 +194,17 @@ _dev_icd = custom_target(
 devenv.append('VK_DRIVER_FILES', _dev_icd.full_path())
 
 if with_tests
+  test(
+    'hk_descriptor_memory',
+    executable(
+      'hk_descriptor_memory_test',
+      ['hk_descriptor_memory.c', 'tests/hk-descriptor-memory.cpp'],
+      include_directories : [inc_src, inc_include],
+      dependencies : [idep_gtest, idep_mesautil],
+    ),
+    suite : ['asahi'],
+    protocol : 'gtest',
+  )
   test(
     'hk_upload',
     executable(

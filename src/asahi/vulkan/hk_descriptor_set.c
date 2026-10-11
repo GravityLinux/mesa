@@ -588,9 +588,6 @@ hk_push_descriptor_set_update(struct hk_push_descriptor_set *push_set,
    }
 }
 
-static void hk_descriptor_pool_free(struct hk_descriptor_pool *pool,
-                                    uint64_t addr, uint64_t size);
-
 static void
 hk_descriptor_set_destroy(struct hk_device *dev,
                           struct hk_descriptor_pool *pool,
@@ -598,11 +595,50 @@ hk_descriptor_set_destroy(struct hk_device *dev,
 {
    list_del(&set->link);
    if (set->size > 0)
-      hk_descriptor_pool_free(pool, set->addr, set->size);
+      hk_descriptor_memory_free(&pool->mem, &set->alloc);
    vk_descriptor_set_layout_unref(&dev->vk, &set->layout->vk);
 
    vk_object_free(&dev->vk, NULL, set);
 }
+
+/* Descriptor memory is in the USC aperture on G16, where shaders address
+ * image descriptors as native table entries. Map it write-back (coherent on
+ * G16, as the USC command pool): vkUpdateDescriptorSets copies read
+ * descriptor memory, and reads from a write-combined mapping are uncached. */
+static bool
+hk_descriptor_bo_create(void *data, uint64_t size,
+                        struct hk_descriptor_backing *out)
+{
+   struct hk_device *dev = data;
+   struct agx_bo *bo = agx_bo_create(&dev->dev, size, 0,
+                                     dev->dev.chip == AGX_CHIP_G16G
+                                        ? AGX_BO_LOW_VA | AGX_BO_WRITEBACK
+                                        : 0,
+                                     "Descriptor pool");
+   if (!bo)
+      return false;
+
+   *out = (struct hk_descriptor_backing){
+      .bo = bo,
+      .addr = bo->va->addr,
+      .map = agx_bo_map(bo),
+      .size = bo->size,
+   };
+   return true;
+}
+
+static void
+hk_descriptor_bo_destroy(void *data, struct hk_descriptor_backing *backing)
+{
+   struct hk_device *dev = data;
+   struct agx_bo *bo = backing->bo;
+   agx_bo_unreference(&dev->dev, bo);
+}
+
+static const struct hk_descriptor_memory_ops hk_descriptor_bo_ops = {
+   .create = hk_descriptor_bo_create,
+   .destroy = hk_descriptor_bo_destroy,
+};
 
 static void
 hk_destroy_descriptor_pool(struct hk_device *dev,
@@ -612,8 +648,7 @@ hk_destroy_descriptor_pool(struct hk_device *dev,
    list_for_each_entry_safe(struct hk_descriptor_set, set, &pool->sets, link)
       hk_descriptor_set_destroy(dev, pool, set);
 
-   util_vma_heap_finish(&pool->heap);
-   agx_bo_unreference(&dev->dev, pool->bo);
+   hk_descriptor_memory_finish(&pool->mem);
 
    vk_object_free(&dev->vk, pAllocator, pool);
 }
@@ -676,62 +711,14 @@ hk_CreateDescriptorPool(VkDevice _device,
     */
    bo_size += HK_MIN_UBO_ALIGNMENT * pCreateInfo->maxSets;
 
-   if (bo_size) {
-      /* G16 shaders address image descriptors as native table entries
-       * relative to the USC aperture. Map it write-back (coherent on G16, as
-       * the USC command pool): vkUpdateDescriptorSets copies read descriptor
-       * memory, and reads from a write-combined mapping are uncached. */
-      pool->bo = agx_bo_create(&dev->dev, bo_size, 0,
-                               dev->dev.chip == AGX_CHIP_G16G
-                                  ? AGX_BO_LOW_VA | AGX_BO_WRITEBACK : 0,
-                               "Descriptor pool");
-      if (!pool->bo) {
-         hk_destroy_descriptor_pool(dev, pAllocator, pool);
-         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
-      }
-
-      pool->mapped_ptr = agx_bo_map(pool->bo);
-
-      /* The BO may be larger thanks to GPU page alignment.  We may as well
-       * make that extra space available to the client.
-       */
-      assert(pool->bo->size >= bo_size);
-      util_vma_heap_init(&pool->heap, pool->bo->va->addr, pool->bo->size);
-   } else {
-      util_vma_heap_init(&pool->heap, 0, 0);
+   if (hk_descriptor_memory_init(&pool->mem, &hk_descriptor_bo_ops, dev,
+                                 bo_size) != HK_DESCRIPTOR_MEMORY_OK) {
+      hk_destroy_descriptor_pool(dev, pAllocator, pool);
+      return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
    }
 
    *pDescriptorPool = hk_descriptor_pool_to_handle(pool);
    return VK_SUCCESS;
-}
-
-static VkResult
-hk_descriptor_pool_alloc(struct hk_descriptor_pool *pool, uint64_t size,
-                         uint64_t alignment, uint64_t *addr_out, void **map_out)
-{
-   assert(size > 0);
-   uint64_t addr = util_vma_heap_alloc(&pool->heap, size, alignment);
-   if (addr == 0)
-      return VK_ERROR_OUT_OF_POOL_MEMORY;
-
-   assert(addr >= pool->bo->va->addr);
-   assert(addr + size <= pool->bo->va->addr + pool->bo->size);
-   uint64_t offset = addr - pool->bo->va->addr;
-
-   *addr_out = addr;
-   *map_out = pool->mapped_ptr + offset;
-
-   return VK_SUCCESS;
-}
-
-static void
-hk_descriptor_pool_free(struct hk_descriptor_pool *pool, uint64_t addr,
-                        uint64_t size)
-{
-   assert(size > 0);
-   assert(addr >= pool->bo->va->addr);
-   assert(addr + size <= pool->bo->va->addr + pool->bo->size);
-   util_vma_heap_free(&pool->heap, addr, size);
 }
 
 static VkResult
@@ -768,12 +755,19 @@ hk_descriptor_set_create(struct hk_device *dev, struct hk_descriptor_pool *pool,
    set->size = align64(set->size, HK_MIN_UBO_ALIGNMENT);
 
    if (set->size > 0) {
-      result = hk_descriptor_pool_alloc(pool, set->size, HK_MIN_UBO_ALIGNMENT,
-                                        &set->addr, &set->mapped_ptr);
-      if (result != VK_SUCCESS) {
+      switch (hk_descriptor_memory_alloc(&pool->mem, set->size,
+                                         HK_MIN_UBO_ALIGNMENT, &set->alloc)) {
+      case HK_DESCRIPTOR_MEMORY_OK:
+         break;
+      case HK_DESCRIPTOR_MEMORY_OUT_OF_POOL:
          vk_object_free(&dev->vk, NULL, set);
-         return result;
+         return VK_ERROR_OUT_OF_POOL_MEMORY;
+      case HK_DESCRIPTOR_MEMORY_OUT_OF_DEVICE:
+         vk_object_free(&dev->vk, NULL, set);
+         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       }
+      set->addr = set->alloc.addr;
+      set->mapped_ptr = set->alloc.map;
    }
 
    vk_descriptor_set_layout_ref(&layout->vk);
