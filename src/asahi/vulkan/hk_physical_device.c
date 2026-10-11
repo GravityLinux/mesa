@@ -1910,6 +1910,17 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
          hk_sparse_unbound_unmapped(&pdev->dev);
    }
 
+   /* VK_EXT_descriptor_buffer rides HK_APPLE9_DESCRIPTOR_BUFFER, as its
+    * memory type does, until it is gated. */
+   if (pdev->dev.chip == AGX_CHIP_G16G &&
+       debug_get_bool_option("HK_APPLE9_DESCRIPTOR_BUFFER", false)) {
+      supported_extensions.EXT_descriptor_buffer = true;
+      supported_features.descriptorBuffer = true;
+      supported_features.descriptorBufferPushDescriptors = true;
+      supported_features.descriptorBufferCaptureReplay = false;
+      supported_features.descriptorBufferImageLayoutIgnored = false;
+   }
+
 
    properties.drmHasRender = true;
    properties.drmRenderMajor = major(render_dev);

@@ -184,6 +184,12 @@ struct hk_buffer_address {
    uint32_t zero; /* Must be zero! */
 };
 
+struct hk_device;
+struct hk_descriptor_set_layout;
+void hk_descriptor_pack_embedded_samplers(
+   struct hk_device *dev, const struct hk_descriptor_set_layout *layout,
+   void *map);
+
 struct hk_descriptor_pool {
    struct vk_object_base base;
 

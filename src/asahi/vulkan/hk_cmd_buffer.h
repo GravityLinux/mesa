@@ -152,6 +152,10 @@ struct hk_descriptor_state {
    bool root_dirty;
    struct hk_root_descriptor_table root;
 
+   /* VK_EXT_descriptor_buffer: bound buffer addresses, indexed by
+    * vkCmdSetDescriptorBufferOffsets bufferIndices. */
+   uint64_t descriptor_buffers[HK_MAX_SETS];
+
    /* Last uploaded root (self-address normalized to 0) and its GPU address.
     * An identical root reuses the upload instead of hashing into the
     * per-command-buffer upload cache. Zeroed with the rest of the state on
