@@ -6901,6 +6901,51 @@ apple9_preamble_rewrite_cost(nir_def *def, const void *unused)
  * A stage with register-indexed samplers reaches the private texel-fetch
  * sampler the same way.
  */
+/* Split an iadd tree into its non-constant terms (NULL when none) and the sum
+ * of its constant terms. */
+static nir_def *
+apple9_split_addend(nir_builder *b, nir_scalar s, uint32_t *constant,
+                    unsigned depth)
+{
+   if (nir_scalar_is_const(s)) {
+      *constant += nir_scalar_as_uint(s);
+      return NULL;
+   }
+   if (depth && nir_scalar_is_alu(s) && nir_scalar_alu_op(s) == nir_op_iadd) {
+      nir_scalar x = nir_scalar_chase_alu_src(s, 0);
+      nir_scalar y = nir_scalar_chase_alu_src(s, 1);
+      uint32_t before = *constant;
+      nir_def *xs = apple9_split_addend(b, x, constant, depth - 1);
+      nir_def *ys = apple9_split_addend(b, y, constant, depth - 1);
+      if (*constant == before && xs && ys)
+         return nir_channel(b, s.def, s.comp);
+      if (!xs || !ys)
+         return xs ? xs : ys;
+      return nir_iadd(b, xs, ys);
+   }
+   return nir_channel(b, s.def, s.comp);
+}
+
+/* Handles are byte offsets into the descriptor aperture, which never wraps,
+ * so the multiple-of-32 part of a handle's constant terms moves only the
+ * entry index. Fold it into the entry immediate: handles that differ by a
+ * record-relative offset (the image and sampler parts of one combined
+ * descriptor, planes, array elements at constant indices) then share one
+ * shift. */
+static nir_def *
+apple9_descriptor_entry(nir_builder *b, nir_def *handle, unsigned entry)
+{
+   uint32_t constant = 0;
+   nir_def *x = apple9_split_addend(b, nir_get_scalar(handle, 0), &constant, 4);
+   int32_t entries = (int32_t)constant >> 5;
+   uint32_t rest = constant & 31;
+   if (!x)
+      return nir_imm_int(b, entries + entry);
+   if (rest)
+      x = nir_iadd_imm(b, x, rest);
+   return nir_iadd_imm(b, nir_ushr_imm(b, x, 5), entries + entry);
+}
+
 static bool
 apple9_lower_texture_handles(nir_shader *nir)
 {
@@ -6925,13 +6970,13 @@ apple9_lower_texture_handles(nir_shader *nir)
             continue;
          b.cursor = nir_before_instr(instr);
          nir_src_rewrite(&tex->src[texture].src,
-            nir_iadd_imm(&b, nir_ushr_imm(&b, tex->src[texture].src.ssa, 5),
-                         AGX_APPLE9_DESCRIPTOR_TEXTURE_ENTRY));
+            apple9_descriptor_entry(&b, tex->src[texture].src.ssa,
+                                    AGX_APPLE9_DESCRIPTOR_TEXTURE_ENTRY));
          int sampler = nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle);
          if (sampler >= 0) {
             nir_src_rewrite(&tex->src[sampler].src,
-               nir_iadd_imm(&b, nir_ushr_imm(&b, tex->src[sampler].src.ssa, 5),
-                            AGX_APPLE9_DESCRIPTOR_SAMPLER_ENTRY));
+               apple9_descriptor_entry(&b, tex->src[sampler].src.ssa,
+                                       AGX_APPLE9_DESCRIPTOR_SAMPLER_ENTRY));
          } else if (samplers && apple9_texture_uses_fetch_sampler(tex)) {
             nir_tex_instr_add_src(tex, nir_tex_src_sampler_handle,
                nir_load_ubo(&b, 1, 32,
@@ -8697,6 +8742,14 @@ apple9_lower_texture_queries_and_layers(nir_builder *b, nir_instr *instr, void *
       } else
          result = agx_apple9_texture_info(b, tex,
                                       tex->op == nir_texop_query_levels ? 3 : 4);
+      /* A null view has no levels, and its size and sample queries return 0
+       * (Vulkan's null descriptors). Buffer metadata has no level count. */
+      if (tex->op != nir_texop_query_levels &&
+          tex->sampler_dim != GLSL_SAMPLER_DIM_BUF) {
+         nir_def *null = nir_ieq_imm(b, agx_apple9_texture_info(b, tex, 3), 0);
+         result = nir_bcsel(b, null, nir_imm_zero(b, result->num_components, 32),
+                            result);
+      }
       nir_def_rewrite_uses(&tex->def, result);
       nir_instr_remove(instr);
       return true;

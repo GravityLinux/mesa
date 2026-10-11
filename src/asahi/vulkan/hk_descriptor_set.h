@@ -93,7 +93,7 @@ struct hk_apple9_texel_metadata {
 };
 
 /* Uniform texel buffers read every format but RGB32 through the texture
- * unit. Like hk_apple9_image_descriptor, the descriptor holds the native
+ * unit. Like hk_apple9_image_part, the descriptor holds the native
  * texture entry for shaders that address it directly. */
 struct hk_apple9_texel_descriptor {
    struct agx_texture_packed tex;
@@ -111,7 +111,7 @@ static_assert(offsetof(struct hk_apple9_texel_descriptor, texture) ==
  * shaders can access them without a declared format. Storage images also
  * hold the native texture entry of their read-only view: loads that no
  * write of the invocation can precede go through the texture unit. The
- * entry is one table slot past where hk_apple9_image_descriptor keeps its
+ * entry is one table slot past where hk_apple9_image_part keeps its
  * own, so a handle 32 bytes past the descriptor addresses it. */
 struct hk_apple9_storage_descriptor {
    struct hk_storage_image_descriptor common;
@@ -150,25 +150,55 @@ enum hk_apple9_store_encode {
 
 enum hk_apple9_store_encode hk_apple9_store_encode(enum pipe_format format);
 
-/* G16 image and sampler descriptors extend the common layout with native
- * state that shaders can address directly. Descriptor memory lives in the
- * USC aperture, so a 32-byte-aligned record at VA v is native table entry
- * (v - shader_base) / 32 when a stage's table pointer is shader_base.
+/* G16 descriptor records, 128 bytes each so translation layers can copy
+ * them with their 128-byte paths: an image part and a sampler part. A
+ * combined image sampler is the image part followed by the sampler part.
+ * Shaders address each part through its own handle; the native entries keep
+ * the table slots AGX_APPLE9_DESCRIPTOR_TEXTURE_ENTRY and
+ * AGX_APPLE9_DESCRIPTOR_SAMPLER_ENTRY past their part's base, as the texel
+ * and storage descriptors do.
  */
-struct hk_apple9_image_descriptor {
-   struct hk_sampled_image_descriptor common;
-   uint8_t texture[AGX_APPLE9_TEXTURE_TABLE_STRIDE];
-   uint8_t sampler[AGX_APPLE9_SAMPLER_TABLE_STRIDE];
-   /* Same layouts as the per-draw texture info and runtime sampler records. */
+struct hk_apple9_image_part {
+   /* Same layout as the per-draw texture info record. */
    uint32_t texture_info[AGX_APPLE9_TEXTURE_INFO_STRIDE / 4];
-   uint32_t runtime_sampler[AGX_APPLE9_RUNTIME_SAMPLER_STRIDE / 4];
+   /* Sparse residency table and the view's base level and layer. */
+   uint32_t residency_lo, residency_hi;
+   uint16_t base_level, base_layer;
+   uint16_t min_lod_fp16, min_lod_uint16;
+   uint8_t pad0[16];
+   uint8_t texture[AGX_APPLE9_TEXTURE_TABLE_STRIDE];
+   uint8_t pad1[32];
 };
-static_assert(sizeof(struct hk_apple9_image_descriptor) == 224,
-              "Apple9 image descriptor has no holes");
-static_assert(offsetof(struct hk_apple9_image_descriptor, texture) % 32 == 0,
-              "native texture entry is table aligned");
-static_assert(offsetof(struct hk_apple9_image_descriptor, sampler) % 32 == 0,
-              "native sampler entry is table aligned");
+static_assert(sizeof(struct hk_apple9_image_part) == 128, "128-byte record");
+static_assert(offsetof(struct hk_apple9_image_part, texture_info) ==
+                 AGX_APPLE9_DESCRIPTOR_TEXTURE_INFO,
+              "texture info where shaders read it");
+static_assert(offsetof(struct hk_apple9_image_part, texture) ==
+                 AGX_APPLE9_DESCRIPTOR_TEXTURE_ENTRY *
+                    AGX_APPLE9_TEXTURE_TABLE_STRIDE,
+              "native texture entry is where register indices expect it");
+
+struct hk_apple9_sampler_part {
+   /* Same layout as the per-draw runtime sampler record. */
+   uint32_t runtime_sampler[AGX_APPLE9_RUNTIME_SAMPLER_STRIDE / 4];
+   uint16_t lod_bias_fp16, txl_nudge_fp16;
+   uint8_t pad0[28];
+   uint8_t sampler[AGX_APPLE9_SAMPLER_TABLE_STRIDE];
+};
+static_assert(sizeof(struct hk_apple9_sampler_part) == 128, "128-byte record");
+static_assert(offsetof(struct hk_apple9_sampler_part, runtime_sampler) ==
+                 AGX_APPLE9_DESCRIPTOR_RUNTIME_SAMPLER,
+              "runtime sampler where shaders read it");
+static_assert(offsetof(struct hk_apple9_sampler_part, sampler) ==
+                 AGX_APPLE9_DESCRIPTOR_SAMPLER_ENTRY *
+                    AGX_APPLE9_SAMPLER_TABLE_STRIDE,
+              "native sampler entry is where register indices expect it");
+
+/* A combined image sampler is an image part followed by a sampler part; a
+ * multi-plane descriptor repeats the whole record per plane. */
+#define HK_APPLE9_COMBINED_DESCRIPTOR_SIZE                                    \
+   (sizeof(struct hk_apple9_image_part) + sizeof(struct hk_apple9_sampler_part))
+#define HK_MAX_SAMPLED_DESCRIPTOR_SIZE (3 * HK_APPLE9_COMBINED_DESCRIPTOR_SIZE)
 
 void hk_apple9_texture_info(uint32_t *data, const struct agx_texture_packed *state);
 bool hk_apple9_runtime_sampler(uint32_t *data, const struct agx_sampler_packed *state,

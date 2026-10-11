@@ -94,15 +94,17 @@ bool agx_compile_apple9_fragment(nir_shader *nir,
 #define AGX_APPLE9_RUNTIME_SAMPLER_STRIDE 64
 
 /* Honeykrisp G16 image descriptors live in the fixed USC aperture. A
- * texture or sampler handle is a descriptor's offset from the aperture base;
- * the descriptor holds the native table entries followed by the same texture
- * info and runtime sampler records as the per-draw sysvals.
+ * texture or sampler handle is the offset from the aperture base of the
+ * descriptor's image or sampler part. The image part starts with the same
+ * texture info record as the per-draw sysvals, the sampler part with the
+ * runtime sampler record; each holds its native table entry at the slot
+ * below.
  */
 #define AGX_APPLE9_USC_BASE (1ull << 40)
 #define AGX_APPLE9_DESCRIPTOR_TEXTURE_ENTRY 2
 #define AGX_APPLE9_DESCRIPTOR_SAMPLER_ENTRY 3
-#define AGX_APPLE9_DESCRIPTOR_TEXTURE_INFO 128
-#define AGX_APPLE9_DESCRIPTOR_RUNTIME_SAMPLER 160
+#define AGX_APPLE9_DESCRIPTOR_TEXTURE_INFO 0
+#define AGX_APPLE9_DESCRIPTOR_RUNTIME_SAMPLER 0
 /* Native table index of the private texel-fetch sampler, for stages whose
  * samplers are register indexed. */
 #define AGX_APPLE9_FETCH_SAMPLER_INDEX_OFFSET (AGX_APPLE9_RUNTIME_SAMPLER_OFFSET + 32 * AGX_APPLE9_RUNTIME_SAMPLER_STRIDE)

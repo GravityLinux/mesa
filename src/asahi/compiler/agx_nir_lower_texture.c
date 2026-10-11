@@ -78,8 +78,9 @@ lower_tex_crawl(nir_builder *b, nir_instr *instr, UNUSED void *data)
    nir_tex_instr *tex = nir_instr_as_tex(instr);
    b->cursor = nir_before_instr(instr);
 
-   if (tex->op != nir_texop_txs && tex->op != nir_texop_texture_samples &&
-       tex->op != nir_texop_query_levels)
+   if ((tex->op != nir_texop_txs && tex->op != nir_texop_texture_samples &&
+        tex->op != nir_texop_query_levels) ||
+       (tex->backend_flags & AGX_TEXTURE_FLAG_METADATA_QUERY))
       return false;
 
    nir_def *ptr = texture_descriptor_ptr(b, tex);

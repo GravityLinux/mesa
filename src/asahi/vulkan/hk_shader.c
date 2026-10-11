@@ -2625,7 +2625,7 @@ hk_apple9_lower_sparse_tex(nir_builder *b, nir_tex_instr *tex,
       nir_def *desc =
          nir_load_from_texture_handle_agx(b, tex->src[handle].src.ssa);
       nir_def *fields = nir_load_global_constant(b, 3, 32,
-         nir_iadd_imm(b, desc, offsetof(struct hk_sampled_image_descriptor, apple9)),
+         nir_iadd_imm(b, desc, offsetof(struct hk_apple9_image_part, residency_lo)),
          .align_mul = 4);
       nir_def *table = nir_pack_64_2x32_split(b, nir_channel(b, fields, 0),
                                               nir_channel(b, fields, 1));
@@ -3282,8 +3282,9 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       NIR_PASS(_, nir, nir_shader_intrinsics_pass, hk_apple9_lower_buffer_address,
                nir_metadata_control_flow, NULL);
       NIR_PASS(_, nir, agx_nir_lower_images);
-      /* The ordinary descriptor prefix also serves storage-image/buffer
-       * queries. Keep these GPU reads independent of native sampled tables. */
+      /* The ordinary descriptor prefix serves storage-image queries. Sampled
+       * views' queries (AGX_TEXTURE_FLAG_METADATA_QUERY) are answered from
+       * texture metadata by the Apple9 backend. */
       NIR_PASS(_, nir, agx_nir_lower_texture_queries);
    } else {
       NIR_PASS(_, nir, agx_nir_lower_texture);
@@ -3513,7 +3514,7 @@ hk_apple9_handle_intrinsic(nir_tex_instr *tex, unsigned sampler)
 }
 
 /* Address a descriptor relative to the USC aperture that holds G16
- * descriptor memory, see hk_apple9_image_descriptor. */
+ * descriptor memory, see hk_apple9_image_part. */
 static void
 hk_apple9_use_descriptor_handle(nir_builder *b, nir_tex_instr *tex,
                                 unsigned sampler)
@@ -3526,11 +3527,8 @@ hk_apple9_use_descriptor_handle(nir_builder *b, nir_tex_instr *tex,
    unsigned root = hk_root_descriptor_offset(sets) + set * sizeof(uint64_t);
    nir_def *base = nir_load_ubo(b, 1, 32, nir_imm_int(b, 0), nir_imm_int(b, root),
                                 .align_mul = 8, .range_base = root, .range = 4);
+   /* Texture and sampler handles address their record part directly. */
    nir_def *offset = handle->src[0].ssa;
-   if (sampler) {
-      offset = nir_iadd_imm(b, offset,
-         -(int)offsetof(struct hk_sampled_image_descriptor, sampler));
-   }
    nir_src_rewrite(&tex->src[src].src, nir_iadd(b, base, offset));
 }
 
