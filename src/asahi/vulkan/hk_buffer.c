@@ -175,17 +175,22 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
         (VK_BUFFER_CREATE_SPARSE_BINDING_BIT |
          VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT)))) {
 
-      uint32_t alignment = hk_get_buffer_alignment(
-         hk_device_physical(dev), buffer->vk.usage, buffer->vk.create_flags);
-      assert(alignment >= 16384);
-      /* As for device memory, align large buffers to 64 KiB. */
-      if (buffer->vk.size >= 65536)
-         alignment = MAX2(alignment, 65536);
-      uint64_t vma_size_B = align64(buffer->vk.size, alignment);
-
       const bool bda_capture_replay =
          buffer->vk.create_flags &
          VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT;
+      const uint64_t bda_fixed_addr =
+         bda_capture_replay ? hk_get_bda_replay_addr(pCreateInfo) : 0;
+
+      uint32_t alignment = hk_get_buffer_alignment(
+         hk_device_physical(dev), buffer->vk.usage, buffer->vk.create_flags);
+      assert(alignment >= 16384);
+      /* As for device memory, align large buffers to 64 KiB. A replayed
+       * address keeps the size it was captured with: captures made with
+       * 16 KiB rounding place the next buffer right after it.
+       */
+      if (buffer->vk.size >= 65536 && !bda_fixed_addr)
+         alignment = MAX2(alignment, 65536);
+      uint64_t vma_size_B = align64(buffer->vk.size, alignment);
 
       enum agx_va_flags flags = buffer->apple9_index_va ? AGX_VA_USC : 0;
       /* Shaders address descriptor records in the USC aperture. */
@@ -195,11 +200,8 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
             VK_BUFFER_USAGE_2_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT |
             VK_BUFFER_USAGE_2_PUSH_DESCRIPTORS_DESCRIPTOR_BUFFER_BIT_EXT)))
          flags |= AGX_VA_USC;
-      uint64_t bda_fixed_addr = 0;
-      if (bda_capture_replay) {
-         bda_fixed_addr = hk_get_bda_replay_addr(pCreateInfo);
+      if (bda_capture_replay)
          flags |= bda_fixed_addr != 0 ? AGX_VA_FIXED : AGX_VA_LOW;
-      }
 
       buffer->va =
          agx_va_alloc(&dev->dev, vma_size_B, alignment, flags, bda_fixed_addr);
