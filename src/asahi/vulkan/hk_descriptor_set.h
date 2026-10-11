@@ -214,6 +214,12 @@ static_assert(offsetof(struct hk_apple9_sampler_part, sampler) ==
                     AGX_APPLE9_SAMPLER_TABLE_STRIDE,
               "native sampler entry is where register indices expect it");
 
+/* A combined image sampler is an image part followed by a sampler part; a
+ * multi-plane descriptor repeats the whole record per plane. */
+#define HK_APPLE9_COMBINED_DESCRIPTOR_SIZE                                    \
+   (sizeof(struct hk_apple9_image_part) + sizeof(struct hk_apple9_sampler_part))
+#define HK_MAX_SAMPLED_DESCRIPTOR_SIZE (3 * HK_APPLE9_COMBINED_DESCRIPTOR_SIZE)
+
 void hk_apple9_texture_info(uint32_t *data, const struct agx_texture_packed *state);
 bool hk_apple9_runtime_sampler(uint32_t *data, const struct agx_sampler_packed *state,
                                bool clamp_to_edge);

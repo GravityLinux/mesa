@@ -56,7 +56,7 @@ write_desc(struct hk_descriptor_set *set, uint32_t binding, uint32_t elem,
 }
 
 /* Pack a sampled image, sampler or combined descriptor, one record per plane,
- * into out (room for 3 records of the largest kind); returns its size. */
+ * into out (HK_MAX_SAMPLED_DESCRIPTOR_SIZE bytes); returns its size. */
 static size_t
 hk_pack_sampled_image(struct hk_device *dev, void *out,
                       VkDescriptorType descriptor_type,
@@ -134,35 +134,45 @@ hk_pack_sampled_image(struct hk_device *dev, void *out,
       }
    }
    if (dev->dev.chip == AGX_CHIP_G16G) {
-      /* Native state for shaders that address the descriptor directly, one
-       * descriptor per plane. */
-      struct hk_apple9_image_descriptor ext[3];
-      memset(ext, 0, sizeof(ext));
+      /* One record per plane: an image part read through texture handles, a
+       * sampler part read through sampler handles, or both in that order for
+       * a combined image sampler. */
+      const bool image = descriptor_type != VK_DESCRIPTOR_TYPE_SAMPLER;
+      const bool sampled = descriptor_type == VK_DESCRIPTOR_TYPE_SAMPLER ||
+                           descriptor_type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+      const size_t record = (image ? sizeof(struct hk_apple9_image_part) : 0) +
+                            (sampled ? sizeof(struct hk_apple9_sampler_part) : 0);
+      memset(out, 0, record * plane_count);
       for (uint8_t plane = 0; plane < plane_count; plane++) {
-         ext[plane].common = desc[plane];
-         if (descriptor_type != VK_DESCRIPTOR_TYPE_SAMPLER) {
+         uint8_t *rec = (uint8_t *)out + plane * record;
+         if (image) {
+            struct hk_apple9_image_part *ip = (void *)rec;
             uint64_t residency = dev->apple9_resident->va->addr;
             if (info && info->imageView != VK_NULL_HANDLE) {
                VK_FROM_HANDLE(hk_image_view, view, info->imageView);
                residency = hk_apple9_view_residency(dev, view, plane);
-               ext[plane].common.apple9.base_level = view->vk.base_mip_level;
-               ext[plane].common.apple9.base_layer = view->vk.base_array_layer;
+               ip->base_level = view->vk.base_mip_level;
+               ip->base_layer = view->vk.base_array_layer;
             }
-            ext[plane].common.apple9.residency_lo = residency;
-            ext[plane].common.apple9.residency_hi = residency >> 32;
-            agx_apple9_translate_texture(ext[plane].texture, &desc[plane].tex);
-            hk_apple9_texture_info(ext[plane].texture_info, &desc[plane].tex);
+            ip->residency_lo = residency;
+            ip->residency_hi = residency >> 32;
+            ip->min_lod_fp16 = desc[plane].min_lod_fp16;
+            ip->min_lod_uint16 = desc[plane].min_lod_uint16;
+            agx_apple9_translate_texture(ip->texture, &desc[plane].tex);
+            hk_apple9_texture_info(ip->texture_info, &desc[plane].tex);
          }
-         if (descriptor_type == VK_DESCRIPTOR_TYPE_SAMPLER ||
-             descriptor_type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
-            hk_apple9_native_sampler(ext[plane].sampler, &desc[plane].sampler,
-                                     false, border);
-            hk_apple9_runtime_sampler(ext[plane].runtime_sampler,
-                                      &desc[plane].sampler, false);
+         if (sampled) {
+            struct hk_apple9_sampler_part *sp =
+               (void *)(rec + (image ? sizeof(struct hk_apple9_image_part) : 0));
+            hk_apple9_native_sampler(sp->sampler, &desc[plane].sampler, false,
+                                     border);
+            hk_apple9_runtime_sampler(sp->runtime_sampler, &desc[plane].sampler,
+                                      false);
+            sp->lod_bias_fp16 = desc[plane].lod_bias_fp16;
+            sp->txl_nudge_fp16 = desc[plane].txl_nudge_fp16;
          }
       }
-      memcpy(out, ext, sizeof(ext[0]) * plane_count);
-      return sizeof(ext[0]) * plane_count;
+      return record * plane_count;
    }
 
    memcpy(out, desc, sizeof(desc[0]) * plane_count);
@@ -186,7 +196,7 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
    }
    /* Push descriptor writes use a transient set without an object base. */
    struct hk_device *dev = (struct hk_device *)set->layout->vk.base.device;
-   struct hk_apple9_image_descriptor out[3];
+   uint8_t out[HK_MAX_SAMPLED_DESCRIPTOR_SIZE];
    size_t size = hk_pack_sampled_image(dev, out, descriptor_type, info, sampler);
    write_desc(set, binding, elem, out, size);
 }
@@ -1050,23 +1060,10 @@ hk_GetDescriptorEXT(VkDevice _device, const VkDescriptorGetInfoEXT *info,
       } else if (info->data.pInputAttachmentImage) {
          image = *info->data.pInputAttachmentImage;
       }
-      struct hk_apple9_image_descriptor out[3];
+      uint8_t out[HK_MAX_SAMPLED_DESCRIPTOR_SIZE];
       size_t size = hk_pack_sampled_image(dev, out, info->type, &image, sampler);
-      if (dev->dev.chip != AGX_CHIP_G16G) {
-         hk_store_descriptor(pDescriptor, dataSize, out, size);
-         break;
-      }
-      /* Planes are consecutive descriptor-buffer records. */
-      unsigned planes = size / sizeof(out[0]);
-      assert(planes * HK_APPLE9_DB_SAMPLED_SIZE <= dataSize);
-      for (unsigned p = 0; p < planes; ++p) {
-         hk_store_descriptor((uint8_t *)pDescriptor + p * HK_APPLE9_DB_SAMPLED_SIZE,
-                             HK_APPLE9_DB_SAMPLED_SIZE, &out[p], sizeof(out[p]));
-      }
-      if (dataSize > planes * HK_APPLE9_DB_SAMPLED_SIZE) {
-         memset((uint8_t *)pDescriptor + planes * HK_APPLE9_DB_SAMPLED_SIZE, 0,
-                dataSize - planes * HK_APPLE9_DB_SAMPLED_SIZE);
-      }
+      /* Planes are already consecutive records. */
+      hk_store_descriptor(pDescriptor, dataSize, out, size);
       break;
    }
 
@@ -1125,7 +1122,7 @@ hk_descriptor_pack_embedded_samplers(struct hk_device *dev,
       if (!bl->immutable_samplers)
          continue;
       for (uint32_t e = 0; e < bl->array_size; ++e) {
-         struct hk_apple9_image_descriptor out[3];
+         uint8_t out[HK_MAX_SAMPLED_DESCRIPTOR_SIZE];
          size_t size = hk_pack_sampled_image(dev, out, VK_DESCRIPTOR_TYPE_SAMPLER,
                                              &(VkDescriptorImageInfo){0},
                                              bl->immutable_samplers[e]);

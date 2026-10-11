@@ -47,6 +47,8 @@ hk_descriptor_stride_align_for_type(
          *stride = HK_APPLE9_DB_SAMPLER_SIZE;
          return;
       case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+         *stride = HK_APPLE9_DB_COMBINED_SIZE;
+         return;
       case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
       case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
          *stride = HK_APPLE9_DB_SAMPLED_SIZE;
@@ -76,7 +78,12 @@ hk_descriptor_stride_align_for_type(
    case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
    case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
       if (pdev->dev.chip == AGX_CHIP_G16G) {
-         *stride = sizeof(struct hk_apple9_image_descriptor);
+         /* Image part, sampler part, or both for a combined image sampler. */
+         *stride = type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+                      ? HK_APPLE9_COMBINED_DESCRIPTOR_SIZE
+                   : type == VK_DESCRIPTOR_TYPE_SAMPLER
+                      ? sizeof(struct hk_apple9_sampler_part)
+                      : sizeof(struct hk_apple9_image_part);
          *alignment = AGX_APPLE9_TEXTURE_TABLE_STRIDE;
          break;
       }
