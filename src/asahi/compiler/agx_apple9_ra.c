@@ -556,7 +556,11 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
                   tuples[nr_tuples++].vector = vector;
                }
             } else if (tuple && load) {
-               ins->retain_mask |= BITFIELD_RANGE(s, width);
+               /* Every candidate derives the same bits; the first (serial)
+                * one sets them, so parallel candidates only read them. */
+               const uint32_t retain = BITFIELD_RANGE(s, width);
+               if ((ins->retain_mask & retain) != retain)
+                  ins->retain_mask |= retain;
             }
             sources[nr_srcs] = vector;
          }
