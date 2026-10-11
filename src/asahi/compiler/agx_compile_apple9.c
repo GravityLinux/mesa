@@ -6884,11 +6884,6 @@ apple9_promote_constants(nir_shader *shader, nir_function_impl *preamble,
    util_dynarray_fini(&list);
 }
 
-/* A value left in the main program holds a register from its definition to
- * its last use. When the uniform words run out, that span, not only the
- * instructions it takes to compute, is what a uniform word saves: long-lived
- * buffer bases and invariant values otherwise occupy GPRs across the whole
- * program and force spills. */
 /* Index of the last instruction of a loop (instructions are indexed in
  * program order, so it is the largest in the loop). */
 static unsigned
@@ -6914,6 +6909,11 @@ apple9_cf_inside(nir_cf_node *node, nir_loop *loop)
    return false;
 }
 
+/* A value left in the main program holds a register from its definition to
+ * its last use. When the uniform words run out, that span, not only the
+ * instructions it takes to compute, is what a uniform word saves: long-lived
+ * buffer bases and invariant values otherwise occupy GPRs across the whole
+ * program and force spills. */
 static unsigned
 apple9_main_span(nir_instr *instr)
 {
@@ -6927,12 +6927,16 @@ apple9_main_span(nir_instr *instr)
       nir_instr *use = nir_src_use_instr(src);
       last = MAX2(last, use->index);
       /* A use inside a loop that does not contain the definition keeps the
-       * value live to the end of that (outermost such) loop. */
+       * value live to the end of that (outermost such) loop, except a phi in
+       * the loop header, whose own value takes over at loop entry. */
       for (nir_cf_node *node = use->block->cf_node.parent; node;
            node = node->parent) {
          if (node->type != nir_cf_node_loop)
             continue;
          nir_loop *loop = nir_cf_node_as_loop(node);
+         if (use->type == nir_instr_type_phi &&
+             use->block == nir_loop_first_block(loop))
+            continue;
          if (!apple9_cf_inside(&instr->block->cf_node, loop))
             last = MAX2(last, apple9_loop_end_index(loop));
       }
