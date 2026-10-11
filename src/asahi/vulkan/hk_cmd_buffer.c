@@ -410,6 +410,8 @@ hk_pool_upload_cached(struct hk_cmd_buffer *cmd, const void *data,
    return ptr.gpu;
 }
 
+DEBUG_GET_ONCE_BOOL_OPTION(hk_upload_stats, "HK_UPLOAD_STATS", false)
+
 /* Upload a per-draw table, reusing the previous upload of the same kind when
  * the contents are unchanged. Unlike the content cache this keeps one entry
  * per kind: these tables carry the root address, so they rarely repeat
@@ -541,7 +543,7 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
     * uploads until reset, but do not retain duplicate CPU copies in executable
     * command buffers.
     */
-   if (cmd->upload_cache && debug_get_bool_option("HK_UPLOAD_STATS", false)) {
+   if (cmd->upload_cache && debug_get_option_hk_upload_stats()) {
       size_t bytes = 0;
       unsigned per_type[HK_UPLOAD_TABLE + 1] = {0};
       hash_table_foreach(cmd->upload_cache, entry) {

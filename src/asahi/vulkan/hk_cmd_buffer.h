@@ -625,7 +625,9 @@ struct hk_cmd_buffer {
    struct hk_upload_last_entry {
       uint64_t gpu;
       uint32_t size;
-      uint8_t data[AGX_MAX_VBUFS * 32];
+      /* The largest table: vertex buffers or a stage's resource table. */
+      uint8_t data[MAX2(AGX_MAX_VBUFS * 32,
+                        AGX_APPLE9_MAX_GRAPHICS_BUFFERS * sizeof(uint64_t))];
    } upload_last[HK_UPLOAD_LAST_COUNT];
 
    /* The previous Apple9 draw in the current graphics control stream, so an
