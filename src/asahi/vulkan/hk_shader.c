@@ -122,6 +122,65 @@ shared_var_info(const struct glsl_type *type, unsigned *size, unsigned *align)
 static uint64_t hk_compiler_env_hash_value;
 static once_flag hk_compiler_env_hash_once = ONCE_FLAG_INIT;
 
+/* Environment knobs whose value changes generated code: their values key the
+ * shader caches. Keep this list next to the knobs; any other AGX_* or
+ * HK_APPLE9_* variable (traces, dumps, statistics, runtime switches, or a
+ * codegen knob missing here) keys the caches by name only, so output paths
+ * never split them while an unlisted knob still does, conservatively.
+ */
+static const char *const hk_codegen_env[] = {
+   "AGX_MESA_DEBUG", "AGX_SPILL_COALESCE", "AGX_SPILL_NO_LOOP_HANDLING",
+   "AGX_APPLE9_BLOCK_ZERO", "AGX_APPLE9_COMPARE_LITERAL",
+   "AGX_APPLE9_FIRST_CANDIDATE", "AGX_APPLE9_FOLD_ASSUME_NO_WRAP",
+   "AGX_APPLE9_GATED", "AGX_APPLE9_HOIST_DISTANCE", "AGX_APPLE9_HOIST_LOADS",
+   "AGX_APPLE9_HOIST_SAMPLES", "AGX_APPLE9_KEEP_UNSELECTED_HOISTS",
+   "AGX_APPLE9_LICM", "AGX_APPLE9_LICM_SPECULATE", "AGX_APPLE9_NO_BFE",
+   "AGX_APPLE9_NO_DESCRIPTOR_HOIST", "AGX_APPLE9_NO_FLOAT_IMM",
+   "AGX_APPLE9_NO_INT_IMM", "AGX_APPLE9_NO_POINTER_LOAD",
+   "AGX_APPLE9_NO_PROMOTE", "AGX_APPLE9_NO_SAMPLER_HOIST",
+   "AGX_APPLE9_PREAMBLE_SPAN", "AGX_APPLE9_RA_WEBS",
+   "AGX_APPLE9_SAFE_HOIST_STAGES",
+   "HK_APPLE9_DESCRIPTOR_BUFFER", "HK_APPLE9_GS_BATCH",
+   "HK_APPLE9_KEEP_UNREAD_OUTPUTS", "HK_APPLE9_MESH_SHADER",
+   "HK_APPLE9_NO_STORE_ENCODE", "HK_APPLE9_NO_TEXTURE_LOADS",
+   "HK_APPLE9_NO_UNIFORM_SAFE_BOUNDED", "HK_APPLE9_ROBUST_MERGE_BYTES",
+   "HK_APPLE9_SPARSE_SCRATCH", "HK_APPLE9_SPARSE_UNMAPPED_RAW",
+   "HK_APPLE9_TESS_BATCH", "HK_APPLE9_TESS_SCAN_BLOCK",
+   "HK_APPLE9_TEXEL_CLASSES", "HK_APPLE9_TEXTURE_LOADS_META",
+   "HK_APPLE9_TEXTURE_LOADS_TYPED", "HK_APPLE9_UNIFORM_SAFE_CLASSES",
+   "HK_APPLE9_VECTORIZE_PEAK_SLACK", "HK_APPLE9_VECTORIZE_PRESSURE_BUDGET",
+   "HK_APPLE9_VECTORIZE_USE_WINDOW", "HK_APPLE9_VECTORIZE_WINDOW",
+};
+
+/* Knobs that never change generated code and must not split the caches at
+ * all: the variant cache check compares against the normal entries. */
+static const char *const hk_ignored_env[] = {
+   "HK_APPLE9_VARIANT_CACHE_VERIFY",
+};
+
+static bool
+hk_env_named(const char *var, const char *const *names, unsigned count)
+{
+   const size_t len = strcspn(var, "=");
+   for (unsigned i = 0; i < count; ++i) {
+      if (strlen(names[i]) == len && !strncmp(var, names[i], len))
+         return true;
+   }
+   return false;
+}
+
+/* How an environment entry keys the caches: 0 not at all, 1 by name, 2 by
+ * value. */
+static unsigned
+hk_env_key_kind(const char *var)
+{
+   if (strncmp(var, "AGX_", 4) && strncmp(var, "HK_APPLE9_", 10))
+      return 0;
+   if (hk_env_named(var, hk_ignored_env, ARRAY_SIZE(hk_ignored_env)))
+      return 0;
+   return hk_env_named(var, hk_codegen_env, ARRAY_SIZE(hk_codegen_env)) ? 2 : 1;
+}
+
 static int
 hk_compare_env(const void *a, const void *b)
 {
@@ -134,7 +193,7 @@ hk_compiler_env_hash_init(void)
    extern char **environ;
    unsigned count = 0;
    for (char **e = environ; e && *e; ++e)
-      count += !strncmp(*e, "AGX_", 4) || !strncmp(*e, "HK_APPLE9_", 10);
+      count += hk_env_key_kind(*e) != 0;
    if (!count)
       return;
 
@@ -145,15 +204,20 @@ hk_compiler_env_hash_init(void)
    }
    unsigned n = 0;
    for (char **e = environ; e && *e && n < count; ++e) {
-      if (!strncmp(*e, "AGX_", 4) || !strncmp(*e, "HK_APPLE9_", 10))
+      if (hk_env_key_kind(*e))
          vars[n++] = *e;
    }
    qsort(vars, n, sizeof(*vars), hk_compare_env);
 
    struct mesa_blake3 ctx;
    _mesa_blake3_init(&ctx);
-   for (unsigned i = 0; i < n; ++i)
-      _mesa_blake3_update(&ctx, vars[i], strlen(vars[i]) + 1);
+   for (unsigned i = 0; i < n; ++i) {
+      /* Name-only knobs hash "NAME", value knobs "NAME=VALUE". */
+      const size_t len = hk_env_key_kind(vars[i]) == 2 ? strlen(vars[i])
+                                                       : strcspn(vars[i], "=");
+      _mesa_blake3_update(&ctx, vars[i], len);
+      _mesa_blake3_update(&ctx, "", 1);
+   }
    blake3_hash hash;
    _mesa_blake3_final(&ctx, hash);
    memcpy(&hk_compiler_env_hash_value, hash, sizeof(hk_compiler_env_hash_value));
