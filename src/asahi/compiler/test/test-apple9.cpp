@@ -9181,9 +9181,9 @@ TEST(Apple9Compiler, TextureOffsetsLowerPerMipThroughOrdinaryFetches)
       agx_shader_part compiled = {};
       ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason)) << (reason ?: "");
       EXPECT_EQ(compiled.info.apple9_texture_mask, 1u << 7);
-      /* Runtime sampler state samples a custom border colour natively. */
-      EXPECT_EQ(compiled.info.apple9_sampler_mask,
-                runtime && !shadow ? 1u << 5 : 0u);
+      /* Runtime sampler state samples single-level offsets (and a custom
+       * border colour) natively, so it binds the sampler. */
+      EXPECT_EQ(compiled.info.apple9_sampler_mask, runtime ? 1u << 5 : 0u);
       EXPECT_TRUE(compiled.info.apple9_uses_texel_fetch);
       free(compiled.binary);
       ralloc_free(b.shader);
