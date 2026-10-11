@@ -262,57 +262,6 @@ hk_apple9_context_alloc(void *data, size_t size, size_t alignment)
    return hk_pool_context_alloc(data, size, alignment);
 }
 
-static struct agx_apple9_render_stage
-hk_apple9_stage(struct hk_shader *s, bool fragment)
-{
-   const struct agx_shader_info *i = &s->b.info;
-   struct agx_apple9_render_stage stage = {
-      .program_id = s->apple9_program_id,
-      .bo = s->bo,
-      .binary = s->code_ptr,
-      .binary_size = i->binary_size,
-      .preamble_offset = i->apple9_preamble_offset,
-      .preamble_size = i->apple9_preamble_size,
-      .publication_count = i->apple9_publication_count,
-      .publication_count_valid = true,
-      .scratch_size = i->scratch_size,
-      .atomic_frame_size = i->apple9_atomic_frame_size,
-      .resource_count = i->apple9_resource_count,
-      .resource_ssbo_mask = i->apple9_resource_ssbo_mask,
-      .resource_write_mask = i->apple9_resource_write_mask,
-      .position_components = fragment ? 0 : 4,
-      .varying_components = i->apple9_varyings.count,
-      .varyings = i->apple9_varyings,
-      .apple9_linear_mask = i->apple9_linear_mask,
-      .apple9_flat_mask = i->apple9_flat_mask,
-      .apple9_reads_z = i->apple9_reads_z,
-      .reads_primitive_id = i->apple9_reads_primitive_id,
-      .reads_point_coord = i->apple9_reads_point_coord,
-      .barycentric_mask = i->apple9_barycentric_mask,
-      .per_vertex_count = i->apple9_per_vertex_count,
-      .writes_point_size = i->apple9_writes_point_size,
-      .writes_layer_viewport = i->writes_layer_viewport,
-      .clip_distance_count = i->apple9_clip_distance_count,
-      .render_targets = s->info.apple9_render_targets,
-      .launch_cache = s->apple9_stage_launch,
-      .texture_mask = i->apple9_texture_mask,
-      .sampler_mask = i->apple9_sampler_mask,
-      .image_mask = i->apple9_image_mask,
-      .uses_texel_fetch = i->apple9_uses_texel_fetch,
-      .reads_tile = i->apple9_reads_tile,
-      .uses_discard = i->apple9_uses_discard,
-      .writes_depth = i->depth_layout != FRAG_DEPTH_LAYOUT_UNCHANGED,
-      .disable_tri_merging = i->disable_tri_merging,
-   };
-   memcpy(stage.resource_binding, i->apple9_resource_binding,
-          sizeof(stage.resource_binding));
-   memcpy(stage.per_vertex, i->apple9_per_vertex, sizeof(stage.per_vertex));
-   /* Every uploaded graphics stage has an id; without one, consecutive draws
-    * silently stop reusing launches and coefficient tables. */
-   assert(!s->bo || stage.program_id);
-   return stage;
-}
-
 /* Draw parameters (first vertex or index bias, then base instance) and the
  * vertex buffer table, shared by the hardware vertex fetch and by software
  * vertex shaders in front of a geometry shader.
@@ -482,18 +431,35 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
                          VK_PRIMITIVE_TOPOLOGY_LINE_LIST &&
                       dyn->ia.primitive_topology <=
                          VK_PRIMITIVE_TOPOLOGY_LINE_STRIP);
-   struct agx_apple9_render_stage vertex = hk_apple9_stage(shaders[0], false);
-   struct agx_apple9_render_stage fragment = hk_apple9_stage(shaders[1], true);
+   const struct agx_apple9_render_stage *vertex = &shaders[0]->apple9_stage;
+   const struct agx_apple9_render_stage *fragment = &shaders[1]->apple9_stage;
    if (!gfx->shaders[MESA_SHADER_FRAGMENT] ||
        gfx->shaders[MESA_SHADER_FRAGMENT] == dev->null_fs) {
       /* The empty fragment program reads no varyings. Retain the producer's
        * layout for the native interface linker, independent of its contents. */
-      fragment.varyings = vertex.varyings;
-      fragment.varying_components = vertex.varying_components;
+      if (!vertex->program_id ||
+          cmd->apple9_null_fs_vertex_id != vertex->program_id) {
+         cmd->apple9_null_fs = *fragment;
+         cmd->apple9_null_fs.varyings = vertex->varyings;
+         cmd->apple9_null_fs.varying_components = vertex->varying_components;
+         cmd->apple9_null_fs_vertex_id = vertex->program_id;
+      }
+      fragment = &cmd->apple9_null_fs;
    }
-   struct agx_apple9_render_pipeline pipeline;
-   if (!agx_apple9_link_render_pipeline(&pipeline, vertex, fragment))
-      UNSUPPORTED();
+   if (!vertex->program_id || !fragment->program_id ||
+       cmd->apple9_linked_id[0] != vertex->program_id ||
+       cmd->apple9_linked_id[1] != fragment->program_id ||
+       cmd->apple9_linked.vertex != vertex ||
+       cmd->apple9_linked.fragment != fragment) {
+      if (!agx_apple9_link_render_pipeline(&cmd->apple9_linked, vertex,
+                                           fragment)) {
+         cmd->apple9_linked_id[0] = cmd->apple9_linked_id[1] = 0;
+         UNSUPPORTED();
+      }
+      cmd->apple9_linked_id[0] = vertex->program_id;
+      cmd->apple9_linked_id[1] = fragment->program_id;
+   }
+   struct agx_apple9_render_pipeline pipeline = cmd->apple9_linked;
    /* Attachmentless render passes acquire their sample count from the first
     * drawing pipeline. Keep the native tile layout and submission state in
     * agreement with the fragment launch, including a pre-existing query CS.
@@ -773,10 +739,10 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    record.object_type = points ? AGX_OBJECT_TYPE_POINT_SPRITE_UV01
                         : lines ? AGX_OBJECT_TYPE_LINE
                                 : AGX_OBJECT_TYPE_TRIANGLE;
-   record.reads_tile = pipeline.fragment.reads_tile;
-   record.uses_discard = pipeline.fragment.uses_discard;
-   record.writes_depth = pipeline.fragment.writes_depth;
-   record.disable_tri_merging = pipeline.fragment.disable_tri_merging;
+   record.reads_tile = fragment->reads_tile;
+   record.uses_discard = fragment->uses_discard;
+   record.writes_depth = fragment->writes_depth;
+   record.disable_tri_merging = fragment->disable_tri_merging;
    record.flatshade_first = pipeline.flatshade_first;
    gfx->descriptors.root.draw.api_sample_mask = dyn->ms.sample_mask;
    gfx->descriptors.root.draw.rasterized_prim =
@@ -795,7 +761,7 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    uint64_t vertex_table = bindings.vertex_buffers;
    for (unsigned stage = 0; stage < 2; ++stage) {
       const struct agx_apple9_render_stage *s =
-         stage ? &pipeline.fragment : &pipeline.vertex;
+         stage ? fragment : vertex;
       uint64_t sysvals = 0;
       if (!hk_apple9_upload_textures(cmd, shaders[stage], true,
                                      pipeline.primitive == AGX_PRIMITIVE_TRIANGLE_FAN,

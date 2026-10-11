@@ -1409,10 +1409,10 @@ agx_apple9_prepare_draw_alloc(
                         const struct agx_apple9_uniform_draw *previous,
    agx_apple9_cached_alloc cached_alloc)
 {
-   const struct agx_apple9_render_stage *stages[] = {&pipeline->vertex,
-                                                     &pipeline->fragment};
+   const struct agx_apple9_render_stage *stages[] = {pipeline->vertex,
+                                                     pipeline->fragment};
    unsigned tile_bytes = 0;
-   for (unsigned rt = 0; rt < pipeline->fragment.render_targets; rt++)
+   for (unsigned rt = 0; rt < pipeline->fragment->render_targets; rt++)
       tile_bytes += 4 * agx_apple9_color_words(pipeline->color_formats[rt]);
    unsigned samples = MAX2(pipeline->samples, 1);
    /* Each sample holds up to 128 bytes at every sample count; the default
@@ -1457,12 +1457,12 @@ agx_apple9_prepare_draw_alloc(
    } else {
       uint8_t contents[APPLE9_CF_BINDINGS_SIZE];
       cf_count = apple9_build_cf_bindings(
-         contents, pipeline->vertex.varying_components,
-         pipeline->fragment.apple9_linear_mask,
-         pipeline->fragment.apple9_flat_mask, draw->provoking_vertex,
-         pipeline->fragment.apple9_reads_z,
-         pipeline->fragment.reads_point_coord, pipeline->fragment.reads_primitive_id,
-         &pipeline->fragment);
+         contents, pipeline->vertex->varying_components,
+         pipeline->fragment->apple9_linear_mask,
+         pipeline->fragment->apple9_flat_mask, draw->provoking_vertex,
+         pipeline->fragment->apple9_reads_z,
+         pipeline->fragment->reads_point_coord, pipeline->fragment->reads_primitive_id,
+         pipeline->fragment);
       bool is_new = true;
       struct agx_ptr cf = cached_alloc
          ? cached_alloc(usc_allocator, AGX_APPLE9_STATE_COEFFICIENTS,
@@ -1479,29 +1479,29 @@ agx_apple9_prepare_draw_alloc(
    memset(ppp, 0, sizeof(draw->ppp_record));
    apple9_put_u32(ppp, 0x10040000);
    unsigned counts[3] = {0};
-   const struct agx_apple9_varying_layout *varyings = &pipeline->vertex.varyings;
+   const struct agx_apple9_varying_layout *varyings = &pipeline->vertex->varyings;
    for (unsigned i = 0; i < ARRAY_SIZE(varyings->mask); ++i) {
       assert(varyings->group[i] < ARRAY_SIZE(counts));
       counts[varyings->group[i]] += util_bitcount(varyings->mask[i]);
    }
    apple9_put_u32(ppp + 4, counts[0] | (counts[1] << 8) | (counts[2] << 16));
    uint8_t *group = ppp + 0x40;
-   apple9_build_direct_bind_group(group, pipeline->vertex.varying_components);
+   apple9_build_direct_bind_group(group, pipeline->vertex->varying_components);
    apple9_put_u32(group + 8, draw->coefficients);
-   if (pipeline->fragment.apple9_reads_z)
+   if (pipeline->fragment->apple9_reads_z)
       apple9_put_u32(group + 0x20, apple9_get_u32(group + 0x20) | (1u << 21));
-   if (pipeline->fragment.reads_primitive_id)
+   if (pipeline->fragment->reads_primitive_id)
       apple9_put_u32(group + 0x68, apple9_get_u32(group + 0x68) | (1u << 12));
-   if (pipeline->vertex.writes_point_size) {
+   if (pipeline->vertex->writes_point_size) {
       apple9_put_u32(group + 0x20, apple9_get_u32(group + 0x20) | (1u << 18));
    }
-   if (pipeline->vertex.writes_layer_viewport)
+   if (pipeline->vertex->writes_layer_viewport)
       apple9_put_u32(group + 0x20, apple9_get_u32(group + 0x20) | (3u << 19));
    apple9_put_u32(group + 0x20, apple9_get_u32(group + 0x20) |
-                  BITFIELD_MASK(pipeline->vertex.clip_distance_count));
-   apple9_put_u32(group + 0x2c, 4 + pipeline->vertex.varying_components +
-                  pipeline->vertex.writes_point_size + pipeline->vertex.clip_distance_count +
-                  pipeline->vertex.writes_layer_viewport);
+                  BITFIELD_MASK(pipeline->vertex->clip_distance_count));
+   apple9_put_u32(group + 0x2c, 4 + pipeline->vertex->varying_components +
+                  pipeline->vertex->writes_point_size + pipeline->vertex->clip_distance_count +
+                  pipeline->vertex->writes_layer_viewport);
    apple9_put_u32(group + 4,
                   (apple9_get_u32(group + 4) & 0xffff) | (cf_count << 16));
    /* Match the textured setup's native state, including with two user
@@ -1653,43 +1653,44 @@ static const struct agx_apple9_ppp_update direct_ppp[] = {
 };
 
 bool
-agx_apple9_link_render_pipeline(struct agx_apple9_render_pipeline *pipeline,
-                                struct agx_apple9_render_stage vertex,
-                                struct agx_apple9_render_stage fragment)
+agx_apple9_link_render_pipeline(
+   struct agx_apple9_render_pipeline *pipeline,
+   const struct agx_apple9_render_stage *vertex,
+   const struct agx_apple9_render_stage *fragment)
 {
-   return agx_apple9_link_render_pipeline_with_prolog(
-      pipeline, (struct agx_apple9_render_stage){0}, vertex, fragment);
+   return agx_apple9_link_render_pipeline_with_prolog(pipeline, NULL, vertex,
+                                                      fragment);
 }
 
 bool
 agx_apple9_link_render_pipeline_with_prolog(
    struct agx_apple9_render_pipeline *pipeline,
-   struct agx_apple9_render_stage vertex_prolog,
-   struct agx_apple9_render_stage vertex,
-   struct agx_apple9_render_stage fragment)
+   const struct agx_apple9_render_stage *vertex_prolog,
+   const struct agx_apple9_render_stage *vertex,
+   const struct agx_apple9_render_stage *fragment)
 {
-   if (!pipeline || !vertex.binary || !vertex.binary_size || !fragment.binary ||
-       !fragment.binary_size || vertex.binary_size > UINT32_MAX ||
-       fragment.binary_size > UINT32_MAX || vertex_prolog.binary ||
-       vertex_prolog.binary_size)
+   if (!pipeline || !vertex || !fragment || !vertex->binary ||
+       !vertex->binary_size || !fragment->binary || !fragment->binary_size ||
+       vertex->binary_size > UINT32_MAX || fragment->binary_size > UINT32_MAX ||
+       (vertex_prolog && (vertex_prolog->binary || vertex_prolog->binary_size)))
       return false;
 
    /*
     * Apple9 compacts the cross-stage interface to scalar UVS slots.  Position
     * occupies slots 0..3; compacted user scalars follow in semantic order.
     */
-   if (vertex.position_components != 4 ||
-       vertex.varying_components > AGX_APPLE9_MAX_VARYING_COMPONENTS ||
-       vertex.clip_distance_count > 8 ||
-       fragment.position_components != 0 ||
-       fragment.varying_components != vertex.varying_components ||
-       memcmp(&vertex.varyings, &fragment.varyings, sizeof(vertex.varyings)) ||
-       fragment.render_targets > 8)
+   if (vertex->position_components != 4 ||
+       vertex->varying_components > AGX_APPLE9_MAX_VARYING_COMPONENTS ||
+       vertex->clip_distance_count > 8 ||
+       fragment->position_components != 0 ||
+       fragment->varying_components != vertex->varying_components ||
+       memcmp(&vertex->varyings, &fragment->varyings, sizeof(vertex->varyings)) ||
+       fragment->render_targets > 8)
       return false;
 
-   const unsigned scalar_outputs = 4 + vertex.varying_components +
-                                   vertex.writes_point_size + vertex.clip_distance_count +
-                                   vertex.writes_layer_viewport;
+   const unsigned scalar_outputs = 4 + vertex->varying_components +
+                                   vertex->writes_point_size + vertex->clip_distance_count +
+                                   vertex->writes_layer_viewport;
    *pipeline = (struct agx_apple9_render_pipeline){
       .vertex = vertex,
       .fragment = fragment,
@@ -1705,7 +1706,7 @@ agx_apple9_link_render_pipeline_with_prolog(
 size_t
 agx_apple9_direct_draw_size(const struct agx_apple9_render_pipeline *pipeline)
 {
-   assert(pipeline && pipeline->vertex.binary && pipeline->fragment.binary);
+   assert(pipeline && pipeline->vertex->binary && pipeline->fragment->binary);
    return 0x78 + (pipeline->index_size ? 20 : 0);
 }
 
@@ -1713,7 +1714,7 @@ static uint8_t *
 agx_apple9_emit_draw_state(uint8_t *out,
                            const struct agx_apple9_render_pipeline *pipeline)
 {
-   assert(pipeline && pipeline->vertex.binary && pipeline->fragment.binary);
+   assert(pipeline && pipeline->vertex->binary && pipeline->fragment->binary);
    assert(pipeline->ppp && !(pipeline->ppp & 0x3f));
 
    uint32_t header[] = {
@@ -1723,7 +1724,7 @@ agx_apple9_emit_draw_state(uint8_t *out,
       pipeline->vertex_launch,
       pipeline->vertex_state_class,
       apple9_provoking_vertex(pipeline->primitive, pipeline->flatshade_first) |
-         (pipeline->fragment.reads_primitive_id ? (1u << 6) : 0),
+         (pipeline->fragment->reads_primitive_id ? (1u << 6) : 0),
       0x00000000, /* VDM padding */
       0x00000500, /* first PPP state update header */
    };

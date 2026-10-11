@@ -646,6 +646,16 @@ struct hk_cmd_buffer {
    struct agx_apple9_uniform_draw apple9_prev_draw;
    struct hk_cs *apple9_prev_cs;
 
+   /* The last linked Apple9 (vertex, fragment) pair, by program id: shader
+    * objects pair stages only at draw time, so link once per change. */
+   struct agx_apple9_render_pipeline apple9_linked;
+   uint64_t apple9_linked_id[2];
+
+   /* The null fragment stage carrying the vertex stage's varying layout,
+    * for the vertex program apple9_null_fs_vertex_id. */
+   struct agx_apple9_render_stage apple9_null_fs;
+   uint64_t apple9_null_fs_vertex_id;
+
    /* List of all recorded control streams */
    struct list_head control_streams;
 

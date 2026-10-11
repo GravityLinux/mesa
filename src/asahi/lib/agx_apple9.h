@@ -101,9 +101,10 @@ struct agx_apple9_render_stage {
 };
 
 struct agx_apple9_render_pipeline {
-   /* Vertex fetch is lowered into the API vertex program. */
-   struct agx_apple9_render_stage vertex;
-   struct agx_apple9_render_stage fragment;
+   /* Vertex fetch is lowered into the API vertex program. The stages belong
+    * to their compiled shaders, which outlive every draw using them. */
+   const struct agx_apple9_render_stage *vertex;
+   const struct agx_apple9_render_stage *fragment;
 
    /* Color surfaces in draw-buffer order; absent attachments have address 0. */
    uint64_t color_targets[8];
@@ -431,15 +432,16 @@ void agx_apple9_pack_nearest_sampler(void *out);
  * direct triangle lists, with optional 16- or 32-bit indices.
  */
 bool
-agx_apple9_link_render_pipeline(struct agx_apple9_render_pipeline *pipeline,
-                                struct agx_apple9_render_stage vertex,
-                                struct agx_apple9_render_stage fragment);
+agx_apple9_link_render_pipeline(
+   struct agx_apple9_render_pipeline *pipeline,
+   const struct agx_apple9_render_stage *vertex,
+   const struct agx_apple9_render_stage *fragment);
 
 bool agx_apple9_link_render_pipeline_with_prolog(
    struct agx_apple9_render_pipeline *pipeline,
-   struct agx_apple9_render_stage vertex_prolog,
-   struct agx_apple9_render_stage vertex,
-   struct agx_apple9_render_stage fragment);
+   const struct agx_apple9_render_stage *vertex_prolog,
+   const struct agx_apple9_render_stage *vertex,
+   const struct agx_apple9_render_stage *fragment);
 
 size_t
 agx_apple9_direct_draw_size(const struct agx_apple9_render_pipeline *pipeline);

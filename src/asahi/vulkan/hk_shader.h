@@ -12,6 +12,7 @@
 #include "util/macros.h"
 #include "agx_linker.h"
 #include "asahi/compiler/agx_apple9_profile.h"
+#include "asahi/lib/agx_apple9.h"
 #include "agx_nir_lower_vbo.h"
 #include "agx_pack.h"
 #include "agx_usc.h"
@@ -277,6 +278,9 @@ struct hk_shader {
     * draws with the same shaders reuse launches and coefficient tables (see
     * agx_apple9_prepare_draw_alloc). Zero disables the reuse. */
    uint64_t apple9_program_id;
+   /* G16 graphics: the native stage description, built once at upload and
+    * linked by pointer at draw time. */
+   struct agx_apple9_render_stage apple9_stage;
 
    /* Cache of fast linked variants */
    struct {
