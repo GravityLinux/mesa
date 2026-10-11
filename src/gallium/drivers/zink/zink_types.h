@@ -37,6 +37,7 @@
 #include "pipe/p_state.h"
 
 #include "pipebuffer/pb_cache.h"
+#include "util/cnd_monotonic.h"
 #include "util/pb_slab.h"
 
 #include "util/blob.h"
@@ -602,7 +603,7 @@ struct zink_batch_usage {
      * it is written under mtx, and the submit increment happens together with setting fence.submitted
      */
    uint32_t submit_count;
-   cnd_t flush;
+   struct u_cnd_monotonic flush;
    mtx_t mtx;
    bool unflushed;
 };
