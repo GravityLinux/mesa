@@ -67,7 +67,9 @@ hk_flush_if_timestamp(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool)
     */
    if (pool->vk.query_type == VK_QUERY_TYPE_TIMESTAMP) {
       perf_debug(cmd, "Flushing for timestamp copy");
+      hk_cs_end_hint(cmd, HK_CS_END_QUERY);
       hk_cmd_buffer_end_graphics(cmd);
+      hk_cs_end_hint(cmd, HK_CS_END_QUERY);
       hk_cmd_buffer_end_compute(cmd);
    }
 }
@@ -240,6 +242,7 @@ hk_occlusion_prepare_draw(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
       if (gfx->occlusion.active_count) {
          if (cs->occlusion_segments == HK_OCCLUSION_SEGMENTS) {
             perf_debug(cmd, "Splitting control stream for occlusion segments");
+            hk_cs_end_hint(cmd, HK_CS_END_QUERY);
             hk_cmd_buffer_end_graphics(cmd);
             cs = hk_cmd_buffer_get_cs(cmd, false /* compute */);
             if (!cs)
@@ -468,6 +471,7 @@ hk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
        cmd->current_cs.cs->timestamp.end.addr) {
 
       perf_debug(cmd, "Splitting for compute timestamp");
+      hk_cs_end_hint(cmd, HK_CS_END_QUERY);
       hk_cmd_buffer_end_compute(cmd);
    }
 

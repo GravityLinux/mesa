@@ -527,7 +527,9 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
 
    perf_debug(cmd, "End command buffer");
    hk_flush_query_writes(cmd);
+   hk_cs_end_hint(cmd, HK_CS_END_CMDBUF);
    hk_cmd_buffer_end_compute(cmd);
+   hk_cs_end_hint(cmd, HK_CS_END_CMDBUF);
    hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.post_gfx);
 
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
@@ -654,10 +656,12 @@ hk_cmd_sync_barrier(struct hk_cmd_buffer *cmd,
          hk_cdm_cache_flush(dev, cs);
    } else if (cmd->sync_fallback ||
        (cmd->current_cs.cs && (cmd->current_cs.cs->sync_stages & ordered)))
+      hk_cs_end_hint(cmd, HK_CS_END_BARRIER);
       hk_cmd_buffer_end_compute(cmd);
 
    if (cmd->sync_fallback ||
        (cmd->current_cs.gfx && (cmd->current_cs.gfx->sync_stages & ordered)))
+      hk_cs_end_hint(cmd, HK_CS_END_BARRIER);
       hk_cmd_buffer_end_graphics(cmd);
 
    struct hk_sync_event event = {

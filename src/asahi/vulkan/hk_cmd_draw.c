@@ -820,6 +820,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    /* Reordering barrier for post-gfx, in case we had any. */
    hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.post_gfx);
 
+   hk_cs_end_hint(cmd, HK_CS_END_BEGIN_RENDER);
    /* Don't reorder compute across render passes.
     *
     * TODO: Check if this is necessary if the proper PipelineBarriers are
@@ -971,6 +972,7 @@ hk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
    }
 
    perf_debug(cmd, "End rendering");
+   hk_cs_end_hint(cmd, HK_CS_END_RENDER_PASS);
    hk_cmd_buffer_end_graphics(cmd);
 
    bool need_resolve = false;

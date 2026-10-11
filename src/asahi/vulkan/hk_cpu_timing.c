@@ -74,9 +74,43 @@ static const char *hk_cpu_cat_name[HK_CPU_CAT_COUNT] = {
    "submit", "present", "wait", "desc", "draw", "dispatch", "record",
 };
 
-static _Atomic uint64_t hk_cpu_wall[HK_CPU_CAT_COUNT];
-static _Atomic uint64_t hk_cpu_thread[HK_CPU_CAT_COUNT];
-static _Atomic uint64_t hk_cpu_calls[HK_CPU_CAT_COUNT];
+/* Per-thread accumulators: wrapped calls add to their own thread's block, with
+ * no shared atomics (recording threads contending on one counter cost Dota
+ * ~60% of its frame rate). The report sums every block; reads race with
+ * writers but each 64-bit counter is read whole. Blocks live until exit. */
+struct hk_cpu_block {
+   uint64_t wall[HK_CPU_CAT_COUNT];
+   uint64_t thread[HK_CPU_CAT_COUNT];
+   uint64_t calls[HK_CPU_CAT_COUNT];
+   struct hk_cpu_block *next;
+};
+static struct hk_cpu_block *_Atomic hk_cpu_blocks;
+static __thread struct hk_cpu_block *hk_cpu_mine;
+
+static struct hk_cpu_block *
+hk_cpu_block(void)
+{
+   if (likely(hk_cpu_mine))
+      return hk_cpu_mine;
+   struct hk_cpu_block *b = calloc(1, sizeof(*b));
+   if (!b)
+      return NULL;
+   struct hk_cpu_block *head = atomic_load(&hk_cpu_blocks);
+   do {
+      b->next = head;
+   } while (!atomic_compare_exchange_weak(&hk_cpu_blocks, &head, b));
+   return hk_cpu_mine = b;
+}
+
+static uint64_t
+hk_cpu_sum(size_t offset, unsigned cat)
+{
+   uint64_t total = 0;
+   for (struct hk_cpu_block *b = atomic_load(&hk_cpu_blocks); b; b = b->next)
+      total += __atomic_load_n((uint64_t *)((char *)b + offset) + cat,
+                               __ATOMIC_RELAXED);
+   return total;
+}
 static _Atomic uint64_t hk_cpu_frames;
 static _Atomic uint64_t hk_cpu_last_report;
 /* Nonzero when HK_CPU_TIMING is set; read inline by the hooks in hk_device.h. */
@@ -113,7 +147,9 @@ static inline void
 hk_cpu_begin(struct hk_cpu_scope *s, enum hk_cpu_cat cat)
 {
    s->cat = cat;
-   s->thread = hk_cpu_level >= 2 || cat <= HK_CPU_DESC;
+   /* Thread CPU time is a syscall in some guests: at level 1 only for the
+    * low-rate submit, present and wait calls. */
+   s->thread = hk_cpu_level >= 2 || cat < HK_CPU_DESC;
    s->cpu = s->thread ? hk_cpu_clock(CLOCK_THREAD_CPUTIME_ID) : 0;
    s->wall = hk_cpu_clock(CLOCK_MONOTONIC);
 }
@@ -121,15 +157,17 @@ hk_cpu_begin(struct hk_cpu_scope *s, enum hk_cpu_cat cat)
 static inline void
 hk_cpu_end(struct hk_cpu_scope *s)
 {
-   atomic_fetch_add_explicit(&hk_cpu_wall[s->cat],
-                             hk_cpu_clock(CLOCK_MONOTONIC) - s->wall,
-                             memory_order_relaxed);
+   struct hk_cpu_block *b = hk_cpu_block();
+   if (!b)
+      return;
+   const uint64_t wall = hk_cpu_clock(CLOCK_MONOTONIC) - s->wall;
+   __atomic_store_n(&b->wall[s->cat], b->wall[s->cat] + wall, __ATOMIC_RELAXED);
    if (s->thread) {
-      atomic_fetch_add_explicit(&hk_cpu_thread[s->cat],
-                                hk_cpu_clock(CLOCK_THREAD_CPUTIME_ID) - s->cpu,
-                                memory_order_relaxed);
+      const uint64_t cpu = hk_cpu_clock(CLOCK_THREAD_CPUTIME_ID) - s->cpu;
+      __atomic_store_n(&b->thread[s->cat], b->thread[s->cat] + cpu,
+                       __ATOMIC_RELAXED);
    }
-   atomic_fetch_add_explicit(&hk_cpu_calls[s->cat], 1, memory_order_relaxed);
+   __atomic_store_n(&b->calls[s->cat], b->calls[s->cat] + 1, __ATOMIC_RELAXED);
 }
 
 static void
@@ -148,9 +186,12 @@ hk_cpu_report(bool force)
    for (unsigned c = 0; c < HK_CPU_CAT_COUNT && n < (int)sizeof(line); ++c) {
       n += snprintf(line + n, sizeof(line) - n,
                     " %s_wall_ns=%" PRIu64 " %s_cpu_ns=%" PRIu64 " %s_calls=%" PRIu64,
-                    hk_cpu_cat_name[c], atomic_load(&hk_cpu_wall[c]),
-                    hk_cpu_cat_name[c], atomic_load(&hk_cpu_thread[c]),
-                    hk_cpu_cat_name[c], atomic_load(&hk_cpu_calls[c]));
+                    hk_cpu_cat_name[c],
+                    hk_cpu_sum(offsetof(struct hk_cpu_block, wall), c),
+                    hk_cpu_cat_name[c],
+                    hk_cpu_sum(offsetof(struct hk_cpu_block, thread), c),
+                    hk_cpu_cat_name[c],
+                    hk_cpu_sum(offsetof(struct hk_cpu_block, calls), c));
    }
    for (unsigned i = 0; i < 4 && n < (int)sizeof(line); ++i) {
       n += snprintf(line + n, sizeof(line) - n,
