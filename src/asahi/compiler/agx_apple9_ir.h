@@ -349,6 +349,9 @@ struct agx_apple9_vir_instr {
    /* Gather one channel (texture_gather_component) of the 2x2 footprint at
     * the view's base level, returned as a dense RGBA tuple. */
    bool texture_gather;
+   /* Immediate texel offset: signed 4-bit x | y << 4 | z << 8. */
+   bool texture_has_offset;
+   uint16_t texture_offset;
    /* Register-supplied table indices, appended as the last sources in this
     * order, replace the immediate texture and sampler indices. */
    bool texture_bindless;

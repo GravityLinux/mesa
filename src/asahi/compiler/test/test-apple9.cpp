@@ -9181,10 +9181,14 @@ TEST(Apple9Compiler, TextureOffsetsLowerPerMipThroughOrdinaryFetches)
       agx_shader_part compiled = {};
       ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason)) << (reason ?: "");
       EXPECT_EQ(compiled.info.apple9_texture_mask, 1u << 7);
-      /* Runtime sampler state samples single-level offsets (and a custom
-       * border colour) natively, so it binds the sampler. */
-      EXPECT_EQ(compiled.info.apple9_sampler_mask, runtime ? 1u << 5 : 0u);
-      EXPECT_TRUE(compiled.info.apple9_uses_texel_fetch);
+      /* 2D and 3D samples encode constant offsets natively. 2D arrays are
+       * still lowered: runtime sampler state samples single levels natively
+       * (and a custom border colour), so it binds the sampler; static keys
+       * filter with ordinary fetches. */
+      const bool native = kind != 1;
+      EXPECT_EQ(compiled.info.apple9_sampler_mask,
+                native || runtime ? 1u << 5 : 0u);
+      EXPECT_EQ(compiled.info.apple9_uses_texel_fetch, !native);
       free(compiled.binary);
       ralloc_free(b.shader);
    }

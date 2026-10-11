@@ -538,6 +538,37 @@ native_offset_level(nir_builder *b, const struct offset_sample *s,
 }
 
 bool
+agx_apple9_texture_native_offset(const nir_tex_instr *tex, uint16_t *bits)
+{
+   int offset = nir_tex_instr_src_index(tex, nir_tex_src_offset);
+   if (offset < 0 || !nir_src_is_const(tex->src[offset].src) ||
+       tex->is_array || tex->op == nir_texop_txf ||
+       (tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
+        tex->op != nir_texop_txl && tex->op != nir_texop_txd &&
+        tex->op != nir_texop_tg4) ||
+       (tex->sampler_dim != GLSL_SAMPLER_DIM_2D &&
+        tex->sampler_dim != GLSL_SAMPLER_DIM_3D) ||
+       (tex->op == nir_texop_tg4 &&
+        (tex->is_shadow || tex->sampler_dim != GLSL_SAMPLER_DIM_2D)) ||
+       nir_tex_instr_src_index(tex, nir_tex_src_min_lod) >= 0)
+      return false;
+   unsigned dims = tex->sampler_dim == GLSL_SAMPLER_DIM_3D ? 3 : 2;
+   nir_src src = tex->src[offset].src;
+   if (src.ssa->num_components < dims)
+      return false;
+   uint16_t packed = 0;
+   for (unsigned c = 0; c < dims; ++c) {
+      int64_t v = nir_src_comp_as_int(src, c);
+      if (v < -8 || v > 7)
+         return false;
+      packed |= (uint16_t)(v & 15) << (4 * c);
+   }
+   if (bits)
+      *bits = packed;
+   return true;
+}
+
+bool
 agx_nir_lower_apple9_texture_offsets(nir_shader *nir,
                                      const struct agx_apple9_sampler_key key[32],
                                      const char **reason)
@@ -555,6 +586,9 @@ agx_nir_lower_apple9_texture_offsets(nir_shader *nir,
          /* Gathers without offsets are native. */
          bool is_gather = tex->op == nir_texop_tg4;
          if (offset < 0 || tex->op == nir_texop_txf)
+            continue;
+         /* The sample instruction encodes these offsets itself. */
+         if (agx_apple9_texture_native_offset(tex, NULL))
             continue;
          if ((tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
               tex->op != nir_texop_txl && tex->op != nir_texop_txd &&

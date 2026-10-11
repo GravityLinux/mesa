@@ -19,6 +19,13 @@
 extern "C" {
 #endif
 
+/* Whether tex's texel offset has a native immediate encoding: a constant
+ * offset in [-8, 7] on a 2D (non-array) or 3D sample, gather or comparison.
+ * If so, *bits receives x | y << 4 | z << 8 in signed 4-bit fields. */
+struct nir_tex_instr;
+bool agx_apple9_texture_native_offset(const struct nir_tex_instr *tex,
+                                      uint16_t *bits);
+
 bool agx_nir_hoist_apple9_uniform_reads(nir_shader *shader);
 bool agx_nir_lower_apple9_math(nir_shader *shader);
 bool agx_nir_opt_apple9_bounds(nir_shader *shader);

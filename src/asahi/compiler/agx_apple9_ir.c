@@ -6722,6 +6722,48 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
          bytes[3] |= 4;
          bytes[10] = 0;
       }
+      /* A texel offset selects the offset form of the sample mode
+       * (bytes 6-7) and is encoded as signed 4-bit immediates: x in bits
+       * 75..78; y bit 0 in bit 79 and bits 1..3 in bits 105..107; z bits
+       * 0..2 in bits 108..110 and bit 3 in bit 21. Measured with our own
+       * MSL compiled for G16 (msl-encodings-20261011): the mode
+       * values pair each form we emit with its offset form. */
+      if (instruction->texture_has_offset) {
+         static const uint16_t modes[][2] = {
+            {0x0000, 0x0201}, /* implicit LOD, gather */
+            {0x0004, 0x0281}, /* bias */
+            {0x0100, 0x0211}, /* explicit LOD */
+            {0x0104, 0x0209}, /* gradient */
+            {0x0114, 0x0249}, /* gradient, minimum LOD */
+            {0x0020, 0x0221}, /* compare, implicit LOD */
+            {0x0024, 0x02a1}, /* compare, bias */
+            {0x0120, 0x0231}, /* compare, explicit LOD */
+            {0x0124, 0x0229}, /* compare, gradient */
+            {0x0180, 0x0291}, /* 3D, implicit LOD */
+            {0x0190, 0x0299}, /* 3D, bias */
+            {0x2188, 0x0219}, /* 3D, explicit LOD */
+            {0x019c, 0x0319}, /* 3D, gradient */
+         };
+         if (instruction->texture_fetch || multisampled ||
+             instruction->texture_lod_query)
+            return false;
+         uint16_t mode = bytes[6] | (bytes[7] << 8);
+         unsigned m = 0;
+         while (m < ARRAY_SIZE(modes) && modes[m][0] != mode)
+            ++m;
+         if (m == ARRAY_SIZE(modes))
+            return false;
+         bytes[6] = modes[m][1] & 0xff;
+         bytes[7] = modes[m][1] >> 8;
+         unsigned x = instruction->texture_offset & 15;
+         unsigned y = (instruction->texture_offset >> 4) & 15;
+         unsigned z = (instruction->texture_offset >> 8) & 15;
+         set_bits(bytes, 75, 4, x);
+         set_bits(bytes, 79, 1, y & 1);
+         set_bits(bytes, 105, 3, y >> 1);
+         set_bits(bytes, 108, 3, z & 7);
+         set_bits(bytes, 21, 1, z >> 3);
+      }
       /* T8132 authored read/sample probes cover all 15 nonempty masks.
        * This four-bit selector has a permuted encoding; it is independent
        * of the resource, sampler, coordinate, LOD and completion fields.

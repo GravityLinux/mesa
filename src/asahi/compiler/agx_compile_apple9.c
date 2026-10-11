@@ -795,8 +795,10 @@ apple9_texture_supported(const nir_tex_instr *tex)
              tex->def.bit_size == 32 && tex->def.num_components == 4 &&
              tex->texture_index < 32 && tex->sampler_index == APPLE9_FETCH_SAMPLER;
    }
-   /* Offset filtering is expanded with sampler state before selection. */
-   if (nir_tex_instr_src_index(tex, nir_tex_src_offset) >= 0)
+   /* Offsets without a native encoding are expanded with sampler state
+    * before selection. */
+   const bool offset = nir_tex_instr_src_index(tex, nir_tex_src_offset) >= 0;
+   if (offset && !agx_apple9_texture_native_offset(tex, NULL))
       return false;
    bool gather = tex->op == nir_texop_tg4;
    bool explicit_lod = tex->op == nir_texop_txl || tex->op == nir_texop_txb ||
@@ -819,7 +821,7 @@ apple9_texture_supported(const nir_tex_instr *tex)
        (tex->dest_type != nir_type_float32 && tex->dest_type != nir_type_int32 &&
         tex->dest_type != nir_type_uint32) ||
        tex->num_srcs != (gradient ? 3 : explicit_lod ? 2 : 1) + tex->is_shadow +
-                        apple9_texture_handle_count(tex) +
+                        offset + apple9_texture_handle_count(tex) +
                         (nir_tex_instr_src_index(tex, nir_tex_src_backend2) >= 0) ||
        tex->texture_index >= 32 ||
        (tex->sampler_index > APPLE9_FETCH_SAMPLER))
@@ -2309,6 +2311,8 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
          agx_apple9_invalidate_uses(&lower->program);
       }
       sample->texture_lod_query = tex->backend_flags & AGX_APPLE9_TEXTURE_LOD_QUERY;
+      sample->texture_has_offset =
+         agx_apple9_texture_native_offset(tex, &sample->texture_offset);
       if (tex->op == nir_texop_tg4) {
          /* A gather always returns its four footprint texels. */
          mask = 0xf;
