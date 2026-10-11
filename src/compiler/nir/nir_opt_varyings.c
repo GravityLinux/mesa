@@ -520,6 +520,7 @@
 
 #include "util/hash_table.h"
 #include "util/u_math.h"
+#include "util/u_dynarray.h"
 #include "util/u_memory.h"
 #include "nir.h"
 #include "nir_builder.h"
@@ -4009,12 +4010,21 @@ update_movable_flags(struct linkage_info *linkage, nir_instr *instr)
    }
 }
 
-/* Gather the input loads used by the post-dominator using DFS. */
+/* Gather the input loads used by the post-dominator using DFS. Every visited
+ * instruction is flagged and recorded so that shared subexpressions are
+ * walked once: without that, a chain of selects that each reuse the previous
+ * result takes exponential time.
+ */
 static void
 gather_used_input_loads(struct linkage_info *linkage, nir_instr *instr,
                         nir_intrinsic_instr *loads[NUM_SCALAR_SLOTS],
-                        unsigned *num_loads)
+                        unsigned *num_loads, struct util_dynarray *visited)
 {
+   if (instr->pass_flags & FLAG_GATHER_LOADS_VISITED)
+      return;
+   instr->pass_flags |= FLAG_GATHER_LOADS_VISITED;
+   util_dynarray_append(visited, instr);
+
    switch (instr->type) {
    case nir_instr_type_undef:
    case nir_instr_type_load_const:
@@ -4026,7 +4036,7 @@ gather_used_input_loads(struct linkage_info *linkage, nir_instr *instr,
 
       for (unsigned i = 0; i < num_srcs; i++) {
          gather_used_input_loads(linkage, nir_def_instr(alu->src[i].src.ssa),
-                                 loads, num_loads);
+                                 loads, num_loads, visited);
       }
       return;
    }
@@ -4040,17 +4050,14 @@ gather_used_input_loads(struct linkage_info *linkage, nir_instr *instr,
 
       case nir_intrinsic_load_deref:
          gather_used_input_loads(linkage, nir_def_instr(intr->src[0].ssa),
-                                 loads, num_loads);
+                                 loads, num_loads, visited);
          return;
 
       case nir_intrinsic_load_input:
       case nir_intrinsic_load_per_vertex_input:
       case nir_intrinsic_load_interpolated_input:
-         if (!(intr->instr.pass_flags & FLAG_GATHER_LOADS_VISITED)) {
-            assert(*num_loads < NUM_SCALAR_SLOTS * 8);
-            loads[(*num_loads)++] = intr;
-            intr->instr.pass_flags |= FLAG_GATHER_LOADS_VISITED;
-         }
+         assert(*num_loads < NUM_SCALAR_SLOTS * 8);
+         loads[(*num_loads)++] = intr;
          return;
 
       default:
@@ -4067,7 +4074,8 @@ gather_used_input_loads(struct linkage_info *linkage, nir_instr *instr,
       nir_deref_instr *parent = nir_deref_instr_parent(deref);
 
       if (parent)
-         gather_used_input_loads(linkage, &parent->instr, loads, num_loads);
+         gather_used_input_loads(linkage, &parent->instr, loads, num_loads,
+                                 visited);
 
       switch (deref->deref_type) {
       case nir_deref_type_var:
@@ -4076,7 +4084,7 @@ gather_used_input_loads(struct linkage_info *linkage, nir_instr *instr,
 
       case nir_deref_type_array:
          gather_used_input_loads(linkage, nir_def_instr(deref->arr.index.ssa),
-                                 loads, num_loads);
+                                 loads, num_loads, visited);
          return;
 
       default:
@@ -4110,12 +4118,15 @@ try_move_postdominator(struct linkage_info *linkage,
    /* Gather the input loads used by the post-dominator using DFS. */
    nir_intrinsic_instr *loads[NUM_SCALAR_SLOTS * 8];
    unsigned num_loads = 0;
-   gather_used_input_loads(linkage, postdom, loads, &num_loads);
+   struct util_dynarray visited;
+   util_dynarray_init(&visited, NULL);
+   gather_used_input_loads(linkage, postdom, loads, &num_loads, &visited);
    assert(num_loads && "no loads were gathered");
 
    /* Clear the flag set by gather_used_input_loads. */
-   for (unsigned i = 0; i < num_loads; i++)
-      loads[i]->instr.pass_flags &= ~FLAG_GATHER_LOADS_VISITED;
+   util_dynarray_foreach(&visited, nir_instr *, instr)
+      (*instr)->pass_flags &= ~FLAG_GATHER_LOADS_VISITED;
+   util_dynarray_fini(&visited);
 
    /* For all the loads, the previous shader must have the corresponding
     * output stores in the same basic block because we are going to replace
