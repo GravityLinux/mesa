@@ -1296,7 +1296,14 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    cs->diag.depth_format = render->depth_att.vk_format;
    cs->diag.color_count = render->color_att_count;
    cs->diag.samples = render->tilebuffer.nr_samples;
-   cs->diag.clears = render->color_att[0].clear | (render->depth_att.clear << 1);
+   /* clears: colour-0 cleared, depth cleared, colour-0 compressed, colour-0
+    * storage usage, depth compressed. */
+   const struct hk_image *c0i = c0 ? container_of(c0->vk.image, struct hk_image, vk) : NULL;
+   const struct hk_image *zsi = zs ? container_of(zs->vk.image, struct hk_image, vk) : NULL;
+   cs->diag.clears = render->color_att[0].clear | (render->depth_att.clear << 1) |
+                     ((c0i && c0i->planes[0].layout.compressed) << 2) |
+                     ((c0i && (c0i->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT)) << 3) |
+                     ((zsi && zsi->planes[0].layout.compressed) << 4);
 
    cs->cr = render->cr;
    cs->cr.bg.main = render->cr.bg.partial;
