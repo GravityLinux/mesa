@@ -267,6 +267,7 @@ hk_apple9_stage(struct hk_shader *s, bool fragment)
 {
    const struct agx_shader_info *i = &s->b.info;
    struct agx_apple9_render_stage stage = {
+      .program_id = s->apple9_program_id,
       .bo = s->bo,
       .binary = s->code_ptr,
       .binary_size = i->binary_size,
@@ -306,6 +307,9 @@ hk_apple9_stage(struct hk_shader *s, bool fragment)
    memcpy(stage.resource_binding, i->apple9_resource_binding,
           sizeof(stage.resource_binding));
    memcpy(stage.per_vertex, i->apple9_per_vertex, sizeof(stage.per_vertex));
+   /* Every uploaded graphics stage has an id; without one, consecutive draws
+    * silently stop reusing launches and coefficient tables. */
+   assert(!s->bo || stage.program_id);
    return stage;
 }
 

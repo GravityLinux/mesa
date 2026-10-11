@@ -62,6 +62,7 @@
 #include "asahi/lib/agx_uvs.h"
 #include "compiler/spirv/nir_spirv.h"
 
+#include "util/u_atomic.h"
 #include "util/blob.h"
 #include "util/hash_table.h"
 #include "util/macros.h"
@@ -3435,6 +3436,8 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
          else
             free(t);
       } else {
+         shader->apple9_program_id =
+            p_atomic_inc_return(&dev->apple9_last_program_id);
          shader->apple9_stage_launch =
             malloc(sizeof(*shader->apple9_stage_launch));
          if (shader->apple9_stage_launch)

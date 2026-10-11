@@ -273,6 +273,10 @@ struct hk_shader {
    /* G16 graphics: launch templates per tile allocation and sample count,
     * built on first use. NULL builds every launch. */
    struct agx_apple9_stage_launch_cache *apple9_stage_launch;
+   /* G16 graphics: device-unique id of this compiled stage, so consecutive
+    * draws with the same shaders reuse launches and coefficient tables (see
+    * agx_apple9_prepare_draw_alloc). Zero disables the reuse. */
+   uint64_t apple9_program_id;
 
    /* Cache of fast linked variants */
    struct {

@@ -1437,16 +1437,7 @@ agx_apple9_prepare_draw_alloc(
    for (unsigned stage = 0; stage < 2; stage++) {
       const struct agx_apple9_render_stage *shader = stages[stage];
       uint64_t table = stage ? draw->fragment_table : draw->vertex_table;
-      bool reuse =
-         previous && shader->program_id &&
-         previous->program_id[stage] == shader->program_id &&
-         previous->code[stage] == draw->code[stage] &&
-         previous->texture_table[stage] == draw->texture_table[stage] &&
-         previous->sampler_table[stage] == draw->sampler_table[stage] &&
-         (stage ? previous->fragment_table : previous->vertex_table) == table &&
-         (!stage ||
-          (previous->samples == samples && previous->tile_bytes == tile_bytes));
-      if (reuse) {
+      if (agx_apple9_draw_reuses_launch(previous, draw, stage)) {
          draw->launch[stage] = previous->launch[stage];
          continue;
       }
@@ -1458,11 +1449,7 @@ agx_apple9_prepare_draw_alloc(
    }
    draw->provoking_vertex = apple9_provoking_vertex(pipeline->primitive,
                                                    draw->flatshade_first);
-   bool reuse_coefficients = previous && pipeline->vertex.program_id &&
-                             pipeline->fragment.program_id &&
-                             previous->program_id[0] == draw->program_id[0] &&
-                             previous->program_id[1] == draw->program_id[1] &&
-                             previous->provoking_vertex == draw->provoking_vertex;
+   bool reuse_coefficients = agx_apple9_draw_reuses_coefficients(previous, draw);
    unsigned cf_count;
    if (reuse_coefficients) {
       draw->coefficients = previous->coefficients;

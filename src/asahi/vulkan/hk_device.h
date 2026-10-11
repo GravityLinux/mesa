@@ -71,6 +71,8 @@ struct hk_device {
    /* G16 private texel-fetch sampler, addressable as a native table entry
     * relative to the USC aperture. */
    struct agx_bo *apple9_fetch_sampler;
+   /* Last G16 graphics program id handed out, see hk_shader::apple9_program_id. */
+   uint64_t apple9_last_program_id;
    /* Runtime sysval block of every kernel, see hk_apple9_upload_textures. */
    struct agx_bo *apple9_compute_sysvals;
 

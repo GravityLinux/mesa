@@ -209,6 +209,36 @@ bool agx_apple9_prepare_graphics_stage(
    unsigned tile_bytes, unsigned samples, uint32_t *launch,
    agx_apple9_cached_alloc cached_alloc);
 
+/* Whether a draw can take the previous draw's launch for stage (0 vertex, 1
+ * fragment) or its coefficient table. Both need nonzero, equal program ids:
+ * a stage without an id is never reused. draw->program_id, code, tables,
+ * samples, tile_bytes and provoking_vertex must already be filled in. */
+static inline bool
+agx_apple9_draw_reuses_launch(const struct agx_apple9_uniform_draw *previous,
+                              const struct agx_apple9_uniform_draw *draw,
+                              unsigned stage)
+{
+   return previous && draw->program_id[stage] &&
+          previous->program_id[stage] == draw->program_id[stage] &&
+          previous->code[stage] == draw->code[stage] &&
+          previous->texture_table[stage] == draw->texture_table[stage] &&
+          previous->sampler_table[stage] == draw->sampler_table[stage] &&
+          (stage ? previous->fragment_table == draw->fragment_table
+                 : previous->vertex_table == draw->vertex_table) &&
+          (!stage || (previous->samples == draw->samples &&
+                      previous->tile_bytes == draw->tile_bytes));
+}
+
+static inline bool
+agx_apple9_draw_reuses_coefficients(const struct agx_apple9_uniform_draw *previous,
+                                    const struct agx_apple9_uniform_draw *draw)
+{
+   return previous && draw->program_id[0] && draw->program_id[1] &&
+          previous->program_id[0] == draw->program_id[0] &&
+          previous->program_id[1] == draw->program_id[1] &&
+          previous->provoking_vertex == draw->provoking_vertex;
+}
+
 /* The caller owns both immutable arenas. Context allocations must lie wholly
  * within the render-context aperture; USC allocations use the shader aperture.
  * A false return leaves the draw unpublished, including on allocation failure.

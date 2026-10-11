@@ -79,3 +79,52 @@ TEST(Apple9Dispatch, PacketFootprints)
       EXPECT_EQ(tail, 0x600fffffu);
    }
 }
+
+/* Consecutive draws with the same compiled stages reuse launches and the
+ * coefficient table; a stage without a program id never does (hk once left
+ * every id at zero, which silently disabled the reuse). */
+TEST(Apple9DrawReuse, StablePairReusesLaunchesAndCoefficients)
+{
+   agx_apple9_uniform_draw a = {}, b = {};
+   for (unsigned s = 0; s < 2; ++s) {
+      a.program_id[s] = b.program_id[s] = 7 + s;
+      a.code[s] = b.code[s] = 0x10000100000ull + s * 0x1000;
+      a.texture_table[s] = b.texture_table[s] = 0x10000000000ull;
+      a.sampler_table[s] = b.sampler_table[s] = 0x10000000000ull;
+   }
+   a.vertex_table = b.vertex_table = 0x1000;
+   a.fragment_table = b.fragment_table = 0x2000;
+   a.samples = b.samples = 1;
+   a.tile_bytes = b.tile_bytes = 4;
+   a.provoking_vertex = b.provoking_vertex = 0;
+   EXPECT_TRUE(agx_apple9_draw_reuses_launch(&a, &b, 0));
+   EXPECT_TRUE(agx_apple9_draw_reuses_launch(&a, &b, 1));
+   EXPECT_TRUE(agx_apple9_draw_reuses_coefficients(&a, &b));
+
+   /* A changed stage table only affects that stage's launch. */
+   b.vertex_table = 0x3000;
+   EXPECT_FALSE(agx_apple9_draw_reuses_launch(&a, &b, 0));
+   EXPECT_TRUE(agx_apple9_draw_reuses_launch(&a, &b, 1));
+   EXPECT_TRUE(agx_apple9_draw_reuses_coefficients(&a, &b));
+   b.vertex_table = a.vertex_table;
+
+   /* Tile allocation and sample count only matter to the fragment launch. */
+   b.tile_bytes = 8;
+   EXPECT_TRUE(agx_apple9_draw_reuses_launch(&a, &b, 0));
+   EXPECT_FALSE(agx_apple9_draw_reuses_launch(&a, &b, 1));
+   b.tile_bytes = a.tile_bytes;
+
+   EXPECT_FALSE(agx_apple9_draw_reuses_launch(nullptr, &b, 0));
+   EXPECT_FALSE(agx_apple9_draw_reuses_coefficients(nullptr, &b));
+}
+
+TEST(Apple9DrawReuse, ZeroProgramIdNeverReuses)
+{
+   agx_apple9_uniform_draw a = {}, b = {};
+   EXPECT_FALSE(agx_apple9_draw_reuses_launch(&a, &b, 0));
+   EXPECT_FALSE(agx_apple9_draw_reuses_launch(&a, &b, 1));
+   EXPECT_FALSE(agx_apple9_draw_reuses_coefficients(&a, &b));
+   a.program_id[0] = b.program_id[0] = 3;
+   EXPECT_TRUE(agx_apple9_draw_reuses_launch(&a, &b, 0));
+   EXPECT_FALSE(agx_apple9_draw_reuses_coefficients(&a, &b));
+}
