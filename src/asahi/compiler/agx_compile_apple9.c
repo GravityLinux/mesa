@@ -5631,7 +5631,7 @@ agx_nir_hoist_apple9_samples(nir_shader *nir)
       return false;
 
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
-   nir_metadata_require(impl, nir_metadata_live_defs);
+   nir_metadata_require(impl, nir_metadata_block_index | nir_metadata_live_defs);
    unsigned total = nir_index_instrs(impl);
    unsigned words = BITSET_WORDS(total);
    void *ctx = ralloc_context(NULL);

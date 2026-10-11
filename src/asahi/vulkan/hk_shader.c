@@ -1320,7 +1320,7 @@ hk_apple9_peak_live_words(nir_shader *nir)
 {
    unsigned peak = 0;
    nir_foreach_function_impl(impl, nir) {
-      nir_metadata_require(impl, nir_metadata_live_defs);
+      nir_metadata_require(impl, nir_metadata_block_index | nir_metadata_live_defs);
       nir_def **defs = calloc(impl->ssa_alloc, sizeof(*defs));
       nir_foreach_block(block, impl) {
          nir_foreach_instr(instr, block)
