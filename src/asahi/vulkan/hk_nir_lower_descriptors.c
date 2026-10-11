@@ -704,7 +704,9 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
       return true;
    }
 
+   /* G16 exposes no custom border colors, so these are G13 only. */
    if (tex->op == nir_texop_has_custom_border_color_agx) {
+      assert(!g16);
       unsigned offs = offsetof(struct hk_sampled_image_descriptor,
                                clamp_0_sampler_index_or_negative);
 
@@ -717,6 +719,7 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
    }
 
    if (tex->op == nir_texop_custom_border_color_agx) {
+      assert(!g16);
       unsigned offs = offsetof(struct hk_sampled_image_descriptor, border);
 
       nir_def *border = load_resource_deref_desc(
@@ -731,8 +734,10 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
    }
 
    {
+      /* On G16 the handle is the image part's address. */
       unsigned offset_B =
-         plane_offset_B + offsetof(struct hk_sampled_image_descriptor, tex);
+         g16 ? plane_offset_B
+             : plane_offset_B + offsetof(struct hk_sampled_image_descriptor, tex);
 
       nir_def *handle =
          load_image_handle(b, ctx, nir_src_for_ssa(texture), offset_B);
