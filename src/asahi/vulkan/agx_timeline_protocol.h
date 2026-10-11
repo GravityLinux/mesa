@@ -29,7 +29,9 @@ enum tl_event {
  TL_KJOB_QUEUE, TL_KJOB_RUN, TL_KJOB_DONE, TL_KVCPU_CLOCK,
  TL_GPU_CLOCK, TL_ERROR, TL_TRANSFER,
  /* hk: one per render Work at submit, id = its vertex timestamp key (as in
-  * TL_IOCTL_CMD c): attachment identity, area, formats, draws, pass code. */
+  * TL_IOCTL_CMD c): attachment identity, area, formats, draws, pass code.
+  * flags: waits on earlier render (bit 0) / compute (1) work, and the same
+  * from the tiling stage (2, 3). */
  TL_RENDER_INFO,
 };
 /* Append-only while enabled. The controller enables recording after warm-up.

@@ -1086,7 +1086,15 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
             hk_gpu_busy_set_pass(queue, cs->pass_code, cs->pass_grid, 0);
             hk_gpu_busy_render(queue, &cmd);
             if (agx_timeline_enabled()) {
-               agx_timeline_emit(TL_RENDER_INFO, 0, tl_timestamp_key(cmd.ts_vtx.start),
+               /* flags: which earlier work this render waits for, overall
+                * and from its tiling (pre-rasterization) stage. */
+               const struct hk_sync_stream *ws = &streams[cs->sync_id];
+               unsigned waits =
+                  (ws->wait.engine[HK_SYNC_RENDER] != HK_SYNC_NONE) |
+                  ((ws->wait.engine[HK_SYNC_CDM] != HK_SYNC_NONE) << 1) |
+                  ((ws->wait_tiling.engine[HK_SYNC_RENDER] != HK_SYNC_NONE) << 2) |
+                  ((ws->wait_tiling.engine[HK_SYNC_CDM] != HK_SYNC_NONE) << 3);
+               agx_timeline_emit(TL_RENDER_INFO, waits, tl_timestamp_key(cmd.ts_vtx.start),
                   cs->diag.color0, cs->diag.depth,
                   cs->diag.area | ((uint64_t)cs->diag.view << 32),
                   cs->diag.color_count | (cs->diag.samples << 8) |
