@@ -126,12 +126,15 @@ hk_get_spirv_options(struct vk_physical_device *vk_pdev,
                      UNUSED mesa_shader_stage stage,
                      const struct vk_pipeline_robustness_state *rs)
 {
+   const struct hk_physical_device *pdev =
+      container_of(vk_pdev, struct hk_physical_device, vk);
+
    return (struct spirv_to_nir_options){
       .ssbo_addr_format = hk_buffer_addr_format(rs->storage_buffers),
       .phys_ssbo_addr_format = nir_address_format_64bit_global,
       .ubo_addr_format = hk_buffer_addr_format(rs->uniform_buffers),
       .shared_addr_format = nir_address_format_32bit_offset,
-      .min_ssbo_alignment = HK_MIN_SSBO_ALIGNMENT,
+      .min_ssbo_alignment = hk_min_ssbo_alignment(&pdev->dev),
       .min_ubo_alignment = HK_MIN_UBO_ALIGNMENT,
    };
 }

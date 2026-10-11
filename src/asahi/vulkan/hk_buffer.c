@@ -30,7 +30,7 @@ hk_get_buffer_alignment(const struct hk_physical_device *pdev,
       alignment = MAX2(alignment, HK_MIN_UBO_ALIGNMENT);
 
    if (usage_flags & VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR)
-      alignment = MAX2(alignment, HK_MIN_SSBO_ALIGNMENT);
+      alignment = MAX2(alignment, hk_min_ssbo_alignment(&pdev->dev));
 
    if (usage_flags & (VK_BUFFER_USAGE_2_UNIFORM_TEXEL_BUFFER_BIT_KHR |
                       VK_BUFFER_USAGE_2_STORAGE_TEXEL_BUFFER_BIT_KHR))
