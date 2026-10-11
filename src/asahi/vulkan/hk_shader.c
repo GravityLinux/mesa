@@ -7,6 +7,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_shader.h"
+#include "util/u_queue.h"
 
 #include "poly/nir/poly_nir.h"
 #include "poly/geometry.h"
@@ -5473,6 +5474,12 @@ struct hk_apple9_variant {
    struct hk_api_shader *api[HK_APPLE9_GFX_STAGES];
    struct hk_apple9_graphics_key key;
    struct hk_api_shader *shaders[HK_APPLE9_GFX_STAGES];
+
+   /* Signalled once the compile finished; result holds its outcome. The
+    * variant is in the table from the start, so threads that need it wait
+    * for this compile while others look up and compile variants freely. */
+   struct util_queue_fence ready;
+   VkResult result;
 };
 
 static uint32_t
@@ -5494,6 +5501,7 @@ hk_apple9_variant_destroy(struct hk_device *dev, struct hk_apple9_variant *v)
       if (v->shaders[s])
          hk_api_shader_destroy(&dev->vk, &v->shaders[s]->vk, NULL);
    }
+   util_queue_fence_destroy(&v->ready);
    free(v);
 }
 
@@ -5524,11 +5532,31 @@ hk_apple9_resolve_graphics(struct hk_device *dev,
          ? _mesa_hash_table_search(dev->apple9_variants.ht, &search)
          : NULL;
    if (entry) {
-      const struct hk_apple9_variant *v = entry->data;
-      memcpy(out, v->shaders, sizeof(v->shaders));
+      struct hk_apple9_variant *v = entry->data;
       simple_mtx_unlock(&dev->apple9_variants.lock);
-      return VK_SUCCESS;
+      util_queue_fence_wait(&v->ready);
+      if (v->result == VK_SUCCESS)
+         memcpy(out, v->shaders, sizeof(v->shaders));
+      return v->result;
    }
+   if (!dev->apple9_variants.ht) {
+      simple_mtx_unlock(&dev->apple9_variants.lock);
+      return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+   }
+
+   /* Publish the variant before compiling, then compile without the lock:
+    * a draw-time compile takes up to a second, and other recording threads
+    * must not block on it for unrelated variants. */
+   struct hk_apple9_variant *v = calloc(1, sizeof(*v));
+   if (!v) {
+      simple_mtx_unlock(&dev->apple9_variants.lock);
+      return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+   }
+   memcpy(v, &search, offsetof(struct hk_apple9_variant, shaders));
+   util_queue_fence_init(&v->ready);
+   util_queue_fence_reset(&v->ready);
+   _mesa_hash_table_insert(dev->apple9_variants.ht, v, v);
+   simple_mtx_unlock(&dev->apple9_variants.lock);
 
    struct vk_shader_compile_info infos[HK_APPLE9_GFX_STAGES];
    unsigned stages[HK_APPLE9_GFX_STAGES];
@@ -5582,30 +5610,23 @@ hk_apple9_resolve_graphics(struct hk_device *dev,
          ralloc_free(infos[i].nir);
    }
 
-   struct hk_apple9_variant *v = NULL;
-   if (result == VK_SUCCESS) {
-      v = calloc(1, sizeof(*v));
-      if (!v)
-         result = vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
-   }
+   /* A failed compile stays in the table with its result, so later draws
+    * with the same state fail at once instead of recompiling. */
    if (result != VK_SUCCESS) {
       for (unsigned i = 0; i < count; ++i) {
          if (compiled[i])
             hk_api_shader_destroy(&dev->vk, compiled[i], NULL);
       }
-      simple_mtx_unlock(&dev->apple9_variants.lock);
-      return result;
+   } else {
+      for (unsigned i = 0; i < count; ++i) {
+         v->shaders[stages[i]] =
+            container_of(compiled[i], struct hk_api_shader, vk);
+      }
+      memcpy(out, v->shaders, sizeof(v->shaders));
    }
-
-   memcpy(v, &search, offsetof(struct hk_apple9_variant, shaders));
-   for (unsigned i = 0; i < count; ++i) {
-      v->shaders[stages[i]] =
-         container_of(compiled[i], struct hk_api_shader, vk);
-   }
-   _mesa_hash_table_insert(dev->apple9_variants.ht, v, v);
-   memcpy(out, v->shaders, sizeof(v->shaders));
-   simple_mtx_unlock(&dev->apple9_variants.lock);
-   return VK_SUCCESS;
+   v->result = result;
+   util_queue_fence_signal(&v->ready);
+   return result;
 }
 
 /* Variants live as long as all of their API shaders. */
