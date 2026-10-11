@@ -7320,7 +7320,8 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
                                     NULL, true, NULL, &candidate_reason) &&
              !setup.info.scratch_size &&
              setup.info.main_size > 4 &&
-             setup.info.main_size <= AGX_APPLE9_MAX_PREAMBLE_BYTES &&
+             setup.info.main_size <=
+                agx_apple9_max_preamble_bytes(nir->info.stage == MESA_SHADER_COMPUTE) &&
              apple9_compile_dag_body(main, &candidate,
                                     profile ? &candidate_profile : NULL,
                                     varyings, resources, &constants, false, cost, &candidate_reason)) {
@@ -7384,6 +7385,8 @@ apple9_preamble_trial(nir_shader *nir, struct agx_shader_part *out,
     * from the same prepared NIR and still checks the assembled code size.
     * Bound retries so pathological setup code cannot multiply compile time.
     */
+   const unsigned max_bytes =
+      agx_apple9_max_preamble_bytes(nir->info.stage == MESA_SHADER_COMPUTE);
    for (unsigned attempt = 0; attempt < 4 && budget; ++attempt) {
       unsigned bytes = 0, words = 0;
       if (apple9_try_preamble(nir, out, profile, varyings, resources, budget,
@@ -7392,13 +7395,13 @@ apple9_preamble_trial(nir_shader *nir, struct agx_shader_part *out,
          ok = true;
          break;
       }
-      if (bytes <= AGX_APPLE9_MAX_PREAMBLE_BYTES)
+      if (bytes <= max_bytes)
          break;
       if (promote_constants) {
          promote_constants = false;
       } else {
          budget = (uint64_t)MIN2(budget, words) *
-                  AGX_APPLE9_MAX_PREAMBLE_BYTES / bytes;
+                  max_bytes / bytes;
          /* Shared setup dependencies make code size nonlinear in result
           * words. Reserve the last retry for a substantial reduction if
           * the proportional estimate has not fitted the setup yet. */

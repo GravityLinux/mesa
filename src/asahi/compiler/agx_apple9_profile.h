@@ -33,8 +33,20 @@ enum agx_apple9_compute_abi {
  * complete four-word blocks in the argument window. Preamble results start
  * after that padded window and extend through the last uniform word. */
 #define AGX_APPLE9_GRAPHICS_ROOT_WORDS 12
-/* Compiler/driver policy bound, not a measured hardware limit. */
-#define AGX_APPLE9_MAX_PREAMBLE_BYTES 8192
+/* Compiler/driver policy bounds on preamble code, not hardware limits: the
+ * launch record branches to the preamble and carries no size field, and
+ * 8-16 KiB graphics and compute preambles ran correctly on G16. Compute
+ * preambles run once per workgroup on its critical path, so compute keeps the
+ * smaller bound until a larger one is shown to pay for its latency. */
+#define AGX_APPLE9_MAX_GRAPHICS_PREAMBLE_BYTES 16384
+#define AGX_APPLE9_MAX_COMPUTE_PREAMBLE_BYTES 8192
+
+static inline unsigned
+agx_apple9_max_preamble_bytes(bool compute)
+{
+   return compute ? AGX_APPLE9_MAX_COMPUTE_PREAMBLE_BYTES
+                  : AGX_APPLE9_MAX_GRAPHICS_PREAMBLE_BYTES;
+}
 
 #define AGX_APPLE9_COMPUTE_DIRECT_MAX_RESOURCES 18
 #define AGX_APPLE9_COMPUTE_MAX_RESOURCES 32
