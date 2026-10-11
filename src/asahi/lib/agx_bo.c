@@ -94,10 +94,16 @@ agx_bo_cache_fetch(struct agx_device *dev, size_t size, size_t align,
    return bo;
 }
 
-static void
+/* Frees at most this many stale BOs per pass, so that a large spike is
+ * returned over several submissions or allocations instead of in one stall. */
+#define AGX_BO_CACHE_EVICT_BATCH 32
+
+/* Returns whether stale BOs remain. */
+static bool
 agx_bo_cache_evict_stale_bos(struct agx_device *dev, unsigned tv_sec)
 {
    struct timespec time;
+   unsigned freed = 0;
 
    clock_gettime(CLOCK_MONOTONIC, &time);
    list_for_each_entry_safe(struct agx_bo, entry, &dev->bo_cache.lru,
@@ -110,11 +116,15 @@ agx_bo_cache_evict_stale_bos(struct agx_device *dev, unsigned tv_sec)
        * dropped at some point.
        */
       if (time.tv_sec - entry->last_used <= 2)
-         break;
+         return false;
+
+      if (freed++ == AGX_BO_CACHE_EVICT_BATCH)
+         return true;
 
       agx_bo_cache_remove_locked(dev, entry);
       agx_bo_free(dev, entry);
    }
+   return false;
 }
 
 static void
@@ -163,6 +173,28 @@ agx_bo_cache_put(struct agx_device *dev, struct agx_bo *bo)
 
       return true;
    }
+}
+
+/* Drop cached BOs that have been unused for a few seconds. Putting a BO into
+ * the cache already does this, but a workload that stops freeing BOs (a spike
+ * of command memory followed by steady frames, or an idle app) would otherwise
+ * keep the cache at its peak, so allocation and queue submission call this
+ * too. It reads a coarse clock and, unless a previous pass left stale BOs,
+ * takes the lock at most once a second. */
+void
+agx_bo_cache_evict_stale(struct agx_device *dev)
+{
+   struct timespec time;
+   clock_gettime(CLOCK_MONOTONIC_COARSE, &time);
+   if (time.tv_sec < p_atomic_read_relaxed(&dev->bo_cache.next_evict_sec))
+      return;
+
+   simple_mtx_lock(&dev->bo_cache.lock);
+   /* While stale BOs remain, look again on the next call. */
+   bool more = agx_bo_cache_evict_stale_bos(dev, time.tv_sec);
+   p_atomic_set(&dev->bo_cache.next_evict_sec,
+                (int64_t)time.tv_sec + (more ? 0 : 1));
+   simple_mtx_unlock(&dev->bo_cache.lock);
 }
 
 void
@@ -391,6 +423,8 @@ agx_bo_create(struct agx_device *dev, size_t size, unsigned align,
    /* BOs are allocated in pages */
    size = ALIGN_POT(size, AIL_PAGESIZE);
    align = MAX2(align, AIL_PAGESIZE);
+
+   agx_bo_cache_evict_stale(dev);
 
    /* See if we have a BO already in the cache */
    bo = agx_bo_cache_fetch(dev, size, align, flags, true);
