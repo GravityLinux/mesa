@@ -662,6 +662,8 @@ struct hk_cmd_buffer {
 
    /* Full-content immutable upload cache, discarded on reset. */
    struct hash_table *upload_cache;
+   /* HK_UPLOAD_STATS: content-cache lookups per record kind. */
+   uint32_t upload_hits[AGX_APPLE9_STATE_COUNT + 3], upload_misses[AGX_APPLE9_STATE_COUNT + 3];
 
    /* Per-draw tables whose contents usually change from one draw to the next
     * (they carry the root address): the last upload of each kind, reused only
@@ -857,6 +859,9 @@ uint64_t hk_pool_upload_last(struct hk_cmd_buffer *cmd, enum hk_upload_last slot
                              const void *data, uint32_t size,
                              uint32_t alignment);
 struct agx_ptr hk_apple9_state_cache_alloc(
+   void *allocator, enum agx_apple9_state_type type, const void *contents,
+   size_t size, size_t alignment, bool *is_new);
+struct agx_ptr hk_apple9_state_uncached_alloc(
    void *allocator, enum agx_apple9_state_type type, const void *contents,
    size_t size, size_t alignment, bool *is_new);
 
