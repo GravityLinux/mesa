@@ -9181,10 +9181,99 @@ TEST(Apple9Compiler, TextureOffsetsLowerPerMipThroughOrdinaryFetches)
       agx_shader_part compiled = {};
       ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason)) << (reason ?: "");
       EXPECT_EQ(compiled.info.apple9_texture_mask, 1u << 7);
-      /* Runtime sampler state samples single-level offsets (and a custom
-       * border colour) natively, so it binds the sampler. */
-      EXPECT_EQ(compiled.info.apple9_sampler_mask, runtime ? 1u << 5 : 0u);
-      EXPECT_TRUE(compiled.info.apple9_uses_texel_fetch);
+      /* With runtime sampler state, 2D and 3D samples encode constant
+       * offsets natively. A 2D array passes the shape check but its final
+       * form has no measured offset variant, so the backend falls back to the
+       * runtime lowering, which samples single levels natively (and a custom
+       * border colour) and binds the sampler. Static keys always lower and
+       * filter with ordinary fetches. */
+      const bool native = runtime && kind != 1;
+      EXPECT_EQ(compiled.info.apple9_sampler_mask,
+                native || runtime ? 1u << 5 : 0u);
+      EXPECT_EQ(compiled.info.apple9_uses_texel_fetch, !native);
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
+}
+
+TEST(Apple9Compiler, TextureOffsetModesCoverOnlyMeasuredForms)
+{
+   uint16_t mode = 0;
+   EXPECT_TRUE(agx_apple9_texture_offset_mode(0x0100, &mode));
+   EXPECT_EQ(mode, 0x0211);
+   EXPECT_TRUE(agx_apple9_texture_offset_mode(0x0114, &mode));
+   EXPECT_EQ(mode, 0x0249);
+   /* Our 2D array forms have no measured offset variant. */
+   for (uint16_t unmapped : {0x0508, 0x040c, 0x050c})
+      EXPECT_FALSE(agx_apple9_texture_offset_mode(unmapped, &mode)) << unmapped;
+   EXPECT_EQ(agx_apple9_texture_mode(true, false, false, 0, false, false),
+             0x0100);
+}
+
+/* Every constant-offset sample compiles with runtime sampler state: either
+ * its final form has an offset encoding or the backend lowers the offset. */
+TEST(Apple9Compiler, TextureOffsetsNeverFailOnUnmappedForms)
+{
+   for (auto op : {nir_texop_tex, nir_texop_txb, nir_texop_txl, nir_texop_txd,
+                   nir_texop_tg4})
+   for (unsigned kind = 0; kind < 3; ++kind)
+   for (bool shadow : {false, true})
+   for (bool min_lod : {false, true}) {
+      if ((kind == 2 && shadow) || (kind == 2 && op == nir_texop_tg4) ||
+          (min_lod && (op == nir_texop_txl || op == nir_texop_tg4)))
+         continue;
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "offset_forms");
+      const unsigned coords = kind ? 3 : 2;
+      const unsigned grad = kind == 2 ? 3 : 2;
+      nir_def *coord = kind ? nir_imm_vec3(&b, .375, .625, .25)
+                            : nir_imm_vec2(&b, .375, .625);
+      nir_tex_src srcs[6];
+      unsigned n = 0;
+      srcs[n++] = nir_tex_src_for_ssa(nir_tex_src_coord, coord);
+      srcs[n++] = nir_tex_src_for_ssa(nir_tex_src_offset,
+         kind == 2 ? nir_imm_ivec3(&b, 1, -2, 3) : nir_imm_ivec2(&b, 1, -2));
+      if (op == nir_texop_txb)
+         srcs[n++] = nir_tex_src_for_ssa(nir_tex_src_bias,
+                                         nir_imm_floatN_t(&b, .5, 16));
+      if (op == nir_texop_txl)
+         srcs[n++] = nir_tex_src_for_ssa(nir_tex_src_lod,
+                                         nir_imm_floatN_t(&b, 1, 16));
+      if (op == nir_texop_txd) {
+         nir_def *d = nir_imm_vec4(&b, .01, .02, .03, 0);
+         srcs[n++] = nir_tex_src_for_ssa(nir_tex_src_ddx, nir_trim_vector(&b, d, grad));
+         srcs[n++] = nir_tex_src_for_ssa(nir_tex_src_ddy, nir_trim_vector(&b, d, grad));
+      }
+      if (min_lod)
+         srcs[n++] = nir_tex_src_for_ssa(nir_tex_src_min_lod, nir_imm_float(&b, .5));
+      if (shadow)
+         srcs[n++] = nir_tex_src_for_ssa(nir_tex_src_comparator, nir_imm_float(&b, .4));
+      nir_tex_instr *tex = nir_tex_instr_create(b.shader, n);
+      tex->op = op;
+      tex->sampler_dim = kind == 2 ? GLSL_SAMPLER_DIM_3D : GLSL_SAMPLER_DIM_2D;
+      tex->is_array = kind == 1;
+      tex->is_shadow = shadow;
+      tex->is_new_style_shadow = shadow;
+      tex->dest_type = nir_type_float32;
+      tex->coord_components = coords;
+      tex->texture_index = 7;
+      tex->sampler_index = 5;
+      for (unsigned i = 0; i < n; ++i)
+         tex->src[i] = srcs[i];
+      nir_def_init(&tex->instr, &tex->def, nir_tex_instr_dest_size(tex), 32);
+      nir_builder_instr_insert(&b, &tex->instr);
+      nir_store_output(&b, nir_pad_vector(&b, &tex->def, 4), nir_imm_int(&b, 0),
+         .write_mask = 15, .src_type = nir_type_float32,
+         .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+      b.shader->info.io_lowered = true;
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_nir_lower_apple9_runtime_sampler_state(b.shader, &reason))
+         << (reason ?: "");
+      nir_validate_shader(b.shader, "runtime offsets");
+      agx_shader_part compiled = {};
+      EXPECT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason))
+         << "op " << int(op) << " kind " << kind << " shadow " << shadow
+         << " min_lod " << min_lod << ": " << (reason ?: "");
       free(compiled.binary);
       ralloc_free(b.shader);
    }
