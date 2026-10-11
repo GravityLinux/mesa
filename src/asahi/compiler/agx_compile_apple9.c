@@ -7279,6 +7279,28 @@ apple9_restore_unselected_hoists(nir_shader *nir, struct hash_table *original_bl
    nir_progress(progress, impl, nir_metadata_control_flow);
 }
 
+/* The main program every preamble attempt starts from: the attempts of both
+ * placements share it, so it is prepared once per compile. */
+static _Thread_local nir_shader *apple9_prepared_main;
+
+static nir_shader *
+apple9_prepare_preamble_main(nir_shader *nir)
+{
+   if (apple9_prepared_main)
+      return nir_shader_clone(NULL, apple9_prepared_main);
+   nir_shader *main = nir_shader_clone(NULL, nir);
+   if (!main)
+      return NULL;
+   /* Avoid spending uniform words on unused components of frontend UBO
+    * vectors. Removing leading components can also reduce the alignment:
+    * vec4 at byte 16 may become vec3 at byte 20. Re-legalize that access
+    * before selecting its memory format or extracting a preamble. */
+   nir_opt_shrink_vectors(main, true);
+   nir_opt_constant_folding(main);
+   apple9_legalize_buffer_accesses(main);
+   return main;
+}
+
 static bool
 apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
                    struct agx_apple9_compute_profile *profile,
@@ -7289,16 +7311,9 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
                    unsigned *preamble_bytes, unsigned *preamble_words,
                    unsigned *address_hoists)
 {
-   nir_shader *main = nir_shader_clone(NULL, nir);
+   nir_shader *main = apple9_prepare_preamble_main(nir);
    if (!main)
       return false;
-   /* Avoid spending uniform words on unused components of frontend UBO
-    * vectors. Removing leading components can also reduce the alignment:
-    * vec4 at byte 16 may become vec3 at byte 20. Re-legalize that access
-    * before selecting its memory format or extracting a preamble. */
-   nir_opt_shrink_vectors(main, true);
-   nir_opt_constant_folding(main);
-   apple9_legalize_buffer_accesses(main);
    struct hash_table *original_blocks = _mesa_pointer_hash_table_create(NULL);
    if (!original_blocks) {
       ralloc_free(main);
@@ -7603,6 +7618,9 @@ apple9_compile_dag_tail(nir_shader *nir, struct agx_shader_part *out,
    char *address_log = NULL, *original_log = NULL;
    size_t address_size = 0, original_size = 0;
    unsigned address_hoists = 0;
+   apple9_prepared_main = NULL;
+   nir_shader *prepared = apple9_prepare_preamble_main(nir);
+   apple9_prepared_main = prepared;
    bool ok = apple9_preamble_trial(nir, out, profile, varyings, &resources,
                                    true, &address_cost, &address_log, &address_size,
                                    &address_hoists);
@@ -7635,6 +7653,8 @@ apple9_compile_dag_tail(nir_shader *nir, struct agx_shader_part *out,
          free(original.binary);
       }
    }
+   apple9_prepared_main = NULL;
+   ralloc_free(prepared);
    *chosen_cost = use_original ? original_cost : address_cost;
    const char *log = use_original ? original_log : address_log;
    size_t size = use_original ? original_size : address_size;
