@@ -4722,8 +4722,18 @@ hk_apple9_compile_prerast(struct hk_device *dev, nir_shader *nir,
       return VK_SUCCESS;
    }
 
-   if (!agx_compile_apple9_tiny(nir, &shader->b, &shader->info.apple9, reason))
+   if (!agx_compile_apple9_tiny(nir, &shader->b, &shader->info.apple9, reason)) {
+      /* Static GS topology can leave the main program with nothing to store:
+       * like an empty program, there is nothing to run. */
+      if (*reason == agx_apple9_compute_without_effects) {
+         memset(&shader->b, 0, sizeof(shader->b));
+         memset(&shader->info.apple9, 0, sizeof(shader->info.apple9));
+         shader->b.info.stats.instrs = 1;
+         *reason = NULL;
+         return VK_SUCCESS;
+      }
       return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
+   }
    return hk_apple9_finish_shader(dev, shader, nir);
 }
 
