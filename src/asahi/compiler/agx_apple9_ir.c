@@ -4788,6 +4788,26 @@ pack_compare_literal(uint8_t *bytes, const struct agx_apple9_vir_instr *I,
    return true;
 }
 
+/* A register operand read as a 16-bit half (Metal's encodings of our own
+ * kernels): the register field holds a half-register index, so the bit
+ * below the register number selects the high half; the per-source width bit
+ * clears, and an integer sign-extension bit may be set. */
+static bool
+pack_half_source(uint8_t *bytes, const struct agx_apple9_vir_instr *I,
+                 unsigned slot, unsigned hi_bit, unsigned width_bit,
+                 unsigned sext_bit)
+{
+   const unsigned bit = BITFIELD_BIT(slot);
+   if (!(I->src_half_mask & bit))
+      return !((I->src_hi_mask | I->src_sext_mask) & bit);
+   if ((I->alu_src_uniform_mask | I->alu_src_immediate_mask) & bit)
+      return false;
+   set_bits(bytes, hi_bit, 1, !!(I->src_hi_mask & bit));
+   set_bits(bytes, width_bit, 1, 0);
+   set_bits(bytes, sext_bit, 1, !!(I->src_sext_mask & bit));
+   return true;
+}
+
 /* Load and store share byte addressing but place the fields two bits apart. */
 static bool
 pack_memory_address(const struct agx_apple9_vir_instr *I,
@@ -4818,6 +4838,8 @@ pack_iadd(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    if (instruction->op == AGX_APPLE9_VIR_ISUB)
       bytes[0] = 0x1f;
    set_bits(bytes, 25, 7, phys[instruction->dest]);
+   if (instruction->src_half_mask & ~3u)
+      return false;
    for (unsigned s = 0; s < 2; ++s) {
       if (instruction->alu_src_immediate_mask & (1u << s)) {
          pack_integer_immediate(bytes, source[s], 42 + 9 * s, 65 + s,
@@ -4825,6 +4847,9 @@ pack_iadd(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
       } else {
          pack_integer_source(bytes, source[s], instruction->alu_src_uniform_mask & (1u << s),
                              live & (1u << s), 42 + 9 * s, 65 + s, 72 + 2 * s);
+         if (!pack_half_source(bytes, instruction, s, 41 + 9 * s, 61 + 2 * s,
+                               73 + 2 * s))
+            return false;
       }
    }
    packed_init(packed, bytes, sizeof(bytes));
@@ -4866,6 +4891,9 @@ pack_imad(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    uint8_t bytes[12] = {0x9f, 0x00, 0x54, 0x00, 0x02, 0x00,
                         0x00, 0x00, 0xd0, 0x2f, 0x2a, 0x00};
    set_bits(bytes, 25, 7, phys[instruction->dest]);
+   /* Only operand A's sign-extension bit is observed for IMAD. */
+   if ((instruction->src_half_mask & ~7u) || (instruction->src_sext_mask & ~1u))
+      return false;
    for (unsigned s = 0; s < 3; ++s) {
       if (instruction->alu_src_immediate_mask & (1u << s)) {
          pack_integer_immediate(bytes, source[s], 42 + 9 * s, 73 + s,
@@ -4873,6 +4901,8 @@ pack_imad(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
       } else {
          pack_integer_source(bytes, source[s], instruction->alu_src_uniform_mask & (1u << s),
                              live & (1u << s), 42 + 9 * s, 73 + s, 81 + 2 * s);
+         if (!pack_half_source(bytes, instruction, s, 41 + 9 * s, 70 + s, 82))
+            return false;
       }
    }
    packed_init(packed, bytes, sizeof(bytes));
@@ -5086,6 +5116,24 @@ pack_float2(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
       set_bits(bytes, 41, 1, 1);
       set_bits(bytes, 20, 1, (src[1] >> 6) & 1);
       set_bits(bytes, 42, 1, src[1] >> 7);
+   }
+   /* An FP16 source converted on read (Metal's encodings of our own
+    * kernels): the width bit (8 for A, 24 for B) clears and bit 35 or 36
+    * selects the high half, which the four-byte form cannot name. */
+   if (instruction->src_half_mask) {
+      if ((instruction->src_half_mask & instruction->alu_src_uniform_mask) ||
+          (instruction->src_half_mask & ~3u) || instruction->src_sext_mask ||
+          instruction->encoding == AGX_APPLE9_ENC_FLOAT2_PROJECT ||
+          instruction->encoding == AGX_APPLE9_ENC_FLOAT2_EXPORT ||
+          (instruction->encoding == AGX_APPLE9_ENC_FLOAT2_BASE &&
+           instruction->src_hi_mask))
+         return false;
+      for (unsigned s = 0; s < 2; ++s) {
+         if (!(instruction->src_half_mask & BITFIELD_BIT(s)))
+            continue;
+         set_bits(bytes, s ? 24 : 8, 1, 0);
+         set_bits(bytes, 35 + s, 1, !!(instruction->src_hi_mask & BITFIELD_BIT(s)));
+      }
    }
    if (instruction->encoding == AGX_APPLE9_ENC_FLOAT2_PROJECT) {
       if (phys[instruction->dest] >= 64 || phys[instruction->src[0]] >= 64 ||
@@ -5418,6 +5466,25 @@ pack_fma(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    set_bits(bytes, 35, 1, !!(instruction->src_abs_mask & 4));
    set_bits(bytes, 36, 1, !!(neg_mask & 4));
    set_bits(bytes, 59, 1, !!(neg_mask & 1) ^ !!(neg_mask & 2));
+   /* FP16 sources converted on read: operand B's width bit 24 with bit 57
+    * set (low half only observed) and the addend's width bit 49 with bit 40 selecting its
+    * high half (Metal's encodings of our own kernels). */
+   if (instruction->src_half_mask) {
+      if ((instruction->src_half_mask & 1) || instruction->src_sext_mask ||
+          (instruction->src_hi_mask & 2) ||
+          (instruction->src_half_mask & inline_mask) ||
+          (compact && (instruction->src_half_mask & 4)))
+         return false;
+      /* Operand B also sets its alternative-file bit, as for a uniform. */
+      if (instruction->src_half_mask & 2) {
+         set_bits(bytes, 24, 1, 0);
+         set_bits(bytes, 57, 1, 1);
+      }
+      if (instruction->src_half_mask & 4) {
+         set_bits(bytes, 49, 1, 0);
+         set_bits(bytes, 40, 1, !!(instruction->src_hi_mask & 4));
+      }
+   }
    if (compact) {
       /* The six-byte form moves source B's alternative-file selector from
        * bit 57 to bit 37. Source C and all GPRs remain six-bit operands;
@@ -7435,6 +7502,22 @@ agx_apple9_pack_vir_instruction(const struct agx_apple9_vir_instr *instruction,
        instruction->op != AGX_APPLE9_VIR_PREDICATE_COMPARE) {
       if (reason)
          *reason = "Apple9 operation does not admit inline ALU operands";
+      return false;
+   }
+
+   /* Integer add/subtract and multiply-add, and floating add/multiply and
+    * FMA, encode half sources. */
+   if ((instruction->src_half_mask | instruction->src_hi_mask |
+        instruction->src_sext_mask) &&
+       instruction->op != AGX_APPLE9_VIR_IADD &&
+       instruction->op != AGX_APPLE9_VIR_ISUB &&
+       instruction->op != AGX_APPLE9_VIR_IMAD &&
+       instruction->op != AGX_APPLE9_VIR_FADD &&
+       instruction->op != AGX_APPLE9_VIR_FSUB &&
+       instruction->op != AGX_APPLE9_VIR_FMUL &&
+       instruction->op != AGX_APPLE9_VIR_FMA) {
+      if (reason)
+         *reason = "Apple9 operation does not take half-register sources";
       return false;
    }
 

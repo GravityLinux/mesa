@@ -99,6 +99,7 @@ struct expression {
    uint32_t op, encoding, immediate, nr_srcs, components;
    uint32_t src_abs, src_neg, saturate;
    uint32_t src_uniform, src_immediate, src_value[4];
+   uint32_t src_half, src_hi, src_sext;
    uint32_t src[AGX_APPLE9_MAX_VIR_SRCS];
 };
 
@@ -185,7 +186,7 @@ fold_integer(struct agx_apple9_vir_instr *I, const bool *constant,
    /* Register sources are only the operands still in the register file;
     * a uniform or immediate operand is not a known constant here. */
    if (!I->nr_srcs || I->nr_srcs > 3 || I->alu_src_uniform_mask ||
-       I->alu_src_immediate_mask)
+       I->alu_src_immediate_mask || I->src_half_mask)
       return false;
    uint32_t c[3] = {0};
    for (unsigned s = 0; s < I->nr_srcs; ++s) {
@@ -958,6 +959,200 @@ fold_uniform_stores(struct agx_apple9_vir_program *p)
    return true;
 }
 
+/* The logical operand slot of register source `source`, skipping slots
+ * filled by uniform words or literals. */
+static int
+register_slot(const struct agx_apple9_vir_instr *I, unsigned source)
+{
+   const unsigned filled = I->alu_src_uniform_mask | I->alu_src_immediate_mask;
+   for (unsigned s = 0, k = 0; s < 4; ++s) {
+      if (filled & BITFIELD_BIT(s))
+         continue;
+      if (k++ == source)
+         return s;
+   }
+   return -1;
+}
+
+/* Whether register source `source` of I is the constant `value`: a literal
+ * move, or a uniform word the constant table names. */
+static bool
+source_is_constant(const struct agx_apple9_vir_program *p,
+                   const struct agx_apple9_uniform_constants *constants,
+                   const struct agx_apple9_vir_instr *I, unsigned slot,
+                   uint32_t value)
+{
+   if (I->alu_src_immediate_mask & BITFIELD_BIT(slot))
+      return I->alu_src_value[slot] == value;
+   if (I->alu_src_uniform_mask & BITFIELD_BIT(slot)) {
+      unsigned word = I->alu_src_value[slot];
+      return constants && word >= constants->base &&
+             word < constants->base + constants->count &&
+             constants->values[word - constants->base] == value;
+   }
+   int source = 0;
+   for (unsigned s = 0; s < slot; ++s)
+      source += !((I->alu_src_uniform_mask | I->alu_src_immediate_mask) & BITFIELD_BIT(s));
+   const struct agx_apple9_vir_instr *D = agx_apple9_definition(p, I->src[source]);
+   return D && D->op == AGX_APPLE9_VIR_IMM && D->immediate == value;
+}
+
+/* Recognize a 16-bit extract or extension of a 32-bit register x: x & 0xffff,
+ * x >> 16 (logical or arithmetic), and (x << 16) >> 16 written as a shift or
+ * a multiply by 0x10000. */
+static bool
+half_extract(const struct agx_apple9_vir_program *p,
+             const struct agx_apple9_uniform_constants *constants,
+             const struct agx_apple9_vir_instr *D, uint32_t *x, bool *hi,
+             bool *sext)
+{
+   if (!D || D->dest_components != 1 || D->src_half_mask || D->saturate)
+      return false;
+   if (D->op == AGX_APPLE9_VIR_UNPACK_HALF && D->nr_srcs == 1 &&
+       D->encoding == AGX_APPLE9_ENC_HALF_TO_FLOAT && D->immediate <= 1) {
+      *x = D->src[0];
+      *hi = D->immediate;
+      *sext = false;
+      return true;
+   }
+   if (D->op == AGX_APPLE9_VIR_IAND && D->encoding == AGX_APPLE9_ENC_LOGIC_EXTENDED) {
+      for (unsigned s = 0; s < 2; ++s) {
+         if (!source_is_constant(p, constants, D, s, 0xffff))
+            continue;
+         for (unsigned k = 0; k < D->nr_srcs; ++k) {
+            if (register_slot(D, k) != (int)(1 - s))
+               continue;
+            *x = D->src[k];
+            *hi = false;
+            *sext = false;
+            return true;
+         }
+      }
+      return false;
+   }
+   const bool shift = D->op == AGX_APPLE9_VIR_USHR || D->op == AGX_APPLE9_VIR_ISHR;
+   if (!shift || D->nr_srcs != 1 || D->alu_src_uniform_mask || D->immediate != 16)
+      return false;
+   const struct agx_apple9_vir_instr *Y = agx_apple9_definition(p, D->src[0]);
+   if (D->op == AGX_APPLE9_VIR_ISHR && Y && Y->dest_components == 1 &&
+       !Y->src_half_mask && !Y->alu_src_uniform_mask) {
+      if (Y->op == AGX_APPLE9_VIR_ISHL && Y->nr_srcs == 1 && Y->immediate == 16) {
+         *x = Y->src[0];
+         *hi = false;
+         *sext = true;
+         return true;
+      }
+      if (Y->op == AGX_APPLE9_VIR_IMAD && !Y->immediate &&
+          Y->encoding == AGX_APPLE9_ENC_INT_MAD_EXTENDED &&
+          source_is_constant(p, constants, Y, 2, 0)) {
+         for (unsigned s = 0; s < 2; ++s) {
+            int reg = register_slot(Y, 0) == (int)(1 - s) ? 0
+                    : register_slot(Y, 1) == (int)(1 - s) ? 1 : -1;
+            if (reg < 0 || !source_is_constant(p, constants, Y, s, 0x10000))
+               continue;
+            *x = Y->src[reg];
+            *hi = false;
+            *sext = true;
+            return true;
+         }
+      }
+   }
+   *x = D->src[0];
+   *hi = true;
+   *sext = D->op == AGX_APPLE9_VIR_ISHR;
+   return true;
+}
+
+/* Integer add/subtract and multiply-add read 16-bit halves of a register
+ * directly, zero- or sign-extended (Metal's encodings of our own kernels).
+ * Fold a recognized extract into every reader when all of them can take
+ * it, so the extract and its mask constant disappear without extending any
+ * other register's lifetime. AGX_APPLE9_NO_HALF_SOURCES=1 disables it. */
+static bool
+fold_half_sources(struct agx_apple9_vir_program *p,
+                  const struct agx_apple9_uniform_constants *constants)
+{
+   static int disabled = -1;
+   if (disabled < 0)
+      disabled = getenv("AGX_APPLE9_NO_HALF_SOURCES") != NULL;
+   if (disabled)
+      return true;
+   if (!agx_apple9_analyze_uses(p))
+      return false;
+
+   for (unsigned i = 0; i < p->instruction_count; ++i) {
+      struct agx_apple9_vir_instr *D = p->instructions[i];
+      uint32_t x;
+      bool hi, sext;
+      if (D->dest == AGX_APPLE9_VREG_INVALID ||
+          !half_extract(p, constants, D, &x, &hi, &sext))
+         continue;
+      bool live_out = p->output == D->dest;
+      for (unsigned l = 0; l < p->live_out_count; ++l)
+         live_out |= p->live_out[l] == D->dest;
+      const struct agx_apple9_use *uses = agx_apple9_uses(p, D->dest);
+      if (live_out || !uses)
+         continue;
+      const bool fp16 = D->op == AGX_APPLE9_VIR_UNPACK_HALF;
+      bool all = true;
+      for (const struct agx_apple9_use *u = uses; u && all; u = u->next) {
+         const struct agx_apple9_vir_instr *R = u->instruction;
+         const int slot = register_slot(R, u->source);
+         const bool add = R->op == AGX_APPLE9_VIR_IADD || R->op == AGX_APPLE9_VIR_ISUB;
+         const bool mad = R->op == AGX_APPLE9_VIR_IMAD && !R->immediate;
+         const bool float2 = (R->op == AGX_APPLE9_VIR_FADD || R->op == AGX_APPLE9_VIR_FSUB ||
+                              R->op == AGX_APPLE9_VIR_FMUL) &&
+                             (R->encoding == AGX_APPLE9_ENC_FLOAT2_COMPACT ||
+                              R->encoding == AGX_APPLE9_ENC_FLOAT2_BASE ||
+                              R->encoding == AGX_APPLE9_ENC_FLOAT2_MODIFIER_EXTENDED ||
+                              R->encoding == AGX_APPLE9_ENC_FLOAT2_ABS_EXTENDED ||
+                              R->encoding == AGX_APPLE9_ENC_FLOAT2_MUL_ABS_EXTENDED);
+         const bool fma = R->op == AGX_APPLE9_VIR_FMA;
+         bool ok;
+         /* FMA's multiplicands commute: a half in A moves to B, which takes
+          * a low half, when B is an ordinary register. */
+         const bool fma_swap = fma && slot == 0 && !hi && R->nr_srcs >= 2 &&
+            !((R->alu_src_uniform_mask | R->alu_src_immediate_mask | R->src_half_mask) & 3) &&
+            R->src[1] != D->dest;
+         if (fp16)
+            ok = (float2 && slot < 2) ||
+                 (fma && (slot == 2 || (slot == 1 && !hi) || fma_swap));
+         else
+            ok = (add && R->encoding == AGX_APPLE9_ENC_INT_ADD_EXTENDED && slot < 2) ||
+                 (mad && R->encoding == AGX_APPLE9_ENC_INT_MAD_EXTENDED &&
+                  (!sext || slot == 0));
+         all = slot >= 0 && ok && !(R->src_half_mask & BITFIELD_BIT(slot)) &&
+               agx_apple9_instr_block(R) == agx_apple9_instr_block(D);
+      }
+      if (!all)
+         continue;
+      for (const struct agx_apple9_use *u = uses; u; u = u->next) {
+         struct agx_apple9_vir_instr *R = u->instruction;
+         unsigned source = u->source;
+         if (fp16 && R->op == AGX_APPLE9_VIR_FMA && register_slot(R, source) == 0) {
+            uint32_t other = R->src[1];
+            R->src[1] = R->src[0];
+            R->src[0] = other;
+            R->src_abs_mask = (R->src_abs_mask & ~3u) |
+               ((R->src_abs_mask & 1) << 1) | ((R->src_abs_mask & 2) >> 1);
+            R->src_neg_mask = (R->src_neg_mask & ~3u) |
+               ((R->src_neg_mask & 1) << 1) | ((R->src_neg_mask & 2) >> 1);
+            source = 1;
+         }
+         const unsigned bit = BITFIELD_BIT(register_slot(R, source));
+         R->src[source] = x;
+         R->src_half_mask |= bit;
+         if (hi) R->src_hi_mask |= bit;
+         if (sext) R->src_sext_mask |= bit;
+      }
+      agx_apple9_invalidate_uses(p);
+      if (!agx_apple9_analyze_uses(p))
+         return false;
+   }
+   agx_apple9_invalidate_uses(p);
+   return true;
+}
+
 bool
 agx_apple9_optimize_vir_with_constants(
    struct agx_apple9_vir_program *p,
@@ -1085,6 +1280,8 @@ agx_apple9_optimize_vir_with_constants(
          .saturate = I->saturate,
          .src_uniform = I->alu_src_uniform_mask,
          .src_immediate = I->alu_src_immediate_mask,
+         .src_half = I->src_half_mask, .src_hi = I->src_hi_mask,
+         .src_sext = I->src_sext_mask,
       };
       for (unsigned s = 0; s < ARRAY_SIZE(key->src_value); ++s) {
          if ((key->src_uniform | key->src_immediate) & BITFIELD_BIT(s))
@@ -1114,7 +1311,8 @@ agx_apple9_optimize_vir_with_constants(
       p->live_out[i] = resolve(replacement, p->live_out[i]);
    if (p->output != AGX_APPLE9_VREG_INVALID)
       p->output = resolve(replacement, p->output);
-   success = fold_saturate(p, replacement) && fold_uniform_stores(p);
+   success = fold_saturate(p, replacement) && fold_uniform_stores(p) &&
+             fold_half_sources(p, constants);
 
 cleanup:
    if (constant_words)
