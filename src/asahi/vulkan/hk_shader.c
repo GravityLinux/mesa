@@ -3513,7 +3513,7 @@ hk_apple9_handle_intrinsic(nir_tex_instr *tex, unsigned sampler)
 }
 
 /* Address a descriptor relative to the USC aperture that holds G16
- * descriptor memory, see hk_apple9_image_descriptor. */
+ * descriptor memory, see hk_apple9_image_part. */
 static void
 hk_apple9_use_descriptor_handle(nir_builder *b, nir_tex_instr *tex,
                                 unsigned sampler)

@@ -93,7 +93,7 @@ struct hk_apple9_texel_metadata {
 };
 
 /* Uniform texel buffers read every format but RGB32 through the texture
- * unit. Like hk_apple9_image_descriptor, the descriptor holds the native
+ * unit. Like hk_apple9_image_part, the descriptor holds the native
  * texture entry for shaders that address it directly. */
 struct hk_apple9_texel_descriptor {
    struct agx_texture_packed tex;
@@ -111,7 +111,7 @@ static_assert(offsetof(struct hk_apple9_texel_descriptor, texture) ==
  * shaders can access them without a declared format. Storage images also
  * hold the native texture entry of their read-only view: loads that no
  * write of the invocation can precede go through the texture unit. The
- * entry is one table slot past where hk_apple9_image_descriptor keeps its
+ * entry is one table slot past where hk_apple9_image_part keeps its
  * own, so a handle 32 bytes past the descriptor addresses it. */
 struct hk_apple9_storage_descriptor {
    struct hk_storage_image_descriptor common;
@@ -149,26 +149,6 @@ enum hk_apple9_store_encode {
 };
 
 enum hk_apple9_store_encode hk_apple9_store_encode(enum pipe_format format);
-
-/* G16 image and sampler descriptors extend the common layout with native
- * state that shaders can address directly. Descriptor memory lives in the
- * USC aperture, so a 32-byte-aligned record at VA v is native table entry
- * (v - shader_base) / 32 when a stage's table pointer is shader_base.
- */
-struct hk_apple9_image_descriptor {
-   struct hk_sampled_image_descriptor common;
-   uint8_t texture[AGX_APPLE9_TEXTURE_TABLE_STRIDE];
-   uint8_t sampler[AGX_APPLE9_SAMPLER_TABLE_STRIDE];
-   /* Same layouts as the per-draw texture info and runtime sampler records. */
-   uint32_t texture_info[AGX_APPLE9_TEXTURE_INFO_STRIDE / 4];
-   uint32_t runtime_sampler[AGX_APPLE9_RUNTIME_SAMPLER_STRIDE / 4];
-};
-static_assert(sizeof(struct hk_apple9_image_descriptor) == 224,
-              "Apple9 image descriptor has no holes");
-static_assert(offsetof(struct hk_apple9_image_descriptor, texture) % 32 == 0,
-              "native texture entry is table aligned");
-static_assert(offsetof(struct hk_apple9_image_descriptor, sampler) % 32 == 0,
-              "native sampler entry is table aligned");
 
 /* G16 descriptor records, 128 bytes each so translation layers can copy
  * them with their 128-byte paths: an image part and a sampler part. A
