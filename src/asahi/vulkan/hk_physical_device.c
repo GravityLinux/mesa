@@ -932,8 +932,7 @@ hk_get_device_properties(const struct agx_device *dev,
       /* VK_KHR_push_descriptor */
       .maxPushDescriptors = HK_MAX_PUSH_DESCRIPTORS,
 
-      /* VK_EXT_descriptor_buffer (G16; advertised with
-       * HK_APPLE9_DESCRIPTOR_BUFFER while it is brought up) */
+      /* VK_EXT_descriptor_buffer (G16; HK_APPLE9_DESCRIPTOR_BUFFER=0 hides it) */
       .combinedImageSamplerDescriptorSingleArray = true,
       .bufferlessPushDescriptors = true,
       .allowSamplerImageViewPostSubmitCreation = false,
@@ -1918,13 +1917,12 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
          hk_sparse_unbound_unmapped(&pdev->dev);
    }
 
-   /* VK_EXT_descriptor_buffer rides HK_APPLE9_DESCRIPTOR_BUFFER, as its
-    * memory type does. With 128 B image and sampler parts vkd3d-proton finds
-    * its host copy templates and no longer crashes at device creation
-    * (ELDEN RING, 2026-10-11). Default-on waits for an in-world A/B of
-    * ELDEN RING with and without descriptor buffers. */
+   /* VK_EXT_descriptor_buffer, with its memory type; HK_APPLE9_DESCRIPTOR_BUFFER=0
+    * hides both. With 128 B image and sampler parts vkd3d-proton finds its
+    * host copy templates; in-world ELDEN RING runs 13% faster with it (x86
+    * driver) and 5% (FEX thunk), with descriptor CPU near zero (2026-10-11). */
    if (pdev->dev.chip == AGX_CHIP_G16G &&
-       debug_get_bool_option("HK_APPLE9_DESCRIPTOR_BUFFER", false)) {
+       debug_get_bool_option("HK_APPLE9_DESCRIPTOR_BUFFER", true)) {
       supported_extensions.EXT_descriptor_buffer = true;
       supported_features.descriptorBuffer = true;
       supported_features.descriptorBufferPushDescriptors = true;
@@ -1989,7 +1987,7 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
 
    pdev->apple9_descriptor_mem_type = UINT8_MAX;
    if (pdev->dev.chip == AGX_CHIP_G16G &&
-       debug_get_bool_option("HK_APPLE9_DESCRIPTOR_BUFFER", false)) {
+       debug_get_bool_option("HK_APPLE9_DESCRIPTOR_BUFFER", true)) {
       pdev->apple9_descriptor_mem_type = pdev->mem_type_count;
       pdev->mem_types[pdev->mem_type_count++] = (VkMemoryType){
          .propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
