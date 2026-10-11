@@ -6,7 +6,7 @@
 #include "util/format/format_utils.h"
 #include "util/format/u_format.h"
 #include "util/half_float.h"
-#include "agx_helpers.h"
+#include "agx_border.h"
 #include "agx_pack.h"
 
 /*
@@ -165,7 +165,7 @@ agx_pack_border(struct agx_border_packed *out, const uint32_t in[4],
       static_assert(PIPE_SWIZZLE_W == 3, "known ordering");
 
       if (desc->swizzle[i] <= PIPE_SWIZZLE_W)
-         channel_map[i] = desc->swizzle[i];
+         channel_map[desc->swizzle[i]] = i;
    }
 
    agx_pack(out, BORDER, cfg) {

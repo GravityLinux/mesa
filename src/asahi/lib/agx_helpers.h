@@ -9,6 +9,7 @@
 #include "asahi/compiler/agx_compile.h"
 #include "asahi/layout/layout.h"
 #include "agx_abi.h"
+#include "agx_border.h"
 #include "agx_pack.h"
 #include "agx_ppp.h"
 #include "libagx_shaders.h"
@@ -315,8 +316,3 @@ agx_fill_decompress_args(struct ail_layout *layout, unsigned layer,
       context, grid, barrier,                                                  \
       agx_fill_decompress_args(layout, layer, level, ptr, images),             \
       util_logbase2(layout->sample_count_sa))
-
-struct agx_border_packed;
-
-void agx_pack_border(struct agx_border_packed *out, const uint32_t in[4],
-                     enum pipe_format format);
