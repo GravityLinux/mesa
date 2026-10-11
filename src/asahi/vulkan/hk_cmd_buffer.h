@@ -584,7 +584,10 @@ struct hk_cs {
       uint32_t area;                   /* width | height << 16 */
       uint32_t view;                   /* base mip | base layer << 8 | layers << 20 */
       uint32_t color0_format, depth_format;
-      uint8_t color_count, samples, clears; /* clears: bit 0 color0, bit 1 depth */
+      uint8_t color_count, samples;
+      /* bit 0 colour-0 cleared, 1 depth cleared, 2 colour-0 compressed,
+       * 3 colour-0 storage usage, 4 depth compressed */
+      uint8_t clears;
    } diag;
 };
 
