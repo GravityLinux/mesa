@@ -181,6 +181,24 @@ struct agx_apple9_uniform_draw {
    uint8_t provoking_vertex;
 };
 
+/* Clear a record for reuse without touching its large arrays:
+ * agx_apple9_prepare_draw_alloc rebuilds ppp_record, and buffers and
+ * viewports are read only up to the counts the caller fills in. */
+static inline void
+agx_apple9_uniform_draw_reset(struct agx_apple9_uniform_draw *draw)
+{
+   memset(draw, 0, offsetof(struct agx_apple9_uniform_draw, ppp_record));
+   memset(&draw->ppp_size, 0,
+          offsetof(struct agx_apple9_uniform_draw, buffers) -
+             offsetof(struct agx_apple9_uniform_draw, ppp_size));
+   memset(&draw->buffer_count, 0,
+          offsetof(struct agx_apple9_uniform_draw, viewports) -
+             offsetof(struct agx_apple9_uniform_draw, buffer_count));
+   memset(&draw->scissor_index, 0,
+          sizeof(*draw) -
+             offsetof(struct agx_apple9_uniform_draw, scissor_index));
+}
+
 void agx_apple9_initialize_entries(struct agx_device *dev);
 
 /* Immutable state caches compare the complete canonical contents. Launch keys

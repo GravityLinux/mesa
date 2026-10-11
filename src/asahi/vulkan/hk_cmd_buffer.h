@@ -640,10 +640,12 @@ struct hk_cmd_buffer {
                         AGX_APPLE9_MAX_GRAPHICS_BUFFERS * sizeof(uint64_t))];
    } upload_last[HK_UPLOAD_LAST_COUNT];
 
-   /* The previous Apple9 draw in the current graphics control stream, so an
-    * unchanged launch, coefficient table or PPP record is reused without
-    * hashing. Records are allocated per control stream (batch). */
-   struct agx_apple9_uniform_draw apple9_prev_draw;
+   /* The current and previous Apple9 draw records, alternating: a draw
+    * compares against the previous draw in the same graphics control stream,
+    * so an unchanged launch, coefficient table or PPP record is reused
+    * without hashing. Records are allocated per control stream (batch). */
+   struct agx_apple9_uniform_draw apple9_draw[2];
+   unsigned apple9_draw_current;
    struct hk_cs *apple9_prev_cs;
 
    /* The last linked Apple9 (vertex, fragment) pair, by program id: shader
