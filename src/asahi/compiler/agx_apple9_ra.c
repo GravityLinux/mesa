@@ -1880,7 +1880,12 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
    remat_known[0][0] = true;
 
    struct apple9_allocation_cost cost = apple9_allocation_cost(&best);
-   if (cost.has_copies || cost.spills) {
+   /* Bank-cost allocations pay off when the plain allocation spills: they
+    * then remove copies and spill traffic. Without spills they almost never
+    * beat it (ELDEN RING's 758 shaders: 16 wins in 1,889 allocations, 0.2%
+    * of their instructions) yet cost a full allocation each. */
+   const bool bank_candidates = cost.spills != 0;
+   if (bank_candidates) {
       /* Bank hints can conflict with later tuples and phi reconciliation.
        * Compare completed allocations so those costs are paid by the policy
        * which caused them, including rematerialization and spill lowering. */
@@ -1909,6 +1914,8 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
       unsigned rejected[2] = {UINT_MAX, UINT_MAX};
       for (unsigned c = 0; c < 2 * ARRAY_SIZE(slacks); ++c) {
          const unsigned banks = c & 1, slack = slacks[c >> 1];
+         if (banks && !bank_candidates)
+            continue;
          if (slack && rejected[banks] <= slacks[(c >> 1) - 1])
             continue;
          agx_apple9_vir_init(&alternative);
