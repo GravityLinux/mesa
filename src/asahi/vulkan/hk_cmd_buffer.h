@@ -589,6 +589,14 @@ struct hk_uploader {
 
 #define HK_TESS_BATCH_LANES 5
 
+enum hk_upload_last {
+   HK_UPLOAD_LAST_DRAW_PARAMS,
+   HK_UPLOAD_LAST_VERTEX_BUFFERS,
+   HK_UPLOAD_LAST_VERTEX_TABLE,
+   HK_UPLOAD_LAST_FRAGMENT_TABLE,
+   HK_UPLOAD_LAST_COUNT,
+};
+
 struct hk_cmd_buffer {
    struct vk_command_buffer vk;
 
@@ -610,6 +618,23 @@ struct hk_cmd_buffer {
 
    /* Full-content immutable upload cache, discarded on reset. */
    struct hash_table *upload_cache;
+
+   /* Per-draw tables whose contents usually change from one draw to the next
+    * (they carry the root address): the last upload of each kind, reused only
+    * when the next is identical, see hk_pool_upload_last. */
+   struct hk_upload_last_entry {
+      uint64_t gpu;
+      uint32_t size;
+      /* The largest table: vertex buffers or a stage's resource table. */
+      uint8_t data[MAX2(AGX_MAX_VBUFS * 32,
+                        AGX_APPLE9_MAX_GRAPHICS_BUFFERS * sizeof(uint64_t))];
+   } upload_last[HK_UPLOAD_LAST_COUNT];
+
+   /* The previous Apple9 draw in the current graphics control stream, so an
+    * unchanged launch, coefficient table or PPP record is reused without
+    * hashing. Records are allocated per control stream (batch). */
+   struct agx_apple9_uniform_draw apple9_prev_draw;
+   struct hk_cs *apple9_prev_cs;
 
    /* List of all recorded control streams */
    struct list_head control_streams;
@@ -764,6 +789,9 @@ enum hk_upload_type {
 uint64_t hk_pool_upload_cached(struct hk_cmd_buffer *cmd, const void *data,
                                uint32_t size, uint32_t alignment,
                                enum hk_upload_type type);
+uint64_t hk_pool_upload_last(struct hk_cmd_buffer *cmd, enum hk_upload_last slot,
+                             const void *data, uint32_t size,
+                             uint32_t alignment);
 struct agx_ptr hk_apple9_state_cache_alloc(
    void *allocator, enum agx_apple9_state_type type, const void *contents,
    size_t size, size_t alignment, bool *is_new);

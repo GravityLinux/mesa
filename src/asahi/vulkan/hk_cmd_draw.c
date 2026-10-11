@@ -36,6 +36,7 @@
 #include "asahi/libagx/query.h"
 #include "asahi/libagx/tessellator.h"
 #include "poly/geometry.h"
+#include "util/u_debug.h"
 #include "util/blend.h"
 #include "util/format/format_utils.h"
 #include "util/format/u_formats.h"
@@ -74,7 +75,10 @@
 /* CTS coverage of indirect draws is pretty bad, so it's helpful to be able to
  * get some extra smoke testing.
  */
-#define HK_TEST_INDIRECTS (getenv("HK_TEST_INDIRECTS") != NULL)
+/* Read once: the environment is scanned linearly, which on every draw cost
+ * 50-100 ns in a typical Proton environment. */
+DEBUG_GET_ONCE_BOOL_OPTION(hk_test_indirects, "HK_TEST_INDIRECTS", false)
+#define HK_TEST_INDIRECTS debug_get_option_hk_test_indirects()
 
 UNUSED static inline void
 print_draw(struct agx_draw d, FILE *fp)

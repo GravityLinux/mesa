@@ -4,6 +4,7 @@
  * Copyright 2022-2023 Collabora Ltd. and Red Hat Inc.
  * SPDX-License-Identifier: MIT
  */
+#include "util/u_debug.h"
 #include "hk_buffer.h"
 
 #include "agx_bo.h"
@@ -83,6 +84,15 @@ hk_get_bda_replay_addr(const VkBufferCreateInfo *pCreateInfo)
    return addr;
 }
 
+DEBUG_GET_ONCE_BOOL_OPTION(hk_sparse_unmapped_raw_opt,
+                           "HK_APPLE9_SPARSE_UNMAPPED_RAW", false)
+
+bool
+hk_sparse_unmapped_raw(void)
+{
+   return debug_get_option_hk_sparse_unmapped_raw_opt();
+}
+
 VkResult
 hk_bind_scratch(struct hk_device *dev, struct agx_va *va, unsigned offset_B,
                 size_t size_B)
@@ -96,7 +106,7 @@ hk_bind_scratch(struct hk_device *dev, struct agx_va *va, unsigned offset_B,
     * them unmapped instead (soft-faulted reads, about 10x slower).
     */
    if (hk_sparse_unbound_unmapped(&dev->dev)) {
-      if (getenv("HK_APPLE9_SPARSE_UNMAPPED_RAW"))
+      if (hk_sparse_unmapped_raw())
          return VK_SUCCESS;
       if (agx_bo_bind(&dev->dev, dev->dev.zero_bo, addr, size_B, 0, flags) ||
           (hk_va_has_ro_shadow(dev, addr) &&

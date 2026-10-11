@@ -59,6 +59,9 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd)
 
    ralloc_free(cmd->upload_cache);
    cmd->upload_cache = NULL;
+   for (unsigned i = 0; i < HK_UPLOAD_LAST_COUNT; ++i)
+      cmd->upload_last[i].gpu = 0;
+   cmd->apple9_prev_cs = NULL;
    hk_descriptor_state_fini(cmd, &cmd->state.gfx.descriptors);
    hk_descriptor_state_fini(cmd, &cmd->state.cs.descriptors);
 
@@ -407,6 +410,32 @@ hk_pool_upload_cached(struct hk_cmd_buffer *cmd, const void *data,
    return ptr.gpu;
 }
 
+DEBUG_GET_ONCE_BOOL_OPTION(hk_upload_stats, "HK_UPLOAD_STATS", false)
+
+/* Upload a per-draw table, reusing the previous upload of the same kind when
+ * the contents are unchanged. Unlike the content cache this keeps one entry
+ * per kind: these tables carry the root address, so they rarely repeat
+ * except consecutively, and hashing each into a growing table costs more
+ * than it saves. */
+uint64_t
+hk_pool_upload_last(struct hk_cmd_buffer *cmd, enum hk_upload_last slot,
+                    const void *data, uint32_t size, uint32_t alignment)
+{
+   struct hk_upload_last_entry *last = &cmd->upload_last[slot];
+   assert(size <= sizeof(last->data));
+   if (last->gpu && last->size == size && !memcmp(last->data, data, size))
+      return last->gpu;
+
+   struct agx_ptr ptr = hk_pool_alloc(cmd, size, alignment);
+   if (!ptr.cpu)
+      return 0;
+   memcpy(ptr.cpu, data, size);
+   memcpy(last->data, data, size);
+   last->size = size;
+   last->gpu = ptr.gpu;
+   return ptr.gpu;
+}
+
 struct agx_ptr
 hk_apple9_state_cache_alloc(void *allocator, enum agx_apple9_state_type type,
                              const void *contents, size_t size,
@@ -414,6 +443,15 @@ hk_apple9_state_cache_alloc(void *allocator, enum agx_apple9_state_type type,
 {
    enum hk_cmd_pool_kind kind = type == AGX_APPLE9_STATE_PPP
                                   ? HK_CMD_POOL_CONTEXT : HK_CMD_POOL_USC;
+   /* A PPP record embeds its draw's launch addresses. Launches are emitted
+    * fresh unless the previous draw's is reused, so a PPP record can only
+    * repeat consecutively, which the previous-draw comparison already reuses:
+    * a content lookup would always miss and grow the cache by one entry per
+    * draw. */
+   if (type == AGX_APPLE9_STATE_PPP) {
+      *is_new = true;
+      return hk_pool_alloc_internal(allocator, size, alignment, kind);
+   }
    return hk_pool_alloc_cached(allocator, kind, type, contents, size,
                                alignment, is_new);
 }
@@ -505,6 +543,23 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
     * uploads until reset, but do not retain duplicate CPU copies in executable
     * command buffers.
     */
+   if (cmd->upload_cache && debug_get_option_hk_upload_stats()) {
+      size_t bytes = 0;
+      unsigned per_type[HK_UPLOAD_TABLE + 1] = {0};
+      hash_table_foreach(cmd->upload_cache, entry) {
+         const struct hk_upload_key *key = entry->key;
+         bytes += key->size;
+         if (key->type <= HK_UPLOAD_TABLE)
+            per_type[key->type]++;
+      }
+      fprintf(stderr, "HK_UPLOAD_STATS cache entries=%u bytes=%zu "
+              "launch=%u coefficients=%u ppp=%u runtime=%u root=%u table=%u\n",
+              cmd->upload_cache->entries, bytes,
+              per_type[AGX_APPLE9_STATE_LAUNCH],
+              per_type[AGX_APPLE9_STATE_COEFFICIENTS],
+              per_type[AGX_APPLE9_STATE_PPP], per_type[HK_UPLOAD_RUNTIME],
+              per_type[HK_UPLOAD_ROOT], per_type[HK_UPLOAD_TABLE]);
+   }
    ralloc_free(cmd->upload_cache);
    cmd->upload_cache = NULL;
 

@@ -326,7 +326,8 @@ hk_apple9_draw_bindings(struct hk_cmd_buffer *cmd, struct agx_draw draw)
               (draw.indexed
                   ? offsetof(VkDrawIndexedIndirectCommand, vertexOffset)
                   : offsetof(VkDrawIndirectCommand, firstVertex))
-         : hk_pool_upload_cached(cmd, params, sizeof(params), 4, HK_UPLOAD_TABLE);
+         : hk_pool_upload_last(cmd, HK_UPLOAD_LAST_DRAW_PARAMS, params,
+                               sizeof(params), 4);
    uint64_t vertex_buffers[ARRAY_SIZE(gfx->vb)][4] = {0};
    for (unsigned i = 0; i < ARRAY_SIZE(gfx->vb); ++i) {
       vertex_buffers[i][0] = gfx->vb[i].addr;
@@ -336,8 +337,8 @@ hk_apple9_draw_bindings(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    return (struct hk_apple9_prerast_bindings){
       .draw_params = draw_params,
       .vertex_buffers =
-         hk_pool_upload_cached(cmd, vertex_buffers, sizeof(vertex_buffers), 16,
-                               HK_UPLOAD_TABLE),
+         hk_pool_upload_last(cmd, HK_UPLOAD_LAST_VERTEX_BUFFERS, vertex_buffers,
+                             sizeof(vertex_buffers), 16),
    };
 }
 
@@ -814,18 +815,23 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
             UNSUPPORTED();
          record.buffers[stage][slot] = address;
       }
-      uint64_t table = hk_pool_upload_cached(cmd, record.buffers[stage],
-                                      s->resource_count * sizeof(uint64_t), 64,
-                                      HK_UPLOAD_TABLE);
+      uint64_t table = hk_pool_upload_last(
+         cmd, stage ? HK_UPLOAD_LAST_FRAGMENT_TABLE : HK_UPLOAD_LAST_VERTEX_TABLE,
+         record.buffers[stage], s->resource_count * sizeof(uint64_t), 64);
       if (stage)
          record.fragment_table = table;
       else
          record.vertex_table = table;
    }
+   const struct agx_apple9_uniform_draw *previous =
+      cmd->apple9_prev_cs == cs ? &cmd->apple9_prev_draw : NULL;
    if (!agx_apple9_prepare_draw_alloc(&dev->dev, cmd, hk_apple9_usc_alloc, cmd,
                                       hk_apple9_context_alloc, &pipeline,
-                                      &record, NULL, hk_apple9_state_cache_alloc))
+                                      &record, previous,
+                                      hk_apple9_state_cache_alloc))
       UNSUPPORTED();
+   cmd->apple9_prev_draw = record;
+   cmd->apple9_prev_cs = cs;
    pipeline.ppp = record.ppp;
    pipeline.ppp_viewport_offset = record.ppp_viewport_offset;
    pipeline.ppp_viewport_words = record.ppp_viewport_words;
