@@ -88,6 +88,11 @@ struct hk_meta_save {
    struct hk_api_shader *apple9_api[HK_APPLE9_GFX_STAGES];
    struct hk_addr_range vb0;
    struct hk_descriptor_set *desc0;
+   /* Set 0's address and size, for descriptor-buffer bindings, which have
+    * neither a set object nor push descriptors. */
+   uint64_t root_set0;
+   uint32_t set0_size;
+   bool descriptor_buffer0;
    bool has_push_desc0;
    bool occlusion;
    struct hk_push_descriptor_set push_desc0;
@@ -125,6 +130,9 @@ hk_meta_begin(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
    save->vb0 = cmd->state.gfx.vb[0];
 
    save->desc0 = desc->sets[0];
+   save->root_set0 = desc->root.sets[0];
+   save->set0_size = desc->set_sizes[0];
+   save->descriptor_buffer0 = desc->descriptor_buffer_sets & BITFIELD_BIT(0);
    save->has_push_desc0 = desc->push[0];
    if (save->has_push_desc0)
       save->push_desc0 = *desc->push[0];
@@ -164,7 +172,15 @@ hk_meta_end(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
    struct hk_descriptor_state *desc = hk_get_descriptors_state(cmd, bind_point);
    desc->root_dirty = true;
 
-   if (save->desc0) {
+   if (save->descriptor_buffer0) {
+      /* Descriptor memory (VK_EXT_descriptor_buffer): a stale push set 0 from
+       * an earlier meta operation must not replace it. */
+      desc->sets[0] = NULL;
+      desc->root.sets[0] = save->root_set0;
+      desc->set_sizes[0] = save->set0_size;
+      desc->descriptor_buffer_sets |= BITFIELD_BIT(0);
+      desc->push_dirty &= ~BITFIELD_BIT(0);
+   } else if (save->desc0) {
       desc->sets[0] = save->desc0;
       desc->root.sets[0] = hk_descriptor_set_addr(save->desc0);
       desc->sets_dirty |= BITFIELD_BIT(0);
@@ -172,6 +188,12 @@ hk_meta_end(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
    } else if (save->has_push_desc0) {
       *desc->push[0] = save->push_desc0;
       desc->push_dirty |= BITFIELD_BIT(0);
+   } else {
+      /* Nothing bound: restore the address meta displaced. */
+      desc->sets[0] = NULL;
+      desc->root.sets[0] = save->root_set0;
+      desc->set_sizes[0] = save->set0_size;
+      desc->push_dirty &= ~BITFIELD_BIT(0);
    }
 
    if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) {

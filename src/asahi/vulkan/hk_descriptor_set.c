@@ -6,6 +6,7 @@
  */
 #include "hk_descriptor_set.h"
 #include "asahi/lib/agx_bo.h"
+#include "util/format/u_format.h"
 #include "util/half_float.h"
 #include "vulkan/vulkan_core.h"
 
@@ -15,9 +16,11 @@
 #include "hk_descriptor_set_layout.h"
 #include "hk_device.h"
 #include "hk_entrypoints.h"
+#include "hk_image.h"
 #include "hk_image_view.h"
 #include "hk_physical_device.h"
 #include "hk_sampler.h"
+#include "hk_descriptor_buffer.h"
 
 static inline uint32_t
 align_u32(uint32_t v, uint32_t a)
@@ -52,11 +55,13 @@ write_desc(struct hk_descriptor_set *set, uint32_t binding, uint32_t elem,
    memcpy(dst, desc_data, desc_size);
 }
 
-static void
-write_sampled_image_view_desc(struct hk_descriptor_set *set,
-                              const VkDescriptorImageInfo *const info,
-                              uint32_t binding, uint32_t elem,
-                              VkDescriptorType descriptor_type)
+/* Pack a sampled image, sampler or combined descriptor, one record per plane,
+ * into out (room for 3 records of the largest kind); returns its size. */
+static size_t
+hk_pack_sampled_image(struct hk_device *dev, void *out,
+                      VkDescriptorType descriptor_type,
+                      const VkDescriptorImageInfo *const info,
+                      struct hk_sampler *sampler)
 {
    struct hk_sampled_image_descriptor desc[3] = {};
 
@@ -87,16 +92,6 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
 
    if (descriptor_type == VK_DESCRIPTOR_TYPE_SAMPLER ||
        descriptor_type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
-      const struct hk_descriptor_set_binding_layout *binding_layout =
-         &set->layout->binding[binding];
-
-      struct hk_sampler *sampler;
-      if (binding_layout->immutable_samplers) {
-         sampler = binding_layout->immutable_samplers[elem];
-      } else {
-         sampler = hk_sampler_from_handle(info->sampler);
-      }
-
       border = sampler->apple9_border;
 
       if (sampler->has_border)
@@ -138,8 +133,6 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
                 sizeof(sampler->custom_border));
       }
    }
-   /* Push descriptor writes use a transient set without an object base. */
-   struct hk_device *dev = (struct hk_device *)set->layout->vk.base.device;
    if (dev->dev.chip == AGX_CHIP_G16G) {
       /* Native state for shaders that address the descriptor directly, one
        * descriptor per plane. */
@@ -168,17 +161,39 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
                                       &desc[plane].sampler, false);
          }
       }
-      write_desc(set, binding, elem, ext, sizeof(ext[0]) * plane_count);
-      return;
+      memcpy(out, ext, sizeof(ext[0]) * plane_count);
+      return sizeof(ext[0]) * plane_count;
    }
 
-   write_desc(set, binding, elem, desc, sizeof(desc[0]) * plane_count);
+   memcpy(out, desc, sizeof(desc[0]) * plane_count);
+   return sizeof(desc[0]) * plane_count;
 }
 
 static void
-write_storage_image_view_desc(struct hk_descriptor_set *set,
+write_sampled_image_view_desc(struct hk_descriptor_set *set,
                               const VkDescriptorImageInfo *const info,
-                              uint32_t binding, uint32_t elem)
+                              uint32_t binding, uint32_t elem,
+                              VkDescriptorType descriptor_type)
+{
+   struct hk_sampler *sampler = NULL;
+   if (descriptor_type == VK_DESCRIPTOR_TYPE_SAMPLER ||
+       descriptor_type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+      const struct hk_descriptor_set_binding_layout *binding_layout =
+         &set->layout->binding[binding];
+      sampler = binding_layout->immutable_samplers
+                   ? binding_layout->immutable_samplers[elem]
+                   : hk_sampler_from_handle(info->sampler);
+   }
+   /* Push descriptor writes use a transient set without an object base. */
+   struct hk_device *dev = (struct hk_device *)set->layout->vk.base.device;
+   struct hk_apple9_image_descriptor out[3];
+   size_t size = hk_pack_sampled_image(dev, out, descriptor_type, info, sampler);
+   write_desc(set, binding, elem, out, size);
+}
+
+static size_t
+hk_pack_storage_image(struct hk_device *dev, void *out,
+                      const VkDescriptorImageInfo *const info)
 {
    struct hk_storage_image_descriptor desc = {};
 
@@ -196,7 +211,6 @@ write_storage_image_view_desc(struct hk_descriptor_set *set,
       agx_set_null_pbe(&desc.pbe);
    }
 
-   struct hk_device *dev = (struct hk_device *)set->layout->vk.base.device;
    if (dev->dev.chip == AGX_CHIP_G16G) {
       struct hk_apple9_storage_descriptor ext = {.common = desc};
       ext.metadata.base = dev->apple9_resident->va->addr;
@@ -210,11 +224,25 @@ write_storage_image_view_desc(struct hk_descriptor_set *set,
             view->vk.base_mip_level | (view->vk.base_array_layer << 16);
          ext.native_ok = agx_apple9_translate_texture(ext.texture, &desc.tex);
       }
-      write_desc(set, binding, elem, &ext, sizeof(ext));
-      return;
+      memcpy(out, &ext, sizeof(ext));
+      return sizeof(ext);
    }
 
-   write_desc(set, binding, elem, &desc, sizeof(desc));
+   memcpy(out, &desc, sizeof(desc));
+   return sizeof(desc);
+}
+
+static void
+write_storage_image_view_desc(struct hk_descriptor_set *set,
+                              const VkDescriptorImageInfo *const info,
+                              uint32_t binding, uint32_t elem)
+{
+   struct hk_device *dev = (struct hk_device *)set->layout->vk.base.device;
+   struct hk_apple9_storage_descriptor out;
+   static_assert(sizeof(out) >= sizeof(struct hk_storage_image_descriptor),
+                 "room for either record");
+   write_desc(set, binding, elem, &out,
+              hk_pack_storage_image(dev, &out, info));
 }
 
 static struct hk_buffer_address
@@ -255,49 +283,68 @@ write_dynamic_buffer_desc(struct hk_descriptor_set *set,
    *desc = get_buffer_address(info, read_only);
 }
 
+/* Pack a texel buffer descriptor from its native state (a buffer view or an
+ * address range), NULL for a null descriptor; returns its size. */
+static size_t
+hk_pack_texel_buffer_desc(struct hk_device *dev, void *out,
+                          VkDescriptorType type,
+                          const struct agx_texture_packed *tex,
+                          const struct agx_pbe_packed *pbe,
+                          const struct hk_apple9_texel_metadata *m,
+                          const uint8_t *apple9_texture)
+{
+   /* G16 uniform texel buffers carry load metadata, also in mutable bindings. */
+   if (dev->dev.chip == AGX_CHIP_G16G &&
+       type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER) {
+      struct hk_apple9_texel_descriptor desc = {};
+      if (tex) {
+         desc.tex = *tex;
+         desc.metadata = *m;
+         memcpy(desc.texture, apple9_texture, sizeof(desc.texture));
+      } else {
+         agx_set_null_texture(&desc.tex);
+         agx_apple9_translate_texture(desc.texture, &desc.tex);
+      }
+      memcpy(out, &desc, sizeof(desc));
+      return sizeof(desc);
+   } else if (dev->dev.chip == AGX_CHIP_G16G) {
+      struct hk_apple9_storage_descriptor desc = {};
+      if (tex) {
+         desc.common.tex = *tex;
+         desc.common.pbe = *pbe;
+         desc.metadata = *m;
+      } else {
+         agx_set_null_texture(&desc.common.tex);
+         agx_set_null_pbe(&desc.common.pbe);
+      }
+      memcpy(out, &desc, sizeof(desc));
+      return sizeof(desc);
+   } else {
+      struct hk_storage_image_descriptor desc = {};
+      if (tex) {
+         desc.tex = *tex;
+         desc.pbe = *pbe;
+      } else {
+         agx_set_null_texture(&desc.tex);
+         agx_set_null_pbe(&desc.pbe);
+      }
+      memcpy(out, &desc, sizeof(desc));
+      return sizeof(desc);
+   }
+}
+
 static void
 write_buffer_view_desc(struct hk_descriptor_set *set,
                        const VkBufferView bufferView, uint32_t binding,
                        uint32_t elem, VkDescriptorType type)
 {
    VK_FROM_HANDLE(hk_buffer_view, view, bufferView);
-   /* G16 uniform texel buffers carry load metadata, also in mutable bindings. */
-   const struct hk_device *dev =
-      (const struct hk_device *)set->layout->vk.base.device;
-   if (dev->dev.chip == AGX_CHIP_G16G &&
-       type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER) {
-      struct hk_apple9_texel_descriptor desc = {};
-      if (view) {
-         desc.tex = view->tex;
-         desc.metadata = view->apple9;
-         memcpy(desc.texture, view->apple9_texture, sizeof(desc.texture));
-      } else {
-         agx_set_null_texture(&desc.tex);
-         agx_apple9_translate_texture(desc.texture, &desc.tex);
-      }
-      write_desc(set, binding, elem, &desc, sizeof(desc));
-   } else if (dev->dev.chip == AGX_CHIP_G16G) {
-      struct hk_apple9_storage_descriptor desc = {};
-      if (view) {
-         desc.common.tex = view->tex;
-         desc.common.pbe = view->pbe;
-         desc.metadata = view->apple9;
-      } else {
-         agx_set_null_texture(&desc.common.tex);
-         agx_set_null_pbe(&desc.common.pbe);
-      }
-      write_desc(set, binding, elem, &desc, sizeof(desc));
-   } else {
-      struct hk_storage_image_descriptor desc = {};
-      if (view) {
-         desc.tex = view->tex;
-         desc.pbe = view->pbe;
-      } else {
-         agx_set_null_texture(&desc.tex);
-         agx_set_null_pbe(&desc.pbe);
-      }
-      write_desc(set, binding, elem, &desc, sizeof(desc));
-   }
+   struct hk_device *dev = (struct hk_device *)set->layout->vk.base.device;
+   uint8_t out[HK_MAX_DESCRIPTOR_SIZE];
+   size_t size = hk_pack_texel_buffer_desc(
+      dev, out, type, view ? &view->tex : NULL, view ? &view->pbe : NULL,
+      view ? &view->apple9 : NULL, view ? view->apple9_texture : NULL);
+   write_desc(set, binding, elem, out, size);
 }
 
 static void
@@ -333,7 +380,7 @@ hk_UpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount,
          uint32_t stride, alignment;
          hk_descriptor_stride_align_for_type(hk_device_physical(dev),
                                              write->descriptorType, NULL,
-                                             &stride, &alignment);
+                                             false, &stride, &alignment);
          if (stride > binding_layout->stride) {
             const VkDescriptorBufferInfo null_info = {.range = VK_WHOLE_SIZE};
             for (uint32_t j = 0; j < write->descriptorCount; j++) {
@@ -352,7 +399,7 @@ hk_UpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount,
          uint32_t image_stride, image_alignment;
          hk_descriptor_stride_align_for_type(hk_device_physical(dev),
                                              VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-                                             NULL, &image_stride,
+                                             NULL, false, &image_stride,
                                              &image_alignment);
          if (stride < binding_layout->stride &&
              image_stride <= binding_layout->stride) {
@@ -591,7 +638,7 @@ hk_CreateDescriptorPool(VkDevice _device,
 
       uint32_t stride, alignment;
       hk_descriptor_stride_align_for_type(pdev, pCreateInfo->pPoolSizes[i].type,
-                                          type_list, &stride, &alignment);
+                                          type_list, false, &stride, &alignment);
       max_align = MAX2(max_align, alignment);
    }
 
@@ -604,7 +651,7 @@ hk_CreateDescriptorPool(VkDevice _device,
 
       uint32_t stride, alignment;
       hk_descriptor_stride_align_for_type(pdev, pCreateInfo->pPoolSizes[i].type,
-                                          type_list, &stride, &alignment);
+                                          type_list, false, &stride, &alignment);
       bo_size +=
          MAX2(stride, max_align) * pCreateInfo->pPoolSizes[i].descriptorCount;
    }
@@ -941,4 +988,149 @@ hk_push_descriptor_set_update_template(
       .mapped_ptr = push_set->data,
    };
    hk_descriptor_set_write_template(&tmp_set, template, data);
+}
+
+/* Copy a packed record into application descriptor memory, zero-filling the
+ * rest of the descriptor so no stale bytes of another type remain. The
+ * destination is written only. */
+static void
+hk_store_descriptor(void *dst, size_t data_size, const void *src, size_t size)
+{
+   assert(size <= data_size);
+   memcpy(dst, src, size);
+   memset((uint8_t *)dst + size, 0, data_size - size);
+}
+
+static void
+hk_get_texel_buffer_descriptor(struct hk_device *dev, VkDescriptorType type,
+                               const VkDescriptorAddressInfoEXT *info,
+                               size_t data_size, void *dst)
+{
+   uint8_t out[HK_MAX_DESCRIPTOR_SIZE];
+   size_t size;
+   if (info && info->address) {
+      struct agx_texture_packed tex;
+      struct agx_pbe_packed pbe;
+      struct hk_apple9_texel_metadata m = {0};
+      uint8_t texture[AGX_APPLE9_TEXTURE_TABLE_STRIDE] = {0};
+      enum pipe_format format = hk_format_to_pipe_format(info->format);
+      uint32_t elements = info->range / util_format_get_blocksize(format);
+      hk_pack_texel_buffer(dev, format, info->address, info->address, elements,
+                           dev->dev.chip == AGX_CHIP_G16G
+                              ? dev->apple9_resident->va->addr : 0,
+                           &tex, &pbe, &m, texture);
+      size = hk_pack_texel_buffer_desc(dev, out, type, &tex, &pbe, &m, texture);
+   } else {
+      size = hk_pack_texel_buffer_desc(dev, out, type, NULL, NULL, NULL, NULL);
+   }
+   hk_store_descriptor(dst, data_size, out, size);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+hk_GetDescriptorEXT(VkDevice _device, const VkDescriptorGetInfoEXT *info,
+                    size_t dataSize, void *pDescriptor)
+{
+   VK_FROM_HANDLE(hk_device, dev, _device);
+
+   switch (info->type) {
+   case VK_DESCRIPTOR_TYPE_SAMPLER:
+   case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+   case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+   case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT: {
+      VkDescriptorImageInfo image = {0};
+      struct hk_sampler *sampler = NULL;
+      if (info->type == VK_DESCRIPTOR_TYPE_SAMPLER) {
+         sampler = hk_sampler_from_handle(*info->data.pSampler);
+      } else if (info->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+         image = *info->data.pCombinedImageSampler;
+         sampler = hk_sampler_from_handle(image.sampler);
+      } else if (info->type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) {
+         if (info->data.pSampledImage)
+            image = *info->data.pSampledImage;
+      } else if (info->data.pInputAttachmentImage) {
+         image = *info->data.pInputAttachmentImage;
+      }
+      struct hk_apple9_image_descriptor out[3];
+      size_t size = hk_pack_sampled_image(dev, out, info->type, &image, sampler);
+      if (dev->dev.chip != AGX_CHIP_G16G) {
+         hk_store_descriptor(pDescriptor, dataSize, out, size);
+         break;
+      }
+      /* Planes are consecutive descriptor-buffer records. */
+      unsigned planes = size / sizeof(out[0]);
+      assert(planes * HK_APPLE9_DB_SAMPLED_SIZE <= dataSize);
+      for (unsigned p = 0; p < planes; ++p) {
+         hk_store_descriptor((uint8_t *)pDescriptor + p * HK_APPLE9_DB_SAMPLED_SIZE,
+                             HK_APPLE9_DB_SAMPLED_SIZE, &out[p], sizeof(out[p]));
+      }
+      if (dataSize > planes * HK_APPLE9_DB_SAMPLED_SIZE) {
+         memset((uint8_t *)pDescriptor + planes * HK_APPLE9_DB_SAMPLED_SIZE, 0,
+                dataSize - planes * HK_APPLE9_DB_SAMPLED_SIZE);
+      }
+      break;
+   }
+
+   case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE: {
+      struct hk_apple9_storage_descriptor out;
+      VkDescriptorImageInfo image = {0};
+      if (info->data.pStorageImage)
+         image = *info->data.pStorageImage;
+      hk_store_descriptor(pDescriptor, dataSize, &out,
+                          hk_pack_storage_image(dev, &out, &image));
+      break;
+   }
+
+   case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+      hk_get_texel_buffer_descriptor(dev, info->type,
+                                     info->data.pUniformTexelBuffer, dataSize,
+                                     pDescriptor);
+      break;
+
+   case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+      hk_get_texel_buffer_descriptor(dev, info->type,
+                                     info->data.pStorageTexelBuffer, dataSize,
+                                     pDescriptor);
+      break;
+
+   case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+   case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER: {
+      const VkDescriptorAddressInfoEXT *a =
+         info->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+            ? info->data.pUniformBuffer
+            : info->data.pStorageBuffer;
+      struct hk_buffer_address desc = {0};
+      if (a && a->address) {
+         assert(a->range <= UINT32_MAX);
+         desc.base_addr = a->address;
+         desc.size = a->range;
+      }
+      hk_store_descriptor(pDescriptor, dataSize, &desc, sizeof(desc));
+      break;
+   }
+
+   default:
+      UNREACHABLE("Unsupported descriptor type");
+   }
+}
+
+/* Pack the immutable samplers of an embedded-sampler layout into map, laid
+ * out as a descriptor buffer of that layout. */
+void
+hk_descriptor_pack_embedded_samplers(struct hk_device *dev,
+                                     const struct hk_descriptor_set_layout *layout,
+                                     void *map)
+{
+   for (uint32_t b = 0; b < layout->binding_count; ++b) {
+      const struct hk_descriptor_set_binding_layout *bl = &layout->binding[b];
+      if (!bl->immutable_samplers)
+         continue;
+      for (uint32_t e = 0; e < bl->array_size; ++e) {
+         struct hk_apple9_image_descriptor out[3];
+         size_t size = hk_pack_sampled_image(dev, out, VK_DESCRIPTOR_TYPE_SAMPLER,
+                                             &(VkDescriptorImageInfo){0},
+                                             bl->immutable_samplers[e]);
+         hk_store_descriptor((uint8_t *)map + bl->offset + e * bl->stride,
+                             bl->stride, out, MIN2(size, bl->stride));
+      }
+   }
 }

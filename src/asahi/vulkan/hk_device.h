@@ -148,6 +148,16 @@ struct hk_device {
 
 VK_DEFINE_HANDLE_CASTS(hk_device, vk.base, VkDevice, VK_OBJECT_TYPE_DEVICE)
 
+/* Sparse resources shadow their pages read-only at sparse_ro_offset in the
+ * main heap. VAs in the USC aperture (G16 sparse descriptor buffers) have no
+ * such shadow. */
+static inline bool
+hk_va_has_ro_shadow(const struct hk_device *dev, uint64_t addr)
+{
+   return addr < dev->dev.shader_base ||
+          addr >= dev->dev.shader_base + (1ull << 32);
+}
+
 enum hk_perftest {
    HK_PERF_NOTESS = BITFIELD_BIT(0),
    HK_PERF_NOBORDER = BITFIELD_BIT(1),

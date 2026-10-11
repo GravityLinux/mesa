@@ -1134,7 +1134,7 @@ hk_get_image_memory_requirements(struct hk_device *dev, struct hk_image *image,
                                  VkMemoryRequirements2 *pMemoryRequirements)
 {
    struct hk_physical_device *pdev = hk_device_physical(dev);
-   uint32_t memory_types = (1 << pdev->mem_type_count) - 1;
+   uint32_t memory_types = hk_general_memory_types(pdev);
    bool sparse =
       image->vk.create_flags & (VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
                                 VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT);

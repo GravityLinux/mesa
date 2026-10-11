@@ -691,6 +691,7 @@ hk_bind_descriptor_sets(UNUSED struct hk_cmd_buffer *cmd,
          }
          desc->sets[s] = set;
          desc->sets_dirty |= BITFIELD_BIT(s);
+         desc->descriptor_buffer_sets &= ~BITFIELD_BIT(s);
 
          /* Binding descriptors invalidates push descriptors */
          desc->push_dirty &= ~BITFIELD_BIT(s);
@@ -740,6 +741,74 @@ hk_CmdBindDescriptorSets2KHR(
    }
 }
 
+VKAPI_ATTR void VKAPI_CALL
+hk_CmdBindDescriptorBuffersEXT(VkCommandBuffer commandBuffer,
+                               uint32_t bufferCount,
+                               const VkDescriptorBufferBindingInfoEXT *pBindingInfos)
+{
+   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   assert(bufferCount <= HK_MAX_SETS);
+   for (uint32_t i = 0; i < bufferCount; ++i) {
+      cmd->state.gfx.descriptors.descriptor_buffers[i] = pBindingInfos[i].address;
+      cmd->state.cs.descriptors.descriptor_buffers[i] = pBindingInfos[i].address;
+   }
+}
+
+/* Point set s at descriptor memory without a VkDescriptorSet object. */
+static void
+hk_bind_descriptor_memory(struct hk_descriptor_state *desc, unsigned s,
+                          uint64_t addr)
+{
+   desc->root.sets[s] = addr;
+   desc->set_sizes[s] = HK_MAX_DESCRIPTOR_SET_SIZE;
+   desc->sets[s] = NULL;
+   desc->descriptor_buffer_sets |= BITFIELD_BIT(s);
+   desc->sets_dirty |= BITFIELD_BIT(s);
+   /* Binding descriptors invalidates push descriptors */
+   desc->push_dirty &= ~BITFIELD_BIT(s);
+   desc->root_dirty = true;
+}
+
+static void
+hk_set_descriptor_buffer_offsets(struct hk_descriptor_state *desc,
+                                 const VkSetDescriptorBufferOffsetsInfoEXT *info)
+{
+   for (uint32_t i = 0; i < info->setCount; ++i) {
+      hk_bind_descriptor_memory(
+         desc, info->firstSet + i,
+         desc->descriptor_buffers[info->pBufferIndices[i]] + info->pOffsets[i]);
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+hk_CmdSetDescriptorBufferOffsets2EXT(
+   VkCommandBuffer commandBuffer,
+   const VkSetDescriptorBufferOffsetsInfoEXT *pInfo)
+{
+   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   if (pInfo->stageFlags & HK_GRAPHICS_STAGES)
+      hk_set_descriptor_buffer_offsets(&cmd->state.gfx.descriptors, pInfo);
+   if (pInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT)
+      hk_set_descriptor_buffer_offsets(&cmd->state.cs.descriptors, pInfo);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+hk_CmdBindDescriptorBufferEmbeddedSamplers2EXT(
+   VkCommandBuffer commandBuffer,
+   const VkBindDescriptorBufferEmbeddedSamplersInfoEXT *pInfo)
+{
+   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(vk_pipeline_layout, pipeline_layout, pInfo->layout);
+   const struct hk_descriptor_set_layout *set_layout =
+      vk_to_hk_descriptor_set_layout(pipeline_layout->set_layouts[pInfo->set]);
+   assert(set_layout->embedded_samplers);
+   uint64_t addr = set_layout->embedded_samplers->va->addr;
+   if (pInfo->stageFlags & HK_GRAPHICS_STAGES)
+      hk_bind_descriptor_memory(&cmd->state.gfx.descriptors, pInfo->set, addr);
+   if (pInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT)
+      hk_bind_descriptor_memory(&cmd->state.cs.descriptors, pInfo->set, addr);
+}
+
 static void
 hk_push_constants(UNUSED struct hk_cmd_buffer *cmd,
                   struct hk_descriptor_state *desc,
@@ -779,6 +848,7 @@ hk_cmd_push_descriptors(struct hk_cmd_buffer *cmd,
 
    /* Pushing descriptors replaces whatever sets are bound */
    desc->sets[set] = NULL;
+   desc->descriptor_buffer_sets &= ~BITFIELD_BIT(set);
    desc->push_dirty |= BITFIELD_BIT(set);
 
    return desc->push[set];

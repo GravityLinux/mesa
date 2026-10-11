@@ -55,6 +55,11 @@ struct hk_physical_device {
    VkMemoryType mem_types[3];
    uint8_t mem_heap_count;
    uint8_t mem_type_count;
+   /* G16 descriptor-buffer memory: shaders address descriptor records
+    * relative to the USC aperture, so this type allocates there (write-back,
+    * as descriptor pools). UINT8_MAX when absent. Only buffers with a
+    * descriptor-buffer usage may (and must) use it. */
+   uint8_t apple9_descriptor_mem_type;
    uint64_t sysmem;
 
    struct hk_queue_family queue_families[3];
@@ -73,6 +78,17 @@ static inline struct hk_instance *
 hk_physical_device_instance(struct hk_physical_device *pdev)
 {
    return (struct hk_instance *)pdev->vk.instance;
+}
+
+/* Memory types usable by images and by buffers without a descriptor-buffer
+ * usage. */
+static inline uint32_t
+hk_general_memory_types(const struct hk_physical_device *pdev)
+{
+   uint32_t types = BITFIELD_MASK(pdev->mem_type_count);
+   if (pdev->apple9_descriptor_mem_type != UINT8_MAX)
+      types &= ~BITFIELD_BIT(pdev->apple9_descriptor_mem_type);
+   return types;
 }
 
 VkResult hk_create_drm_physical_device(struct vk_instance *vk_instance,

@@ -49,6 +49,13 @@ struct hk_descriptor_set_layout {
    /* Does not contain the size needed for variable count descriptors */
    uint32_t non_variable_descriptor_buffer_size;
 
+   /* Created for VK_EXT_descriptor_buffer: advertised descriptor sizes. */
+   bool descriptor_buffer;
+
+   /* Embedded immutable samplers, packed at their binding offsets and bound
+    * with vkCmdBindDescriptorBufferEmbeddedSamplersEXT; else NULL. */
+   struct agx_bo *embedded_samplers;
+
    /* Number of bindings in this descriptor set */
    uint32_t binding_count;
 
@@ -62,8 +69,8 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(hk_descriptor_set_layout, vk.base,
 
 void hk_descriptor_stride_align_for_type(
    const struct hk_physical_device *pdev, VkDescriptorType type,
-   const VkMutableDescriptorTypeListEXT *type_list, uint32_t *stride,
-   uint32_t *alignment);
+   const VkMutableDescriptorTypeListEXT *type_list, bool descriptor_buffer,
+   uint32_t *stride, uint32_t *alignment);
 
 static inline struct hk_descriptor_set_layout *
 vk_to_hk_descriptor_set_layout(struct vk_descriptor_set_layout *layout)

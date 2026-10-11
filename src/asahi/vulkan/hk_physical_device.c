@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_physical_device.h"
+#include "hk_descriptor_buffer.h"
 
 #include "asahi/compiler/agx_nir_texture.h"
 #include "asahi/lib/agx_device.h"
@@ -929,6 +930,36 @@ hk_get_device_properties(const struct agx_device *dev,
 
       /* VK_KHR_push_descriptor */
       .maxPushDescriptors = HK_MAX_PUSH_DESCRIPTORS,
+
+      /* VK_EXT_descriptor_buffer (G16; advertised with
+       * HK_APPLE9_DESCRIPTOR_BUFFER while it is brought up) */
+      .combinedImageSamplerDescriptorSingleArray = true,
+      .bufferlessPushDescriptors = true,
+      .allowSamplerImageViewPostSubmitCreation = false,
+      .descriptorBufferOffsetAlignment = HK_APPLE9_DB_ALIGNMENT,
+      .maxDescriptorBufferBindings = HK_MAX_SETS,
+      .maxResourceDescriptorBufferBindings = HK_MAX_SETS,
+      .maxSamplerDescriptorBufferBindings = HK_MAX_SETS,
+      .maxEmbeddedImmutableSamplerBindings = HK_MAX_SETS,
+      .maxEmbeddedImmutableSamplers = 2048,
+      .EDBsamplerDescriptorSize = HK_APPLE9_DB_SAMPLER_SIZE,
+      .combinedImageSamplerDescriptorSize = HK_APPLE9_DB_SAMPLED_SIZE,
+      .sampledImageDescriptorSize = HK_APPLE9_DB_SAMPLED_SIZE,
+      .storageImageDescriptorSize = HK_APPLE9_DB_STORAGE_SIZE,
+      .uniformTexelBufferDescriptorSize = HK_APPLE9_DB_TEXEL_SIZE,
+      .robustUniformTexelBufferDescriptorSize = HK_APPLE9_DB_TEXEL_SIZE,
+      .storageTexelBufferDescriptorSize = HK_APPLE9_DB_STORAGE_SIZE,
+      .robustStorageTexelBufferDescriptorSize = HK_APPLE9_DB_STORAGE_SIZE,
+      .uniformBufferDescriptorSize = HK_APPLE9_DB_BUFFER_SIZE,
+      .robustUniformBufferDescriptorSize = HK_APPLE9_DB_BUFFER_SIZE,
+      .storageBufferDescriptorSize = HK_APPLE9_DB_BUFFER_SIZE,
+      .robustStorageBufferDescriptorSize = HK_APPLE9_DB_BUFFER_SIZE,
+      .inputAttachmentDescriptorSize = HK_APPLE9_DB_SAMPLED_SIZE,
+      .maxSamplerDescriptorBufferRange = HK_APPLE9_DB_RANGE,
+      .maxResourceDescriptorBufferRange = HK_APPLE9_DB_RANGE,
+      .samplerDescriptorBufferAddressSpaceSize = HK_APPLE9_DB_ADDRESS_SPACE,
+      .resourceDescriptorBufferAddressSpaceSize = HK_APPLE9_DB_ADDRESS_SPACE,
+      .descriptorBufferAddressSpaceSize = HK_APPLE9_DB_ADDRESS_SPACE,
 
       /* VK_EXT_custom_border_color */
       .maxCustomBorderColorSamplers = 4000,
@@ -1884,6 +1915,17 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
          hk_sparse_unbound_unmapped(&pdev->dev);
    }
 
+   /* VK_EXT_descriptor_buffer rides HK_APPLE9_DESCRIPTOR_BUFFER, as its
+    * memory type does, until it is gated. */
+   if (pdev->dev.chip == AGX_CHIP_G16G &&
+       debug_get_bool_option("HK_APPLE9_DESCRIPTOR_BUFFER", false)) {
+      supported_extensions.EXT_descriptor_buffer = true;
+      supported_features.descriptorBuffer = true;
+      supported_features.descriptorBufferPushDescriptors = true;
+      supported_features.descriptorBufferCaptureReplay = false;
+      supported_features.descriptorBufferImageLayoutIgnored = false;
+   }
+
 
    properties.drmHasRender = true;
    properties.drmRenderMajor = major(render_dev);
@@ -1938,6 +1980,19 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
       .heapIndex = sysmem_heap_idx,
    };
+
+   pdev->apple9_descriptor_mem_type = UINT8_MAX;
+   if (pdev->dev.chip == AGX_CHIP_G16G &&
+       debug_get_bool_option("HK_APPLE9_DESCRIPTOR_BUFFER", false)) {
+      pdev->apple9_descriptor_mem_type = pdev->mem_type_count;
+      pdev->mem_types[pdev->mem_type_count++] = (VkMemoryType){
+         .propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+                          VK_MEMORY_PROPERTY_HOST_CACHED_BIT |
+                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+         .heapIndex = sysmem_heap_idx,
+      };
+   }
 
    assert(pdev->mem_heap_count <= ARRAY_SIZE(pdev->mem_heaps));
    assert(pdev->mem_type_count <= ARRAY_SIZE(pdev->mem_types));

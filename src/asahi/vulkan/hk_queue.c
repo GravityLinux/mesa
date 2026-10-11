@@ -578,8 +578,10 @@ hk_flush_bind(struct hk_bind_builder *b)
          .range = b->size,
       };
       util_dynarray_append(&b->binds, op);
-      op.addr = agx_rw_addr_to_ro(&b->dev->dev, op.addr);
-      util_dynarray_append(&b->binds, op);
+      if (hk_va_has_ro_shadow(b->dev, op.addr)) {
+         op.addr = agx_rw_addr_to_ro(&b->dev->dev, op.addr);
+         util_dynarray_append(&b->binds, op);
+      }
       return VK_SUCCESS;
    } else if (!b->mem) {
       op = (struct drm_asahi_gem_bind_op){
@@ -600,6 +602,8 @@ hk_flush_bind(struct hk_bind_builder *b)
    }
 
    util_dynarray_append(&b->binds, op);
+   if (!hk_va_has_ro_shadow(b->dev, op.addr))
+      return VK_SUCCESS;
 
    /* Shadow a read-only mapping to the upper half */
    op.flags &= ~DRM_ASAHI_BIND_WRITE;
