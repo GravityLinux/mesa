@@ -61,6 +61,7 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd)
    cmd->upload_cache = NULL;
    for (unsigned i = 0; i < HK_UPLOAD_LAST_COUNT; ++i)
       cmd->upload_last[i].gpu = 0;
+   cmd->apple9_prev_cs = NULL;
    hk_descriptor_state_fini(cmd, &cmd->state.gfx.descriptors);
    hk_descriptor_state_fini(cmd, &cmd->state.cs.descriptors);
 
@@ -440,6 +441,15 @@ hk_apple9_state_cache_alloc(void *allocator, enum agx_apple9_state_type type,
 {
    enum hk_cmd_pool_kind kind = type == AGX_APPLE9_STATE_PPP
                                   ? HK_CMD_POOL_CONTEXT : HK_CMD_POOL_USC;
+   /* A PPP record embeds its draw's launch addresses. Launches are emitted
+    * fresh unless the previous draw's is reused, so a PPP record can only
+    * repeat consecutively, which the previous-draw comparison already reuses:
+    * a content lookup would always miss and grow the cache by one entry per
+    * draw. */
+   if (type == AGX_APPLE9_STATE_PPP) {
+      *is_new = true;
+      return hk_pool_alloc_internal(allocator, size, alignment, kind);
+   }
    return hk_pool_alloc_cached(allocator, kind, type, contents, size,
                                alignment, is_new);
 }
@@ -533,10 +543,20 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
     */
    if (cmd->upload_cache && debug_get_bool_option("HK_UPLOAD_STATS", false)) {
       size_t bytes = 0;
-      hash_table_foreach(cmd->upload_cache, entry)
-         bytes += ((const struct hk_upload_key *)entry->key)->size;
-      fprintf(stderr, "HK_UPLOAD_STATS cache entries=%u bytes=%zu\n",
-              cmd->upload_cache->entries, bytes);
+      unsigned per_type[HK_UPLOAD_TABLE + 1] = {0};
+      hash_table_foreach(cmd->upload_cache, entry) {
+         const struct hk_upload_key *key = entry->key;
+         bytes += key->size;
+         if (key->type <= HK_UPLOAD_TABLE)
+            per_type[key->type]++;
+      }
+      fprintf(stderr, "HK_UPLOAD_STATS cache entries=%u bytes=%zu "
+              "launch=%u coefficients=%u ppp=%u runtime=%u root=%u table=%u\n",
+              cmd->upload_cache->entries, bytes,
+              per_type[AGX_APPLE9_STATE_LAUNCH],
+              per_type[AGX_APPLE9_STATE_COEFFICIENTS],
+              per_type[AGX_APPLE9_STATE_PPP], per_type[HK_UPLOAD_RUNTIME],
+              per_type[HK_UPLOAD_ROOT], per_type[HK_UPLOAD_TABLE]);
    }
    ralloc_free(cmd->upload_cache);
    cmd->upload_cache = NULL;

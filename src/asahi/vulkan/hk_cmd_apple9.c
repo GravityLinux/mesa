@@ -823,10 +823,15 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       else
          record.vertex_table = table;
    }
+   const struct agx_apple9_uniform_draw *previous =
+      cmd->apple9_prev_cs == cs ? &cmd->apple9_prev_draw : NULL;
    if (!agx_apple9_prepare_draw_alloc(&dev->dev, cmd, hk_apple9_usc_alloc, cmd,
                                       hk_apple9_context_alloc, &pipeline,
-                                      &record, NULL, hk_apple9_state_cache_alloc))
+                                      &record, previous,
+                                      hk_apple9_state_cache_alloc))
       UNSUPPORTED();
+   cmd->apple9_prev_draw = record;
+   cmd->apple9_prev_cs = cs;
    pipeline.ppp = record.ppp;
    pipeline.ppp_viewport_offset = record.ppp_viewport_offset;
    pipeline.ppp_viewport_words = record.ppp_viewport_words;
