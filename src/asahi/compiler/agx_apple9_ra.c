@@ -313,6 +313,18 @@ static bool apple9_reads_sources_at_issue(const struct agx_apple9_vir_instr *ins
  * program. */
 static _Thread_local bool apple9_in_candidate_job;
 
+
+/* AGX_APPLE9_SPILL_WHOLE_PHIS=1 restores the shared spiller's rule that one
+ * evicted phi source spills the whole phi. */
+static bool
+apple9_spill_whole_phis(void)
+{
+   static int whole = -1;
+   if (whole < 0)
+      whole = getenv("AGX_APPLE9_SPILL_WHOLE_PHIS") != NULL;
+   return whole;
+}
+
 static bool
 apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
                        const char **reason)
@@ -336,6 +348,7 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
       .preserve_source_kills = true,
       .defer_spill_lowering = true,
       .disable_occupancy_rematerialization = true,
+      .spill_partial_phi_sources = !apple9_spill_whole_phis(),
       .mov_imm_registers = 2 * 64,
    };
    list_inithead(&ctx->blocks);
