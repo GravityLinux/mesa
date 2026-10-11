@@ -4928,7 +4928,7 @@ apple9_alu_sources(const struct agx_apple9_vir_instr *I, const uint8_t *phys,
             return false;
          values[s] = I->alu_src_value[s];
       } else if (file == AGX_APPLE9_FILE_IMMEDIATE) {
-         if (!agx_apple9_source_immediate_encodable(I->encoding,
+         if (!agx_apple9_source_immediate_encodable(I->encoding, s,
                                                     I->alu_src_value[s]))
             return false;
          values[s] = I->alu_src_value[s];
@@ -5217,6 +5217,33 @@ agx_apple9_encode_float_immediate(uint32_t bits, uint8_t *encoded)
    return found;
 }
 
+/* Some operand descriptors carry a fourth mantissa bit beside the byte
+ * (Metal's encodings of our own kernels: x * 17, x * 2.125, max(x, 31),
+ * fma(x, y, 31)). Only normal exponents are used with it. */
+bool
+agx_apple9_encode_float_immediate_wide(uint32_t bits, uint8_t *encoded,
+                                       bool *low)
+{
+   *low = false;
+   if (agx_apple9_encode_float_immediate(bits, encoded))
+      return true;
+   const uint32_t magnitude = bits & 0x7fffffffu;
+   for (unsigned exponent = 9; exponent < 16; ++exponent) {
+      for (unsigned mantissa = 0; mantissa < 16; mantissa += 2) {
+         float value = (1.0f + (mantissa + 1) / 16.0f) *
+                       (1u << (exponent - 8)) * 0.125f;
+         uint32_t candidate;
+         memcpy(&candidate, &value, sizeof(candidate));
+         if (candidate == magnitude) {
+            *encoded = (exponent << 4) | mantissa | 1;
+            *low = true;
+            return true;
+         }
+      }
+   }
+   return false;
+}
+
 static bool
 pack_float2_immediate(const struct agx_apple9_vir_instr *instruction,
                       const uint8_t *phys,
@@ -5230,10 +5257,11 @@ pack_float2_immediate(const struct agx_apple9_vir_instr *instruction,
    const uint32_t bits = instruction->immediate;
    bool extended = instruction->encoding == AGX_APPLE9_ENC_FLOAT2_IMMEDIATE_EXTENDED;
    uint8_t encoded;
+   bool low;
    if (instruction->nr_srcs != 1 ||
        (!extended && instruction->encoding != AGX_APPLE9_ENC_FLOAT2_IMMEDIATE_COMPACT) ||
        (instruction->saturate && !extended) ||
-       !agx_apple9_encode_float_immediate(bits, &encoded) ||
+       !agx_apple9_encode_float_immediate_wide(bits, &encoded, &low) ||
        instruction->src_abs_mask || (instruction->src_neg_mask & ~1))
       return false;
 
@@ -5246,6 +5274,7 @@ pack_float2_immediate(const struct agx_apple9_vir_instr *instruction,
    if (instruction->op == AGX_APPLE9_VIR_FMUL_IMM)
       set_bits(bytes, 16, 3, 5);
    set_bits(bytes, 19, 1, bits >> 31);
+   set_bits(bytes, 35, 1, low);
    unsigned dst = phys[instruction->dest], src = phys[instruction->src[0]];
    set_bits(bytes, 4, 4, dst & 15);
    set_bits(bytes, 22, 2, (dst >> 4) & 3);
@@ -5333,8 +5362,10 @@ pack_fma(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
       if (!(inline_mask & BITFIELD_BIT(s)))
          continue;
       uint8_t encoded;
+      bool low = false;
       if (instruction->alu_src_immediate_mask & BITFIELD_BIT(s)) {
-         if (!agx_apple9_encode_float_immediate(source[s], &encoded))
+         if (s == 2 ? !agx_apple9_encode_float_immediate_wide(source[s], &encoded, &low)
+                    : !agx_apple9_encode_float_immediate(source[s], &encoded))
             return false;
          if (!(instruction->src_abs_mask & BITFIELD_BIT(s)))
             neg_mask ^= (source[s] >> 31) << s;
@@ -5347,7 +5378,8 @@ pack_fma(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
          set_bits(bytes, 20, 1, (instruction->alu_src_uniform_mask & 2) ? (source[s] >> 6) & 1 : 0);
          set_bits(bytes, 58, 1, (instruction->alu_src_uniform_mask & 2) ? source[s] >> 7 : 0);
       } else {
-         bytes[5] = encoded & ~1;
+         /* The addend's fourth mantissa bit replaces the byte's low bit. */
+         bytes[5] = (encoded & ~1) | low;
          set_bits(bytes, 37, 1, 1);
          set_bits(bytes, 39, 1, (instruction->alu_src_uniform_mask & 4) ? (source[s] >> 6) & 1 : 0);
          set_bits(bytes, 38, 1, (instruction->alu_src_uniform_mask & 4) ? source[s] >> 7 : 0);
@@ -5568,13 +5600,20 @@ pack_minmax(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    uint32_t source[3];
    uint8_t live;
    if (!apple9_alu_sources(instruction, phys, 2, source, &live) ||
-       instruction->alu_src_immediate_mask || instruction->alu_src_uniform_mask == 3)
+       (instruction->alu_src_immediate_mask & 1) ||
+       (instruction->alu_src_uniform_mask | instruction->alu_src_immediate_mask) == 3)
       return false;
    bool half = instruction->encoding == AGX_APPLE9_ENC_HALF_MINMAX;
    bool floating = half || instruction->op == AGX_APPLE9_VIR_FMIN ||
                    instruction->op == AGX_APPLE9_VIR_FMAX;
+   /* Only floating FP32 min/max has a minifloat operand B. */
+   if (instruction->alu_src_immediate_mask &&
+       (half || !floating || (instruction->src_neg_mask & 2)))
+      return false;
    if ((!half && instruction->encoding != AGX_APPLE9_ENC_MINMAX_COMPACT) ||
-       instruction->nr_srcs + util_bitcount(instruction->alu_src_uniform_mask) != 2 || instruction->src_abs_mask ||
+       instruction->nr_srcs + util_bitcount(instruction->alu_src_uniform_mask |
+                                            instruction->alu_src_immediate_mask) != 2 ||
+       instruction->src_abs_mask ||
        (instruction->src_neg_mask & ~(floating ? 2u : 0u)))
       return false;
    uint8_t select;
@@ -5624,7 +5663,8 @@ pack_minmax(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
 
    if (!pack_compact_binary_gprs(bytes, phys[instruction->dest],
                                  instruction->alu_src_uniform_mask & 1 ? 0 : source[0],
-                                 instruction->alu_src_uniform_mask & 2 ? 0 : source[1],
+                                 (instruction->alu_src_uniform_mask |
+                                  instruction->alu_src_immediate_mask) & 2 ? 0 : source[1],
                                  AGX_APPLE9_GPR_COUNT))
       return false;
    if (instruction->src_neg_mask & 2) {
@@ -5639,6 +5679,22 @@ pack_minmax(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
       set_bits(bytes, 24, 1, 0);
    }
    pack_binary_uniforms(bytes, instruction, source);
+   if (instruction->alu_src_immediate_mask & 2) {
+      /* The minifloat takes the uniform index byte; its exponent >= 8 sets
+       * the top bit that distinguishes it. Bit 20 holds the sign and bit
+       * 36 the fourth mantissa bit; bit 18 is clear as for a negated
+       * register. */
+      uint8_t encoded;
+      bool low;
+      if (!agx_apple9_encode_float_immediate_wide(source[1], &encoded, &low))
+         return false;
+      bytes[3] = encoded;
+      set_bits(bytes, 18, 1, 0);
+      set_bits(bytes, 20, 1, source[1] >> 31);
+      set_bits(bytes, 36, 1, low);
+      set_bits(bytes, 41, 1, 1);
+      set_bits(bytes, 42, 1, 0);
+   }
    packed_init(packed, bytes, sizeof(bytes));
    return true;
 }

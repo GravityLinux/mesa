@@ -1246,6 +1246,35 @@ TEST_F(Apple9Optimization, SelectXorSwapsComplementaryArmsAndKeepsOtherUses)
    }
 }
 
+TEST_F(Apple9Optimization, MinMaxCommutesOnlyNonzeroLiteralsIntoOperandB)
+{
+   /* G16 min/max returns operand B for zeros of opposite sign, so a zero
+    * literal written as operand A must not move to B (hardware probe:
+    * max(+0, -0) is -0). Other literals tie only with equal bits. */
+   for (uint32_t literal : {0x00000000u, 0x80000000u, 0x3f800000u}) {
+      agx_apple9_vir_finish(&p);
+      agx_apple9_vir_init(&p);
+      auto input = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_GET_GLOBAL_ID,
+         AGX_APPLE9_ENC_GET_SR, nullptr, 0, 0);
+      uint32_t sources[] = {imm(literal), input};
+      p.output = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_FMAX,
+         AGX_APPLE9_ENC_MINMAX_COMPACT, sources, 2, 0);
+      ASSERT_TRUE(agx_apple9_optimize_vir(&p));
+      const auto *I = agx_apple9_definition(&p, p.output);
+      ASSERT_EQ(I->op, AGX_APPLE9_VIR_FMAX);
+      if (literal & 0x7fffffffu) {
+         EXPECT_EQ(I->alu_src_immediate_mask, 2u);
+         EXPECT_EQ(I->alu_src_value[1], literal);
+         ASSERT_EQ(I->nr_srcs, 1u);
+         EXPECT_EQ(I->src[0], input);
+      } else {
+         EXPECT_EQ(I->alu_src_immediate_mask, 0u);
+         ASSERT_EQ(I->nr_srcs, 2u);
+         EXPECT_EQ(I->src[1], input);
+      }
+   }
+}
+
 TEST_F(Apple9Optimization, SelectXorKeepsNoncomplementaryArms)
 {
    auto input = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_GET_GLOBAL_ID,

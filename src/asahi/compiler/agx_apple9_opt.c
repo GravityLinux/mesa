@@ -418,7 +418,10 @@ select_float_sources(struct agx_apple9_vir_instr *I,
          if (I->src_neg_mask & (1u << c))
             value ^= 0x80000000u;
          uint8_t encoded;
-         if (!agx_apple9_encode_float_immediate(value, &encoded))
+         bool low;
+         if (!(agx_apple9_float_immediates_disabled()
+                  ? agx_apple9_encode_float_immediate(value, &encoded)
+                  : agx_apple9_encode_float_immediate_wide(value, &encoded, &low)))
             continue;
          I->op = I->op == AGX_APPLE9_VIR_FMUL ? AGX_APPLE9_VIR_FMUL_IMM
                                              : AGX_APPLE9_VIR_FADD_IMM;
@@ -591,6 +594,9 @@ inline_alu_sources(struct agx_apple9_vir_instr *I, const uint16_t *uniform_read,
    bool select = I->op == AGX_APPLE9_VIR_SELECT &&
       I->encoding != AGX_APPLE9_ENC_HALF_COMPARE_SELECT;
    bool fma = I->op == AGX_APPLE9_VIR_FMA;
+   bool minmax_float = (I->op == AGX_APPLE9_VIR_FMIN || I->op == AGX_APPLE9_VIR_FMAX) &&
+                       I->encoding == AGX_APPLE9_ENC_MINMAX_COMPACT &&
+                       !agx_apple9_float_immediates_disabled();
    bool integer = I->op == AGX_APPLE9_VIR_IADD || I->op == AGX_APPLE9_VIR_ISUB ||
                   I->op == AGX_APPLE9_VIR_IMAD;
    unsigned arity = unary ? 1 : shift ? I->nr_srcs : select ? 4 : fma || I->op == AGX_APPLE9_VIR_IMAD ? 3 : 2;
@@ -618,14 +624,39 @@ inline_alu_sources(struct agx_apple9_vir_instr *I, const uint16_t *uniform_read,
       if (uniform_read[reg[s]]) {
          file[s] = AGX_APPLE9_FILE_UNIFORM;
          value[s] = uniform_read[reg[s]] - 1;
-      } else if (fma && !filled && constant[reg[s]]) {
+      } else if ((fma || minmax_float) && !filled && constant[reg[s]]) {
+         /* The literal takes this slot's modifiers below. FMA operand B
+          * and min/max operand A have no fourth mantissa bit. */
+         uint32_t literal = values[reg[s]];
+         if (I->src_abs_mask & BITFIELD_BIT(s)) literal &= 0x7fffffffu;
+         if (I->src_neg_mask & BITFIELD_BIT(s)) literal ^= 0x80000000u;
          uint8_t encoded;
-         if (agx_apple9_encode_float_immediate(values[reg[s]], &encoded)) {
+         bool low;
+         bool wide = !agx_apple9_float_immediates_disabled() &&
+                     (minmax_float || s == 2);
+         if (wide ? agx_apple9_encode_float_immediate_wide(literal, &encoded, &low)
+                  : agx_apple9_encode_float_immediate(literal, &encoded)) {
             file[s] = AGX_APPLE9_FILE_IMMEDIATE;
             value[s] = values[reg[s]];
          }
       }
    }
+   /* Floating min/max takes a literal only as operand B. They commute for
+    * NaN operands (the result is the other value) but not for zeros of
+    * opposite sign, where G16 returns operand B: max(+0, -0) is -0. A zero
+    * literal therefore stays in operand A's register. */
+   if (minmax_float && file[0] == AGX_APPLE9_FILE_IMMEDIATE &&
+       file[1] != AGX_APPLE9_FILE_IMMEDIATE && !(I->src_neg_mask & 2) &&
+       (value[0] & 0x7fffffffu) != 0) {
+      uint32_t src = I->src[0];
+      I->src[0] = I->src[1]; I->src[1] = src;
+      uint8_t f = file[0]; file[0] = file[1]; file[1] = f;
+      uint32_t v = value[0]; value[0] = value[1]; value[1] = v;
+      reg[0] = I->src[0]; reg[1] = I->src[1];
+      I->src_neg_mask = ((I->src_neg_mask & 1) << 1) | ((I->src_neg_mask & 2) >> 1);
+   }
+   if (minmax_float && file[0] == AGX_APPLE9_FILE_IMMEDIATE)
+      file[0] = 0;
    if (filled) {
       /* Only one of the two leading operands of a plain binary operation may
        * leave the register file; keep whichever was already selected. */

@@ -6800,8 +6800,15 @@ apple9_uniform_constant_use(nir_alu_instr *alu, unsigned s, uint32_t *value)
       return false;
    /* Packed float immediates are already free. */
    uint8_t encoded;
-   if (is_float)
-      return !agx_apple9_encode_float_immediate(*value, &encoded);
+   if (is_float) {
+      /* Floating min/max operands, FADD/FMUL operands and the FMA addend
+       * also take a fourth mantissa bit (min/max commute to operand B). */
+      bool low;
+      bool wide = !agx_apple9_float_immediates_disabled() &&
+                  (alu->op != nir_op_ffma || s == 2);
+      return !(wide ? agx_apple9_encode_float_immediate_wide(*value, &encoded, &low)
+                    : agx_apple9_encode_float_immediate(*value, &encoded));
+   }
    /* So are 8-bit literals of integer add/subtract, logic and selected
     * values; a small negative addend is subtracted. */
    if (agx_apple9_integer_immediates_disabled())
