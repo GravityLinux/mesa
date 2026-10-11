@@ -440,12 +440,26 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
          agx_phi_to(&b, ra->values[ins->dest], agx_num_predecessors(block));
    }
 
+   /* Register tuples collected for operands that are only read, such as a
+    * load's base address pair, are reused by later instructions of the same
+    * block that read the same values, instead of collecting a copy each. */
+   struct {
+      uint32_t src[4];
+      unsigned width, last;
+      agx_index vector;
+   } tuples[16];
+   unsigned nr_tuples = 0;
+   agx_block *tuple_block = NULL;
    for (unsigned i = 0; i < p->instruction_count; ++i) {
       struct agx_apple9_vir_instr *ins = p->instructions[i];
       struct agx_apple9_block *owner = agx_apple9_instr_block(ins);
       agx_block *block = apple9_shared_block(ra, owner);
       if (ins->op == AGX_APPLE9_VIR_PHI)
          continue;
+      if (block != tuple_block) {
+         tuple_block = block;
+         nr_tuples = 0;
+      }
       if (!block) {
          if (ins->dest_components || ins->nr_srcs) {
             *reason = "Apple9 synthetic control block has SSA dataflow";
@@ -507,12 +521,39 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
                                : agx_channels(vector) == width);
             for (unsigned c = 1; c < width; ++c)
                tuple &= ins->src[s + c] == ins->src[s] + c;
-            if (!tuple) {
+            const bool shared =
+               !(operand && (operand->flags & AGX_APPLE9_OPERAND_CLOBBER)) &&
+               width <= 4;
+            bool reused = false;
+            if (!tuple && shared) {
+               for (unsigned t = 0; t < nr_tuples && !reused; ++t) {
+                  if (tuples[t].width != width)
+                     continue;
+                  bool same = true;
+                  for (unsigned c = 0; c < width; ++c)
+                     same &= tuples[t].src[c] == ins->src[s + c];
+                  /* Only for a nearby reader: holding the tuple across a long
+                   * stretch adds register pressure to save two copies. */
+                  if (same && i - tuples[t].last <= 128) {
+                     vector = tuples[t].vector;
+                     tuples[t].last = i;
+                     reused = true;
+                  }
+               }
+            }
+            if (!tuple && !reused) {
                vector = agx_vec_temp(ctx, AGX_SIZE_32, width);
                agx_instr *collect = agx_collect_to(&b, vector, width);
                for (unsigned c = 0; c < width; ++c)
                   collect->src[c] = ra->values[ins->src[s + c]];
-            } else if (load) {
+               if (shared && nr_tuples < ARRAY_SIZE(tuples)) {
+                  tuples[nr_tuples].width = width;
+                  for (unsigned c = 0; c < width; ++c)
+                     tuples[nr_tuples].src[c] = ins->src[s + c];
+                  tuples[nr_tuples].last = i;
+                  tuples[nr_tuples++].vector = vector;
+               }
+            } else if (tuple && load) {
                ins->retain_mask |= BITFIELD_RANGE(s, width);
             }
             sources[nr_srcs] = vector;
