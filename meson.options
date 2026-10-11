@@ -919,5 +919,8 @@ option(
 option('hk-long-wait-watchdog', type : 'boolean', value : false,
        description : 'Enable five-second driver wait diagnostics in HK test builds')
 
+option('hk-cpu-sub-timing', type : 'boolean', value : false,
+       description : 'Build HK_CPU_TIMING per-draw sub-step timers (sub_* fields; small per-draw cost)')
+
 option('hk-gpu-busy-counters', type : 'boolean', value : true,
        description : 'Build HK firmware-timestamp GPU busy intervals (runtime: HK_GPU_BUSY_FILE)')

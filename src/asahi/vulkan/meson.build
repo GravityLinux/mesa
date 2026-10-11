@@ -95,6 +95,9 @@ hk_deps = [
 ]
 
 hk_diagnostic_c_args = []
+if get_option('hk-cpu-sub-timing')
+  hk_diagnostic_c_args += '-DHK_CPU_SUB_TIMING=1'
+endif
 if get_option('hk-gpu-busy-counters')
   if host_machine.system() != 'linux'
     error('HK GPU busy diagnostics currently require Linux')

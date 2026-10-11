@@ -255,17 +255,25 @@ uint64_t hk_cpu_sub_begin_slow(void);
 void hk_cpu_sub_end_slow(uint64_t start, enum hk_cpu_sub sub);
 void hk_cpu_sub_count_slow(enum hk_cpu_sub sub);
 
+/* Draw sub-step timers sit on the per-draw path, so they are only built with
+ * -Dhk-cpu-sub-timing=true; otherwise they compile to nothing. */
 static inline uint64_t
 hk_cpu_sub_begin(void)
 {
+#ifdef HK_CPU_SUB_TIMING
    return unlikely(hk_cpu_level) ? hk_cpu_sub_begin_slow() : 0;
+#else
+   return 0;
+#endif
 }
 
 static inline void
 hk_cpu_sub_end(uint64_t start, enum hk_cpu_sub sub)
 {
+#ifdef HK_CPU_SUB_TIMING
    if (unlikely(start))
       hk_cpu_sub_end_slow(start, sub);
+#endif
 }
 
 static inline void
