@@ -244,7 +244,7 @@ hk_apple9_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
    if (!agx_apple9_prepare_graphics_stage(
           &dev->dev, cmd, hk_apple9_usc_alloc, &shader, true, table,
           textures.gpu, sampler.gpu, tile_bytes, key.samples, &launch,
-          hk_apple9_state_cache_alloc))
+          hk_apple9_state_uncached_alloc))
       goto fail;
    return (struct hk_bg_eot){.usc = launch};
 

@@ -59,6 +59,8 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd, bool release)
 
    ralloc_free(cmd->upload_cache);
    cmd->upload_cache = NULL;
+   memset(cmd->upload_hits, 0, sizeof(cmd->upload_hits));
+   memset(cmd->upload_misses, 0, sizeof(cmd->upload_misses));
    for (unsigned i = 0; i < HK_UPLOAD_LAST_COUNT; ++i)
       cmd->upload_last[i].gpu = 0;
    cmd->apple9_prev_cs = NULL;
@@ -379,9 +381,11 @@ hk_pool_alloc_cached(struct hk_cmd_buffer *cmd, enum hk_cmd_pool_kind kind,
          _mesa_hash_table_search_pre_hashed(cmd->upload_cache, hash, &key);
       if (entry) {
          *is_new = false;
+         cmd->upload_hits[MIN2(type, HK_UPLOAD_TABLE)]++;
          return ((struct hk_upload_entry *)entry->data)->ptr;
       }
    }
+   cmd->upload_misses[MIN2(type, HK_UPLOAD_TABLE)]++;
 
    struct agx_ptr ptr = hk_pool_alloc_internal(cmd, size, alignment, kind);
    if (!ptr.cpu || !cmd->upload_cache)
@@ -460,6 +464,20 @@ hk_apple9_state_cache_alloc(void *allocator, enum agx_apple9_state_type type,
    }
    return hk_pool_alloc_cached(allocator, kind, type, contents, size,
                                alignment, is_new);
+}
+
+/* Records that embed this pass's own uploads (background/EOT stages) can never
+ * match an earlier entry, so they skip the content lookup and its hashing. */
+struct agx_ptr
+hk_apple9_state_uncached_alloc(void *allocator, enum agx_apple9_state_type type,
+                                const void *contents, size_t size,
+                                size_t alignment, bool *is_new)
+{
+   *is_new = true;
+   return hk_pool_alloc_internal(allocator, size, alignment,
+                                 type == AGX_APPLE9_STATE_PPP
+                                    ? HK_CMD_POOL_CONTEXT
+                                    : HK_CMD_POOL_USC);
 }
 
 uint64_t
@@ -567,6 +585,13 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
               per_type[AGX_APPLE9_STATE_COEFFICIENTS],
               per_type[AGX_APPLE9_STATE_PPP], per_type[HK_UPLOAD_RUNTIME],
               per_type[HK_UPLOAD_ROOT], per_type[HK_UPLOAD_TABLE]);
+      static const char *names[] = {"launch", "coefficients", "ppp",
+                                    "runtime", "root", "table"};
+      for (unsigned t = 0; t <= HK_UPLOAD_TABLE; ++t) {
+         if (cmd->upload_hits[t] + cmd->upload_misses[t])
+            fprintf(stderr, "HK_UPLOAD_STATS %s hits=%u misses=%u\n", names[t],
+                    cmd->upload_hits[t], cmd->upload_misses[t]);
+      }
    }
    ralloc_free(cmd->upload_cache);
    cmd->upload_cache = NULL;
