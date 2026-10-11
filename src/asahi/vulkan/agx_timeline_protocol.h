@@ -28,6 +28,9 @@ enum tl_event {
  TL_KIOCTL_BEGIN, TL_KIOCTL_END, TL_KFENCE_INIT, TL_KFENCE_SIGNAL,
  TL_KJOB_QUEUE, TL_KJOB_RUN, TL_KJOB_DONE, TL_KVCPU_CLOCK,
  TL_GPU_CLOCK, TL_ERROR, TL_TRANSFER,
+ /* hk: one per render Work at submit, id = its vertex timestamp key (as in
+  * TL_IOCTL_CMD c): attachment identity, area, formats, draws, pass code. */
+ TL_RENDER_INFO,
 };
 /* Append-only while enabled. The controller enables recording after warm-up.
  * Full buffers increment dropped rather than silently overwriting history.

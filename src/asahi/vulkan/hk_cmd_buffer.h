@@ -577,6 +577,15 @@ struct hk_cs {
     * restart indices is complicated and just checking the saved value is cheap.
     */
    uint32_t restart_index;
+
+   /* HK_TIMELINE_FILE (TL_RENDER_INFO): what this render stream targets. */
+   struct {
+      uint64_t color0, depth;          /* image identity */
+      uint32_t area;                   /* width | height << 16 */
+      uint32_t view;                   /* base mip | base layer << 8 | layers << 20 */
+      uint32_t color0_format, depth_format;
+      uint8_t color_count, samples, clears; /* clears: bit 0 color0, bit 1 depth */
+   } diag;
 };
 
 /*

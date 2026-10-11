@@ -1282,6 +1282,22 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
     * initially use the partial background/EOT program and ZLS control.
     * hk_BeginRendering/hk_EndRendering will override.
     */
+   const struct hk_image_view *c0 = render->color_att[0].iview;
+   const struct hk_image_view *zs = render->depth_att.iview ?: render->stencil_att.iview;
+   cs->diag.color0 = c0 ? (uintptr_t)c0->vk.image : 0;
+   cs->diag.depth = zs ? (uintptr_t)zs->vk.image : 0;
+   cs->diag.area = MIN2(render->area.extent.width, 0xffff) |
+                   (MIN2(render->area.extent.height, 0xffff) << 16);
+   const struct hk_image_view *v = c0 ?: zs;
+   cs->diag.view = v ? (MIN2(v->vk.base_mip_level, 0xff) |
+                        (MIN2(v->vk.base_array_layer, 0xfff) << 8) |
+                        (MIN2(render->layer_count, 0xfff) << 20)) : 0;
+   cs->diag.color0_format = render->color_att[0].vk_format;
+   cs->diag.depth_format = render->depth_att.vk_format;
+   cs->diag.color_count = render->color_att_count;
+   cs->diag.samples = render->tilebuffer.nr_samples;
+   cs->diag.clears = render->color_att[0].clear | (render->depth_att.clear << 1);
+
    cs->cr = render->cr;
    cs->cr.bg.main = render->cr.bg.partial;
    cs->cr.eot.main = render->cr.eot.partial;
