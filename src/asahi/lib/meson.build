@@ -78,6 +78,7 @@ if with_tests
       'libasahi_tests',
       files(
         'tests/test-packing.cpp',
+        'tests/test-border.cpp',
         'tests/test-apple9-cdm.cpp',
         'tests/test-apple9-launch-template.cpp',
         'tests/test-tilebuffer.cpp',
