@@ -26,6 +26,13 @@ struct nir_tex_instr;
 bool agx_apple9_texture_native_offset(const struct nir_tex_instr *tex,
                                       uint16_t *bits);
 
+/* The sample mode word (instruction bytes 6-7) for an ordinary sample form,
+ * and whether that form has a measured offset variant (returned in
+ * *offset_mode). Shared by the packer and the backend's offset fallback. */
+uint16_t agx_apple9_texture_mode(bool explicit_lod, bool gradient, bool bias,
+                                 unsigned dimension, bool shadow, bool min_lod);
+bool agx_apple9_texture_offset_mode(uint16_t mode, uint16_t *offset_mode);
+
 bool agx_nir_hoist_apple9_uniform_reads(nir_shader *shader);
 bool agx_nir_lower_apple9_math(nir_shader *shader);
 bool agx_nir_opt_apple9_bounds(nir_shader *shader);
@@ -399,6 +406,9 @@ struct agx_apple9_texture_mapping {
 #define AGX_APPLE9_TEXTURE_FETCH_BOUNDED (1 << 10)
 /* Handle sources hold native table indices rather than descriptor offsets. */
 #define AGX_APPLE9_TEXTURE_HANDLE_INDEX (1 << 11)
+/* The sample's final form has no measured offset encoding: lower its texel
+ * offset in NIR instead of encoding it. */
+#define AGX_APPLE9_TEXTURE_OFFSET_FALLBACK (1 << 12)
 
 bool agx_nir_lower_apple9_sampler_state(
    nir_shader *nir, const struct agx_apple9_sampler_key key[32],

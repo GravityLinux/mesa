@@ -8588,6 +8588,62 @@ apple9_native_min_lod(const nir_tex_instr *tex)
  * Only spatial coordinates contribute derivatives, excluding the layer and
  * comparator. An instruction bias scales gradients so the minimum LOD clamps
  * the biased LOD, while the sampler's bias is applied afterwards. */
+/* Whether a texture operation's final form, after the remaining backend
+ * rewrites (implicit 3D and comparison samples become bias-0 samples), has a
+ * measured offset encoding. Mirrors selection (see the texture emitters). */
+static bool
+apple9_offset_form_encodable(const nir_tex_instr *tex)
+{
+   const bool volume = tex->coord_components >= 3 || tex->is_shadow;
+   unsigned dimension = 0;
+   if (tex->is_array || tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE)
+      return false;
+   if (tex->sampler_dim == GLSL_SAMPLER_DIM_3D)
+      dimension = 3;
+   /* Minimum-LOD samples keep the offset lowering (see the shape check). */
+   if (nir_tex_instr_src_index(tex, nir_tex_src_min_lod) >= 0)
+      return false;
+   bool explicit_lod = false, bias = false, gradient = false;
+   switch (tex->op) {
+   case nir_texop_tg4:
+      /* Only the plain 2D gather form was measured. */
+      if (volume)
+         return false;
+      break;
+   case nir_texop_txd:
+      gradient = true;
+      break;
+   case nir_texop_txl:
+      explicit_lod = true;
+      break;
+   case nir_texop_txb:
+      explicit_lod = bias = true;
+      break;
+   case nir_texop_tex:
+      explicit_lod = bias = volume;
+      break;
+   default:
+      return false;
+   }
+   uint16_t mode = agx_apple9_texture_mode(explicit_lod, gradient, bias,
+                                           dimension, tex->is_shadow, false);
+   return agx_apple9_texture_offset_mode(mode, NULL);
+}
+
+static bool
+apple9_flag_unencodable_offsets(nir_builder *b, nir_instr *instr, void *data)
+{
+   if (instr->type != nir_instr_type_tex)
+      return false;
+   nir_tex_instr *tex = nir_instr_as_tex(instr);
+   if (nir_tex_instr_src_index(tex, nir_tex_src_offset) < 0 ||
+       apple9_offset_form_encodable(tex))
+      return false;
+   tex->backend_flags |= AGX_APPLE9_TEXTURE_OFFSET_FALLBACK;
+   *(bool *)data = true;
+   return true;
+}
+
 static bool
 apple9_lower_implicit_gradients(nir_builder *b, nir_instr *instr, void *data)
 {
@@ -10066,6 +10122,15 @@ apple9_lower_textures(nir_shader *nir)
    nir_shader_instructions_pass(nir, apple9_lower_min_lod,
                                 nir_metadata_control_flow, NULL);
    nir_lower_tex(nir, &tex_options);
+   /* Native texel offsets need a measured offset form for the sample's final
+    * form; lower any other offset with runtime sampler state, never fail. */
+   bool fallback = false;
+   nir_shader_instructions_pass(nir, apple9_flag_unencodable_offsets,
+                                nir_metadata_all, &fallback);
+   if (fallback) {
+      const char *offset_reason = NULL;
+      agx_nir_lower_apple9_texture_offsets(nir, NULL, &offset_reason);
+   }
    nir_shader_instructions_pass(nir, apple9_lower_buffer_texture,
                                 nir_metadata_none, NULL);
    nir_shader_instructions_pass(nir, apple9_bound_texel_fetch,

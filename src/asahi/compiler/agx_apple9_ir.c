@@ -4,6 +4,7 @@
  */
 
 #include "agx_apple9_ir.h"
+#include "agx_compile_apple9.h"
 #include "agx_compile.h"
 #include "agx_apple9_encoding.h"
 #include "agx_apple9_profile.h"
@@ -5069,6 +5070,80 @@ pack_float2(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    return true;
 }
 
+uint16_t
+agx_apple9_texture_mode(bool explicit_lod, bool gradient, bool bias,
+                        unsigned dimension, bool shadow, bool min_lod)
+{
+   /* Mirrors the sample packer's mode bytes for ordinary samples. */
+   uint8_t b6 = 0, b7 = 0;
+   if (gradient) {
+      b6 = 4;
+      b7 = 1;
+   }
+   if (explicit_lod) {
+      b6 = bias ? 4 : 0;
+      b7 = bias ? 0 : 1;
+   }
+   if (!gradient && dimension == 2) {
+      b6 = bias ? 0x0c : 0x08;
+      b7 = bias ? 4 : 5;
+   }
+   if (!gradient && dimension == 3) {
+      b6 = bias ? 0x90 : 0x88;
+      b7 = bias ? 0x01 : 0x21;
+   } else if (!gradient && dimension == 1) {
+      b6 = bias ? 0x14 : 0x00;
+      b7 = bias ? 0x00 : 0x03;
+   } else if (!gradient && dimension == 4) {
+      b6 = bias ? 0x1c : 0x08;
+      b7 = bias ? 0x00 : 0x03;
+   }
+   if (gradient && dimension == 2) {
+      b6 = 0x0c;
+      b7 = 5;
+   } else if (gradient && dimension == 3) {
+      b6 = 0x9c;
+      b7 = 1;
+   }
+   if (min_lod)
+      b6 |= 0x10;
+   if (shadow)
+      b6 |= 0x20;
+   return b6 | (b7 << 8);
+}
+
+/* A texel offset selects the offset form of the sample mode word. The
+ * pairs were measured from our own MSL compiled for G16, form by form
+ * (msl-encodings-20261011). Our 2D-array mode words differ from
+ * Metal's, so arrays have no measured offset form yet. */
+bool
+agx_apple9_texture_offset_mode(uint16_t mode, uint16_t *offset_mode)
+{
+   static const uint16_t modes[][2] = {
+      {0x0000, 0x0201}, /* implicit LOD, gather */
+      {0x0004, 0x0281}, /* bias */
+      {0x0100, 0x0211}, /* explicit LOD */
+      {0x0104, 0x0209}, /* gradient */
+      {0x0114, 0x0249}, /* gradient, minimum LOD */
+      {0x0020, 0x0221}, /* compare, implicit LOD */
+      {0x0024, 0x02a1}, /* compare, bias */
+      {0x0120, 0x0231}, /* compare, explicit LOD */
+      {0x0124, 0x0229}, /* compare, gradient */
+      {0x0180, 0x0291}, /* 3D, implicit LOD */
+      {0x0190, 0x0299}, /* 3D, bias */
+      {0x2188, 0x0219}, /* 3D, explicit LOD */
+      {0x019c, 0x0319}, /* 3D, gradient */
+   };
+   for (unsigned m = 0; m < ARRAY_SIZE(modes); ++m) {
+      if (modes[m][0] == mode) {
+         if (offset_mode)
+            *offset_mode = modes[m][1];
+         return true;
+      }
+   }
+   return false;
+}
+
 bool
 agx_apple9_encode_float_immediate(uint32_t bits, uint8_t *encoded)
 {
@@ -6729,32 +6804,14 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
        * MSL compiled for G16 (msl-encodings-20261011): the mode
        * values pair each form we emit with its offset form. */
       if (instruction->texture_has_offset) {
-         static const uint16_t modes[][2] = {
-            {0x0000, 0x0201}, /* implicit LOD, gather */
-            {0x0004, 0x0281}, /* bias */
-            {0x0100, 0x0211}, /* explicit LOD */
-            {0x0104, 0x0209}, /* gradient */
-            {0x0114, 0x0249}, /* gradient, minimum LOD */
-            {0x0020, 0x0221}, /* compare, implicit LOD */
-            {0x0024, 0x02a1}, /* compare, bias */
-            {0x0120, 0x0231}, /* compare, explicit LOD */
-            {0x0124, 0x0229}, /* compare, gradient */
-            {0x0180, 0x0291}, /* 3D, implicit LOD */
-            {0x0190, 0x0299}, /* 3D, bias */
-            {0x2188, 0x0219}, /* 3D, explicit LOD */
-            {0x019c, 0x0319}, /* 3D, gradient */
-         };
+         uint16_t offset_mode;
          if (instruction->texture_fetch || multisampled ||
-             instruction->texture_lod_query)
+             instruction->texture_lod_query ||
+             !agx_apple9_texture_offset_mode(bytes[6] | (bytes[7] << 8),
+                                             &offset_mode))
             return false;
-         uint16_t mode = bytes[6] | (bytes[7] << 8);
-         unsigned m = 0;
-         while (m < ARRAY_SIZE(modes) && modes[m][0] != mode)
-            ++m;
-         if (m == ARRAY_SIZE(modes))
-            return false;
-         bytes[6] = modes[m][1] & 0xff;
-         bytes[7] = modes[m][1] >> 8;
+         bytes[6] = offset_mode & 0xff;
+         bytes[7] = offset_mode >> 8;
          unsigned x = instruction->texture_offset & 15;
          unsigned y = (instruction->texture_offset >> 4) & 15;
          unsigned z = (instruction->texture_offset >> 8) & 15;

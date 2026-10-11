@@ -541,15 +541,18 @@ bool
 agx_apple9_texture_native_offset(const nir_tex_instr *tex, uint16_t *bits)
 {
    int offset = nir_tex_instr_src_index(tex, nir_tex_src_offset);
+   /* The shape of an encodable offset. Whether the sample's final form has
+    * a measured offset variant is decided by the backend, which lowers the
+    * offset otherwise (AGX_APPLE9_TEXTURE_OFFSET_FALLBACK). */
    if (offset < 0 || !nir_src_is_const(tex->src[offset].src) ||
-       tex->is_array || tex->op == nir_texop_txf ||
+       tex->op == nir_texop_txf ||
+       (tex->backend_flags & AGX_APPLE9_TEXTURE_OFFSET_FALLBACK) ||
        (tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
         tex->op != nir_texop_txl && tex->op != nir_texop_txd &&
         tex->op != nir_texop_tg4) ||
        (tex->sampler_dim != GLSL_SAMPLER_DIM_2D &&
         tex->sampler_dim != GLSL_SAMPLER_DIM_3D) ||
-       (tex->op == nir_texop_tg4 &&
-        (tex->is_shadow || tex->sampler_dim != GLSL_SAMPLER_DIM_2D)) ||
+       /* The minimum-LOD forms are native only without an offset. */
        nir_tex_instr_src_index(tex, nir_tex_src_min_lod) >= 0)
       return false;
    unsigned dims = tex->sampler_dim == GLSL_SAMPLER_DIM_3D ? 3 : 2;
@@ -587,8 +590,10 @@ agx_nir_lower_apple9_texture_offsets(nir_shader *nir,
          bool is_gather = tex->op == nir_texop_tg4;
          if (offset < 0 || tex->op == nir_texop_txf)
             continue;
-         /* The sample instruction encodes these offsets itself. */
-         if (agx_apple9_texture_native_offset(tex, NULL))
+         /* With runtime sampler state, the sample instruction encodes these
+          * offsets itself unless the backend finds no offset form for the
+          * sample's final form. Static (Gallium) keys keep the lowering. */
+         if (!key && agx_apple9_texture_native_offset(tex, NULL))
             continue;
          if ((tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
               tex->op != nir_texop_txl && tex->op != nir_texop_txd &&
