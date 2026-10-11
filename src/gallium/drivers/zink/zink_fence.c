@@ -40,8 +40,12 @@
 static void
 destroy_fence(struct zink_screen *screen, struct zink_tc_fence *mfence)
 {
-   if (mfence->fence)
+   if (mfence->fence) {
+      struct zink_batch_state *bs = zink_batch_state(mfence->fence);
+      mtx_lock(&bs->usage.mtx);
       util_dynarray_delete_unordered(&mfence->fence->mfences, struct zink_tc_fence *, mfence);
+      mtx_unlock(&bs->usage.mtx);
+   }
    mfence->fence = NULL;
    tc_unflushed_batch_token_reference(&mfence->tc_token, NULL);
    if (mfence->sem)
