@@ -82,6 +82,10 @@ main(int argc, char **argv)
    printf("hash=%08x size=%u\n",
           _mesa_hash_data(part.binary, part.info.binary_size),
           part.info.binary_size);
+   /* Same line as hk's HK_APPLE9_FINAL_STATS, for corpus statistics. */
+   fprintf(stderr, "APPLE9_FINAL stage=%u bytes=%u preamble=%u\n",
+           MESA_SHADER_FRAGMENT, part.info.binary_size,
+           part.info.apple9_preamble_size);
    if (argc > 2) {
       FILE *out = fopen(argv[2], "wb");
       if (!out || fwrite(part.binary, 1, part.info.binary_size, out) !=
