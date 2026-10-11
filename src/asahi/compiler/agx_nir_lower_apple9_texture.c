@@ -88,7 +88,10 @@ descriptor_word(nir_builder *b, nir_def *handle, unsigned offset)
    nir_def *address = nir_pack_64_2x32_split(
       b, nir_iadd_imm(b, handle, offset),
       nir_imm_int(b, AGX_APPLE9_USC_BASE >> 32));
-   return nir_load_global_constant(b, 1, 32, address, .align_mul = 4);
+   /* EXP: descriptor records are constant for the draw; speculating them
+    * lets the preamble hoist uniform sampler work out of control flow. */
+   return nir_load_global_constant(b, 1, 32, address, .align_mul = 4,
+      .access = ACCESS_CAN_REORDER | ACCESS_CAN_SPECULATE);
 }
 
 nir_def *
