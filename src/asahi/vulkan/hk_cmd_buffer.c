@@ -691,6 +691,7 @@ hk_bind_descriptor_sets(UNUSED struct hk_cmd_buffer *cmd,
          }
          desc->sets[s] = set;
          desc->sets_dirty |= BITFIELD_BIT(s);
+         desc->descriptor_buffer_sets &= ~BITFIELD_BIT(s);
 
          /* Binding descriptors invalidates push descriptors */
          desc->push_dirty &= ~BITFIELD_BIT(s);
@@ -761,6 +762,7 @@ hk_bind_descriptor_memory(struct hk_descriptor_state *desc, unsigned s,
    desc->root.sets[s] = addr;
    desc->set_sizes[s] = HK_MAX_DESCRIPTOR_SET_SIZE;
    desc->sets[s] = NULL;
+   desc->descriptor_buffer_sets |= BITFIELD_BIT(s);
    desc->sets_dirty |= BITFIELD_BIT(s);
    /* Binding descriptors invalidates push descriptors */
    desc->push_dirty &= ~BITFIELD_BIT(s);
@@ -846,6 +848,7 @@ hk_cmd_push_descriptors(struct hk_cmd_buffer *cmd,
 
    /* Pushing descriptors replaces whatever sets are bound */
    desc->sets[set] = NULL;
+   desc->descriptor_buffer_sets &= ~BITFIELD_BIT(set);
    desc->push_dirty |= BITFIELD_BIT(set);
 
    return desc->push[set];
