@@ -16,7 +16,7 @@ hk_descriptor_chunk_create(struct hk_descriptor_memory *mem, uint64_t size)
    if (!chunk)
       return NULL;
 
-   if (!mem->ops->create(mem->data, size, &chunk->backing)) {
+   if (!mem->ops->create(mem->data, size, 0, &chunk->backing)) {
       free(chunk);
       return NULL;
    }
@@ -69,7 +69,7 @@ hk_descriptor_memory_init(struct hk_descriptor_memory *mem,
 
 enum hk_descriptor_memory_result
 hk_descriptor_memory_alloc(struct hk_descriptor_memory *mem, uint64_t size,
-                           uint64_t alignment,
+                           uint64_t alignment, uint64_t reserve,
                            struct hk_descriptor_allocation *out)
 {
    assert(size > 0);
@@ -88,7 +88,7 @@ hk_descriptor_memory_alloc(struct hk_descriptor_memory *mem, uint64_t size,
 
    if (size >= HK_DESCRIPTOR_MEMORY_DEDICATED_MIN) {
       struct hk_descriptor_backing backing;
-      if (!mem->ops->create(mem->data, size, &backing))
+      if (!mem->ops->create(mem->data, size, reserve, &backing))
          return HK_DESCRIPTOR_MEMORY_OUT_OF_DEVICE;
 
       /* Buffers are page aligned, beyond any descriptor set alignment. */
