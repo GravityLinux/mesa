@@ -450,6 +450,71 @@ select_float_sources(struct agx_apple9_vir_instr *I,
    select_saturated_encoding(I);
 }
 
+/* Compare operand B of a select or predicate holds a literal: a minifloat
+ * with sign for floating conditions, an 8-bit integer otherwise. A constant
+ * operand A moves to B by reversing an ordered relation. Run after the
+ * selected-value literals, which leave the compare operands first. */
+static void
+inline_compare_literal(struct agx_apple9_vir_instr *I, const bool *constant,
+                       const uint32_t *values)
+{
+   if (agx_apple9_compare_literals_disabled() ||
+       !agx_apple9_compare_literal_slot(I, 1) || I->nr_srcs < 2 ||
+       ((I->alu_src_uniform_mask | I->alu_src_immediate_mask) & 3))
+      return;
+   const bool is_float = agx_apple9_compare_is_float(I);
+   const bool predicate = I->op == AGX_APPLE9_VIR_PREDICATE_COMPARE;
+   const bool extended = I->encoding == AGX_APPLE9_ENC_PREDICATE_COMPARE_EXTENDED;
+   const unsigned modifiers = I->src_abs_mask | I->src_neg_mask;
+
+   uint32_t literal[2];
+   bool can[2];
+   for (unsigned s = 0; s < 2; ++s) {
+      literal[s] = values[I->src[s]];
+      if (is_float) {
+         if (I->src_abs_mask & BITFIELD_BIT(s)) literal[s] &= 0x7fffffffu;
+         if (I->src_neg_mask & BITFIELD_BIT(s)) literal[s] ^= 0x80000000u;
+      }
+      can[s] = constant[I->src[s]] &&
+               (is_float || !(modifiers & BITFIELD_BIT(s))) &&
+               agx_apple9_compare_literal_encodable(I, literal[s]);
+   }
+
+   if (!can[1]) {
+      /* a OP k is k OP' a for the reversed ordered relation; equality is
+       * symmetric. NaN operands compare false either way. The register
+       * moving to A must not carry modifiers, which A cannot take here. */
+      const unsigned condition = I->immediate & 0xff;
+      unsigned reversed;
+      if (extended)
+         reversed = condition == AGX_APPLE9_PREDICATE_EXT_FEQ ||
+                    condition == AGX_APPLE9_PREDICATE_EXT_IEQ ? condition : ~0u;
+      else if (condition == AGX_APPLE9_SELECT_FEQ && !predicate)
+         reversed = condition;
+      else if (condition >= AGX_APPLE9_SELECT_FGT &&
+               condition <= AGX_APPLE9_SELECT_ILT)
+         reversed = condition ^ 1;
+      else
+         reversed = ~0u;
+      if (!can[0] || reversed == ~0u || (modifiers & 2))
+         return;
+      uint32_t src = I->src[0];
+      I->src[0] = I->src[1]; I->src[1] = src;
+      I->src_abs_mask = (I->src_abs_mask & ~3u) | ((I->src_abs_mask & 1) << 1);
+      I->src_neg_mask = (I->src_neg_mask & ~3u) | ((I->src_neg_mask & 1) << 1);
+      I->immediate = (I->immediate & ~0xffu) | reversed;
+      literal[1] = literal[0];
+   }
+
+   I->alu_src_immediate_mask |= 2;
+   I->alu_src_value[1] = literal[1];
+   I->src_abs_mask &= ~2u;
+   I->src_neg_mask &= ~2u;
+   for (unsigned s = 1; s + 1 < I->nr_srcs; ++s)
+      I->src[s] = I->src[s + 1];
+   --I->nr_srcs;
+}
+
 /* Integer add/subtract, multiply-add, logic and select operand descriptors
  * hold an 8-bit zero-extended literal. Give a constant register operand that
  * form when its slot admits it, commuting it there or negating an add when
@@ -970,8 +1035,10 @@ agx_apple9_optimize_vir_with_constants(
       if (!agx_apple9_instr_is_pure_alu(I)) {
          /* A predicate has no SSA destination and cannot be CSE'd as an ALU
           * value, but its explicit operands may still read uniforms. */
-         if (I->op == AGX_APPLE9_VIR_PREDICATE_COMPARE)
+         if (I->op == AGX_APPLE9_VIR_PREDICATE_COMPARE) {
+            inline_compare_literal(I, constant, values);
             inline_alu_sources(I, uniform_read, constant, values);
+         }
          drop_zero_load_index(I, constant, values);
          continue;
       }
@@ -987,6 +1054,7 @@ agx_apple9_optimize_vir_with_constants(
       fold_select_xor(I, definitions, constant, values, uniform_writes);
       select_float_sources(I, definitions, constant, values);
       inline_integer_immediates(I, constant, values);
+      inline_compare_literal(I, constant, values);
       inline_alu_sources(I, uniform_read, constant, values);
       for (unsigned c = 0; c < I->dest_components; ++c)
          definitions[I->dest + c] = I;

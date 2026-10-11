@@ -6811,6 +6811,15 @@ apple9_uniform_constant_use(nir_alu_instr *alu, unsigned s, uint32_t *value)
    }
    /* So are 8-bit literals of integer add/subtract, logic and selected
     * values; a small negative addend is subtracted. */
+   /* Compare operands take a literal as well (either side, by reversal). */
+   if (comparison && !agx_apple9_compare_literals_disabled()) {
+      bool low;
+      bool float_compare = alu->op == nir_op_flt || alu->op == nir_op_fge ||
+                           alu->op == nir_op_feq || alu->op == nir_op_fneu;
+      return float_compare
+                ? !agx_apple9_encode_float_immediate_wide(*value, &encoded, &low)
+                : *value > UINT8_MAX;
+   }
    if (agx_apple9_integer_immediates_disabled())
       return true;
    switch (alu->op) {

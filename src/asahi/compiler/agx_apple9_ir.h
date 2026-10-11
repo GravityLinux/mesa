@@ -604,6 +604,56 @@ agx_apple9_wide_float_immediate_slot(enum agx_apple9_encoding encoding,
                          encoding == AGX_APPLE9_ENC_FLOAT3_SATURATE_EXTENDED));
 }
 
+/* Compare literals are opt-in (AGX_APPLE9_COMPARE_LITERAL=1): they shrink
+ * preambles and main programs across the corpora but shift the spiller's
+ * choices in ELDEN RING's register-exhausted fragment family (+677 spills
+ * over 21 programs), pending timing and a spill-choice fix. */
+static inline bool
+agx_apple9_compare_literals_disabled(void)
+{
+   static int disabled = -1;
+   if (disabled < 0)
+      disabled = getenv("AGX_APPLE9_COMPARE_LITERAL") == NULL;
+   return disabled;
+}
+
+/* Compare operand B of a select or predicate takes a literal in the byte
+ * that otherwise names a uniform: a minifloat with its sign beside it for
+ * floating conditions, an 8-bit integer otherwise. */
+static inline bool
+agx_apple9_compare_literal_slot(const struct agx_apple9_vir_instr *I,
+                                unsigned slot)
+{
+   return slot == 1 &&
+          ((I->op == AGX_APPLE9_VIR_SELECT &&
+            I->encoding == AGX_APPLE9_ENC_SELECT_GPR_WIDE) ||
+           (I->op == AGX_APPLE9_VIR_PREDICATE_COMPARE &&
+            (I->encoding == AGX_APPLE9_ENC_PREDICATE_COMPARE_SHORT ||
+             I->encoding == AGX_APPLE9_ENC_PREDICATE_COMPARE_EXTENDED)));
+}
+
+static inline bool
+agx_apple9_compare_is_float(const struct agx_apple9_vir_instr *I)
+{
+   const unsigned condition = I->immediate & 0xff;
+   if (I->encoding == AGX_APPLE9_ENC_PREDICATE_COMPARE_EXTENDED)
+      return condition != AGX_APPLE9_PREDICATE_EXT_IEQ;
+   return condition == AGX_APPLE9_SELECT_FEQ ||
+          condition == AGX_APPLE9_SELECT_FGT ||
+          condition == AGX_APPLE9_SELECT_FLT;
+}
+
+static inline bool
+agx_apple9_compare_literal_encodable(const struct agx_apple9_vir_instr *I,
+                                     uint32_t value)
+{
+   uint8_t encoded;
+   bool low;
+   return agx_apple9_compare_is_float(I)
+             ? agx_apple9_encode_float_immediate_wide(value, &encoded, &low)
+             : value <= UINT8_MAX;
+}
+
 static inline bool
 agx_apple9_source_immediate_encodable(enum agx_apple9_encoding encoding,
                                       unsigned slot, uint32_t value)
