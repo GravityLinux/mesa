@@ -44,6 +44,10 @@
  *
  *   compile_<kind>_wall_ns=... compile_<kind>_cpu_ns=... compile_<kind>_calls=...
  *   compile_<kind>_max_ns=...  the longest single compile (a stutter bound)
+ *
+ * Draw sub-steps are timed with wall clock only (see hk_cpu_sub):
+ *
+ *   sub_<step>_ns=... sub_<step>_n=...
  */
 
 #include <stdatomic.h>
@@ -82,6 +86,11 @@ static const char *hk_cpu_gs_shape_name[4] = {"dyn", "idx", "prim", "inst"};
 static _Atomic uint64_t hk_cpu_compile_wall[2], hk_cpu_compile_thread[2];
 static _Atomic uint64_t hk_cpu_compile_calls[2], hk_cpu_compile_max[2];
 static const char *hk_cpu_compile_name[2] = {"api", "draw"};
+static _Atomic uint64_t hk_cpu_sub_ns[HK_CPU_SUB_COUNT], hk_cpu_sub_n[HK_CPU_SUB_COUNT];
+static const char *hk_cpu_sub_name[HK_CPU_SUB_COUNT] = {
+   "resolve", "resolve_slow", "tess", "gs", "robust_index", "a9draw",
+   "push_desc", "root", "textures", "tables", "prepare_alloc", "cmd_bo",
+};
 static FILE *hk_cpu_out;
 
 static inline uint64_t
@@ -131,7 +140,7 @@ hk_cpu_report(bool force)
                                                   now)))
       return;
 
-   char line[2048];
+   char line[4096];
    int n = snprintf(line, sizeof(line), "HK_CPU cpu_ns=%" PRIu64 " frames=%" PRIu64,
                     now, atomic_load(&hk_cpu_frames));
    for (unsigned c = 0; c < HK_CPU_CAT_COUNT && n < (int)sizeof(line); ++c) {
@@ -151,6 +160,12 @@ hk_cpu_report(bool force)
    if (n < (int)sizeof(line)) {
       n += snprintf(line + n, sizeof(line) - n, " gs_indirect_draws=%" PRIu64,
                     atomic_load(&hk_cpu_gs_indirect));
+   }
+   for (unsigned i = 0; i < HK_CPU_SUB_COUNT && n < (int)sizeof(line); ++i) {
+      n += snprintf(line + n, sizeof(line) - n,
+                    " sub_%s_ns=%" PRIu64 " sub_%s_n=%" PRIu64,
+                    hk_cpu_sub_name[i], atomic_load(&hk_cpu_sub_ns[i]),
+                    hk_cpu_sub_name[i], atomic_load(&hk_cpu_sub_n[i]));
    }
    for (unsigned i = 0; i < 2 && n < (int)sizeof(line); ++i) {
       const char *k = hk_cpu_compile_name[i];
@@ -412,4 +427,21 @@ hk_cpu_timing_compile_end(const struct hk_cpu_compile_scope *s, bool draw_time)
    while (wall > max &&
           !atomic_compare_exchange_weak(&hk_cpu_compile_max[k], &max, wall))
       ;
+}
+
+uint64_t
+hk_cpu_sub_begin(void)
+{
+   return hk_cpu_level ? hk_cpu_clock(CLOCK_MONOTONIC) : 0;
+}
+
+void
+hk_cpu_sub_end(uint64_t start, enum hk_cpu_sub sub)
+{
+   if (!start)
+      return;
+   atomic_fetch_add_explicit(&hk_cpu_sub_ns[sub],
+                             hk_cpu_clock(CLOCK_MONOTONIC) - start,
+                             memory_order_relaxed);
+   atomic_fetch_add_explicit(&hk_cpu_sub_n[sub], 1, memory_order_relaxed);
 }

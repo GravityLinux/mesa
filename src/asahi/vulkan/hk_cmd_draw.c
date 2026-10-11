@@ -4411,8 +4411,10 @@ hk_apple9_resolve_shaders(struct hk_cmd_buffer *cmd)
    BITSET_SET(state.dynamic, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES);
 
    struct hk_api_shader *out[HK_APPLE9_GFX_STAGES];
+   uint64_t t_slow = hk_cpu_sub_begin();
    VkResult result =
       hk_apple9_resolve_graphics(dev, gfx->apple9_api, &state, out);
+   hk_cpu_sub_end(t_slow, HK_CPU_SUB_RESOLVE_SLOW);
    if (result != VK_SUCCESS) {
       vk_command_buffer_set_error(&cmd->vk, result);
       return false;
@@ -4449,7 +4451,10 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
    if (hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G) {
       if (!hk_apple9_prepare_draw(cmd))
          return;
-      if (!hk_apple9_resolve_shaders(cmd))
+      uint64_t t_resolve = hk_cpu_sub_begin();
+      bool resolved = hk_apple9_resolve_shaders(cmd);
+      hk_cpu_sub_end(t_resolve, HK_CPU_SUB_RESOLVE);
+      if (!resolved)
          return;
       if (hk_cond_render_applies(cmd))
          draw_ = hk_apple9_predicate_draw(cmd, draw_);
@@ -4494,13 +4499,24 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
             draw = hk_apple9_draw_without_adj(cmd, draw);
          else if (!cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY] &&
                   !cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL] &&
-                  hk_apple9_needs_index_copy(cmd, draw))
+                  hk_apple9_needs_index_copy(cmd, draw)) {
+            uint64_t t = hk_cpu_sub_begin();
             draw = hk_apple9_robust_index(cmd, draw);
-         if (cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL])
+            hk_cpu_sub_end(t, HK_CPU_SUB_ROBUST_INDEX);
+         }
+         if (cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL]) {
+            uint64_t t = hk_cpu_sub_begin();
             draw = hk_apple9_launch_tess(cmd, draw);
-         if (cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY])
+            hk_cpu_sub_end(t, HK_CPU_SUB_TESS);
+         }
+         if (cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY]) {
+            uint64_t t = hk_cpu_sub_begin();
             draw = hk_apple9_launch_gs(cmd, draw);
+            hk_cpu_sub_end(t, HK_CPU_SUB_GS);
+         }
+         uint64_t t = hk_cpu_sub_begin();
          hk_apple9_draw(cmd, draw_id, draw);
+         hk_cpu_sub_end(t, HK_CPU_SUB_A9DRAW);
       }
       return;
    }

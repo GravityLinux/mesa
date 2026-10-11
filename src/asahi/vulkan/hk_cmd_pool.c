@@ -46,8 +46,10 @@ hk_cmd_bo_create(struct hk_cmd_pool *pool, enum hk_cmd_pool_kind kind,
       "USC command pool",
       "Render context command pool",
    };
+   uint64_t t_bo = hk_cpu_sub_begin();
    bo->bo = agx_bo_create(&dev->dev, HK_CMD_BO_SIZE, 0,
                           hk_cmd_pool_bo_flags(dev, kind), labels[kind]);
+   hk_cpu_sub_end(t_bo, HK_CPU_SUB_CMD_BO);
    if (bo->bo == NULL) {
       vk_free(&pool->vk.alloc, bo);
       return vk_error(pool, VK_ERROR_OUT_OF_DEVICE_MEMORY);

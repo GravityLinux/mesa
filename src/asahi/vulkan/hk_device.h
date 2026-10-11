@@ -231,3 +231,21 @@ struct hk_cpu_compile_scope {
 void hk_cpu_timing_compile_begin(struct hk_cpu_compile_scope *s);
 void hk_cpu_timing_compile_end(const struct hk_cpu_compile_scope *s,
                                bool draw_time);
+/* Wall time of draw sub-steps; begin returns 0 when timing is off. */
+enum hk_cpu_sub {
+   HK_CPU_SUB_RESOLVE,
+   HK_CPU_SUB_RESOLVE_SLOW,
+   HK_CPU_SUB_TESS,
+   HK_CPU_SUB_GS,
+   HK_CPU_SUB_ROBUST_INDEX,
+   HK_CPU_SUB_A9DRAW,
+   HK_CPU_SUB_PUSH_DESC,
+   HK_CPU_SUB_ROOT,
+   HK_CPU_SUB_TEXTURES,
+   HK_CPU_SUB_TABLES,
+   HK_CPU_SUB_PREPARE_ALLOC,
+   HK_CPU_SUB_CMD_BO,
+   HK_CPU_SUB_COUNT,
+};
+uint64_t hk_cpu_sub_begin(void);
+void hk_cpu_sub_end(uint64_t start, enum hk_cpu_sub sub);
