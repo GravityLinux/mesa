@@ -140,6 +140,8 @@ reset_batch_state_internal(struct zink_screen *screen, struct zink_batch_state *
       zink_fence_reference(screen, mfence, NULL);
    util_dynarray_clear(&bs->fences);
 
+   /* fence waiters read these under the usage mutex: update them together */
+   mtx_lock(&bs->usage.mtx);
    /* only increment batch generation if previously in-use to avoid false detection of batch completion */
    if (bs->fence.submitted)
       bs->usage.submit_count++;
@@ -147,9 +149,11 @@ reset_batch_state_internal(struct zink_screen *screen, struct zink_batch_state *
     * before the state is reused
     */
    bs->fence.submitted = false;
-   if (bs->fence.batch_id)
-      zink_screen_update_last_finished(screen, bs->fence.batch_id);
+   const uint64_t reset_batch_id = bs->fence.batch_id;
    bs->fence.batch_id = 0;
+   mtx_unlock(&bs->usage.mtx);
+   if (reset_batch_id)
+      zink_screen_update_last_finished(screen, reset_batch_id);
    bs->usage.usage = 0;
    bs->next = NULL;
    bs->last_added_obj = NULL;
@@ -650,6 +654,7 @@ submit_queue(void *data, void *gdata, int thread_index)
    VkSubmitInfo si[ZINK_SUBMIT_MAX] = {0};
    VkSubmitInfo *submit = si;
    int num_si = ZINK_SUBMIT_MAX;
+   bool count_submit = false;
    while (!bs->fence.batch_id)
       bs->fence.batch_id = (uint32_t)p_atomic_inc_return(&screen->curr_batch);
    bs->usage.usage = bs->fence.batch_id;
@@ -840,13 +845,24 @@ submit_queue(void *data, void *gdata, int thread_index)
    if (bs->sparse_semaphore)
       (void)util_dynarray_pop(&bs->acquires, VkSemaphore);
 
-   bs->usage.submit_count++;
+   /* submit_count is incremented together with fence.submitted below */
+   count_submit = true;
 end:
+   /* wake unflushed-usage waiters */
+   mtx_lock(&bs->usage.mtx);
    cnd_broadcast(&bs->usage.flush);
+   mtx_unlock(&bs->usage.mtx);
 
    post_submit(bs, screen);
 
+   /* submit_count and submitted must change together and only after post_submit,
+    * otherwise a fence waiter could see this batch as already reset
+    */
+   mtx_lock(&bs->usage.mtx);
+   if (count_submit)
+      bs->usage.submit_count++;
    p_atomic_set(&bs->fence.submitted, true);
+   mtx_unlock(&bs->usage.mtx);
 
    simple_mtx_lock(&screen->active_batch_states_lock);
    simple_mtx_lock(&screen->free_batch_states_lock);

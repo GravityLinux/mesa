@@ -281,7 +281,11 @@ struct tc_unflushed_batch_token;
 /* an async fence created for tc */
 struct zink_tc_fence {
    struct pipe_reference reference;
-   /* enables distinction between tc fence submission and vk queue submission */
+   /* the batch state's usage.submit_count from before the submit of the batch this fence belongs to:
+    * - diff == 0: the batch has not been submitted yet (or the submit failed if fence->submitted)
+    * - diff == 1: the batch has been submitted (or a failed submit was reset if !fence->submitted)
+    * - diff > 1: the batch state has been reset
+    */
    uint32_t submit_count;
    /* when the tc fence is signaled for use */
    struct util_queue_fence ready;
@@ -592,7 +596,10 @@ struct zink_batch_usage {
     /* this is a monotonic int used to disambiguate internal fences from their tc fence references AND
      * to disambiguate zink_bo usage when batches are reused
      *
-     * it increments on batch submit and batch reset, meaning that a diff<=1 means matching usage
+     * it increments once when the batch is successfully submitted and once when a submitted batch state
+     * is reset, meaning that a diff<=1 means matching usage
+     *
+     * it is written under mtx, and the submit increment happens together with setting fence.submitted
      */
    uint32_t submit_count;
    cnd_t flush;
