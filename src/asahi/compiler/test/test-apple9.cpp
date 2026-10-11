@@ -17,6 +17,7 @@ extern "C" {
 #include "compiler/nir/nir_xfb_info.h"
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <vector>
 #include <cmath>
 #include <vector>
 #include "gallium/include/pipe/p_defines.h"
@@ -1775,6 +1776,128 @@ TEST(Apple9Machine, DependencyLayoutsAreEncodingProperties)
    for (const auto &test : cases)
       EXPECT_EQ(agx_apple9_encoding_info(test.encoding)->dependency_layout,
                 test.layout);
+}
+
+/* 8-bit integer literals, against Metal's encodings of our own kernels
+ * (msl-encodings-20261011/imm3). Every source is a last use.
+ * Dependency fields are masked; the scheduler owns them. */
+TEST(Apple9Packer, IntegerImmediatesMatchOwnMslEncodings)
+{
+   struct {
+      const char *name;
+      enum agx_apple9_vir_opcode op;
+      enum agx_apple9_encoding encoding;
+      uint8_t nr_srcs, immediate_mask;
+      uint8_t phys[4];
+      uint32_t values[4];
+      uint32_t condition;
+      std::vector<uint8_t> metal;
+      std::vector<uint8_t> dependency;
+   } cases[] = {
+      /* x + 7, Metal's literal in operand A. */
+      {"add_x7", AGX_APPLE9_VIR_IADD, AGX_APPLE9_ENC_INT_ADD_EXTENDED, 1, 1,
+       {0, 0}, {7, 0}, 0,
+       {0x9f, 0x01, 0x56, 0x00, 0x02, 0x0e, 0x00, 0x88, 0x15, 0x04},
+       {0x00, 0xf0, 0x03}},
+      {"sub_x5", AGX_APPLE9_VIR_ISUB, AGX_APPLE9_ENC_INT_ADD_EXTENDED, 1, 2,
+       {0, 0}, {0, 5}, 0,
+       {0x1f, 0x01, 0x56, 0x00, 0x02, 0x00, 0x14, 0x28, 0x13, 0x01},
+       {0x00, 0xf0, 0x03}},
+      {"sub_255", AGX_APPLE9_VIR_ISUB, AGX_APPLE9_ENC_INT_ADD_EXTENDED, 1, 2,
+       {0, 0}, {0, 255}, 0,
+       {0x1f, 0x01, 0x56, 0x00, 0x02, 0x00, 0xfc, 0x2b, 0x13, 0x01},
+       {0x00, 0xf0, 0x03}},
+      {"sub_200x", AGX_APPLE9_VIR_ISUB, AGX_APPLE9_ENC_INT_ADD_EXTENDED, 1, 1,
+       {0, 0}, {200, 0}, 0,
+       {0x1f, 0x01, 0x56, 0x00, 0x02, 0x90, 0x01, 0x88, 0x15, 0x04},
+       {0x00, 0xf0, 0x03}},
+      /* x * y + v: the addend. */
+      {"mad_xy2", AGX_APPLE9_VIR_IMAD, AGX_APPLE9_ENC_INT_MAD_EXTENDED, 2, 4,
+       {0, 2, 0}, {0, 0, 2}, 0,
+       {0x9f, 0x00, 0x56, 0x00, 0x02, 0x08, 0x00, 0x10, 0xd0, 0x26, 0x0a, 0x00},
+       {0x00, 0xf0, 0x03}},
+      {"mad_xy255", AGX_APPLE9_VIR_IMAD, AGX_APPLE9_ENC_INT_MAD_EXTENDED, 2, 4,
+       {0, 2, 0}, {0, 0, 255}, 0,
+       {0x9f, 0x00, 0x56, 0x00, 0x02, 0x08, 0x00, 0xf8, 0xd7, 0x26, 0x0a, 0x00},
+       {0x00, 0xf0, 0x03}},
+      /* x * 127 + y: the multiplier. */
+      {"mad_x127y", AGX_APPLE9_VIR_IMAD, AGX_APPLE9_ENC_INT_MAD_EXTENDED, 2, 2,
+       {0, 0, 2}, {0, 127, 0}, 0,
+       {0x9f, 0x00, 0x56, 0x00, 0x02, 0x00, 0xfc, 0x21, 0x50, 0x2b, 0x22, 0x00},
+       {0x00, 0xf0, 0x03}},
+      {"xor_99", AGX_APPLE9_VIR_IXOR, AGX_APPLE9_ENC_LOGIC_EXTENDED, 1, 2,
+       {0, 0}, {0, 99}, 0,
+       {0x0b, 0x01, 0x0e, 0xe3, 0x12, 0x0a, 0x00, 0x80, 0x00, 0x00},
+       {0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0x00, 0xe0}},
+      {"or_9", AGX_APPLE9_VIR_IOR, AGX_APPLE9_ENC_LOGIC_EXTENDED, 1, 2,
+       {0, 0}, {0, 9}, 0,
+       {0x0b, 0x01, 0x0f, 0x89, 0x12, 0x0a, 0x00, 0x80, 0x00, 0x00},
+       {0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0x00, 0xe0}},
+      {"and_200", AGX_APPLE9_VIR_IAND, AGX_APPLE9_ENC_LOGIC_EXTENDED, 1, 2,
+       {0, 0}, {0, 200}, 0,
+       {0x0b, 0x01, 0x1f, 0xc9, 0x00, 0x02, 0x00, 0x80, 0x00, 0x00},
+       {0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0x00, 0xe0}},
+      {"xor_254", AGX_APPLE9_VIR_IXOR, AGX_APPLE9_ENC_LOGIC_EXTENDED, 1, 2,
+       {0, 0}, {0, 254}, 0,
+       {0x0b, 0x01, 0x1e, 0xff, 0x02, 0x0a, 0x00, 0x80, 0x00, 0x00},
+       {0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0x00, 0xe0}},
+      /* x > z ? 200 : y */
+      {"sel_200y", AGX_APPLE9_VIR_SELECT, AGX_APPLE9_ENC_SELECT_GPR_WIDE, 3, 4,
+       {0, 0, 4, 2}, {0, 0, 200, 0}, AGX_APPLE9_SELECT_UGT,
+       {0x02, 0x01, 0x1f, 0x09, 0xa2, 0xc8, 0x04, 0xc0, 0x80, 0x04},
+       {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0}},
+      /* x > z ? 5 : 7 */
+      {"sel_57", AGX_APPLE9_VIR_SELECT, AGX_APPLE9_ENC_SELECT_GPR_WIDE, 2, 12,
+       {0, 0, 2}, {0, 0, 5, 7}, AGX_APPLE9_SELECT_UGT,
+       {0x02, 0x01, 0x1f, 0x05, 0x22, 0x85, 0x04, 0xc0, 0x20, 0x87},
+       {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0}},
+   };
+   for (const auto &test : cases) {
+      /* phys[0] is the destination; the rest name the register sources. */
+      agx_apple9_vir_instr I = {
+         .op = test.op,
+         .encoding = test.encoding,
+         .dest = 0,
+         .src = {1, 2, 3},
+         .immediate = test.condition,
+         .nr_srcs = test.nr_srcs,
+         .alu_src_immediate_mask = test.immediate_mask,
+      };
+      for (unsigned s = 0; s < 4; ++s)
+         I.alu_src_value[s] = test.values[s];
+      agx_apple9_packed_instruction packed = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_pack_vir_instruction(&I, test.phys, &packed, &reason))
+         << test.name << ": " << (reason ? reason : "");
+      ASSERT_EQ(packed.length, test.metal.size()) << test.name;
+      for (unsigned i = 0; i < test.metal.size(); ++i) {
+         uint8_t mask = i < test.dependency.size() ? test.dependency[i] : 0;
+         EXPECT_EQ(packed.bytes[i] & ~mask, test.metal[i] & ~mask)
+            << test.name << " byte=" << i;
+      }
+   }
+
+   /* 256 has no literal form; neither has the first multiplicand. */
+   uint8_t phys[] = {0, 0, 0};
+   agx_apple9_vir_instr add = {
+      .op = AGX_APPLE9_VIR_IADD,
+      .encoding = AGX_APPLE9_ENC_INT_ADD_EXTENDED,
+      .dest = 0,
+      .src = {1},
+      .nr_srcs = 1,
+      .alu_src_immediate_mask = 2,
+      .alu_src_value = {0, 256},
+   };
+   agx_apple9_packed_instruction packed = {};
+   const char *reason = nullptr;
+   EXPECT_FALSE(agx_apple9_pack_vir_instruction(&add, phys, &packed, &reason));
+   add.op = AGX_APPLE9_VIR_IMAD;
+   add.encoding = AGX_APPLE9_ENC_INT_MAD_EXTENDED;
+   add.src[1] = 2;
+   add.nr_srcs = 2;
+   add.alu_src_immediate_mask = 1;
+   add.alu_src_value[0] = 3;
+   EXPECT_FALSE(agx_apple9_pack_vir_instruction(&add, phys, &packed, &reason));
 }
 
 TEST(Apple9Packer, RegisterFormsMatchValidatedProbeTemplates)

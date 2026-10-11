@@ -111,12 +111,14 @@ TEST_F(Apple9Optimization, RepeatedOperandSelectionKeepsUniformAddends)
    constants.values[0] = 2;
    ASSERT_TRUE(agx_apple9_optimize_vir_with_constants(&p, &constants));
    ASSERT_TRUE(agx_apple9_analyze_uses(&p));
+   /* The -1 addend is subtracted as a literal. */
    const auto *A = agx_apple9_definition(&p, p.output);
-   EXPECT_EQ(A->op, AGX_APPLE9_VIR_IADD);
+   EXPECT_EQ(A->op, AGX_APPLE9_VIR_ISUB);
    EXPECT_EQ(A->alu_src_uniform_mask, 1);
    EXPECT_EQ(A->alu_src_value[0], 4u);
-   ASSERT_EQ(A->nr_srcs, 1);
-   EXPECT_EQ(agx_apple9_definition(&p, A->src[0])->immediate, 0xffffffffu);
+   EXPECT_EQ(A->alu_src_immediate_mask, 2);
+   EXPECT_EQ(A->alu_src_value[1], 1u);
+   EXPECT_EQ(A->nr_srcs, 0);
 }
 
 TEST_F(Apple9Optimization, UniformAndImmediateOperandsLeaveOnlyGprUses)
@@ -1223,14 +1225,22 @@ TEST_F(Apple9Optimization, SelectXorSwapsComplementaryArmsAndKeepsOtherUses)
          EXPECT_EQ(R->alu_src_uniform_mask, uniform_compare ? 2u : 0u);
          if (uniform_compare) EXPECT_EQ(R->alu_src_value[1], 241u);
          EXPECT_EQ(R->src[0], input);
+         /* An arm is an 8-bit literal or one of the last GPR sources. */
+         auto arm = [&](const agx_apple9_vir_instr *I, unsigned k) {
+            unsigned literals = I->alu_src_immediate_mask & 0xc;
+            if (literals & (4u << k))
+               return I->alu_src_value[2 + k];
+            unsigned r = I->nr_srcs - (2 - util_bitcount(literals));
+            if (k && !(literals & 4))
+               ++r;
+            auto D = agx_apple9_definition(&p, I->src[r]);
+            EXPECT_EQ(D->op, AGX_APPLE9_VIR_IMM);
+            return D->immediate;
+         };
          for (unsigned x : {0u, 16u, 17u, 18u, 0xffffffffu}) {
             unsigned branch = x < 17 ? 0 : 1;
-            auto old_arm = agx_apple9_definition(&p, S->src[S->nr_srcs - 2 + branch]);
-            auto new_arm = agx_apple9_definition(&p, R->src[R->nr_srcs - 2 + branch]);
-            ASSERT_EQ(old_arm->op, AGX_APPLE9_VIR_IMM);
-            ASSERT_EQ(new_arm->op, AGX_APPLE9_VIR_IMM);
-            EXPECT_EQ(new_arm->immediate, old_arm->immediate ^ mask);
-            EXPECT_EQ(old_arm->immediate, branch ? 0u : mask);
+            EXPECT_EQ(arm(R, branch), arm(S, branch) ^ mask);
+            EXPECT_EQ(arm(S, branch), branch ? 0u : mask);
          }
       }
    }

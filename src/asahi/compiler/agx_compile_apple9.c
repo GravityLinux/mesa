@@ -6800,7 +6800,20 @@ apple9_uniform_constant_use(nir_alu_instr *alu, unsigned s, uint32_t *value)
       return false;
    /* Packed float immediates are already free. */
    uint8_t encoded;
-   return !(is_float && agx_apple9_encode_float_immediate(*value, &encoded));
+   if (is_float)
+      return !agx_apple9_encode_float_immediate(*value, &encoded);
+   /* So are 8-bit literals of integer add/subtract, logic and selected
+    * values; a small negative addend is subtracted. */
+   if (agx_apple9_integer_immediates_disabled())
+      return true;
+   switch (alu->op) {
+   case nir_op_iadd:
+      return *value > UINT8_MAX && -*value > UINT8_MAX;
+   case nir_op_iand: case nir_op_ior: case nir_op_ixor: case nir_op_bcsel:
+      return *value > UINT8_MAX;
+   default:
+      return true;
+   }
 }
 
 struct apple9_constant_count {
