@@ -9253,7 +9253,8 @@ TEST(Apple9Compiler, TextureOffsetsNeverFailOnUnmappedForms)
       tex->sampler_dim = kind == 2 ? GLSL_SAMPLER_DIM_3D : GLSL_SAMPLER_DIM_2D;
       tex->is_array = kind == 1;
       tex->is_shadow = shadow;
-      tex->is_new_style_shadow = shadow;
+      /* Comparison gathers return four results, as SPIR-V produces them. */
+      tex->is_new_style_shadow = shadow && op != nir_texop_tg4;
       tex->dest_type = nir_type_float32;
       tex->coord_components = coords;
       tex->texture_index = 7;

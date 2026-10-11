@@ -8606,9 +8606,11 @@ apple9_offset_form_encodable(const nir_tex_instr *tex)
    bool explicit_lod = false, bias = false, gradient = false;
    switch (tex->op) {
    case nir_texop_tg4:
-      /* Only the plain 2D gather form was measured. */
-      if (volume)
+      /* Comparison gathers select the explicit-LOD comparison form (the
+       * base level); plain 2D gathers the implicit form. */
+      if (dimension == 3)
          return false;
+      explicit_lod = tex->is_shadow;
       break;
    case nir_texop_txd:
       gradient = true;
