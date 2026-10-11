@@ -222,8 +222,8 @@ hk_sparse_unbound_unmapped(const struct agx_device *dev)
 /* Debug only: HK_CPU_TIMING, see hk_cpu_timing.c */
 struct vk_device_dispatch_table;
 void hk_cpu_timing_install(struct vk_device_dispatch_table *table);
-void hk_cpu_timing_note_gs(unsigned shape, bool indirect, uint64_t prims,
-                           unsigned max_indices);
+void hk_cpu_timing_note_gs_slow(unsigned shape, bool indirect, uint64_t prims,
+                                unsigned max_indices);
 struct hk_cpu_compile_scope {
    bool active;
    uint64_t wall, cpu;
@@ -249,6 +249,36 @@ enum hk_cpu_sub {
    HK_CPU_SUB_CMD_BO_DESTROY_CAP,
    HK_CPU_SUB_COUNT,
 };
-uint64_t hk_cpu_sub_begin(void);
-void hk_cpu_sub_end(uint64_t start, enum hk_cpu_sub sub);
-void hk_cpu_sub_count(enum hk_cpu_sub sub);
+/* HK_CPU_TIMING level; the hooks below cost one load and branch when off. */
+extern int hk_cpu_level;
+uint64_t hk_cpu_sub_begin_slow(void);
+void hk_cpu_sub_end_slow(uint64_t start, enum hk_cpu_sub sub);
+void hk_cpu_sub_count_slow(enum hk_cpu_sub sub);
+
+static inline uint64_t
+hk_cpu_sub_begin(void)
+{
+   return unlikely(hk_cpu_level) ? hk_cpu_sub_begin_slow() : 0;
+}
+
+static inline void
+hk_cpu_sub_end(uint64_t start, enum hk_cpu_sub sub)
+{
+   if (unlikely(start))
+      hk_cpu_sub_end_slow(start, sub);
+}
+
+static inline void
+hk_cpu_timing_note_gs(unsigned shape, bool indirect, uint64_t prims,
+                      unsigned max_indices)
+{
+   if (unlikely(hk_cpu_level))
+      hk_cpu_timing_note_gs_slow(shape, indirect, prims, max_indices);
+}
+
+static inline void
+hk_cpu_sub_count(enum hk_cpu_sub sub)
+{
+   if (unlikely(hk_cpu_level))
+      hk_cpu_sub_count_slow(sub);
+}

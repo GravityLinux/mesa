@@ -79,7 +79,8 @@ static _Atomic uint64_t hk_cpu_thread[HK_CPU_CAT_COUNT];
 static _Atomic uint64_t hk_cpu_calls[HK_CPU_CAT_COUNT];
 static _Atomic uint64_t hk_cpu_frames;
 static _Atomic uint64_t hk_cpu_last_report;
-static int hk_cpu_level;
+/* Nonzero when HK_CPU_TIMING is set; read inline by the hooks in hk_device.h. */
+int hk_cpu_level;
 static _Atomic uint64_t hk_cpu_gs_draws[4], hk_cpu_gs_prims[4], hk_cpu_gs_slots[4];
 static _Atomic uint64_t hk_cpu_gs_indirect;
 static const char *hk_cpu_gs_shape_name[4] = {"dyn", "idx", "prim", "inst"};
@@ -384,10 +385,10 @@ hk_cpu_timing_install(struct vk_device_dispatch_table *t)
 }
 
 void
-hk_cpu_timing_note_gs(unsigned shape, bool indirect, uint64_t prims,
-                      unsigned max_indices)
+hk_cpu_timing_note_gs_slow(unsigned shape, bool indirect, uint64_t prims,
+                           unsigned max_indices)
 {
-   if (!hk_cpu_level || shape >= 4)
+   if (shape >= 4)
       return;
 
    atomic_fetch_add_explicit(&hk_cpu_gs_draws[shape], 1, memory_order_relaxed);
@@ -431,16 +432,14 @@ hk_cpu_timing_compile_end(const struct hk_cpu_compile_scope *s, bool draw_time)
 }
 
 uint64_t
-hk_cpu_sub_begin(void)
+hk_cpu_sub_begin_slow(void)
 {
-   return hk_cpu_level ? hk_cpu_clock(CLOCK_MONOTONIC) : 0;
+   return hk_cpu_clock(CLOCK_MONOTONIC);
 }
 
 void
-hk_cpu_sub_end(uint64_t start, enum hk_cpu_sub sub)
+hk_cpu_sub_end_slow(uint64_t start, enum hk_cpu_sub sub)
 {
-   if (!start)
-      return;
    atomic_fetch_add_explicit(&hk_cpu_sub_ns[sub],
                              hk_cpu_clock(CLOCK_MONOTONIC) - start,
                              memory_order_relaxed);
@@ -448,8 +447,7 @@ hk_cpu_sub_end(uint64_t start, enum hk_cpu_sub sub)
 }
 
 void
-hk_cpu_sub_count(enum hk_cpu_sub sub)
+hk_cpu_sub_count_slow(enum hk_cpu_sub sub)
 {
-   if (hk_cpu_level)
-      atomic_fetch_add_explicit(&hk_cpu_sub_n[sub], 1, memory_order_relaxed);
+   atomic_fetch_add_explicit(&hk_cpu_sub_n[sub], 1, memory_order_relaxed);
 }
