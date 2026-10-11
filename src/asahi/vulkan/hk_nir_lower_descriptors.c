@@ -10,6 +10,7 @@
 #include "agx_nir_texture.h"
 #include "hk_cmd_buffer.h"
 #include "hk_descriptor_set.h"
+#include "hk_descriptor_buffer.h"
 #include "hk_descriptor_set_layout.h"
 #include "hk_shader.h"
 
@@ -624,13 +625,21 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
    nir_def *tex_index;
    get_resource_deref_binding(b, nir_src_as_deref(nir_src_for_ssa(texture)),
                               &tex_set, &tex_binding, &tex_index);
+   const struct hk_descriptor_set_layout *tex_layout =
+      ctx->set_layouts[tex_set];
    const struct hk_device *dev =
-      (const struct hk_device *)ctx->set_layouts[tex_set]->vk.base.device;
-   /* Planes are consecutive image descriptors. */
-   const uint64_t plane_offset_B =
-      plane * (dev->dev.chip == AGX_CHIP_G16G
-                  ? sizeof(struct hk_apple9_image_descriptor)
-                  : sizeof(struct hk_sampled_image_descriptor));
+      (const struct hk_device *)tex_layout->vk.base.device;
+   /* Planes are consecutive image descriptors, padded to the descriptor
+    * size in descriptor-buffer layouts. */
+   uint64_t plane_size_B = sizeof(struct hk_sampled_image_descriptor);
+   if (dev->dev.chip == AGX_CHIP_G16G) {
+      plane_size_B =
+         (tex_layout->vk.flags &
+          VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT)
+            ? HK_APPLE9_DB_SAMPLED_SIZE
+            : sizeof(struct hk_apple9_image_descriptor);
+   }
+   const uint64_t plane_offset_B = plane * plane_size_B;
 
    /* LOD bias is passed in the descriptor set, rather than embedded into
     * the sampler descriptor. There's no spot in the hardware descriptor,
