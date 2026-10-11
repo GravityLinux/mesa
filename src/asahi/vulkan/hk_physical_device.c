@@ -1916,11 +1916,10 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
    }
 
    /* VK_EXT_descriptor_buffer rides HK_APPLE9_DESCRIPTOR_BUFFER, as its
-    * memory type does. Do not enable it by default: vkd3d-proton's host copy
-    * templates stop at 128 B descriptors, and with our 256 B image/sampler
-    * records it still selects its embedded mutable path and crashes at
-    * device creation (ELDEN RING, 2026-10-11). Default-on waits for records
-    * of 128 B or less. */
+    * memory type does. With 128 B image and sampler parts vkd3d-proton finds
+    * its host copy templates and no longer crashes at device creation
+    * (ELDEN RING, 2026-10-11). Default-on waits for an in-world A/B of
+    * ELDEN RING with and without descriptor buffers. */
    if (pdev->dev.chip == AGX_CHIP_G16G &&
        debug_get_bool_option("HK_APPLE9_DESCRIPTOR_BUFFER", false)) {
       supported_extensions.EXT_descriptor_buffer = true;
