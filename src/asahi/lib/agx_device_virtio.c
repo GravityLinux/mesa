@@ -205,6 +205,7 @@ agx_virtio_bo_mmap(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr,
       return NULL;
    }
 
+   agx_bo_mapping_dontfork(map, size);
    return map;
 }
 

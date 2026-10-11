@@ -246,6 +246,24 @@ agx_bo_alloc(struct agx_device *dev, size_t size, size_t align,
    return bo;
 }
 
+/* BO mappings are MAP_SHARED views of GPU memory. A forked child inherits
+ * them at the same addresses but none of the driver state that owns them,
+ * and the parent may later reuse those addresses for other BOs: any write
+ * the child makes there, through its copy of the parent's heap pointers or
+ * an allocator reusing the range, lands in live GPU memory such as shader
+ * code. A GPU mapping is never valid to use in a child, so leave them out
+ * of fork(). A failure only loses this protection.
+ */
+void
+agx_bo_mapping_dontfork(void *map, size_t size)
+{
+#ifdef MADV_DONTFORK
+   if (madvise(map, size, MADV_DONTFORK))
+      mesa_logw_once("madvise(MADV_DONTFORK) on a BO mapping failed: %s",
+                     strerror(errno));
+#endif
+}
+
 static void *
 agx_bo_mmap(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr,
             size_t size)
@@ -271,6 +289,7 @@ agx_bo_mmap(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr,
       return NULL;
    }
 
+   agx_bo_mapping_dontfork(map, size);
    return map;
 }
 

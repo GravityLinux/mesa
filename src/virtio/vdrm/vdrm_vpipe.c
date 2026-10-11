@@ -468,6 +468,8 @@ vpipe_bo_map(struct vdrm_device *vdev, uint32_t handle, size_t size, void *place
    int fd = vpipe_bo_export_dmabuf(vdev, handle);
    void *ret = mmap(placed_addr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
    close(fd);
+   if (ret != MAP_FAILED)
+      vdrm_mapping_dontfork(ret, size);
 
    return ret;
 }
@@ -758,6 +760,8 @@ init_shmem(struct vpipe_device *vtdev)
 
    vdev->shmem = mmap(0, SHMEM_SZ, PROT_READ | PROT_WRITE,
                       MAP_SHARED, shmem_fd, 0);
+   if (vdev->shmem != MAP_FAILED)
+      vdrm_mapping_dontfork(vdev->shmem, SHMEM_SZ);
 
    /* We no longer need the fd: */
    close(shmem_fd);

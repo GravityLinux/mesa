@@ -206,6 +206,7 @@ map_handle(int fd, uint32_t handle, size_t size, void **map, void *placed_addr)
       return -1;
    }
 
+   vdrm_mapping_dontfork(*map, size);
    return 0;
 }
 
