@@ -3526,11 +3526,8 @@ hk_apple9_use_descriptor_handle(nir_builder *b, nir_tex_instr *tex,
    unsigned root = hk_root_descriptor_offset(sets) + set * sizeof(uint64_t);
    nir_def *base = nir_load_ubo(b, 1, 32, nir_imm_int(b, 0), nir_imm_int(b, root),
                                 .align_mul = 8, .range_base = root, .range = 4);
+   /* Texture and sampler handles address their record part directly. */
    nir_def *offset = handle->src[0].ssa;
-   if (sampler) {
-      offset = nir_iadd_imm(b, offset,
-         -(int)offsetof(struct hk_sampled_image_descriptor, sampler));
-   }
    nir_src_rewrite(&tex->src[src].src, nir_iadd(b, base, offset));
 }
 

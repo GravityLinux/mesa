@@ -605,6 +605,18 @@ try_lower_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
    }
 }
 
+/* Bytes per plane of a G16 sampled descriptor, see hk_apple9_image_part. */
+static unsigned
+apple9_record_size(VkDescriptorType type)
+{
+   return type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+             ? sizeof(struct hk_apple9_image_part) +
+                  sizeof(struct hk_apple9_sampler_part)
+          : type == VK_DESCRIPTOR_TYPE_SAMPLER
+             ? sizeof(struct hk_apple9_sampler_part)
+             : sizeof(struct hk_apple9_image_part);
+}
+
 static bool
 lower_tex(nir_builder *b, nir_tex_instr *tex,
           const struct lower_descriptors_ctx *ctx)
@@ -629,31 +641,45 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
       ctx->set_layouts[tex_set];
    const struct hk_device *dev =
       (const struct hk_device *)tex_layout->vk.base.device;
-   /* Planes are consecutive image descriptors, padded to the descriptor
-    * size in descriptor-buffer layouts. */
+   /* Planes are consecutive descriptors. On G16 each plane is a whole
+    * record: an image part, followed by a sampler part in combined image
+    * samplers. The sampler of a combined binding is its plane's sampler
+    * part. */
+   const bool g16 = dev->dev.chip == AGX_CHIP_G16G;
    uint64_t plane_size_B = sizeof(struct hk_sampled_image_descriptor);
-   if (dev->dev.chip == AGX_CHIP_G16G) {
-      plane_size_B =
-         (tex_layout->vk.flags &
-          VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT)
-            ? HK_APPLE9_DB_SAMPLED_SIZE
-            : sizeof(struct hk_apple9_image_descriptor);
+   if (g16) {
+      plane_size_B = apple9_record_size(
+         get_binding_layout(tex_set, tex_binding, ctx)->type);
    }
    const uint64_t plane_offset_B = plane * plane_size_B;
+   uint64_t sampler_part_B = plane_offset_B;
+   if (g16 && sampler) {
+      uint32_t s_set, s_binding;
+      nir_def *s_index;
+      get_resource_deref_binding(b, nir_src_as_deref(nir_src_for_ssa(sampler)),
+                                 &s_set, &s_binding, &s_index);
+      VkDescriptorType type = get_binding_layout(s_set, s_binding, ctx)->type;
+      sampler_part_B = plane * apple9_record_size(type) +
+         (type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+             ? sizeof(struct hk_apple9_image_part) : 0);
+   }
 
    /* LOD bias is passed in the descriptor set, rather than embedded into
     * the sampler descriptor. There's no spot in the hardware descriptor,
     * plus this saves on precious sampler heap spots.
     */
    if (tex->op == nir_texop_lod_bias) {
+      const bool nudge = tex->backend_flags & HK_TEX_TXL_NUDGE;
       unsigned offs =
-         (tex->backend_flags & HK_TEX_TXL_NUDGE)
-            ? offsetof(struct hk_sampled_image_descriptor, txl_nudge_fp16)
-            : offsetof(struct hk_sampled_image_descriptor, lod_bias_fp16);
+         g16 ? sampler_part_B +
+                  (nudge ? offsetof(struct hk_apple9_sampler_part, txl_nudge_fp16)
+                         : offsetof(struct hk_apple9_sampler_part, lod_bias_fp16))
+         : plane_offset_B +
+              (nudge ? offsetof(struct hk_sampled_image_descriptor, txl_nudge_fp16)
+                     : offsetof(struct hk_sampled_image_descriptor, lod_bias_fp16));
 
       nir_def *bias = load_resource_deref_desc(
-         b, 1, 16, nir_src_as_deref(nir_src_for_ssa(sampler)),
-         plane_offset_B + offs, ctx);
+         b, 1, 16, nir_src_as_deref(nir_src_for_ssa(sampler)), offs, ctx);
 
       nir_def_replace(&tex->def, bias);
       return true;
@@ -663,10 +689,12 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
       assert(tex->dest_type == nir_type_float16 ||
              tex->dest_type == nir_type_uint16);
 
+      const bool fp16 = tex->dest_type == nir_type_float16;
       unsigned offs =
-         tex->dest_type == nir_type_float16
-            ? offsetof(struct hk_sampled_image_descriptor, min_lod_fp16)
-            : offsetof(struct hk_sampled_image_descriptor, min_lod_uint16);
+         g16 ? (fp16 ? offsetof(struct hk_apple9_image_part, min_lod_fp16)
+                     : offsetof(struct hk_apple9_image_part, min_lod_uint16))
+             : (fp16 ? offsetof(struct hk_sampled_image_descriptor, min_lod_fp16)
+                     : offsetof(struct hk_sampled_image_descriptor, min_lod_uint16));
 
       nir_def *min = load_resource_deref_desc(
          b, 1, 16, nir_src_as_deref(nir_src_for_ssa(texture)),
@@ -722,7 +750,24 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
          tex->backend_flags |= HK_APPLE9_TEX_DESCRIPTOR_HANDLE;
    }
 
-   if (sampler != NULL) {
+   if (sampler != NULL && g16) {
+      /* The handle is the sampler part's address; G16 has no sampler heap
+       * index. */
+      uint32_t set, binding;
+      nir_def *idx;
+      get_resource_deref_binding(b, nir_src_as_deref(nir_src_for_ssa(sampler)),
+                                 &set, &binding, &idx);
+      const struct hk_descriptor_set_binding_layout *binding_layout =
+         get_binding_layout(set, binding, ctx);
+      if (ctx->clamp_desc_array_bounds)
+         idx = nir_umin(b, idx, nir_imm_int(b, binding_layout->array_size - 1));
+      nir_def *desc_offs_B = nir_iadd_imm(
+         b, nir_amul_imm(b, idx, binding_layout->stride),
+         binding_layout->offset + sampler_part_B);
+      nir_tex_instr_add_src(tex, nir_tex_src_sampler_handle,
+         nir_bindless_sampler_agx(b, desc_offs_B, nir_imm_intN_t(b, 0, 16),
+                                  .desc_set = set));
+   } else if (sampler != NULL) {
       unsigned offs =
          offsetof(struct hk_sampled_image_descriptor, sampler_index);
       bool clamp_to_0 = tex->backend_flags & AGX_TEXTURE_FLAG_CLAMP_TO_0;
