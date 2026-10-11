@@ -655,14 +655,16 @@ hk_cmd_sync_barrier(struct hk_cmd_buffer *cmd,
       else
          hk_cdm_cache_flush(dev, cs);
    } else if (cmd->sync_fallback ||
-       (cmd->current_cs.cs && (cmd->current_cs.cs->sync_stages & ordered)))
+       (cmd->current_cs.cs && (cmd->current_cs.cs->sync_stages & ordered))) {
       hk_cs_end_hint(cmd, HK_CS_END_BARRIER);
       hk_cmd_buffer_end_compute(cmd);
+   }
 
    if (cmd->sync_fallback ||
-       (cmd->current_cs.gfx && (cmd->current_cs.gfx->sync_stages & ordered)))
+       (cmd->current_cs.gfx && (cmd->current_cs.gfx->sync_stages & ordered))) {
       hk_cs_end_hint(cmd, HK_CS_END_BARRIER);
       hk_cmd_buffer_end_graphics(cmd);
+   }
 
    struct hk_sync_event event = {
       .stream = HK_SYNC_NONE, .src = src_stages, .dst = dst_stages,
