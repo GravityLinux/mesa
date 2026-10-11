@@ -31,11 +31,16 @@ struct hk_descriptor_backing {
    uint64_t addr;
    uint8_t *map;
    uint64_t size;
+   /* Reserved VA when the backing was created with a reserve (see create). */
+   void *va;
 };
 
 struct hk_descriptor_memory_ops {
-   /* Create a mapped buffer of at least size bytes; false on failure. */
-   bool (*create)(void *data, uint64_t size, struct hk_descriptor_backing *out);
+   /* Create a mapped buffer of at least size bytes; false on failure. With
+    * reserve > size, the buffer sits at the start of reserve bytes of GPU VA
+    * whose tail reads as zero, so reads up to reserve stay mapped. */
+   bool (*create)(void *data, uint64_t size, uint64_t reserve,
+                  struct hk_descriptor_backing *out);
    void (*destroy)(void *data, struct hk_descriptor_backing *backing);
 };
 
@@ -75,7 +80,7 @@ hk_descriptor_memory_init(struct hk_descriptor_memory *mem,
 
 enum hk_descriptor_memory_result
 hk_descriptor_memory_alloc(struct hk_descriptor_memory *mem, uint64_t size,
-                           uint64_t alignment,
+                           uint64_t alignment, uint64_t reserve,
                            struct hk_descriptor_allocation *out);
 
 void hk_descriptor_memory_free(struct hk_descriptor_memory *mem,

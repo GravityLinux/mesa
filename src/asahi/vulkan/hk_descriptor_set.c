@@ -606,14 +606,14 @@ hk_descriptor_set_destroy(struct hk_device *dev,
  * G16, as the USC command pool): vkUpdateDescriptorSets copies read
  * descriptor memory, and reads from a write-combined mapping are uncached. */
 static bool
-hk_descriptor_bo_create(void *data, uint64_t size,
+hk_descriptor_bo_create(void *data, uint64_t size, uint64_t reserve,
                         struct hk_descriptor_backing *out)
 {
    struct hk_device *dev = data;
+   const bool low_va = dev->dev.chip == AGX_CHIP_G16G;
    struct agx_bo *bo = agx_bo_create(&dev->dev, size, 0,
-                                     dev->dev.chip == AGX_CHIP_G16G
-                                        ? AGX_BO_LOW_VA | AGX_BO_WRITEBACK
-                                        : 0,
+                                     low_va ? AGX_BO_LOW_VA | AGX_BO_WRITEBACK
+                                            : 0,
                                      "Descriptor pool");
    if (!bo)
       return false;
@@ -624,6 +624,25 @@ hk_descriptor_bo_create(void *data, uint64_t size,
       .map = agx_bo_map(bo),
       .size = bo->size,
    };
+
+   /* Reads past the set up to the layout maximum: alias the BO at the start
+    * of a reserved range and map the zero page read-only over the tail. */
+   const uint64_t page = AIL_PAGESIZE;
+   reserve = align64(reserve, page);
+   if (reserve > bo->size && dev->dev.zero_bo) {
+      struct agx_va *va = agx_va_alloc(&dev->dev, reserve, page,
+                                       low_va ? AGX_VA_USC : 0, 0);
+      if (va && !agx_bo_bind(&dev->dev, bo, va->addr, bo->size, 0,
+                             DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE) &&
+          !agx_bo_bind(&dev->dev, dev->dev.zero_bo, va->addr + bo->size,
+                       reserve - bo->size, 0,
+                       DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_SINGLE_PAGE)) {
+         out->addr = va->addr;
+         out->va = va;
+      } else if (va) {
+         agx_va_free(&dev->dev, va, true);
+      }
+   }
    return true;
 }
 
@@ -632,6 +651,8 @@ hk_descriptor_bo_destroy(void *data, struct hk_descriptor_backing *backing)
 {
    struct hk_device *dev = data;
    struct agx_bo *bo = backing->bo;
+   if (backing->va)
+      agx_va_free(&dev->dev, backing->va, true);
    agx_bo_unreference(&dev->dev, bo);
 }
 
@@ -667,6 +688,8 @@ hk_CreateDescriptorPool(VkDevice _device,
                            VK_OBJECT_TYPE_DESCRIPTOR_POOL);
    if (!pool)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+   pool->host_only =
+      pCreateInfo->flags & VK_DESCRIPTOR_POOL_CREATE_HOST_ONLY_BIT_EXT;
 
    list_inithead(&pool->sets);
 
@@ -754,9 +777,29 @@ hk_descriptor_set_create(struct hk_device *dev, struct hk_descriptor_pool *pool,
 
    set->size = align64(set->size, HK_MIN_UBO_ALIGNMENT);
 
+   /* Shaders clamp a variable-count binding's index to the layout maximum,
+    * not to this set's count, and preamble hoisting may read a descriptor
+    * whose guarded index is past the count. Keep those reads mapped: a
+    * dedicated allocation reserves VA up to the layout maximum, its tail
+    * reading as zero. Chunk suballocations stay inside mapped chunks. */
+   /* Host-only pools (vkd3d's CPU descriptor heaps) are never read by the
+    * GPU and reserve nothing: at vkd3d's 1M-descriptor layout maximum a
+    * reservation is 128 MiB of USC aperture per set. */
+   uint64_t reserve = 0;
+   if (!pool->host_only && layout->binding_count > 0 &&
+       (layout->binding[layout->binding_count - 1].flags &
+        VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT)) {
+      const struct hk_descriptor_set_binding_layout *b =
+         &layout->binding[layout->binding_count - 1];
+      reserve = align64(layout->non_variable_descriptor_buffer_size +
+                           (uint64_t)b->stride * (b->array_size + 1),
+                        HK_MIN_UBO_ALIGNMENT);
+   }
+
    if (set->size > 0) {
       switch (hk_descriptor_memory_alloc(&pool->mem, set->size,
-                                         HK_MIN_UBO_ALIGNMENT, &set->alloc)) {
+                                         HK_MIN_UBO_ALIGNMENT, reserve,
+                                         &set->alloc)) {
       case HK_DESCRIPTOR_MEMORY_OK:
          break;
       case HK_DESCRIPTOR_MEMORY_OUT_OF_POOL:

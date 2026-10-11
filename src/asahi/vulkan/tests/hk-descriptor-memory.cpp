@@ -17,7 +17,8 @@ struct FakeDevice {
    unsigned creates = 0;
    bool fail = false;
 
-   static bool create(void *data, uint64_t size, hk_descriptor_backing *out)
+   static bool create(void *data, uint64_t size, uint64_t reserve,
+                      hk_descriptor_backing *out)
    {
       auto *dev = static_cast<FakeDevice *>(data);
       if (dev->fail)
@@ -55,16 +56,16 @@ TEST(HkDescriptorMemory, SmallPoolIsOneBufferUpFront)
    EXPECT_EQ(dev.live.size(), 1u);
 
    hk_descriptor_allocation a, b;
-   ASSERT_EQ(hk_descriptor_memory_alloc(&mem, 512 << 10, 64, &a),
+   ASSERT_EQ(hk_descriptor_memory_alloc(&mem, 512 << 10, 64, 0, &a),
              HK_DESCRIPTOR_MEMORY_OK);
-   ASSERT_EQ(hk_descriptor_memory_alloc(&mem, 512 << 10, 64, &b),
+   ASSERT_EQ(hk_descriptor_memory_alloc(&mem, 512 << 10, 64, 0, &b),
              HK_DESCRIPTOR_MEMORY_OK);
    hk_descriptor_allocation c;
-   EXPECT_EQ(hk_descriptor_memory_alloc(&mem, 64, 64, &c),
+   EXPECT_EQ(hk_descriptor_memory_alloc(&mem, 64, 64, 0, &c),
              HK_DESCRIPTOR_MEMORY_OUT_OF_POOL);
    EXPECT_EQ(dev.live.size(), 1u);
    hk_descriptor_memory_free(&mem, &a);
-   EXPECT_EQ(hk_descriptor_memory_alloc(&mem, 64, 64, &c),
+   EXPECT_EQ(hk_descriptor_memory_alloc(&mem, 64, 64, 0, &c),
              HK_DESCRIPTOR_MEMORY_OK);
    hk_descriptor_memory_finish(&mem);
    EXPECT_TRUE(dev.live.empty());
@@ -82,13 +83,13 @@ TEST(HkDescriptorMemory, LargePoolBacksSetsOnDemand)
 
    /* Its sets use the layout's 128 B stride: half the worst case. */
    hk_descriptor_allocation heap;
-   ASSERT_EQ(hk_descriptor_memory_alloc(&mem, 128ull << 20, 64, &heap),
+   ASSERT_EQ(hk_descriptor_memory_alloc(&mem, 128ull << 20, 64, 0, &heap),
              HK_DESCRIPTOR_MEMORY_OK);
    EXPECT_NE(heap.dedicated.bo, nullptr);
    EXPECT_EQ(heap.dedicated.size, 128ull << 20);
 
    hk_descriptor_allocation small;
-   ASSERT_EQ(hk_descriptor_memory_alloc(&mem, 4096, 64, &small),
+   ASSERT_EQ(hk_descriptor_memory_alloc(&mem, 4096, 64, 0, &small),
              HK_DESCRIPTOR_MEMORY_OK);
    EXPECT_EQ(small.dedicated.bo, nullptr);
    EXPECT_EQ(dev.live.size(), 2u);
@@ -111,19 +112,19 @@ TEST(HkDescriptorMemory, LargePoolKeepsTheWorstCaseBudget)
    ASSERT_EQ(hk_descriptor_memory_init(&mem, &fake_ops, &dev, budget),
              HK_DESCRIPTOR_MEMORY_OK);
    hk_descriptor_allocation a, b, c;
-   ASSERT_EQ(hk_descriptor_memory_alloc(&mem, 16ull << 20, 64, &a),
+   ASSERT_EQ(hk_descriptor_memory_alloc(&mem, 16ull << 20, 64, 0, &a),
              HK_DESCRIPTOR_MEMORY_OK);
-   ASSERT_EQ(hk_descriptor_memory_alloc(&mem, 4ull << 20, 64, &b),
+   ASSERT_EQ(hk_descriptor_memory_alloc(&mem, 4ull << 20, 64, 0, &b),
              HK_DESCRIPTOR_MEMORY_OK);
-   EXPECT_EQ(hk_descriptor_memory_alloc(&mem, 64, 64, &c),
+   EXPECT_EQ(hk_descriptor_memory_alloc(&mem, 64, 64, 0, &c),
              HK_DESCRIPTOR_MEMORY_OUT_OF_POOL);
    hk_descriptor_memory_free(&mem, &b);
-   EXPECT_EQ(hk_descriptor_memory_alloc(&mem, 64, 64, &c),
+   EXPECT_EQ(hk_descriptor_memory_alloc(&mem, 64, 64, 0, &c),
              HK_DESCRIPTOR_MEMORY_OK);
 
    dev.fail = true;
    hk_descriptor_memory_free(&mem, &a);
-   EXPECT_EQ(hk_descriptor_memory_alloc(&mem, 2ull << 20, 64, &a),
+   EXPECT_EQ(hk_descriptor_memory_alloc(&mem, 2ull << 20, 64, 0, &a),
              HK_DESCRIPTOR_MEMORY_OUT_OF_DEVICE);
    EXPECT_EQ(mem.used, 64u);
    hk_descriptor_memory_free(&mem, &c);
@@ -154,7 +155,7 @@ TEST(HkDescriptorMemory, ChurnDoesNotFragmentOrLeak)
       while (live < (24ull << 20)) {
          uint64_t size = sizes[rng() % std::size(sizes)];
          hk_descriptor_allocation a;
-         ASSERT_EQ(hk_descriptor_memory_alloc(&mem, size, 64, &a),
+         ASSERT_EQ(hk_descriptor_memory_alloc(&mem, size, 64, 0, &a),
                    HK_DESCRIPTOR_MEMORY_OK);
          ASSERT_EQ(a.addr % 64, 0u);
          sets.push_back(a);

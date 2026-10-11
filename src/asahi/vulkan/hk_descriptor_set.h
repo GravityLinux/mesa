@@ -227,6 +227,9 @@ struct hk_descriptor_pool {
    struct list_head sets;
 
    struct hk_descriptor_memory mem;
+
+   /* VK_DESCRIPTOR_POOL_CREATE_HOST_ONLY_BIT_EXT: never read by the GPU. */
+   bool host_only;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(hk_descriptor_pool, base, VkDescriptorPool,
