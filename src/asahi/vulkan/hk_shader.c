@@ -2625,7 +2625,7 @@ hk_apple9_lower_sparse_tex(nir_builder *b, nir_tex_instr *tex,
       nir_def *desc =
          nir_load_from_texture_handle_agx(b, tex->src[handle].src.ssa);
       nir_def *fields = nir_load_global_constant(b, 3, 32,
-         nir_iadd_imm(b, desc, offsetof(struct hk_sampled_image_descriptor, apple9)),
+         nir_iadd_imm(b, desc, offsetof(struct hk_apple9_image_part, residency_lo)),
          .align_mul = 4);
       nir_def *table = nir_pack_64_2x32_split(b, nir_channel(b, fields, 0),
                                               nir_channel(b, fields, 1));
