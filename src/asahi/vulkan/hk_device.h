@@ -245,7 +245,10 @@ enum hk_cpu_sub {
    HK_CPU_SUB_TABLES,
    HK_CPU_SUB_PREPARE_ALLOC,
    HK_CPU_SUB_CMD_BO,
+   HK_CPU_SUB_CMD_BO_DESTROY_RELEASE,
+   HK_CPU_SUB_CMD_BO_DESTROY_CAP,
    HK_CPU_SUB_COUNT,
 };
 uint64_t hk_cpu_sub_begin(void);
 void hk_cpu_sub_end(uint64_t start, enum hk_cpu_sub sub);
+void hk_cpu_sub_count(enum hk_cpu_sub sub);

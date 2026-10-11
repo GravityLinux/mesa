@@ -90,6 +90,7 @@ static _Atomic uint64_t hk_cpu_sub_ns[HK_CPU_SUB_COUNT], hk_cpu_sub_n[HK_CPU_SUB
 static const char *hk_cpu_sub_name[HK_CPU_SUB_COUNT] = {
    "resolve", "resolve_slow", "tess", "gs", "robust_index", "a9draw",
    "push_desc", "root", "textures", "tables", "prepare_alloc", "cmd_bo",
+   "cmd_bo_destroy_release", "cmd_bo_destroy_cap",
 };
 static FILE *hk_cpu_out;
 
@@ -444,4 +445,11 @@ hk_cpu_sub_end(uint64_t start, enum hk_cpu_sub sub)
                              hk_cpu_clock(CLOCK_MONOTONIC) - start,
                              memory_order_relaxed);
    atomic_fetch_add_explicit(&hk_cpu_sub_n[sub], 1, memory_order_relaxed);
+}
+
+void
+hk_cpu_sub_count(enum hk_cpu_sub sub)
+{
+   if (hk_cpu_level)
+      atomic_fetch_add_explicit(&hk_cpu_sub_n[sub], 1, memory_order_relaxed);
 }
