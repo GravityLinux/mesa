@@ -734,6 +734,10 @@ struct hk_cmd_buffer {
    /* Owned large BOs */
    struct util_dynarray large_bos;
 
+   /* Virtio resource ids (uint32_t) of implicit-sync (WSI) memory this
+    * recording accesses; submissions list them as external resources. */
+   struct util_dynarray implicit_sync_res;
+
    /* Apple9 shader BOs whose arena entries this recording may encode, each
     * referenced and pinned once until reset, and the last two pinned. */
    struct set *apple9_pinned;
@@ -852,6 +856,18 @@ void hk_cmd_sync_barrier(struct hk_cmd_buffer *cmd,
                          VkPipelineStageFlags2 src, VkPipelineStageFlags2 dst,
                          VkAccessFlags2 src_access, VkAccessFlags2 dst_access);
 void hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs);
+
+static inline void
+hk_cmd_use_implicit_sync(struct hk_cmd_buffer *cmd, uint32_t res)
+{
+   if (!res)
+      return;
+   util_dynarray_foreach(&cmd->implicit_sync_res, uint32_t, r) {
+      if (*r == res)
+         return;
+   }
+   util_dynarray_append(&cmd->implicit_sync_res, res);
+}
 void hk_cdm_compute_barrier(struct hk_device *dev, struct hk_cs *cs);
 uint32_t hk_default_sample_positions(unsigned nr_samples);
 struct vk_sample_locations_state;

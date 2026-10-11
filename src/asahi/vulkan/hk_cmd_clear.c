@@ -132,6 +132,7 @@ hk_CmdClearColorImage(VkCommandBuffer commandBuffer, VkImage _image,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(hk_image, image, _image);
+   hk_cmd_use_implicit_sync(cmd, image->implicit_sync_res);
 
    for (uint32_t r = 0; r < rangeCount; r++) {
       hk_clear_image(cmd, image, PIPE_FORMAT_NONE, pColor->uint32, &pRanges[r],
@@ -148,6 +149,7 @@ hk_CmdClearDepthStencilImage(VkCommandBuffer commandBuffer, VkImage _image,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(hk_image, image, _image);
+   hk_cmd_use_implicit_sync(cmd, image->implicit_sync_res);
 
    for (uint32_t r = 0; r < rangeCount; r++) {
       uint32_t colour[4] = {fui(pDepthStencil->depth), pDepthStencil->stencil};

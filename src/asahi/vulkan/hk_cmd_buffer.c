@@ -91,6 +91,7 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd, bool release)
    cmd->apple9_last_pin[0] = cmd->apple9_last_pin[1] = NULL;
 
    util_dynarray_clear(&cmd->large_bos);
+   util_dynarray_clear(&cmd->implicit_sync_res);
    util_dynarray_clear(&cmd->query_adds);
    util_dynarray_clear(&cmd->query_writes);
    util_dynarray_clear(&cmd->occlusion_accum);
@@ -134,6 +135,7 @@ hk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
    hk_free_resettable_cmd_buffer(cmd, false);
    _mesa_set_destroy(cmd->apple9_pinned, NULL);
    util_dynarray_fini(&cmd->large_bos);
+   util_dynarray_fini(&cmd->implicit_sync_res);
    util_dynarray_fini(&cmd->query_adds);
    util_dynarray_fini(&cmd->query_writes);
    util_dynarray_fini(&cmd->occlusion_accum);
@@ -173,6 +175,7 @@ hk_create_cmd_buffer(struct vk_command_pool *vk_pool,
    }
 
    cmd->large_bos = UTIL_DYNARRAY_INIT;
+   cmd->implicit_sync_res = UTIL_DYNARRAY_INIT;
    cmd->query_adds = UTIL_DYNARRAY_INIT;
    cmd->query_writes = UTIL_DYNARRAY_INIT;
    cmd->occlusion_accum = UTIL_DYNARRAY_INIT;

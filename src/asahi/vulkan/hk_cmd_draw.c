@@ -229,6 +229,22 @@ hk_cmd_invalidate_graphics_state(struct hk_cmd_buffer *cmd)
 }
 
 static void
+hk_attachment_use_implicit_sync(struct hk_cmd_buffer *cmd,
+                                const struct hk_attachment *att)
+{
+   if (att->iview) {
+      hk_cmd_use_implicit_sync(
+         cmd, container_of(att->iview->vk.image, struct hk_image, vk)
+                 ->implicit_sync_res);
+   }
+   if (att->resolve_iview) {
+      hk_cmd_use_implicit_sync(
+         cmd, container_of(att->resolve_iview->vk.image, struct hk_image, vk)
+                 ->implicit_sync_res);
+   }
+}
+
+static void
 hk_attachment_init(struct hk_attachment *att,
                    const VkRenderingAttachmentInfo *info)
 {
@@ -568,10 +584,13 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    for (uint32_t i = 0; i < render->color_att_count; i++) {
       hk_attachment_init(&render->color_att[i],
                          &pRenderingInfo->pColorAttachments[i]);
+      hk_attachment_use_implicit_sync(cmd, &render->color_att[i]);
    }
 
    hk_attachment_init(&render->depth_att, pRenderingInfo->pDepthAttachment);
    hk_attachment_init(&render->stencil_att, pRenderingInfo->pStencilAttachment);
+   hk_attachment_use_implicit_sync(cmd, &render->depth_att);
+   hk_attachment_use_implicit_sync(cmd, &render->stencil_att);
 
    for (uint32_t i = 0; i < render->color_att_count; i++) {
       hk_merge_render_iview(render, render->color_att[i].iview, false);

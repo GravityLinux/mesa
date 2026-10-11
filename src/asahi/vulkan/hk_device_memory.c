@@ -12,6 +12,7 @@
 #include "hk_physical_device.h"
 
 #include "asahi/lib/agx_bo.h"
+#include "wsi_common.h"
 #include "util/u_atomic.h"
 
 #include <inttypes.h>
@@ -47,78 +48,6 @@ hk_memory_type_flags(const VkMemoryType *type,
       flags |= AGX_BO_SHARED | AGX_BO_SHAREABLE;
 
    return flags;
-}
-
-static void
-hk_add_ext_bo_locked(struct hk_device *dev, struct agx_bo *bo)
-{
-   uint32_t id = bo->uapi_handle;
-
-   unsigned count = util_dynarray_num_elements(&dev->external_bos.list,
-                                               struct asahi_ccmd_submit_res);
-
-   for (unsigned i = 0; i < count; i++) {
-      struct asahi_ccmd_submit_res *p = util_dynarray_element(
-         &dev->external_bos.list, struct asahi_ccmd_submit_res, i);
-
-      if (p->res_id == id) {
-         ++*util_dynarray_element(&dev->external_bos.counts, unsigned, i);
-         return;
-      }
-   }
-
-   struct asahi_ccmd_submit_res res = {
-      .res_id = id,
-      .flags = ASAHI_EXTRES_READ | ASAHI_EXTRES_WRITE,
-   };
-   util_dynarray_append(&dev->external_bos.list, res);
-   util_dynarray_append_typed(&dev->external_bos.counts, unsigned, 1);
-}
-
-static void
-hk_add_ext_bo(struct hk_device *dev, struct agx_bo *bo)
-{
-   if (dev->dev.is_virtio) {
-      u_rwlock_wrlock(&dev->external_bos.lock);
-      hk_add_ext_bo_locked(dev, bo);
-      u_rwlock_wrunlock(&dev->external_bos.lock);
-   }
-}
-
-static void
-hk_remove_ext_bo_locked(struct hk_device *dev, struct agx_bo *bo)
-{
-   uint32_t id = bo->uapi_handle;
-   unsigned count = util_dynarray_num_elements(&dev->external_bos.list,
-                                               struct asahi_ccmd_submit_res);
-
-   for (unsigned i = 0; i < count; i++) {
-      struct asahi_ccmd_submit_res *p = util_dynarray_element(
-         &dev->external_bos.list, struct asahi_ccmd_submit_res, i);
-
-      if (p->res_id == id) {
-         unsigned *ctr =
-            util_dynarray_element(&dev->external_bos.counts, unsigned, i);
-         if (!--*ctr) {
-            *ctr = util_dynarray_pop(&dev->external_bos.counts, unsigned);
-            *p = util_dynarray_pop(&dev->external_bos.list,
-                                   struct asahi_ccmd_submit_res);
-         }
-         return;
-      }
-   }
-
-   UNREACHABLE("BO not found");
-}
-
-static void
-hk_remove_ext_bo(struct hk_device *dev, struct agx_bo *bo)
-{
-   if (dev->dev.is_virtio) {
-      u_rwlock_wrlock(&dev->external_bos.lock);
-      hk_remove_ext_bo_locked(dev, bo);
-      u_rwlock_wrunlock(&dev->external_bos.lock);
-   }
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -244,8 +173,13 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
       }
    }
 
-   if (mem->bo->flags & (AGX_BO_SHAREABLE | AGX_BO_SHARED))
-      hk_add_ext_bo(dev, mem->bo);
+   /* Under virtio the host compositor reads WSI images with implicit sync,
+    * which virglrenderer derives from a submission's external resources.
+    * Other external memory uses explicit sync, as on native.
+    */
+   mem->implicit_sync = dev->dev.is_virtio &&
+      vk_find_struct_const(pAllocateInfo->pNext,
+                           WSI_MEMORY_ALLOCATE_INFO_MESA) != NULL;
 
    if (fd_info && fd_info->handleType) {
       /* From the Vulkan spec:
@@ -293,9 +227,6 @@ hk_FreeMemory(VkDevice device, VkDeviceMemory _mem,
    p_atomic_add(&heap->used, -((int64_t)mem->bo->size));
    p_atomic_add(&hk_process_heap_used[type->heapIndex],
                 -((int64_t)mem->bo->size));
-
-   if (mem->bo->flags & (AGX_BO_SHAREABLE | AGX_BO_SHARED))
-      hk_remove_ext_bo(dev, mem->bo);
 
    /* Freeing mapped memory implicitly unmaps it. */
    if (mem->map)

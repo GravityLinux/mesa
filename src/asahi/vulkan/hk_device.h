@@ -145,11 +145,6 @@ struct hk_device {
 
    uint32_t perftest;
 
-   struct {
-      struct u_rwlock lock;
-      struct util_dynarray list;
-      struct util_dynarray counts;
-   } external_bos;
 };
 
 VK_DEFINE_HANDLE_CASTS(hk_device, vk.base, VkDevice, VK_OBJECT_TYPE_DEVICE)

@@ -26,6 +26,9 @@ struct hk_buffer {
 
    /* Apple9 sparse residency: one byte per page, nonzero if bound. */
    struct agx_bo *apple9_residency;
+
+   /* Virtio resource id of bound implicit-sync (WSI) memory, or 0. */
+   uint32_t implicit_sync_res;
 };
 
 /* Descriptor residency pointer of a sparse residency buffer, biased so the

@@ -1448,6 +1448,7 @@ hk_BindImageMemory2(VkDevice device, uint32_t bindInfoCount,
 #endif
 
       assert(mem);
+      image->implicit_sync_res = mem->implicit_sync ? mem->bo->uapi_handle : 0;
       uint64_t offset_B = pBindInfos[i].memoryOffset;
       if (image->disjoint) {
          const VkBindImagePlaneMemoryInfo *plane_info = vk_find_struct_const(
