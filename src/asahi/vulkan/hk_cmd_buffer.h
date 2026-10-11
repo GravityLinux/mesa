@@ -137,12 +137,17 @@ struct hk_root_descriptor_table {
    /* Client push constants */
    uint8_t push[HK_MAX_PUSH_SIZE];
 
-   /* Dynamic buffer bindings */
-   struct hk_buffer_address dynamic_buffers[HK_MAX_DYNAMIC_BUFFERS];
-
    /* Start index in dynamic_buffers where each set starts */
    uint8_t set_dynamic_buffer_start[HK_MAX_SETS];
+
+   /* Dynamic buffer bindings. Last, so that a root upload can stop after the
+    * slots in use, see hk_cmd_buffer_upload_root. */
+   struct hk_buffer_address dynamic_buffers[HK_MAX_DYNAMIC_BUFFERS];
 };
+
+/* Bumped whenever hk_root_descriptor_table offsets change: compiled shaders
+ * bake them, so pipeline and disk cache keys include it. */
+#define HK_ROOT_LAYOUT_VERSION 2
 
 /* helper macro for computing root descriptor byte offsets */
 #define hk_root_descriptor_offset(member)                                      \
@@ -163,7 +168,12 @@ struct hk_descriptor_state {
     * An identical root reuses the upload instead of hashing into the
     * per-command-buffer upload cache. Zeroed with the rest of the state on
     * reset, i.e. whenever the upload pool is. */
+   /* Dynamic buffer slots bound since the last reset: roots are uploaded up
+    * to the end of these. */
+   uint32_t root_dynamic_count;
+
    bool root_last_valid;
+   uint32_t root_last_size;
    uint64_t root_last_gpu;
    struct hk_root_descriptor_table root_last;
 
@@ -630,11 +640,23 @@ struct hk_cmd_buffer {
                         AGX_APPLE9_MAX_GRAPHICS_BUFFERS * sizeof(uint64_t))];
    } upload_last[HK_UPLOAD_LAST_COUNT];
 
-   /* The previous Apple9 draw in the current graphics control stream, so an
-    * unchanged launch, coefficient table or PPP record is reused without
-    * hashing. Records are allocated per control stream (batch). */
-   struct agx_apple9_uniform_draw apple9_prev_draw;
+   /* The current and previous Apple9 draw records, alternating: a draw
+    * compares against the previous draw in the same graphics control stream,
+    * so an unchanged launch, coefficient table or PPP record is reused
+    * without hashing. Records are allocated per control stream (batch). */
+   struct agx_apple9_uniform_draw apple9_draw[2];
+   unsigned apple9_draw_current;
    struct hk_cs *apple9_prev_cs;
+
+   /* The last linked Apple9 (vertex, fragment) pair, by program id: shader
+    * objects pair stages only at draw time, so link once per change. */
+   struct agx_apple9_render_pipeline apple9_linked;
+   uint64_t apple9_linked_id[2];
+
+   /* The null fragment stage carrying the vertex stage's varying layout,
+    * for the vertex program apple9_null_fs_vertex_id. */
+   struct agx_apple9_render_stage apple9_null_fs;
+   uint64_t apple9_null_fs_vertex_id;
 
    /* List of all recorded control streams */
    struct list_head control_streams;

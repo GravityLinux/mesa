@@ -62,6 +62,7 @@
 #include "asahi/lib/agx_uvs.h"
 #include "compiler/spirv/nir_spirv.h"
 
+#include "util/u_atomic.h"
 #include "util/blob.h"
 #include "util/hash_table.h"
 #include "util/macros.h"
@@ -3414,6 +3415,59 @@ hk_apple9_bodies_finish(struct hk_device *dev)
    dev->apple9_bodies.ht = NULL;
 }
 
+/* The native description of an uploaded G16 graphics stage. */
+static void
+hk_apple9_init_render_stage(struct hk_shader *s)
+{
+   bool fragment = s->info.stage == MESA_SHADER_FRAGMENT;
+   const struct agx_shader_info *i = &s->b.info;
+   struct agx_apple9_render_stage stage = {
+      .program_id = s->apple9_program_id,
+      .bo = s->bo,
+      .binary = s->code_ptr,
+      .binary_size = i->binary_size,
+      .preamble_offset = i->apple9_preamble_offset,
+      .preamble_size = i->apple9_preamble_size,
+      .publication_count = i->apple9_publication_count,
+      .publication_count_valid = true,
+      .scratch_size = i->scratch_size,
+      .atomic_frame_size = i->apple9_atomic_frame_size,
+      .resource_count = i->apple9_resource_count,
+      .resource_ssbo_mask = i->apple9_resource_ssbo_mask,
+      .resource_write_mask = i->apple9_resource_write_mask,
+      .position_components = fragment ? 0 : 4,
+      .varying_components = i->apple9_varyings.count,
+      .varyings = i->apple9_varyings,
+      .apple9_linear_mask = i->apple9_linear_mask,
+      .apple9_flat_mask = i->apple9_flat_mask,
+      .apple9_reads_z = i->apple9_reads_z,
+      .reads_primitive_id = i->apple9_reads_primitive_id,
+      .reads_point_coord = i->apple9_reads_point_coord,
+      .barycentric_mask = i->apple9_barycentric_mask,
+      .per_vertex_count = i->apple9_per_vertex_count,
+      .writes_point_size = i->apple9_writes_point_size,
+      .writes_layer_viewport = i->writes_layer_viewport,
+      .clip_distance_count = i->apple9_clip_distance_count,
+      .render_targets = s->info.apple9_render_targets,
+      .launch_cache = s->apple9_stage_launch,
+      .texture_mask = i->apple9_texture_mask,
+      .sampler_mask = i->apple9_sampler_mask,
+      .image_mask = i->apple9_image_mask,
+      .uses_texel_fetch = i->apple9_uses_texel_fetch,
+      .reads_tile = i->apple9_reads_tile,
+      .uses_discard = i->apple9_uses_discard,
+      .writes_depth = i->depth_layout != FRAG_DEPTH_LAYOUT_UNCHANGED,
+      .disable_tri_merging = i->disable_tri_merging,
+   };
+   memcpy(stage.resource_binding, i->apple9_resource_binding,
+          sizeof(stage.resource_binding));
+   memcpy(stage.per_vertex, i->apple9_per_vertex, sizeof(stage.per_vertex));
+   /* Every uploaded graphics stage has an id; without one, consecutive draws
+    * silently stop reusing launches and coefficient tables. */
+   assert(!s->bo || stage.program_id);
+   s->apple9_stage = stage;
+}
+
 static VkResult
 hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
 {
@@ -3436,10 +3490,13 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
          else
             free(t);
       } else {
+         shader->apple9_program_id =
+            p_atomic_inc_return(&dev->apple9_last_program_id);
          shader->apple9_stage_launch =
             malloc(sizeof(*shader->apple9_stage_launch));
          if (shader->apple9_stage_launch)
             agx_apple9_stage_launch_cache_init(shader->apple9_stage_launch);
+         hk_apple9_init_render_stage(shader);
       }
       return VK_SUCCESS;
    }

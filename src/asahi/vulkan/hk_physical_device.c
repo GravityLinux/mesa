@@ -16,6 +16,7 @@
 #include "util/os_misc.h"
 #include "git_sha1.h"
 #include "hk_buffer.h"
+#include "hk_cmd_buffer.h"
 #include "hk_entrypoints.h"
 #include "hk_image.h"
 #include "hk_instance.h"
@@ -1160,6 +1161,8 @@ hk_physical_device_init_pipeline_cache(struct hk_physical_device *pdev)
 
    const uint64_t compiler_flags = hk_physical_device_compiler_flags(pdev);
    _mesa_blake3_update(&blake3_ctx, &compiler_flags, sizeof(compiler_flags));
+   const uint32_t root_layout = HK_ROOT_LAYOUT_VERSION;
+   _mesa_blake3_update(&blake3_ctx, &root_layout, sizeof(root_layout));
 
    unsigned char blake3[BLAKE3_KEY_LEN];
    _mesa_blake3_final(&blake3_ctx, blake3);

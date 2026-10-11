@@ -101,9 +101,10 @@ struct agx_apple9_render_stage {
 };
 
 struct agx_apple9_render_pipeline {
-   /* Vertex fetch is lowered into the API vertex program. */
-   struct agx_apple9_render_stage vertex;
-   struct agx_apple9_render_stage fragment;
+   /* Vertex fetch is lowered into the API vertex program. The stages belong
+    * to their compiled shaders, which outlive every draw using them. */
+   const struct agx_apple9_render_stage *vertex;
+   const struct agx_apple9_render_stage *fragment;
 
    /* Color surfaces in draw-buffer order; absent attachments have address 0. */
    uint64_t color_targets[8];
@@ -180,6 +181,24 @@ struct agx_apple9_uniform_draw {
    uint8_t provoking_vertex;
 };
 
+/* Clear a record for reuse without touching its large arrays:
+ * agx_apple9_prepare_draw_alloc rebuilds ppp_record, and buffers and
+ * viewports are read only up to the counts the caller fills in. */
+static inline void
+agx_apple9_uniform_draw_reset(struct agx_apple9_uniform_draw *draw)
+{
+   memset(draw, 0, offsetof(struct agx_apple9_uniform_draw, ppp_record));
+   memset(&draw->ppp_size, 0,
+          offsetof(struct agx_apple9_uniform_draw, buffers) -
+             offsetof(struct agx_apple9_uniform_draw, ppp_size));
+   memset(&draw->buffer_count, 0,
+          offsetof(struct agx_apple9_uniform_draw, viewports) -
+             offsetof(struct agx_apple9_uniform_draw, buffer_count));
+   memset(&draw->scissor_index, 0,
+          sizeof(*draw) -
+             offsetof(struct agx_apple9_uniform_draw, scissor_index));
+}
+
 void agx_apple9_initialize_entries(struct agx_device *dev);
 
 /* Immutable state caches compare the complete canonical contents. Launch keys
@@ -208,6 +227,36 @@ bool agx_apple9_prepare_graphics_stage(
    uint64_t table, uint64_t textures, uint64_t samplers,
    unsigned tile_bytes, unsigned samples, uint32_t *launch,
    agx_apple9_cached_alloc cached_alloc);
+
+/* Whether a draw can take the previous draw's launch for stage (0 vertex, 1
+ * fragment) or its coefficient table. Both need nonzero, equal program ids:
+ * a stage without an id is never reused. draw->program_id, code, tables,
+ * samples, tile_bytes and provoking_vertex must already be filled in. */
+static inline bool
+agx_apple9_draw_reuses_launch(const struct agx_apple9_uniform_draw *previous,
+                              const struct agx_apple9_uniform_draw *draw,
+                              unsigned stage)
+{
+   return previous && draw->program_id[stage] &&
+          previous->program_id[stage] == draw->program_id[stage] &&
+          previous->code[stage] == draw->code[stage] &&
+          previous->texture_table[stage] == draw->texture_table[stage] &&
+          previous->sampler_table[stage] == draw->sampler_table[stage] &&
+          (stage ? previous->fragment_table == draw->fragment_table
+                 : previous->vertex_table == draw->vertex_table) &&
+          (!stage || (previous->samples == draw->samples &&
+                      previous->tile_bytes == draw->tile_bytes));
+}
+
+static inline bool
+agx_apple9_draw_reuses_coefficients(const struct agx_apple9_uniform_draw *previous,
+                                    const struct agx_apple9_uniform_draw *draw)
+{
+   return previous && draw->program_id[0] && draw->program_id[1] &&
+          previous->program_id[0] == draw->program_id[0] &&
+          previous->program_id[1] == draw->program_id[1] &&
+          previous->provoking_vertex == draw->provoking_vertex;
+}
 
 /* The caller owns both immutable arenas. Context allocations must lie wholly
  * within the render-context aperture; USC allocations use the shader aperture.
@@ -401,15 +450,16 @@ void agx_apple9_pack_nearest_sampler(void *out);
  * direct triangle lists, with optional 16- or 32-bit indices.
  */
 bool
-agx_apple9_link_render_pipeline(struct agx_apple9_render_pipeline *pipeline,
-                                struct agx_apple9_render_stage vertex,
-                                struct agx_apple9_render_stage fragment);
+agx_apple9_link_render_pipeline(
+   struct agx_apple9_render_pipeline *pipeline,
+   const struct agx_apple9_render_stage *vertex,
+   const struct agx_apple9_render_stage *fragment);
 
 bool agx_apple9_link_render_pipeline_with_prolog(
    struct agx_apple9_render_pipeline *pipeline,
-   struct agx_apple9_render_stage vertex_prolog,
-   struct agx_apple9_render_stage vertex,
-   struct agx_apple9_render_stage fragment);
+   const struct agx_apple9_render_stage *vertex_prolog,
+   const struct agx_apple9_render_stage *vertex,
+   const struct agx_apple9_render_stage *fragment);
 
 size_t
 agx_apple9_direct_draw_size(const struct agx_apple9_render_pipeline *pipeline);

@@ -5945,15 +5945,15 @@ static bool
 agx_apple9_validate_resources(struct agx_context *ctx)
 {
    struct agx_apple9_render_pipeline pipeline;
-   if (!agx_apple9_link_render_pipeline(&pipeline, (ctx->gs ? ctx->gs->gs_copy : ctx->vs)->apple9_render_stage,
-                                        ctx->fs->apple9_render_stage)) {
+   if (!agx_apple9_link_render_pipeline(&pipeline, &(ctx->gs ? ctx->gs->gs_copy : ctx->vs)->apple9_render_stage,
+                                        &ctx->fs->apple9_render_stage)) {
       fprintf(stderr, "Apple9 graphics stages cannot be linked\n");
       return false;
    }
 
    const struct agx_apple9_render_stage *stages[] = {
-      &pipeline.vertex,
-      &pipeline.fragment,
+      pipeline.vertex,
+      pipeline.fragment,
    };
    for (unsigned i = 0; i < ARRAY_SIZE(stages); ++i) {
       const struct agx_apple9_render_stage *rs = stages[i];
@@ -6833,8 +6833,8 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
 
       struct agx_apple9_render_pipeline pipeline;
       bool linked = agx_apple9_link_render_pipeline(
-         &pipeline, (ctx->gs ? ctx->gs->gs_copy : ctx->vs)->apple9_render_stage,
-         ctx->fs->apple9_render_stage);
+         &pipeline, &(ctx->gs ? ctx->gs->gs_copy : ctx->vs)->apple9_render_stage,
+         &ctx->fs->apple9_render_stage);
       assert(linked && "Apple9 render stages must be compiled before draw");
 
       if (!agx_apple9_collect_color_targets(batch, &pipeline)) {
@@ -6847,8 +6847,8 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
       struct agx_apple9_uniform_draw *record = &draw_record;
       const struct agx_apple9_uniform_draw *previous =
          batch->apple9_draw_count ? &batch->apple9_previous_draw : NULL;
-      agx_batch_add_bo(batch, pipeline.vertex.bo);
-      agx_batch_add_bo(batch, pipeline.fragment.bo);
+      agx_batch_add_bo(batch, pipeline.vertex->bo);
+      agx_batch_add_bo(batch, pipeline.fragment->bo);
       record->flatshade_first = ctx->rast->base.flatshade_first;
       memcpy(record->viewport_translate, ctx->viewport[0].translate,
              sizeof(record->viewport_translate));
@@ -6893,10 +6893,10 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
          memcpy(util_dynarray_grow_bytes(&batch->scissor, 1, sizeof(scissor)),
                 &scissor, sizeof(scissor));
       }
-      record->reads_tile = pipeline.fragment.reads_tile;
-      record->uses_discard = pipeline.fragment.uses_discard;
-      record->writes_depth = pipeline.fragment.writes_depth;
-      record->disable_tri_merging = pipeline.fragment.disable_tri_merging;
+      record->reads_tile = pipeline.fragment->reads_tile;
+      record->uses_discard = pipeline.fragment->uses_discard;
+      record->writes_depth = pipeline.fragment->writes_depth;
+      record->disable_tri_merging = pipeline.fragment->disable_tri_merging;
       for (unsigned rt = 0; rt < batch->key.nr_cbufs; ++rt) {
          struct agx_blend_standard blend =
             agx_unpack_blend_standard(ctx->blend->key.rt[rt].mode);
@@ -6958,7 +6958,7 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
       memcpy(&record->stencil[1], &ctx->zs->back_stencil, 4);
       for (unsigned stage = 0; stage < 2; ++stage) {
          const struct agx_apple9_render_stage *rs =
-            stage ? &pipeline.fragment : &pipeline.vertex;
+            stage ? pipeline.fragment : pipeline.vertex;
          mesa_shader_stage shader =
             stage ? MESA_SHADER_FRAGMENT :
             ctx->gs ? MESA_SHADER_GEOMETRY : MESA_SHADER_VERTEX;
@@ -7028,7 +7028,7 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
       }
       for (unsigned stage = 0; stage < 2; ++stage) {
          const struct agx_apple9_render_stage *rs =
-            stage ? &pipeline.fragment : &pipeline.vertex;
+            stage ? pipeline.fragment : pipeline.vertex;
          struct agx_stage *shader = &ctx->stage[
             stage ? MESA_SHADER_FRAGMENT :
             ctx->gs ? MESA_SHADER_GEOMETRY : MESA_SHADER_VERTEX];
