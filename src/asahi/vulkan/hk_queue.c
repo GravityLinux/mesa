@@ -1085,6 +1085,16 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
             /* Render keys omit the per-frame draw count, which varies. */
             hk_gpu_busy_set_pass(queue, cs->pass_code, cs->pass_grid, 0);
             hk_gpu_busy_render(queue, &cmd);
+            if (agx_timeline_enabled()) {
+               agx_timeline_emit(TL_RENDER_INFO, 0, tl_timestamp_key(cmd.ts_vtx.start),
+                  cs->diag.color0, cs->diag.depth,
+                  cs->diag.area | ((uint64_t)cs->diag.view << 32),
+                  cs->diag.color_count | (cs->diag.samples << 8) |
+                     (cs->diag.clears << 16),
+                  cs->diag.color0_format | ((uint64_t)cs->diag.depth_format << 32),
+                  cs->stats.cmds | ((uint64_t)cs->stats.calls << 32),
+                  cs->pass_code);
+            }
             util_dynarray_append(&payload, cmd);
             nr_vdm++;
          }
