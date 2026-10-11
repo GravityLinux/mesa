@@ -181,10 +181,18 @@ normalize_runtime_coordinates(nir_builder *b, nir_tex_instr *tex,
 {
    /* Unnormalized samplers are restricted to single-level 1D/2D views.
     * The frontend has already expanded 1D to 2D with unit height, and may
-    * have rewritten 2D as layer 0 of a one-layer array. */
+    * have rewritten 2D as layer 0 of a one-layer array. Vulkan also forbids
+    * them with ImplicitLod, Dref and Proj sampling and with any bias or
+    * offset (VUID-vkCmdDraw-None-02703/02704), so those samples never take
+    * pixel coordinates. */
    if (tex->sampler_dim != GLSL_SAMPLER_DIM_2D ||
        (tex->is_array && !(tex->backend_flags & AGX_TEXTURE_FLAG_ARRAYED_2D)) ||
-       nir_tex_instr_is_query(tex) || tex->op == nir_texop_txf)
+       nir_tex_instr_is_query(tex) || tex->op == nir_texop_txf ||
+       tex->op == nir_texop_tex || tex->op == nir_texop_txb ||
+       tex->is_shadow ||
+       nir_tex_instr_src_index(tex, nir_tex_src_projector) >= 0 ||
+       nir_tex_instr_src_index(tex, nir_tex_src_bias) >= 0 ||
+       nir_tex_instr_src_index(tex, nir_tex_src_offset) >= 0)
       return false;
    int src = nir_tex_instr_src_index(tex, nir_tex_src_coord);
    if (src < 0 || tex->texture_index >= 32 || tex->sampler_index >= 32)
