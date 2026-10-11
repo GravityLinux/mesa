@@ -127,34 +127,6 @@ tc_fence_finish(struct zink_context *ctx, struct zink_tc_fence *mfence, uint64_t
 }
 
 static bool
-fence_wait(struct zink_screen *screen, struct zink_fence *fence, uint64_t timeout_ns)
-{
-   struct zink_batch_state *bs = zink_batch_state(fence);
-   if (screen->device_lost)
-      return true;
-   if (fence->completed)
-      return true;
-
-   if (screen->threaded_submit) {
-      int64_t abs_timeout = os_time_get_absolute_timeout(timeout_ns);
-      if (!util_queue_fence_wait_timeout(&bs->flush_completed, abs_timeout))
-         return false;
-   }
-
-   assert(fence->batch_id);
-   assert(fence->submitted);
-
-   bool success = zink_screen_timeline_wait(screen, fence->batch_id, timeout_ns);
-
-   if (success) {
-      fence->completed = true;
-      bs->usage.usage = 0;
-      zink_screen_update_last_finished(screen, fence->batch_id);
-   }
-   return success;
-}
-
-static bool
 zink_fence_finish(struct zink_screen *screen, struct pipe_context *pctx, struct zink_tc_fence *mfence,
                   uint64_t timeout_ns)
 {
@@ -184,23 +156,46 @@ zink_fence_finish(struct zink_screen *screen, struct pipe_context *pctx, struct 
       return true;
 
    struct zink_fence *fence = mfence->fence;
+   struct zink_batch_state *bs = zink_batch_state(fence);
+   const int64_t abs_timeout = os_time_get_absolute_timeout(timeout_ns);
 
-   unsigned submit_diff = zink_batch_submit_count_diff(zink_batch_state(mfence->fence)->usage.submit_count, mfence->submit_count);
-   /* this batch is known to have finished because it has been submitted more than 1 time
-    * since the tc fence last saw it
+   mtx_lock(&bs->usage.mtx);
+   if (screen->threaded_submit && bs->usage.submit_count == mfence->submit_count && !fence->submitted) {
+      mtx_unlock(&bs->usage.mtx);
+      if (!util_queue_fence_wait_timeout(&bs->flush_completed, abs_timeout))
+         return false;
+      mtx_lock(&bs->usage.mtx);
+   }
+   const uint32_t submit_diff = bs->usage.submit_count - mfence->submit_count;
+   const bool submitted = fence->submitted;
+   const bool completed = fence->completed;
+   const uint64_t batch_id = fence->batch_id;
+   mtx_unlock(&bs->usage.mtx);
+
+   /* - submit_diff == 0: the submit failed and there is nothing to wait on
+    * - submit_diff > 1 or !submitted: the batch state was reset, so the batch has finished
+    * - completed: another waiter already finished this fence
     */
-   if (submit_diff > 1)
+   if (submit_diff != 1 || !submitted || completed)
       return true;
 
-   /* - if fence is submitted, batch_id is nonzero and can be checked
-    * - if fence is not submitted here, it must be reset; batch_id will be 0 and submitted is false
-    * in either case, the fence has finished
-    */
-   if ((fence->submitted && zink_screen_check_last_finished(screen, fence->batch_id)) ||
-       (!fence->submitted && submit_diff))
-      return true;
+   if (timeout_ns && timeout_ns != OS_TIMEOUT_INFINITE) {
+      const int64_t time_ns = os_time_get_nano();
+      timeout_ns = abs_timeout > time_ns ? abs_timeout - time_ns : 0;
+   }
+   if (!zink_screen_timeline_wait(screen, batch_id, timeout_ns))
+      return false;
 
-   return fence_wait(screen, fence, timeout_ns);
+   /* the mutex was dropped for the wait: only flag completion
+    * if the batch state still belongs to this fence
+    */
+   mtx_lock(&bs->usage.mtx);
+   if ((uint32_t)(bs->usage.submit_count - mfence->submit_count) == 1 && fence->batch_id == batch_id) {
+      fence->completed = true;
+      bs->usage.usage = 0;
+   }
+   mtx_unlock(&bs->usage.mtx);
+   return true;
 }
 
 static bool
