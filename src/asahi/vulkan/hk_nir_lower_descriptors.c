@@ -646,6 +646,10 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
     * samplers. The sampler of a combined binding is its plane's sampler
     * part. */
    const bool g16 = dev->dev.chip == AGX_CHIP_G16G;
+   if (g16 && tex->sampler_dim != GLSL_SAMPLER_DIM_BUF &&
+       (tex->op == nir_texop_txs || tex->op == nir_texop_query_levels ||
+        tex->op == nir_texop_texture_samples))
+      tex->backend_flags |= AGX_TEXTURE_FLAG_METADATA_QUERY;
    uint64_t plane_size_B = sizeof(struct hk_sampled_image_descriptor);
    if (g16) {
       plane_size_B = apple9_record_size(

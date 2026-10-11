@@ -8742,6 +8742,14 @@ apple9_lower_texture_queries_and_layers(nir_builder *b, nir_instr *instr, void *
       } else
          result = agx_apple9_texture_info(b, tex,
                                       tex->op == nir_texop_query_levels ? 3 : 4);
+      /* A null view has no levels, and its size and sample queries return 0
+       * (Vulkan's null descriptors). Buffer metadata has no level count. */
+      if (tex->op != nir_texop_query_levels &&
+          tex->sampler_dim != GLSL_SAMPLER_DIM_BUF) {
+         nir_def *null = nir_ieq_imm(b, agx_apple9_texture_info(b, tex, 3), 0);
+         result = nir_bcsel(b, null, nir_imm_zero(b, result->num_components, 32),
+                            result);
+      }
       nir_def_rewrite_uses(&tex->def, result);
       nir_instr_remove(instr);
       return true;

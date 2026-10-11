@@ -3282,8 +3282,9 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       NIR_PASS(_, nir, nir_shader_intrinsics_pass, hk_apple9_lower_buffer_address,
                nir_metadata_control_flow, NULL);
       NIR_PASS(_, nir, agx_nir_lower_images);
-      /* The ordinary descriptor prefix also serves storage-image/buffer
-       * queries. Keep these GPU reads independent of native sampled tables. */
+      /* The ordinary descriptor prefix serves storage-image queries. Sampled
+       * views' queries (AGX_TEXTURE_FLAG_METADATA_QUERY) are answered from
+       * texture metadata by the Apple9 backend. */
       NIR_PASS(_, nir, agx_nir_lower_texture_queries);
    } else {
       NIR_PASS(_, nir, agx_nir_lower_texture);
