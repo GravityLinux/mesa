@@ -485,10 +485,17 @@ inline_compare_literal(struct agx_apple9_vir_instr *I, const bool *constant,
        * symmetric. NaN operands compare false either way. The register
        * moving to A must not carry modifiers, which A cannot take here. */
       const unsigned condition = I->immediate & 0xff;
+      /* A select's equality bit does not compose like "or equal": with ILT
+       * it is integer equality, and with IGT it is not equality (see the
+       * select lowering). Only its symmetric forms commute. */
+      const bool equality = !predicate && (I->immediate & AGX_APPLE9_SELECT_EQUALITY);
       unsigned reversed;
       if (extended)
          reversed = condition == AGX_APPLE9_PREDICATE_EXT_FEQ ||
                     condition == AGX_APPLE9_PREDICATE_EXT_IEQ ? condition : ~0u;
+      else if (equality)
+         reversed = condition == AGX_APPLE9_SELECT_ILT ||
+                    condition == AGX_APPLE9_SELECT_FEQ ? condition : ~0u;
       else if (condition == AGX_APPLE9_SELECT_FEQ && !predicate)
          reversed = condition;
       else if (condition >= AGX_APPLE9_SELECT_FGT &&
@@ -728,12 +735,6 @@ inline_alu_sources(struct agx_apple9_vir_instr *I, const uint16_t *uniform_read,
       if (!shift && !predicate && !select && !fma && !float2 && !integer &&
           (filled & 3) && (file[0] || file[1]))
          file[0] = file[1] = 0;
-      /* A compare whose operand B is a literal keeps operand A in a
-       * register: with a uniform A beside the literal, T8132 compared
-       * wrongly (dEQP-VK.subgroups.builtin_mask_var.framebuffer.
-       * subgroupeqmask_geometry, an extended predicate u10 == 0). */
-      if ((predicate || select) && (I->alu_src_immediate_mask & 2))
-         file[0] = 0;
       unsigned source = 0;
       for (unsigned s = 0; s < arity; ++s) {
          if (filled & BITFIELD_BIT(s))
