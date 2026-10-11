@@ -15,6 +15,7 @@
 #include "hk_gpu_busy.h"
 #include "util/u_wait_watchdog.h"
 #include "hk_queue.h"
+#include "agx_timeline_uapi.h"
 #include "hk_buffer.h"
 
 #include "agx_bg_eot.h"
@@ -377,7 +378,12 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
    U_WATCHDOG_SCOPE(wd, "HK submit ioctl", dev->dev.fd, submit->queue_id, wd_id,
                     0, UINT64_MAX, wd_waits);
 #endif
+   /* HK_TIMELINE_FILE: ioctl begin/end records around the submit. */
+   uint64_t trace_id = agx_timeline_enabled() ? agx_timeline_id() : 0;
+   agx_timeline_submit(TL_IOCTL_BEGIN, trace_id, dev->dev.fd, submit, 0);
    int ret = dev->dev.ops.submit(&dev->dev, submit, &virt);
+   agx_timeline_emit(TL_IOCTL_END, 0, trace_id, (uint64_t)(int64_t)ret,
+                     errno, 0, 0, 0, 0, 0);
    int submit_errno = errno;
    u_watchdog_submit_result(wd_id, ret, errno);
    u_watchdog_ioctl("HK submit", dev->dev.fd, ret, errno);
@@ -1052,6 +1058,7 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
 
             struct drm_asahi_cmd_compute cmd;
             asahi_fill_cdm_command(dev, cs, &cmd);
+            hk_gpu_busy_set_pass(queue, cs->pass_code, cs->pass_grid, cs->pass_count);
             hk_gpu_busy_compute(queue, &cmd);
             util_dynarray_append(&payload, cmd);
             nr_cdm++;
@@ -1066,6 +1073,8 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
             asahi_fill_vdm_command(dev, cs, &cmd);
             if (hk_defer_render_wait(dev, &streams[cs->sync_id]))
                cmd.flags |= DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT;
+            /* Render keys omit the per-frame draw count, which varies. */
+            hk_gpu_busy_set_pass(queue, cs->pass_code, cs->pass_grid, 0);
             hk_gpu_busy_render(queue, &cmd);
             util_dynarray_append(&payload, cmd);
             nr_vdm++;

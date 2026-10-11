@@ -219,3 +219,74 @@ hk_sparse_unbound_unmapped(const struct agx_device *dev)
    return dev->chip == AGX_CHIP_G16G && agx_has_soft_fault((struct agx_device *)dev) &&
           !getenv("HK_APPLE9_SPARSE_SCRATCH");
 }
+/* Debug only: HK_CPU_TIMING, see hk_cpu_timing.c */
+struct vk_device_dispatch_table;
+void hk_cpu_timing_install(struct vk_device_dispatch_table *table);
+void hk_cpu_timing_note_gs_slow(unsigned shape, bool indirect, uint64_t prims,
+                                unsigned max_indices);
+struct hk_cpu_compile_scope {
+   bool active;
+   uint64_t wall, cpu;
+};
+void hk_cpu_timing_compile_begin(struct hk_cpu_compile_scope *s);
+void hk_cpu_timing_compile_end(const struct hk_cpu_compile_scope *s,
+                               bool draw_time);
+/* Wall time of draw sub-steps; begin returns 0 when timing is off. */
+enum hk_cpu_sub {
+   HK_CPU_SUB_RESOLVE,
+   HK_CPU_SUB_RESOLVE_SLOW,
+   HK_CPU_SUB_TESS,
+   HK_CPU_SUB_GS,
+   HK_CPU_SUB_ROBUST_INDEX,
+   HK_CPU_SUB_A9DRAW,
+   HK_CPU_SUB_PUSH_DESC,
+   HK_CPU_SUB_ROOT,
+   HK_CPU_SUB_TEXTURES,
+   HK_CPU_SUB_TABLES,
+   HK_CPU_SUB_PREPARE_ALLOC,
+   HK_CPU_SUB_CMD_BO,
+   HK_CPU_SUB_CMD_BO_DESTROY_RELEASE,
+   HK_CPU_SUB_CMD_BO_DESTROY_CAP,
+   HK_CPU_SUB_COUNT,
+};
+/* HK_CPU_TIMING level; the hooks below cost one load and branch when off. */
+extern int hk_cpu_level;
+uint64_t hk_cpu_sub_begin_slow(void);
+void hk_cpu_sub_end_slow(uint64_t start, enum hk_cpu_sub sub);
+void hk_cpu_sub_count_slow(enum hk_cpu_sub sub);
+
+/* Draw sub-step timers sit on the per-draw path, so they are only built with
+ * -Dhk-cpu-sub-timing=true; otherwise they compile to nothing. */
+static inline uint64_t
+hk_cpu_sub_begin(void)
+{
+#ifdef HK_CPU_SUB_TIMING
+   return unlikely(hk_cpu_level) ? hk_cpu_sub_begin_slow() : 0;
+#else
+   return 0;
+#endif
+}
+
+static inline void
+hk_cpu_sub_end(uint64_t start, enum hk_cpu_sub sub)
+{
+#ifdef HK_CPU_SUB_TIMING
+   if (unlikely(start))
+      hk_cpu_sub_end_slow(start, sub);
+#endif
+}
+
+static inline void
+hk_cpu_timing_note_gs(unsigned shape, bool indirect, uint64_t prims,
+                      unsigned max_indices)
+{
+   if (unlikely(hk_cpu_level))
+      hk_cpu_timing_note_gs_slow(shape, indirect, prims, max_indices);
+}
+
+static inline void
+hk_cpu_sub_count(enum hk_cpu_sub sub)
+{
+   if (unlikely(hk_cpu_level))
+      hk_cpu_sub_count_slow(sub);
+}

@@ -5,6 +5,9 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_device.h"
+#include "agx_timeline.h"
+#include "vk_util.h"
+#include "wsi_common_entrypoints.h"
 
 #include "agx_bg_eot.h"
 #include "agx_apple9.h"
@@ -381,6 +384,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    dev->vk.shader_ops = &hk_device_shader_ops;
    dev->vk.command_dispatch_table = &dev->cmd_dispatch;
+   hk_cpu_timing_install(&dev->vk.dispatch_table);
 
    drmDevicePtr drm_device = NULL;
    int ret = drmGetDeviceFromDevId(pdev->render_dev, 0, &drm_device);
@@ -647,4 +651,49 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    agx_bg_eot_cleanup(&dev->bg_eot);
    agx_close_device(&dev->dev);
    vk_free(&dev->vk.alloc, dev);
+}
+
+/* HK_TIMELINE_FILE: present records (flag 100 is the presentation API scope;
+ * f is the dynamic present mode, or UINT32_MAX when not given). */
+VKAPI_ATTR VkResult VKAPI_CALL
+hk_QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *info)
+{
+   const VkSwapchainPresentModeInfoKHR *mode_info =
+      vk_find_struct_const(info->pNext, SWAPCHAIN_PRESENT_MODE_INFO_KHR);
+   uint64_t mode = UINT32_MAX;
+   if (mode_info && info->swapchainCount == 1 && mode_info->swapchainCount == 1)
+      mode = mode_info->pPresentModes[0];
+   struct agx_timeline_scope trace = agx_timeline_scope_begin(
+      100, (uintptr_t)queue, info->swapchainCount, 0, 0, mode);
+   VkResult result = wsi_QueuePresentKHR(queue, info);
+   agx_timeline_scope_end(&trace, result);
+   if (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR)
+      agx_timeline_presented();
+   return result;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+hk_CreateGraphicsPipelines(VkDevice device, VkPipelineCache cache, uint32_t count,
+                        const VkGraphicsPipelineCreateInfo *infos,
+                        const VkAllocationCallbacks *alloc, VkPipeline *pipelines)
+{
+   struct agx_timeline_scope trace = agx_timeline_scope_begin(
+      101, (uintptr_t)device, count, 0, 0, 0);
+   VkResult result = vk_common_CreateGraphicsPipelines(device, cache, count,
+                                                   infos, alloc, pipelines);
+   agx_timeline_scope_end(&trace, result);
+   return result;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+hk_CreateComputePipelines(VkDevice device, VkPipelineCache cache, uint32_t count,
+                        const VkComputePipelineCreateInfo *infos,
+                        const VkAllocationCallbacks *alloc, VkPipeline *pipelines)
+{
+   struct agx_timeline_scope trace = agx_timeline_scope_begin(
+      102, (uintptr_t)device, count, 0, 0, 0);
+   VkResult result = vk_common_CreateComputePipelines(device, cache, count,
+                                                   infos, alloc, pipelines);
+   agx_timeline_scope_end(&trace, result);
+   return result;
 }

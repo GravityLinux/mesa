@@ -3,6 +3,7 @@
  * unions, without retaining a command trace or changing application queries.
  */
 #include "hk_gpu_busy.h"
+#include "agx_timeline.h"
 #include "git_sha1.h"
 #ifdef HK_GPU_BUSY_COUNTERS
 #include <errno.h>
@@ -19,6 +20,9 @@
 #include "hk_device.h"
 #include "hk_gpu_busy_intervals.h"
 #include "hk_queue.h"
+#include <string.h>
+#include "util/hash_table.h"
+#include "agx_bo.h"
 
 #define BUSY_SLOTS   8192
 #define BUSY_SECONDS 64
@@ -27,10 +31,65 @@
 #define FRAG         2
 #define COMPUTE      3
 
+struct busy_pass_key {
+   uint64_t code;
+   uint32_t grid[3];
+   uint32_t count;
+};
+
 struct busy_slot {
    uint64_t point, submit_cpu_ns;
    unsigned engines;
+   struct busy_pass_key pass;
 };
+
+#define PASS_SLOTS 16384
+struct busy_pass {
+   struct busy_pass_key key;
+   bool used;
+   uint64_t commands, ns[4];
+};
+static struct busy_pass passes[PASS_SLOTS];
+static uint64_t passes_dropped, pass_next_dump_ns;
+static struct busy_pass_key pending_pass;
+
+static void
+pass_add(const struct busy_pass_key *key, unsigned engine, uint64_t ns, bool first)
+{
+   uint64_t h = key->code ^ ((uint64_t)key->grid[0] << 1) ^ ((uint64_t)key->grid[1] << 21) ^
+                ((uint64_t)key->grid[2] << 41) ^ ((uint64_t)key->count << 13);
+   h ^= h >> 29;
+   h *= UINT64_C(0xbf58476d1ce4e5b9);
+   for (unsigned probe = 0; probe < 64; ++probe) {
+      struct busy_pass *p = &passes[(h + probe) % PASS_SLOTS];
+      if (!p->used) {
+         p->used = true;
+         p->key = *key;
+      } else if (memcmp(&p->key, key, sizeof(*key))) {
+         continue;
+      }
+      p->ns[engine] += ns;
+      p->commands += first;
+      return;
+   }
+   passes_dropped++;
+}
+
+static void
+pass_dump(FILE *f, uint64_t now)
+{
+   fprintf(f, "GPU_PASS_BEGIN cpu_ns=%" PRIu64 " dropped=%" PRIu64 "\n", now, passes_dropped);
+   for (unsigned i = 0; i < PASS_SLOTS; ++i) {
+      struct busy_pass *p = &passes[i];
+      if (!p->used)
+         continue;
+      fprintf(f, "GPU_PASS code=0x%" PRIx64 " grid=%u,%u,%u count=%u commands=%" PRIu64
+              " vertex_ns=%" PRIu64 " fragment_ns=%" PRIu64 " compute_ns=%" PRIu64 "\n",
+              p->key.code, p->key.grid[0], p->key.grid[1], p->key.grid[2], p->key.count,
+              p->commands, p->ns[1], p->ns[2], p->ns[3]);
+   }
+   fprintf(f, "GPU_PASS_END cpu_ns=%" PRIu64 "\n", now);
+}
 
 struct busy_bin {
    uint64_t second, revision, pairs;
@@ -62,9 +121,23 @@ struct busy_device {
    uint64_t pairs_requested, pairs_written, pairs_collected;
    uint64_t app_pairs, full_pairs, initial_pairs, invalid_pairs, late_pairs;
    uint64_t queries, query_errors;
+   bool timeline_clock_calibrated;
 };
 
 static pthread_mutex_t busy_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* HK_GPU_BUSY_FILE enables busy counters, pass identity and shader identity;
+ * without it every entry point returns at once. Read once. */
+static bool
+busy_enabled(void)
+{
+   static int enabled = -1;
+   if (enabled < 0) {
+      const char *file = getenv("HK_GPU_BUSY_FILE");
+      enabled = file && *file;
+   }
+   return enabled;
+}
 static struct busy_device *devices;
 
 static FILE *
@@ -94,6 +167,8 @@ open_log(void)
    FILE *f = fdopen(fd, "a");
    if (!f)
       close(fd);
+   else
+      setvbuf(f, NULL, _IOLBF, 0);
    return f;
 }
 
@@ -210,21 +285,107 @@ collect(struct busy_device *d, uint64_t now)
          struct busy_slot *slot = &q->slots[i];
          if (!slot->engines || slot->point > completed)
             continue;
+         /* The submit's progress point only orders its last command; wait for
+          * this command's own end timestamps (pass-complete-overlay). */
+         bool written = true;
+         for (unsigned engine = VTX; engine <= COMPUTE; ++engine) {
+            if (slot->engines & (1u << engine))
+               written &= q->map[4 * i + (engine == FRAG ? 2 : 0) + 1] != 0;
+         }
+         if (!written && now - slot->submit_cpu_ns < 10 * SECOND_NS)
+            continue;
          for (unsigned engine = VTX; engine <= COMPUTE; ++engine) {
             if (!(slot->engines & (1u << engine)))
                continue;
             unsigned offset = engine == FRAG ? 2 : 0;
             uint64_t start = q->map[4 * i + offset];
             uint64_t end = q->map[4 * i + offset + 1];
+            /* HK_TIMELINE_FILE: per-command GPU intervals; f is the DRM fd,
+             * which identifies the device across submit records. */
+            agx_timeline_emit(TL_GPU_INTERVAL, engine, slot->point,
+               q->queue->drm.id, ((uint64_t)q->handle << 32) | ((4*i+offset)*8),
+               agx_gpu_timestamp_to_ns(&d->dev->dev, start),
+               agx_gpu_timestamp_to_ns(&d->dev->dev, end), 1000000000,
+               d->dev->dev.fd, 0);
             add_interval(d, engine,
                          agx_gpu_timestamp_to_ns(&d->dev->dev, start),
                          agx_gpu_timestamp_to_ns(&d->dev->dev, end));
+            if (start && end > start)
+               pass_add(&slot->pass, engine,
+                        agx_gpu_timestamp_to_ns(&d->dev->dev, end) -
+                           agx_gpu_timestamp_to_ns(&d->dev->dev, start),
+                        engine != FRAG);
          }
          slot->engines = 0;
          q->free_slots[q->free_count++] = i;
       }
    }
    flush_log(d, now);
+   if (now >= pass_next_dump_ns) {
+      pass_next_dump_ns = now + 5 * SECOND_NS;
+      pass_dump(d->file, now);
+      fflush(d->file);
+   }
+}
+
+void
+hk_gpu_busy_set_pass(struct hk_queue *queue, uint64_t code,
+                     const uint32_t grid[3], uint32_t count)
+{
+   if (!queue->gpu_busy)
+      return;
+   pthread_mutex_lock(&busy_lock);
+   pending_pass = (struct busy_pass_key){
+      .code = code, .grid = {grid[0], grid[1], grid[2]}, .count = count};
+   pthread_mutex_unlock(&busy_lock);
+}
+
+void
+hk_gpu_busy_shader(struct agx_bo *bo, const void *code, uint32_t size,
+                   unsigned stage)
+{
+   if (!bo || !busy_enabled())
+      return;
+   uint32_t hash = _mesa_hash_data(code, size);
+   pthread_mutex_lock(&busy_lock);
+   for (struct busy_device *d = devices; d; d = d->next) {
+      fprintf(d->file, "GPU_SHADER cpu_ns=%" PRIu64 " code=0x%" PRIx64
+              " hash=0x%08x size=%u stage=%u\n", os_time_get_nano(),
+              bo->va->addr, hash, size, stage);
+      break;
+   }
+   pthread_mutex_unlock(&busy_lock);
+   const char *dir = getenv("HK_GPU_PASS_SHADER_DIR");
+   if (dir) {
+      char path[512];
+      snprintf(path, sizeof(path), "%s/%08x-%u.bin", dir, hash, size);
+      FILE *f = fopen(path, "wbx");
+      if (f) {
+         fwrite(code, 1, size, f);
+         fclose(f);
+      }
+   }
+}
+
+void
+hk_gpu_busy_shader_source(const void *code, uint32_t size, const char *name,
+                          const uint8_t *blake3, unsigned stage)
+{
+   if (!code || !busy_enabled())
+      return;
+   char b3[65];
+   for (unsigned i = 0; i < 32; ++i)
+      snprintf(b3 + 2 * i, 3, "%02x", blake3[i]);
+   char clean[96] = "";
+   for (unsigned i = 0; name && name[i] && i + 1 < sizeof(clean); ++i)
+      clean[i] = (name[i] <= ' ' || name[i] == '=') ? '_' : name[i];
+   pthread_mutex_lock(&busy_lock);
+   for (struct busy_device *d = devices; d; d = d->next) {
+      fprintf(d->file, "GPU_SHADER_SRC hash=0x%08x size=%u stage=%u blake3=%s name=%s\n",
+              _mesa_hash_data(code, size), size, stage, b3, clean[0] ? clean : "-");
+      break;
+   }
+   pthread_mutex_unlock(&busy_lock);
 }
 
 void
@@ -236,6 +397,41 @@ hk_gpu_busy_sample(struct hk_queue *queue)
    pthread_mutex_lock(&busy_lock);
    struct busy_device *d = queue->gpu_busy->device;
    queue->gpu_busy->submit_cpu_ns = now;
+   /* HK_TIMELINE_FILE: calibrate GPU timestamps against CNTVCT (aarch64)
+    * or CLOCK_MONOTONIC once recording is enabled. */
+   if (agx_timeline_enabled() &&
+#if defined(__aarch64__)
+       !d->timeline_clock_calibrated
+#else
+       now >= d->next_sample_ns
+#endif
+       ) {
+      d->timeline_clock_calibrated = true;
+      for (unsigned i = 0; i < 32; i++) {
+         uint64_t before = os_time_get_nano(), first = before, last = 0;
+         uint64_t hz = 1000000000;
+#if defined(__aarch64__)
+         __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(first));
+         __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(hz));
+#endif
+         uint64_t gpu = agx_get_gpu_timestamp(&d->dev->dev);
+#if defined(__aarch64__)
+         __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(last));
+#endif
+         uint64_t after = os_time_get_nano();
+#if !defined(__aarch64__)
+         last = after;
+#endif
+         agx_timeline_emit(TL_GPU_CLOCK,
+#if defined(__aarch64__)
+                           1,
+#else
+                           2,
+#endif
+                           queue->drm.id, gpu, before, after, 1000000000,
+                           first, last, hz);
+      }
+   }
    if (now >= d->next_sample_ns) {
       d->next_sample_ns = now + SECOND_NS;
       collect(d, now);
@@ -278,6 +474,7 @@ instrument(struct hk_queue *queue, struct drm_asahi_timestamps *first,
    }
    unsigned index = q->free_slots[--q->free_count];
    q->slots[index] = (struct busy_slot){
+      .pass = pending_pass,
       .point = queue->drm.timeline_value,
       .submit_cpu_ns = q->submit_cpu_ns,
       .engines =
@@ -317,6 +514,10 @@ hk_gpu_busy_init(struct hk_queue *queue)
 {
    struct hk_device *dev = hk_queue_device(queue);
    if (!dev->dev.params.command_timestamp_frequency_hz)
+      return;
+   /* Off unless HK_GPU_BUSY_FILE is set: no timestamp BOs and no per-command
+    * work otherwise. */
+   if (!busy_enabled())
       return;
    struct hk_gpu_busy_queue *q = calloc(1, sizeof(*q));
    if (!q)

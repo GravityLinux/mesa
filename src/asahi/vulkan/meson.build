@@ -1,6 +1,7 @@
 # Copyright © 2022 Collabora Ltd. and Red Hat Inc.
 # SPDX-License-Identifier: MIT
 hk_files = files(
+  'agx_timeline.c',
   'hk_gpu_busy.c',
   'hk_gpu_busy.h',
   'hk_gpu_busy_intervals.h',
@@ -25,6 +26,7 @@ hk_files = files(
   'hk_descriptor_table.c',
   'hk_descriptor_table.h',
   'hk_device.c',
+  'hk_cpu_timing.c',
   'hk_device.h',
   'hk_device_memory.c',
   'hk_device_memory.h',
@@ -93,6 +95,9 @@ hk_deps = [
 ]
 
 hk_diagnostic_c_args = []
+if get_option('hk-cpu-sub-timing')
+  hk_diagnostic_c_args += '-DHK_CPU_SUB_TIMING=1'
+endif
 if get_option('hk-gpu-busy-counters')
   if host_machine.system() != 'linux'
     error('HK GPU busy diagnostics currently require Linux')

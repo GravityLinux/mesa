@@ -7,6 +7,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_shader.h"
+#include "hk_gpu_busy.h"
 #include "util/u_queue.h"
 
 #include "poly/nir/poly_nir.h"
@@ -29,6 +30,7 @@
 #include "hk_cmd_buffer.h"
 #include "hk_descriptor_set_layout.h"
 #include "hk_device.h"
+#include "agx_timeline.h"
 #include "hk_image.h"
 #include "hk_physical_device.h"
 #include "hk_sampler.h"
@@ -3480,6 +3482,8 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
       shader->bo = hk_apple9_body_bo(dev, shader->code_ptr, shader->code_size);
       if (!shader->bo)
          return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      hk_gpu_busy_shader(shader->bo, shader->code_ptr, shader->code_size,
+                         shader->info.stage);
       if (shader->info.stage == MESA_SHADER_COMPUTE) {
          const struct agx_apple9_compute_profile *p = &shader->info.apple9;
          struct agx_apple9_launch_template *t = malloc(sizeof(*t));
@@ -4074,6 +4078,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
 
    shader->code_ptr = shader->b.binary;
    shader->code_size = shader->b.info.binary_size;
+   hk_gpu_busy_shader_source(shader->code_ptr, shader->code_size, nir->info.name,
+                             nir->info.source_blake3, sw_stage);
 
    shader->info.stage = sw_stage;
    shader->info.clip_distance_array_size = nir->info.clip_distance_array_size;
@@ -5130,6 +5136,8 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
          }
          shader->code_ptr = shader->b.binary;
          shader->code_size = shader->b.info.binary_size;
+         hk_gpu_busy_shader_source(shader->code_ptr, shader->code_size, nir->info.name,
+                                   nir->info.source_blake3, nir->info.stage);
          shader->info.clip_distance_array_size =
             nir->info.clip_distance_array_size;
          shader->info.cull_distance_array_size =
@@ -5603,8 +5611,11 @@ hk_apple9_resolve_graphics(struct hk_device *dev,
 
    struct vk_shader *compiled[HK_APPLE9_GFX_STAGES] = {NULL};
    if (result == VK_SUCCESS) {
+      struct hk_cpu_compile_scope scope;
+      hk_cpu_timing_compile_begin(&scope);
       result = hk_apple9_compile_graphics(dev, count, infos, NULL, &search.key,
                                           NULL, NULL, compiled);
+      hk_cpu_timing_compile_end(&scope, true);
    } else {
       for (unsigned i = 0; i < count; ++i)
          ralloc_free(infos[i].nir);
@@ -5661,13 +5672,14 @@ hk_apple9_variants_finish(struct hk_device *dev)
 }
 
 static VkResult
-hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
+hk_compile_shaders_timed(struct vk_device *vk_dev, uint32_t shader_count,
                    struct vk_shader_compile_info *infos,
                    const struct vk_graphics_pipeline_state *state,
                    const struct vk_features *features,
                    const VkAllocationCallbacks *pAllocator,
                    struct vk_shader **shaders_out)
 {
+   agx_timeline_emit(100, 103, 0, shader_count, 0, 0, 0, 0, 0, 0);
    struct hk_device *dev = container_of(vk_dev, struct hk_device, vk);
    nir_shader *shaders[shader_count];
 
@@ -5743,6 +5755,23 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
    }
 
    return VK_SUCCESS;
+}
+
+static VkResult
+hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
+                   struct vk_shader_compile_info *infos,
+                   const struct vk_graphics_pipeline_state *state,
+                   const struct vk_features *features,
+                   const VkAllocationCallbacks *pAllocator,
+                   struct vk_shader **shaders_out)
+{
+   struct hk_cpu_compile_scope scope;
+   hk_cpu_timing_compile_begin(&scope);
+   VkResult result = hk_compile_shaders_timed(vk_dev, shader_count, infos,
+                                              state, features, pAllocator,
+                                              shaders_out);
+   hk_cpu_timing_compile_end(&scope, false);
+   return result;
 }
 
 static VkResult

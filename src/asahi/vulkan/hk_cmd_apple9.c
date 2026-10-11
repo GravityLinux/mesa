@@ -755,8 +755,12 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
           ? 4 : 0);
    gfx->descriptors.root.draw.draw_id = draw_id;
    gfx->descriptors.root_dirty = true;
+   uint64_t t_sub = hk_cpu_sub_begin();
    hk_cmd_buffer_flush_push_descriptors(cmd, &gfx->descriptors);
+   hk_cpu_sub_end(t_sub, HK_CPU_SUB_PUSH_DESC);
+   t_sub = hk_cpu_sub_begin();
    gfx->root = hk_cmd_buffer_upload_root(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
+   hk_cpu_sub_end(t_sub, HK_CPU_SUB_ROOT);
    struct hk_apple9_prerast_bindings bindings =
       hk_apple9_draw_bindings(cmd, draw);
    uint64_t draw_params = bindings.draw_params;
@@ -765,11 +769,15 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       const struct agx_apple9_render_stage *s =
          stage ? fragment : vertex;
       uint64_t sysvals = 0;
-      if (!hk_apple9_upload_textures(cmd, shaders[stage], true,
-                                     pipeline.primitive == AGX_PRIMITIVE_TRIANGLE_FAN,
-                                     &record->texture_table[stage],
-                                     &record->sampler_table[stage], &sysvals))
+      t_sub = hk_cpu_sub_begin();
+      bool textures_ok = hk_apple9_upload_textures(
+         cmd, shaders[stage], true,
+         pipeline.primitive == AGX_PRIMITIVE_TRIANGLE_FAN,
+         &record->texture_table[stage], &record->sampler_table[stage], &sysvals);
+      hk_cpu_sub_end(t_sub, HK_CPU_SUB_TEXTURES);
+      if (!textures_ok)
          UNSUPPORTED();
+      t_sub = hk_cpu_sub_begin();
       for (unsigned slot = 0; slot < s->resource_count; ++slot) {
          unsigned binding = s->resource_binding[slot];
          uint64_t address;
@@ -794,14 +802,17 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
          record->fragment_table = table;
       else
          record->vertex_table = table;
+      hk_cpu_sub_end(t_sub, HK_CPU_SUB_TABLES);
    }
    const struct agx_apple9_uniform_draw *previous =
       cmd->apple9_prev_cs == cs ? &cmd->apple9_draw[!cmd->apple9_draw_current]
                                 : NULL;
-   if (!agx_apple9_prepare_draw_alloc(&dev->dev, cmd, hk_apple9_usc_alloc, cmd,
-                                      hk_apple9_context_alloc, &pipeline,
-                                      record, previous,
-                                      hk_apple9_state_cache_alloc))
+   t_sub = hk_cpu_sub_begin();
+   bool prepared = agx_apple9_prepare_draw_alloc(
+      &dev->dev, cmd, hk_apple9_usc_alloc, cmd, hk_apple9_context_alloc,
+      &pipeline, record, previous, hk_apple9_state_cache_alloc);
+   hk_cpu_sub_end(t_sub, HK_CPU_SUB_PREPARE_ALLOC);
+   if (!prepared)
       UNSUPPORTED();
    cmd->apple9_draw_current = !cmd->apple9_draw_current;
    cmd->apple9_prev_cs = cs;
@@ -828,6 +839,8 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
                                    draw.b.count[1]));
    }
    cs->stats.cmds++;
+   if (!cs->pass_count++)
+      cs->pass_code = shaders[1]->bo ? shaders[1]->bo->va->addr : 0;
    return;
 unsupported:
    fprintf(
