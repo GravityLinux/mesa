@@ -21,6 +21,10 @@ struct hk_device_memory {
 
    struct agx_bo *bo;
 
+   /* Virtio: WSI memory, which the host compositor accesses with implicit
+    * sync. Submissions using it list it as an external resource. */
+   bool implicit_sync;
+
    /* The API mapping, which the memory object owns. */
    void *map;
    size_t map_size;

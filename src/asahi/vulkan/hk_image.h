@@ -106,6 +106,9 @@ struct hk_image {
 
    uint8_t plane_count;
    struct hk_image_plane planes[3];
+
+   /* Virtio resource id of bound implicit-sync (WSI) memory, or 0. */
+   uint32_t implicit_sync_res;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(hk_image, vk.base, VkImage, VK_OBJECT_TYPE_IMAGE)

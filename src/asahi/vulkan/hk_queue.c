@@ -336,18 +336,27 @@ max_commands_per_submit(struct hk_device *dev)
                    DRM_ASAHI_BARRIER_NONE - 1)) : 1;
 }
 
+/* Virtio external resources of one submission: the implicit-sync (WSI)
+ * memory its command buffers access. virglrenderer waits for the host
+ * dma-buf fences of each (e.g. the compositor still reading a swapchain
+ * image) and attaches the submission's fence to them, so the compositor waits
+ * for the rendering. Submissions without WSI memory send none and synchronize
+ * explicitly only.
+ */
+struct hk_extres {
+   uint32_t count;
+   struct asahi_ccmd_submit_res *res;
+};
+
 static VkResult
 queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
-                    unsigned ring_idx)
+                    unsigned ring_idx, const struct hk_extres *extres)
 {
-   struct agx_submit_virt virt = {.ring_idx = ring_idx};
-
-   if (dev->dev.is_virtio) {
-      u_rwlock_rdlock(&dev->external_bos.lock);
-      virt.extres_count = util_dynarray_num_elements(
-         &dev->external_bos.list, struct asahi_ccmd_submit_res);
-      virt.extres = util_dynarray_begin(&dev->external_bos.list);
-   }
+   struct agx_submit_virt virt = {
+      .ring_idx = ring_idx,
+      .extres_count = extres->count,
+      .extres = extres->res,
+   };
 
 #ifdef HK_WAIT_WATCHDOG
    const struct drm_asahi_sync *wd_syncs = (const void *)(uintptr_t)submit->syncs;
@@ -373,9 +382,6 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
    u_watchdog_submit_result(wd_id, ret, errno);
    u_watchdog_ioctl("HK submit", dev->dev.fd, ret, errno);
 
-   if (dev->dev.is_virtio)
-      u_rwlock_rdunlock(&dev->external_bos.lock);
-
    /* The kernel rejects submissions once the GPU has failed (EIO) or when
     * a command is invalid. Either way the queue cannot make progress: report
     * device loss rather than silently dropping the work.
@@ -396,7 +402,8 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
  */
 static VkResult
 queue_submit_looped(struct hk_device *dev, struct drm_asahi_submit *submit,
-                    unsigned command_count, unsigned ring_idx)
+                    unsigned command_count, unsigned ring_idx,
+                    const struct hk_extres *extres)
 {
    uint8_t *cmdbuf = (uint8_t *)(uintptr_t)submit->cmdbuf;
    uint32_t offs = 0;
@@ -439,7 +446,9 @@ queue_submit_looped(struct hk_device *dev, struct drm_asahi_submit *submit,
          .out_sync_count = has_out_syncs ? submit->out_sync_count : 0,
       };
 
-      VkResult result = queue_submit_single(dev, &submit_ioctl, ring_idx);
+      /* Each slice lists the external resources: the first waits for the
+       * compositor, the last hands its fence to it. */
+      VkResult result = queue_submit_single(dev, &submit_ioctl, ring_idx, extres);
       if (result != VK_SUCCESS)
          return result;
 
@@ -1092,15 +1101,41 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
       .cmdbuf = (uint64_t)(uintptr_t)(payload.data),
    };
 
+   struct util_dynarray extres_list = UTIL_DYNARRAY_INIT;
+   if (dev->dev.is_virtio) {
+      for (unsigned i = 0; i < submit->command_buffer_count; ++i) {
+         struct hk_cmd_buffer *cmdbuf =
+            (struct hk_cmd_buffer *)submit->command_buffers[i];
+         util_dynarray_foreach(&cmdbuf->implicit_sync_res, uint32_t, res) {
+            bool seen = false;
+            util_dynarray_foreach(&extres_list, struct asahi_ccmd_submit_res, e)
+               seen |= e->res_id == *res;
+            if (!seen) {
+               struct asahi_ccmd_submit_res e = {
+                  .res_id = *res,
+                  .flags = ASAHI_EXTRES_READ | ASAHI_EXTRES_WRITE,
+               };
+               util_dynarray_append(&extres_list, e);
+            }
+         }
+      }
+   }
+   const struct hk_extres extres = {
+      .count = util_dynarray_num_elements(&extres_list,
+                                          struct asahi_ccmd_submit_res),
+      .res = util_dynarray_begin(&extres_list),
+   };
+
    VkResult result;
    if (command_count <= max_commands_per_submit(dev)) {
-      result =
-         queue_submit_single(dev, &submit_ioctl, queue->drm.virt_ring_idx);
+      result = queue_submit_single(dev, &submit_ioctl,
+                                   queue->drm.virt_ring_idx, &extres);
    } else {
       result = queue_submit_looped(dev, &submit_ioctl, command_count,
-                                   queue->drm.virt_ring_idx);
+                                   queue->drm.virt_ring_idx, &extres);
    }
 
+   util_dynarray_fini(&extres_list);
    util_dynarray_fini(&payload);
    if (result == VK_SUCCESS) {
       hk_sync_next_submit(&sync);

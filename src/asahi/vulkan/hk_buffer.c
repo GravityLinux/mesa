@@ -381,6 +381,9 @@ hk_BindBufferMemory2(VkDevice device, uint32_t bindInfoCount,
       VK_FROM_HANDLE(hk_device_memory, mem, pBindInfos[i].memory);
       VK_FROM_HANDLE(hk_buffer, buffer, pBindInfos[i].buffer);
 
+      buffer->implicit_sync_res =
+         mem->implicit_sync ? mem->bo->uapi_handle : 0;
+
       if (buffer->va) {
          VK_FROM_HANDLE(hk_device, dev, device);
          size_t size = MIN2(mem->bo->size - pBindInfos[i].memoryOffset,
