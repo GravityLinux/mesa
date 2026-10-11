@@ -56,10 +56,10 @@ static struct busy_pass_key pending_pass;
 static void
 pass_add(const struct busy_pass_key *key, unsigned engine, uint64_t ns, bool first)
 {
-   uint64_t h = key->code ^ ((uint64_t)key->grid[0] << 1) ^ ((uint64_t)key->grid[1] << 21) ^
-                ((uint64_t)key->grid[2] << 41) ^ ((uint64_t)key->count << 13);
-   h ^= h >> 29;
-   h *= UINT64_C(0xbf58476d1ce4e5b9);
+   /* Hash the whole key: code addresses are page aligned and render keys have
+    * no grid or count, so a key-derived index lands most passes in a few
+    * probe chains, and later passes are dropped once those fill. */
+   uint32_t h = _mesa_hash_data(key, sizeof(*key));
    for (unsigned probe = 0; probe < 64; ++probe) {
       struct busy_pass *p = &passes[(h + probe) % PASS_SLOTS];
       if (!p->used) {
