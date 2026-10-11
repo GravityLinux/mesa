@@ -1,6 +1,7 @@
 # Copyright © 2022 Collabora Ltd. and Red Hat Inc.
 # SPDX-License-Identifier: MIT
 hk_files = files(
+  'agx_timeline.c',
   'hk_gpu_busy.c',
   'hk_gpu_busy.h',
   'hk_gpu_busy_intervals.h',

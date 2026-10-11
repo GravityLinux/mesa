@@ -29,6 +29,7 @@
 #include "hk_cmd_buffer.h"
 #include "hk_descriptor_set_layout.h"
 #include "hk_device.h"
+#include "agx_timeline.h"
 #include "hk_image.h"
 #include "hk_physical_device.h"
 #include "hk_sampler.h"
@@ -5671,6 +5672,7 @@ hk_compile_shaders_timed(struct vk_device *vk_dev, uint32_t shader_count,
                    const VkAllocationCallbacks *pAllocator,
                    struct vk_shader **shaders_out)
 {
+   agx_timeline_emit(100, 103, 0, shader_count, 0, 0, 0, 0, 0, 0);
    struct hk_device *dev = container_of(vk_dev, struct hk_device, vk);
    nir_shader *shaders[shader_count];
 

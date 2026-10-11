@@ -3,6 +3,7 @@
  * unions, without retaining a command trace or changing application queries.
  */
 #include "hk_gpu_busy.h"
+#include "agx_timeline.h"
 #include "git_sha1.h"
 #ifdef HK_GPU_BUSY_COUNTERS
 #include <errno.h>
@@ -62,6 +63,7 @@ struct busy_device {
    uint64_t pairs_requested, pairs_written, pairs_collected;
    uint64_t app_pairs, full_pairs, initial_pairs, invalid_pairs, late_pairs;
    uint64_t queries, query_errors;
+   bool timeline_clock_calibrated;
 };
 
 static pthread_mutex_t busy_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -216,6 +218,13 @@ collect(struct busy_device *d, uint64_t now)
             unsigned offset = engine == FRAG ? 2 : 0;
             uint64_t start = q->map[4 * i + offset];
             uint64_t end = q->map[4 * i + offset + 1];
+            /* HK_TIMELINE_FILE: per-command GPU intervals; f is the DRM fd,
+             * which identifies the device across submit records. */
+            agx_timeline_emit(TL_GPU_INTERVAL, engine, slot->point,
+               q->queue->drm.id, ((uint64_t)q->handle << 32) | ((4*i+offset)*8),
+               agx_gpu_timestamp_to_ns(&d->dev->dev, start),
+               agx_gpu_timestamp_to_ns(&d->dev->dev, end), 1000000000,
+               d->dev->dev.fd, 0);
             add_interval(d, engine,
                          agx_gpu_timestamp_to_ns(&d->dev->dev, start),
                          agx_gpu_timestamp_to_ns(&d->dev->dev, end));
@@ -236,6 +245,41 @@ hk_gpu_busy_sample(struct hk_queue *queue)
    pthread_mutex_lock(&busy_lock);
    struct busy_device *d = queue->gpu_busy->device;
    queue->gpu_busy->submit_cpu_ns = now;
+   /* HK_TIMELINE_FILE: calibrate GPU timestamps against CNTVCT (aarch64)
+    * or CLOCK_MONOTONIC once recording is enabled. */
+   if (agx_timeline_enabled() &&
+#if defined(__aarch64__)
+       !d->timeline_clock_calibrated
+#else
+       now >= d->next_sample_ns
+#endif
+       ) {
+      d->timeline_clock_calibrated = true;
+      for (unsigned i = 0; i < 32; i++) {
+         uint64_t before = os_time_get_nano(), first = before, last = 0;
+         uint64_t hz = 1000000000;
+#if defined(__aarch64__)
+         __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(first));
+         __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(hz));
+#endif
+         uint64_t gpu = agx_get_gpu_timestamp(&d->dev->dev);
+#if defined(__aarch64__)
+         __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(last));
+#endif
+         uint64_t after = os_time_get_nano();
+#if !defined(__aarch64__)
+         last = after;
+#endif
+         agx_timeline_emit(TL_GPU_CLOCK,
+#if defined(__aarch64__)
+                           1,
+#else
+                           2,
+#endif
+                           queue->drm.id, gpu, before, after, 1000000000,
+                           first, last, hz);
+      }
+   }
    if (now >= d->next_sample_ns) {
       d->next_sample_ns = now + SECOND_NS;
       collect(d, now);
@@ -317,6 +361,11 @@ hk_gpu_busy_init(struct hk_queue *queue)
 {
    struct hk_device *dev = hk_queue_device(queue);
    if (!dev->dev.params.command_timestamp_frequency_hz)
+      return;
+   /* Off unless HK_GPU_BUSY_FILE is set: no timestamp BOs and no per-command
+    * work otherwise. */
+   const char *enabled = getenv("HK_GPU_BUSY_FILE");
+   if (!enabled || !*enabled)
       return;
    struct hk_gpu_busy_queue *q = calloc(1, sizeof(*q));
    if (!q)
