@@ -1316,7 +1316,7 @@ apple9_select_compact_alu(struct agx_apple9_vir_instr *I)
        (I->op == AGX_APPLE9_VIR_FADD || I->op == AGX_APPLE9_VIR_FMUL)) {
       I->encoding = AGX_APPLE9_ENC_FLOAT2_BASE;
    } else if (I->encoding == AGX_APPLE9_ENC_FLOAT3_EXTENDED &&
-              !(inline_mask & ~2) && !(I->src_half_mask & 4) &&
+              !(inline_mask & ~2) && !I->src_half_mask &&
               (!(I->alu_src_uniform_mask & 2) || I->alu_src_value[1] < 64) &&
               !((I->alu_src_immediate_mask & 2) && (I->alu_src_value[1] >> 31))) {
       I->encoding = AGX_APPLE9_ENC_FLOAT3_COMPACT;

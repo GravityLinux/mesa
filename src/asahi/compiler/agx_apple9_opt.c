@@ -1112,14 +1112,10 @@ fold_half_sources(struct agx_apple9_vir_program *p,
                               R->encoding == AGX_APPLE9_ENC_FLOAT2_MUL_ABS_EXTENDED);
          const bool fma = R->op == AGX_APPLE9_VIR_FMA;
          bool ok;
-         /* FMA's multiplicands commute: a half in A moves to B, which takes
-          * a low half, when B is an ordinary register. */
-         const bool fma_swap = fma && slot == 0 && !hi && R->nr_srcs >= 2 &&
-            !((R->alu_src_uniform_mask | R->alu_src_immediate_mask | R->src_half_mask) & 3) &&
-            R->src[1] != D->dest;
          if (fp16)
-            ok = (float2 && slot < 2) ||
-                 (fma && (slot == 2 || (slot == 1 && !hi) || fma_swap));
+            /* Not FMA multiplicands: FP16 operand B broke the blend
+             * epilogues on G16 (e2 CTS), cause not understood yet. */
+            ok = (float2 && slot < 2) || (fma && slot == 2);
          else
             ok = (add && R->encoding == AGX_APPLE9_ENC_INT_ADD_EXTENDED && slot < 2) ||
                  (mad && R->encoding == AGX_APPLE9_ENC_INT_MAD_EXTENDED &&
@@ -1131,17 +1127,7 @@ fold_half_sources(struct agx_apple9_vir_program *p,
          continue;
       for (const struct agx_apple9_use *u = uses; u; u = u->next) {
          struct agx_apple9_vir_instr *R = u->instruction;
-         unsigned source = u->source;
-         if (fp16 && R->op == AGX_APPLE9_VIR_FMA && register_slot(R, source) == 0) {
-            uint32_t other = R->src[1];
-            R->src[1] = R->src[0];
-            R->src[0] = other;
-            R->src_abs_mask = (R->src_abs_mask & ~3u) |
-               ((R->src_abs_mask & 1) << 1) | ((R->src_abs_mask & 2) >> 1);
-            R->src_neg_mask = (R->src_neg_mask & ~3u) |
-               ((R->src_neg_mask & 1) << 1) | ((R->src_neg_mask & 2) >> 1);
-            source = 1;
-         }
+         const unsigned source = u->source;
          const unsigned bit = BITFIELD_BIT(register_slot(R, source));
          R->src[source] = x;
          R->src_half_mask |= bit;
