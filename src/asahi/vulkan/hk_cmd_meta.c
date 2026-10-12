@@ -142,6 +142,12 @@ hk_meta_begin(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
 
    cmd->in_meta = true;
    cmd->sync_scope = HK_SYNC_TRANSFER;
+   /* Its compute work may run ahead of a render kept open for merging. */
+   cmd->merge_move_stage = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT |
+                           VK_PIPELINE_STAGE_2_COPY_BIT |
+                           VK_PIPELINE_STAGE_2_BLIT_BIT |
+                           VK_PIPELINE_STAGE_2_RESOLVE_BIT |
+                           VK_PIPELINE_STAGE_2_CLEAR_BIT;
 }
 
 static void
@@ -227,6 +233,7 @@ hk_meta_end(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
    memcpy(desc->root.push, save->push, sizeof(save->push));
    cmd->in_meta = false;
    cmd->sync_scope = 0;
+   cmd->merge_move_stage = 0;
 }
 
 #define BINDING_OUTPUT 0

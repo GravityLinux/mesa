@@ -461,7 +461,18 @@ dispatch(struct hk_cmd_buffer *cmd, struct agx_grid grid)
       if (!agx_is_indirect(grid) &&
           (!grid.count[0] || !grid.count[1] || !grid.count[2]))
          return;
+      /* An API dispatch may run ahead of a render kept open for merging
+       * when nothing orders it after the render. Indirect grids,
+       * statistics and predication stay in place. */
+      const VkPipelineStageFlags2 saved_move = cmd->merge_move_stage;
+      if (!cmd->in_meta)
+         cmd->merge_move_stage =
+            agx_is_indirect(grid) || hk_cond_render_applies(cmd) ||
+                  hk_stat_enabled(hk_pipeline_stat_addr(
+                     cmd, VK_QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_INVOCATIONS_BIT))
+               ? 0 : VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
       struct hk_cs *cs = hk_cmd_buffer_get_cs(cmd, true);
+      cmd->merge_move_stage = saved_move;
       if (!cs)
          return;
       uint64_t stat = hk_pipeline_stat_addr(

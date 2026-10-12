@@ -219,6 +219,9 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
 
    cmd->current_cs.gfx = NULL;
    cmd->merge_cs = NULL;
+   cmd->merge_pre_cs = NULL;
+   cmd->merge_reach = 0;
+   cmd->merge_move_stage = 0;
    cmd->current_cs.cs = NULL;
    cmd->current_cs.post_gfx = NULL;
    cmd->current_cs.pre_gfx = NULL;
@@ -710,6 +713,62 @@ hk_render_merge_barrier(VkPipelineStageFlags2 src, VkPipelineStageFlags2 dst,
             ~(attachment_access | VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT));
 }
 
+/* Place the sync events recorded from index first onwards ahead of the open
+ * render's events, after earlier ones placed there. */
+static void
+hk_render_merge_place_events(struct hk_cmd_buffer *cmd, unsigned first)
+{
+   unsigned count =
+      util_dynarray_num_elements(&cmd->sync_events, struct hk_sync_event);
+   unsigned n = count - first;
+   if (!n || first == cmd->merge_event)
+      goto done;
+   struct hk_sync_event *events = cmd->sync_events.data;
+   struct hk_sync_event moved[8];
+   assert(n <= ARRAY_SIZE(moved));
+   memcpy(moved, &events[first], n * sizeof(*events));
+   memmove(&events[cmd->merge_event + n], &events[cmd->merge_event],
+           (first - cmd->merge_event) * sizeof(*events));
+   memcpy(&events[cmd->merge_event], moved, n * sizeof(*events));
+done:
+   cmd->merge_event += n;
+}
+
+/* The compute stream for work moved ahead of the open render. */
+struct hk_cs *
+hk_render_merge_pre_cs(struct hk_cmd_buffer *cmd, unsigned stages)
+{
+   unsigned first =
+      util_dynarray_num_elements(&cmd->sync_events, struct hk_sync_event);
+   bool created = !cmd->merge_pre_cs;
+   struct hk_cs *cs =
+      hk_cmd_buffer_get_cs_general(cmd, &cmd->merge_pre_cs, true, stages);
+   if (created && cs)
+      perf_debug(cmd, "Moving compute ahead of the open render");
+   hk_render_merge_place_events(cmd, first);
+   return cs;
+}
+
+/* Pipeline stages in a barrier scope, with the shorthand stages expanded:
+ * TOP_OF_PIPE as a source and BOTTOM_OF_PIPE as a destination name none;
+ * BOTTOM_OF_PIPE as a source and TOP_OF_PIPE as a destination mean all. */
+static VkPipelineStageFlags2
+hk_merge_expand_stages(VkPipelineStageFlags2 stages, bool source)
+{
+   const VkPipelineStageFlags2 all = ~(VkPipelineStageFlags2)0;
+   if (stages & (VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT |
+                 (source ? VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT
+                         : VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT)))
+      return all;
+   if (stages & VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT)
+      stages |= hk_merge_graphics_stages();
+   if (stages & VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT)
+      stages |= VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_BLIT_BIT |
+                VK_PIPELINE_STAGE_2_RESOLVE_BIT | VK_PIPELINE_STAGE_2_CLEAR_BIT;
+   return stages & ~(VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT |
+                     VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT);
+}
+
 static bool
 hk_image_overlaps(const struct hk_image *a, const struct hk_image *b)
 {
@@ -771,13 +830,31 @@ hk_cmd_sync_barrier(struct hk_cmd_buffer *cmd,
                     VkAccessFlags2 src_access, VkAccessFlags2 dst_access)
 {
    if (cmd->merge_cs) {
-      bool image_barrier = false;
+      static int move_compute = -1;
+      if (move_compute < 0)
+         move_compute =
+            debug_get_bool_option("HK_APPLE9_MERGE_MOVE_COMPUTE", true);
+      const VkPipelineStageFlags2 xsrc = hk_merge_expand_stages(src, true);
+      const VkPipelineStageFlags2 xdst = hk_merge_expand_stages(dst, false);
+      bool image_barrier = false, unrelated = false;
       if ((!cmd->in_meta &&
            hk_render_merge_barrier(src, dst, src_access, dst_access)) ||
-          (image_barrier = hk_render_merge_image_barrier(cmd, src))) {
+          (image_barrier = hk_render_merge_image_barrier(cmd, src)) ||
+          (unrelated = move_compute && !cmd->in_meta &&
+                       !(xsrc & cmd->merge_reach))) {
          cmd->merge_cs->merge_hoisted |= image_barrier;
          if (image_barrier)
             perf_debug(cmd, "Hoisting an image barrier ahead of the open render");
+         /* The execution scope of a barrier with colour-output or test
+          * sources covers the render's own passes; only when they cannot
+          * read their attachments as textures does it order nothing of
+          * theirs that later work could depend on. */
+         if (!unrelated && (!image_barrier || cmd->merge_feedback))
+            cmd->merge_reach |= xdst;
+         /* Work moved ahead of the render after this barrier must follow it
+          * in its own stream. */
+         if (unrelated && cmd->merge_pre_cs)
+            hk_cmd_buffer_end_compute_internal(cmd, &cmd->merge_pre_cs);
          /* The next render pass may continue the open render, where the tile
           * order satisfies this barrier. Earlier work it orders must still
           * precede the whole render: place it before the render's first
