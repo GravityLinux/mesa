@@ -5705,6 +5705,17 @@ hk_apple9_variant_destroy(struct hk_device *dev, struct hk_apple9_variant *v)
    free(v);
 }
 
+static bool
+hk_apple9_remove_generic_output(nir_builder *b, nir_intrinsic_instr *intr,
+                                UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_store_output ||
+       nir_intrinsic_io_semantics(intr).location < VARYING_SLOT_VAR0)
+      return false;
+   nir_instr_remove(&intr->instr);
+   return true;
+}
+
 VkResult
 hk_apple9_resolve_graphics(struct hk_device *dev,
                            struct hk_api_shader *const api[HK_APPLE9_GFX_STAGES],
@@ -5787,6 +5798,24 @@ hk_apple9_resolve_graphics(struct hk_device *dev,
          .set_layout_count = d->set_layout_count,
       };
       stages[count++] = s;
+   }
+
+   /* Without a fragment shader nothing reads the generic varyings of a
+    * vertex-only draw: drop them so their stores and the arithmetic feeding
+    * them die. The variant is keyed on the bound stages, so the fragment
+    * shader is known absent for every draw that uses it. Transform feedback
+    * still captures them. This runs before the cull-distance null program
+    * below is linked: it reads nothing, but as a consumer it would otherwise
+    * keep every generic output.
+    */
+   if (result == VK_SUCCESS && !api[MESA_SHADER_FRAGMENT] && count == 1 &&
+       infos[0].stage == MESA_SHADER_VERTEX && !infos[0].nir->xfb_info) {
+      nir_shader *vs = infos[0].nir;
+      if (nir_shader_intrinsics_pass(vs, hk_apple9_remove_generic_output,
+                                     nir_metadata_control_flow, NULL)) {
+         NIR_PASS(_, vs, nir_opt_dce);
+         nir_shader_gather_info(vs, nir_shader_get_entrypoint(vs));
+      }
    }
 
    /* Cull distances are applied by the fragment program, so a draw without
