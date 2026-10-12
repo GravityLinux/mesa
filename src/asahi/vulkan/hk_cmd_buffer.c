@@ -770,6 +770,10 @@ hk_cmd_sync_barrier(struct hk_cmd_buffer *cmd,
                     VkPipelineStageFlags2 src, VkPipelineStageFlags2 dst,
                     VkAccessFlags2 src_access, VkAccessFlags2 dst_access)
 {
+   /* No synchronization may come between a suspended render pass and the
+    * one resuming it; if any does, end the render as before. */
+   if (cmd->merge_cs && cmd->merge_suspended)
+      hk_cmd_render_merge_flush(cmd);
    if (cmd->merge_cs) {
       bool image_barrier = false;
       if ((!cmd->in_meta &&

@@ -246,6 +246,12 @@ struct hk_rendering_state {
    /* An attachment is in a layout that also allows shader access (GENERAL
     * or a feedback loop): passes may read it as a texture. */
    bool feedback;
+
+   /* Depth and stencil loads of a suspend/resume chain continued in one
+    * hardware render: those of its first render pass. */
+   bool chain_load[2];
+   /* This render pass resumed a suspended one in its render. */
+   bool resumed;
    VkRenderingFlagBits flags;
 
    VkRect2D area;
@@ -741,6 +747,10 @@ struct hk_cmd_buffer {
     * must store them too, or the merged render would drop those stores. */
    uint32_t merge_store_mask;
    bool merge_feedback;
+   /* The open render is a suspended render pass, which only its resuming
+    * render pass may continue (HK_APPLE9_MERGE_RESUME). */
+   bool merge_suspended;
+   bool merge_chain_load[2];
    /* The kept-open render has no draws yet: its render state, which the
     * empty-render optimization needs if it ends without being continued. */
    struct hk_rendering_state *merge_empty_render;
@@ -1138,6 +1148,7 @@ hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
    const bool restore = cs && cs == cmd->merge_cs && cmd->merge_empty;
    cmd->merge_cs = NULL;
    cmd->merge_empty = false;
+   cmd->merge_suspended = false;
    if (cs && !cs->end_reason)
       cs->end_reason = cmd->end_hint;
    if (cs) {

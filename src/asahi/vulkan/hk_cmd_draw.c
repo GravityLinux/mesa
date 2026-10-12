@@ -534,7 +534,8 @@ hk_pack_zls_control(struct agx_zls_control_packed *packed,
                     struct ail_layout *z_layout, struct ail_layout *s_layout,
                     const VkRenderingAttachmentInfo *z,
                     const VkRenderingAttachmentInfo *s,
-                    bool incomplete_render_area, bool partial_render, bool last)
+                    bool incomplete_render_area, bool partial_render, bool last,
+                    const bool *chain_load)
 {
    struct agx_zls zls = {0};
 
@@ -552,6 +553,12 @@ hk_pack_zls_control(struct agx_zls_control_packed *packed,
 
       zls.s_load = s->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD || partial_render ||
                    incomplete_render_area;
+   }
+
+   /* A continued suspend/resume chain loads as its first render pass did. */
+   if (chain_load && !partial_render) {
+      zls.z_load = z && chain_load[0];
+      zls.s_load = s && chain_load[1];
    }
 
    agx_pack_zls_control(packed, z_layout, s_layout, &zls);
@@ -641,6 +648,24 @@ hk_render_merge_begin(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
           !memcmp(&key, &cmd->merge_key, sizeof(key));
 }
 
+/* HK_APPLE9_MERGE_RESUME (default on): a suspended render pass keeps its
+ * render open for the resuming one. Only state commands may come between
+ * them, so the resuming pass continues the same render pass instance in one
+ * hardware render: loads from the first pass, stores from the last. */
+static bool
+hk_render_suspend_keeps_open(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("HK_APPLE9_MERGE_RESUME", true);
+   const struct hk_rendering_state *render = &cmd->state.gfx.render;
+   return enabled && cs && (render->flags & VK_RENDERING_SUSPENDING_BIT) &&
+          hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G &&
+          cmd->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY && !cmd->in_meta &&
+          !cmd->sync_fallback && !cmd->current_cs.pre_gfx &&
+          !cmd->current_cs.post_gfx && !cmd->tess_batch.draws;
+}
+
 /* At the end of a render pass, whether its render can stay open. */
 static bool
 hk_render_merge_end(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
@@ -660,8 +685,11 @@ hk_render_merge_end(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
       views[i] = render->color_att[i].iview;
    }
 
+   /* A render pass that resumed in its render ends it like any other. */
    return hk_render_merge_key(
-      &cmd->merge_key, render->flags, render->layer_count, render->view_mask,
+      &cmd->merge_key,
+      render->flags & ~(render->resumed ? VK_RENDERING_RESUMING_BIT : 0),
+      render->layer_count, render->view_mask,
       render->color_att_count, views,
       render->depth_att.iview || render->stencil_att.iview);
 }
@@ -672,7 +700,15 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    bool merge = false;
-   if (cmd->merge_cs) {
+   /* The resuming render pass of a suspended one continues its render. */
+   bool resume = false;
+   if (cmd->merge_cs && cmd->merge_suspended) {
+      resume = (pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT) &&
+               !cmd->in_meta;
+      if (!resume)
+         hk_cmd_render_merge_flush(cmd);
+   }
+   if (cmd->merge_cs && !resume) {
       merge = hk_render_merge_begin(cmd, pRenderingInfo);
       if (!merge) {
          hk_render_merge_trace(cmd->in_meta ? "begin: meta" : "begin: mismatch",
@@ -683,8 +719,9 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       }
    }
 
+   /* A continued render needs no dependency on itself. */
    cmd->sync_render_continuation =
-      (pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT) != 0;
+      (pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT) != 0 && !resume;
    cmd->sync_render_stages = cmd->sync_scope ?: HK_SYNC_GRAPHICS;
    cmd->state.gfx.render_gen++;
    struct hk_rendering_state *render = &cmd->state.gfx.render;
@@ -920,24 +957,52 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    }
 
    hk_pack_zls_control(&render->cr.zls_control, z_layout, s_layout, attach_z,
-                       attach_s, incomplete_render_area, false, false);
+                       attach_s, incomplete_render_area, false, false, NULL);
 
    hk_pack_zls_control(&render->cr.zls_control_partial, z_layout, s_layout,
-                       attach_z, attach_s, incomplete_render_area, true, false);
+                       attach_z, attach_s, incomplete_render_area, true, false,
+                       NULL);
 
    const bool drop_stores =
       hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G &&
       !(render->flags & VK_RENDERING_SUSPENDING_BIT);
+   /* The first render pass of a chain decides its loads. */
+   if (!resume) {
+      render->chain_load[0] =
+         attach_z && attach_z->imageView &&
+         (attach_z->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD || incomplete_render_area);
+      render->chain_load[1] =
+         attach_s && attach_s->imageView &&
+         (attach_s->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD || incomplete_render_area);
+   } else {
+      memcpy(render->chain_load, cmd->merge_chain_load, sizeof(render->chain_load));
+   }
    hk_pack_zls_control(&render->zls_last, z_layout, s_layout, attach_z,
-                       attach_s, incomplete_render_area, false, drop_stores);
+                       attach_s, incomplete_render_area, false, drop_stores,
+                       resume ? render->chain_load : NULL);
    hk_pack_zls_control(&render->zls_partial_last, z_layout, s_layout, attach_z,
-                       attach_s, incomplete_render_area, true, drop_stores);
+                       attach_s, incomplete_render_area, true, drop_stores,
+                       resume ? render->chain_load : NULL);
 
    /* If multiview is disabled, always read 0. If multiview is enabled,
     * hk_set_view_index will dirty the root each draw.
     */
    cmd->state.gfx.descriptors.root.draw.view_index = 0;
    cmd->state.gfx.descriptors.root_dirty = true;
+
+   if (resume) {
+      /* Same render pass instance: keep the open render's background and
+       * load configuration; this pass's store operations apply at its end. */
+      perf_debug(cmd, "Resuming the suspended render pass in its render");
+      render->first_cs = cmd->merge_first_cs ? cmd->merge_cs : NULL;
+      render->feedback |= cmd->merge_feedback;
+      render->resumed = true;
+      cmd->merge_cs = NULL;
+      cmd->merge_empty = false;
+      cmd->merge_suspended = false;
+      hk_cmd_buffer_dirty_all(cmd);
+      return;
+   }
 
    if (render->flags & VK_RENDERING_RESUMING_BIT)
       return;
@@ -1122,7 +1187,11 @@ hk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
    }
 
    perf_debug(cmd, "End rendering");
-   if (hk_render_merge_end(cmd, cs)) {
+   const bool suspend = hk_render_suspend_keeps_open(cmd, cs);
+   if (suspend || hk_render_merge_end(cmd, cs)) {
+      cmd->merge_suspended = suspend;
+      memcpy(cmd->merge_chain_load, render->chain_load,
+             sizeof(cmd->merge_chain_load));
       /* Keep the render open for a following render pass to continue. */
       /* A continuing pass stores at least what the passes before it did, so
        * its mask covers the whole open render. */
