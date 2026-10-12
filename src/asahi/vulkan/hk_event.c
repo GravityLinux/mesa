@@ -160,6 +160,7 @@ hk_CmdSetEvent2(VkCommandBuffer commandBuffer, VkEvent _event,
                 const VkDependencyInfo *pDependencyInfo)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   hk_cmd_render_merge_flush(cmd);
    VK_FROM_HANDLE(hk_event, event, _event);
 
    perf_debug(cmd, "Set event");
@@ -176,6 +177,7 @@ hk_CmdResetEvent2(VkCommandBuffer commandBuffer, VkEvent _event,
                   VkPipelineStageFlags2 stageMask)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   hk_cmd_render_merge_flush(cmd);
    VK_FROM_HANDLE(hk_event, event, _event);
 
    perf_debug(cmd, "Reset event");
@@ -193,6 +195,7 @@ hk_CmdWaitEvents2(VkCommandBuffer commandBuffer, uint32_t eventCount,
                   const VkDependencyInfo *pDependencyInfos)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   hk_cmd_render_merge_flush(cmd);
    perf_debug(cmd, "Wait events");
 
    /* The big hammer. Need to check if this is actually needed.

@@ -241,6 +241,8 @@ struct hk_render_registers {
 };
 
 struct hk_rendering_state {
+   /* Colour attachments this render pass stores (bit per attachment). */
+   uint32_t store_mask;
    VkRenderingFlagBits flags;
 
    VkRect2D area;
@@ -641,6 +643,15 @@ enum hk_upload_last {
    HK_UPLOAD_LAST_COUNT,
 };
 
+/* Identity of a render pass's attachments, for HK_APPLE9_MERGE_RENDERS. */
+struct hk_render_merge_key {
+   const struct vk_image *image[HK_MAX_RTS];
+   uint32_t level[HK_MAX_RTS];
+   uint32_t layer[HK_MAX_RTS];
+   VkFormat format[HK_MAX_RTS];
+   uint32_t color_count, layer_count, view_mask;
+};
+
 struct hk_cmd_buffer {
    struct vk_command_buffer vk;
 
@@ -707,6 +718,21 @@ struct hk_cmd_buffer {
    bool sync_render_continuation;
    bool sync_fallback;
    bool api_dispatch;
+
+   /* HK_APPLE9_MERGE_RENDERS: the control stream of a render pass that has
+    * ended but is kept open, so the next render pass on the same attachments
+    * can continue it. Ending graphics, or any command other than a
+    * render-pass-internal barrier, closes it (hk_cmd_render_merge_flush).
+    */
+   struct hk_cs *merge_cs;
+   struct hk_render_merge_key merge_key;
+   /* sync_events index of merge_cs's first event, where barriers recorded
+    * between the merged passes go. */
+   unsigned merge_event;
+   bool merge_first_cs;
+   /* Colour attachments the open render's passes stored: a continuing pass
+    * must store them too, or the merged render would drop those stores. */
+   uint32_t merge_store_mask;
 
    /* Current recorded control stream */
    struct {
@@ -916,10 +942,19 @@ uint32_t hk_default_sample_positions(unsigned nr_samples);
 struct vk_sample_locations_state;
 uint32_t hk_pack_ppp_multisamplectrl(const struct vk_sample_locations_state *sl);
 
+void hk_cmd_render_merge_flush_why(struct hk_cmd_buffer *cmd, const char *why);
+void hk_render_merge_trace(const char *why, uint64_t a, uint64_t b);
+#define hk_cmd_render_merge_flush(cmd) hk_cmd_render_merge_flush_why(cmd, __func__)
+
 static inline struct hk_cs *
 hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
                              bool compute, unsigned stages)
 {
+   /* Work recorded outside a render pass ends a render kept open for
+    * merging. A merged render pass takes the stream before drawing. */
+   if (unlikely(cmd->merge_cs))
+      hk_cmd_render_merge_flush(cmd);
+
    if ((*ptr) == NULL) {
       /* Most control streams are short. Reserve only a small root block;
        * hk_ensure_cs_has_space() chains larger blocks for long streams.
@@ -1082,6 +1117,7 @@ static void
 hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
 {
    struct hk_cs *cs = cmd->current_cs.gfx;
+   cmd->merge_cs = NULL;
    if (cs && !cs->end_reason)
       cs->end_reason = cmd->end_hint;
    if (cs) {
