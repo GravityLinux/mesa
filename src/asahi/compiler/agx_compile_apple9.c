@@ -25,6 +25,7 @@
 #include <string.h>
 
 DEBUG_GET_ONCE_BOOL_OPTION(apple9_no_bfe, "AGX_APPLE9_NO_BFE", false)
+DEBUG_GET_ONCE_BOOL_OPTION(apple9_no_native_min_lod, "AGX_APPLE9_NO_NATIVE_MINLOD", false)
 DEBUG_GET_ONCE_NUM_OPTION(apple9_hoist_loads, "AGX_APPLE9_HOIST_LOADS", 0)
 
 /* Apple9 compute compilation uses one NIR-to-VIR-to-machine pipeline. */
@@ -848,9 +849,11 @@ apple9_texture_supported(const nir_tex_instr *tex)
    int comparator = nir_tex_instr_src_index(tex, nir_tex_src_comparator);
    if (tex->is_shadow && (comparator < 0 || tex->src[comparator].src.ssa->bit_size != 32))
       return false;
-   /* A packed minimum LOD accompanies only 2D and 2D array gradients. */
+   /* A packed minimum LOD accompanies 2D and 2D array gradients and biased
+    * samples. */
    int min_lod = nir_tex_instr_src_index(tex, nir_tex_src_backend2);
-   if (min_lod >= 0 && (!gradient || tex->is_shadow ||
+   if (min_lod >= 0 && ((!gradient && tex->op != nir_texop_txb) ||
+                        tex->is_shadow ||
                         tex->sampler_dim != GLSL_SAMPLER_DIM_2D ||
                         tex->src[min_lod].src.ssa->bit_size != 32))
       return false;
@@ -2259,12 +2262,20 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
             apple9_lower_dag_scalar(
                lower, nir_get_scalar(tex->src[lod_source].src.ssa, 0));
          bool fetch = tex->op == nir_texop_txf;
+         int min_lod = nir_tex_instr_src_index(tex, nir_tex_src_backend2);
+         uint32_t min_word = min_lod < 0 ? AGX_APPLE9_VREG_INVALID :
+            apple9_lower_dag_scalar(lower,
+               nir_get_scalar(tex->src[min_lod].src.ssa, 0));
          if (tex->coord_components >= 3 || tex->is_shadow) {
             if (tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE || tex->is_array) {
                uint32_t fields[] = {packed_lod, layer_or_face};
                packed_lod = apple9_dag_emit(lower, AGX_APPLE9_VIR_IOR,
                   AGX_APPLE9_ENC_LOGIC_EXTENDED, fields, 2, 0);
             }
+            /* A biased array sample takes its minimum LOD (Q6 << 16) in the
+             * third parameter word, which otherwise repeats the layer. */
+            if (min_lod >= 0)
+               coords[2] = min_word;
             result = agx_apple9_vir_emit_texture_volume(&lower->program, coords,
                packed_lod, texture,
                util_bitcount(lower->sampler_mask & BITFIELD_MASK(tex->sampler_index)),
@@ -2273,6 +2284,14 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                tex->is_array ? 2 :
                   tex->sampler_dim == GLSL_SAMPLER_DIM_3D ? 3 : 0,
                bias, tex->is_shadow);
+         } else if (min_lod >= 0) {
+            uint32_t fields[] = {packed_lod, min_word};
+            result = agx_apple9_vir_emit_texture_min_lod(
+               &lower->program, coords, apple9_dag_zero(lower),
+               apple9_dag_emit(lower, AGX_APPLE9_VIR_IOR,
+                  AGX_APPLE9_ENC_LOGIC_EXTENDED, fields, 2, 0),
+               texture,
+               util_bitcount(lower->sampler_mask & BITFIELD_MASK(tex->sampler_index)));
          } else
             result = agx_apple9_vir_emit_texture_lod(
             &lower->program, coords, packed_lod, texture,
@@ -8816,6 +8835,17 @@ apple9_native_min_lod(const nir_tex_instr *tex)
           nir_tex_instr_src_index(tex, nir_tex_src_offset) < 0;
 }
 
+/* Implicit and biased 2D and 2D array samples with a minimum LOD have a
+ * native biased form; an implicit sample is one with zero bias.
+ * AGX_APPLE9_NO_NATIVE_MINLOD=1 sends them through gradients instead. */
+static bool
+apple9_native_biased_min_lod(const nir_tex_instr *tex)
+{
+   return !debug_get_option_apple9_no_native_min_lod() &&
+          apple9_native_min_lod(tex) &&
+          (tex->op == nir_texop_tex || tex->op == nir_texop_txb);
+}
+
 /* Route linear compute sampling, implicit array-shadow sampling,
  * and implicit 2D sampling with a minimum LOD through explicit gradients.
  * Only spatial coordinates contribute derivatives, excluding the layer and
@@ -8894,7 +8924,7 @@ apple9_lower_implicit_gradients(nir_builder *b, nir_instr *instr, void *data)
    nir_tex_instr *tex = nir_instr_as_tex(instr);
    if (!compute && !(tex->is_array && tex->is_shadow &&
                     tex->sampler_dim == GLSL_SAMPLER_DIM_2D) &&
-       !apple9_native_min_lod(tex))
+       (!apple9_native_min_lod(tex) || apple9_native_biased_min_lod(tex)))
       return false;
    if (tex->op != nir_texop_tex && tex->op != nir_texop_txb)
       return false;
@@ -10290,7 +10320,13 @@ apple9_lower_min_lod(nir_builder *b, nir_instr *instr, UNUSED void *data)
       return false;
 
    b->cursor = nir_before_instr(instr);
-   if (tex->op == nir_texop_txd && apple9_native_min_lod(tex)) {
+   const bool biased = b->shader->info.stage == MESA_SHADER_FRAGMENT &&
+                       apple9_native_biased_min_lod(tex);
+   if ((tex->op == nir_texop_txd && apple9_native_min_lod(tex)) || biased) {
+      if (tex->op == nir_texop_tex) {
+         nir_tex_instr_add_src(tex, nir_tex_src_bias, nir_imm_float(b, 0.0f));
+         tex->op = nir_texop_txb;
+      }
       nir_def *min_lod = nir_steal_tex_src(tex, nir_tex_src_min_lod);
       uint32_t fp_math_ctrl = b->fp_math_ctrl;
       b->fp_math_ctrl = nir_fp_no_fast_math;
@@ -10298,7 +10334,10 @@ apple9_lower_min_lod(nir_builder *b, nir_instr *instr, UNUSED void *data)
                                   nir_imm_float(b, 2047.0f / 64.0f));
       nir_def *fixed = nir_f2u32(b, nir_ffloor(b, nir_fmul_imm(b, clamped, 64.0f)));
       b->fp_math_ctrl = fp_math_ctrl;
-      nir_tex_instr_add_src(tex, nir_tex_src_backend2, nir_ishl_imm(b, fixed, 16));
+      /* Signed Q6: in bits 16..27 of its word for gradients and arrays,
+       * in the low 12 bits beside the bias for biased 2D samples. */
+      nir_tex_instr_add_src(tex, nir_tex_src_backend2,
+                            biased && !tex->is_array ? fixed : nir_ishl_imm(b, fixed, 16));
       return true;
    }
    if (tex->op != nir_texop_tex && tex->op != nir_texop_txb)
