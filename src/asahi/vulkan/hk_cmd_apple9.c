@@ -500,6 +500,8 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       }
       cmd->apple9_linked_id[0] = vertex->program_id;
       cmd->apple9_linked_id[1] = fragment->program_id;
+      agx_apple9_build_ppp_static(&cmd->apple9_linked, cmd->apple9_ppp_static);
+      cmd->apple9_linked.ppp_static = cmd->apple9_ppp_static;
    }
    struct agx_apple9_render_pipeline pipeline = cmd->apple9_linked;
    /* Attachmentless render passes acquire their sample count from the first

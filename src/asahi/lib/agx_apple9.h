@@ -111,6 +111,11 @@ struct agx_apple9_render_pipeline {
    enum pipe_format color_formats[8];
    uint8_t samples;
 
+   /* The first AGX_APPLE9_PPP_STATIC_SIZE bytes of the PPP record that depend
+    * only on the linked vertex and fragment stages (agx_apple9_build_ppp_static),
+    * built once per link; NULL builds them in every draw. */
+   const uint8_t *ppp_static;
+
    /* Batch-owned PPP record, relative to the render-context aperture. */
    uint32_t ppp;
    /* Viewport block within the PPP record and its length in words. Zero
@@ -262,6 +267,10 @@ agx_apple9_draw_reuses_coefficients(const struct agx_apple9_uniform_draw *previo
  * within the render-context aperture; USC allocations use the shader aperture.
  * A false return leaves the draw unpublished, including on allocation failure.
  */
+#define AGX_APPLE9_PPP_STATIC_SIZE 0xc0
+void agx_apple9_build_ppp_static(const struct agx_apple9_render_pipeline *pipeline,
+                                 uint8_t out[AGX_APPLE9_PPP_STATIC_SIZE]);
+
 bool agx_apple9_prepare_draw_alloc(
    struct agx_device *dev, void *usc_allocator,
    struct agx_ptr (*usc_alloc)(void *, size_t, size_t), void *context_allocator,
