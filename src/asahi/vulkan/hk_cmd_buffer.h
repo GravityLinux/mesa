@@ -241,6 +241,8 @@ struct hk_render_registers {
 };
 
 struct hk_rendering_state {
+   /* Stages that may depend on the open render this pass continued. */
+   VkPipelineStageFlags2 merge_reach;
    /* Colour attachments this render pass stores (bit per attachment). */
    uint32_t store_mask;
    /* An attachment is in a layout that also allows shader access (GENERAL
@@ -751,6 +753,14 @@ struct hk_cmd_buffer {
     * render pass may continue (HK_APPLE9_MERGE_RESUME). */
    bool merge_suspended;
    bool merge_chain_load[2];
+   /* Compute or transfer work recorded while a render is kept open, which
+    * nothing makes depend on the render, runs in this stream placed before
+    * it. merge_reach: the stages that may depend on the open render (its
+    * graphics stages and the destinations of barriers from them);
+    * merge_move_stage: the stage of the command being recorded, if it may
+    * move ahead of the render. */
+   struct hk_cs *merge_pre_cs;
+   VkPipelineStageFlags2 merge_reach, merge_move_stage;
    /* The kept-open render has no draws yet: its render state, which the
     * empty-render optimization needs if it ends without being continued. */
    struct hk_rendering_state *merge_empty_render;
@@ -968,8 +978,35 @@ uint32_t hk_default_sample_positions(unsigned nr_samples);
 struct vk_sample_locations_state;
 uint32_t hk_pack_ppp_multisamplectrl(const struct vk_sample_locations_state *sl);
 
+/* The pipeline stages a render pass instance runs in. */
+static inline VkPipelineStageFlags2
+hk_merge_graphics_stages(void)
+{
+   return VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
+          VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
+          VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT |
+          VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT |
+          VK_PIPELINE_STAGE_2_PRE_RASTERIZATION_SHADERS_BIT |
+          VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+          VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT |
+          VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT |
+          VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT |
+          VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT |
+          VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT |
+          VK_PIPELINE_STAGE_2_TRANSFORM_FEEDBACK_BIT_EXT |
+          VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+          VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+          VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
+          VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+          VK_PIPELINE_STAGE_2_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR |
+          VK_PIPELINE_STAGE_2_CONDITIONAL_RENDERING_BIT_EXT |
+          VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT;
+}
+
 void hk_cmd_render_merge_flush_why(struct hk_cmd_buffer *cmd, const char *why);
+struct hk_cs *hk_render_merge_pre_cs(struct hk_cmd_buffer *cmd, unsigned stages);
 void hk_render_merge_trace(const char *why, uint64_t a, uint64_t b);
+bool hk_render_merge_move_enabled(void);
 #define hk_cmd_render_merge_flush(cmd) hk_cmd_render_merge_flush_why(cmd, __func__)
 
 static inline struct hk_cs *
@@ -978,8 +1015,14 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
 {
    /* Work recorded outside a render pass ends a render kept open for
     * merging. A merged render pass takes the stream before drawing. */
-   if (unlikely(cmd->merge_cs))
+   if (unlikely(cmd->merge_cs) && ptr != &cmd->merge_pre_cs) {
+      if (compute && ptr == &cmd->current_cs.cs && cmd->merge_move_stage &&
+          !cmd->merge_suspended &&
+          !(cmd->merge_move_stage & cmd->merge_reach) &&
+          hk_render_merge_move_enabled())
+         return hk_render_merge_pre_cs(cmd, stages);
       hk_cmd_render_merge_flush(cmd);
+   }
 
    if ((*ptr) == NULL) {
       /* Most control streams are short. Reserve only a small root block;
@@ -1025,7 +1068,7 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
        * that's allowed by Vulkan and required for efficient
        * geometry/tessellation shaders.)
        */
-      if (before_gfx && cmd->current_cs.gfx) {
+      if ((before_gfx || ptr == &cmd->merge_pre_cs) && cmd->current_cs.gfx) {
          list_addtail(&cs->node, &cmd->current_cs.gfx->node);
       } else {
          list_addtail(&cs->node, &cmd->control_streams);
@@ -1149,6 +1192,8 @@ hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
    cmd->merge_cs = NULL;
    cmd->merge_empty = false;
    cmd->merge_suspended = false;
+   cmd->merge_reach = 0;
+   hk_cmd_buffer_end_compute_internal(cmd, &cmd->merge_pre_cs);
    if (cs && !cs->end_reason)
       cs->end_reason = cmd->end_hint;
    if (cs) {

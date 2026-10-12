@@ -1014,6 +1014,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       render->first_cs = cmd->merge_first_cs ? cmd->merge_cs : NULL;
       /* The render's earlier passes may have read their attachments too. */
       render->feedback |= cmd->merge_feedback;
+      render->merge_reach = cmd->merge_reach;
       cmd->merge_cs = NULL;
       cmd->merge_empty = false;
       hk_cmd_buffer_dirty_all(cmd);
@@ -1197,6 +1198,7 @@ hk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
        * its mask covers the whole open render. */
       cmd->merge_store_mask = render->store_mask;
       cmd->merge_feedback = render->feedback;
+      cmd->merge_reach = hk_merge_graphics_stages() | render->merge_reach;
       cmd->merge_cs = cs;
       cmd->merge_first_cs = cs == render->first_cs;
       /* A render without draws yet: keep its state for the empty-render
