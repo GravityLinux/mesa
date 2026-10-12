@@ -147,6 +147,7 @@ hk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
    for (unsigned i = 0; i < HK_TESS_BATCH_LANES; ++i)
       util_dynarray_fini(&cmd->tess_batch.lane[i]);
    util_dynarray_fini(&cmd->sync_remap);
+   free(cmd->merge_empty_render);
    vk_command_buffer_finish(&cmd->vk);
    vk_free(&pool->vk.alloc, cmd);
 }

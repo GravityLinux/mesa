@@ -648,7 +648,7 @@ hk_render_merge_end(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    struct hk_rendering_state *render = &cmd->state.gfx.render;
    struct hk_image_view *views[HK_MAX_RTS] = {NULL};
 
-   if (!cs || !cs->stats.cmds || !hk_render_merge_enabled(cmd) ||
+   if (!cs || !hk_render_merge_enabled(cmd) ||
        cmd->sync_fallback || cmd->current_cs.pre_gfx ||
        cmd->current_cs.post_gfx || cmd->tess_batch.draws ||
        cmd->state.gfx.occlusion.active_count)
@@ -937,6 +937,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       perf_debug(cmd, "Merging render pass into the previous render");
       render->first_cs = cmd->merge_first_cs ? cmd->merge_cs : NULL;
       cmd->merge_cs = NULL;
+      cmd->merge_empty = false;
       hk_cmd_buffer_dirty_all(cmd);
       return;
    }
@@ -1115,6 +1116,21 @@ hk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
       cmd->merge_store_mask = render->store_mask;
       cmd->merge_cs = cs;
       cmd->merge_first_cs = cs == render->first_cs;
+      /* A render without draws yet: keep its state for the empty-render
+       * optimization in case nothing continues it. */
+      cmd->merge_empty = !cs->stats.cmds;
+      if (cmd->merge_empty) {
+         if (!cmd->merge_empty_render)
+            cmd->merge_empty_render = malloc(sizeof(*render));
+         if (cmd->merge_empty_render) {
+            memcpy(cmd->merge_empty_render, render, sizeof(*render));
+         } else {
+            cmd->merge_cs = NULL;
+            cmd->merge_empty = false;
+            hk_cs_end_hint(cmd, HK_CS_END_RENDER_PASS);
+            hk_cmd_buffer_end_graphics(cmd);
+         }
+      }
       /* Barriers before the next pass go ahead of the stream's first event. */
       unsigned i = 0, n = util_dynarray_num_elements(&cmd->sync_events,
                                                     struct hk_sync_event);

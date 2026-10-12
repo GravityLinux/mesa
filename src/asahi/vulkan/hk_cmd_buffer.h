@@ -737,6 +737,10 @@ struct hk_cmd_buffer {
    /* Colour attachments the open render's passes stored: a continuing pass
     * must store them too, or the merged render would drop those stores. */
    uint32_t merge_store_mask;
+   /* The kept-open render has no draws yet: its render state, which the
+    * empty-render optimization needs if it ends without being continued. */
+   struct hk_rendering_state *merge_empty_render;
+   bool merge_empty;
    /* The image barrier being recorded by vkCmdPipelineBarrier2, if any, and
     * whether it transfers queue-family ownership. */
    struct hk_image *barrier_image;
@@ -1125,7 +1129,11 @@ static void
 hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
 {
    struct hk_cs *cs = cmd->current_cs.gfx;
+   /* An empty render kept open for merging ends after its render pass: the
+    * empty-render optimization needs that pass's render state back. */
+   const bool restore = cs && cs == cmd->merge_cs && cmd->merge_empty;
    cmd->merge_cs = NULL;
+   cmd->merge_empty = false;
    if (cs && !cs->end_reason)
       cs->end_reason = cmd->end_hint;
    if (cs) {
@@ -1134,7 +1142,14 @@ hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
    }
 
    if (cs && cs->stats.cmds == 0) {
-      hk_optimize_empty_vdm(cmd);
+      if (restore) {
+         struct hk_rendering_state *render = &cmd->state.gfx.render;
+         memcpy(render, cmd->merge_empty_render, sizeof(*render));
+         hk_optimize_empty_vdm(cmd);
+         memset(render, 0, sizeof(*render));
+      } else {
+         hk_optimize_empty_vdm(cmd);
+      }
    } else if (cs) {
       /* Scissor and depth bias arrays are staged to dynamic arrays on the
        * CPU. When we end the control stream, they're done growing and are
