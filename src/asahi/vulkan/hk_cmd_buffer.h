@@ -722,6 +722,8 @@ struct hk_cmd_buffer {
    /* The last linked Apple9 (vertex, fragment) pair, by program id: shader
     * objects pair stages only at draw time, so link once per change. */
    struct agx_apple9_render_pipeline apple9_linked;
+   /* Stage-derived PPP bytes of apple9_linked (agx_apple9_build_ppp_static). */
+   uint8_t apple9_ppp_static[AGX_APPLE9_PPP_STATIC_SIZE];
    uint64_t apple9_linked_id[2];
 
    /* The null fragment stage carrying the vertex stage's varying layout,

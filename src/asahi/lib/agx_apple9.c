@@ -1397,6 +1397,47 @@ agx_apple9_prepare_graphics_stage(
    return true;
 }
 
+/* The PPP record bytes that depend only on the linked stages: header,
+ * varying group counts and the direct bind group with its stage-derived bits.
+ * Draw-dependent words (coefficients, coefficient count, fragment launch,
+ * tile allocation, raster, depth, stencil and viewports) are applied per draw
+ * on top. */
+void
+agx_apple9_build_ppp_static(const struct agx_apple9_render_pipeline *pipeline,
+                            uint8_t out[AGX_APPLE9_PPP_STATIC_SIZE])
+{
+   uint8_t *ppp = out;
+   memset(ppp, 0, AGX_APPLE9_PPP_STATIC_SIZE);
+   apple9_put_u32(ppp, 0x10040000);
+   unsigned counts[3] = {0};
+   const struct agx_apple9_varying_layout *varyings = &pipeline->vertex->varyings;
+   for (unsigned i = 0; i < ARRAY_SIZE(varyings->mask); ++i) {
+      assert(varyings->group[i] < ARRAY_SIZE(counts));
+      counts[varyings->group[i]] += util_bitcount(varyings->mask[i]);
+   }
+   apple9_put_u32(ppp + 4, counts[0] | (counts[1] << 8) | (counts[2] << 16));
+   uint8_t *group = ppp + 0x40;
+   apple9_build_direct_bind_group(group, pipeline->vertex->varying_components);
+   if (pipeline->fragment->apple9_reads_z)
+      apple9_put_u32(group + 0x20, apple9_get_u32(group + 0x20) | (1u << 21));
+   if (pipeline->fragment->reads_primitive_id)
+      apple9_put_u32(group + 0x68, apple9_get_u32(group + 0x68) | (1u << 12));
+   if (pipeline->vertex->writes_point_size) {
+      apple9_put_u32(group + 0x20, apple9_get_u32(group + 0x20) | (1u << 18));
+   }
+   if (pipeline->vertex->writes_layer_viewport)
+      apple9_put_u32(group + 0x20, apple9_get_u32(group + 0x20) | (3u << 19));
+   apple9_put_u32(group + 0x20, apple9_get_u32(group + 0x20) |
+                  BITFIELD_MASK(pipeline->vertex->clip_distance_count));
+   apple9_put_u32(group + 0x2c, 4 + pipeline->vertex->varying_components +
+                  pipeline->vertex->writes_point_size + pipeline->vertex->clip_distance_count +
+                  pipeline->vertex->writes_layer_viewport);
+   /* Match the textured setup's native state, including with two user
+    * varyings. This field's full resource-count formula is unresolved;
+    * the varying-only estimate is insufficient to describe the captures. */
+   apple9_put_u32(group + 0x18, MAX2(apple9_get_u32(group + 0x18), 1));
+}
+
 /* Launches, roots, coefficients and PPP records are immutable batch storage.
  * The selected entry has the lifetime of its independently owned shader BO. */
 bool
@@ -1476,38 +1517,24 @@ agx_apple9_prepare_draw_alloc(
    }
    draw->cf_count = cf_count;
    uint8_t *ppp = draw->ppp_record;
-   memset(ppp, 0, sizeof(draw->ppp_record));
-   apple9_put_u32(ppp, 0x10040000);
-   unsigned counts[3] = {0};
-   const struct agx_apple9_varying_layout *varyings = &pipeline->vertex->varyings;
-   for (unsigned i = 0; i < ARRAY_SIZE(varyings->mask); ++i) {
-      assert(varyings->group[i] < ARRAY_SIZE(counts));
-      counts[varyings->group[i]] += util_bitcount(varyings->mask[i]);
+   /* Stage-derived bytes come from the link (or are built here); the rest of
+    * the record starts zeroed and takes the draw's state. */
+   if (pipeline->ppp_static) {
+      memcpy(ppp, pipeline->ppp_static, AGX_APPLE9_PPP_STATIC_SIZE);
+#ifndef NDEBUG
+      uint8_t check[AGX_APPLE9_PPP_STATIC_SIZE];
+      agx_apple9_build_ppp_static(pipeline, check);
+      assert(!memcmp(check, ppp, sizeof(check)) && "stale linked PPP template");
+#endif
+   } else {
+      agx_apple9_build_ppp_static(pipeline, ppp);
    }
-   apple9_put_u32(ppp + 4, counts[0] | (counts[1] << 8) | (counts[2] << 16));
+   memset(ppp + AGX_APPLE9_PPP_STATIC_SIZE, 0,
+          sizeof(draw->ppp_record) - AGX_APPLE9_PPP_STATIC_SIZE);
    uint8_t *group = ppp + 0x40;
-   apple9_build_direct_bind_group(group, pipeline->vertex->varying_components);
    apple9_put_u32(group + 8, draw->coefficients);
-   if (pipeline->fragment->apple9_reads_z)
-      apple9_put_u32(group + 0x20, apple9_get_u32(group + 0x20) | (1u << 21));
-   if (pipeline->fragment->reads_primitive_id)
-      apple9_put_u32(group + 0x68, apple9_get_u32(group + 0x68) | (1u << 12));
-   if (pipeline->vertex->writes_point_size) {
-      apple9_put_u32(group + 0x20, apple9_get_u32(group + 0x20) | (1u << 18));
-   }
-   if (pipeline->vertex->writes_layer_viewport)
-      apple9_put_u32(group + 0x20, apple9_get_u32(group + 0x20) | (3u << 19));
-   apple9_put_u32(group + 0x20, apple9_get_u32(group + 0x20) |
-                  BITFIELD_MASK(pipeline->vertex->clip_distance_count));
-   apple9_put_u32(group + 0x2c, 4 + pipeline->vertex->varying_components +
-                  pipeline->vertex->writes_point_size + pipeline->vertex->clip_distance_count +
-                  pipeline->vertex->writes_layer_viewport);
    apple9_put_u32(group + 4,
                   (apple9_get_u32(group + 4) & 0xffff) | (cf_count << 16));
-   /* Match the textured setup's native state, including with two user
-    * varyings. This field's full resource-count formula is unresolved;
-    * the varying-only estimate is insufficient to describe the captures. */
-   apple9_put_u32(group + 0x18, MAX2(apple9_get_u32(group + 0x18), 1));
    apple9_put_u32(group + 0x14, draw->launch[1] / 0x40);
    apple9_put_u32(group + 0x5c, tile_bytes ? 0x1ffff : 0);
    /* Discards and explicit per-sample stores preserve omitted samples and
