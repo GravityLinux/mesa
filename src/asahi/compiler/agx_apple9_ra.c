@@ -2190,9 +2190,14 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
          agx_apple9_vir_finish(&prefetched[i].result);
       prefetched[i].valid = false;
    }
+   /* Uniform-rematerialization-off retries: the latency-scheduled one has
+    * never beaten the others (0 of 216 spilling allocations over ER, its
+    * draw-time fragments, CS2, Lethal Company, Willems, CTS and robust
+    * corpora), so only the plain-scheduled retry runs. */
+   const unsigned remat_off_latency = 0;
    if (cost.spills && parallel) {
       unsigned n = 0;
-      for (unsigned latency = 0; latency <= (long_dependencies > 1); ++latency) {
+      for (unsigned latency = 0; latency <= remat_off_latency; ++latency) {
          for (unsigned banks = 0; banks < 2; ++banks) {
             if ((bank_candidates && !banks) ||
                 (remat_known[latency][banks] && !remat_used[latency][banks]))
@@ -2213,7 +2218,7 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
          }
    }
    if (cost.spills) {
-      for (unsigned latency = 0; latency <= (long_dependencies > 1); ++latency) {
+      for (unsigned latency = 0; latency <= remat_off_latency; ++latency) {
          for (unsigned banks = 0; banks < 2; ++banks) {
             if (bank_candidates && !banks)
                continue;
