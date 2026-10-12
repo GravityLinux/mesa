@@ -481,6 +481,10 @@ struct hk_cs {
     * barrier was hoisted ahead of this stream (hk_cmd_sync_barrier). */
    bool merge_writes, merge_hoisted;
 
+   /* enum hk_pre_raster_reads of the stream's draws: what their
+    * pre-rasterization stages read (hk_queue's tiling-wait elision). */
+   uint8_t pre_raster_reads;
+
    /* enum hk_cs_end, and whether an hk meta operation created the stream. */
    uint8_t end_reason;
    bool meta;
@@ -1332,7 +1336,7 @@ struct hk_bg_eot hk_apple9_build_bg_eot(
    bool store, bool partial, bool incomplete);
 
 bool hk_apple9_pin_entry(void *allocator, struct agx_bo *bo);
-bool hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd);
+bool hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool indirect);
 void hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
                     struct agx_draw draw);
 struct hk_apple9_prerast_bindings

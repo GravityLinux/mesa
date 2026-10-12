@@ -15,6 +15,7 @@
 #include "hk_gpu_busy.h"
 #include "util/u_wait_watchdog.h"
 #include "hk_queue.h"
+#include <inttypes.h>
 #include "agx_timeline_uapi.h"
 #include "hk_buffer.h"
 
@@ -908,21 +909,93 @@ hk_resolve_sync(struct hk_cmd_buffer *cmd, struct hk_sync_state *state,
 }
 
 /* Defer a render command's render dependency to its fragment stage when its
- * tiling stage depends on no earlier render work. Tiling commands on one queue
- * run in order, and fragment work waits for the same render completions as
- * before. Opt-in until measured: without the kernel's render_barrier=2 the
- * deferred wait costs more per pass than the tiling wait it replaces.
+ * tiling stage needs no earlier render work. Tiling commands on one queue run
+ * in order, and fragment work waits for the same render completions as
+ * before. Without that flag the firmware holds the render's tiling until the
+ * previous render's fragment work completes, so renders never overlap.
+ * HK_APPLE9_FRAGMENT_BARRIER=0 keeps every render dependency before tiling.
  */
 DEBUG_GET_ONCE_BOOL_OPTION(hk_apple9_fragment_barrier,
-                           "HK_APPLE9_FRAGMENT_BARRIER", false)
+                           "HK_APPLE9_FRAGMENT_BARRIER", true)
+
+/* A barrier into pre-rasterization stages (as applications commonly write
+ * for render targets read by "any shader") orders the render's tiling after
+ * earlier renders. That order is observable only through memory the tiling
+ * work reads; vertex pipelines do not store (vertexPipelineStoresAndAtomics
+ * is false). Earlier renders write their attachments, which only image reads
+ * can observe, and memory only when they store, run atomics or capture
+ * transform feedback. So when the render's pre-rasterization work reads no
+ * images, and reads no buffers while such a writer may still be running, the
+ * tiling wait for earlier renders is moot. HK_APPLE9_NO_TILING_ELISION=1
+ * disables this.
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(hk_apple9_no_tiling_elision,
+                           "HK_APPLE9_NO_TILING_ELISION", false)
+
+/* HK_TILING_ELISION_STATS=1 (diagnostic): how renders with an earlier
+ * render dependency were classified, printed every 4096 such renders. */
+enum hk_tiling_class {
+   HK_TILING_FRAGMENT_ONLY, /* no tiling dependency on earlier renders */
+   HK_TILING_ELIDED,        /* tiling dependency elided */
+   HK_TILING_IMAGES,        /* kept: pre-rasterization reads images */
+   HK_TILING_UNKNOWN,       /* kept: unclassified pre-rasterization work */
+   HK_TILING_WRITER,        /* kept: reads buffers while a writer may run */
+   HK_TILING_OFF,           /* kept: elision disabled */
+   HK_TILING_CLASSES,
+};
+
+static void
+hk_tiling_stat(enum hk_tiling_class cls)
+{
+   static int enabled = -1;
+   static uint64_t counts[HK_TILING_CLASSES], total;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("HK_TILING_ELISION_STATS", false);
+   if (!enabled)
+      return;
+   counts[cls]++;
+   if (++total % 4096 == 0)
+      fprintf(stderr, "HK_TILING renders=%" PRIu64 " fragment_only=%" PRIu64
+              " elided=%" PRIu64 " images=%" PRIu64 " unknown=%" PRIu64
+              " writer=%" PRIu64 " off=%" PRIu64 "\n", total,
+              counts[HK_TILING_FRAGMENT_ONLY], counts[HK_TILING_ELIDED],
+              counts[HK_TILING_IMAGES], counts[HK_TILING_UNKNOWN],
+              counts[HK_TILING_WRITER], counts[HK_TILING_OFF]);
+}
 
 static bool
-hk_defer_render_wait(struct hk_device *dev, const struct hk_sync_stream *s)
+hk_defer_render_wait(struct hk_device *dev, struct hk_queue *queue,
+                     const struct hk_cs *cs, const struct hk_sync_stream *s)
 {
-   return (dev->dev.params.features & DRM_ASAHI_FEATURE_FRAGMENT_BARRIER) &&
-          debug_get_option_hk_apple9_fragment_barrier() &&
-          s->wait.engine[HK_SYNC_RENDER] != HK_SYNC_NONE &&
-          s->wait_tiling.engine[HK_SYNC_RENDER] == HK_SYNC_NONE;
+   if (!(dev->dev.params.features & DRM_ASAHI_FEATURE_FRAGMENT_BARRIER) ||
+       !debug_get_option_hk_apple9_fragment_barrier() ||
+       s->wait.engine[HK_SYNC_RENDER] == HK_SYNC_NONE)
+      return false;
+   enum hk_tiling_class cls =
+      s->wait_tiling.engine[HK_SYNC_RENDER] == HK_SYNC_NONE ? HK_TILING_FRAGMENT_ONLY
+      : debug_get_option_hk_apple9_no_tiling_elision()     ? HK_TILING_OFF
+      : (cs->pre_raster_reads & HK_READS_UNKNOWN)          ? HK_TILING_UNKNOWN
+      : (cs->pre_raster_reads & HK_READS_IMAGES)           ? HK_TILING_IMAGES
+      : ((cs->pre_raster_reads & HK_READS_BUFFERS) &&
+         queue->render_writer_pending)                     ? HK_TILING_WRITER
+                                                           : HK_TILING_ELIDED;
+   hk_tiling_stat(cls);
+   return cls == HK_TILING_FRAGMENT_ONLY || cls == HK_TILING_ELIDED;
+}
+
+/* Track memory-writing renders for hk_defer_render_wait. A render whose
+ * tiling waits for the immediately preceding render (deferring nothing)
+ * starts after every earlier render completed, since the render lane runs in
+ * order. */
+static void
+hk_track_render_writes(struct hk_queue *queue, const struct hk_cs *cs,
+                       const struct hk_sync_stream *s, bool deferred)
+{
+   if (!deferred && s->wait_tiling.engine[HK_SYNC_RENDER] != HK_SYNC_NONE &&
+       s->wait_tiling.engine[HK_SYNC_RENDER] + 1 == s->index)
+      queue->render_writer_pending = false;
+   if (cs->merge_writes)
+      queue->render_writer_pending = true;
 }
 
 static uint16_t
@@ -1080,8 +1153,11 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
 
             struct drm_asahi_cmd_render cmd;
             asahi_fill_vdm_command(dev, cs, &cmd);
-            if (hk_defer_render_wait(dev, &streams[cs->sync_id]))
+            const bool deferred =
+               hk_defer_render_wait(dev, queue, cs, &streams[cs->sync_id]);
+            if (deferred)
                cmd.flags |= DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT;
+            hk_track_render_writes(queue, cs, &streams[cs->sync_id], deferred);
             /* Render keys omit the per-frame draw count, which varies. */
             hk_gpu_busy_set_pass(queue, cs->pass_code, cs->pass_grid, 0);
             hk_gpu_busy_render(queue, &cmd);

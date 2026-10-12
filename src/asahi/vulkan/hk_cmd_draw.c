@@ -4650,7 +4650,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
       return;
 
    if (hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G) {
-      if (!hk_apple9_prepare_draw(cmd))
+      if (!hk_apple9_prepare_draw(cmd, agx_is_indirect(draw_.b)))
          return;
       uint64_t t_resolve = hk_cpu_sub_begin();
       bool resolved = hk_apple9_resolve_shaders(cmd);
@@ -4920,7 +4920,7 @@ hk_apple9_draw_mesh(struct hk_cmd_buffer *cmd, uint32_t draw_id,
 
    if (direct && (!direct[0] || !direct[1] || !direct[2]))
       return;
-   if (!hk_apple9_prepare_draw(cmd))
+   if (!hk_apple9_prepare_draw(cmd, !direct || count_addr))
       return;
    if (!hk_apple9_resolve_shaders(cmd))
       return;
