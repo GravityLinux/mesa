@@ -6170,7 +6170,9 @@ hk_deserialize_api_shader(struct vk_device *vk_dev, struct blob_reader *blob,
    /* Fragment variants record memory writes; assume them elsewhere. */
    obj->writes_memory = obj->vk.stage != MESA_SHADER_FRAGMENT ||
                         obj->variants[0].info.fs.writes_memory;
-   obj->pre_raster_reads = HK_READS_UNKNOWN;
+   obj->pre_raster_reads = blob_read_uint8(blob);
+   if (blob->overrun)
+      obj->pre_raster_reads = HK_READS_UNKNOWN;
 
    *shader_out = &obj->vk;
    return VK_SUCCESS;
@@ -6216,6 +6218,7 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
    hk_foreach_variant(obj, shader) {
       hk_shader_serialize(vk_dev, shader, blob);
    }
+   blob_write_uint8(blob, obj->pre_raster_reads);
 
    return !blob->out_of_memory;
 }

@@ -938,7 +938,8 @@ enum hk_tiling_class {
    HK_TILING_FRAGMENT_ONLY, /* no tiling dependency on earlier renders */
    HK_TILING_ELIDED,        /* tiling dependency elided */
    HK_TILING_IMAGES,        /* kept: pre-rasterization reads images */
-   HK_TILING_UNKNOWN,       /* kept: unclassified pre-rasterization work */
+   HK_TILING_UNKNOWN,       /* kept: unclassified pre-rasterization shader */
+   HK_TILING_INTERNAL,      /* kept: meta, XFB, tessellation or geometry */
    HK_TILING_WRITER,        /* kept: reads buffers while a writer may run */
    HK_TILING_OFF,           /* kept: elision disabled */
    HK_TILING_CLASSES,
@@ -957,9 +958,10 @@ hk_tiling_stat(enum hk_tiling_class cls)
    if (++total % 4096 == 0)
       fprintf(stderr, "HK_TILING renders=%" PRIu64 " fragment_only=%" PRIu64
               " elided=%" PRIu64 " images=%" PRIu64 " unknown=%" PRIu64
-              " writer=%" PRIu64 " off=%" PRIu64 "\n", total,
+              " internal=%" PRIu64 " writer=%" PRIu64 " off=%" PRIu64 "\n", total,
               counts[HK_TILING_FRAGMENT_ONLY], counts[HK_TILING_ELIDED],
               counts[HK_TILING_IMAGES], counts[HK_TILING_UNKNOWN],
+              counts[HK_TILING_INTERNAL],
               counts[HK_TILING_WRITER], counts[HK_TILING_OFF]);
 }
 
@@ -974,6 +976,7 @@ hk_defer_render_wait(struct hk_device *dev, struct hk_queue *queue,
    enum hk_tiling_class cls =
       s->wait_tiling.engine[HK_SYNC_RENDER] == HK_SYNC_NONE ? HK_TILING_FRAGMENT_ONLY
       : debug_get_option_hk_apple9_no_tiling_elision()     ? HK_TILING_OFF
+      : (cs->pre_raster_reads & HK_READS_INTERNAL)         ? HK_TILING_INTERNAL
       : (cs->pre_raster_reads & HK_READS_UNKNOWN)          ? HK_TILING_UNKNOWN
       : (cs->pre_raster_reads & HK_READS_IMAGES)           ? HK_TILING_IMAGES
       : ((cs->pre_raster_reads & HK_READS_BUFFERS) &&

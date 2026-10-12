@@ -385,6 +385,9 @@ enum hk_pre_raster_reads {
    HK_READS_BUFFERS = BITFIELD_BIT(1),
    /* Not classified: keep the tiling wait. */
    HK_READS_UNKNOWN = BITFIELD_BIT(2),
+   /* hk-internal pre-rasterization work (meta, transform feedback,
+    * tessellation, geometry): keep the tiling wait. */
+   HK_READS_INTERNAL = BITFIELD_BIT(3),
 };
 
 uint8_t hk_nir_pre_raster_reads(const nir_shader *nir);

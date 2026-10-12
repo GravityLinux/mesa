@@ -389,7 +389,7 @@ hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool indirect)
    uint8_t reads = indirect ? HK_READS_BUFFERS : 0;
    if (cmd->in_meta || gfx->xfb_enabled || gfx->shaders[MESA_SHADER_TESS_CTRL] ||
        gfx->shaders[MESA_SHADER_TESS_EVAL] || gfx->shaders[MESA_SHADER_GEOMETRY])
-      reads |= HK_READS_UNKNOWN;
+      reads |= HK_READS_INTERNAL;
    for (unsigned s = 0; s < ARRAY_SIZE(gfx->shaders); ++s) {
       if (s == MESA_SHADER_FRAGMENT || s == MESA_SHADER_COMPUTE || !gfx->shaders[s])
          continue;
