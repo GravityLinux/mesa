@@ -46,6 +46,10 @@ bool agx_nir_lower_apple9_subgroup_denorms(nir_shader *shader);
 
 /* Schedule texture operations without increasing estimated scalar-word pressure. */
 bool agx_nir_hoist_apple9_samples(nir_shader *shader);
+/* While set on this thread (compiling a spill probe), register allocation
+ * keeps its first candidate. */
+void agx_apple9_ra_set_probe(bool probe);
+bool agx_apple9_ra_is_probe(void);
 bool agx_nir_hoist_apple9_derivative_sources(nir_shader *shader);
 
 /* After generic texture lowering, backend1 holds a packed Apple9 LOD/bias
