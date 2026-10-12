@@ -534,11 +534,12 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
     */
    if (dev->dev.chip == AGX_CHIP_G16G) {
       result = hk_apple9_create_null_fs(dev, pAllocator, true, &dev->null_fs);
-      if (result == VK_SUCCESS)
-         result = hk_apple9_create_null_fs(dev, pAllocator, false,
-                                           &dev->null_fs_trivial);
       if (result != VK_SUCCESS)
          goto fail_meta;
+      result = hk_apple9_create_null_fs(dev, pAllocator, false,
+                                        &dev->null_fs_trivial);
+      if (result != VK_SUCCESS)
+         goto fail_null_fs;
    } else {
       nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT,
                                                      &agx_nir_options, "empty FS");
@@ -567,6 +568,8 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    return VK_SUCCESS;
 
+fail_null_fs:
+   hk_api_shader_destroy(&dev->vk, &dev->null_fs->vk, pAllocator);
 fail_meta:
    hk_device_finish_meta(dev);
 fail_mem_cache:
