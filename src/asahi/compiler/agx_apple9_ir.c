@@ -5241,8 +5241,11 @@ agx_apple9_texture_mode(bool explicit_lod, bool gradient, bool bias,
 
 /* A texel offset selects the offset form of the sample mode word. The
  * pairs were measured from our own MSL compiled for G16, form by form
- * (msl-encodings-20261011). Our 2D-array mode words differ from
- * Metal's, so arrays have no measured offset form yet. */
+ * (msl-encodings-20261011). Our 2D-array mode words carry the
+ * layer with the LOD (bit 0x0400), unlike Metal's; the explicit-LOD array
+ * form takes Metal's array offset form with that bit (0x0651), checked on
+ * G16 against a CPU reference for ten offsets on every layer
+ * (array-offset-probe). Other array forms are not measured. */
 bool
 agx_apple9_texture_offset_mode(uint16_t mode, uint16_t *offset_mode)
 {
@@ -5250,6 +5253,7 @@ agx_apple9_texture_offset_mode(uint16_t mode, uint16_t *offset_mode)
       {0x0000, 0x0201}, /* implicit LOD, gather */
       {0x0004, 0x0281}, /* bias */
       {0x0100, 0x0211}, /* explicit LOD */
+      {0x0508, 0x0651}, /* 2D array, explicit LOD */
       {0x0104, 0x0209}, /* gradient */
       {0x0114, 0x0249}, /* gradient, minimum LOD */
       {0x0020, 0x0221}, /* compare, implicit LOD */
