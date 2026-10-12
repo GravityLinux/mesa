@@ -310,6 +310,9 @@ struct ra_ctx {
     * restrictions, since different uses can need incompatible banks. */
    const struct agx_reg_constraint *preferred;
    const unsigned *scarcity;
+   /* scarcity_floor[l][r]: the least scarcity of any 1 << l register window
+    * starting at r or above, a lower bound for placement_floor. */
+   const unsigned (*scarcity_floor)[AGX_NUM_REGS + 1];
    unsigned demand;
 };
 
@@ -590,6 +593,9 @@ agx_calc_register_demand(agx_context *ctx, bool remat)
    return max_demand;
 }
 
+/* Window sizes (1 << l halves) with a precomputed scarcity floor. */
+#define RA_SCARCITY_FLOOR_SIZES 6
+
 struct placement_cost {
    uint64_t dead, edge, affinity;
    unsigned moves, collect, preference, materialization, growth, scarcity, reg;
@@ -824,6 +830,9 @@ placement_floor(struct ra_ctx *rctx, unsigned ssa, unsigned reg, unsigned count,
       cost.materialization = reg + count > immediate_regs;
    unsigned limit = MAX2(rctx->demand, *rctx->count[RA_GPR]);
    cost.growth = reg + count > limit ? reg + count - limit : 0;
+   unsigned l = util_logbase2(count);
+   if (rctx->scarcity_floor && l < RA_SCARCITY_FLOOR_SIZES && reg <= AGX_NUM_REGS)
+      cost.scarcity = rctx->scarcity_floor[l][reg];
    return cost;
 }
 
@@ -1445,6 +1454,13 @@ place_constrained_value(struct ra_ctx *rctx, agx_index value,
       .dead = rctx->dead_total - max_dead,
       .affinity = rctx->affinity_total - max_affinity,
    };
+   /* Moves rank first: when any aligned window is free, only free windows
+    * can win, so occupied ones need no costing. */
+   bool any_free = false;
+   for (unsigned reg = first; reg <= last && !any_free; reg += align) {
+      any_free = !BITSET_TEST_COUNT(rctx->pinned, reg, count) &&
+                 !BITSET_TEST_COUNT(rctx->used_regs[RA_GPR], reg, count);
+   }
    for (unsigned reg = first; reg <= last; reg += align) {
       if (chosen != ~0u &&
           placement_cheaper(best, placement_floor(rctx, ssa, reg, count, &floors,
@@ -1454,7 +1470,7 @@ place_constrained_value(struct ra_ctx *rctx, agx_index value,
          continue;
       /* Moves rank first, so an occupied region never beats a free one. */
       bool occupied = BITSET_TEST_COUNT(rctx->used_regs[RA_GPR], reg, count);
-      if (occupied && chosen != ~0u && !best.moves)
+      if (occupied && (any_free || (chosen != ~0u && !best.moves)))
          continue;
       struct placement_cost cost = placement_cost(rctx, ssa, reg, count);
       if (occupied && rctx->preferred && !have_tuple_base) {
@@ -2636,6 +2652,24 @@ agx_ra(agx_context *ctx)
          constraint_preferences(ctx, preferred, scarcity, max_regs);
    }
 
+   unsigned (*scarcity_floor)[AGX_NUM_REGS + 1] = NULL;
+   if (preferred) {
+      scarcity_floor = malloc(RA_SCARCITY_FLOOR_SIZES * sizeof(*scarcity_floor));
+      for (unsigned l = 0; scarcity_floor && l < RA_SCARCITY_FLOOR_SIZES; ++l) {
+         unsigned width = 1u << l;
+         scarcity_floor[l][AGX_NUM_REGS] = UINT_MAX;
+         for (int r = AGX_NUM_REGS - 1; r >= 0; --r) {
+            unsigned sum = UINT_MAX;
+            if (r + width <= AGX_NUM_REGS) {
+               sum = 0;
+               for (unsigned h = r; h < r + width; ++h)
+                  sum += scarcity[h];
+            }
+            scarcity_floor[l][r] = MIN2(sum, scarcity_floor[l][r + 1]);
+         }
+      }
+   }
+
    struct agx_spill_interference *spill_graph =
       ctx->spill_home ? agx_spill_coalesce_prepare(ctx) : NULL;
    bool success = false;
@@ -2671,6 +2705,7 @@ agx_ra(agx_context *ctx)
          .count[RA_MEM] = &mem_slot_count,
          .preferred = preferred,
          .scarcity = scarcity,
+         .scarcity_floor = scarcity_floor,
          .demand = demand,
          .affinity_ssa = ~0u,
       }))
@@ -2829,6 +2864,7 @@ agx_ra(agx_context *ctx)
    success = true;
 
 cleanup:
+   free(scarcity_floor);
    ralloc_free(spill_graph);
    agx_foreach_block(ctx, block) {
       free(block->ssa_to_reg_out);
