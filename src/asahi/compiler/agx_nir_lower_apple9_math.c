@@ -609,6 +609,10 @@ conversion_select_redundant(nir_scalar cond, nir_scalar x, uint32_t k, bool sign
    if (!nir_scalar_is_alu(cond))
       return false;
    nir_op op = nir_scalar_alu_op(cond);
+   /* Only these per-component comparisons qualify; other conditions (such
+    * as vector comparisons with sized sources) cannot be chased per scalar. */
+   if (op != nir_op_fneu && op != nir_op_flt && op != nir_op_fge)
+      return false;
    nir_scalar a = nir_scalar_chase_movs(nir_scalar_chase_alu_src(cond, 0));
    nir_scalar b = nir_scalar_chase_movs(nir_scalar_chase_alu_src(cond, 1));
    float c;
