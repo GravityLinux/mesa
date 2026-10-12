@@ -770,6 +770,14 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       hk_merge_render_iview(render, render->color_att[i].iview, false);
    }
 
+   u_foreach_bit(i, render->store_mask) {
+      struct hk_image_view *view = render->color_att[i].iview;
+      struct hk_image *image = container_of(view->vk.image, struct hk_image, vk);
+      if (image->planes[view->planes[0].image_plane].layout.tiling ==
+          AIL_TILING_LINEAR)
+         render->linear_store = true;
+   }
+
    hk_merge_render_iview(
       render, render->depth_att.iview ?: render->stencil_att.iview, true);
 
@@ -1031,6 +1039,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
    cs->cr.bg.main = render->cr.bg.main;
    cs->cr.zls_control = render->cr.zls_control;
+   cs->linear_store = render->linear_store;
    render->first_cs = cs;
 
    /* Reordering barrier for post-gfx, in case we had any. */
