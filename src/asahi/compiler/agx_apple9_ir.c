@@ -5502,21 +5502,18 @@ pack_fma(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    set_bits(bytes, 35, 1, !!(instruction->src_abs_mask & 4));
    set_bits(bytes, 36, 1, !!(neg_mask & 4));
    set_bits(bytes, 59, 1, !!(neg_mask & 1) ^ !!(neg_mask & 2));
-   /* FP16 sources converted on read: operand B's width bit 24 with bit 57
-    * set (low half only observed) and the addend's width bit 49 with bit 40 selecting its
-    * high half (Metal's encodings of our own kernels). The six-byte form has
-    * no bit 57 (it moves B's selector to bit 37) and was not measured with
+   /* FP16 sources converted on read: operand B's width bit 24 (low half
+    * only observed; bit 57 stays clear, it selects the uniform file) and the
+    * addend's width bit 49 with bit 40 selecting its high half (Metal's
+    * encodings of our own kernels). The six-byte form was not measured with
     * half sources, so it takes none. */
    if (instruction->src_half_mask) {
       if ((instruction->src_half_mask & 1) || instruction->src_sext_mask ||
           (instruction->src_hi_mask & 2) ||
           (instruction->src_half_mask & inline_mask) || compact)
          return false;
-      /* Operand B also sets its alternative-file bit, as for a uniform. */
-      if (instruction->src_half_mask & 2) {
+      if (instruction->src_half_mask & 2)
          set_bits(bytes, 24, 1, 0);
-         set_bits(bytes, 57, 1, 1);
-      }
       if (instruction->src_half_mask & 4) {
          set_bits(bytes, 49, 1, 0);
          set_bits(bytes, 40, 1, !!(instruction->src_hi_mask & 4));

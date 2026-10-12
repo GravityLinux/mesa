@@ -2292,7 +2292,7 @@ TEST(Apple9Packer, Fp16SourcesMatchOwnMslEncodings)
        {0, 0, 0x20, 0, 0, 0, 0, 0xe0}},
       /* fma(fx, float(h.x), fz): operand B r4 low half */
       {"fma_fhf", AGX_APPLE9_VIR_FMA, AGX_APPLE9_ENC_FLOAT3_EXTENDED, 3, 2, 0,
-       {0, 0, 4, 2}, {0x09, 0x01, 0x1e, 0x08, 0x81, 0x04, 0x02, 0xc2},
+       {0, 0, 4, 2}, {0x09, 0x01, 0x1e, 0x08, 0x81, 0x04, 0x02, 0xc0},
        {0, 0, 0x20, 0, 0, 0, 0, 0xe0}},
    };
    for (const auto &test : cases) {
