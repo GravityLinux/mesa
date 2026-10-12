@@ -14,6 +14,7 @@
 #include "asahi/lib/agx_bo.h"
 #include "wsi_common.h"
 #include "util/u_atomic.h"
+#include "util/u_debug.h"
 
 #include <inttypes.h>
 #include <sys/mman.h>
@@ -193,6 +194,22 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
          result = vk_error(dev, VK_ERROR_UNKNOWN);
          goto fail_alloc;
       }
+   }
+
+   if (debug_get_bool_option("HK_REPLAY_DEBUG", false)) {
+      const VkMemoryAllocateFlagsInfo *flags_info =
+         vk_find_struct_const(pAllocateInfo->pNext, MEMORY_ALLOCATE_FLAGS_INFO);
+      const VkMemoryOpaqueCaptureAddressAllocateInfo *opaque_info =
+         vk_find_struct_const(pAllocateInfo->pNext,
+                              MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO);
+      fprintf(stderr,
+              "hk-replay: memory size=0x%" PRIx64 " type=%u flags=0x%x "
+              "requested=0x%" PRIx64 " got=0x%" PRIx64 "\n",
+              (uint64_t)pAllocateInfo->allocationSize,
+              pAllocateInfo->memoryTypeIndex,
+              flags_info ? flags_info->flags : 0,
+              opaque_info ? opaque_info->opaqueCaptureAddress : 0,
+              mem->bo->va ? mem->bo->va->addr : 0);
    }
 
    /* Under virtio the host compositor reads WSI images with implicit sync,

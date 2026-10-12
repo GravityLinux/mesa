@@ -223,6 +223,13 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
       buffer->va =
          agx_va_alloc(&dev->dev, vma_size_B, alignment, flags, bda_fixed_addr);
 
+      if (bda_capture_replay && debug_get_bool_option("HK_REPLAY_DEBUG", false))
+         fprintf(stderr,
+                 "hk-replay: buffer size=0x%" PRIx64 " usage=0x%" PRIx64
+                 " flags=0x%x requested=0x%" PRIx64 " got=0x%" PRIx64 "\n",
+                 (uint64_t)buffer->vk.size, (uint64_t)buffer->vk.usage, flags,
+                 bda_fixed_addr, buffer->va ? buffer->va->addr : 0);
+
       /* The USC aperture is shared with shaders. When it is full, place the
        * buffer like any other and copy its indices at draw time.
        */

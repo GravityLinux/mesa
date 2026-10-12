@@ -33,6 +33,7 @@
 #include "util/list.h"
 #include "util/macros.h"
 #include "util/u_debug.h"
+#include <unistd.h>
 #include "util/u_dynarray.h"
 #include "vulkan/vulkan_core.h"
 
@@ -1027,6 +1028,12 @@ static VkResult
 queue_submit(struct hk_device *dev, struct hk_queue *queue,
              struct vk_queue_submit *submit)
 {
+   if (debug_get_bool_option("HK_ABORT_BEFORE_SUBMIT", false)) {
+      fprintf(stderr, "hk-replay: HK_ABORT_BEFORE_SUBMIT, exiting before the "
+                      "first queue submit\n");
+      _exit(3);
+   }
+
    /* TODO: Support asynchronous sparse queue? */
    if (submit->buffer_bind_count || submit->image_bind_count ||
        submit->image_opaque_bind_count) {
@@ -1035,6 +1042,13 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
       if (result != VK_SUCCESS)
          return result;
    }
+
+   /* Diagnostic: run an application (a GFXR replay) with no GPU work at
+    * all. Command buffers are dropped; fences and semaphores signal as for an
+    * empty submit.
+    */
+   if (debug_get_bool_option("HK_NULL_SUBMIT", false))
+      return queue_submit_empty(dev, queue, submit);
 
    unsigned command_count = 0;
 
