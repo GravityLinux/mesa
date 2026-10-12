@@ -745,9 +745,11 @@ agx_open_device(void *memctx, struct agx_device *dev)
    /* Capture-replay allocations (VK_*_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT) come
     * from the top of each heap, which nothing else uses: a captured address
     * is then free at replay, whatever the replaying driver allocated first.
+    * Only devices created for capture or replay reserve them.
     */
-   uint64_t replay_size = MIN2(user_size / 8, 16ull << 30);
-   uint64_t replay_usc_size = shader_size / 8;
+   uint64_t replay_size =
+      dev->capture_replay ? MIN2(user_size / 8, 16ull << 30) : 0;
+   uint64_t replay_usc_size = dev->capture_replay ? shader_size / 8 : 0;
    util_vma_heap_init(&dev->main_heap, user_start, user_size - replay_size);
    util_vma_heap_init(&dev->replay_heap, user_start + user_size - replay_size,
                       replay_size);

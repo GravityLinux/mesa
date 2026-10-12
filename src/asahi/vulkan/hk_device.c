@@ -425,6 +425,13 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       dev->vk.enabled_features.pipelineRobustness = false;
    }
 
+   /* Reserve the capture-replay VA ranges only for devices that capture or
+    * replay; other devices keep their heaps whole. */
+   dev->dev.capture_replay =
+      dev->vk.enabled_features.bufferDeviceAddressCaptureReplay ||
+      dev->vk.enabled_features.bufferDeviceAddressCaptureReplayEXT ||
+      dev->vk.enabled_features.descriptorBufferCaptureReplay;
+
    bool succ = agx_open_device(NULL, &dev->dev);
    drmFreeDevice(&drm_device);
    if (!succ) {

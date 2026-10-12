@@ -135,7 +135,9 @@ struct agx_device {
    struct util_vma_heap main_heap;
    struct util_vma_heap usc_heap;
    struct util_vma_heap context_heap;
-   /* Capture-replay ranges at the top of the main and USC heaps. */
+   /* Capture-replay ranges at the top of the main and USC heaps, reserved
+    * (non-empty) only if capture_replay is set before agx_open_device. */
+   bool capture_replay;
    struct util_vma_heap replay_heap, replay_usc_heap;
    uint64_t guard_size;
 
