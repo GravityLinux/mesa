@@ -35,8 +35,17 @@ agx_va_alloc(struct agx_device *dev, uint64_t size_B, uint64_t align_B,
 
    simple_mtx_lock(&dev->vma_lock);
    if (flags & AGX_VA_FIXED) {
-      if (util_vma_heap_alloc_addr(heap, fixed_va, size_B))
+      if (util_vma_heap_alloc_addr(heap, fixed_va, size_B)) {
          addr = fixed_va;
+      } else if (flags & AGX_VA_REPLAY) {
+         /* Captures made before the replay ranges existed hold addresses in
+          * the ordinary heaps. Same address, other heap; never another one.
+          */
+         flags &= ~AGX_VA_REPLAY;
+         heap = agx_vma_heap(dev, flags);
+         if (util_vma_heap_alloc_addr(heap, fixed_va, size_B))
+            addr = fixed_va;
+      }
    } else {
       addr = util_vma_heap_alloc(heap, size_B, align_B);
    }
