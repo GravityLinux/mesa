@@ -952,23 +952,31 @@ enum hk_tiling_class {
 };
 
 static void
-hk_tiling_stat(enum hk_tiling_class cls)
+hk_tiling_stat(enum hk_tiling_class cls, bool meta)
 {
    static int enabled = -1;
-   static uint64_t counts[HK_TILING_CLASSES], total;
+   static uint64_t counts[HK_TILING_CLASSES], total, meta_elided, meta_kept;
    if (enabled < 0)
       enabled = debug_get_bool_option("HK_TILING_ELISION_STATS", false);
    if (!enabled)
       return;
    counts[cls]++;
+   if (meta) {
+      if (cls == HK_TILING_FRAGMENT_ONLY || cls == HK_TILING_ELIDED)
+         meta_elided++;
+      else
+         meta_kept++;
+   }
    if (++total % 4096 == 0)
       fprintf(stderr, "HK_TILING renders=%" PRIu64 " fragment_only=%" PRIu64
               " elided=%" PRIu64 " images=%" PRIu64 " unknown=%" PRIu64
-              " internal=%" PRIu64 " writer=%" PRIu64 " off=%" PRIu64 "\n", total,
+              " internal=%" PRIu64 " writer=%" PRIu64 " off=%" PRIu64
+              " meta_elided=%" PRIu64 " meta_kept=%" PRIu64 "\n", total,
               counts[HK_TILING_FRAGMENT_ONLY], counts[HK_TILING_ELIDED],
               counts[HK_TILING_IMAGES], counts[HK_TILING_UNKNOWN],
               counts[HK_TILING_INTERNAL],
-              counts[HK_TILING_WRITER], counts[HK_TILING_OFF]);
+              counts[HK_TILING_WRITER], counts[HK_TILING_OFF], meta_elided,
+              meta_kept);
 }
 
 static bool
@@ -988,7 +996,7 @@ hk_defer_render_wait(struct hk_device *dev, struct hk_queue *queue,
       : ((cs->pre_raster_reads & HK_READS_BUFFERS) &&
          queue->render_writer_pending)                     ? HK_TILING_WRITER
                                                            : HK_TILING_ELIDED;
-   hk_tiling_stat(cls);
+   hk_tiling_stat(cls, cs->pre_raster_reads & HK_READS_META);
    return cls == HK_TILING_FRAGMENT_ONLY || cls == HK_TILING_ELIDED;
 }
 

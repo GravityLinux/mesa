@@ -384,10 +384,18 @@ hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool reads_buffers)
    cs->merge_writes |= writes;
 
    /* What the draw's pre-rasterization work reads. hk-internal pre-raster
-    * work (tessellation, geometry, transform feedback) and meta draws keep
-    * the tiling wait. */
+    * work (tessellation, geometry, transform feedback) keeps the tiling
+    * wait. Meta draws compile their pipelines like applications', so their
+    * shaders carry a read class (vk_meta vertex shaders read push constants
+    * and its own vertex data); HK_APPLE9_META_TILING_INTERNAL=1 keeps them
+    * internal instead. */
+   static int meta_internal = -1;
+   if (meta_internal < 0)
+      meta_internal = debug_get_bool_option("HK_APPLE9_META_TILING_INTERNAL", false);
    uint8_t reads = reads_buffers ? HK_READS_BUFFERS : 0;
-   if (cmd->in_meta || gfx->xfb_enabled || gfx->shaders[MESA_SHADER_TESS_CTRL] ||
+   if (cmd->in_meta)
+      reads |= HK_READS_META | (meta_internal ? HK_READS_INTERNAL : 0);
+   if (gfx->xfb_enabled || gfx->shaders[MESA_SHADER_TESS_CTRL] ||
        gfx->shaders[MESA_SHADER_TESS_EVAL] || gfx->shaders[MESA_SHADER_GEOMETRY])
       reads |= HK_READS_INTERNAL;
    for (unsigned s = 0; s < ARRAY_SIZE(gfx->shaders); ++s) {
