@@ -25,6 +25,7 @@
 #include <string.h>
 
 DEBUG_GET_ONCE_BOOL_OPTION(apple9_no_bfe, "AGX_APPLE9_NO_BFE", false)
+DEBUG_GET_ONCE_BOOL_OPTION(apple9_no_native_min_lod, "AGX_APPLE9_NO_NATIVE_MINLOD", false)
 DEBUG_GET_ONCE_NUM_OPTION(apple9_hoist_loads, "AGX_APPLE9_HOIST_LOADS", 0)
 
 /* Apple9 compute compilation uses one NIR-to-VIR-to-machine pipeline. */
@@ -8815,11 +8816,13 @@ apple9_native_min_lod(const nir_tex_instr *tex)
 }
 
 /* Implicit and biased 2D and 2D array samples with a minimum LOD have a
- * native biased form; an implicit sample is one with zero bias. */
+ * native biased form; an implicit sample is one with zero bias.
+ * AGX_APPLE9_NO_NATIVE_MINLOD=1 sends them through gradients instead. */
 static bool
 apple9_native_biased_min_lod(const nir_tex_instr *tex)
 {
-   return apple9_native_min_lod(tex) &&
+   return !debug_get_option_apple9_no_native_min_lod() &&
+          apple9_native_min_lod(tex) &&
           (tex->op == nir_texop_tex || tex->op == nir_texop_txb);
 }
 
