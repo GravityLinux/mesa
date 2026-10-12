@@ -75,7 +75,8 @@ struct agx_submit_virt {
 
 typedef struct {
    struct agx_bo *(*bo_alloc)(struct agx_device *dev, size_t size, size_t align,
-                              enum agx_bo_flags flags);
+                              enum agx_bo_flags flags,
+                              enum agx_va_flags va_flags, uint64_t fixed_va);
    int (*bo_bind)(struct agx_device *dev, struct drm_asahi_gem_bind_op *ops,
                   uint32_t count);
    /* Map the first size bytes of a BO, at fixed_addr unless NULL. Returns
@@ -134,6 +135,8 @@ struct agx_device {
    struct util_vma_heap main_heap;
    struct util_vma_heap usc_heap;
    struct util_vma_heap context_heap;
+   /* Capture-replay ranges at the top of the main and USC heaps. */
+   struct util_vma_heap replay_heap, replay_usc_heap;
    uint64_t guard_size;
 
    /* To emulate sparse-resident buffers, we map buffers in both the bottom half

@@ -185,11 +185,18 @@ hk_destroy_sampler_heap(struct hk_device *dev, struct hk_sampler_heap *h)
 
 static VkResult
 hk_sampler_heap_add_locked(struct hk_device *dev, struct hk_sampler_heap *h,
-                           struct agx_sampler_packed desc,
+                           struct agx_sampler_packed desc, uint32_t index,
                            struct hk_rc_sampler **out)
 {
    struct hash_entry *ent = _mesa_hash_table_search(h->ht, &desc);
    if (ent != NULL) {
+      /* Identical samplers share an entry at capture, and so at replay. */
+      if (index != HK_DESCRIPTOR_TABLE_ANY_INDEX &&
+          ((struct hk_rc_sampler *)ent->data)->index != index)
+         return vk_errorf(dev, VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS,
+                          "Sampler replayed at index %u, already at %u",
+                          index, ((struct hk_rc_sampler *)ent->data)->index);
+
       *out = ent->data;
 
       assert((*out)->refcount != 0);
@@ -202,7 +209,6 @@ hk_sampler_heap_add_locked(struct hk_device *dev, struct hk_sampler_heap *h,
    if (!rc)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
-   uint32_t index;
    VkResult result =
       hk_descriptor_table_add(dev, &h->table, &desc, sizeof(desc), &index);
    if (result != VK_SUCCESS) {
@@ -224,12 +230,12 @@ hk_sampler_heap_add_locked(struct hk_device *dev, struct hk_sampler_heap *h,
 
 VkResult
 hk_sampler_heap_add(struct hk_device *dev, struct agx_sampler_packed desc,
-                    struct hk_rc_sampler **out)
+                    uint32_t index, struct hk_rc_sampler **out)
 {
    struct hk_sampler_heap *h = &dev->samplers;
 
    simple_mtx_lock(&h->lock);
-   VkResult result = hk_sampler_heap_add_locked(dev, h, desc, out);
+   VkResult result = hk_sampler_heap_add_locked(dev, h, desc, index, out);
    simple_mtx_unlock(&h->lock);
 
    return result;

@@ -978,23 +978,38 @@ hk_apple9_residency_init(struct hk_apple9_residency *r,
    }
 }
 
+/* Sparse planes own their address and residency table, and descriptors embed
+ * both. Descriptor-buffer capture replay places them in the replay range, at
+ * the captured addresses on replay (replay == NULL: anywhere in the range).
+ */
 static VkResult
 hk_image_plane_alloc_vma(struct hk_device *dev, struct hk_image_plane *plane,
-                         VkImageCreateFlags create_flags)
+                         VkImageCreateFlags create_flags,
+                         const struct hk_image_plane_capture_data *replay)
 {
    const bool sparse_bound = create_flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT;
    const bool sparse_resident =
       create_flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT;
    assert(sparse_bound || !sparse_resident);
 
+   const bool capture_replay =
+      create_flags & VK_IMAGE_CREATE_DESCRIPTOR_BUFFER_CAPTURE_REPLAY_BIT_EXT;
+   const uint64_t replay_va = replay ? replay->va : 0;
+   const uint64_t replay_residency = replay ? replay->residency : 0;
+
    if (sparse_bound) {
       size_t size = align(plane->layout.size_B, HK_SPARSE_ALIGN_B);
-      plane->va = agx_va_alloc(&dev->dev, size, AIL_PAGESIZE, 0, 0);
-      plane->addr = plane->va->addr;
-      if (plane->addr == 0) {
-         return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+      enum agx_va_flags va_flags =
+         capture_replay ? AGX_VA_REPLAY | (replay_va ? AGX_VA_FIXED : 0) : 0;
+      plane->va =
+         agx_va_alloc(&dev->dev, size, AIL_PAGESIZE, va_flags, replay_va);
+      if (!plane->va) {
+         return vk_errorf(dev, replay_va
+                                  ? VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS
+                                  : VK_ERROR_OUT_OF_DEVICE_MEMORY,
                           "Sparse VMA allocation failed");
       }
+      plane->addr = plane->va->addr;
 
       /* Bind scratch pages to discard writes, including from lowered software
        * texture atomics. Reads will use the hardware texture unit sparse
@@ -1012,10 +1027,17 @@ hk_image_plane_alloc_vma(struct hk_device *dev, struct hk_image_plane *plane,
       size_t size_B = sizeof(struct hk_apple9_residency) +
                       align(ail_bytes_to_pages(layout->layer_stride_B) *
                                layout->depth_px, 4);
+      enum agx_va_flags va_flags =
+         capture_replay
+            ? AGX_VA_REPLAY | (replay_residency ? AGX_VA_FIXED : 0)
+            : 0;
       plane->apple9_residency =
-         agx_bo_create(&dev->dev, size_B, 0, 0, "Apple9 residency");
+         agx_bo_create_va(&dev->dev, size_B, 0, 0, va_flags, replay_residency,
+                          "Apple9 residency");
       if (!plane->apple9_residency) {
-         return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+         return vk_errorf(dev, replay_residency
+                                  ? VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS
+                                  : VK_ERROR_OUT_OF_DEVICE_MEMORY,
                           "Residency table allocation failed");
       }
 
@@ -1086,9 +1108,24 @@ hk_CreateImage(VkDevice _device, const VkImageCreateInfo *pCreateInfo,
       return result;
    }
 
+   struct hk_image_capture_data replay_data;
+   const struct hk_image_capture_data *replay = NULL;
+   if (image->vk.create_flags &
+       VK_IMAGE_CREATE_DESCRIPTOR_BUFFER_CAPTURE_REPLAY_BIT_EXT) {
+      const VkOpaqueCaptureDescriptorDataCreateInfoEXT *cap_info =
+         vk_find_struct_const(pCreateInfo->pNext,
+                              OPAQUE_CAPTURE_DESCRIPTOR_DATA_CREATE_INFO_EXT);
+      if (cap_info && cap_info->opaqueCaptureDescriptorData) {
+         memcpy(&replay_data, cap_info->opaqueCaptureDescriptorData,
+                sizeof(replay_data));
+         replay = &replay_data;
+      }
+   }
+
    for (uint8_t plane = 0; plane < image->plane_count; plane++) {
       result = hk_image_plane_alloc_vma(dev, &image->planes[plane],
-                                        image->vk.create_flags);
+                                        image->vk.create_flags,
+                                        replay ? &replay->planes[plane] : NULL);
       if (result != VK_SUCCESS) {
          hk_image_finish(dev, image, pAllocator);
          vk_free2(&dev->vk.alloc, pAllocator, image);
@@ -1825,5 +1862,29 @@ hk_TransitionImageLayoutEXT(
    const VkHostImageLayoutTransitionInfoEXT *transitions)
 {
    /* We don't do anything with layouts so this should be a no-op */
+   return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+hk_GetImageOpaqueCaptureDescriptorDataEXT(
+   UNUSED VkDevice device, const VkImageCaptureDescriptorDataInfoEXT *pInfo,
+   void *pData)
+{
+   VK_FROM_HANDLE(hk_image, image, pInfo->image);
+
+   /* Bound images take their addresses from capture-replay memory; only
+    * sparse planes have addresses of their own.
+    */
+   struct hk_image_capture_data data = {0};
+   for (uint8_t p = 0; p < image->plane_count; p++) {
+      const struct hk_image_plane *plane = &image->planes[p];
+      if (plane->va && (plane->va->flags & AGX_VA_REPLAY))
+         data.planes[p].va = plane->va->addr;
+      if (plane->apple9_residency &&
+          (plane->apple9_residency->va->flags & AGX_VA_REPLAY))
+         data.planes[p].residency = plane->apple9_residency->va->addr;
+   }
+
+   memcpy(pData, &data, sizeof(data));
    return VK_SUCCESS;
 }

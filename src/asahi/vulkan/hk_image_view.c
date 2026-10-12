@@ -656,3 +656,15 @@ hk_apple9_view_residency(const struct hk_device *dev,
 
    return (table ? table : dev->apple9_resident)->va->addr;
 }
+
+VKAPI_ATTR VkResult VKAPI_CALL
+hk_GetImageViewOpaqueCaptureDescriptorDataEXT(
+   UNUSED VkDevice device,
+   UNUSED const VkImageViewCaptureDescriptorDataInfoEXT *pInfo,
+   void *pData)
+{
+   /* Views allocate nothing that descriptors embed; their addresses are the
+    * image's. */
+   memset(pData, 0, HK_IMAGE_VIEW_CAPTURE_DATA_SIZE);
+   return VK_SUCCESS;
+}

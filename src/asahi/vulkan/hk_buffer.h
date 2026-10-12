@@ -17,6 +17,11 @@
 struct hk_device_memory;
 struct hk_physical_device;
 
+/* Buffers placed at a replayable address of their own. */
+#define HK_BUFFER_CREATE_CAPTURE_REPLAY_BITS                                   \
+   (VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT |                       \
+    VK_BUFFER_CREATE_DESCRIPTOR_BUFFER_CAPTURE_REPLAY_BIT_EXT)
+
 struct hk_buffer {
    struct vk_buffer vk;
 

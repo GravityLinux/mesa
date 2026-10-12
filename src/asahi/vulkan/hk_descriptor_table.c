@@ -127,13 +127,41 @@ hk_descriptor_table_alloc_locked(struct hk_device *dev,
    return VK_SUCCESS;
 }
 
+/* Allocates a given index, for descriptor-buffer capture replay. */
+static VkResult
+hk_descriptor_table_alloc_at_locked(struct hk_device *dev,
+                                    struct hk_descriptor_table *table,
+                                    uint32_t index)
+{
+   if (index < table->next_desc) {
+      for (uint32_t i = 0; i < table->free_count; i++) {
+         if (table->free_table[i] == index) {
+            table->free_table[i] = table->free_table[--table->free_count];
+            return VK_SUCCESS;
+         }
+      }
+   } else if (index < table->alloc) {
+      while (table->next_desc < index)
+         table->free_table[table->free_count++] = table->next_desc++;
+
+      table->next_desc++;
+      return VK_SUCCESS;
+   }
+
+   return vk_errorf(dev, VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS,
+                    "Descriptor table index %u unavailable", index);
+}
+
 static VkResult
 hk_descriptor_table_add_locked(struct hk_device *dev,
                                struct hk_descriptor_table *table,
                                const void *desc_data, size_t desc_size,
                                uint32_t *index_out)
 {
-   VkResult result = hk_descriptor_table_alloc_locked(dev, table, index_out);
+   VkResult result =
+      *index_out != HK_DESCRIPTOR_TABLE_ANY_INDEX
+         ? hk_descriptor_table_alloc_at_locked(dev, table, *index_out)
+         : hk_descriptor_table_alloc_locked(dev, table, index_out);
    if (result != VK_SUCCESS)
       return result;
 

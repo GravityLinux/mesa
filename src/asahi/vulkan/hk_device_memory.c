@@ -149,10 +149,32 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
        * derive those addresses from the memory's, so align large ones.
        */
       unsigned va_align = aligned_size >= 65536 ? 65536 : 0;
-      mem->bo = agx_bo_create(&dev->dev, aligned_size, va_align, flags,
-                              "App memory");
+
+      /* Capture-replay memory lives in the replay range, at its captured
+       * address on replay. Buffers and images bound to it get their captured
+       * addresses with it, and so do descriptors that embed them.
+       */
+      enum agx_va_flags va_flags = 0;
+      uint64_t replay_addr = 0;
+      if (mem->vk.alloc_flags &
+          VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT) {
+         const VkMemoryOpaqueCaptureAddressAllocateInfo *replay_info =
+            vk_find_struct_const(pAllocateInfo->pNext,
+                                 MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO);
+         if (replay_info)
+            replay_addr = replay_info->opaqueCaptureAddress;
+
+         va_flags = AGX_VA_REPLAY | (replay_addr ? AGX_VA_FIXED : 0);
+      }
+
+      mem->bo = agx_bo_create_va(&dev->dev, aligned_size, va_align, flags,
+                                 va_flags, replay_addr, "App memory");
       if (!mem->bo) {
-         result = vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+         result = replay_addr
+                     ? vk_errorf(dev, VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS,
+                                 "Replay address 0x%" PRIx64 " unavailable",
+                                 replay_addr)
+                     : vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
          goto fail_alloc;
       }
    }
@@ -378,10 +400,15 @@ hk_GetMemoryFdKHR(VkDevice device, const VkMemoryGetFdInfoKHR *pGetFdInfo,
 VKAPI_ATTR uint64_t VKAPI_CALL
 hk_GetDeviceMemoryOpaqueCaptureAddress(
    UNUSED VkDevice device,
-   UNUSED const VkDeviceMemoryOpaqueCaptureAddressInfo *pInfo)
+   const VkDeviceMemoryOpaqueCaptureAddressInfo *pInfo)
 {
-   /* Addresses are replayed at buffer and image creation, not memory. */
-   return 0;
+   VK_FROM_HANDLE(hk_device_memory, mem, pInfo->memory);
+
+   /* Only capture-replay memory can be placed at a given address again. */
+   if (!(mem->bo->va->flags & AGX_VA_REPLAY))
+      return 0;
+
+   return mem->bo->va->addr;
 }
 
 /* Device memory is never paged out, so priorities have no effect. */

@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "util/u_debug.h"
+#include <inttypes.h>
 #include "hk_buffer.h"
 
 #include "agx_bo.h"
@@ -38,7 +39,7 @@ hk_get_buffer_alignment(const struct hk_physical_device *pdev,
       alignment = MAX2(alignment, HK_MIN_TEXEL_BUFFER_ALIGNMENT);
 
    if (create_flags & (VK_BUFFER_CREATE_SPARSE_BINDING_BIT |
-                       VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT))
+                       HK_BUFFER_CREATE_CAPTURE_REPLAY_BITS))
       alignment = MAX2(alignment, 16384);
 
    return alignment;
@@ -58,6 +59,23 @@ hk_get_bda_replay_addr(const VkBufferCreateInfo *pCreateInfo)
 #else
             assert(addr == 0 || bda->opaqueCaptureAddress == addr);
             addr = bda->opaqueCaptureAddress;
+#endif
+         }
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_OPAQUE_CAPTURE_DESCRIPTOR_DATA_CREATE_INFO_EXT: {
+         /* Descriptor-buffer capture data of a buffer is its address. */
+         const VkOpaqueCaptureDescriptorDataCreateInfoEXT *dd = (void *)ext;
+         uint64_t dd_addr = 0;
+         if (dd->opaqueCaptureDescriptorData)
+            memcpy(&dd_addr, dd->opaqueCaptureDescriptorData, sizeof(dd_addr));
+         if (dd_addr != 0) {
+#ifdef NDEBUG
+            return dd_addr;
+#else
+            assert(addr == 0 || dd_addr == addr);
+            addr = dd_addr;
 #endif
          }
          break;
@@ -173,11 +191,10 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
    if (buffer->vk.size > 0 &&
        (buffer->apple9_index_va || (buffer->vk.create_flags &
         (VK_BUFFER_CREATE_SPARSE_BINDING_BIT |
-         VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT)))) {
+         HK_BUFFER_CREATE_CAPTURE_REPLAY_BITS)))) {
 
       const bool bda_capture_replay =
-         buffer->vk.create_flags &
-         VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT;
+         buffer->vk.create_flags & HK_BUFFER_CREATE_CAPTURE_REPLAY_BITS;
       const uint64_t bda_fixed_addr =
          bda_capture_replay ? hk_get_bda_replay_addr(pCreateInfo) : 0;
 
@@ -201,7 +218,7 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
             VK_BUFFER_USAGE_2_PUSH_DESCRIPTORS_DESCRIPTOR_BUFFER_BIT_EXT)))
          flags |= AGX_VA_USC;
       if (bda_capture_replay)
-         flags |= bda_fixed_addr != 0 ? AGX_VA_FIXED : AGX_VA_LOW;
+         flags |= AGX_VA_REPLAY | (bda_fixed_addr != 0 ? AGX_VA_FIXED : 0);
 
       buffer->va =
          agx_va_alloc(&dev->dev, vma_size_B, alignment, flags, bda_fixed_addr);
@@ -221,6 +238,11 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
 
       if (!buffer->va) {
          vk_buffer_destroy(&dev->vk, pAllocator, &buffer->vk);
+         /* Never place a replayed buffer anywhere but its captured address. */
+         if (bda_fixed_addr)
+            return vk_errorf(dev, VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS,
+                             "Replay address 0x%" PRIx64 " unavailable",
+                             bda_fixed_addr);
          return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
                           "Sparse VMA allocation failed");
       }
@@ -428,7 +450,11 @@ hk_GetBufferOpaqueCaptureAddress(UNUSED VkDevice device,
 {
    VK_FROM_HANDLE(hk_buffer, buffer, pInfo->buffer);
 
-   return hk_buffer_address_rw(buffer, 0);
+   /* Only capture-replay buffers have an address of their own to replay. */
+   if (!buffer->va || !(buffer->va->flags & AGX_VA_REPLAY))
+      return 0;
+
+   return buffer->va->addr;
 }
 
 uint64_t
@@ -450,4 +476,18 @@ hk_buffer_address(const struct hk_buffer *buffer, uint64_t offset,
    }
 
    return addr;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+hk_GetBufferOpaqueCaptureDescriptorDataEXT(
+   UNUSED VkDevice device, const VkBufferCaptureDescriptorDataInfoEXT *pInfo,
+   void *pData)
+{
+   VK_FROM_HANDLE(hk_buffer, buffer, pInfo->buffer);
+
+   uint64_t addr = buffer->va && (buffer->va->flags & AGX_VA_REPLAY)
+                      ? buffer->va->addr
+                      : 0;
+   memcpy(pData, &addr, sizeof(addr));
+   return VK_SUCCESS;
 }
