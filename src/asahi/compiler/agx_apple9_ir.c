@@ -753,6 +753,34 @@ agx_apple9_vir_emit_texture_lod(struct agx_apple9_vir_program *program,
                                   true, bias);
 }
 
+/* A biased 2D sample clamped to a minimum LOD: four parameter words, the
+ * coordinates, a zero word and word 3 = bias Q6 << 16 | minimum LOD Q6
+ * (low 12 bits), with mode 0x0804. Measured on G16 against the gradient form
+ * (bit exact for implicit and biased samples across nearest and linear
+ * mipmapping, fractional minimum LODs and clamps at the base and last levels;
+ * msl-encodings-20261011, minlod-probe). */
+uint32_t
+agx_apple9_vir_emit_texture_min_lod(struct agx_apple9_vir_program *program,
+                                   const uint32_t coords[2], uint32_t zero,
+                                   uint32_t bias_min_lod, unsigned texture,
+                                   unsigned sampler)
+{
+   if (!program || !coords || zero >= program->value_count ||
+       bias_min_lod >= program->value_count)
+      return AGX_APPLE9_VREG_INVALID;
+   uint32_t result = apple9_vir_emit_texture(program, coords, zero, texture,
+                                             sampler, true, true);
+   if (result == AGX_APPLE9_VREG_INVALID)
+      return result;
+   struct agx_apple9_vir_instr *params = program->instructions[program->instruction_count - 2];
+   params->encoding = AGX_APPLE9_ENC_TEXTURE_VOLUME_PARAMS;
+   params->nr_srcs = 4;
+   params->src[2] = zero;
+   params->src[3] = bias_min_lod;
+   program->instructions[program->instruction_count - 1]->texture_min_lod = true;
+   return result;
+}
+
 uint32_t
 agx_apple9_vir_emit_texture_ms(struct agx_apple9_vir_program *program,
                               const uint32_t coords[4],
@@ -7046,9 +7074,17 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
          bytes[7] = 1;
       }
       if (instruction->texture_min_lod) {
-         if (!gradient || instruction->texture_dimension == 3)
+         if (instruction->texture_dimension == 3 ||
+             (!gradient && (!lod || !instruction->immediate ||
+                            instruction->texture_dimension != 0)))
             return false;
-         bytes[6] |= 0x10;
+         if (gradient) {
+            bytes[6] |= 0x10;
+         } else {
+            /* Bias with a minimum LOD, both in parameter word 3. */
+            bytes[6] = 0x04;
+            bytes[7] = 0x08;
+         }
       }
       if (instruction->texture_shadow) {
          bytes[6] |= 0x20;

@@ -345,7 +345,9 @@ struct agx_apple9_vir_instr {
    uint8_t texture_dimension;
    bool texture_shadow;
    /* Gradient samples clamp the selected LOD from below by the signed Q6
-    * value in bits 16..27 of coordinate word 3. */
+    * value in bits 16..27 of coordinate word 3; biased 2D samples by the
+    * one in its low 12 bits. Biased array samples carry theirs in word 2
+    * without this flag. */
    bool texture_min_lod;
    bool texture_fetch;
    bool texture_lod_query;
@@ -725,6 +727,9 @@ uint32_t agx_apple9_vir_emit_texture_sample(
    struct agx_apple9_vir_program *program, const uint32_t coords[2],
    uint32_t one, unsigned texture, unsigned sampler);
 
+uint32_t agx_apple9_vir_emit_texture_min_lod(
+   struct agx_apple9_vir_program *program, const uint32_t coords[2],
+   uint32_t zero, uint32_t bias_min_lod, unsigned texture, unsigned sampler);
 uint32_t agx_apple9_vir_emit_texture_ms(
    struct agx_apple9_vir_program *program, const uint32_t coords[4],
    unsigned texture, unsigned sampler, bool array);
