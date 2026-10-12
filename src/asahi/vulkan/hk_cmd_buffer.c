@@ -732,7 +732,7 @@ hk_image_overlaps(const struct hk_image *a, const struct hk_image *b)
  * reads after the barrier in R see them. Later draws in R that write memory
  * end it first (hk_apple9_prepare_draw). */
 static bool
-hk_render_merge_image_barrier(struct hk_cmd_buffer *cmd)
+hk_render_merge_image_barrier(struct hk_cmd_buffer *cmd, VkPipelineStageFlags2 src)
 {
    static int enabled = -1;
    if (enabled < 0)
@@ -740,6 +740,19 @@ hk_render_merge_image_barrier(struct hk_cmd_buffer *cmd)
    const struct hk_image *image = cmd->barrier_image;
    if (!enabled || !image || cmd->barrier_qfot || cmd->in_meta ||
        cmd->merge_cs->merge_writes || image->planes[0].sparse_map)
+      return false;
+   /* The barrier's execution scope covers all earlier work in its source
+    * stages, not only accesses to its image. When the render's attachments
+    * are in layouts that allow shader access, its passes may have read them
+    * as textures; a source in shader stages may order those reads before a
+    * later pass's attachment writes, which other tiles of the merged render
+    * could perform first. */
+   const VkPipelineStageFlags2 attachment_output =
+      VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+      VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+      VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
+      VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+   if (cmd->merge_feedback && (src & ~attachment_output))
       return false;
    for (unsigned i = 0; i < cmd->merge_key.color_count; ++i) {
       const struct vk_image *target = cmd->merge_key.image[i];
@@ -761,7 +774,7 @@ hk_cmd_sync_barrier(struct hk_cmd_buffer *cmd,
       bool image_barrier = false;
       if ((!cmd->in_meta &&
            hk_render_merge_barrier(src, dst, src_access, dst_access)) ||
-          (image_barrier = hk_render_merge_image_barrier(cmd))) {
+          (image_barrier = hk_render_merge_image_barrier(cmd, src))) {
          cmd->merge_cs->merge_hoisted |= image_barrier;
          if (image_barrier)
             perf_debug(cmd, "Hoisting an image barrier ahead of the open render");

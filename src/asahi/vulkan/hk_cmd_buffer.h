@@ -243,6 +243,9 @@ struct hk_render_registers {
 struct hk_rendering_state {
    /* Colour attachments this render pass stores (bit per attachment). */
    uint32_t store_mask;
+   /* An attachment is in a layout that also allows shader access (GENERAL
+    * or a feedback loop): passes may read it as a texture. */
+   bool feedback;
    VkRenderingFlagBits flags;
 
    VkRect2D area;
@@ -737,6 +740,7 @@ struct hk_cmd_buffer {
    /* Colour attachments the open render's passes stored: a continuing pass
     * must store them too, or the merged render would drop those stores. */
    uint32_t merge_store_mask;
+   bool merge_feedback;
    /* The kept-open render has no draws yet: its render state, which the
     * empty-render optimization needs if it ends without being continued. */
    struct hk_rendering_state *merge_empty_render;

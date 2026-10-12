@@ -698,6 +698,17 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
           is_attachment_stored(&pRenderingInfo->pColorAttachments[i]))
          render->store_mask |= BITFIELD_BIT(i);
    }
+   const VkRenderingAttachmentInfo *feedback_att[HK_MAX_RTS + 2] = {
+      pRenderingInfo->pDepthAttachment, pRenderingInfo->pStencilAttachment};
+   for (uint32_t i = 0; i < MIN2(pRenderingInfo->colorAttachmentCount, HK_MAX_RTS); i++)
+      feedback_att[2 + i] = &pRenderingInfo->pColorAttachments[i];
+   for (unsigned i = 0; i < ARRAY_SIZE(feedback_att); ++i) {
+      const VkRenderingAttachmentInfo *att = feedback_att[i];
+      if (att && att->imageView &&
+          (att->imageLayout == VK_IMAGE_LAYOUT_GENERAL ||
+           att->imageLayout == VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT))
+         render->feedback = true;
+   }
    render->view_mask = pRenderingInfo->viewMask;
    render->layer_count = pRenderingInfo->layerCount;
    render->tilebuffer.nr_samples = 0;
@@ -936,6 +947,8 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
        * first pass, loads or clears every tile it processes. */
       perf_debug(cmd, "Merging render pass into the previous render");
       render->first_cs = cmd->merge_first_cs ? cmd->merge_cs : NULL;
+      /* The render's earlier passes may have read their attachments too. */
+      render->feedback |= cmd->merge_feedback;
       cmd->merge_cs = NULL;
       cmd->merge_empty = false;
       hk_cmd_buffer_dirty_all(cmd);
@@ -1114,6 +1127,7 @@ hk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
       /* A continuing pass stores at least what the passes before it did, so
        * its mask covers the whole open render. */
       cmd->merge_store_mask = render->store_mask;
+      cmd->merge_feedback = render->feedback;
       cmd->merge_cs = cs;
       cmd->merge_first_cs = cs == render->first_cs;
       /* A render without draws yet: keep its state for the empty-render
