@@ -596,6 +596,10 @@ hk_render_merge_key(struct hk_render_merge_key *key, VkRenderingFlags flags,
                  VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT)) ||
        depth_stencil || !color_count || color_count > HK_MAX_RTS)
       return false;
+   /* Merged multiview renders fail multiview.readback_implicit_clear 8_1_1_8
+    * (cause not understood yet); keep multiview renders separate. */
+   if (view_mask)
+      return false;
 
    memset(key, 0, sizeof(*key));
    key->color_count = color_count;
