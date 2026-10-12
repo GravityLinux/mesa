@@ -2262,6 +2262,45 @@ TEST(Apple9Packer, HalfSourceSignAndCompactFma)
    EXPECT_FALSE(agx_apple9_pack_vir_instruction(&fma, phys, &packed, &reason));
 }
 
+/* The single-instruction colour pack, from Metal's encodings of our own render
+ * pipelines writing RG11B10Float and RGB10A2Unorm (pack-probe pv.*.bin and
+ * pl.*.bin): sources dying at the pack, and one kept live. */
+TEST(Apple9Packer, PackFormatMatchesOwnMslEncodings)
+{
+   struct {
+      const char *name;
+      enum agx_apple9_pack_format format;
+      uint8_t phys[5], live;
+      std::vector<uint8_t> metal;
+   } cases[] = {
+      {"rg11b10_dead", AGX_APPLE9_PACK_R11G11B10_FLOAT, {0, 0, 1, 2}, 0,
+       {0xa7, 0x06, 0x54, 0x00, 0x02, 0x00, 0x08, 0x20, 0x10, 0xa0, 0xca, 0x89, 0x24, 0x08}},
+      {"rg11b10_live0", AGX_APPLE9_PACK_R11G11B10_FLOAT, {0, 1, 0, 2}, 1,
+       {0xa7, 0x06, 0x54, 0x00, 0x02, 0x04, 0x02, 0x20, 0x10, 0xa0, 0x8a, 0x89, 0x24, 0x08}},
+      {"rgb10a2_dead", AGX_APPLE9_PACK_R10G10B10A2_UNORM, {0, 0, 1, 2, 3}, 0,
+       {0xa7, 0x06, 0x54, 0x00, 0x02, 0x00, 0x08, 0x20, 0x60, 0xa0, 0xea, 0x8b, 0x24, 0x11}},
+   };
+   for (const auto &test : cases) {
+      const bool rgba = test.format == AGX_APPLE9_PACK_R10G10B10A2_UNORM;
+      agx_apple9_vir_instr I = {
+         .op = AGX_APPLE9_VIR_PACK_FORMAT,
+         .encoding = rgba ? AGX_APPLE9_ENC_PACK_FORMAT : AGX_APPLE9_ENC_PACK_FORMAT_RGB,
+         .dest = 0,
+         .src = {1, 2, 3, 4},
+         .nr_srcs = (uint8_t)(rgba ? 4 : 3),
+      };
+      I.immediate = test.format;
+      I.live_after_mask = test.live;
+      agx_apple9_packed_instruction packed = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_pack_vir_instruction(&I, test.phys, &packed, &reason))
+         << test.name << ": " << (reason ? reason : "");
+      ASSERT_EQ(packed.length, test.metal.size()) << test.name;
+      for (unsigned i = 0; i < test.metal.size(); ++i)
+         EXPECT_EQ(packed.bytes[i], test.metal[i]) << test.name << " byte=" << i;
+   }
+}
+
 TEST(Apple9Packer, Fp16SourcesMatchOwnMslEncodings)
 {
    struct {

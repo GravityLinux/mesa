@@ -50,6 +50,9 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_PACK_HALF_2X16,
    AGX_APPLE9_VIR_PACK_UNORM_2X16,
    AGX_APPLE9_VIR_PACK_UNORM_4X8,
+   /* Three or four FP32 channels to one packed word; immediate is an
+    * enum agx_apple9_pack_format. */
+   AGX_APPLE9_VIR_PACK_FORMAT,
    /* immediate selects the low (0) or high (1) half of the source. */
    AGX_APPLE9_VIR_UNPACK_HALF,
    /* Two normalized components to FP32. Mode plus input half in immediate. */
@@ -257,6 +260,13 @@ enum agx_apple9_select_condition {
  * completion groups for outstanding asynchronous work.  AUTO is compiler IR only and must be resolved
  * after final instruction scheduling, before packing.
  */
+/* Formats of AGX_APPLE9_VIR_PACK_FORMAT (Metal's encodings of our own render
+ * pipelines: one instruction per packed colour). */
+enum agx_apple9_pack_format {
+   AGX_APPLE9_PACK_R11G11B10_FLOAT,
+   AGX_APPLE9_PACK_R10G10B10A2_UNORM,
+};
+
 enum agx_apple9_scoreboard_slot {
    AGX_APPLE9_SCOREBOARD_SLOT_NONE = 0,
    AGX_APPLE9_SCOREBOARD_SLOT_1 = 1,

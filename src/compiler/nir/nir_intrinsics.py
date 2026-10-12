@@ -2707,6 +2707,12 @@ load("helper_arg_hi_agx", [], [], [CAN_ELIMINATE])
 # Must only appear in the last block of the shader part.
 intrinsic("export_agx", [0], indices=[BASE])
 
+# Pack an RGB(A) FP32 colour into one 32-bit word of the given packed format
+# (R11G11B10_FLOAT or R10G10B10A2_UNORM, component 0 in the low bits), as the
+# Apple9 single-instruction format pack does.
+intrinsic("pack_format_agx", src_comp=[0], dest_comp=1, bit_sizes=[32],
+          indices=[FORMAT], flags=[CAN_ELIMINATE, CAN_REORDER])
+
 # Load an exported vector at the beginning of the shader part from GPRs starting
 # at BASE. Must only appear in the first block of the shader part.
 load("exported_agx", [], [BASE], [CAN_ELIMINATE])
