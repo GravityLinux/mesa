@@ -183,7 +183,8 @@ agx_bo_cache_put_locked(struct agx_device *dev, struct agx_bo *bo)
 static bool
 agx_bo_cache_put(struct agx_device *dev, struct agx_bo *bo)
 {
-   if (bo->flags & AGX_BO_SHARED) {
+   if ((bo->flags & AGX_BO_SHARED) ||
+       (bo->va && (bo->va->flags & (AGX_VA_REPLAY | AGX_VA_FIXED)))) {
       return false;
    } else {
       simple_mtx_lock(&dev->bo_cache.lock);
@@ -432,6 +433,9 @@ agx_bo_unreference(struct agx_device *dev, struct agx_bo *bo)
    pthread_mutex_unlock(&dev->bo_map_lock);
 }
 
+static void agx_bo_finish_create(struct agx_device *dev, struct agx_bo *bo,
+                                 const char *label);
+
 struct agx_bo *
 agx_bo_create(struct agx_device *dev, size_t size, unsigned align,
               enum agx_bo_flags flags, const char *label)
@@ -459,12 +463,12 @@ agx_bo_create(struct agx_device *dev, size_t size, unsigned align,
     * flush the cache to make space for the new allocation.
     */
    if (!bo)
-      bo = dev->ops.bo_alloc(dev, size, align, flags);
+      bo = dev->ops.bo_alloc(dev, size, align, flags, 0, 0);
    if (!bo)
       bo = agx_bo_cache_fetch(dev, size, align, flags, false);
    if (!bo) {
       agx_bo_cache_evict_all(dev);
-      bo = dev->ops.bo_alloc(dev, size, align, flags);
+      bo = dev->ops.bo_alloc(dev, size, align, flags, 0, 0);
    }
 
    if (!bo) {
@@ -472,6 +476,38 @@ agx_bo_create(struct agx_device *dev, size_t size, unsigned align,
       return NULL;
    }
 
+   agx_bo_finish_create(dev, bo, label);
+   return bo;
+}
+
+struct agx_bo *
+agx_bo_create_va(struct agx_device *dev, size_t size, unsigned align,
+                 enum agx_bo_flags flags, enum agx_va_flags va_flags,
+                 uint64_t fixed_va, const char *label)
+{
+   if (!va_flags)
+      return agx_bo_create(dev, size, align, flags, label);
+
+   assert(size > 0);
+   size = ALIGN_POT(size, AIL_PAGESIZE);
+   align = MAX2(align, AIL_PAGESIZE);
+
+   /* A cached BO keeps the VA it was created with, so these never come from
+    * the cache (and never go back to it, see agx_bo_cache_put).
+    */
+   struct agx_bo *bo =
+      dev->ops.bo_alloc(dev, size, align, flags, va_flags, fixed_va);
+   if (!bo)
+      return NULL;
+
+   agx_bo_finish_create(dev, bo, label);
+   return bo;
+}
+
+static void
+agx_bo_finish_create(struct agx_device *dev, struct agx_bo *bo,
+                     const char *label)
+{
    if (bo->shim_cpu_epoch)
       *bo->shim_cpu_epoch = 0; /* Cache reuse must opt in again. */
    bo->label = label;
@@ -486,7 +522,6 @@ agx_bo_create(struct agx_device *dev, size_t size, unsigned align,
    }
 
    agx_bo_dump_all_periodic(dev);
-   return bo;
 }
 
 /* Native DRM mappings are coherent; the remote shim needs an explicit pull. */

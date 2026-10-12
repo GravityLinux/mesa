@@ -113,6 +113,19 @@ struct hk_image {
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(hk_image, vk.base, VkImage, VK_OBJECT_TYPE_IMAGE)
 
+/* Opaque capture data of an image: the addresses of each sparse plane and of
+ * its residency table, which descriptors embed. Zero where not replayable. */
+struct hk_image_plane_capture_data {
+   uint64_t va, residency;
+};
+
+struct hk_image_capture_data {
+   struct hk_image_plane_capture_data planes[3];
+};
+
+/* Image views have no capture data of their own. */
+#define HK_IMAGE_VIEW_CAPTURE_DATA_SIZE 4
+
 static inline uint64_t
 hk_image_plane_base_address(const struct hk_image_plane *plane)
 {

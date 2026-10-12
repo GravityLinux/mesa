@@ -35,5 +35,10 @@ struct hk_sampler {
    } planes[2];
 };
 
+/* Opaque capture data of a sampler: the sampler heap index of each plane. */
+struct hk_sampler_capture_data {
+   uint32_t index[2];
+};
+
 VK_DEFINE_NONDISP_HANDLE_CASTS(hk_sampler, vk.base, VkSampler,
                                VK_OBJECT_TYPE_SAMPLER)

@@ -53,9 +53,10 @@ enum agx_va_flags {
    /* Within the Apple9 render-context aperture, outside kernel storage. */
    AGX_VA_CONTEXT = (1 << 2),
 
-   /* Allocated from the bottom of the heap, away from ordinary BOs, so a
-    * replayed address stays free while the driver keeps allocating. */
-   AGX_VA_LOW = (1 << 3),
+   /* Capture-replay range: the top of the main or USC heap, which no other
+    * allocation uses, so a captured address is still free at replay whatever
+    * the driver allocated first. Combined with AGX_VA_FIXED on replay. */
+   AGX_VA_REPLAY = (1 << 3),
 };
 
 struct agx_va {
@@ -149,6 +150,13 @@ agx_bo_writer(uint32_t queue, uint32_t syncobj)
 struct agx_bo *agx_bo_create(struct agx_device *dev, size_t size,
                              unsigned align, enum agx_bo_flags flags,
                              const char *label);
+
+/* As agx_bo_create, with extra VA flags (AGX_VA_REPLAY, AGX_VA_FIXED) and a
+ * fixed address. Such BOs bypass the BO cache in both directions. */
+struct agx_bo *agx_bo_create_va(struct agx_device *dev, size_t size,
+                                unsigned align, enum agx_bo_flags flags,
+                                enum agx_va_flags va_flags, uint64_t fixed_va,
+                                const char *label);
 
 void agx_bo_reference(struct agx_bo *bo);
 void agx_bo_unreference(struct agx_device *dev, struct agx_bo *bo);

@@ -21,6 +21,7 @@
 #include "hk_image.h"
 #include "hk_instance.h"
 #include "hk_private.h"
+#include "hk_sampler.h"
 #include "hk_shader.h"
 #include "hk_wsi.h"
 
@@ -960,6 +961,13 @@ hk_get_device_properties(const struct agx_device *dev,
       .samplerDescriptorBufferAddressSpaceSize = HK_APPLE9_DB_ADDRESS_SPACE,
       .resourceDescriptorBufferAddressSpaceSize = HK_APPLE9_DB_ADDRESS_SPACE,
       .descriptorBufferAddressSpaceSize = HK_APPLE9_DB_ADDRESS_SPACE,
+      .bufferCaptureReplayDescriptorDataSize = sizeof(uint64_t),
+      .imageCaptureReplayDescriptorDataSize =
+         sizeof(struct hk_image_capture_data),
+      .imageViewCaptureReplayDescriptorDataSize =
+         HK_IMAGE_VIEW_CAPTURE_DATA_SIZE,
+      .samplerCaptureReplayDescriptorDataSize =
+         sizeof(struct hk_sampler_capture_data),
 
       /* VK_EXT_custom_border_color */
       .maxCustomBorderColorSamplers = 4000,
@@ -1926,7 +1934,7 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
       supported_extensions.EXT_descriptor_buffer = true;
       supported_features.descriptorBuffer = true;
       supported_features.descriptorBufferPushDescriptors = true;
-      supported_features.descriptorBufferCaptureReplay = false;
+      supported_features.descriptorBufferCaptureReplay = true;
       supported_features.descriptorBufferImageLayoutIgnored = false;
    }
 

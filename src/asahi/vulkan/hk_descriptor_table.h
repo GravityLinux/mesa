@@ -39,6 +39,10 @@ VkResult hk_descriptor_table_init(struct hk_device *dev,
 void hk_descriptor_table_finish(struct hk_device *dev,
                                 struct hk_descriptor_table *table);
 
+/* index_out is in/out: HK_DESCRIPTOR_TABLE_ANY_INDEX, or the index to take
+ * (descriptor-buffer capture replay). */
+#define HK_DESCRIPTOR_TABLE_ANY_INDEX UINT32_MAX
+
 VkResult hk_descriptor_table_add(struct hk_device *dev,
                                  struct hk_descriptor_table *table,
                                  const void *desc_data, size_t desc_size,

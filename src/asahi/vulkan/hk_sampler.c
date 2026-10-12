@@ -193,6 +193,20 @@ hk_CreateSampler(VkDevice device,
    if (!sampler)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
+   /* Descriptors carry the sampler heap index of each plane. A replayed
+    * sampler takes the indices it was captured with.
+    */
+   struct hk_sampler_capture_data replay = {
+      .index = {HK_DESCRIPTOR_TABLE_ANY_INDEX, HK_DESCRIPTOR_TABLE_ANY_INDEX},
+   };
+   if (info->flags & VK_SAMPLER_CREATE_DESCRIPTOR_BUFFER_CAPTURE_REPLAY_BIT_EXT) {
+      const VkOpaqueCaptureDescriptorDataCreateInfoEXT *cap_info =
+         vk_find_struct_const(info->pNext,
+                              OPAQUE_CAPTURE_DESCRIPTOR_DATA_CREATE_INFO_EXT);
+      if (cap_info && cap_info->opaqueCaptureDescriptorData)
+         memcpy(&replay, cap_info->opaqueCaptureDescriptorData, sizeof(replay));
+   }
+
    /* G16 samples custom border colours natively, with the border format the
     * application provides (customBorderColorWithoutFormat is not exposed).
     * Its opaque black needs no RGBA4 workaround through that path. */
@@ -252,7 +266,8 @@ hk_CreateSampler(VkDevice device,
       sampler->txl_nudge_fp16 = _mesa_float_to_half(1.0f / 64.0f);
 
    result =
-      hk_sampler_heap_add(dev, samp, &sampler->planes[sampler->plane_count].hw);
+      hk_sampler_heap_add(dev, samp, replay.index[sampler->plane_count],
+                          &sampler->planes[sampler->plane_count].hw);
    if (result != VK_SUCCESS) {
       hk_DestroySampler(device, hk_sampler_to_handle(sampler), pAllocator);
       return result;
@@ -283,7 +298,8 @@ hk_CreateSampler(VkDevice device,
 
          pack_sampler(pdev, &plane2_info, false, workaround_rgba4, false, &samp);
          result = hk_sampler_heap_add(
-            dev, samp, &sampler->planes[sampler->plane_count].hw);
+            dev, samp, replay.index[sampler->plane_count],
+            &sampler->planes[sampler->plane_count].hw);
 
          if (result != VK_SUCCESS) {
             hk_DestroySampler(device, hk_sampler_to_handle(sampler),
@@ -299,6 +315,7 @@ hk_CreateSampler(VkDevice device,
        */
       pack_sampler(pdev, info, false, workaround_rgba4, false, &samp);
       result = hk_sampler_heap_add(dev, samp,
+                                   replay.index[sampler->plane_count],
                                    &sampler->planes[sampler->plane_count].hw);
 
       if (result != VK_SUCCESS) {
@@ -349,4 +366,21 @@ hk_DestroySampler(VkDevice device, VkSampler _sampler,
    }
 
    vk_sampler_destroy(&dev->vk, pAllocator, &sampler->vk);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+hk_GetSamplerOpaqueCaptureDescriptorDataEXT(
+   UNUSED VkDevice device, const VkSamplerCaptureDescriptorDataInfoEXT *pInfo,
+   void *pData)
+{
+   VK_FROM_HANDLE(hk_sampler, sampler, pInfo->sampler);
+
+   struct hk_sampler_capture_data data = {
+      .index = {HK_DESCRIPTOR_TABLE_ANY_INDEX, HK_DESCRIPTOR_TABLE_ANY_INDEX},
+   };
+   for (unsigned i = 0; i < sampler->plane_count; i++)
+      data.index[i] = sampler->planes[i].hw->index;
+
+   memcpy(pData, &data, sizeof(data));
+   return VK_SUCCESS;
 }

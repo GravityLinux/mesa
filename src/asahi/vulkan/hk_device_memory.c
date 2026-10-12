@@ -14,6 +14,7 @@
 #include "asahi/lib/agx_bo.h"
 #include "wsi_common.h"
 #include "util/u_atomic.h"
+#include "util/u_debug.h"
 
 #include <inttypes.h>
 #include <sys/mman.h>
@@ -149,10 +150,32 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
        * derive those addresses from the memory's, so align large ones.
        */
       unsigned va_align = aligned_size >= 65536 ? 65536 : 0;
-      mem->bo = agx_bo_create(&dev->dev, aligned_size, va_align, flags,
-                              "App memory");
+
+      /* Capture-replay memory lives in the replay range, at its captured
+       * address on replay. Buffers and images bound to it get their captured
+       * addresses with it, and so do descriptors that embed them.
+       */
+      enum agx_va_flags va_flags = 0;
+      uint64_t replay_addr = 0;
+      if (mem->vk.alloc_flags &
+          VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT) {
+         const VkMemoryOpaqueCaptureAddressAllocateInfo *replay_info =
+            vk_find_struct_const(pAllocateInfo->pNext,
+                                 MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO);
+         if (replay_info)
+            replay_addr = replay_info->opaqueCaptureAddress;
+
+         va_flags = AGX_VA_REPLAY | (replay_addr ? AGX_VA_FIXED : 0);
+      }
+
+      mem->bo = agx_bo_create_va(&dev->dev, aligned_size, va_align, flags,
+                                 va_flags, replay_addr, "App memory");
       if (!mem->bo) {
-         result = vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+         result = replay_addr
+                     ? vk_errorf(dev, VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS,
+                                 "Replay address 0x%" PRIx64 " unavailable",
+                                 replay_addr)
+                     : vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
          goto fail_alloc;
       }
    }
@@ -171,6 +194,22 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
          result = vk_error(dev, VK_ERROR_UNKNOWN);
          goto fail_alloc;
       }
+   }
+
+   if (debug_get_bool_option("HK_REPLAY_DEBUG", false)) {
+      const VkMemoryAllocateFlagsInfo *flags_info =
+         vk_find_struct_const(pAllocateInfo->pNext, MEMORY_ALLOCATE_FLAGS_INFO);
+      const VkMemoryOpaqueCaptureAddressAllocateInfo *opaque_info =
+         vk_find_struct_const(pAllocateInfo->pNext,
+                              MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO);
+      fprintf(stderr,
+              "hk-replay: memory size=0x%" PRIx64 " type=%u flags=0x%x "
+              "requested=0x%" PRIx64 " got=0x%" PRIx64 "\n",
+              (uint64_t)pAllocateInfo->allocationSize,
+              pAllocateInfo->memoryTypeIndex,
+              flags_info ? flags_info->flags : 0,
+              opaque_info ? opaque_info->opaqueCaptureAddress : 0,
+              mem->bo->va ? mem->bo->va->addr : 0);
    }
 
    /* Under virtio the host compositor reads WSI images with implicit sync,
@@ -378,10 +417,15 @@ hk_GetMemoryFdKHR(VkDevice device, const VkMemoryGetFdInfoKHR *pGetFdInfo,
 VKAPI_ATTR uint64_t VKAPI_CALL
 hk_GetDeviceMemoryOpaqueCaptureAddress(
    UNUSED VkDevice device,
-   UNUSED const VkDeviceMemoryOpaqueCaptureAddressInfo *pInfo)
+   const VkDeviceMemoryOpaqueCaptureAddressInfo *pInfo)
 {
-   /* Addresses are replayed at buffer and image creation, not memory. */
-   return 0;
+   VK_FROM_HANDLE(hk_device_memory, mem, pInfo->memory);
+
+   /* Only capture-replay memory can be placed at a given address again. */
+   if (!(mem->bo->va->flags & AGX_VA_REPLAY))
+      return 0;
+
+   return mem->bo->va->addr;
 }
 
 /* Device memory is never paged out, so priorities have no effect. */
