@@ -7194,6 +7194,21 @@ apple9_preamble_safe_read(nir_instr *instr)
           nir_scalar_as_uint(hi) == (AGX_APPLE9_USC_BASE >> 32);
 }
 
+/* The first block of a loop at function level runs once whenever the shader
+ * reaches the loop: no break or continue can precede it. A uniform value it
+ * computes from read-only memory is the same on every iteration, so it can
+ * move to the entry like a function-level block. DXIL's single-trip
+ * "loop { ...; break; }" early-exit wrapper puts whole shaders there. */
+static bool
+apple9_block_runs_once_per_loop_entry(nir_block *block)
+{
+   nir_cf_node *parent = block->cf_node.parent;
+   return parent->type == nir_cf_node_loop &&
+          parent->parent->type == nir_cf_node_function &&
+          block == nir_loop_first_block(nir_cf_node_as_loop(parent)) &&
+          !getenv("AGX_APPLE9_NO_LOOP_HEAD_HOIST");
+}
+
 static bool
 apple9_can_hoist_uniform(nir_src *src, void *data)
 {
@@ -7204,6 +7219,7 @@ apple9_can_hoist_uniform(nir_src *src, void *data)
       return *state == 2;
    *state = 1;
    if (instr->block != s->entry && !nir_instr_can_speculate(instr) &&
+       !apple9_block_runs_once_per_loop_entry(instr->block) &&
        !(s->safe_reads && apple9_preamble_safe_read(instr)) &&
        !(s->descriptor_reads && apple9_descriptor_read(instr)) &&
        !(s->descriptor_chain && apple9_preamble_safe_read(instr) &&
@@ -7316,9 +7332,13 @@ apple9_hoist_uniform_reads(nir_shader *nir, struct hash_table *original_blocks,
       if (block == s.entry)
          continue;
       nir_foreach_instr_safe(instr, block) {
+         /* In a run-once loop head, offer whole uniform expressions (the
+          * bounds selects of the reads), not just the reads. */
          if (!apple9_is_bounds_limit(instr) &&
              !(instr->type == nir_instr_type_intrinsic &&
-               nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_global_2x32))
+               nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_global_2x32) &&
+             !(instr->type == nir_instr_type_alu &&
+               apple9_block_runs_once_per_loop_entry(block)))
             continue;
          nir_src src = nir_src_for_ssa(nir_instr_def(instr));
          s.descriptor_chain = s.descriptor_reads && apple9_descriptor_read(instr);
