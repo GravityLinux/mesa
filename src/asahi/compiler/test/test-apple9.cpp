@@ -9700,13 +9700,13 @@ TEST(Apple9Compiler, TextureOffsetsLowerPerMipThroughOrdinaryFetches)
       agx_shader_part compiled = {};
       ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason)) << (reason ?: "");
       EXPECT_EQ(compiled.info.apple9_texture_mask, 1u << 7);
-      /* With runtime sampler state, 2D and 3D samples encode constant
-       * offsets natively. A 2D array passes the shape check but its final
-       * form has no measured offset variant, so the backend falls back to the
-       * runtime lowering, which samples single levels natively (and a custom
-       * border colour) and binds the sampler. Static keys always lower and
-       * filter with ordinary fetches. */
-      const bool native = runtime && kind != 1;
+      /* With runtime sampler state, 2D, 2D array and 3D samples encode
+       * constant offsets natively. A shadow 2D array's final form has no
+       * measured offset variant, so the backend falls back to the runtime
+       * lowering, which samples single levels natively (and a custom border
+       * colour) and binds the sampler. Static keys always lower and filter
+       * with ordinary fetches. */
+      const bool native = runtime && !(kind == 1 && shadow);
       EXPECT_EQ(compiled.info.apple9_sampler_mask,
                 native || runtime ? 1u << 5 : 0u);
       EXPECT_EQ(compiled.info.apple9_uses_texel_fetch, !native);
@@ -9722,8 +9722,11 @@ TEST(Apple9Compiler, TextureOffsetModesCoverOnlyMeasuredForms)
    EXPECT_EQ(mode, 0x0211);
    EXPECT_TRUE(agx_apple9_texture_offset_mode(0x0114, &mode));
    EXPECT_EQ(mode, 0x0249);
-   /* Our 2D array forms have no measured offset variant. */
-   for (uint16_t unmapped : {0x0508, 0x040c, 0x050c})
+   /* The explicit-LOD 2D array form takes 0x0651; the biased and gradient
+    * array forms have no measured offset variant. */
+   EXPECT_TRUE(agx_apple9_texture_offset_mode(0x0508, &mode));
+   EXPECT_EQ(mode, 0x0651);
+   for (uint16_t unmapped : {0x040c, 0x050c})
       EXPECT_FALSE(agx_apple9_texture_offset_mode(unmapped, &mode)) << unmapped;
    EXPECT_EQ(agx_apple9_texture_mode(true, false, false, 0, false, false),
              0x0100);

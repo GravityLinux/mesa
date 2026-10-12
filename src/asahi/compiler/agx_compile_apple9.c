@@ -8809,10 +8809,13 @@ apple9_offset_form_encodable(const nir_tex_instr *tex)
 {
    const bool volume = tex->coord_components >= 3 || tex->is_shadow;
    unsigned dimension = 0;
-   if (tex->is_array || tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE)
+   if (tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE)
       return false;
    if (tex->sampler_dim == GLSL_SAMPLER_DIM_3D)
       dimension = 3;
+   /* 2D arrays pack the layer with the LOD (dimension 2). */
+   if (tex->is_array)
+      dimension = 2;
    /* Minimum-LOD samples keep the offset lowering (see the shape check). */
    if (nir_tex_instr_src_index(tex, nir_tex_src_min_lod) >= 0)
       return false;
