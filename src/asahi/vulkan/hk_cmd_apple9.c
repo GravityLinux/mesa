@@ -358,6 +358,31 @@ hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd)
       }
    }
 
+   /* A stream that continued across a hoisted image barrier must not write
+    * memory: tiles of its earlier passes may still read what it writes. */
+   const struct hk_graphics_state *gfx = &cmd->state.gfx;
+   bool writes = gfx->xfb_enabled;
+   for (unsigned s = 0; s < MESA_SHADER_FRAGMENT + 1 && !writes; ++s) {
+      if (s != MESA_SHADER_COMPUTE && gfx->shaders[s])
+         writes = gfx->shaders[s]->writes_memory;
+   }
+   writes |= gfx->shaders[MESA_SHADER_TASK] && gfx->shaders[MESA_SHADER_TASK]->writes_memory;
+   writes |= gfx->shaders[MESA_SHADER_MESH] && gfx->shaders[MESA_SHADER_MESH]->writes_memory;
+   if (unlikely(writes && cs->merge_hoisted)) {
+      perf_debug(cmd, "Splitting Apple9 render: memory writes after a hoisted barrier");
+      hk_cs_end_hint(cmd, HK_CS_END_RENDER_SPLIT);
+      hk_cmd_buffer_end_graphics(cmd);
+      cs = hk_cmd_buffer_get_cs(cmd, false);
+      if (!cs)
+         return false;
+      if (bias) {
+         bool success = u_tristate_set(&cs->cr.dbias_is_int, dbias_is_int);
+         assert(success);
+         (void)success;
+      }
+   }
+   cs->merge_writes |= writes;
+
    return true;
 }
 

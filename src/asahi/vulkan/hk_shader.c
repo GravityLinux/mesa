@@ -5109,6 +5109,7 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
          }
          struct hk_shader *shader = &obj->variants[0];
          nir_shader *nir = infos[i].nir;
+         obj->writes_memory = nir->info.writes_memory;
          shader->info.set_count = infos[i].set_layout_count;
          shader->info.apple9_render_targets = key.targets;
          if (!hk_apple9_texture_bindings(nir) ||
@@ -5644,6 +5645,7 @@ hk_apple9_defer_graphics(struct hk_device *dev, uint32_t count,
          }
       }
       obj->apple9_deferred = deferred;
+      obj->writes_memory = infos[i].nir->info.writes_memory;
       out[i] = &obj->vk;
    }
 
@@ -6045,6 +6047,7 @@ hk_deserialize_api_shader(struct vk_device *vk_dev, struct blob_reader *blob,
       d->sample_shading = blob_read_uint8(blob);
       d->zs_self_dep = blob_read_uint8(blob);
       d->undefined_colors = blob_read_uint8(blob);
+      obj->writes_memory = blob_read_uint8(blob);
       d->nir_size = blob_read_uint32(blob);
       const void *nir = blob_read_bytes(blob, d->nir_size);
       d->nir = blob->overrun ? NULL : malloc(MAX2(d->nir_size, 1));
@@ -6067,6 +6070,9 @@ hk_deserialize_api_shader(struct vk_device *vk_dev, struct blob_reader *blob,
          return result;
       }
    }
+   /* Fragment variants record memory writes; assume them elsewhere. */
+   obj->writes_memory = obj->vk.stage != MESA_SHADER_FRAGMENT ||
+                        obj->variants[0].info.fs.writes_memory;
 
    *shader_out = &obj->vk;
    return VK_SUCCESS;
@@ -6102,6 +6108,7 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
       blob_write_uint8(blob, d->sample_shading);
       blob_write_uint8(blob, d->zs_self_dep);
       blob_write_uint8(blob, d->undefined_colors);
+      blob_write_uint8(blob, obj->writes_memory);
       blob_write_uint32(blob, d->nir_size);
       blob_write_bytes(blob, d->nir, d->nir_size);
       return !blob->out_of_memory;

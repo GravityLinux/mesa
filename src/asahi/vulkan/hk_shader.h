@@ -383,6 +383,9 @@ struct hk_api_shader {
    /* Is this an internal passthrough geometry shader? */
    bool is_passthrough;
 
+   /* The program stores to memory or runs atomics (any variant). */
+   bool writes_memory;
+
    /* Apple9 graphics shaders whose key depends on state that is dynamic or
     * unknown at compile time keep their NIR and are compiled at draw time,
     * together with the other bound stages. Their variants are unused.

@@ -474,6 +474,10 @@ struct hk_cs {
    uint32_t pass_grid[3];
    uint32_t pass_count;
 
+   /* Render merging: a draw of this stream writes memory, and an image
+    * barrier was hoisted ahead of this stream (hk_cmd_sync_barrier). */
+   bool merge_writes, merge_hoisted;
+
    /* enum hk_cs_end, and whether an hk meta operation created the stream. */
    uint8_t end_reason;
    bool meta;
@@ -733,6 +737,10 @@ struct hk_cmd_buffer {
    /* Colour attachments the open render's passes stored: a continuing pass
     * must store them too, or the merged render would drop those stores. */
    uint32_t merge_store_mask;
+   /* The image barrier being recorded by vkCmdPipelineBarrier2, if any, and
+    * whether it transfers queue-family ownership. */
+   struct hk_image *barrier_image;
+   bool barrier_qfot;
 
    /* Current recorded control stream */
    struct {
