@@ -709,14 +709,61 @@ hk_render_merge_barrier(VkPipelineStageFlags2 src, VkPipelineStageFlags2 dst,
             ~(attachment_access | VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT));
 }
 
+static bool
+hk_image_overlaps(const struct hk_image *a, const struct hk_image *b)
+{
+   for (unsigned p = 0; p < a->plane_count; ++p) {
+      for (unsigned q = 0; q < b->plane_count; ++q) {
+         uint64_t a0 = a->planes[p].addr, a1 = a0 + a->planes[p].layout.size_B;
+         uint64_t b0 = b->planes[q].addr, b1 = b0 + b->planes[q].layout.size_B;
+         if (a0 < b1 && b0 < a1)
+            return true;
+      }
+   }
+   return false;
+}
+
+/* Whether the image barrier being recorded may leave the open render R open
+ * (HK_APPLE9_MERGE_HOIST_BARRIERS, default on). Its image is none of R's
+ * attachments nor shares memory with them, and R's stream has not written
+ * memory from a shader, so every write to the image precedes R in recording
+ * order: placing the barrier ahead of R orders those writes before R, and
+ * reads after the barrier in R see them. Later draws in R that write memory
+ * end it first (hk_apple9_prepare_draw). */
+static bool
+hk_render_merge_image_barrier(struct hk_cmd_buffer *cmd)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("HK_APPLE9_MERGE_HOIST_BARRIERS", true);
+   const struct hk_image *image = cmd->barrier_image;
+   if (!enabled || !image || cmd->barrier_qfot || cmd->in_meta ||
+       cmd->merge_cs->merge_writes || image->planes[0].sparse_map)
+      return false;
+   for (unsigned i = 0; i < cmd->merge_key.color_count; ++i) {
+      const struct vk_image *target = cmd->merge_key.image[i];
+      if (!target)
+         continue;
+      const struct hk_image *t = container_of(target, struct hk_image, vk);
+      if (t == image || t->planes[0].sparse_map || hk_image_overlaps(t, image))
+         return false;
+   }
+   return true;
+}
+
 void
 hk_cmd_sync_barrier(struct hk_cmd_buffer *cmd,
                     VkPipelineStageFlags2 src, VkPipelineStageFlags2 dst,
                     VkAccessFlags2 src_access, VkAccessFlags2 dst_access)
 {
    if (cmd->merge_cs) {
-      if (!cmd->in_meta &&
-          hk_render_merge_barrier(src, dst, src_access, dst_access)) {
+      bool image_barrier = false;
+      if ((!cmd->in_meta &&
+           hk_render_merge_barrier(src, dst, src_access, dst_access)) ||
+          (image_barrier = hk_render_merge_image_barrier(cmd))) {
+         cmd->merge_cs->merge_hoisted |= image_barrier;
+         if (image_barrier)
+            perf_debug(cmd, "Hoisting an image barrier ahead of the open render");
          /* The next render pass may continue the open render, where the tile
           * order satisfies this barrier. Earlier work it orders must still
           * precede the whole render: place it before the render's first
@@ -832,8 +879,13 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
       BARRIER(pDependencyInfo->pMemoryBarriers[i]);
    for (unsigned i = 0; i < pDependencyInfo->bufferMemoryBarrierCount; ++i)
       BARRIER(pDependencyInfo->pBufferMemoryBarriers[i]);
-   for (unsigned i = 0; i < pDependencyInfo->imageMemoryBarrierCount; ++i)
-      BARRIER(pDependencyInfo->pImageMemoryBarriers[i]);
+   for (unsigned i = 0; i < pDependencyInfo->imageMemoryBarrierCount; ++i) {
+      const VkImageMemoryBarrier2 *b = &pDependencyInfo->pImageMemoryBarriers[i];
+      cmd->barrier_image = hk_image_from_handle(b->image);
+      cmd->barrier_qfot = b->srcQueueFamilyIndex != b->dstQueueFamilyIndex;
+      BARRIER(*b);
+   }
+   cmd->barrier_image = NULL;
 #undef BARRIER
 }
 
