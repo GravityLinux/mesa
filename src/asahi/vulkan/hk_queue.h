@@ -20,6 +20,11 @@ struct hk_queue {
 #endif
    struct hk_sync_state sync;
 
+   /* A render that writes memory other than its attachments (stores,
+    * atomics, transform feedback) was submitted, and no later render's
+    * tiling has waited for its completion since (hk_queue.c). */
+   bool render_writer_pending;
+
    struct {
       /* Asahi kernel queue ID */
       uint32_t id;

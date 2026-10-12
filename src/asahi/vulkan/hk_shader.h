@@ -377,6 +377,21 @@ hk_num_variants(mesa_shader_stage stage)
 
 struct hk_apple9_deferred;
 
+enum hk_pre_raster_reads {
+   /* Sampled, storage or input-attachment images: may alias attachments. */
+   HK_READS_IMAGES = BITFIELD_BIT(0),
+   /* Buffers of any kind, vertex attributes, descriptors and indirect
+    * arguments: only memory-writing renders can produce them. */
+   HK_READS_BUFFERS = BITFIELD_BIT(1),
+   /* Not classified: keep the tiling wait. */
+   HK_READS_UNKNOWN = BITFIELD_BIT(2),
+   /* hk-internal pre-rasterization work (meta, transform feedback,
+    * tessellation, geometry): keep the tiling wait. */
+   HK_READS_INTERNAL = BITFIELD_BIT(3),
+};
+
+uint8_t hk_nir_pre_raster_reads(const nir_shader *nir);
+
 struct hk_api_shader {
    struct vk_shader vk;
 
@@ -385,6 +400,11 @@ struct hk_api_shader {
 
    /* The program stores to memory or runs atomics (any variant). */
    bool writes_memory;
+
+   /* Memory a pre-rasterization program reads (enum hk_pre_raster_reads):
+    * images or buffers. Decides whether its render's tiling must wait for
+    * earlier renders' writes (hk_queue). */
+   uint8_t pre_raster_reads;
 
    /* Apple9 graphics shaders whose key depends on state that is dynamic or
     * unknown at compile time keep their NIR and are compiled at draw time,

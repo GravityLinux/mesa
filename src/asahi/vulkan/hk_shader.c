@@ -3762,6 +3762,70 @@ hk_apple9_fragment_dump_end(struct blob *nir_blob, bool compiled,
    blob_finish(nir_blob);
 }
 
+/* Which memory a shader reads, from its intrinsics: texture and image
+ * operations read images; loads from any buffer, global or descriptor
+ * memory and vertex attributes read buffers. Queries and stores do not
+ * read. Unknown memory loads count as buffers. */
+uint8_t
+hk_nir_pre_raster_reads(const nir_shader *nir)
+{
+   uint8_t reads = 0;
+   if (nir->info.stage == MESA_SHADER_VERTEX && nir->info.inputs_read)
+      reads |= HK_READS_BUFFERS;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_tex) {
+               if (!nir_tex_instr_is_query(nir_instr_as_tex(instr)))
+                  reads |= HK_READS_IMAGES;
+               continue;
+            }
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            switch (intr->intrinsic) {
+            case nir_intrinsic_image_load:
+            case nir_intrinsic_image_sparse_load:
+            case nir_intrinsic_image_deref_load:
+            case nir_intrinsic_image_deref_sparse_load:
+            case nir_intrinsic_bindless_image_load:
+            case nir_intrinsic_bindless_image_sparse_load:
+            case nir_intrinsic_load_input_attachment_coord:
+               reads |= HK_READS_IMAGES;
+               break;
+            case nir_intrinsic_load_ubo:
+            case nir_intrinsic_load_ubo_vec4:
+            case nir_intrinsic_load_ssbo:
+            case nir_intrinsic_load_global:
+            case nir_intrinsic_load_global_constant:
+            case nir_intrinsic_load_global_2x32:
+            case nir_intrinsic_load_global_bounded:
+            case nir_intrinsic_load_global_constant_bounded:
+            case nir_intrinsic_load_global_constant_offset:
+            case nir_intrinsic_load_input:
+            case nir_intrinsic_load_input_vertex:
+            case nir_intrinsic_load_per_vertex_input:
+               reads |= HK_READS_BUFFERS;
+               break;
+            case nir_intrinsic_load_deref: {
+               nir_deref_instr *deref = nir_src_as_deref(intr->src[0]);
+               if (nir_deref_mode_may_be(deref, nir_var_mem_ubo | nir_var_mem_ssbo |
+                                                   nir_var_mem_global |
+                                                   nir_var_shader_in))
+                  reads |= HK_READS_BUFFERS;
+               if (nir_deref_mode_may_be(deref, nir_var_image | nir_var_uniform))
+                  reads |= HK_READS_IMAGES;
+               break;
+            }
+            default:
+               break;
+            }
+         }
+      }
+   }
+   return reads;
+}
+
 static bool
 hk_apple9_texture_bindings(nir_shader *nir)
 {
@@ -4403,6 +4467,7 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
       ralloc_free(nir);
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
    }
+   obj->pre_raster_reads = HK_READS_UNKNOWN;
 
    if (!nir->info.io_lowered) {
       hk_lower_nir(dev, nir, info->robustness, false, info->set_layout_count,
@@ -5110,6 +5175,7 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
          struct hk_shader *shader = &obj->variants[0];
          nir_shader *nir = infos[i].nir;
          obj->writes_memory = nir->info.writes_memory;
+         obj->pre_raster_reads = hk_nir_pre_raster_reads(nir);
          shader->info.set_count = infos[i].set_layout_count;
          shader->info.apple9_render_targets = key.targets;
          if (!hk_apple9_texture_bindings(nir) ||
@@ -5646,6 +5712,7 @@ hk_apple9_defer_graphics(struct hk_device *dev, uint32_t count,
       }
       obj->apple9_deferred = deferred;
       obj->writes_memory = infos[i].nir->info.writes_memory;
+      obj->pre_raster_reads = hk_nir_pre_raster_reads(infos[i].nir);
       out[i] = &obj->vk;
    }
 
@@ -6077,6 +6144,7 @@ hk_deserialize_api_shader(struct vk_device *vk_dev, struct blob_reader *blob,
       d->zs_self_dep = blob_read_uint8(blob);
       d->undefined_colors = blob_read_uint8(blob);
       obj->writes_memory = blob_read_uint8(blob);
+      obj->pre_raster_reads = blob_read_uint8(blob);
       d->nir_size = blob_read_uint32(blob);
       const void *nir = blob_read_bytes(blob, d->nir_size);
       d->nir = blob->overrun ? NULL : malloc(MAX2(d->nir_size, 1));
@@ -6102,6 +6170,9 @@ hk_deserialize_api_shader(struct vk_device *vk_dev, struct blob_reader *blob,
    /* Fragment variants record memory writes; assume them elsewhere. */
    obj->writes_memory = obj->vk.stage != MESA_SHADER_FRAGMENT ||
                         obj->variants[0].info.fs.writes_memory;
+   obj->pre_raster_reads = blob_read_uint8(blob);
+   if (blob->overrun)
+      obj->pre_raster_reads = HK_READS_UNKNOWN;
 
    *shader_out = &obj->vk;
    return VK_SUCCESS;
@@ -6138,6 +6209,7 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
       blob_write_uint8(blob, d->zs_self_dep);
       blob_write_uint8(blob, d->undefined_colors);
       blob_write_uint8(blob, obj->writes_memory);
+      blob_write_uint8(blob, obj->pre_raster_reads);
       blob_write_uint32(blob, d->nir_size);
       blob_write_bytes(blob, d->nir, d->nir_size);
       return !blob->out_of_memory;
@@ -6146,6 +6218,7 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
    hk_foreach_variant(obj, shader) {
       hk_shader_serialize(vk_dev, shader, blob);
    }
+   blob_write_uint8(blob, obj->pre_raster_reads);
 
    return !blob->out_of_memory;
 }
