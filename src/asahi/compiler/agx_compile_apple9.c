@@ -994,6 +994,7 @@ apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
            op == nir_intrinsic_load_coefficients_agx ||
            op == nir_intrinsic_load_tile_pixel_agx ||
            op == nir_intrinsic_load_local_pixel_agx ||
+           op == nir_intrinsic_pack_format_agx ||
            op == nir_intrinsic_load_sample_mask_in ||
            op == nir_intrinsic_load_sample_mask ||
            op == nir_intrinsic_sample_mask_agx ||
@@ -2412,6 +2413,21 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
             value = apple9_dag_emit(lower, AGX_APPLE9_VIR_IADD,
                AGX_APPLE9_ENC_INT_ADD_EXTENDED, add, 2, 0);
          }
+      } else if (intr && intr->intrinsic == nir_intrinsic_pack_format_agx) {
+         const bool rgba = nir_intrinsic_format(intr) == PIPE_FORMAT_R10G10B10A2_UNORM;
+         if (nir_intrinsic_format(intr) != PIPE_FORMAT_R11G11B10_FLOAT && !rgba)
+            return AGX_APPLE9_VREG_INVALID;
+         uint32_t sources[4];
+         for (unsigned c = 0; c < (rgba ? 4 : 3); ++c) {
+            sources[c] = apple9_lower_dag_scalar(lower,
+               nir_get_scalar(intr->src[0].ssa, c));
+            if (sources[c] == AGX_APPLE9_VREG_INVALID)
+               return AGX_APPLE9_VREG_INVALID;
+         }
+         value = apple9_dag_emit(lower, AGX_APPLE9_VIR_PACK_FORMAT,
+            rgba ? AGX_APPLE9_ENC_PACK_FORMAT : AGX_APPLE9_ENC_PACK_FORMAT_RGB,
+            sources, rgba ? 4 : 3,
+            rgba ? AGX_APPLE9_PACK_R10G10B10A2_UNORM : AGX_APPLE9_PACK_R11G11B10_FLOAT);
       } else if (intr && (intr->intrinsic == nir_intrinsic_read_invocation ||
                           intr->intrinsic == nir_intrinsic_shuffle)) {
          if (scalar.def->bit_size != 32)
@@ -9326,6 +9342,9 @@ apple9_blend_channel_reads_destination(enum pipe_blend_func func,
    }
 }
 
+static nir_def *apple9_pack_color(nir_builder *b, enum pipe_format format,
+                                  nir_def *color);
+
 static bool
 apple9_lower_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
@@ -9570,7 +9589,7 @@ apple9_lower_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          }
       }
       if (packed_format)
-         packed[0] = nir_format_pack_rgba(b, format, color);
+         packed[0] = apple9_pack_color(b, format, color);
       nir_store_local_pixel_agx(b, nir_vec(b, packed, words),
          nir_iand(b, coverage, sample_mask), nir_undef(b, 2, 16),
          .base = 4 * offset, .format = raw_format,
@@ -9582,6 +9601,30 @@ apple9_lower_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    }
    nir_instr_remove(&intr->instr);
    return true;
+}
+
+/* Packed colour formats with a native single-instruction pack (G16: RG11B10
+ * float and RGB10A2 unorm, component 0 in the low bits); others, and
+ * AGX_APPLE9_NO_PACK_FORMAT=1, use NIR's software pack. */
+DEBUG_GET_ONCE_BOOL_OPTION(apple9_no_pack_format, "AGX_APPLE9_NO_PACK_FORMAT", false)
+
+static nir_def *
+apple9_pack_color(nir_builder *b, enum pipe_format format, nir_def *color)
+{
+   if (debug_get_option_apple9_no_pack_format())
+      return nir_format_pack_rgba(b, format, color);
+   switch (format) {
+   case PIPE_FORMAT_R11G11B10_FLOAT:
+      return nir_pack_format_agx(b, nir_trim_vector(b, color, 3),
+                                 .format = PIPE_FORMAT_R11G11B10_FLOAT);
+   case PIPE_FORMAT_R10G10B10A2_UNORM:
+      return nir_pack_format_agx(b, color, .format = PIPE_FORMAT_R10G10B10A2_UNORM);
+   case PIPE_FORMAT_B10G10R10A2_UNORM:
+      return nir_pack_format_agx(b, nir_swizzle(b, color, (unsigned[]){2, 1, 0, 3}, 4),
+                                 .format = PIPE_FORMAT_R10G10B10A2_UNORM);
+   default:
+      return nir_format_pack_rgba(b, format, color);
+   }
 }
 
 /* Vertex channels preserve integer values; packed 32-bit formats are
@@ -10574,6 +10617,9 @@ apple9_lower_cull_distance_fs(nir_shader *nir,
    nir->info.fs.uses_discard = true;
    nir_progress(true, impl, nir_metadata_none);
 }
+
+static nir_def *apple9_pack_color(nir_builder *b, enum pipe_format format,
+                                  nir_def *color);
 
 static bool
 apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,

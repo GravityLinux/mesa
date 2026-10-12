@@ -52,6 +52,7 @@ agx_apple9_instr_is_pure_alu(const struct agx_apple9_vir_instr *I)
    case AGX_APPLE9_VIR_PACK_HALF_2X16:
    case AGX_APPLE9_VIR_PACK_UNORM_2X16:
    case AGX_APPLE9_VIR_PACK_UNORM_4X8:
+   case AGX_APPLE9_VIR_PACK_FORMAT:
    case AGX_APPLE9_VIR_UNPACK_HALF:
    case AGX_APPLE9_VIR_UNPACK_NORM:
    case AGX_APPLE9_VIR_IADD:

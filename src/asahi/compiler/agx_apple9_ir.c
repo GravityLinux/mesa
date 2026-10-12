@@ -6181,6 +6181,37 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       packed_init(packed, code, bytes ? 20 : 10);
       return true;
    }
+   case AGX_APPLE9_VIR_PACK_FORMAT: {
+      /* One 14-byte instruction: destination at bit 25, channel registers
+       * at bits 42, 51, 60 and 69, each followed by a bit that keeps the
+       * register cached, and release bits 86-89 for registers that die
+       * here. Bytes 8-13 carry the format (Metal's encodings of our own
+       * render pipelines writing RG11B10Float and RGB10A2Unorm). */
+      bool rgba = instruction->immediate == AGX_APPLE9_PACK_R10G10B10A2_UNORM;
+      unsigned dst = phys[instruction->dest];
+      uint32_t source[4];
+      uint8_t live;
+      if (instruction->encoding != (rgba ? AGX_APPLE9_ENC_PACK_FORMAT
+                                          : AGX_APPLE9_ENC_PACK_FORMAT_RGB) ||
+          instruction->immediate > AGX_APPLE9_PACK_R10G10B10A2_UNORM ||
+          instruction->nr_srcs != (rgba ? 4 : 3) || dst >= AGX_APPLE9_GPR_COUNT ||
+          instruction->alu_src_uniform_mask || instruction->alu_src_immediate_mask ||
+          !apple9_alu_sources(instruction, phys, instruction->nr_srcs, source, &live))
+         return false;
+      uint8_t bytes[14] = {0xa7, 0x06, 0x54, 0, 0x02, 0, 0, 0,
+                           rgba ? 0x00 : 0x10, 0xa0, rgba ? 0x2a : 0x0a, 0x88, 0x24,
+                           rgba ? 0x11 : 0x08};
+      set_bits(bytes, 25, 7, dst);
+      for (unsigned s = 0; s < instruction->nr_srcs; ++s) {
+         if (source[s] >= AGX_APPLE9_GPR_COUNT)
+            return false;
+         set_bits(bytes, 42 + 9 * s, 7, source[s]);
+         set_bits(bytes, 49 + 9 * s, 1, !!(live & BITFIELD_BIT(s)));
+         set_bits(bytes, 86 + s, 1, !(live & BITFIELD_BIT(s)));
+      }
+      packed_init(packed, bytes, sizeof(bytes));
+      return true;
+   }
    case AGX_APPLE9_VIR_F2F16:
    case AGX_APPLE9_VIR_PACK_HALF_2X16:
    case AGX_APPLE9_VIR_UNPACK_HALF: {
