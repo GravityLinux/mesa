@@ -926,7 +926,13 @@ DEBUG_GET_ONCE_BOOL_OPTION(hk_apple9_fragment_barrier,
  * can observe, and memory only when they store, run atomics or capture
  * transform feedback. So when the render's pre-rasterization work reads no
  * images, and reads no buffers while such a writer may still be running, the
- * tiling wait for earlier renders is moot. HK_APPLE9_NO_TILING_ELISION=1
+ * tiling wait for earlier renders is moot. Index fetch and indirect
+ * arguments count as buffer reads.
+ *
+ * Not covered: an attachment whose memory is aliased by a buffer that later
+ * renders read as vertex, index or uniform data (memory aliasing). Only
+ * stores, atomics and transform feedback mark a writer; treating every render
+ * as one would remove nearly all of the elision. HK_APPLE9_NO_TILING_ELISION=1
  * disables this.
  */
 DEBUG_GET_ONCE_BOOL_OPTION(hk_apple9_no_tiling_elision,

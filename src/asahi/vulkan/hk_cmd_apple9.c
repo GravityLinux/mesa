@@ -317,7 +317,7 @@ hk_apple9_rast_primitive(enum mesa_prim prim)
  * Reserve for every emulated multiview draw so these stay together.
  */
 bool
-hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool indirect)
+hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool reads_buffers)
 {
    if (vk_command_buffer_has_error(&cmd->vk))
       return false;
@@ -386,7 +386,7 @@ hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool indirect)
    /* What the draw's pre-rasterization work reads. hk-internal pre-raster
     * work (tessellation, geometry, transform feedback) and meta draws keep
     * the tiling wait. */
-   uint8_t reads = indirect ? HK_READS_BUFFERS : 0;
+   uint8_t reads = reads_buffers ? HK_READS_BUFFERS : 0;
    if (cmd->in_meta || gfx->xfb_enabled || gfx->shaders[MESA_SHADER_TESS_CTRL] ||
        gfx->shaders[MESA_SHADER_TESS_EVAL] || gfx->shaders[MESA_SHADER_GEOMETRY])
       reads |= HK_READS_INTERNAL;
