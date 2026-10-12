@@ -164,8 +164,11 @@ agx_pack_border(struct agx_border_packed *out, const uint32_t in[4],
       static_assert(PIPE_SWIZZLE_X == 0, "known ordering");
       static_assert(PIPE_SWIZZLE_W == 3, "known ordering");
 
+      /* Depth/stencil swizzles put stencil in the Y slot, but a stencil (or
+       * depth) border colour arrives in R, so every stored channel reads R. */
       if (desc->swizzle[i] <= PIPE_SWIZZLE_W)
-         channel_map[desc->swizzle[i]] = i;
+         channel_map[desc->swizzle[i]] =
+            desc->colorspace == UTIL_FORMAT_COLORSPACE_ZS ? 0 : i;
    }
 
    agx_pack(out, BORDER, cfg) {

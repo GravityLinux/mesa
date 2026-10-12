@@ -4,6 +4,7 @@
 
 #include "agx_border.h"
 #include "agx_pack.h"
+#include "util/format/u_format.h"
 
 TEST(Border, FormatChannelOrder)
 {
@@ -32,6 +33,30 @@ TEST(Border, FormatChannelOrder)
       EXPECT_EQ(border.channel_1, c.memory_channels[1]);
       EXPECT_EQ(border.channel_2, c.memory_channels[2]);
       EXPECT_EQ(border.channel_3, c.memory_channels[3]);
+   }
+}
+
+TEST(Border, StencilReadsRed)
+{
+   /* Vulkan passes a stencil border value in R; the S8 swizzle is _X__. */
+   const uint32_t rgba[] = {173, 34, 0, 1};
+   const enum pipe_format formats[] = {PIPE_FORMAT_S8_UINT,
+                                       PIPE_FORMAT_X24S8_UINT,
+                                       PIPE_FORMAT_X32_S8X24_UINT};
+   for (enum pipe_format format : formats) {
+      SCOPED_TRACE(format);
+      struct agx_border_packed packed;
+      agx_pack_border(&packed, rgba, format);
+      agx_unpack(stderr, &packed, BORDER, border);
+      const struct util_format_description *desc =
+         util_format_description(format);
+      for (unsigned i = 0; i < 4; ++i) {
+         if (desc->swizzle[i] <= PIPE_SWIZZLE_W) {
+            uint32_t ch[] = {border.channel_0, border.channel_1,
+                             border.channel_2, border.channel_3};
+            EXPECT_EQ(ch[desc->swizzle[i]], 173u);
+         }
+      }
    }
 }
 
