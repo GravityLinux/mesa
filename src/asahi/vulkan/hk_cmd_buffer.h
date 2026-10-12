@@ -246,6 +246,9 @@ struct hk_rendering_state {
    /* An attachment is in a layout that also allows shader access (GENERAL
     * or a feedback loop): passes may read it as a texture. */
    bool feedback;
+   /* A stored colour attachment is linear, so buffers aliasing its memory
+    * can observe the render's writes (hk_queue's tiling-wait elision). */
+   bool linear_store;
    VkRenderingFlagBits flags;
 
    VkRect2D area;
@@ -484,6 +487,8 @@ struct hk_cs {
    /* enum hk_pre_raster_reads of the stream's draws: what their
     * pre-rasterization stages read (hk_queue's tiling-wait elision). */
    uint8_t pre_raster_reads;
+   /* The stream's render stores a linear colour attachment. */
+   bool linear_store;
 
    /* enum hk_cs_end, and whether an hk meta operation created the stream. */
    uint8_t end_reason;

@@ -396,6 +396,7 @@ hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool reads_buffers)
       reads |= gfx->shaders[s]->pre_raster_reads;
    }
    cs->pre_raster_reads |= reads;
+   cs->linear_store |= gfx->render.linear_store;
 
    return true;
 }

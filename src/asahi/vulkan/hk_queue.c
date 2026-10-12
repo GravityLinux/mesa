@@ -929,11 +929,11 @@ DEBUG_GET_ONCE_BOOL_OPTION(hk_apple9_fragment_barrier,
  * tiling wait for earlier renders is moot. Index fetch and indirect
  * arguments count as buffer reads.
  *
- * Not covered: an attachment whose memory is aliased by a buffer that later
- * renders read as vertex, index or uniform data (memory aliasing). Only
- * stores, atomics and transform feedback mark a writer; treating every render
- * as one would remove nearly all of the elision. HK_APPLE9_NO_TILING_ELISION=1
- * disables this.
+ * A buffer aliasing an attachment's memory observes the render's writes
+ * only for linear attachments (an optimally tiled image's contents are
+ * undefined through a buffer alias), so renders storing a linear colour
+ * attachment count as writers too. HK_APPLE9_NO_TILING_ELISION=1 disables
+ * the elision.
  */
 DEBUG_GET_ONCE_BOOL_OPTION(hk_apple9_no_tiling_elision,
                            "HK_APPLE9_NO_TILING_ELISION", false)
@@ -1003,7 +1003,7 @@ hk_track_render_writes(struct hk_queue *queue, const struct hk_cs *cs,
    if (!deferred && s->wait_tiling.engine[HK_SYNC_RENDER] != HK_SYNC_NONE &&
        s->wait_tiling.engine[HK_SYNC_RENDER] + 1 == s->index)
       queue->render_writer_pending = false;
-   if (cs->merge_writes)
+   if (cs->merge_writes || cs->linear_store)
       queue->render_writer_pending = true;
 }
 
