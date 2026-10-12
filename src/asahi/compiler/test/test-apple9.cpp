@@ -2228,6 +2228,40 @@ TEST(Apple9Packer, HalfSourcesMatchOwnMslEncodings)
 /* FP16 sources of floating add/multiply and FMA, converted on read, against
  * Metal's encodings of our own kernels (msl-encodings-20261011/
  * half-src). Dependency fields and the producer-state bit 21 are masked. */
+/* IMAD has one sign-extension bit (82), operand A's: a zero-extended half
+ * in B or C must not clear it, and the six-byte FMA form takes no FP16
+ * sources (it has no bit 57 for operand B). */
+TEST(Apple9Packer, HalfSourceSignAndCompactFma)
+{
+   uint8_t phys[4] = {0, 2, 4, 6};
+   agx_apple9_vir_instr mad = {
+      .op = AGX_APPLE9_VIR_IMAD,
+      .encoding = AGX_APPLE9_ENC_INT_MAD_EXTENDED,
+      .dest = 0,
+      .src = {1, 2, 3},
+      .nr_srcs = 3,
+   };
+   mad.src_half_mask = 3;
+   mad.src_hi_mask = 3;
+   mad.src_sext_mask = 1;
+   agx_apple9_packed_instruction packed = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_pack_vir_instruction(&mad, phys, &packed, &reason))
+      << (reason ? reason : "");
+   EXPECT_EQ((packed.bytes[10] >> 2) & 1, 1);
+
+   agx_apple9_vir_instr fma = {
+      .op = AGX_APPLE9_VIR_FMA,
+      .encoding = AGX_APPLE9_ENC_FLOAT3_COMPACT,
+      .dest = 0,
+      .src = {1, 2, 3},
+      .nr_srcs = 3,
+   };
+   fma.src_half_mask = 2;
+   packed = {};
+   EXPECT_FALSE(agx_apple9_pack_vir_instruction(&fma, phys, &packed, &reason));
+}
+
 TEST(Apple9Packer, Fp16SourcesMatchOwnMslEncodings)
 {
    struct {

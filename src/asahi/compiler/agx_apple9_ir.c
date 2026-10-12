@@ -4832,7 +4832,8 @@ pack_half_source(uint8_t *bytes, const struct agx_apple9_vir_instr *I,
       return false;
    set_bits(bytes, hi_bit, 1, !!(I->src_hi_mask & bit));
    set_bits(bytes, width_bit, 1, 0);
-   set_bits(bytes, sext_bit, 1, !!(I->src_sext_mask & bit));
+   if (sext_bit != ~0u)
+      set_bits(bytes, sext_bit, 1, !!(I->src_sext_mask & bit));
    return true;
 }
 
@@ -4929,7 +4930,10 @@ pack_imad(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
       } else {
          pack_integer_source(bytes, source[s], instruction->alu_src_uniform_mask & (1u << s),
                              live & (1u << s), 42 + 9 * s, 73 + s, 81 + 2 * s);
-         if (!pack_half_source(bytes, instruction, s, 41 + 9 * s, 70 + s, 82))
+         /* The one sign-extension bit belongs to operand A; B and C must
+          * not clear it. */
+         if (!pack_half_source(bytes, instruction, s, 41 + 9 * s, 70 + s,
+                               s == 0 ? 82 : ~0u))
             return false;
       }
    }
@@ -5500,12 +5504,13 @@ pack_fma(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    set_bits(bytes, 59, 1, !!(neg_mask & 1) ^ !!(neg_mask & 2));
    /* FP16 sources converted on read: operand B's width bit 24 with bit 57
     * set (low half only observed) and the addend's width bit 49 with bit 40 selecting its
-    * high half (Metal's encodings of our own kernels). */
+    * high half (Metal's encodings of our own kernels). The six-byte form has
+    * no bit 57 (it moves B's selector to bit 37) and was not measured with
+    * half sources, so it takes none. */
    if (instruction->src_half_mask) {
       if ((instruction->src_half_mask & 1) || instruction->src_sext_mask ||
           (instruction->src_hi_mask & 2) ||
-          (instruction->src_half_mask & inline_mask) ||
-          (compact && (instruction->src_half_mask & 4)))
+          (instruction->src_half_mask & inline_mask) || compact)
          return false;
       /* Operand B also sets its alternative-file bit, as for a uniform. */
       if (instruction->src_half_mask & 2) {
