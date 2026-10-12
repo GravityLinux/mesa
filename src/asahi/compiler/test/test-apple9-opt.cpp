@@ -1275,6 +1275,39 @@ TEST_F(Apple9Optimization, MinMaxCommutesOnlyNonzeroLiteralsIntoOperandB)
    }
 }
 
+TEST_F(Apple9Optimization, CompareLiteralKeepsEqualitySelectsSymmetric)
+{
+   /* Integer equality is ILT with the equality bit; IGT with the bit is not
+    * equality. A constant operand A of an equality select moves to B with
+    * the condition unchanged (dEQP-VK.subgroups.builtin_mask_var.
+    * framebuffer.subgroupeqmask_geometry failed when it became IGT). An
+    * ordered relation with the bit does not commute. */
+   for (uint32_t condition : {(uint32_t)(AGX_APPLE9_SELECT_ILT | AGX_APPLE9_SELECT_EQUALITY),
+                              (uint32_t)(AGX_APPLE9_SELECT_FGT | AGX_APPLE9_SELECT_EQUALITY)}) {
+      agx_apple9_vir_finish(&p);
+      agx_apple9_vir_init(&p);
+      auto input = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_GET_GLOBAL_ID,
+         AGX_APPLE9_ENC_GET_SR, nullptr, 0, 0);
+      auto other = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_GET_GLOBAL_ID,
+         AGX_APPLE9_ENC_GET_SR, nullptr, 0, 1);
+      uint32_t sources[] = {imm(5), input, input, other};
+      p.output = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_SELECT,
+         AGX_APPLE9_ENC_SELECT_GPR_WIDE, sources, 4, condition);
+      ASSERT_TRUE(agx_apple9_optimize_vir(&p));
+      const auto *S = agx_apple9_definition(&p, p.output);
+      ASSERT_EQ(S->op, AGX_APPLE9_VIR_SELECT);
+      if ((condition & 0xff) == AGX_APPLE9_SELECT_ILT) {
+         EXPECT_EQ(S->immediate, condition);
+         EXPECT_EQ(S->alu_src_immediate_mask & 2, 2u);
+         EXPECT_EQ(S->alu_src_value[1], 5u);
+         EXPECT_EQ(S->src[0], input);
+      } else {
+         EXPECT_EQ(S->immediate, condition);
+         EXPECT_EQ(S->alu_src_immediate_mask & 3, 0u);
+      }
+   }
+}
+
 TEST_F(Apple9Optimization, SelectXorKeepsNoncomplementaryArms)
 {
    auto input = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_GET_GLOBAL_ID,

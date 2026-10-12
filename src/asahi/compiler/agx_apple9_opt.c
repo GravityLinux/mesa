@@ -485,10 +485,17 @@ inline_compare_literal(struct agx_apple9_vir_instr *I, const bool *constant,
        * symmetric. NaN operands compare false either way. The register
        * moving to A must not carry modifiers, which A cannot take here. */
       const unsigned condition = I->immediate & 0xff;
+      /* A select's equality bit does not compose like "or equal": with ILT
+       * it is integer equality, and with IGT it is not equality (see the
+       * select lowering). Only its symmetric forms commute. */
+      const bool equality = !predicate && (I->immediate & AGX_APPLE9_SELECT_EQUALITY);
       unsigned reversed;
       if (extended)
          reversed = condition == AGX_APPLE9_PREDICATE_EXT_FEQ ||
                     condition == AGX_APPLE9_PREDICATE_EXT_IEQ ? condition : ~0u;
+      else if (equality)
+         reversed = condition == AGX_APPLE9_SELECT_ILT ||
+                    condition == AGX_APPLE9_SELECT_FEQ ? condition : ~0u;
       else if (condition == AGX_APPLE9_SELECT_FEQ && !predicate)
          reversed = condition;
       else if (condition >= AGX_APPLE9_SELECT_FGT &&
