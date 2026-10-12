@@ -1068,16 +1068,14 @@ half_extract(const struct agx_apple9_vir_program *p,
  * directly, zero- or sign-extended (Metal's encodings of our own kernels).
  * Fold a recognized extract into every reader when all of them can take
  * it, so the extract and its mask constant disappear without extending any
- * other register's lifetime. Off by default until its CTS regressions (blend
- * epilogues, integer dot products) are fixed; AGX_APPLE9_HALF_SOURCES=1
- * enables it. */
+ * other register's lifetime. AGX_APPLE9_NO_HALF_SOURCES=1 disables it. */
 static bool
 fold_half_sources(struct agx_apple9_vir_program *p,
                   const struct agx_apple9_uniform_constants *constants)
 {
    static int disabled = -1;
    if (disabled < 0)
-      disabled = !debug_get_bool_option("AGX_APPLE9_HALF_SOURCES", false);
+      disabled = debug_get_bool_option("AGX_APPLE9_NO_HALF_SOURCES", false);
    if (disabled)
       return true;
    if (!agx_apple9_analyze_uses(p))
