@@ -5,6 +5,8 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_cmd_buffer.h"
+#include <inttypes.h>
+#include "util/simple_mtx.h"
 #include "asahi/lib/agx_apple9.h"
 
 #include "agx_abi.h"
@@ -215,6 +217,7 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    }
 
    cmd->current_cs.gfx = NULL;
+   cmd->merge_cs = NULL;
    cmd->current_cs.cs = NULL;
    cmd->current_cs.post_gfx = NULL;
    cmd->current_cs.pre_gfx = NULL;
@@ -540,6 +543,7 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
 
+   hk_cmd_render_merge_flush(cmd);
    assert(cmd->current_cs.gfx == NULL && cmd->current_cs.pre_gfx == NULL &&
           "must end rendering before ending the command buffer");
 
@@ -633,11 +637,114 @@ hk_cmd_sync_work(struct hk_cmd_buffer *cmd, struct hk_cs *cs, unsigned stages)
    util_dynarray_append(&cmd->sync_events, event);
 }
 
+/* HK_APPLE9_MERGE_TRACE (diagnostic): counts what ends renders kept open
+ * for merging, printed to stderr every 5000 events as MERGE_TRACE lines. */
+void
+hk_render_merge_trace(const char *why, uint64_t a, uint64_t b)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("HK_APPLE9_MERGE_TRACE", false);
+   if (!enabled)
+      return;
+   static simple_mtx_t lock = SIMPLE_MTX_INITIALIZER;
+   static struct { const char *why; uint64_t a, b, n; } table[64];
+   static unsigned events;
+   simple_mtx_lock(&lock);
+   unsigned i = 0;
+   while (i < ARRAY_SIZE(table) && table[i].why &&
+          (table[i].why != why || table[i].a != a || table[i].b != b))
+      ++i;
+   if (i < ARRAY_SIZE(table)) {
+      table[i].why = why;
+      table[i].a = a;
+      table[i].b = b;
+      ++table[i].n;
+   }
+   if (++events % 5000 == 0) {
+      for (unsigned j = 0; j < ARRAY_SIZE(table) && table[j].why; ++j)
+         fprintf(stderr, "MERGE_TRACE events=%u why=%s a=0x%" PRIx64 " b=0x%" PRIx64 " n=%" PRIu64 "\n",
+                 events, table[j].why, table[j].a, table[j].b, table[j].n);
+   }
+   simple_mtx_unlock(&lock);
+}
+
+void
+hk_cmd_render_merge_flush_why(struct hk_cmd_buffer *cmd, const char *why)
+{
+   if (!cmd->merge_cs)
+      return;
+   if (why)
+      hk_render_merge_trace(why, 0, 0);
+
+   assert(cmd->current_cs.gfx == cmd->merge_cs);
+   hk_cs_end_hint(cmd, HK_CS_END_RENDER_PASS);
+   hk_cmd_buffer_end_graphics(cmd);
+   assert(!cmd->merge_cs);
+}
+
+/* Whether a barrier between two render passes only orders attachment access,
+ * which a single hardware render already orders in each tile.
+ */
+static bool
+hk_render_merge_barrier(VkPipelineStageFlags2 src, VkPipelineStageFlags2 dst,
+                        VkAccessFlags2 src_access, VkAccessFlags2 dst_access)
+{
+   const VkPipelineStageFlags2 attachment =
+      VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+      VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+      VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+   const VkAccessFlags2 attachment_access =
+      VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+      VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
+      VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+      VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+   if (!src || !dst || (src & ~attachment) ||
+       (dst & ~(attachment | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT)))
+      return false;
+
+   return !(src_access & ~attachment_access) &&
+          !(dst_access &
+            ~(attachment_access | VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT));
+}
+
 void
 hk_cmd_sync_barrier(struct hk_cmd_buffer *cmd,
                     VkPipelineStageFlags2 src, VkPipelineStageFlags2 dst,
                     VkAccessFlags2 src_access, VkAccessFlags2 dst_access)
 {
+   if (cmd->merge_cs) {
+      if (!cmd->in_meta &&
+          hk_render_merge_barrier(src, dst, src_access, dst_access)) {
+         /* The next render pass may continue the open render, where the tile
+          * order satisfies this barrier. Earlier work it orders must still
+          * precede the whole render: place it before the render's first
+          * event. Later streams order after the render by its own scope.
+          */
+         struct hk_sync_event event = {
+            .stream = HK_SYNC_NONE,
+            .src = hk_sync_stage_mask(src, true),
+            .dst = hk_sync_stage_mask(dst, false),
+         };
+         unsigned count =
+            util_dynarray_num_elements(&cmd->sync_events, struct hk_sync_event);
+         assert(cmd->merge_event < count);
+         util_dynarray_append(&cmd->sync_events, event);
+         struct hk_sync_event *events = cmd->sync_events.data;
+         memmove(&events[cmd->merge_event + 1], &events[cmd->merge_event],
+                 (count - cmd->merge_event) * sizeof(*events));
+         events[cmd->merge_event++] = event;
+         hk_render_merge_trace("barrier kept", src, dst);
+         return;
+      }
+
+      hk_render_merge_trace(cmd->in_meta ? "meta barrier" : "barrier",
+                            src | (uint64_t)!!src_access << 63,
+                            dst | (uint64_t)!!dst_access << 63);
+      hk_cmd_render_merge_flush_why(cmd, NULL);
+   }
+
    unsigned src_stages = hk_sync_stage_mask(src, true);
    unsigned dst_stages = hk_sync_stage_mask(dst, false);
    /* vk_meta barriers name implementation stages. Its operations are tracked

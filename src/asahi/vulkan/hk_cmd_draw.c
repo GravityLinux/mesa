@@ -557,11 +557,132 @@ hk_pack_zls_control(struct agx_zls_control_packed *packed,
    agx_pack_zls_control(packed, z_layout, s_layout, &zls);
 }
 
+/* HK_APPLE9_MERGE_RENDERS (default on; =0 disables): continue the hardware render of a
+ * render pass in the next render pass when nothing but attachment barriers
+ * separates them and both use the same colour attachments. The render covers
+ * the whole attachment whatever the render area, and tiles keep their
+ * contents between the passes, which satisfies the second pass's load.
+ * Depth/stencil passes are not merged: their ZLS control mixes the first
+ * pass's loads with the last pass's stores.
+ */
+static bool
+hk_render_merge_enabled(struct hk_cmd_buffer *cmd)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("HK_APPLE9_MERGE_RENDERS", true);
+
+   return enabled && hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G &&
+          cmd->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY && !cmd->in_meta;
+}
+
+/* Key a render pass that may merge, from its colour views, or return false.
+ * The caller checks load and store operations.
+ */
+static bool
+hk_render_merge_key(struct hk_render_merge_key *key, VkRenderingFlags flags,
+                    uint32_t layer_count, uint32_t view_mask,
+                    uint32_t color_count, struct hk_image_view *const *views,
+                    bool depth_stencil)
+{
+   if ((flags & (VK_RENDERING_SUSPENDING_BIT | VK_RENDERING_RESUMING_BIT |
+                 VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT)) ||
+       depth_stencil || !color_count || color_count > HK_MAX_RTS)
+      return false;
+
+   memset(key, 0, sizeof(*key));
+   key->color_count = color_count;
+   key->layer_count = layer_count;
+   key->view_mask = view_mask;
+   for (unsigned i = 0; i < color_count; ++i) {
+      const struct hk_image_view *view = views[i];
+      if (view) {
+         key->image[i] = view->vk.image;
+         key->level[i] = view->vk.base_mip_level;
+         key->layer[i] = view->vk.base_array_layer;
+         key->format[i] = view->vk.format;
+      }
+   }
+   return true;
+}
+
+static bool
+hk_render_merge_begin(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
+{
+   struct hk_image_view *views[HK_MAX_RTS] = {NULL};
+   struct hk_render_merge_key key;
+   bool depth_stencil = (info->pDepthAttachment &&
+                         info->pDepthAttachment->imageView) ||
+                        (info->pStencilAttachment &&
+                         info->pStencilAttachment->imageView);
+
+   uint32_t store_mask = 0;
+   for (unsigned i = 0; i < MIN2(info->colorAttachmentCount, HK_MAX_RTS); ++i) {
+      const VkRenderingAttachmentInfo *att = &info->pColorAttachments[i];
+      views[i] = hk_image_view_from_handle(att->imageView);
+      /* Clears would need an in-pass clear over the render area. */
+      if (att->imageView && att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
+         return false;
+      if (att->imageView && is_attachment_stored(att))
+         store_mask |= BITFIELD_BIT(i);
+   }
+   /* The merged render ends with this pass's store operations. An attachment
+    * an earlier pass stored but this one does not would lose the earlier
+    * pass's results outside this pass's render area. */
+   if (cmd->merge_store_mask & ~store_mask) {
+      hk_render_merge_trace("begin: store", cmd->merge_store_mask, store_mask);
+      return false;
+   }
+
+   return hk_render_merge_enabled(cmd) &&
+          hk_render_merge_key(&key, info->flags, info->layerCount,
+                              info->viewMask, info->colorAttachmentCount, views,
+                              depth_stencil) &&
+          !memcmp(&key, &cmd->merge_key, sizeof(key));
+}
+
+/* At the end of a render pass, whether its render can stay open. */
+static bool
+hk_render_merge_end(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   struct hk_rendering_state *render = &cmd->state.gfx.render;
+   struct hk_image_view *views[HK_MAX_RTS] = {NULL};
+
+   if (!cs || !cs->stats.cmds || !hk_render_merge_enabled(cmd) ||
+       cmd->sync_fallback || cmd->current_cs.pre_gfx ||
+       cmd->current_cs.post_gfx || cmd->tess_batch.draws ||
+       cmd->state.gfx.occlusion.active_count)
+      return false;
+
+   for (unsigned i = 0; i < MIN2(render->color_att_count, HK_MAX_RTS); ++i) {
+      if (render->color_att[i].resolve_mode != VK_RESOLVE_MODE_NONE)
+         return false;
+      views[i] = render->color_att[i].iview;
+   }
+
+   return hk_render_merge_key(
+      &cmd->merge_key, render->flags, render->layer_count, render->view_mask,
+      render->color_att_count, views,
+      render->depth_att.iview || render->stencil_att.iview);
+}
+
 VKAPI_ATTR void VKAPI_CALL
 hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
                      const VkRenderingInfo *pRenderingInfo)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   bool merge = false;
+   if (cmd->merge_cs) {
+      merge = hk_render_merge_begin(cmd, pRenderingInfo);
+      if (!merge) {
+         hk_render_merge_trace(cmd->in_meta ? "begin: meta" : "begin: mismatch",
+                               pRenderingInfo->colorAttachmentCount,
+                               pRenderingInfo->colorAttachmentCount ?
+                                  pRenderingInfo->pColorAttachments[0].loadOp : ~0ull);
+         hk_cmd_render_merge_flush_why(cmd, NULL);
+      }
+   }
+
    cmd->sync_render_continuation =
       (pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT) != 0;
    cmd->sync_render_stages = cmd->sync_scope ?: HK_SYNC_GRAPHICS;
@@ -572,6 +693,11 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
    render->flags = pRenderingInfo->flags;
    render->area = pRenderingInfo->renderArea;
+   for (uint32_t i = 0; i < MIN2(pRenderingInfo->colorAttachmentCount, 32); i++) {
+      if (pRenderingInfo->pColorAttachments[i].imageView &&
+          is_attachment_stored(&pRenderingInfo->pColorAttachments[i]))
+         render->store_mask |= BITFIELD_BIT(i);
+   }
    render->view_mask = pRenderingInfo->viewMask;
    render->layer_count = pRenderingInfo->layerCount;
    render->tilebuffer.nr_samples = 0;
@@ -805,6 +931,16 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    if (render->flags & VK_RENDERING_RESUMING_BIT)
       return;
 
+   if (merge) {
+      /* Continue the open render. Its background program, made for the
+       * first pass, loads or clears every tile it processes. */
+      perf_debug(cmd, "Merging render pass into the previous render");
+      render->first_cs = cmd->merge_first_cs ? cmd->merge_cs : NULL;
+      cmd->merge_cs = NULL;
+      hk_cmd_buffer_dirty_all(cmd);
+      return;
+   }
+
    /* The first control stream of the render pass is special since it gets
     * the clears. Create it and swap in the clear.
     */
@@ -972,8 +1108,41 @@ hk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
    }
 
    perf_debug(cmd, "End rendering");
-   hk_cs_end_hint(cmd, HK_CS_END_RENDER_PASS);
-   hk_cmd_buffer_end_graphics(cmd);
+   if (hk_render_merge_end(cmd, cs)) {
+      /* Keep the render open for a following render pass to continue. */
+      /* A continuing pass stores at least what the passes before it did, so
+       * its mask covers the whole open render. */
+      cmd->merge_store_mask = render->store_mask;
+      cmd->merge_cs = cs;
+      cmd->merge_first_cs = cs == render->first_cs;
+      /* Barriers before the next pass go ahead of the stream's first event. */
+      unsigned i = 0, n = util_dynarray_num_elements(&cmd->sync_events,
+                                                    struct hk_sync_event);
+      const struct hk_sync_event *events = cmd->sync_events.data;
+      while (i < n && events[i].stream != cs->sync_id)
+         ++i;
+      assert(i < n && "a stream with draws has a sync event");
+      cmd->merge_event = i;
+   } else {
+      if (cs) {
+         /* Why this render is not kept open (diagnostic). */
+         bool resolve = false;
+         for (unsigned i = 0; i < render->color_att_count; ++i)
+            resolve |= render->color_att[i].resolve_mode != VK_RESOLVE_MODE_NONE;
+         hk_render_merge_trace(
+            "end: ineligible",
+            (render->depth_att.iview || render->stencil_att.iview) |
+               resolve << 1 | cmd->sync_fallback << 2 |
+               (cmd->current_cs.pre_gfx || cmd->current_cs.post_gfx) << 3 |
+               !!cmd->tess_batch.draws << 4 |
+               !!cmd->state.gfx.occlusion.active_count << 5 | cmd->in_meta << 6 |
+               (cmd->vk.level != VK_COMMAND_BUFFER_LEVEL_PRIMARY) << 7 |
+               !cs->stats.cmds << 8 | !render->color_att_count << 9,
+            render->flags);
+      }
+      hk_cs_end_hint(cmd, HK_CS_END_RENDER_PASS);
+      hk_cmd_buffer_end_graphics(cmd);
+   }
 
    bool need_resolve = false;
 
@@ -5227,6 +5396,7 @@ hk_CmdBeginConditionalRenderingEXT(
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(hk_buffer, buffer, pConditionalRenderingBegin->buffer);
+   hk_cmd_render_merge_flush(cmd);
 
    uint64_t predicate =
       hk_buffer_address(buffer, pConditionalRenderingBegin->offset, true);
@@ -5241,6 +5411,7 @@ VKAPI_ATTR void VKAPI_CALL
 hk_CmdEndConditionalRenderingEXT(VkCommandBuffer commandBuffer)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   hk_cmd_render_merge_flush(cmd);
    cmd->state.cond_render.active = false;
 }
 
