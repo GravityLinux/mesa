@@ -996,6 +996,7 @@ hk_merge_graphics_stages(void)
 void hk_cmd_render_merge_flush_why(struct hk_cmd_buffer *cmd, const char *why);
 struct hk_cs *hk_render_merge_pre_cs(struct hk_cmd_buffer *cmd, unsigned stages);
 void hk_render_merge_trace(const char *why, uint64_t a, uint64_t b);
+bool hk_render_merge_move_enabled(void);
 #define hk_cmd_render_merge_flush(cmd) hk_cmd_render_merge_flush_why(cmd, __func__)
 
 static inline struct hk_cs *
@@ -1006,7 +1007,8 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
     * merging. A merged render pass takes the stream before drawing. */
    if (unlikely(cmd->merge_cs) && ptr != &cmd->merge_pre_cs) {
       if (compute && ptr == &cmd->current_cs.cs && cmd->merge_move_stage &&
-          !(cmd->merge_move_stage & cmd->merge_reach))
+          !(cmd->merge_move_stage & cmd->merge_reach) &&
+          hk_render_merge_move_enabled())
          return hk_render_merge_pre_cs(cmd, stages);
       hk_cmd_render_merge_flush(cmd);
    }

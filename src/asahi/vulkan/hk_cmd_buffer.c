@@ -743,8 +743,10 @@ hk_render_merge_pre_cs(struct hk_cmd_buffer *cmd, unsigned stages)
    bool created = !cmd->merge_pre_cs;
    struct hk_cs *cs =
       hk_cmd_buffer_get_cs_general(cmd, &cmd->merge_pre_cs, true, stages);
-   if (created && cs)
+   if (created && cs) {
       perf_debug(cmd, "Moving compute ahead of the open render");
+      hk_render_merge_trace("moved ahead", cmd->merge_move_stage, cmd->merge_reach);
+   }
    hk_render_merge_place_events(cmd, first);
    return cs;
 }
@@ -824,23 +826,31 @@ hk_render_merge_image_barrier(struct hk_cmd_buffer *cmd, VkPipelineStageFlags2 s
    return true;
 }
 
+/* HK_APPLE9_MERGE_MOVE_COMPUTE=0 keeps compute and transfer work in order
+ * after a render kept open for merging, and ends the render at every barrier
+ * that does not involve it. */
+bool
+hk_render_merge_move_enabled(void)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("HK_APPLE9_MERGE_MOVE_COMPUTE", true);
+   return enabled;
+}
+
 void
 hk_cmd_sync_barrier(struct hk_cmd_buffer *cmd,
                     VkPipelineStageFlags2 src, VkPipelineStageFlags2 dst,
                     VkAccessFlags2 src_access, VkAccessFlags2 dst_access)
 {
    if (cmd->merge_cs) {
-      static int move_compute = -1;
-      if (move_compute < 0)
-         move_compute =
-            debug_get_bool_option("HK_APPLE9_MERGE_MOVE_COMPUTE", true);
       const VkPipelineStageFlags2 xsrc = hk_merge_expand_stages(src, true);
       const VkPipelineStageFlags2 xdst = hk_merge_expand_stages(dst, false);
       bool image_barrier = false, unrelated = false;
       if ((!cmd->in_meta &&
            hk_render_merge_barrier(src, dst, src_access, dst_access)) ||
           (image_barrier = hk_render_merge_image_barrier(cmd, src)) ||
-          (unrelated = move_compute && !cmd->in_meta &&
+          (unrelated = hk_render_merge_move_enabled() && !cmd->in_meta &&
                        !(xsrc & cmd->merge_reach))) {
          cmd->merge_cs->merge_hoisted |= image_barrier;
          if (image_barrier)
