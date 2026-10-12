@@ -720,6 +720,9 @@ hk_gpu_busy_finish(struct hk_queue *queue)
    *link = q->next;
    queue->gpu_busy = NULL;
    if (!d->queues) {
+      /* collect() dumps the pass table only every 5 s; write the passes
+       * since the last dump before the log closes. */
+      pass_dump(d, os_time_get_nano());
       struct busy_device **device_link = &devices;
       while (*device_link != d)
          device_link = &(*device_link)->next;
