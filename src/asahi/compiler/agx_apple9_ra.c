@@ -1594,6 +1594,20 @@ static const char apple9_duplicate_candidate_reason[] =
 /* Everything after scheduling depends only on the scheduled IR and these
  * policy inputs, so an equal digest means an identical allocation, which
  * can never be strictly cheaper than the one already compared. */
+static _Thread_local bool agx_apple9_ra_probe;
+
+void
+agx_apple9_ra_set_probe(bool probe)
+{
+   agx_apple9_ra_probe = probe;
+}
+
+bool
+agx_apple9_ra_is_probe(void)
+{
+   return agx_apple9_ra_probe;
+}
+
 static bool
 apple9_seen_schedule(agx_context *ctx, struct util_dynarray *seen,
                      bool cost_constraints, bool copy_register,
@@ -2101,6 +2115,17 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
       }
    }
    remat_known[0][0] = true;
+   /* A spill probe needs only the first allocation. */
+   if (agx_apple9_ra_probe) {
+      util_dynarray_fini(&seen);
+      agx_apple9_vir_finish(&alternative);
+      agx_apple9_vir_finish(program);
+      *program = best;
+      for (struct agx_apple9_block *block = program->allocated_blocks; block;
+           block = block->allocated_next)
+         block->program = program;
+      return true;
+   }
 
    struct apple9_allocation_cost cost = apple9_allocation_cost(&best);
    /* Bank-cost allocations pay off when the plain allocation spills: they

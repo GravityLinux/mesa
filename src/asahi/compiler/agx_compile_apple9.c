@@ -6633,8 +6633,8 @@ apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
                        const char **reason)
 {
    nir_shader *plain = NULL;
-   if (preamble || !apple9_hoist_limit() || !apple9_has_samples(nir) ||
-       !(plain = nir_shader_clone(NULL, nir)))
+   if (preamble || agx_apple9_ra_is_probe() || !apple9_hoist_limit() ||
+       !apple9_has_samples(nir) || !(plain = nir_shader_clone(NULL, nir)))
       return apple9_compile_dag_once(nir, out, profile, varyings, resources,
                                      constants, preamble, true, cost, reason);
 
@@ -7732,37 +7732,77 @@ apple9_compile_dag_tail(nir_shader *nir, struct agx_shader_part *out,
    apple9_prepared_main = NULL;
    nir_shader *prepared = apple9_prepare_preamble_main(nir);
    apple9_prepared_main = prepared;
-   bool ok = apple9_preamble_trial(nir, out, profile, varyings, &resources,
-                                   true, &address_cost, &address_log, &address_size,
-                                   &address_hoists);
-   bool use_original = false;
    /* Moving uniform addresses competes with descriptor values and constants
     * for preamble storage. If the resulting main spills, compare the old
     * placement using the same loop-weighted allocation cost as sample
     * hoisting, while also rejecting any static spill increase. Preserve a
-    * usable original preamble if new setup does
-    * not fit. The common no-spill case needs only one search. Without any
-    * address hoist the original placement prepares the same main program,
-    * so its search could only repeat this one. */
-   if (!ok || (address_cost.spills && address_hoists)) {
-      struct agx_shader_part original = {0};
-      struct agx_apple9_compute_profile original_profile = {0};
-      bool original_ok = apple9_preamble_trial(
-         nir, &original, profile ? &original_profile : NULL, varyings, &resources,
-         false, &original_cost, &original_log, &original_size, NULL);
-      use_original = original_ok &&
-                     (!ok || address_cost.spills > original_cost.spills ||
-                      apple9_dag_cost_less(&original_cost, &address_cost));
-      if (use_original) {
-         if (ok)
-            free(out->binary);
-         *out = original;
-         if (profile)
-            *profile = original_profile;
-         ok = true;
-      } else {
-         free(original.binary);
+    * usable original preamble if new setup does not fit. The common no-spill
+    * case needs only one search. Without any address hoist the original
+    * placement prepares the same main program, so its search could only
+    * repeat this one.
+    *
+    * When the address placement spills, the original placement nearly always
+    * spills less (ELDEN RING: 288 of 290 fragment shaders), so the address
+    * trial's full candidate search is usually wasted. Probe the address
+    * placement with one allocation; if that spills, compile the original
+    * placement first. Keep it outright when it does not spill or clearly
+    * spills less than the probe; otherwise complete the address trial and
+    * compare as before. */
+   struct agx_shader_part original = {0};
+   struct agx_apple9_compute_profile original_profile = {0};
+   bool have_original = false, original_ok = false, ok = false;
+   bool use_original = false, address_done = false;
+   if (!getenv("AGX_APPLE9_NO_ADDRESS_PROBE")) {
+      struct agx_shader_part probe = {0};
+      struct apple9_dag_cost probe_cost = {0};
+      char *probe_log = NULL;
+      size_t probe_size = 0;
+      unsigned probe_hoists = 0;
+      agx_apple9_ra_set_probe(true);
+      bool probe_ok = apple9_preamble_trial(nir, &probe, NULL, varyings, &resources,
+                                            true, &probe_cost, &probe_log,
+                                            &probe_size, &probe_hoists);
+      agx_apple9_ra_set_probe(false);
+      free(probe.binary);
+      free(probe_log);
+      if (probe_ok && probe_cost.spills && probe_hoists) {
+         have_original = true;
+         original_ok = apple9_preamble_trial(
+            nir, &original, profile ? &original_profile : NULL, varyings,
+            &resources, false, &original_cost, &original_log, &original_size, NULL);
+         if (original_ok &&
+             (!original_cost.spills ||
+              original_cost.weighted_spills * 10 <= probe_cost.weighted_spills * 9)) {
+            use_original = true;
+            address_done = true;
+         }
       }
+   }
+   if (!address_done) {
+      ok = apple9_preamble_trial(nir, out, profile, varyings, &resources,
+                                 true, &address_cost, &address_log, &address_size,
+                                 &address_hoists);
+      if (!ok || (address_cost.spills && address_hoists)) {
+         if (!have_original) {
+            original_ok = apple9_preamble_trial(
+               nir, &original, profile ? &original_profile : NULL, varyings,
+               &resources, false, &original_cost, &original_log, &original_size,
+               NULL);
+         }
+         use_original = original_ok &&
+                        (!ok || address_cost.spills > original_cost.spills ||
+                         apple9_dag_cost_less(&original_cost, &address_cost));
+      }
+   }
+   if (use_original) {
+      if (ok)
+         free(out->binary);
+      *out = original;
+      if (profile)
+         *profile = original_profile;
+      ok = true;
+   } else {
+      free(original.binary);
    }
    apple9_prepared_main = NULL;
    ralloc_free(prepared);
