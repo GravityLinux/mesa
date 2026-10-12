@@ -2272,7 +2272,7 @@ hk_apple9_encode_texel(nir_builder *b, nir_def *value, nir_def *layout,
 /* HK_APPLE9_NO_STORE_ENCODE=1 keeps every store on the layout encoder (A/B). */
 DEBUG_GET_ONCE_BOOL_OPTION(hk_apple9_no_store_encode, "HK_APPLE9_NO_STORE_ENCODE", false)
 
-static nir_def *
+nir_def *
 hk_apple9_encode_texel_fast(nir_builder *b, nir_def *value, nir_def *layout,
                             bool floating, nir_def *encode)
 {
@@ -2297,9 +2297,16 @@ hk_apple9_encode_texel_fast(nir_builder *b, nir_def *value, nir_def *layout,
          nir_pack_half_2x16_split(b, nir_channel(b, value, 2), nir_channel(b, value, 3)),
          nir_imm_int(b, 0), nir_imm_int(b, 0));
       nir_push_else(b, NULL);
+      nir_push_if(b, nir_ieq_imm(b, encode, HK_STORE_ENCODE_FLOAT11));
+      nir_def *float11 = nir_vec4(b,
+         nir_format_pack_11f11f10f(b, nir_trim_vector(b, value, 3)),
+         nir_imm_int(b, 0), nir_imm_int(b, 0), nir_imm_int(b, 0));
+      nir_push_else(b, NULL);
       nir_def *generic = hk_apple9_encode_texel(b, value, layout, true);
       nir_pop_if(b, NULL);
-      nir_def *half_or_generic = nir_if_phi(b, float16, generic);
+      nir_def *float11_or_generic = nir_if_phi(b, float11, generic);
+      nir_pop_if(b, NULL);
+      nir_def *half_or_generic = nir_if_phi(b, float16, float11_or_generic);
       nir_pop_if(b, NULL);
       rest = nir_if_phi(b, unorm8, half_or_generic);
    } else {

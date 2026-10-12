@@ -150,6 +150,18 @@ if with_tests
     suite : ['asahi', 'honeykrisp'],
   )
   test(
+    'hk_texel_encode',
+    executable(
+      'hk_texel_encode',
+      'tests/hk-texel-encode.c',
+      include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                             inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+      dependencies : [hk_deps],
+      link_with : [libhk],
+    ),
+    suite : ['asahi', 'honeykrisp'],
+  )
+  test(
     'hk_sync_tests',
     executable(
       'hk_sync_tests',

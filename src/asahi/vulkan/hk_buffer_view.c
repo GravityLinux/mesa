@@ -108,6 +108,8 @@ hk_apple9_texel_layout(enum pipe_format format,
 enum hk_apple9_store_encode
 hk_apple9_store_encode(enum pipe_format format)
 {
+   if (format == PIPE_FORMAT_R11G11B10_FLOAT)
+      return HK_STORE_ENCODE_FLOAT11;
    const struct util_format_description *desc = util_format_description(format);
    if (desc->layout != UTIL_FORMAT_LAYOUT_PLAIN ||
        desc->colorspace != UTIL_FORMAT_COLORSPACE_RGB || !desc->nr_channels)

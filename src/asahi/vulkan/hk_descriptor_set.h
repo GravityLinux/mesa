@@ -147,6 +147,8 @@ enum hk_apple9_store_encode {
    HK_STORE_ENCODE_UNORM8,
    /* 16-bit float channels. */
    HK_STORE_ENCODE_FLOAT16,
+   /* R11G11B10 unsigned float (B10G11R11_UFLOAT_PACK32). */
+   HK_STORE_ENCODE_FLOAT11,
 };
 
 enum hk_apple9_store_encode hk_apple9_store_encode(enum pipe_format format);
