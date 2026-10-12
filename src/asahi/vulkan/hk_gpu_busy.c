@@ -10,7 +10,9 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
 #include <xf86drm.h>
@@ -75,20 +77,24 @@ pass_add(const struct busy_pass_key *key, unsigned engine, uint64_t ns, bool fir
    passes_dropped++;
 }
 
+struct busy_device;
+static void busy_printf(struct busy_device *d, const char *fmt, ...)
+   __attribute__((format(printf, 2, 3)));
+
 static void
-pass_dump(FILE *f, uint64_t now)
+pass_dump(struct busy_device *f, uint64_t now)
 {
-   fprintf(f, "GPU_PASS_BEGIN cpu_ns=%" PRIu64 " dropped=%" PRIu64 "\n", now, passes_dropped);
+   busy_printf(f, "GPU_PASS_BEGIN cpu_ns=%" PRIu64 " dropped=%" PRIu64 "\n", now, passes_dropped);
    for (unsigned i = 0; i < PASS_SLOTS; ++i) {
       struct busy_pass *p = &passes[i];
       if (!p->used)
          continue;
-      fprintf(f, "GPU_PASS code=0x%" PRIx64 " grid=%u,%u,%u count=%u commands=%" PRIu64
+      busy_printf(f, "GPU_PASS code=0x%" PRIx64 " grid=%u,%u,%u count=%u commands=%" PRIu64
               " vertex_ns=%" PRIu64 " fragment_ns=%" PRIu64 " compute_ns=%" PRIu64 "\n",
               p->key.code, p->key.grid[0], p->key.grid[1], p->key.grid[2], p->key.count,
               p->commands, p->ns[1], p->ns[2], p->ns[3]);
    }
-   fprintf(f, "GPU_PASS_END cpu_ns=%" PRIu64 "\n", now);
+   busy_printf(f, "GPU_PASS_END cpu_ns=%" PRIu64 "\n", now);
 }
 
 struct busy_bin {
@@ -98,7 +104,6 @@ struct busy_bin {
    struct hk_busy_ranges ranges[4];
 };
 
-struct busy_device;
 struct hk_gpu_busy_queue {
    struct hk_gpu_busy_queue *next;
    struct busy_device *device;
@@ -115,7 +120,13 @@ struct busy_device {
    struct busy_device *next;
    struct hk_device *dev;
    struct hk_gpu_busy_queue *queues;
-   FILE *file;
+   /* Log lines are formatted into out under busy_lock and written to fd by
+    * the collector thread after it drops the lock, so neither the file
+    * system (a virtio round trip per write under muvm) nor collection runs
+    * on the submitting thread. */
+   int fd;
+   char *out;
+   size_t out_len, out_cap;
    uint64_t next_sample_ns;
    struct busy_bin bins[BUSY_SECONDS];
    uint64_t pairs_requested, pairs_written, pairs_collected;
@@ -125,6 +136,44 @@ struct busy_device {
 };
 
 static pthread_mutex_t busy_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void
+busy_printf(struct busy_device *d, const char *fmt, ...)
+{
+   for (;;) {
+      va_list args;
+      va_start(args, fmt);
+      size_t room = d->out_cap - d->out_len;
+      int n = vsnprintf(d->out ? d->out + d->out_len : NULL, room, fmt, args);
+      va_end(args);
+      if (n < 0)
+         return;
+      if ((size_t)n < room) {
+         d->out_len += n;
+         return;
+      }
+      size_t cap = MAX2(d->out_cap * 2, d->out_len + n + 4096);
+      char *out = realloc(d->out, cap);
+      if (!out)
+         return;
+      d->out = out;
+      d->out_cap = cap;
+   }
+}
+
+static void
+write_all(int fd, const char *data, size_t len)
+{
+   while (len) {
+      ssize_t n = write(fd, data, len);
+      if (n < 0 && errno == EINTR)
+         continue;
+      if (n <= 0)
+         return;
+      data += n;
+      len -= n;
+   }
+}
 
 /* HK_GPU_BUSY_FILE enables busy counters, pass identity and shader identity;
  * without it every entry point returns at once. Read once. */
@@ -140,7 +189,7 @@ busy_enabled(void)
 }
 static struct busy_device *devices;
 
-static FILE *
+static int
 open_log(void)
 {
    char path[4096];
@@ -158,18 +207,13 @@ open_log(void)
    int fd =
       open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600);
    if (fd < 0)
-      return NULL;
+      return -1;
    struct stat st;
    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_uid != geteuid()) {
       close(fd);
-      return NULL;
+      return -1;
    }
-   FILE *f = fdopen(fd, "a");
-   if (!f)
-      close(fd);
-   else
-      setvbuf(f, NULL, _IOLBF, 0);
-   return f;
+   return fd;
 }
 
 static void
@@ -223,8 +267,8 @@ flush_log(struct busy_device *d, uint64_t now)
          if (b->ranges[e].overflow)
             overflow_mask |= 1u << e;
       }
-      fprintf(
-         d->file,
+      busy_printf(
+         d,
          "GPU_BUSY pid=%d device=%p cpu_ns=%" PRIu64 " gpu_second=%" PRIu64
          " revision=%" PRIu64 " union_ns=%" PRIu64 " vertex_ns=%" PRIu64
          " fragment_ns=%" PRIu64 " compute_ns=%" PRIu64 " pairs=%" PRIu64
@@ -248,7 +292,7 @@ flush_log(struct busy_device *d, uint64_t now)
    }
    if (!pending)
       oldest_pending = 0;
-   fprintf(d->file,
+   busy_printf(d,
            "GPU_BUSY_SAMPLE pid=%d device=%p cpu_ns=%" PRIu64
            " requested=%" PRIu64 " written=%" PRIu64 " collected=%" PRIu64
            " app_owned=%" PRIu64 " pool_full=%" PRIu64 " initial=%" PRIu64
@@ -259,7 +303,6 @@ flush_log(struct busy_device *d, uint64_t now)
            d->pairs_collected, d->app_pairs, d->full_pairs, d->initial_pairs,
            d->invalid_pairs, d->late_pairs, pending, oldest_pending, d->queries,
            d->query_errors);
-   fflush(d->file);
 }
 
 /* One non-waiting completed-point query per live queue per second, independent
@@ -323,8 +366,7 @@ collect(struct busy_device *d, uint64_t now)
    flush_log(d, now);
    if (now >= pass_next_dump_ns) {
       pass_next_dump_ns = now + 5 * SECOND_NS;
-      pass_dump(d->file, now);
-      fflush(d->file);
+      pass_dump(d, now);
    }
 }
 
@@ -349,7 +391,7 @@ hk_gpu_busy_shader(struct agx_bo *bo, const void *code, uint32_t size,
    uint32_t hash = _mesa_hash_data(code, size);
    pthread_mutex_lock(&busy_lock);
    for (struct busy_device *d = devices; d; d = d->next) {
-      fprintf(d->file, "GPU_SHADER cpu_ns=%" PRIu64 " code=0x%" PRIx64
+      busy_printf(d, "GPU_SHADER cpu_ns=%" PRIu64 " code=0x%" PRIx64
               " hash=0x%08x size=%u stage=%u\n", os_time_get_nano(),
               bo->va->addr, hash, size, stage);
       break;
@@ -381,7 +423,7 @@ hk_gpu_busy_shader_source(const void *code, uint32_t size, const char *name,
       clean[i] = (name[i] <= ' ' || name[i] == '=') ? '_' : name[i];
    pthread_mutex_lock(&busy_lock);
    for (struct busy_device *d = devices; d; d = d->next) {
-      fprintf(d->file, "GPU_SHADER_SRC hash=0x%08x size=%u stage=%u blake3=%s name=%s\n",
+      busy_printf(d, "GPU_SHADER_SRC hash=0x%08x size=%u stage=%u blake3=%s name=%s\n",
               _mesa_hash_data(code, size), size, stage, b3, clean[0] ? clean : "-");
       break;
    }
@@ -432,11 +474,60 @@ hk_gpu_busy_sample(struct hk_queue *queue)
                            first, last, hz);
       }
    }
-   if (now >= d->next_sample_ns) {
-      d->next_sample_ns = now + SECOND_NS;
-      collect(d, now);
-   }
    pthread_mutex_unlock(&busy_lock);
+}
+
+/* Once a second: collect every device under busy_lock, then write what was
+ * formatted with the lock dropped. */
+static void *
+collector_main(void *arg)
+{
+   for (;;) {
+      struct timespec second = {.tv_sec = 1};
+      while (nanosleep(&second, &second) && errno == EINTR)
+         ;
+      struct pending {
+         int fd;
+         char *data;
+         size_t len;
+      } pending[8];
+      unsigned count = 0;
+      pthread_mutex_lock(&busy_lock);
+      uint64_t now = os_time_get_nano();
+      for (struct busy_device *d = devices; d; d = d->next) {
+         if (now >= d->next_sample_ns) {
+            d->next_sample_ns = now + SECOND_NS;
+            collect(d, now);
+         }
+         if (!d->out_len || count == ARRAY_SIZE(pending))
+            continue;
+         int fd = dup(d->fd);
+         if (fd < 0)
+            continue;
+         pending[count++] = (struct pending){fd, d->out, d->out_len};
+         d->out = NULL;
+         d->out_len = d->out_cap = 0;
+      }
+      pthread_mutex_unlock(&busy_lock);
+      for (unsigned i = 0; i < count; ++i) {
+         write_all(pending[i].fd, pending[i].data, pending[i].len);
+         close(pending[i].fd);
+         free(pending[i].data);
+      }
+   }
+   return NULL;
+}
+
+static void
+start_collector(void)
+{
+   pthread_t thread;
+   pthread_attr_t attr;
+   pthread_attr_init(&attr);
+   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+   if (pthread_create(&thread, &attr, collector_main, NULL))
+      fprintf(stderr, "HK GPU busy collector thread unavailable\n");
+   pthread_attr_destroy(&attr);
 }
 
 static bool
@@ -545,8 +636,8 @@ hk_gpu_busy_init(struct hk_queue *queue)
          pthread_mutex_unlock(&busy_lock);
          goto fail;
       }
-      d->file = open_log();
-      if (!d->file) {
+      d->fd = open_log();
+      if (d->fd < 0) {
          free(d);
          pthread_mutex_unlock(&busy_lock);
          goto fail;
@@ -565,7 +656,7 @@ hk_gpu_busy_init(struct hk_queue *queue)
       uint64_t unix_after =
          (uint64_t)wall_after.tv_sec * SECOND_NS + wall_after.tv_nsec;
       d->next_sample_ns = after + SECOND_NS;
-      fprintf(d->file,
+      busy_printf(d,
               "GPU_BUSY_CONFIG pid=%d device=%p gpu_anchor_ns=%" PRIu64
               " cpu_before_ns=%" PRIu64 " cpu_after_ns=%" PRIu64
               " unix_before_ns=%" PRIu64 " unix_after_ns=%" PRIu64
@@ -578,13 +669,14 @@ hk_gpu_busy_init(struct hk_queue *queue)
               unix_after,
               (uint64_t)dev->dev.params.command_timestamp_frequency_hz,
               BUSY_SLOTS, BUSY_SECONDS, HK_BUSY_MAX_RANGES);
-      fflush(d->file);
    }
    q->device = d;
    q->next = d->queues;
    d->queues = q;
    queue->gpu_busy = q;
    pthread_mutex_unlock(&busy_lock);
+   static pthread_once_t collector_once = PTHREAD_ONCE_INIT;
+   pthread_once(&collector_once, start_collector);
    return;
 fail:
    fprintf(stderr, "HK GPU busy counters unavailable for queue %u\n",
@@ -617,7 +709,9 @@ hk_gpu_busy_finish(struct hk_queue *queue)
       for (unsigned i = 0; i < BUSY_SECONDS; ++i)
          for (unsigned e = 0; e < 4; ++e)
             free(d->bins[i].ranges[e].data);
-      fclose(d->file);
+      write_all(d->fd, d->out, d->out_len);
+      close(d->fd);
+      free(d->out);
       free(d);
    }
    pthread_mutex_unlock(&busy_lock);
