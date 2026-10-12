@@ -388,6 +388,10 @@ struct agx_apple9_vir_instr {
     * to the hardware operand slots. Uniform and immediate masks are disjoint. */
    uint8_t alu_src_uniform_mask, alu_src_immediate_mask;
    uint32_t alu_src_value[4];
+   /* Register operand slots read as 16-bit halves of their 32-bit source
+    * register: the high half when set in src_hi_mask, sign- rather than
+    * zero-extended when set in src_sext_mask. */
+   uint8_t src_half_mask, src_hi_mask, src_sext_mask;
    /* Clamp the floating result to [0, 1], mapping NaN to positive zero. */
    bool saturate;
 

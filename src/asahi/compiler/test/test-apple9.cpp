@@ -2165,6 +2165,123 @@ TEST(Apple9Packer, UniformMovesMatchOwnMslEncodings)
    EXPECT_FALSE(agx_apple9_pack_vir_instruction(&move, high, &packed, &reason));
 }
 
+/* 16-bit half sources of integer add/subtract and multiply-add, against
+ * Metal's encodings of our own kernels (msl-encodings-20261011/
+ * half-src). Every source is a last use; dependency fields are masked. */
+TEST(Apple9Packer, HalfSourcesMatchOwnMslEncodings)
+{
+   struct {
+      const char *name;
+      enum agx_apple9_vir_opcode op;
+      enum agx_apple9_encoding encoding;
+      uint8_t nr_srcs, half, hi, sext;
+      uint8_t phys[4];
+      std::vector<uint8_t> metal;
+   } cases[] = {
+      /* x + (lo|hi of r2), x in r0 */
+      {"add_xlo", AGX_APPLE9_VIR_IADD, AGX_APPLE9_ENC_INT_ADD_EXTENDED, 2, 1, 0, 0,
+       {0, 2, 0}, {0x9f, 0x01, 0x56, 0x00, 0x02, 0x08, 0x00, 0x88, 0x17, 0x05}},
+      {"add_xslo", AGX_APPLE9_VIR_IADD, AGX_APPLE9_ENC_INT_ADD_EXTENDED, 2, 1, 0, 1,
+       {0, 2, 0}, {0x9f, 0x01, 0x56, 0x00, 0x02, 0x08, 0x00, 0x88, 0x17, 0x07}},
+      {"add_xhi", AGX_APPLE9_VIR_IADD, AGX_APPLE9_ENC_INT_ADD_EXTENDED, 2, 1, 1, 0,
+       {0, 2, 0}, {0x9f, 0x01, 0x56, 0x00, 0x02, 0x0a, 0x00, 0x88, 0x17, 0x05}},
+      {"add_xshi", AGX_APPLE9_VIR_IADD, AGX_APPLE9_ENC_INT_ADD_EXTENDED, 2, 1, 1, 1,
+       {0, 2, 0}, {0x9f, 0x01, 0x56, 0x00, 0x02, 0x0a, 0x00, 0x88, 0x17, 0x07}},
+      /* x - (lo|hi of r2), sign-extended, in operand B */
+      {"sub_xslo", AGX_APPLE9_VIR_ISUB, AGX_APPLE9_ENC_INT_ADD_EXTENDED, 2, 2, 0, 2,
+       {0, 0, 2}, {0x1f, 0x01, 0x56, 0x00, 0x02, 0x00, 0x10, 0x28, 0x17, 0x0d}},
+      {"sub_xshi", AGX_APPLE9_VIR_ISUB, AGX_APPLE9_ENC_INT_ADD_EXTENDED, 2, 2, 2, 2,
+       {0, 0, 2}, {0x1f, 0x01, 0x56, 0x00, 0x02, 0x00, 0x14, 0x28, 0x17, 0x0d}},
+      /* (hi of r4) * x + z */
+      {"mad_hi", AGX_APPLE9_VIR_IMAD, AGX_APPLE9_ENC_INT_MAD_EXTENDED, 3, 1, 1, 0,
+       {0, 4, 0, 2}, {0x9f, 0x00, 0x56, 0x00, 0x02, 0x12, 0x00, 0x20, 0x90, 0x2f, 0x2a, 0x00}},
+      {"mad_shi", AGX_APPLE9_VIR_IMAD, AGX_APPLE9_ENC_INT_MAD_EXTENDED, 3, 1, 1, 1,
+       {0, 4, 0, 2}, {0x9f, 0x00, 0x56, 0x00, 0x02, 0x12, 0x00, 0x20, 0x90, 0x2f, 0x2e, 0x00}},
+      /* x * z + (hi of r4) */
+      {"mad_chi", AGX_APPLE9_VIR_IMAD, AGX_APPLE9_ENC_INT_MAD_EXTENDED, 3, 4, 4, 0,
+       {0, 2, 0, 4}, {0x9f, 0x00, 0x56, 0x00, 0x02, 0x08, 0x00, 0x48, 0xd0, 0x2e, 0x2a, 0x00}},
+   };
+   for (const auto &test : cases) {
+      agx_apple9_vir_instr I = {
+         .op = test.op,
+         .encoding = test.encoding,
+         .dest = 0,
+         .src = {1, 2, 3},
+         .nr_srcs = test.nr_srcs,
+      };
+      I.src_half_mask = test.half;
+      I.src_hi_mask = test.hi;
+      I.src_sext_mask = test.sext;
+      agx_apple9_packed_instruction packed = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_pack_vir_instruction(&I, test.phys, &packed, &reason))
+         << test.name << ": " << (reason ? reason : "");
+      ASSERT_EQ(packed.length, test.metal.size()) << test.name;
+      for (unsigned i = 0; i < test.metal.size(); ++i) {
+         const uint8_t mask = i == 1 ? 0xf0 : i == 2 ? 0x03 : 0;
+         EXPECT_EQ(packed.bytes[i] & ~mask, test.metal[i] & ~mask)
+            << test.name << " byte=" << i;
+      }
+   }
+}
+
+/* FP16 sources of floating add/multiply and FMA, converted on read, against
+ * Metal's encodings of our own kernels (msl-encodings-20261011/
+ * half-src). Dependency fields and the producer-state bit 21 are masked. */
+TEST(Apple9Packer, Fp16SourcesMatchOwnMslEncodings)
+{
+   struct {
+      const char *name;
+      enum agx_apple9_vir_opcode op;
+      enum agx_apple9_encoding encoding;
+      uint8_t nr_srcs, half, hi;
+      uint8_t phys[4];
+      std::vector<uint8_t> metal, mask;
+   } cases[] = {
+      /* fx + float(h.x): A = r0, B = r2 low half */
+      {"fadd_fh", AGX_APPLE9_VIR_FADD, AGX_APPLE9_ENC_FLOAT2_COMPACT, 2, 2, 0,
+       {0, 0, 2}, {0x09, 0x01, 0x1c, 0x04, 0x00, 0xc0}, {0, 0, 0x20, 0, 0, 0xe0}},
+      /* float(h.y) + fx: A = r2 high half, B = r0 */
+      {"fadd_whi", AGX_APPLE9_VIR_FADD, AGX_APPLE9_ENC_FLOAT2_COMPACT, 2, 1, 1,
+       {0, 2, 0}, {0x09, 0x04, 0x1c, 0x01, 0x08, 0x00}, {0, 0, 0x20, 0, 0, 0xe0}},
+      {"fmul_whi", AGX_APPLE9_VIR_FMUL, AGX_APPLE9_ENC_FLOAT2_COMPACT, 2, 1, 1,
+       {0, 2, 0}, {0x09, 0x04, 0x1d, 0x01, 0x08, 0x00}, {0, 0, 0x20, 0, 0, 0xe0}},
+      /* float(h.x) * float(h.y): both halves of r0 */
+      {"fmul_hh", AGX_APPLE9_VIR_FMUL, AGX_APPLE9_ENC_FLOAT2_COMPACT, 2, 3, 2,
+       {0, 0, 0}, {0x09, 0x00, 0x1d, 0x00, 0x10, 0xc0}, {0, 0, 0x20, 0, 0, 0xe0}},
+      /* four-byte form, low half of r2 in A */
+      {"fadd_wlo", AGX_APPLE9_VIR_FADD, AGX_APPLE9_ENC_FLOAT2_BASE, 2, 1, 0,
+       {0, 2, 0}, {0x09, 0x04, 0x18, 0x01}, {0, 0, 0x20, 0}},
+      /* fma(fx, fz, float(h.y)): addend r4 high half */
+      {"fma_whi_c", AGX_APPLE9_VIR_FMA, AGX_APPLE9_ENC_FLOAT3_EXTENDED, 3, 4, 4,
+       {0, 0, 2, 4}, {0x09, 0x01, 0x1e, 0x05, 0x81, 0x09, 0x00, 0x40},
+       {0, 0, 0x20, 0, 0, 0, 0, 0xe0}},
+      /* fma(fx, float(h.x), fz): operand B r4 low half */
+      {"fma_fhf", AGX_APPLE9_VIR_FMA, AGX_APPLE9_ENC_FLOAT3_EXTENDED, 3, 2, 0,
+       {0, 0, 4, 2}, {0x09, 0x01, 0x1e, 0x08, 0x81, 0x04, 0x02, 0xc2},
+       {0, 0, 0x20, 0, 0, 0, 0, 0xe0}},
+   };
+   for (const auto &test : cases) {
+      agx_apple9_vir_instr I = {
+         .op = test.op,
+         .encoding = test.encoding,
+         .dest = 0,
+         .src = {1, 2, 3},
+         .nr_srcs = test.nr_srcs,
+      };
+      I.src_half_mask = test.half;
+      I.src_hi_mask = test.hi;
+      agx_apple9_packed_instruction packed = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_pack_vir_instruction(&I, test.phys, &packed, &reason))
+         << test.name << ": " << (reason ? reason : "");
+      ASSERT_EQ(packed.length, test.metal.size()) << test.name;
+      for (unsigned i = 0; i < test.metal.size(); ++i)
+         EXPECT_EQ(packed.bytes[i] & ~test.mask[i], test.metal[i] & ~test.mask[i])
+            << test.name << " byte=" << i;
+   }
+}
+
 TEST(Apple9Packer, RegisterFormsMatchValidatedProbeTemplates)
 {
    uint8_t phys[] = {64, 2, 95, 5};
