@@ -410,6 +410,24 @@ hk_gpu_busy_shader(struct agx_bo *bo, const void *code, uint32_t size,
 }
 
 void
+hk_gpu_busy_storage_format(unsigned vk_format, unsigned store_encode)
+{
+   static bool seen[1024];
+   if (!busy_enabled() || vk_format >= ARRAY_SIZE(seen) || seen[vk_format])
+      return;
+   pthread_mutex_lock(&busy_lock);
+   if (!seen[vk_format]) {
+      seen[vk_format] = true;
+      for (struct busy_device *d = devices; d; d = d->next) {
+         busy_printf(d, "GPU_STORAGE_FORMAT vk=%u store_encode=%u\n",
+                     vk_format, store_encode);
+         break;
+      }
+   }
+   pthread_mutex_unlock(&busy_lock);
+}
+
+void
 hk_gpu_busy_shader_source(const void *code, uint32_t size, const char *name,
                           const uint8_t *blake3, unsigned stage)
 {
