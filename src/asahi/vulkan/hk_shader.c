@@ -2781,7 +2781,14 @@ hk_apple9_lower_sparse_tex(nir_builder *b, nir_tex_instr *tex,
       } else {
          coord = nir_f2f32(b, coord);
          nir_def *xy = nir_trim_vector(b, coord, 2);
-         nir_def *size0 = nir_trim_vector(b, nir_get_texture_size(b, tex), 2);
+         /* This query is inserted after descriptor lowering, which normally
+          * marks sampled-image queries as using the Apple9 metadata. Without
+          * the flag, the common query lowering decodes that metadata as a
+          * legacy texture descriptor.
+          */
+         nir_def *size_query = nir_get_texture_size(b, tex);
+         nir_def_as_tex(size_query)->backend_flags |= AGX_TEXTURE_FLAG_METADATA_QUERY;
+         nir_def *size0 = nir_trim_vector(b, size_query, 2);
          nir_def *lod = hk_apple9_sparse_lod(b, tex, xy, nir_u2f32(b, size0));
          /* Nearest mipmapping selects ceil(lod + 1/2) - 1. */
          level = nir_f2u32(b, nir_fmax(b, nir_fceil(b, nir_fadd_imm(b, lod, -0.5)),
@@ -2870,6 +2877,16 @@ hk_apple9_lower_sparse_intrinsic(nir_builder *b, nir_intrinsic_instr *intr,
    nir_def *result = nir_vec_scalars(b, comps, intr->def.num_components + 1);
    nir_def_rewrite_uses_after(&intr->def, result);
    return true;
+}
+
+bool
+hk_apple9_lower_sparse_residency(nir_shader *nir)
+{
+   bool progress = nir_shader_tex_pass(nir, hk_apple9_lower_sparse_tex,
+                                       nir_metadata_none, NULL);
+   progress |= nir_shader_intrinsics_pass(nir, hk_apple9_lower_sparse_intrinsic,
+                                          nir_metadata_none, NULL);
+   return progress;
 }
 
 /* Apple9 can access uncompressed storage images through the same
@@ -3401,10 +3418,7 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
 
    if (dev->dev.chip == AGX_CHIP_G16G) {
       /* Buffer residency lookups add control flow. */
-      NIR_PASS(_, nir, nir_shader_tex_pass, hk_apple9_lower_sparse_tex,
-               nir_metadata_none, NULL);
-      NIR_PASS(_, nir, nir_shader_intrinsics_pass,
-               hk_apple9_lower_sparse_intrinsic, nir_metadata_none, NULL);
+      NIR_PASS(_, nir, hk_apple9_lower_sparse_residency);
       /* Texel-buffer bounds and RGB32 checks add control flow. */
       NIR_PASS(_, nir, nir_shader_tex_pass, hk_apple9_lower_texel_buffer,
                nir_metadata_none, NULL);
