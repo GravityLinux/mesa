@@ -138,6 +138,18 @@ libvulkan_asahi = shared_library(
 
 if with_tests
   test(
+    'hk_sparse_residency',
+    executable(
+      'hk_sparse_residency',
+      'tests/hk-sparse-residency.c',
+      include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                             inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+      dependencies : [hk_deps],
+      link_with : [libhk],
+    ),
+    suite : ['asahi', 'honeykrisp'],
+  )
+  test(
     'hk_barrier_recording',
     executable(
       'hk_barrier_recording',
