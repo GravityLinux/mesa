@@ -39,13 +39,13 @@ poly_nir_load_vertex_id(nir_builder *b, nir_def *id)
 static bool
 lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
-   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *vertex_id = data;
 
    if (intr->intrinsic == nir_intrinsic_load_vertex_id) {
-      nir_def *id = nir_channel(b, nir_load_global_invocation_id(b, 32), 0);
-      nir_def_replace(&intr->def, poly_nir_load_vertex_id(b, id));
+      nir_def_replace(&intr->def, vertex_id);
       return true;
    } else if (intr->intrinsic == nir_intrinsic_load_instance_id) {
+      b->cursor = nir_before_instr(&intr->instr);
       nir_def_replace(&intr->def,
                       nir_channel(b, nir_load_global_invocation_id(b, 32), 1));
       return true;
@@ -54,8 +54,29 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    return false;
 }
 
+static bool
+reads_vertex_id(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   return intr->intrinsic == nir_intrinsic_load_vertex_id;
+}
+
 bool
 poly_nir_lower_sw_vs(nir_shader *s)
 {
-   return nir_shader_intrinsics_pass(s, lower, nir_metadata_control_flow, NULL);
+   /* Vertex fetch reads the vertex ID once per attribute. Pull it from the
+    * index buffer once, at the top, rather than once per read: each pull is
+    * control flow, so later passes cannot merge the copies.
+    */
+   nir_function_impl *impl = nir_shader_get_entrypoint(s);
+   nir_def *vertex_id = NULL;
+   if (nir_function_intrinsics_pass(impl, reads_vertex_id, nir_metadata_all,
+                                    NULL)) {
+      nir_builder b = nir_builder_at(nir_before_impl(impl));
+      nir_def *id = nir_channel(&b, nir_load_global_invocation_id(&b, 32), 0);
+      vertex_id = poly_nir_load_vertex_id(&b, id);
+   }
+
+   return nir_function_intrinsics_pass(impl, lower, nir_metadata_none,
+                                       vertex_id) ||
+          vertex_id != NULL;
 }
