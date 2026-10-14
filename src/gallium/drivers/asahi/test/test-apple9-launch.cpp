@@ -160,7 +160,8 @@ TEST(Apple9Launcher, InvalidParametersCannotPublishPartialCode)
       reject(bad);
    }
    bad = p;
-   for (unsigned bytes : {1u, 64u, 129u, 384u, 32768u, UINT32_MAX}) {
+   for (unsigned bytes : {1u, 64u, 129u, 384u,
+                          2u * AGX_APPLE9_MAX_SHARED_BYTES, UINT32_MAX}) {
       bad.threadgroup_memory_bytes = bytes;
       reject(bad);
    }
@@ -201,7 +202,8 @@ TEST(Apple9Launcher, ThreadgroupAllocationDoesNotChangeEntryOrFrame)
                                        AGX_APPLE9_LAUNCH_COMPUTE, &p));
    unsigned call = agx_apple9_launch_call_offset(AGX_APPLE9_LAUNCH_COMPUTE,
                                                  p.resource_count);
-   for (unsigned bytes : {128, 256, 512, 1024, 2048, 4096, 8192, 16384}) {
+   for (unsigned bytes : {128, 256, 512, 1024, 2048, 4096, 8192, 16384,
+                          AGX_APPLE9_MAX_SHARED_BYTES}) {
       p.threadgroup_memory_bytes = bytes;
       ASSERT_TRUE(agx_apple9_launch_build(out.data(), out.size(),
                                           AGX_APPLE9_LAUNCH_COMPUTE, &p));
