@@ -2156,6 +2156,28 @@ hk_apple9_decode_texel_select(nir_builder *b, nir_def *words, nir_def *layout,
    return nir_vec(b, rgba, 4);
 }
 
+/* The common unsigned-float packer clamps with maximumNumber, which turns
+ * NaNs into zero. Classify the original bits and preserve NaNs, including
+ * payloads lost by mantissa truncation. Finite and infinity encodings retain
+ * the common packer's behavior. */
+static nir_def *
+hk_apple9_pack_float11(nir_builder *b, nir_def *rgb)
+{
+   nir_def *packed = nir_format_pack_11f11f10f(b, rgb);
+   const unsigned shifts[] = {0, 11, 22};
+   const uint32_t masks[] = {0x7ff, 0x7ff, 0x3ff};
+   const uint32_t nans[] = {0x7e0, 0x7e0, 0x3f0};
+   for (unsigned c = 0; c < 3; ++c) {
+      nir_def *is_nan = nir_ult(b, nir_imm_int(b, 0x7f800000),
+         nir_iand_imm(b, nir_channel(b, rgb, c), 0x7fffffff));
+      nir_def *repaired = nir_ior_imm(b,
+         nir_iand_imm(b, packed, ~(masks[c] << shifts[c])),
+         nans[c] << shifts[c]);
+      packed = nir_bcsel(b, is_nan, repaired, packed);
+   }
+   return packed;
+}
+
 /* Encode a texel into zero-padded 32-bit words for its descriptor layout. */
 static nir_def *
 hk_apple9_encode_texel_kind(nir_builder *b, nir_def *value, nir_def *layout,
@@ -2203,7 +2225,7 @@ hk_apple9_encode_texel_kind(nir_builder *b, nir_def *value, nir_def *layout,
                                   cls == HK_TEXEL_RGB9E5)) {
          if (cls < 0 || cls == HK_TEXEL_FLOAT11)
             bits = nir_bcsel(b, nir_ieq_imm(b, kind, HK_TEXEL_FLOAT11),
-                             nir_format_pack_11f11f10f(b, rgb), bits);
+                             hk_apple9_pack_float11(b, rgb), bits);
          if (cls < 0 || cls == HK_TEXEL_RGB9E5)
             bits = nir_bcsel(b, nir_ieq_imm(b, kind, HK_TEXEL_RGB9E5),
                              nir_format_pack_r9g9b9e5(b, rgb), bits);
@@ -2300,7 +2322,7 @@ hk_apple9_encode_texel_fast(nir_builder *b, nir_def *value, nir_def *layout,
       nir_push_else(b, NULL);
       nir_push_if(b, nir_ieq_imm(b, encode, HK_STORE_ENCODE_FLOAT11));
       nir_def *float11 = nir_vec4(b,
-         nir_format_pack_11f11f10f(b, nir_trim_vector(b, value, 3)),
+         hk_apple9_pack_float11(b, nir_trim_vector(b, value, 3)),
          nir_imm_int(b, 0), nir_imm_int(b, 0), nir_imm_int(b, 0));
       nir_push_else(b, NULL);
       nir_def *generic = hk_apple9_encode_texel(b, value, layout, true);
@@ -2983,7 +3005,9 @@ hk_apple9_lower_storage_image(nir_builder *b, nir_intrinsic_instr *intr,
          value = nir_if_phi(b, fetched, nir_pad_vector_imm_int(b, value, 0, 4));
       }
    } else {
-      nir_def *raw = nir_format_pack_rgba(b, format, intr->src[3].ssa);
+      nir_def *raw = format == PIPE_FORMAT_R11G11B10_FLOAT
+         ? hk_apple9_pack_float11(b, nir_trim_vector(b, intr->src[3].ssa, 3))
+         : nir_format_pack_rgba(b, format, intr->src[3].ssa);
       raw = size_B <= 4 ? nir_u2uN(b, raw, size_B * 8)
                         : nir_trim_vector(b, raw, size_B / 4);
       nir_store_global(b, raw, addr, .align_mul = size_B,
