@@ -9,6 +9,7 @@
 
 #include "agx_pack.h"
 #include "hk_private.h"
+#include "hk_descriptor_memory.h"
 #include "vk_image.h"
 
 struct hk_device;
@@ -19,11 +20,9 @@ struct hk_device;
 struct hk_image_view {
    struct vk_image_view vk;
 
-   /* Immutable native PBE cache, owned by this view. Arrays use one 2D
-    * entry per face/layer until the native dynamic-layer form is qualified. */
-   uint32_t apple9_store_flags;
-   uint8_t apple9_pbe[AGX_APPLE9_TEXTURE_TABLE_STRIDE];
-   struct agx_bo *apple9_layer_pbes;
+   /* A suballocation in the device's immutable native PBE table. */
+   uint32_t apple9_store_flags, apple9_pbe_index;
+   struct hk_descriptor_allocation apple9_pbes;
 
    uint8_t plane_count;
    struct {

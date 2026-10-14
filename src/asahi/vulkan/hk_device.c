@@ -154,6 +154,35 @@ hk_destroy_internal_shaders(struct hk_device *dev,
    simple_mtx_destroy(&s->lock);
 }
 
+/* Native PBE entries share device-owned USC slabs. Their addresses never
+ * move, so copied bindless descriptors remain valid until view destruction. */
+static bool
+hk_apple9_pbe_slab_create(void *data, uint64_t size, uint64_t reserve,
+                         struct hk_descriptor_backing *out)
+{
+   struct hk_device *dev = data;
+   assert(!reserve);
+   struct agx_bo *bo = agx_bo_create(&dev->dev, size, 0,
+      AGX_BO_LOW_VA | AGX_BO_READONLY | AGX_BO_WRITEBACK, "Storage image PBE table");
+   if (!bo)
+      return false;
+   *out = (struct hk_descriptor_backing){
+      .bo = bo, .addr = bo->va->addr, .map = agx_bo_map(bo), .size = bo->size,
+   };
+   return true;
+}
+
+static void
+hk_apple9_pbe_slab_destroy(void *data, struct hk_descriptor_backing *backing)
+{
+   struct hk_device *dev = data;
+   agx_bo_unreference(&dev->dev, backing->bo);
+}
+
+static const struct hk_descriptor_memory_ops hk_apple9_pbe_ops = {
+   .create = hk_apple9_pbe_slab_create, .destroy = hk_apple9_pbe_slab_destroy,
+};
+
 DERIVE_HASH_TABLE(agx_sampler_packed);
 
 static VkResult
@@ -440,6 +469,9 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       goto fail_fd;
    }
 
+   simple_mtx_init(&dev->apple9_pbe_lock, mtx_plain);
+   hk_apple9_pbe_table_init(&dev->apple9_pbes, &hk_apple9_pbe_ops, dev);
+
    if (dev->dev.chip == AGX_CHIP_G16G)
       agx_apple9_initialize_entries(&dev->dev);
 
@@ -608,6 +640,8 @@ fail_samplers:
       agx_bo_unreference(&dev->dev, dev->apple9_resident);
    hk_destroy_sampler_heap(dev, &dev->samplers);
 fail_dev:
+   hk_apple9_pbe_table_finish(&dev->apple9_pbes);
+   simple_mtx_destroy(&dev->apple9_pbe_lock);
    agx_close_device(&dev->dev);
 fail_fd:
    close(dev->dev.fd);
@@ -671,6 +705,8 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    agx_bo_unreference(&dev->dev, dev->heap_alt);
    agx_bo_unreference(&dev->dev, dev->mesh_heap);
    agx_bg_eot_cleanup(&dev->bg_eot);
+   hk_apple9_pbe_table_finish(&dev->apple9_pbes);
+   simple_mtx_destroy(&dev->apple9_pbe_lock);
    agx_close_device(&dev->dev);
    vk_free(&dev->vk.alloc, dev);
 }

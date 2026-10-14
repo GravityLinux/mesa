@@ -2,6 +2,8 @@
 #ifndef AGX_APPLE9_LAYOUT_H
 #define AGX_APPLE9_LAYOUT_H
 
+#define AGX_APPLE9_TEXTURE_TABLE_STRIDE 32
+
 /* The launch target carries 2 * entry_offset + 0x2a in 24 bits. Entries
  * reside in this compact USC range and branch to independently allocated
  * shader bodies anywhere in the 4-GiB USC heap. An entry belongs to its

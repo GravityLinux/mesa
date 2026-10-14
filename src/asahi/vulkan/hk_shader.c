@@ -2524,7 +2524,9 @@ static bool
 hk_apple9_can_native_store(const nir_builder *b, const nir_intrinsic_instr *intr)
 {
    enum glsl_sampler_dim dim = nir_intrinsic_image_dim(intr);
-   return b->shader->info.stage == MESA_SHADER_COMPUTE &&
+   enum pipe_format format = nir_intrinsic_format(intr);
+   return (format == PIPE_FORMAT_NONE || hk_apple9_native_store_format(format)) &&
+          b->shader->info.stage == MESA_SHADER_COMPUTE &&
           (dim == GLSL_SAMPLER_DIM_2D || dim == GLSL_SAMPLER_DIM_CUBE) &&
           intr->src[3].ssa->bit_size == 32 &&
           nir_alu_type_get_base_type(nir_intrinsic_src_type(intr)) == nir_type_float &&
@@ -2547,20 +2549,16 @@ static void
 hk_apple9_native_store(nir_builder *b, nir_intrinsic_instr *intr,
                         nir_def *pbe_addr, nir_def *coord, bool array)
 {
-   nir_def *index;
-   if (array) {
-      nir_def *base = nir_load_global_constant(b, 1, 32,
-         nir_iadd_imm(b, pbe_addr,
-            offsetof(struct hk_apple9_storage_descriptor, layer_pbe_index) -
-               offsetof(struct hk_storage_image_descriptor, pbe)), .align_mul = 4);
-      /* Storage cube coordinates already contain the flattened face layer. */
-      index = nir_iadd(b, base, nir_channel(b, coord, 2));
-   } else {
-      nir_def *native = nir_iadd_imm(b, nir_u2u32(b, pbe_addr),
-         offsetof(struct hk_apple9_storage_descriptor, pbe) -
-            offsetof(struct hk_storage_image_descriptor, pbe));
-      index = nir_ushr_imm(b, native, 5);
-   }
+   nir_def *packed = nir_load_global_constant(b, 1, 32,
+      nir_iadd_imm(b, pbe_addr,
+         offsetof(struct hk_apple9_storage_descriptor, native_ok) -
+            offsetof(struct hk_storage_image_descriptor, pbe)), .align_mul = 4);
+   nir_def *index = nir_iand_imm(b,
+      nir_ushr_imm(b, packed, HK_APPLE9_STORAGE_PBE_SHIFT),
+      HK_APPLE9_STORAGE_PBE_MASK);
+   /* Storage cube coordinates already contain the flattened face layer. */
+   if (array)
+      index = nir_iadd(b, index, nir_channel(b, coord, 2));
    nir_image_store_apple9_agx(b, index, nir_trim_vector(b, nir_u2u32(b, coord), 2),
       nir_pad_vector_imm_int(b, intr->src[3].ssa, 0, 4),
       .access = nir_intrinsic_access(intr));

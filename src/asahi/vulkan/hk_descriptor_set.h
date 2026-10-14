@@ -55,7 +55,7 @@ struct hk_sampled_image_descriptor {
          uint16_t base_level, base_layer;
          uint32_t pad;
       } apple9;
-   };
+  };
    uint8_t pad2[4];
 };
 static_assert(sizeof(struct hk_sampled_image_descriptor) == 64,
@@ -131,21 +131,18 @@ struct hk_apple9_storage_descriptor {
     * encode the texel, chosen on the host from the view format. */
    uint32_t store_encode;
    uint8_t texture[AGX_APPLE9_TEXTURE_TABLE_STRIDE];
-   /* Native representation of common.pbe in the same bindless record. */
-   uint8_t pbe[AGX_APPLE9_TEXTURE_TABLE_STRIDE];
-   /* Arrays select immutable 2D PBE entries by relative layer. */
-   uint32_t layer_pbe_index;
-   uint32_t pad[7];
 };
-static_assert(sizeof(struct hk_apple9_storage_descriptor) == 192,
-              "Apple9 storage descriptor has no holes");
+static_assert(sizeof(struct hk_apple9_storage_descriptor) == 128,
+              "Apple9 storage descriptor retains the 128-byte ABI");
 static_assert(offsetof(struct hk_apple9_storage_descriptor, texture) ==
                  (AGX_APPLE9_DESCRIPTOR_TEXTURE_ENTRY + 1) *
                     AGX_APPLE9_TEXTURE_TABLE_STRIDE,
               "native storage entry is one table slot past the image one");
 
-static_assert(offsetof(struct hk_apple9_storage_descriptor, pbe) == 128,
-              "native PBE keeps the texture and metadata offsets stable");
+/* native_ok packs capability flags in bits 0..2 and the USC-relative PBE
+ * table index in bits 3..29. All native writes, including 2D, use the table. */
+#define HK_APPLE9_STORAGE_PBE_SHIFT 3
+#define HK_APPLE9_STORAGE_PBE_MASK ((1u << 27) - 1)
 
 void hk_apple9_texel_layout(enum pipe_format format,
                             struct hk_apple9_texel_metadata *metadata);

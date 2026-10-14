@@ -28,9 +28,10 @@ bool
 agx_apple9_translate_pbe(void *out, const struct agx_pbe_packed *state,
                         enum pipe_format format, const struct ail_layout *layout,
                         uint64_t layer_base, unsigned level,
-                        unsigned layer_count, bool layered)
+                        unsigned layer_count, bool layered,
+                        unsigned dimension)
 {
-   if (!layout->levels || layout->levels > 16 ||
+   if (dimension > 15 || !layout->levels || layout->levels > 16 ||
        level >= layout->levels || !layout->width_px || !layout->height_px ||
        layout->width_px > 16384 || layout->height_px > 16384 ||
        !layer_count || layer_count > 65536)
@@ -65,7 +66,7 @@ agx_apple9_translate_pbe(void *out, const struct agx_pbe_packed *state,
    memcpy(header, state, sizeof(header));
    unsigned width = u_minify(layout->width_px, descriptor_level);
    unsigned height = u_minify(layout->height_px, descriptor_level);
-   header[0] = (header[0] & 0x00ffffff) | ((width - 1) << 24);
+   header[0] = (header[0] & 0x00fffff0) | dimension | ((width - 1) << 24);
    header[1] = ((width - 1) >> 8) | ((height - 1) << 6) |
                (header[1] & 0x01000000) |
                ((uint32_t)layout->compressed << 27);

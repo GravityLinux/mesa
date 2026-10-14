@@ -597,7 +597,9 @@ hk_DestroyImageView(VkDevice _device, VkImageView imageView,
    if (!view)
       return;
 
-   agx_bo_unreference(&dev->dev, view->apple9_layer_pbes);
+   simple_mtx_lock(&dev->apple9_pbe_lock);
+   hk_apple9_pbe_table_free(&dev->apple9_pbes, &view->apple9_pbes);
+   simple_mtx_unlock(&dev->apple9_pbe_lock);
    vk_image_view_finish(&view->vk);
    vk_free2(&dev->vk.alloc, pAllocator, view);
 }
@@ -607,13 +609,8 @@ hk_apple9_translate_storage_pbe(void *out, const struct agx_pbe_packed *state,
                                 enum pipe_format format, const struct ail_layout *layout,
                                 uint64_t base, unsigned level)
 {
-   if (!agx_apple9_translate_pbe(out, state, format, layout, base, level, 1, false))
-      return false;
-   /* A cache entry represents one 2D plane even when common.pbe represents
-    * an array/cube. Preserve all format and swizzle fields of that PBE. */
-   uint8_t *entry = out;
-   entry[0] = (entry[0] & 0xf0) | AGX_TEXTURE_DIMENSION_2D;
-   return true;
+   return agx_apple9_translate_pbe(out, state, format, layout, base, level,
+                                  1, false, AGX_TEXTURE_DIMENSION_2D);
 }
 
 /* Storage writes use the native representation of the existing PBE half.
@@ -623,8 +620,8 @@ static void
 hk_apple9_init_storage_pbe(struct hk_device *dev, struct hk_image_view *view)
 {
    view->apple9_store_flags = 0;
-   view->apple9_layer_pbes = NULL;
-   memset(view->apple9_pbe, 0, sizeof(view->apple9_pbe));
+   view->apple9_pbes = (struct hk_descriptor_allocation){0};
+   view->apple9_pbe_index = 0;
    if (dev->dev.chip != AGX_CHIP_G16G || view->plane_count != 1 ||
        !(view->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT) ||
        !hk_apple9_native_store_format(format_for_plane(view, 0)) ||
@@ -635,12 +632,11 @@ hk_apple9_init_storage_pbe(struct hk_device *dev, struct hk_image_view *view)
                 view->vk.view_type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
    if (!array && view->vk.view_type != VK_IMAGE_VIEW_TYPE_2D)
       return;
-   /* Opaque capture data does not preserve internal cache addresses. Keep
-    * flagged array views on the address-stable converter representation. */
-   if (array && ((view->vk.create_flags &
+   /* Opaque capture data does not preserve table allocation addresses. */
+   if ((view->vk.create_flags &
                    VK_IMAGE_VIEW_CREATE_DESCRIPTOR_BUFFER_CAPTURE_REPLAY_BIT_EXT) ||
                  (view->vk.image->create_flags &
-                   VK_IMAGE_CREATE_DESCRIPTOR_BUFFER_CAPTURE_REPLAY_BIT_EXT)))
+                   VK_IMAGE_CREATE_DESCRIPTOR_BUFFER_CAPTURE_REPLAY_BIT_EXT))
       return;
    const struct hk_image *image = container_of(view->vk.image, struct hk_image, vk);
    unsigned plane = view->planes[0].image_plane;
@@ -648,26 +644,33 @@ hk_apple9_init_storage_pbe(struct hk_device *dev, struct hk_image_view *view)
    if (layout->compressed || image->planes[plane].sparse_map)
       return;
    unsigned count = array ? view->vk.layer_count : 1;
-   if (array) {
-      view->apple9_layer_pbes = agx_bo_create(&dev->dev,
-         count * AGX_APPLE9_TEXTURE_TABLE_STRIDE, 0,
-         AGX_BO_LOW_VA | AGX_BO_READONLY | AGX_BO_WRITEBACK,
-         "Storage image layer PBEs");
-      if (!view->apple9_layer_pbes)
-         return;
+   simple_mtx_lock(&dev->apple9_pbe_lock);
+   bool allocated = hk_apple9_pbe_table_alloc(&dev->apple9_pbes, count, &view->apple9_pbes);
+   simple_mtx_unlock(&dev->apple9_pbe_lock);
+   if (!allocated)
+      return;
+   uint64_t index = (view->apple9_pbes.addr - dev->dev.shader_base) /
+                     AGX_APPLE9_TEXTURE_TABLE_STRIDE;
+   if (index > HK_APPLE9_STORAGE_PBE_MASK) {
+      simple_mtx_lock(&dev->apple9_pbe_lock);
+      hk_apple9_pbe_table_free(&dev->apple9_pbes, &view->apple9_pbes);
+      simple_mtx_unlock(&dev->apple9_pbe_lock);
+      return;
    }
-   uint8_t *entries = array ? agx_bo_map(view->apple9_layer_pbes) : view->apple9_pbe;
+   uint8_t *entries = view->apple9_pbes.map;
    for (unsigned i = 0; i < count; ++i) {
       uint64_t base = hk_image_base_address(image, plane) +
          ail_get_layer_level_B(layout, view->vk.base_array_layer + i, 0);
       if (!hk_apple9_translate_storage_pbe(entries + i * AGX_APPLE9_TEXTURE_TABLE_STRIDE,
              &view->planes[0].storage, format_for_plane(view, 0), layout, base,
              view->vk.base_mip_level)) {
-         agx_bo_unreference(&dev->dev, view->apple9_layer_pbes);
-         view->apple9_layer_pbes = NULL;
+         simple_mtx_lock(&dev->apple9_pbe_lock);
+         hk_apple9_pbe_table_free(&dev->apple9_pbes, &view->apple9_pbes);
+         simple_mtx_unlock(&dev->apple9_pbe_lock);
          return;
       }
    }
+   view->apple9_pbe_index = index;
    view->apple9_store_flags = array ? HK_APPLE9_STORAGE_LAYER_WRITE_VALID
                                     : HK_APPLE9_STORAGE_WRITE_VALID;
 }
@@ -685,7 +688,7 @@ hk_CreateImageView(VkDevice _device, const VkImageViewCreateInfo *pCreateInfo,
    if (!view)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   view->apple9_layer_pbes = NULL;
+   view->apple9_pbes = (struct hk_descriptor_allocation){0};
    result = hk_image_view_init(dev, view, pCreateInfo);
    if (result != VK_SUCCESS) {
       hk_DestroyImageView(_device, hk_image_view_to_handle(view), pAllocator);
@@ -713,10 +716,13 @@ hk_apple9_image_view_eot(const struct hk_image_view *view, bool layered, void *o
     * descriptor, like the legacy PBE above, stores the base-level depth. */
    unsigned layers = view->vk.view_type == VK_IMAGE_VIEW_TYPE_3D
                         ? image->vk.extent.depth : view->vk.layer_count;
+   const struct agx_pbe_packed *state = layered ? &view->planes[0].layered_eot
+                                                 : &view->planes[0].eot;
+   agx_unpack(stderr, state, PBE, pbe);
    return agx_apple9_translate_pbe(
       out, layered ? &view->planes[0].layered_eot : &view->planes[0].eot,
       format_for_plane(view, 0), layout, base, view->vk.base_mip_level,
-      layered ? layers : 1, layered);
+      layered ? layers : 1, layered, pbe.dimension);
 }
 
 uint64_t

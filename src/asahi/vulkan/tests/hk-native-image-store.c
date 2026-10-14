@@ -25,7 +25,16 @@ int main(void)
    };
    for (unsigned i = 0; i < ARRAY_SIZE(fallback); ++i)
       CHECK(!hk_apple9_native_store_format(fallback[i]));
-   CHECK(sizeof(struct hk_apple9_storage_descriptor) % AGX_APPLE9_TEXTURE_TABLE_STRIDE == 0);
+   CHECK(sizeof(struct hk_apple9_storage_descriptor) == 128);
+   CHECK(HK_APPLE9_DB_STORAGE_SIZE == 128);
+   CHECK(offsetof(struct hk_apple9_storage_descriptor, native_ok) == 88);
+   CHECK(offsetof(struct hk_apple9_storage_descriptor, store_encode) == 92);
+   const uint32_t indices[] = {0, 1, 2048, HK_APPLE9_STORAGE_PBE_MASK};
+   for (unsigned i = 0; i < ARRAY_SIZE(indices); ++i) {
+      uint32_t packed = (indices[i] << HK_APPLE9_STORAGE_PBE_SHIFT) | 7;
+      CHECK((packed & 7) == 7);
+      CHECK(((packed >> HK_APPLE9_STORAGE_PBE_SHIFT) & HK_APPLE9_STORAGE_PBE_MASK) == indices[i]);
+   }
    CHECK(HK_APPLE9_DB_STORAGE_SIZE >= sizeof(struct hk_apple9_storage_descriptor));
    CHECK(util_is_power_of_two_nonzero(HK_APPLE9_DB_STORAGE_SIZE));
    CHECK(!(HK_APPLE9_STORAGE_READ_VALID & HK_APPLE9_STORAGE_WRITE_VALID));

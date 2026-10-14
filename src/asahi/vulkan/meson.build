@@ -20,6 +20,7 @@ hk_files = files(
   'hk_cmd_pool.h',
   'hk_descriptor_set.h',
   'hk_descriptor_memory.c',
+  'hk_apple9_pbe_table.c',
   'hk_descriptor_set.c',
   'hk_descriptor_set_layout.c',
   'hk_descriptor_set_layout.h',
@@ -242,8 +243,8 @@ if with_tests
     'hk_descriptor_memory',
     executable(
       'hk_descriptor_memory_test',
-      ['hk_descriptor_memory.c', 'tests/hk-descriptor-memory.cpp'],
-      include_directories : [inc_src, inc_include],
+      ['hk_descriptor_memory.c', 'hk_apple9_pbe_table.c', 'tests/hk-descriptor-memory.cpp'],
+      include_directories : [inc_src, inc_include, inc_asahi],
       dependencies : [idep_gtest, idep_mesautil],
     ),
     suite : ['asahi'],

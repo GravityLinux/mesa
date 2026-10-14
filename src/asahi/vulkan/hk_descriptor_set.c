@@ -253,10 +253,7 @@ hk_pack_storage_image(struct hk_device *dev, void *out,
          if (agx_apple9_translate_texture(ext.texture, &desc.tex))
             ext.native_ok |= HK_APPLE9_STORAGE_READ_VALID;
          ext.native_ok |= view->apple9_store_flags;
-         memcpy(ext.pbe, view->apple9_pbe, sizeof(ext.pbe));
-         if (view->apple9_layer_pbes)
-            ext.layer_pbe_index = (uint32_t)view->apple9_layer_pbes->va->addr /
-                                  AGX_APPLE9_TEXTURE_TABLE_STRIDE;
+         ext.native_ok |= view->apple9_pbe_index << HK_APPLE9_STORAGE_PBE_SHIFT;
       }
       memcpy(out, &ext, sizeof(ext));
       return sizeof(ext);
