@@ -105,7 +105,7 @@ TEST(Apple9ComputeGeometry, RejectsMalformedDirectGeometry)
       record, sizeof(record), 0x1000200000ull, &geometry));
 }
 
-TEST(Apple9ComputeGeometry, RoundsPartialGroupsAndChecksAxisLimit)
+TEST(Apple9ComputeGeometry, RoundsPartialGroupsBeyondApiAxisLimit)
 {
    uint8_t record[0x100] = {};
    agx_apple9_compute_geometry geometry = {
@@ -118,10 +118,17 @@ TEST(Apple9ComputeGeometry, RoundsPartialGroupsAndChecksAxisLimit)
    EXPECT_EQ(get_u32(record, 0xc0), 65535u);
    EXPECT_EQ(get_u32(record, 0xc4), 3u);
    EXPECT_EQ(get_u32(record, 0xc8), 1u);
+   /* Internal dispatches use 32-bit counts, beyond the API's 65535 limit. */
    geometry.threads[0]++;
-   EXPECT_FALSE(agx_apple9_build_compute_geometry_fields(
+   ASSERT_TRUE(agx_apple9_build_compute_geometry_fields(
       record, sizeof(record), 0x1000200000ull, &geometry));
+   EXPECT_EQ(get_u32(record, 0xc0), 65536u);
    geometry.threads[0] = UINT32_MAX;
-   EXPECT_FALSE(agx_apple9_build_compute_geometry_fields(
+   ASSERT_TRUE(agx_apple9_build_compute_geometry_fields(
       record, sizeof(record), 0x1000200000ull, &geometry));
+   EXPECT_EQ(get_u32(record, 0xc0), 613566757u);
+   geometry.local[0] = 1;
+   ASSERT_TRUE(agx_apple9_build_compute_geometry_fields(
+      record, sizeof(record), 0x1000200000ull, &geometry));
+   EXPECT_EQ(get_u32(record, 0xc0), UINT32_MAX);
 }
