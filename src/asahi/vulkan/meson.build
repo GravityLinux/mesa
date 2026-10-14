@@ -137,6 +137,18 @@ libvulkan_asahi = shared_library(
 )
 
 if with_tests
+  test(
+    'hk-heap-oom',
+    executable(
+      'hk-heap-oom', 'tests/hk-heap-oom.c',
+      include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                             inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+      dependencies : [hk_deps],
+      link_with : [libhk],
+      link_args : ['-Wl,--wrap=agx_bo_create', '-Wl,--wrap=__vk_errorf'],
+    ),
+    suite : ['asahi', 'honeykrisp'],
+  )
   foreach t : ['hk-pregfx-recording', 'hk-heap-resubmit', 'hk-heap-addresses']
     test(
       t,

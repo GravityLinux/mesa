@@ -1357,6 +1357,9 @@ hk_init_heap(const void *data)
       dev->dev.chip == AGX_CHIP_G16G ? AGX_BO_LOW_VA : 0;
    dev->heap = agx_bo_create(&dev->dev, size, 0, flags, "Geometry heap");
 
+   if (!dev->heap)
+      return;
+
    /* The geometry state buffer is initialized here and then is treated by
     * the CPU as rodata, even though the GPU uses it for scratch internally.
     */
@@ -1397,6 +1400,10 @@ hk_heap(struct hk_cmd_buffer *cmd)
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
    util_call_once_data(&dev->heap_init_once, hk_init_heap, cmd);
+   if (!dev->heap) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      return 0;
+   }
 
    /* Pre-gfx overlap: each render gets its own heap descriptor. Reset its
     * allocation cursor before its first use on every execution, including
@@ -1406,11 +1413,16 @@ hk_heap(struct hk_cmd_buffer *cmd)
    if (hk_pregfx_overlap()) {
       if (!cmd->uses_heap) {
          struct agx_bo *bo = dev->heap;
-         const unsigned h = cmd->heap_renders++ & 1;
+         const unsigned h = cmd->heap_renders & 1;
          if (h) {
             util_call_once_data(&dev->heap_alt_init_once, hk_init_heap_alt, cmd);
             bo = dev->heap_alt;
          }
+         if (!bo) {
+            vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+            return 0;
+         }
+         cmd->heap_renders++;
 
          /* The render's pre-gfx work waits for the previous user of this
           * heap, see hk_cmd_pregfx_precise. */
@@ -1464,7 +1476,10 @@ hk_heap(struct hk_cmd_buffer *cmd)
 static struct agx_bo *
 hk_geometry_heap_bo(struct hk_cmd_buffer *cmd)
 {
-   hk_heap(cmd);
+   /* Recording can continue after OOM, but the command buffer cannot be
+    * submitted. Keep address construction safe on those error paths. */
+   if (!hk_heap(cmd))
+      return NULL;
    assert(cmd->heap_bo);
    return cmd->heap_bo;
 }
@@ -1474,8 +1489,8 @@ hk_heap_indexed_indirect(struct hk_cmd_buffer *cmd, uint64_t ptr,
                          enum agx_index_size index_size, bool restart)
 {
    struct agx_bo *bo = hk_geometry_heap_bo(cmd);
-   return agx_draw_indexed_indirect(ptr, bo->va->addr, bo->size, index_size,
-                                   restart);
+   return agx_draw_indexed_indirect(ptr, bo ? bo->va->addr : 0,
+                                   bo ? bo->size : 0, index_size, restart);
 }
 
 static uint64_t
@@ -1671,8 +1686,8 @@ hk_upload_geometry_params(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    if (indirect) {
       if (gsi->shape == POLY_GS_SHAPE_DYNAMIC_INDEXED) {
          struct agx_bo *bo = hk_geometry_heap_bo(cmd);
-         cmd->geom_index_buffer = bo->va->addr;
-         cmd->geom_index_count = bo->size;
+         cmd->geom_index_buffer = bo ? bo->va->addr : 0;
+         cmd->geom_index_count = bo ? bo->size : 0;
       } else {
          cmd->geom_index_count =
             poly_gs_rast_vertices(gsi->shape, gsi->max_indices, 1, 0);
@@ -1750,7 +1765,8 @@ hk_upload_tess_params(struct hk_cmd_buffer *cmd, struct poly_tess_params *out,
    size_t draw_stride_B = draw_stride_el * sizeof(uint32_t);
 
    /* heap is allocated by hk_heap */
-   args.patch_coord_buffer = hk_geometry_heap_bo(cmd)->va->addr;
+   struct agx_bo *bo = hk_geometry_heap_bo(cmd);
+   args.patch_coord_buffer = bo ? bo->va->addr : 0;
 
    if (!agx_is_indirect(draw.b)) {
       unsigned in_patches = draw.b.count[0] / args.input_patch_size;
