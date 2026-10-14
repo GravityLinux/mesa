@@ -24,7 +24,6 @@ extern "C" {
 #endif
 
 /* Direct resource table slot size; sampler payloads occupy only eight bytes. */
-#define AGX_APPLE9_TEXTURE_TABLE_STRIDE 32
 #define AGX_APPLE9_SAMPLER_TABLE_STRIDE 32
 
 /* Linear sampled textures encode (row_bytes / 16) - 1 in 16 bits. */
@@ -435,7 +434,8 @@ struct ail_layout;
 bool agx_apple9_translate_pbe(void *out, const struct agx_pbe_packed *state,
                             enum pipe_format format, const struct ail_layout *layout,
                             uint64_t layer_base, unsigned level,
-                            unsigned layer_count, bool layered);
+                            unsigned layer_count, bool layered,
+                            unsigned dimension);
 
 bool agx_apple9_translate_sampler(void *out,
                                   const struct agx_sampler_packed *state);

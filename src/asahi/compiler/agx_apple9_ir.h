@@ -37,6 +37,7 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_DEVICE_LOAD,
    AGX_APPLE9_VIR_PUBLICATION_TUPLE,
    AGX_APPLE9_VIR_TEXTURE_SAMPLE,
+   AGX_APPLE9_VIR_IMAGE_STORE,
    AGX_APPLE9_VIR_BLOCK_IMAGE_STORE,
    AGX_APPLE9_VIR_BIT_COUNT,
    AGX_APPLE9_VIR_UFIND_MSB,
@@ -728,6 +729,11 @@ uint32_t agx_apple9_vir_emit_device_load_vector(
 uint32_t
 agx_apple9_vir_emit_publication_pair(struct agx_apple9_vir_program *program,
                                      const uint32_t src[2], bool split);
+
+/* Formatless FP32 write through an ordinary bindless PBE table index. */
+bool agx_apple9_vir_emit_image_store(struct agx_apple9_vir_program *program,
+                                   const uint32_t xy[2], const uint32_t rgba[4],
+                                   uint32_t index);
 
 bool agx_apple9_vir_emit_block_image_store(
    struct agx_apple9_vir_program *program, const uint32_t src[4],

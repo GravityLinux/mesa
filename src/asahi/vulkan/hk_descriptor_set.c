@@ -202,6 +202,22 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
    write_desc(set, binding, elem, out, size);
 }
 
+bool
+hk_apple9_native_store_format(enum pipe_format format)
+{
+   switch (format) {
+   case PIPE_FORMAT_R11G11B10_FLOAT:
+   case PIPE_FORMAT_R16G16B16A16_FLOAT:
+   case PIPE_FORMAT_R8G8B8A8_UNORM:
+   case PIPE_FORMAT_R32_FLOAT:
+   case PIPE_FORMAT_R16G16_FLOAT:
+   case PIPE_FORMAT_R32G32B32A32_FLOAT:
+      return true;
+   default:
+      return false;
+   }
+}
+
 static size_t
 hk_pack_storage_image(struct hk_device *dev, void *out,
                       const VkDescriptorImageInfo *const info)
@@ -234,7 +250,10 @@ hk_pack_storage_image(struct hk_device *dev, void *out,
          ext.metadata.base = hk_apple9_view_residency(dev, view, 0);
          ext.metadata.elements =
             view->vk.base_mip_level | (view->vk.base_array_layer << 16);
-         ext.native_ok = agx_apple9_translate_texture(ext.texture, &desc.tex);
+         if (agx_apple9_translate_texture(ext.texture, &desc.tex))
+            ext.native_ok |= HK_APPLE9_STORAGE_READ_VALID;
+         ext.native_ok |= view->apple9_store_flags;
+         ext.native_ok |= view->apple9_pbe_index << HK_APPLE9_STORAGE_PBE_SHIFT;
       }
       memcpy(out, &ext, sizeof(ext));
       return sizeof(ext);

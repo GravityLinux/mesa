@@ -20,6 +20,7 @@ hk_files = files(
   'hk_cmd_pool.h',
   'hk_descriptor_set.h',
   'hk_descriptor_memory.c',
+  'hk_apple9_pbe_table.c',
   'hk_descriptor_set.c',
   'hk_descriptor_set_layout.c',
   'hk_descriptor_set_layout.h',
@@ -149,7 +150,7 @@ if with_tests
     ),
     suite : ['asahi', 'honeykrisp'],
   )
-  foreach t : ['hk-pregfx-recording', 'hk-heap-resubmit', 'hk-heap-addresses']
+  foreach t : ['hk-pregfx-recording', 'hk-heap-resubmit', 'hk-heap-addresses', 'hk-native-image-store']
     test(
       t,
       executable(
@@ -159,7 +160,7 @@ if with_tests
                                inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
         dependencies : [hk_deps],
         link_with : [libhk],
-        link_args : t != 'hk-pregfx-recording' ? ['-Wl,--wrap=hk_dispatch_precomp'] : [],
+        link_args : t in ['hk-heap-resubmit', 'hk-heap-addresses'] ? ['-Wl,--wrap=hk_dispatch_precomp'] : [],
       ),
       suite : ['asahi', 'honeykrisp'],
     )
@@ -254,8 +255,8 @@ if with_tests
     'hk_descriptor_memory',
     executable(
       'hk_descriptor_memory_test',
-      ['hk_descriptor_memory.c', 'tests/hk-descriptor-memory.cpp'],
-      include_directories : [inc_src, inc_include],
+      ['hk_descriptor_memory.c', 'hk_apple9_pbe_table.c', 'tests/hk-descriptor-memory.cpp'],
+      include_directories : [inc_src, inc_include, inc_asahi],
       dependencies : [idep_gtest, idep_mesautil],
     ),
     suite : ['asahi'],

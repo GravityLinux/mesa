@@ -97,6 +97,7 @@ apple9_schedule_resources(const agx_instr *I, uint32_t *reads, uint32_t *writes)
    case AGX_APPLE9_VIR_SHARED_ATOMIC:
    case AGX_APPLE9_VIR_DEVICE_ATOMIC:
    case AGX_APPLE9_VIR_DEVICE_ATOMIC_RESULT:
+   case AGX_APPLE9_VIR_IMAGE_STORE:
    case AGX_APPLE9_VIR_BLOCK_IMAGE_STORE:
       *reads |= APPLE9_SCHED_MEMORY;
       *writes |= APPLE9_SCHED_MEMORY;
@@ -1240,7 +1241,8 @@ apple9_producer_hazard(const struct agx_apple9_vir_instr *ins,
        producer->op == AGX_APPLE9_VIR_SHARED_ATOMIC)
       return true;
    /* This compound encoding contains a fixed slot-1 publication and wait. */
-   return ins->encoding == AGX_APPLE9_ENC_BLOCK_IMAGE_STORE &&
+   return (ins->encoding == AGX_APPLE9_ENC_BLOCK_IMAGE_STORE ||
+           ins->encoding == AGX_APPLE9_ENC_IMAGE_WRITE) &&
           producer->producer_scoreboard_slot == AGX_APPLE9_SCOREBOARD_SLOT_1;
 }
 

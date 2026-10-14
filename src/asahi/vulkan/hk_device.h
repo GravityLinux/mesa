@@ -21,6 +21,7 @@
 #include "hk_private.h"
 
 #include "hk_descriptor_table.h"
+#include "hk_apple9_pbe_table.h"
 #include "hk_queue.h"
 #include "vk_device.h"
 #include "vk_meta.h"
@@ -67,6 +68,9 @@ struct hk_device {
    struct agxdecode_ctx *decode_ctx;
 
    struct hk_sampler_heap samplers;
+
+   simple_mtx_t apple9_pbe_lock;
+   struct hk_apple9_pbe_table apple9_pbes;
 
    /* G16 private texel-fetch sampler, addressable as a native table entry
     * relative to the USC aperture. */

@@ -2156,6 +2156,28 @@ hk_apple9_decode_texel_select(nir_builder *b, nir_def *words, nir_def *layout,
    return nir_vec(b, rgba, 4);
 }
 
+/* The common unsigned-float packer clamps with maximumNumber, which turns
+ * NaNs into zero. Classify the original bits and preserve NaNs, including
+ * payloads lost by mantissa truncation. Finite and infinity encodings retain
+ * the common packer's behavior. */
+static nir_def *
+hk_apple9_pack_float11(nir_builder *b, nir_def *rgb)
+{
+   nir_def *packed = nir_format_pack_11f11f10f(b, rgb);
+   const unsigned shifts[] = {0, 11, 22};
+   const uint32_t masks[] = {0x7ff, 0x7ff, 0x3ff};
+   const uint32_t nans[] = {0x7e0, 0x7e0, 0x3f0};
+   for (unsigned c = 0; c < 3; ++c) {
+      nir_def *is_nan = nir_ult(b, nir_imm_int(b, 0x7f800000),
+         nir_iand_imm(b, nir_channel(b, rgb, c), 0x7fffffff));
+      nir_def *repaired = nir_ior_imm(b,
+         nir_iand_imm(b, packed, ~(masks[c] << shifts[c])),
+         nans[c] << shifts[c]);
+      packed = nir_bcsel(b, is_nan, repaired, packed);
+   }
+   return packed;
+}
+
 /* Encode a texel into zero-padded 32-bit words for its descriptor layout. */
 static nir_def *
 hk_apple9_encode_texel_kind(nir_builder *b, nir_def *value, nir_def *layout,
@@ -2203,7 +2225,7 @@ hk_apple9_encode_texel_kind(nir_builder *b, nir_def *value, nir_def *layout,
                                   cls == HK_TEXEL_RGB9E5)) {
          if (cls < 0 || cls == HK_TEXEL_FLOAT11)
             bits = nir_bcsel(b, nir_ieq_imm(b, kind, HK_TEXEL_FLOAT11),
-                             nir_format_pack_11f11f10f(b, rgb), bits);
+                             hk_apple9_pack_float11(b, rgb), bits);
          if (cls < 0 || cls == HK_TEXEL_RGB9E5)
             bits = nir_bcsel(b, nir_ieq_imm(b, kind, HK_TEXEL_RGB9E5),
                              nir_format_pack_r9g9b9e5(b, rgb), bits);
@@ -2300,7 +2322,7 @@ hk_apple9_encode_texel_fast(nir_builder *b, nir_def *value, nir_def *layout,
       nir_push_else(b, NULL);
       nir_push_if(b, nir_ieq_imm(b, encode, HK_STORE_ENCODE_FLOAT11));
       nir_def *float11 = nir_vec4(b,
-         nir_format_pack_11f11f10f(b, nir_trim_vector(b, value, 3)),
+         hk_apple9_pack_float11(b, nir_trim_vector(b, value, 3)),
          nir_imm_int(b, 0), nir_imm_int(b, 0), nir_imm_int(b, 0));
       nir_push_else(b, NULL);
       nir_def *generic = hk_apple9_encode_texel(b, value, layout, true);
@@ -2491,15 +2513,93 @@ hk_apple9_texture_load(nir_builder *b, nir_intrinsic_instr *intr,
 static nir_def *
 hk_apple9_native_ok(nir_builder *b, nir_def *tex)
 {
-   return nir_ine_imm(b, nir_load_global_constant(b, 1, 32,
+   return nir_ine_imm(b, nir_iand_imm(b,
+      nir_load_global_constant(b, 1, 32,
+         nir_iadd_imm(b, nir_load_from_texture_handle_agx(b, tex),
+                      offsetof(struct hk_apple9_storage_descriptor, native_ok)),
+         .align_mul = 4), HK_APPLE9_STORAGE_READ_VALID), 0);
+}
+
+/* PBE export completion makes writes visible after a dispatch, but our
+ * same-invocation check did not observe a native write through global image
+ * memory. Until that visibility operation is qualified, keep read/write
+ * shaders on the converter. Decide before lowering removes any image loads. */
+bool
+hk_apple9_native_store_shader(const nir_shader *nir)
+{
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            switch (nir_instr_as_intrinsic(instr)->intrinsic) {
+            case nir_intrinsic_bindless_image_load:
+            case nir_intrinsic_bindless_image_atomic:
+            case nir_intrinsic_bindless_image_atomic_swap:
+               return false;
+            default:
+               break;
+            }
+         }
+      }
+   }
+   return true;
+}
+
+struct hk_apple9_storage_lowering {
+   struct set *texture_loads;
+   bool native_stores;
+};
+
+static bool
+hk_apple9_can_native_store(const nir_builder *b, const nir_intrinsic_instr *intr,
+                            bool native_stores)
+{
+   enum glsl_sampler_dim dim = nir_intrinsic_image_dim(intr);
+   enum pipe_format format = nir_intrinsic_format(intr);
+   return native_stores &&
+          (format == PIPE_FORMAT_NONE || hk_apple9_native_store_format(format)) &&
+          b->shader->info.stage == MESA_SHADER_COMPUTE &&
+          (dim == GLSL_SAMPLER_DIM_2D || dim == GLSL_SAMPLER_DIM_CUBE) &&
+          intr->src[3].ssa->bit_size == 32 &&
+          nir_alu_type_get_base_type(nir_intrinsic_src_type(intr)) == nir_type_float &&
+          !(nir_intrinsic_access(intr) & (ACCESS_COHERENT | ACCESS_VOLATILE));
+}
+
+static nir_def *
+hk_apple9_native_write_ok(nir_builder *b, nir_def *tex, bool array)
+{
+   nir_def *flags = nir_load_global_constant(b, 1, 32,
       nir_iadd_imm(b, nir_load_from_texture_handle_agx(b, tex),
                    offsetof(struct hk_apple9_storage_descriptor, native_ok)),
-      .align_mul = 4), 0);
+      .align_mul = 4);
+   unsigned mask = array ? HK_APPLE9_STORAGE_LAYER_WRITE_VALID
+                         : HK_APPLE9_STORAGE_WRITE_VALID;
+   return nir_ine_imm(b, nir_iand_imm(b, flags, mask), 0);
+}
+
+static void
+hk_apple9_native_store(nir_builder *b, nir_intrinsic_instr *intr,
+                        nir_def *pbe_addr, nir_def *coord, bool array)
+{
+   nir_def *packed = nir_load_global_constant(b, 1, 32,
+      nir_iadd_imm(b, pbe_addr,
+         offsetof(struct hk_apple9_storage_descriptor, native_ok) -
+            offsetof(struct hk_storage_image_descriptor, pbe)), .align_mul = 4);
+   nir_def *index = nir_iand_imm(b,
+      nir_ushr_imm(b, packed, HK_APPLE9_STORAGE_PBE_SHIFT),
+      HK_APPLE9_STORAGE_PBE_MASK);
+   /* Storage cube coordinates already contain the flattened face layer. */
+   if (array)
+      index = nir_iadd(b, index, nir_channel(b, coord, 2));
+   nir_image_store_apple9_agx(b, index, nir_trim_vector(b, nir_u2u32(b, coord), 2),
+      nir_pad_vector_imm_int(b, intr->src[3].ssa, 0, 4),
+      .access = nir_intrinsic_access(intr));
 }
 
 static bool
 hk_apple9_lower_formatless_storage(nir_builder *b, nir_intrinsic_instr *intr,
-                                   bool load, bool route)
+                                   bool load, bool route, bool native_stores)
 {
    if (nir_def_instr(intr->src[0].ssa)->type != nir_instr_type_intrinsic)
       return false;
@@ -2563,12 +2663,15 @@ hk_apple9_lower_formatless_storage(nir_builder *b, nir_intrinsic_instr *intr,
    /* The address is arithmetic on the descriptor, valid for any coordinate,
     * so compute it ahead of the bounds check: its uniform part can then
     * move to the preamble. Only the access below depends on the check. */
-   nir_def *ok = route ? hk_apple9_native_ok(b, tex) : NULL;
+   bool native = !load && hk_apple9_can_native_store(b, intr, native_stores);
+   bool native_array = array || cube;
+   nir_def *ok = route ? hk_apple9_native_ok(b, tex) :
+      native ? hk_apple9_native_write_ok(b, tex, native_array) : NULL;
    nir_def *pbe_addr = nir_load_from_texture_handle_agx(b, pbe);
    nir_def *addr = NULL;
    if (dim == GLSL_SAMPLER_DIM_BUF) {
       addr = hk_apple9_buffer_texel_address(b, meta, coord, size_B);
-   } else if (!route) {
+   } else if (!route && !native) {
       bool layered = array || cube || dim == GLSL_SAMPLER_DIM_3D;
       addr = libagx_image_texel_address(
          b, pbe_addr, nir_pad_vector_imm_int(b, coord, 0, 4),
@@ -2602,6 +2705,16 @@ hk_apple9_lower_formatless_storage(nir_builder *b, nir_intrinsic_instr *intr,
          value = nir_if_phi(b, fetched, value);
       }
    } else {
+      if (native) {
+         nir_push_if(b, ok);
+         hk_apple9_native_store(b, intr, pbe_addr, coord, native_array);
+         nir_push_else(b, NULL);
+         addr = libagx_image_texel_address(
+            b, pbe_addr, nir_pad_vector_imm_int(b, coord, 0, 4),
+            nir_u2u32(b, intr->src[2].ssa), size_B,
+            nir_imm_bool(b, false), nir_imm_bool(b, false),
+            nir_imm_bool(b, native_array), nir_imm_bool(b, false));
+      }
       bool floating = nir_alu_type_get_base_type(nir_intrinsic_src_type(intr)) ==
                       nir_type_float;
       nir_def *texel = nir_pad_vector_imm_int(b, intr->src[3].ssa, 0, 4);
@@ -2609,6 +2722,8 @@ hk_apple9_lower_formatless_storage(nir_builder *b, nir_intrinsic_instr *intr,
          ? hk_apple9_encode_texel_fast(b, texel, layout, floating, encode)
          : hk_apple9_encode_texel(b, texel, layout, floating);
       hk_apple9_store_texel_words(b, addr, size_B, words, access);
+      if (native)
+         nir_pop_if(b, NULL);
    }
    nir_def *zero = NULL;
    if (load) {
@@ -2897,13 +3012,15 @@ static bool
 hk_apple9_lower_storage_image(nir_builder *b, nir_intrinsic_instr *intr,
                               void *data)
 {
+   const struct hk_apple9_storage_lowering *lower = data;
    bool load = intr->intrinsic == nir_intrinsic_bindless_image_load;
    if (!load && intr->intrinsic != nir_intrinsic_bindless_image_store)
       return false;
    enum pipe_format format = nir_intrinsic_format(intr);
    if (format == PIPE_FORMAT_NONE)
       return hk_apple9_lower_formatless_storage(b, intr, load,
-                                                load && data && _mesa_set_search(data, intr));
+                                                load && _mesa_set_search(lower->texture_loads, intr),
+                                                lower->native_stores);
    const struct util_format_description *desc = util_format_description(format);
    unsigned size_B = util_format_get_blocksize(format);
    if ((desc->layout != UTIL_FORMAT_LAYOUT_PLAIN &&
@@ -2956,11 +3073,14 @@ hk_apple9_lower_storage_image(nir_builder *b, nir_intrinsic_instr *intr,
    }
    /* Typed loads already decode with a known format; the texture unit only
     * pays off for formatless ones. HK_APPLE9_TEXTURE_LOADS_TYPED measures. */
-   bool route = load && data && _mesa_set_search(data, intr) &&
+   bool route = load && _mesa_set_search(lower->texture_loads, intr) &&
                 getenv("HK_APPLE9_TEXTURE_LOADS_TYPED");
-   nir_def *ok = route ? hk_apple9_native_ok(b, tex) : NULL;
+   bool native = !load && hk_apple9_can_native_store(b, intr, lower->native_stores);
+   bool native_array = array || cube;
+   nir_def *ok = route ? hk_apple9_native_ok(b, tex) :
+      native ? hk_apple9_native_write_ok(b, tex, native_array) : NULL;
    /* See hk_apple9_lower_formatless_storage: address ahead of the check. */
-   nir_def *addr = route ? NULL : nir_bindless_image_texel_address(b, 64, pbe, coord,
+   nir_def *addr = route || native ? NULL : nir_bindless_image_texel_address(b, 64, pbe, coord,
       intr->src[2].ssa, .image_dim = dim,
       .image_array = array, .format = format, .access = nir_intrinsic_access(intr));
    nir_push_if(b, inside);
@@ -2983,12 +3103,25 @@ hk_apple9_lower_storage_image(nir_builder *b, nir_intrinsic_instr *intr,
          value = nir_if_phi(b, fetched, nir_pad_vector_imm_int(b, value, 0, 4));
       }
    } else {
-      nir_def *raw = nir_format_pack_rgba(b, format, intr->src[3].ssa);
+      if (native) {
+         nir_push_if(b, ok);
+         hk_apple9_native_store(b, intr, nir_load_from_texture_handle_agx(b, pbe),
+                                 coord, native_array);
+         nir_push_else(b, NULL);
+         addr = nir_bindless_image_texel_address(b, 64, pbe, coord,
+            intr->src[2].ssa, .image_dim = dim, .image_array = array,
+            .format = format, .access = nir_intrinsic_access(intr));
+      }
+      nir_def *raw = format == PIPE_FORMAT_R11G11B10_FLOAT
+         ? hk_apple9_pack_float11(b, nir_trim_vector(b, intr->src[3].ssa, 3))
+         : nir_format_pack_rgba(b, format, intr->src[3].ssa);
       raw = size_B <= 4 ? nir_u2uN(b, raw, size_B * 8)
                         : nir_trim_vector(b, raw, size_B / 4);
       nir_store_global(b, raw, addr, .align_mul = size_B,
                        .write_mask = BITFIELD_MASK(raw->num_components),
                        .access = nir_intrinsic_access(intr));
+      if (native)
+         nir_pop_if(b, NULL);
    }
    nir_def *zero = NULL;
    if (load) {
@@ -3424,8 +3557,12 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
                nir_metadata_none, NULL);
       struct set *texture_loads = _mesa_pointer_set_create(NULL);
       hk_apple9_texture_route_loads(nir, texture_loads);
+      struct hk_apple9_storage_lowering lower = {
+         .texture_loads = texture_loads,
+         .native_stores = hk_apple9_native_store_shader(nir),
+      };
       NIR_PASS(_, nir, nir_shader_intrinsics_pass, hk_apple9_lower_storage_image,
-               nir_metadata_none, texture_loads);
+               nir_metadata_none, &lower);
       _mesa_set_destroy(texture_loads, NULL);
    }
 

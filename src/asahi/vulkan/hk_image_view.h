@@ -9,6 +9,7 @@
 
 #include "agx_pack.h"
 #include "hk_private.h"
+#include "hk_descriptor_memory.h"
 #include "vk_image.h"
 
 struct hk_device;
@@ -18,6 +19,10 @@ struct hk_device;
 
 struct hk_image_view {
    struct vk_image_view vk;
+
+   /* A suballocation in the device's immutable native PBE table. */
+   uint32_t apple9_store_flags, apple9_pbe_index;
+   struct hk_descriptor_allocation apple9_pbes;
 
    uint8_t plane_count;
    struct {
@@ -41,3 +46,8 @@ uint64_t hk_apple9_view_residency(const struct hk_device *dev,
 /* Encode an uncompressed native tile-store view for render submission. */
 bool hk_apple9_image_view_eot(const struct hk_image_view *view, bool layered,
                             void *out);
+
+/* Native writes address an individual 2D plane of the storage PBE. */
+bool hk_apple9_translate_storage_pbe(void *out, const struct agx_pbe_packed *state,
+                                     enum pipe_format format, const struct ail_layout *layout,
+                                     uint64_t base, unsigned level);

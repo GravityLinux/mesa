@@ -1005,7 +1005,8 @@ apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
            op == nir_intrinsic_store_local_pixel_agx ||
            op == nir_intrinsic_demote || op == nir_intrinsic_demote_if))
          return true;
-      return op == nir_intrinsic_load_global_invocation_id ||
+      return op == nir_intrinsic_image_store_apple9_agx ||
+             op == nir_intrinsic_load_global_invocation_id ||
              op == nir_intrinsic_load_workgroup_id ||
              op == nir_intrinsic_load_tile_id_agx ||
              op == nir_intrinsic_load_layer_id ||
@@ -3327,7 +3328,8 @@ apple9_collect_buffer_map(nir_shader *nir, struct apple9_buffer_map *map,
 
          nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
          map->writes_global |= intr->intrinsic == nir_intrinsic_store_global_2x32 ||
-                               apple9_is_global_atomic(intr->intrinsic);
+                               apple9_is_global_atomic(intr->intrinsic) ||
+                               intr->intrinsic == nir_intrinsic_image_store_apple9_agx;
          if (intr->intrinsic != nir_intrinsic_load_ssbo &&
              intr->intrinsic != nir_intrinsic_load_ubo &&
              intr->intrinsic != nir_intrinsic_store_ssbo &&
@@ -3393,7 +3395,9 @@ apple9_collect_buffer_map(nir_shader *nir, struct apple9_buffer_map *map,
       map->count > AGX_APPLE9_COMPUTE_DIRECT_MAX_RESOURCES;
    nir_foreach_block(block, impl) {
       nir_foreach_instr(instr, block)
-         map->descriptor_tables |= instr->type == nir_instr_type_tex;
+         map->descriptor_tables |= instr->type == nir_instr_type_tex ||
+            (instr->type == nir_instr_type_intrinsic &&
+             nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_image_store_apple9_agx);
    }
    for (unsigned i = 0; i < map->count; ++i) {
       if (map->resource[i].read)
@@ -3674,7 +3678,7 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
       }
    }
 
-   if (!uniform_stores && stores->size == 0 && atomics->size == 0 &&
+   if (!uniform_stores && !map->writes_global && stores->size == 0 && atomics->size == 0 &&
        nir->info.stage == MESA_SHADER_COMPUTE) {
       *reason = "Apple9 requires at least one SSBO side effect";
       return false;
@@ -4386,6 +4390,18 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
                   lower->reason = "unsupported Apple9 graphics output";
                return false;
             }
+            continue;
+         }
+         if (intr->intrinsic == nir_intrinsic_image_store_apple9_agx) {
+            uint32_t index = apple9_lower_dag_scalar(lower, nir_get_scalar(intr->src[0].ssa, 0));
+            uint32_t xy[2], rgba[4];
+            for (unsigned c = 0; c < 2; ++c)
+               xy[c] = apple9_lower_dag_scalar(lower, nir_get_scalar(intr->src[1].ssa, c));
+            for (unsigned c = 0; c < 4; ++c)
+               rgba[c] = apple9_lower_dag_scalar(lower, nir_get_scalar(intr->src[2].ssa, c));
+            if (index == AGX_APPLE9_VREG_INVALID ||
+                !agx_apple9_vir_emit_image_store(&lower->program, xy, rgba, index))
+               return false;
             continue;
          }
          if (intr->intrinsic == nir_intrinsic_image_store_block_agx) {

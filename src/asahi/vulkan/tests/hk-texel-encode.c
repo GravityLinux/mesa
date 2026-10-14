@@ -159,7 +159,7 @@ check_float11(void)
       0x00800000, 0x38800000, 0x38000000, 0x37800000, 0x33800000,
       0x3f800000, 0xbf800000, 0x477e0000, 0x477f0000, 0x477fe000,
       0x47800000, 0x7f7fffff, 0x7f800000, 0xff800000, 0x7fc00000,
-      0xffc00000, 0x7f800001, 0x3f7fffff, 0x3f8007ff, 0x3f801000,
+      0xffc00000, 0x7f800001, 0xff800001, 0x7f800010, 0xff800010, 0x3f7fffff, 0x3f8007ff, 0x3f801000,
    };
    for (unsigned i = 0; i < ARRAY_SIZE(specials); ++i) {
       float f = bits_to_float(specials[i]);
@@ -226,10 +226,9 @@ check_float11(void)
    printf("float11: %u texels, %u fast/generic mismatches, %u fixed-case spec "
           "deviations, NaN inputs %u (%u not encoded as NaN)\n",
           n, mismatch, spec_bad, nan_cases, nan_bad);
-   /* The fast arm must match the generic encoder exactly. Conversion-rule
-    * deviations are properties of nir_format_pack_11f11f10f shared by both
-    * paths and are reported, not failed here. */
-   return mismatch != 0;
+   /* Keep reporting unrelated finite rounding deviations, but require NaN
+    * preservation as well as identical generic/fast results. */
+   return mismatch != 0 || nan_bad != 0;
 }
 
 /* NIR ALU instructions left on the path that a uniform store encoding
