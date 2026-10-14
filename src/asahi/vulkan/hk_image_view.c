@@ -635,6 +635,13 @@ hk_apple9_init_storage_pbe(struct hk_device *dev, struct hk_image_view *view)
                 view->vk.view_type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
    if (!array && view->vk.view_type != VK_IMAGE_VIEW_TYPE_2D)
       return;
+   /* Opaque capture data does not preserve internal cache addresses. Keep
+    * flagged array views on the address-stable converter representation. */
+   if (array && ((view->vk.create_flags &
+                   VK_IMAGE_VIEW_CREATE_DESCRIPTOR_BUFFER_CAPTURE_REPLAY_BIT_EXT) ||
+                 (view->vk.image->create_flags &
+                   VK_IMAGE_CREATE_DESCRIPTOR_BUFFER_CAPTURE_REPLAY_BIT_EXT)))
+      return;
    const struct hk_image *image = container_of(view->vk.image, struct hk_image, vk);
    unsigned plane = view->planes[0].image_plane;
    const struct ail_layout *layout = &image->planes[plane].layout;
@@ -730,8 +737,8 @@ hk_GetImageViewOpaqueCaptureDescriptorDataEXT(
    UNUSED const VkImageViewCaptureDescriptorDataInfoEXT *pInfo,
    void *pData)
 {
-   /* Views allocate nothing that descriptors embed; their addresses are the
-    * image's. */
+   /* Capture/replay views do not allocate layer PBE caches; their descriptor
+    * addresses remain image-owned. */
    memset(pData, 0, HK_IMAGE_VIEW_CAPTURE_DATA_SIZE);
    return VK_SUCCESS;
 }
