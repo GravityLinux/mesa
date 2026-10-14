@@ -668,6 +668,7 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    hk_destroy_sampler_heap(dev, &dev->samplers);
    agx_bo_unreference(&dev->dev, dev->rodata.bo);
    agx_bo_unreference(&dev->dev, dev->heap);
+   agx_bo_unreference(&dev->dev, dev->heap_alt);
    agx_bo_unreference(&dev->dev, dev->mesh_heap);
    agx_bg_eot_cleanup(&dev->bg_eot);
    agx_close_device(&dev->dev);

@@ -134,6 +134,12 @@ struct hk_device {
     */
    struct agx_bo *heap;
    util_once_flag heap_init_once;
+   /* HK_APPLE9_PREGFX_OVERLAP: a second heap, so consecutive renders using
+    * the heap alternate between the two and a render's pre-gfx work need not
+    * wait for the previous render's tiling to stop reading its allocations.
+    */
+   struct agx_bo *heap_alt;
+   util_once_flag heap_alt_init_once;
    struct agx_bo *mesh_heap;
    util_once_flag mesh_heap_init_once;
 
@@ -225,6 +231,8 @@ hk_sparse_unbound_unmapped(const struct agx_device *dev)
 /* Debug only: HK_CPU_TIMING, see hk_cpu_timing.c */
 struct vk_device_dispatch_table;
 void hk_cpu_timing_install(struct vk_device_dispatch_table *table);
+/* Heap-using renders in one command buffer, or summed over one submit. */
+void hk_cpu_timing_note_heap(unsigned renders, bool submit);
 void hk_cpu_timing_note_gs_slow(unsigned shape, bool indirect, uint64_t prims,
                                 unsigned max_indices);
 struct hk_cpu_compile_scope {
