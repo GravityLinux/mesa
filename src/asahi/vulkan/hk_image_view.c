@@ -602,6 +602,20 @@ hk_DestroyImageView(VkDevice _device, VkImageView imageView,
    vk_free2(&dev->vk.alloc, pAllocator, view);
 }
 
+bool
+hk_apple9_translate_storage_pbe(void *out, const struct agx_pbe_packed *state,
+                                enum pipe_format format, const struct ail_layout *layout,
+                                uint64_t base, unsigned level)
+{
+   if (!agx_apple9_translate_pbe(out, state, format, layout, base, level, 1, false))
+      return false;
+   /* A cache entry represents one 2D plane even when common.pbe represents
+    * an array/cube. Preserve all format and swizzle fields of that PBE. */
+   uint8_t *entry = out;
+   entry[0] = (entry[0] & 0xf0) | AGX_TEXTURE_DIMENSION_2D;
+   return true;
+}
+
 /* Storage writes use the native representation of the existing PBE half.
  * Per-layer 2D entries keep layer selection in descriptor addressing. The
  * shader never modifies descriptors, so divergent layers cannot race. */
@@ -639,9 +653,9 @@ hk_apple9_init_storage_pbe(struct hk_device *dev, struct hk_image_view *view)
    for (unsigned i = 0; i < count; ++i) {
       uint64_t base = hk_image_base_address(image, plane) +
          ail_get_layer_level_B(layout, view->vk.base_array_layer + i, 0);
-      if (!agx_apple9_translate_pbe(entries + i * AGX_APPLE9_TEXTURE_TABLE_STRIDE,
+      if (!hk_apple9_translate_storage_pbe(entries + i * AGX_APPLE9_TEXTURE_TABLE_STRIDE,
              &view->planes[0].storage, format_for_plane(view, 0), layout, base,
-             view->vk.base_mip_level, 1, false)) {
+             view->vk.base_mip_level)) {
          agx_bo_unreference(&dev->dev, view->apple9_layer_pbes);
          view->apple9_layer_pbes = NULL;
          return;

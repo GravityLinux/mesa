@@ -5,6 +5,7 @@
 #include <string.h>
 #include "hk_descriptor_set.h"
 #include "hk_descriptor_buffer.h"
+#include "hk_image_view.h"
 #include "asahi/layout/layout.h"
 
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "failed: %s\n", #c); return 1; } } while (0)
@@ -38,17 +39,20 @@ int main(void)
       .tiling = AIL_TILING_TWIDDLED, .layer_stride_B = 0x4000,
    };
    struct agx_pbe_packed legacy = {0};
+   ((uint8_t *)&legacy)[0] = AGX_TEXTURE_DIMENSION_2D_ARRAY;
+   struct agx_pbe_packed saved = legacy;
    uint8_t entries[12][AGX_APPLE9_TEXTURE_TABLE_STRIDE];
    for (unsigned i = 0; i < 12; ++i) {
       uint64_t base = UINT64_C(0x2ffff00000) + ail_get_layer_offset_B(&layout, 3 + i);
-      CHECK(agx_apple9_translate_pbe(entries[i], &legacy, layout.format,
-         &layout, base, 0, 1, false));
+      CHECK(hk_apple9_translate_storage_pbe(entries[i], &legacy, layout.format,
+         &layout, base, 0));
+      CHECK((entries[i][0] & 0xf) == AGX_TEXTURE_DIMENSION_2D);
       uint64_t address;
       memcpy(&address, entries[i] + 8, sizeof(address));
       CHECK((address & ((UINT64_C(1) << 40) - 1)) == base >> 4);
       CHECK(!(address >> 44)); /* No array operand or count on a 2D entry. */
    }
-   CHECK(!memcmp(&legacy, &(struct agx_pbe_packed){0}, sizeof(legacy)));
+   CHECK(!memcmp(&legacy, &saved, sizeof(legacy)));
    puts("native storage: eligibility, descriptor ABI and per-layer addresses pass");
    return 0;
 }

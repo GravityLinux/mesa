@@ -47,3 +47,8 @@ uint64_t hk_apple9_view_residency(const struct hk_device *dev,
 /* Encode an uncompressed native tile-store view for render submission. */
 bool hk_apple9_image_view_eot(const struct hk_image_view *view, bool layered,
                             void *out);
+
+/* Native writes address an individual 2D plane of the storage PBE. */
+bool hk_apple9_translate_storage_pbe(void *out, const struct agx_pbe_packed *state,
+                                     enum pipe_format format, const struct ail_layout *layout,
+                                     uint64_t base, unsigned level);
