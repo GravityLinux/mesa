@@ -13,6 +13,7 @@
 #include "agx_nir_texture.h"
 #include "agx_pack.h"
 #include "hk_device.h"
+#include "hk_descriptor_set.h"
 #include "hk_entrypoints.h"
 #include "hk_image.h"
 #include "hk_physical_device.h"
@@ -596,8 +597,58 @@ hk_DestroyImageView(VkDevice _device, VkImageView imageView,
    if (!view)
       return;
 
+   agx_bo_unreference(&dev->dev, view->apple9_layer_pbes);
    vk_image_view_finish(&view->vk);
    vk_free2(&dev->vk.alloc, pAllocator, view);
+}
+
+/* Storage writes use the native representation of the existing PBE half.
+ * Per-layer 2D entries keep layer selection in descriptor addressing. The
+ * shader never modifies descriptors, so divergent layers cannot race. */
+static void
+hk_apple9_init_storage_pbe(struct hk_device *dev, struct hk_image_view *view)
+{
+   view->apple9_store_flags = 0;
+   view->apple9_layer_pbes = NULL;
+   memset(view->apple9_pbe, 0, sizeof(view->apple9_pbe));
+   if (dev->dev.chip != AGX_CHIP_G16G || view->plane_count != 1 ||
+       !(view->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT) ||
+       !hk_apple9_native_store_format(format_for_plane(view, 0)) ||
+       view->vk.image->samples != 1)
+      return;
+   bool array = view->vk.view_type == VK_IMAGE_VIEW_TYPE_2D_ARRAY ||
+                view->vk.view_type == VK_IMAGE_VIEW_TYPE_CUBE ||
+                view->vk.view_type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
+   if (!array && view->vk.view_type != VK_IMAGE_VIEW_TYPE_2D)
+      return;
+   const struct hk_image *image = container_of(view->vk.image, struct hk_image, vk);
+   unsigned plane = view->planes[0].image_plane;
+   const struct ail_layout *layout = &image->planes[plane].layout;
+   if (layout->compressed || image->planes[plane].sparse_map)
+      return;
+   unsigned count = array ? view->vk.layer_count : 1;
+   if (array) {
+      view->apple9_layer_pbes = agx_bo_create(&dev->dev,
+         count * AGX_APPLE9_TEXTURE_TABLE_STRIDE, 0,
+         AGX_BO_LOW_VA | AGX_BO_READONLY | AGX_BO_WRITEBACK,
+         "Storage image layer PBEs");
+      if (!view->apple9_layer_pbes)
+         return;
+   }
+   uint8_t *entries = array ? agx_bo_map(view->apple9_layer_pbes) : view->apple9_pbe;
+   for (unsigned i = 0; i < count; ++i) {
+      uint64_t base = hk_image_base_address(image, plane) +
+         ail_get_layer_level_B(layout, view->vk.base_array_layer + i, 0);
+      if (!agx_apple9_translate_pbe(entries + i * AGX_APPLE9_TEXTURE_TABLE_STRIDE,
+             &view->planes[0].storage, format_for_plane(view, 0), layout, base,
+             view->vk.base_mip_level, 1, false)) {
+         agx_bo_unreference(&dev->dev, view->apple9_layer_pbes);
+         view->apple9_layer_pbes = NULL;
+         return;
+      }
+   }
+   view->apple9_store_flags = array ? HK_APPLE9_STORAGE_LAYER_WRITE_VALID
+                                    : HK_APPLE9_STORAGE_WRITE_VALID;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -613,12 +664,14 @@ hk_CreateImageView(VkDevice _device, const VkImageViewCreateInfo *pCreateInfo,
    if (!view)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
+   view->apple9_layer_pbes = NULL;
    result = hk_image_view_init(dev, view, pCreateInfo);
    if (result != VK_SUCCESS) {
       hk_DestroyImageView(_device, hk_image_view_to_handle(view), pAllocator);
       return result;
    }
 
+   hk_apple9_init_storage_pbe(dev, view);
    *pView = hk_image_view_to_handle(view);
 
    return VK_SUCCESS;

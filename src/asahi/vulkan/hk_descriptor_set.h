@@ -108,6 +108,14 @@ static_assert(offsetof(struct hk_apple9_texel_descriptor, texture) ==
                     AGX_APPLE9_TEXTURE_TABLE_STRIDE,
               "native texture entry is where register indices expect it");
 
+enum hk_apple9_storage_native_flags {
+   HK_APPLE9_STORAGE_READ_VALID = 1 << 0,
+   HK_APPLE9_STORAGE_WRITE_VALID = 1 << 1,
+   HK_APPLE9_STORAGE_LAYER_WRITE_VALID = 1 << 2,
+};
+
+bool hk_apple9_native_store_format(enum pipe_format format);
+
 /* Apple9 storage images and texel buffers append their texel layout, so
  * shaders can access them without a declared format. Storage images also
  * hold the native texture entry of their read-only view: loads that no
@@ -117,19 +125,27 @@ static_assert(offsetof(struct hk_apple9_texel_descriptor, texture) ==
 struct hk_apple9_storage_descriptor {
    struct hk_storage_image_descriptor common;
    struct hk_apple9_texel_metadata metadata;
-   /* Nonzero when texture holds a valid native entry. */
+   /* enum hk_apple9_storage_native_flags */
    uint32_t native_ok;
    /* enum hk_apple9_store_encode: how a store without a shader format can
     * encode the texel, chosen on the host from the view format. */
    uint32_t store_encode;
    uint8_t texture[AGX_APPLE9_TEXTURE_TABLE_STRIDE];
+   /* Native representation of common.pbe in the same bindless record. */
+   uint8_t pbe[AGX_APPLE9_TEXTURE_TABLE_STRIDE];
+   /* Arrays select immutable 2D PBE entries by relative layer. */
+   uint32_t layer_pbe_index;
+   uint32_t pad[7];
 };
-static_assert(sizeof(struct hk_apple9_storage_descriptor) == 128,
+static_assert(sizeof(struct hk_apple9_storage_descriptor) == 192,
               "Apple9 storage descriptor has no holes");
 static_assert(offsetof(struct hk_apple9_storage_descriptor, texture) ==
                  (AGX_APPLE9_DESCRIPTOR_TEXTURE_ENTRY + 1) *
                     AGX_APPLE9_TEXTURE_TABLE_STRIDE,
               "native storage entry is one table slot past the image one");
+
+static_assert(offsetof(struct hk_apple9_storage_descriptor, pbe) == 128,
+              "native PBE keeps the texture and metadata offsets stable");
 
 void hk_apple9_texel_layout(enum pipe_format format,
                             struct hk_apple9_texel_metadata *metadata);

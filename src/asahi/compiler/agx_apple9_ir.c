@@ -685,6 +685,47 @@ agx_apple9_vir_emit_publication_pair(struct agx_apple9_vir_program *program,
    return result;
 }
 
+bool
+agx_apple9_vir_emit_image_store(struct agx_apple9_vir_program *program,
+                                const uint32_t xy[2], const uint32_t rgba[4],
+                                uint32_t index)
+{
+   if (!program || !xy || !rgba || index >= program->value_count)
+      return false;
+   for (unsigned c = 0; c < 2; ++c)
+      if (xy[c] >= program->value_count)
+         return false;
+   for (unsigned c = 0; c < 4; ++c)
+      if (rgba[c] >= program->value_count)
+         return false;
+   uint32_t zero = agx_apple9_vir_emit(program, AGX_APPLE9_VIR_IMM,
+      AGX_APPLE9_ENC_MOV_IMM_COMPACT, NULL, 0, 0);
+   uint32_t pair_src[] = {index, zero};
+   uint32_t pair = agx_apple9_vir_emit_collect(program, pair_src, 2);
+   if (pair == AGX_APPLE9_VREG_INVALID)
+      return false;
+   uint32_t tuple = program->value_count;
+   if (!apple9_vir_append_values(program, 8))
+      return false;
+   struct agx_apple9_vir_instr *ins = apple9_vir_append_instruction(program);
+   if (!ins)
+      return false;
+   *ins = (struct agx_apple9_vir_instr){
+      .op = AGX_APPLE9_VIR_PUBLICATION_TUPLE,
+      .encoding = AGX_APPLE9_ENC_IMAGE_WRITE_PARAMS,
+      .dest = tuple, .dest_components = 8, .nr_srcs = 8,
+      /* Zero the unused plane fields in the 2D packet. */
+      .src = {xy[0], xy[1], rgba[0], rgba[1], zero, zero, rgba[2], rgba[3]},
+   };
+   uint32_t sources[10];
+   for (unsigned i = 0; i < 8; ++i)
+      sources[i] = tuple + i;
+   sources[8] = pair;
+   sources[9] = pair + 1;
+   return agx_apple9_vir_emit_side_effect(program, AGX_APPLE9_VIR_IMAGE_STORE,
+      AGX_APPLE9_ENC_IMAGE_WRITE, sources, 10, 0);
+}
+
 /* Publish a coordinate/byte-offset tuple, then export the implicit tile.
  * The synchronous store contract releases its publication and joins the
  * memory operation before the next VIR instruction. */
@@ -1637,7 +1678,7 @@ apple9_vir_is_graphics_output(enum agx_apple9_vir_opcode op)
    return op == AGX_APPLE9_VIR_COVERAGE || op == AGX_APPLE9_VIR_DEPTH_STORE || op == AGX_APPLE9_VIR_VARY_STORE ||
           op == AGX_APPLE9_VIR_TILE_ACCESS ||
           op == AGX_APPLE9_VIR_TILE_STORE || op == AGX_APPLE9_VIR_TILE_FENCE ||
-          op == AGX_APPLE9_VIR_BLOCK_IMAGE_STORE;
+          op == AGX_APPLE9_VIR_BLOCK_IMAGE_STORE || op == AGX_APPLE9_VIR_IMAGE_STORE;
 }
 
 static bool
@@ -1704,7 +1745,8 @@ apple9_publication_end(const struct agx_apple9_vir_program *program,
          const struct agx_apple9_vir_instr *sample = use->instruction;
          unsigned position = apple9_node(sample)->position;
          if (sample->op == AGX_APPLE9_VIR_COVERAGE || sample->op == AGX_APPLE9_VIR_DEPTH_STORE ||
-             sample->op == AGX_APPLE9_VIR_BLOCK_IMAGE_STORE) {
+             sample->op == AGX_APPLE9_VIR_BLOCK_IMAGE_STORE ||
+             sample->op == AGX_APPLE9_VIR_IMAGE_STORE) {
             end = MAX2(end, position);
             continue;
          }
@@ -1747,13 +1789,15 @@ apple9_validate_value_files(const struct agx_apple9_vir_program *program,
          bool table_index = ins->op == AGX_APPLE9_VIR_TEXTURE_SAMPLE &&
                             j + ins->texture_bindless + ins->sampler_bindless >=
                                ins->nr_srcs;
+         table_index |= ins->op == AGX_APPLE9_VIR_IMAGE_STORE && j >= 8;
          if (ins->src[j] >= program->value_count ||
              program->publication[ins->src[j]] !=
                 (!table_index &&
                  (ins->op == AGX_APPLE9_VIR_COVERAGE || ins->op == AGX_APPLE9_VIR_DEPTH_STORE ||
                   ins->op == AGX_APPLE9_VIR_VARY_STORE ||
                   ins->op == AGX_APPLE9_VIR_TEXTURE_SAMPLE ||
-                  ins->op == AGX_APPLE9_VIR_BLOCK_IMAGE_STORE)))
+                  ins->op == AGX_APPLE9_VIR_BLOCK_IMAGE_STORE ||
+                  ins->op == AGX_APPLE9_VIR_IMAGE_STORE)))
             goto invalid;
       }
       if (ins->op == AGX_APPLE9_VIR_PHI_SRC &&
@@ -2215,7 +2259,8 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
           instruction->op == AGX_APPLE9_VIR_TILE_ACCESS ||
           instruction->op == AGX_APPLE9_VIR_TILE_STORE ||
           instruction->op == AGX_APPLE9_VIR_TILE_FENCE ||
-          instruction->op == AGX_APPLE9_VIR_BLOCK_IMAGE_STORE) {
+          instruction->op == AGX_APPLE9_VIR_BLOCK_IMAGE_STORE ||
+          instruction->op == AGX_APPLE9_VIR_IMAGE_STORE) {
          unsigned gprs[AGX_APPLE9_MAX_ENCODING_OPERANDS], count;
          struct agx_apple9_packed_instruction packed;
          if (instruction->dest != AGX_APPLE9_VREG_INVALID ||
@@ -3759,8 +3804,9 @@ apple9_collect_memory_source_tuples(struct agx_apple9_vir_program *program,
          store->encoding == AGX_APPLE9_ENC_DEVICE_STORE_INDIRECT;
       for (unsigned tuple_index = 0; tuple_index < (store_indirect ? 2 : 1);
            ++tuple_index) {
-         const bool indirect = load_indirect || tuple_index == 1;
-         const unsigned first = load_pointer ? 0
+         const bool image = store->op == AGX_APPLE9_VIR_IMAGE_STORE;
+         const bool indirect = load_indirect || tuple_index == 1 || image;
+         const unsigned first = image ? 8 : load_pointer ? 0
                                 : load_indirect ? 1
                                 : tuple_index == 1
                                    ? store->memory_components + 1
@@ -6916,11 +6962,13 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
           instruction->encoding == AGX_APPLE9_ENC_TEXTURE_VOLUME_PARAMS ||
           instruction->encoding == AGX_APPLE9_ENC_TEXTURE_GRAD_PARAMS ||
           instruction->encoding == AGX_APPLE9_ENC_TEXTURE_GRAD_ARRAY_PARAMS ||
-          instruction->encoding == AGX_APPLE9_ENC_TEXTURE_GRAD_VOLUME_PARAMS) {
+          instruction->encoding == AGX_APPLE9_ENC_TEXTURE_GRAD_VOLUME_PARAMS ||
+          instruction->encoding == AGX_APPLE9_ENC_IMAGE_WRITE_PARAMS) {
+         bool image_write = instruction->encoding == AGX_APPLE9_ENC_IMAGE_WRITE_PARAMS;
          bool block_extended = instruction->encoding == AGX_APPLE9_ENC_BLOCK_STORE_EXTENDED_PARAMS;
          bool block = block_extended || instruction->encoding == AGX_APPLE9_ENC_BLOCK_STORE_PARAMS;
          bool gradient = instruction->encoding == AGX_APPLE9_ENC_TEXTURE_GRAD_PARAMS;
-         bool grad_array = instruction->encoding == AGX_APPLE9_ENC_TEXTURE_GRAD_ARRAY_PARAMS;
+         bool grad_array = instruction->encoding == AGX_APPLE9_ENC_TEXTURE_GRAD_ARRAY_PARAMS || image_write;
          bool grad_volume = instruction->encoding == AGX_APPLE9_ENC_TEXTURE_GRAD_VOLUME_PARAMS;
          unsigned count = grad_volume ? 9 : grad_array ? 8 : gradient ? 6 :
                           (instruction->encoding == AGX_APPLE9_ENC_TEXTURE_VOLUME_PARAMS || block_extended) ? 4 : 3;
@@ -6929,7 +6977,8 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
          unsigned base = phys[instruction->dest];
          if (instruction->nr_srcs != count ||
              instruction->dest_components != components ||
-             base > (block ? 12 : 32 - components) || (base & 3))
+             base > (block ? 12 : 32 - components) || (base & 3) ||
+             (image_write && (base & 7)))
             return false;
          uint8_t bytes[100];
          for (unsigned c = 0; c < count; ++c) {
@@ -6975,6 +7024,31 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
             return false;
          memcpy(bytes + c * 8, part.bytes, 8);
       }
+      packed_init(packed, bytes, sizeof(bytes));
+      return true;
+   }
+   case AGX_APPLE9_VIR_IMAGE_STORE: {
+      if (instruction->encoding != AGX_APPLE9_ENC_IMAGE_WRITE ||
+          instruction->nr_srcs != 10)
+         return false;
+      unsigned base = phys[instruction->src[0]];
+      unsigned index = phys[instruction->src[8]];
+      if (base > 24 || (base & 7) || index >= AGX_APPLE9_GPR_COUNT - 1 ||
+          (index & 1) || phys[instruction->src[9]] != index + 1)
+         return false;
+      for (unsigned i = 1; i < 8; ++i)
+         if (phys[instruction->src[i]] != base + i)
+            return false;
+      /* FP32 data, 2D coordinates, immediate LOD zero, bindless GPR-index
+       * operand. Source release follows SSA liveness; the PBE determines
+       * format and physical layout. Join the PBE export domain before the
+       * publication is reused, as for block-image stores. */
+      const uint8_t bytes[] = {
+         0xd7, 0x10, 0x54, base << 1, 0, 0x40, 0, index << 1,
+         0x20 | ((instruction->live_after_mask & (3u << 8)) ? 0 : 1),
+         0x04, 0, 0, 0x88, 0x3a, 0x89, 0,
+         0x07, 0x12, 0x54, 0, 3, 0,
+      };
       packed_init(packed, bytes, sizeof(bytes));
       return true;
    }

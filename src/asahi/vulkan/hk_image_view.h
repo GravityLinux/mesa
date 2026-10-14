@@ -19,6 +19,12 @@ struct hk_device;
 struct hk_image_view {
    struct vk_image_view vk;
 
+   /* Immutable native PBE cache, owned by this view. Arrays use one 2D
+    * entry per face/layer until the native dynamic-layer form is qualified. */
+   uint32_t apple9_store_flags;
+   uint8_t apple9_pbe[AGX_APPLE9_TEXTURE_TABLE_STRIDE];
+   struct agx_bo *apple9_layer_pbes;
+
    uint8_t plane_count;
    struct {
       uint8_t image_plane;
