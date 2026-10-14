@@ -236,6 +236,7 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    cmd->geom_index_count = 0;
    cmd->geom_instance_count = 0;
    cmd->uses_heap = false;
+   cmd->heap_bo = NULL;
    cmd->heap_renders = 0;
    cmd->heap_last1[0] = cmd->heap_last1[1] = 0;
    cmd->uses_mesh_heap = false;

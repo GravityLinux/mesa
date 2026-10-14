@@ -137,7 +137,7 @@ libvulkan_asahi = shared_library(
 )
 
 if with_tests
-  foreach t : ['hk-pregfx-recording', 'hk-heap-resubmit']
+  foreach t : ['hk-pregfx-recording', 'hk-heap-resubmit', 'hk-heap-addresses']
     test(
       t,
       executable(
@@ -147,7 +147,7 @@ if with_tests
                                inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
         dependencies : [hk_deps],
         link_with : [libhk],
-        link_args : t == 'hk-heap-resubmit' ? ['-Wl,--wrap=hk_dispatch_precomp'] : [],
+        link_args : t != 'hk-pregfx-recording' ? ['-Wl,--wrap=hk_dispatch_precomp'] : [],
       ),
       suite : ['asahi', 'honeykrisp'],
     )

@@ -845,6 +845,9 @@ struct hk_cmd_buffer {
     * heap_renders counts the heap-using renders so
     * far (in both modes; its parity picks the heap with the switch). */
    uint64_t heap_desc;
+   /* Physical BO selected with heap_desc for this render. All heap-relative
+    * CPU-recorded bases/bounds must use this same BO. */
+   struct agx_bo *heap_bo;
    uint32_t heap_renders;
    /* 1 + the sync ID of the last render using each heap (0: none). */
    uint32_t heap_last1[2];

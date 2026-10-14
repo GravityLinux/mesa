@@ -1421,6 +1421,7 @@ hk_heap(struct hk_cmd_buffer *cmd)
          } else {
             cmd->heap_last1[h] = 0;
          }
+         cmd->heap_bo = bo;
          struct poly_heap heap = {.base = bo->va->addr, .size = bo->size};
          cmd->heap_desc = hk_pool_upload(cmd, &heap, sizeof(heap), 16);
          cmd->uses_heap = true;
@@ -1451,7 +1452,30 @@ hk_heap(struct hk_cmd_buffer *cmd)
       cmd->uses_heap = true;
    }
 
+   cmd->heap_bo = dev->heap;
    return dev->rodata.heap;
+}
+
+/* GPU-generated index/coordinate offsets are relative to the BO in the
+ * render's heap descriptor, including odd renders using the alternate heap.
+ * Keep this selection at recording time: later renders change cmd->heap_bo,
+ * but already recorded draws and uniforms retain their own address values.
+ */
+static struct agx_bo *
+hk_geometry_heap_bo(struct hk_cmd_buffer *cmd)
+{
+   hk_heap(cmd);
+   assert(cmd->heap_bo);
+   return cmd->heap_bo;
+}
+
+static struct agx_draw
+hk_heap_indexed_indirect(struct hk_cmd_buffer *cmd, uint64_t ptr,
+                         enum agx_index_size index_size, bool restart)
+{
+   struct agx_bo *bo = hk_geometry_heap_bo(cmd);
+   return agx_draw_indexed_indirect(ptr, bo->va->addr, bo->size, index_size,
+                                   restart);
 }
 
 static uint64_t
@@ -1572,7 +1596,6 @@ hk_geom_index_alloc(struct hk_cmd_buffer *cmd, uint32_t size)
 static uint64_t
 hk_upload_geometry_params(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 {
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_descriptor_state *desc = &cmd->state.gfx.descriptors;
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct hk_api_shader *gs = gfx->shaders[MESA_SHADER_GEOMETRY];
@@ -1647,11 +1670,9 @@ hk_upload_geometry_params(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 
    if (indirect) {
       if (gsi->shape == POLY_GS_SHAPE_DYNAMIC_INDEXED) {
-         /* Need to allocate heap if we haven't yet */
-         hk_heap(cmd);
-
-         cmd->geom_index_buffer = dev->heap->va->addr;
-         cmd->geom_index_count = dev->heap->size;
+         struct agx_bo *bo = hk_geometry_heap_bo(cmd);
+         cmd->geom_index_buffer = bo->va->addr;
+         cmd->geom_index_count = bo->size;
       } else {
          cmd->geom_index_count =
             poly_gs_rast_vertices(gsi->shape, gsi->max_indices, 1, 0);
@@ -1692,7 +1713,6 @@ static void
 hk_upload_tess_params(struct hk_cmd_buffer *cmd, struct poly_tess_params *out,
                       struct agx_draw draw)
 {
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct hk_shader *tcs = hk_only_variant(gfx->shaders[MESA_SHADER_TESS_CTRL]);
@@ -1730,7 +1750,7 @@ hk_upload_tess_params(struct hk_cmd_buffer *cmd, struct poly_tess_params *out,
    size_t draw_stride_B = draw_stride_el * sizeof(uint32_t);
 
    /* heap is allocated by hk_heap */
-   args.patch_coord_buffer = dev->heap->va->addr;
+   args.patch_coord_buffer = hk_geometry_heap_bo(cmd)->va->addr;
 
    if (!agx_is_indirect(draw.b)) {
       unsigned in_patches = draw.b.count[0] / args.input_patch_size;
@@ -1979,7 +1999,6 @@ static struct agx_draw
 hk_draw_without_restart(struct hk_cmd_buffer *cmd, struct agx_draw draw,
                         uint32_t draw_count)
 {
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
 
@@ -2010,9 +2029,8 @@ hk_draw_without_restart(struct hk_cmd_buffer *cmd, struct agx_draw draw,
                                 AGX_BARRIER_ALL | AGX_PREGFX, ia,
                                 poly_compact_prim(prim));
 
-   return agx_draw_indexed_indirect(ia.out_draw, dev->heap->va->addr,
-                                    dev->heap->size, draw.index_size,
-                                    false /* restart */);
+   return hk_heap_indexed_indirect(cmd, ia.out_draw, draw.index_size,
+                                   false /* restart */);
 }
 
 /* Native Apple9 fans flat shade consistently only from their first vertex.
@@ -2020,7 +2038,6 @@ hk_draw_without_restart(struct hk_cmd_buffer *cmd, struct agx_draw draw,
 static struct agx_draw
 hk_apple9_unroll_fan(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 {
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_graphics_state *gfx = &cmd->state.gfx;
 
    perf_debug(cmd, "Unrolling a last-provoking triangle fan");
@@ -2055,9 +2072,8 @@ hk_apple9_unroll_fan(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    libagx_unroll_geometry_struct(cmd, agx_1d(1024), AGX_BARRIER_ALL | AGX_PREGFX,
                                  ia, poly_compact_prim(MESA_PRIM_TRIANGLE_FAN));
 
-   return agx_draw_indexed_indirect(ia.out_draw, dev->heap->va->addr,
-                                    dev->heap->size, AGX_INDEX_SIZE_U32,
-                                    false /* restart */);
+   return hk_heap_indexed_indirect(cmd, ia.out_draw, AGX_INDEX_SIZE_U32,
+                                   false /* restart */);
 }
 
 static struct agx_draw
@@ -2224,7 +2240,6 @@ hk_apple9_dispatch_prerast(struct hk_cmd_buffer *cmd, struct hk_shader *s,
 static struct agx_draw
 hk_apple9_draw_without_adj(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 {
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
    enum mesa_prim prim = vk_topology_to_mesa(dyn->ia.primitive_topology);
 
@@ -2256,8 +2271,7 @@ hk_apple9_draw_without_adj(struct hk_cmd_buffer *cmd, struct agx_draw draw)
       draw.indexed ? agx_index_size_to_B(draw.index_size) : 0, prim,
       dyn->rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT);
 
-   return agx_draw_indexed_indirect(out_draw, dev->heap->va->addr,
-                                    dev->heap->size, AGX_INDEX_SIZE_U32, false);
+   return hk_heap_indexed_indirect(cmd, out_draw, AGX_INDEX_SIZE_U32, false);
 }
 
 /* The Apple9 index fetch reads only from the USC aperture and is bounded in
@@ -2291,7 +2305,6 @@ hk_apple9_needs_index_copy(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 static struct agx_draw
 hk_apple9_robust_index(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 {
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
    uint64_t in_draw = draw.b.ptr;
    if (!agx_is_indirect(draw.b)) {
       uint32_t desc[5] = {draw.b.count[0], draw.b.count[1], draw.start,
@@ -2307,9 +2320,8 @@ hk_apple9_robust_index(struct hk_cmd_buffer *cmd, struct agx_draw draw)
       draw.index_buffer_range_B >> draw.index_size,
       agx_index_size_to_B(draw.index_size));
 
-   return agx_draw_indexed_indirect(out_draw, dev->heap->va->addr,
-                                    dev->heap->size, draw.index_size,
-                                    draw.restart);
+   return hk_heap_indexed_indirect(cmd, out_draw, draw.index_size,
+                                   draw.restart);
 }
 
 static void
@@ -2339,7 +2351,6 @@ hk_apple9_launch_tess(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    const unsigned max_batch_patches = 2048;
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct hk_descriptor_state *desc = &gfx->descriptors;
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
    struct hk_api_shader *tcs_api = gfx->shaders[MESA_SHADER_TESS_CTRL];
    struct hk_api_shader *tes_api = gfx->shaders[MESA_SHADER_TESS_EVAL];
@@ -2500,8 +2511,8 @@ hk_apple9_launch_tess(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    if (batch)
       cmd->tess_batch.draws++;
 
-   return agx_draw_indexed_indirect(gfx->tess.out_draws, dev->heap->va->addr,
-                                    dev->heap->size, AGX_INDEX_SIZE_U32, false);
+   return hk_heap_indexed_indirect(cmd, gfx->tess.out_draws,
+                                   AGX_INDEX_SIZE_U32, false);
 }
 
 /* Run the vertex and geometry shaders as compute before the render pass,
@@ -2743,8 +2754,8 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    libagx_tessellate(cmd, grid_tess, AGX_BARRIER_ALL | AGX_PREGFX, info.mode,
                      POLY_TESS_MODE_WITH_COUNTS, state);
 
-   return agx_draw_indexed_indirect(gfx->tess.out_draws, dev->heap->va->addr,
-                                    dev->heap->size, AGX_INDEX_SIZE_U32, false);
+   return hk_heap_indexed_indirect(cmd, gfx->tess.out_draws,
+                                   AGX_INDEX_SIZE_U32, false);
 }
 
 void
