@@ -1309,6 +1309,17 @@ hk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
    if (vk_queue_is_lost(&queue->vk))
       return VK_ERROR_DEVICE_LOST;
 
+   if (hk_cpu_level) {
+      unsigned total = 0;
+      for (unsigned i = 0; i < submit->command_buffer_count; ++i) {
+         struct hk_cmd_buffer *cmd =
+            container_of(submit->command_buffers[i], struct hk_cmd_buffer, vk);
+         hk_cpu_timing_note_heap(cmd->heap_renders, false);
+         total += cmd->heap_renders;
+      }
+      hk_cpu_timing_note_heap(total, true);
+   }
+
    hk_gpu_busy_sample(queue);
    VkResult result = queue_submit(dev, queue, submit);
    agx_bo_cache_evict_stale(&dev->dev);

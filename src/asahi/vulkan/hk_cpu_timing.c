@@ -127,6 +127,8 @@ static const char *hk_cpu_sub_name[HK_CPU_SUB_COUNT] = {
    "push_desc", "root", "textures", "tables", "prepare_alloc", "cmd_bo",
    "cmd_bo_destroy_release", "cmd_bo_destroy_cap",
 };
+/* Heap-using renders per command buffer and per submit: 1, 2, 3, 4+. */
+static _Atomic uint64_t hk_cpu_heap_cmd[4], hk_cpu_heap_submit[4];
 static FILE *hk_cpu_out;
 
 static inline uint64_t
@@ -220,8 +222,24 @@ hk_cpu_report(bool force)
                     k, atomic_load(&hk_cpu_compile_calls[i]),
                     k, atomic_load(&hk_cpu_compile_max[i]));
    }
+   for (unsigned i = 0; i < 4 && n < (int)sizeof(line); ++i) {
+      n += snprintf(line + n, sizeof(line) - n,
+                    " heap_cmd_%u=%" PRIu64 " heap_submit_%u=%" PRIu64, i + 1,
+                    atomic_load(&hk_cpu_heap_cmd[i]), i + 1,
+                    atomic_load(&hk_cpu_heap_submit[i]));
+   }
    fprintf(hk_cpu_out, "%s\n", line);
    fflush(hk_cpu_out);
+}
+
+void
+hk_cpu_timing_note_heap(unsigned renders, bool submit)
+{
+   if (!renders)
+      return;
+   atomic_fetch_add_explicit(
+      &(submit ? hk_cpu_heap_submit : hk_cpu_heap_cmd)[MIN2(renders, 4) - 1], 1,
+      memory_order_relaxed);
 }
 
 #define HK_WRAP_VOID(cat, name, PARAMS, ARGS)                                  \

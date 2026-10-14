@@ -236,6 +236,8 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    cmd->geom_index_count = 0;
    cmd->geom_instance_count = 0;
    cmd->uses_heap = false;
+   cmd->heap_renders = 0;
+   cmd->heap_last1[0] = cmd->heap_last1[1] = 0;
    cmd->uses_mesh_heap = false;
    cmd->sync_fallback = false;
    cmd->sync_next_group = 0;
@@ -639,6 +641,66 @@ hk_cmd_sync_work(struct hk_cmd_buffer *cmd, struct hk_cs *cs, unsigned stages)
 
    struct hk_sync_event event = {.stream = cs->sync_id, .dst = stages};
    util_dynarray_append(&cmd->sync_events, event);
+}
+
+/* Pre-gfx overlap (HK_APPLE9_PREGFX_OVERLAP). A pre-gfx stream runs before
+ * its render, so register its scope there, ahead of the render's own first
+ * event, rather than forcing full ordering:
+ * - it does the render's pre-rasterization work, so it waits for what the
+ *   application ordered before that (barriers into vertex input, indirect and
+ *   pre-rasterization stages). Legacy self-dependencies may also name
+ *   pre-rasterization stages, but all of this render's pre-gfx work executes
+ *   before the render; it cannot be ordered between its draws;
+ * - it fills the render's geometry heap, so it waits for the previous render
+ *   that used the same heap (hk_heap alternates two). Without one in this
+ *   command buffer, it waits for all earlier work;
+ * - the render waits for it.
+ * A dependency the resolver cannot express in stream order still falls back
+ * to full ordering there.
+ */
+void
+hk_cmd_pregfx_precise(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   struct hk_cs *gfx = cmd->current_cs.gfx;
+   struct util_dynarray *events = &cmd->sync_events;
+   const unsigned count = util_dynarray_num_elements(events, struct hk_sync_event);
+   struct hk_sync_event *ev = events->data;
+   unsigned pos = 0;
+   /* Kept barriers and moved compute can insert events before an open render
+    * while later passes continue it. Stream IDs are stable; array indices
+    * are not. Find the first event of the whole render, including its earlier
+    * passes that did not need pre-gfx work.
+    */
+   while (pos < count && ev[pos].stream != gfx->sync_id)
+      ++pos;
+   assert(pos < count && "a render with work has a sync event");
+   if (pos == count) {
+      cmd->sync_fallback = true;
+      return;
+   }
+
+   struct hk_sync_event pre = {
+      .stream = cs->sync_id,
+      .dst = gfx->heap_prev1 ? HK_SYNC_TILING : HK_SYNC_ALL,
+      .after1 = gfx->heap_prev1,
+   };
+   if (!util_dynarray_grow(events, struct hk_sync_event, 1)) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+      return;
+   }
+   ev = events->data;
+   memmove(&ev[pos + 1], &ev[pos], (count - pos) * sizeof(*ev));
+   ev[pos] = pre;
+
+   /* The render's own first event moved one along; it now also waits for its
+    * pre-gfx work. */
+   assert(ev[pos + 1].stream == gfx->sync_id);
+   ev[pos + 1].after1 = cs->sync_id + 1;
+   if (cmd->merge_event > pos)
+      cmd->merge_event++;
+
+   cs->sync_stages |= pre.dst;
+   cs->pregfx_precise = true;
 }
 
 /* HK_APPLE9_MERGE_TRACE (diagnostic): counts what ends renders kept open

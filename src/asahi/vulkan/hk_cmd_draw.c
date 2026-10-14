@@ -1369,17 +1369,80 @@ hk_init_heap(const void *data)
    };
 }
 
-static uint64_t
+static void
+hk_init_heap_alt(const void *data)
+{
+   struct hk_cmd_buffer *cmd = (struct hk_cmd_buffer *)data;
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+
+   perf_debug(cmd, "Allocating second heap");
+   dev->heap_alt = agx_bo_create(&dev->dev, dev->heap->size, 0, dev->heap->flags,
+                                 "Geometry heap (alternate)");
+}
+
+/* HK_APPLE9_PREGFX_OVERLAP (experimental): costs a second 128 MiB geometry
+ * heap (USC aperture), allocated on first use by an odd heap-using render. */
+bool
+hk_pregfx_overlap(void)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("HK_APPLE9_PREGFX_OVERLAP", false);
+   return enabled;
+}
+
+uint64_t
 hk_heap(struct hk_cmd_buffer *cmd)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
    util_call_once_data(&dev->heap_init_once, hk_init_heap, cmd);
 
+   /* Pre-gfx overlap: each render gets its own heap descriptor. Reset its
+    * allocation cursor before its first use on every execution, including
+    * command-buffer resubmissions. Consecutive heap-using renders alternate
+    * between two heaps, costing a second 128 MiB on first alternate use.
+    */
+   if (hk_pregfx_overlap()) {
+      if (!cmd->uses_heap) {
+         struct agx_bo *bo = dev->heap;
+         const unsigned h = cmd->heap_renders++ & 1;
+         if (h) {
+            util_call_once_data(&dev->heap_alt_init_once, hk_init_heap_alt, cmd);
+            bo = dev->heap_alt;
+         }
+
+         /* The render's pre-gfx work waits for the previous user of this
+          * heap, see hk_cmd_pregfx_precise. */
+         struct hk_cs *gfx = cmd->current_cs.gfx;
+         if (gfx) {
+            gfx->heap_prev1 = cmd->heap_last1[h];
+            cmd->heap_last1[h] = gfx->sync_id + 1;
+         } else {
+            cmd->heap_last1[h] = 0;
+         }
+         struct poly_heap heap = {.base = bo->va->addr, .size = bo->size};
+         cmd->heap_desc = hk_pool_upload(cmd, &heap, sizeof(heap), 16);
+         cmd->uses_heap = true;
+
+         /* The pre-gfx stream already waits for this heap's previous user.
+          * Reset there, before any tessellation/geometry allocation, so the
+          * next render can still overlap the previous render on the other
+          * heap. Without a render, ordinary compute orders conservatively.
+          */
+         libagx_write_u32(cmd, agx_1d(1),
+                         AGX_BARRIER_ALL | (gfx ? AGX_PREGFX : 0),
+                         cmd->heap_desc + offsetof(struct poly_heap, bottom), 0);
+      }
+      return cmd->heap_desc;
+   }
+
    /* We need to free all allocations after each command buffer execution */
    if (!cmd->uses_heap) {
       perf_debug(cmd, "Freeing heap");
       uint64_t addr = dev->rodata.heap;
+
+      cmd->heap_renders++;
 
       /* Zeroing the allocated index frees everything */
       hk_queue_write(cmd, addr + offsetof(struct poly_heap, bottom), 0,
