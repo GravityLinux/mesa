@@ -1141,18 +1141,13 @@ target_is_array(enum pipe_texture_target target)
    }
 }
 
-static void
-agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
-                     struct pipe_image_view *view, bool block_access,
-                     bool arrays_as_2d, bool force_2d_array, bool emrt)
+static enum pipe_texture_target
+agx_pbe_image_target(const struct pipe_image_view *view, bool arrays_as_2d,
+                     bool force_2d_array)
 {
-   struct agx_resource *tex = agx_resource(view->resource);
-   const struct util_format_description *desc =
-      util_format_description(view->format);
-   enum pipe_texture_target target = tex->base.target;
-   bool is_buffer = (target == PIPE_BUFFER);
+   enum pipe_texture_target target = view->resource->target;
 
-   if (!is_buffer && view->u.tex.single_layer_view)
+   if (target != PIPE_BUFFER && view->u.tex.single_layer_view)
       target = PIPE_TEXTURE_2D;
 
    arrays_as_2d |= (view->access & PIPE_IMAGE_ACCESS_DRIVER_INTERNAL);
@@ -1165,6 +1160,21 @@ agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
    if ((arrays_as_2d && target_is_array(target)) || target_is_cube(target) ||
        force_2d_array)
       target = PIPE_TEXTURE_2D_ARRAY;
+
+   return target;
+}
+
+static void
+agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
+                     struct pipe_image_view *view, bool block_access,
+                     bool arrays_as_2d, bool force_2d_array, bool emrt)
+{
+   struct agx_resource *tex = agx_resource(view->resource);
+   const struct util_format_description *desc =
+      util_format_description(view->format);
+   enum pipe_texture_target target =
+      agx_pbe_image_target(view, arrays_as_2d, force_2d_array);
+   bool is_buffer = (tex->base.target == PIPE_BUFFER);
 
    unsigned level = is_buffer ? 0 : view->u.tex.level;
    unsigned layer = is_buffer ? 0 : view->u.tex.first_layer;
@@ -6241,11 +6251,14 @@ agx_apple9_upload_textures(struct agx_batch *batch, struct agx_stage *shader,
       agx_batch_upload_pbe(batch, &legacy, view, true, false, false,
                            uncompressed);
       unsigned level = view->u.tex.level;
+      enum agx_texture_dimension dimension = agx_translate_tex_dim(
+         agx_pbe_image_target(view, false, false),
+         util_res_sample_count(&resource->base));
       if (!agx_apple9_translate_pbe(
              descriptor, &legacy, view->format, &layout,
              agx_map_texture_gpu(resource, view->u.tex.first_layer), level,
              view->u.tex.last_layer - view->u.tex.first_layer + 1,
-             !view->u.tex.single_layer_view)) {
+             !view->u.tex.single_layer_view, dimension)) {
          fprintf(stderr, "Apple9 unsupported block image descriptor\n");
          abort();
       }
