@@ -6,12 +6,15 @@
 #include "hk_descriptor_set.h"
 #include "hk_descriptor_buffer.h"
 #include "hk_image_view.h"
+#include "hk_shader.h"
+#include "compiler/nir/nir_builder.h"
 #include "asahi/layout/layout.h"
 
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "failed: %s\n", #c); return 1; } } while (0)
 
 int main(void)
 {
+   glsl_type_singleton_init_or_ref();
    const enum pipe_format supported[] = {
       PIPE_FORMAT_R11G11B10_FLOAT, PIPE_FORMAT_R16G16B16A16_FLOAT,
       PIPE_FORMAT_R8G8B8A8_UNORM, PIPE_FORMAT_R32_FLOAT,
@@ -62,6 +65,31 @@ int main(void)
       CHECK(!(address >> 44)); /* No array operand or count on a 2D entry. */
    }
    CHECK(!memcmp(&legacy, &saved, sizeof(legacy)));
+   /* Eligibility is frozen before any load is lowered/removed: a later
+    * store in a read/write shader must not regain native eligibility. */
+   const nir_intrinsic_op reads[] = {
+      nir_intrinsic_bindless_image_load, nir_intrinsic_bindless_image_atomic,
+      nir_intrinsic_bindless_image_atomic_swap,
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(reads); ++i) {
+      const nir_shader_compiler_options options = {0};
+      nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, &options, "read_write");
+      CHECK(hk_apple9_native_store_shader(b.shader));
+      nir_intrinsic_instr *read = nir_intrinsic_instr_create(b.shader, reads[i]);
+      read->num_components = reads[i] == nir_intrinsic_bindless_image_load ? 4 : 1;
+      nir_intrinsic_set_image_dim(read, GLSL_SAMPLER_DIM_2D);
+      nir_intrinsic_set_format(read, PIPE_FORMAT_R32_UINT);
+      const nir_intrinsic_info *info = &nir_intrinsic_infos[reads[i]];
+      for (unsigned j = 0; j < info->num_srcs; ++j) {
+         unsigned components = info->src_components[j] ? info->src_components[j] : read->num_components;
+         read->src[j] = nir_src_for_ssa(nir_imm_zero(&b, components, j == 0 ? 64 : 32));
+      }
+      nir_def_init(&read->instr, &read->def, read->num_components, 32);
+      nir_builder_instr_insert(&b, &read->instr);
+      CHECK(!hk_apple9_native_store_shader(b.shader));
+      ralloc_free(b.shader);
+   }
    puts("native storage: eligibility, descriptor ABI and per-layer addresses pass");
+   glsl_type_singleton_decref();
    return 0;
 }

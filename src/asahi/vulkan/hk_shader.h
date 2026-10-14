@@ -434,6 +434,8 @@ bool hk_apple9_lower_sparse_residency(nir_shader *nir);
 /* Encode a storage-image texel into zero-padded words: from the descriptor's
  * store encoding when it names a canonical format, otherwise from its
  * per-component layout. Exposed for the encoder unit test. */
+bool hk_apple9_native_store_shader(const nir_shader *nir);
+
 nir_def *hk_apple9_encode_texel_fast(struct nir_builder *b, nir_def *value,
                                      nir_def *layout, bool floating,
                                      nir_def *encode);

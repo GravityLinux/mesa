@@ -2520,12 +2520,45 @@ hk_apple9_native_ok(nir_builder *b, nir_def *tex)
          .align_mul = 4), HK_APPLE9_STORAGE_READ_VALID), 0);
 }
 
+/* PBE export completion makes writes visible after a dispatch, but our
+ * same-invocation check did not observe a native write through global image
+ * memory. Until that visibility operation is qualified, keep read/write
+ * shaders on the converter. Decide before lowering removes any image loads. */
+bool
+hk_apple9_native_store_shader(const nir_shader *nir)
+{
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            switch (nir_instr_as_intrinsic(instr)->intrinsic) {
+            case nir_intrinsic_bindless_image_load:
+            case nir_intrinsic_bindless_image_atomic:
+            case nir_intrinsic_bindless_image_atomic_swap:
+               return false;
+            default:
+               break;
+            }
+         }
+      }
+   }
+   return true;
+}
+
+struct hk_apple9_storage_lowering {
+   struct set *texture_loads;
+   bool native_stores;
+};
+
 static bool
-hk_apple9_can_native_store(const nir_builder *b, const nir_intrinsic_instr *intr)
+hk_apple9_can_native_store(const nir_builder *b, const nir_intrinsic_instr *intr,
+                            bool native_stores)
 {
    enum glsl_sampler_dim dim = nir_intrinsic_image_dim(intr);
    enum pipe_format format = nir_intrinsic_format(intr);
-   return (format == PIPE_FORMAT_NONE || hk_apple9_native_store_format(format)) &&
+   return native_stores &&
+          (format == PIPE_FORMAT_NONE || hk_apple9_native_store_format(format)) &&
           b->shader->info.stage == MESA_SHADER_COMPUTE &&
           (dim == GLSL_SAMPLER_DIM_2D || dim == GLSL_SAMPLER_DIM_CUBE) &&
           intr->src[3].ssa->bit_size == 32 &&
@@ -2566,7 +2599,7 @@ hk_apple9_native_store(nir_builder *b, nir_intrinsic_instr *intr,
 
 static bool
 hk_apple9_lower_formatless_storage(nir_builder *b, nir_intrinsic_instr *intr,
-                                   bool load, bool route)
+                                   bool load, bool route, bool native_stores)
 {
    if (nir_def_instr(intr->src[0].ssa)->type != nir_instr_type_intrinsic)
       return false;
@@ -2630,7 +2663,7 @@ hk_apple9_lower_formatless_storage(nir_builder *b, nir_intrinsic_instr *intr,
    /* The address is arithmetic on the descriptor, valid for any coordinate,
     * so compute it ahead of the bounds check: its uniform part can then
     * move to the preamble. Only the access below depends on the check. */
-   bool native = !load && hk_apple9_can_native_store(b, intr);
+   bool native = !load && hk_apple9_can_native_store(b, intr, native_stores);
    bool native_array = array || cube;
    nir_def *ok = route ? hk_apple9_native_ok(b, tex) :
       native ? hk_apple9_native_write_ok(b, tex, native_array) : NULL;
@@ -2979,13 +3012,15 @@ static bool
 hk_apple9_lower_storage_image(nir_builder *b, nir_intrinsic_instr *intr,
                               void *data)
 {
+   const struct hk_apple9_storage_lowering *lower = data;
    bool load = intr->intrinsic == nir_intrinsic_bindless_image_load;
    if (!load && intr->intrinsic != nir_intrinsic_bindless_image_store)
       return false;
    enum pipe_format format = nir_intrinsic_format(intr);
    if (format == PIPE_FORMAT_NONE)
       return hk_apple9_lower_formatless_storage(b, intr, load,
-                                                load && data && _mesa_set_search(data, intr));
+                                                load && _mesa_set_search(lower->texture_loads, intr),
+                                                lower->native_stores);
    const struct util_format_description *desc = util_format_description(format);
    unsigned size_B = util_format_get_blocksize(format);
    if ((desc->layout != UTIL_FORMAT_LAYOUT_PLAIN &&
@@ -3038,9 +3073,9 @@ hk_apple9_lower_storage_image(nir_builder *b, nir_intrinsic_instr *intr,
    }
    /* Typed loads already decode with a known format; the texture unit only
     * pays off for formatless ones. HK_APPLE9_TEXTURE_LOADS_TYPED measures. */
-   bool route = load && data && _mesa_set_search(data, intr) &&
+   bool route = load && _mesa_set_search(lower->texture_loads, intr) &&
                 getenv("HK_APPLE9_TEXTURE_LOADS_TYPED");
-   bool native = !load && hk_apple9_can_native_store(b, intr);
+   bool native = !load && hk_apple9_can_native_store(b, intr, lower->native_stores);
    bool native_array = array || cube;
    nir_def *ok = route ? hk_apple9_native_ok(b, tex) :
       native ? hk_apple9_native_write_ok(b, tex, native_array) : NULL;
@@ -3522,8 +3557,12 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
                nir_metadata_none, NULL);
       struct set *texture_loads = _mesa_pointer_set_create(NULL);
       hk_apple9_texture_route_loads(nir, texture_loads);
+      struct hk_apple9_storage_lowering lower = {
+         .texture_loads = texture_loads,
+         .native_stores = hk_apple9_native_store_shader(nir),
+      };
       NIR_PASS(_, nir, nir_shader_intrinsics_pass, hk_apple9_lower_storage_image,
-               nir_metadata_none, texture_loads);
+               nir_metadata_none, &lower);
       _mesa_set_destroy(texture_loads, NULL);
    }
 
