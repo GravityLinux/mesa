@@ -651,7 +651,7 @@ hk_apple9_init_storage_pbe(struct hk_device *dev, struct hk_image_view *view)
       return;
    uint64_t index = (view->apple9_pbes.addr - dev->dev.shader_base) /
                      AGX_APPLE9_TEXTURE_TABLE_STRIDE;
-   if (index > HK_APPLE9_STORAGE_PBE_MASK) {
+   if (index + count - 1 > HK_APPLE9_STORAGE_PBE_MASK) {
       simple_mtx_lock(&dev->apple9_pbe_lock);
       hk_apple9_pbe_table_free(&dev->apple9_pbes, &view->apple9_pbes);
       simple_mtx_unlock(&dev->apple9_pbe_lock);
@@ -716,13 +716,16 @@ hk_apple9_image_view_eot(const struct hk_image_view *view, bool layered, void *o
     * descriptor, like the legacy PBE above, stores the base-level depth. */
    unsigned layers = view->vk.view_type == VK_IMAGE_VIEW_TYPE_3D
                         ? image->vk.extent.depth : view->vk.layer_count;
-   const struct agx_pbe_packed *state = layered ? &view->planes[0].layered_eot
-                                                 : &view->planes[0].eot;
-   agx_unpack(stderr, state, PBE, pbe);
+   const struct agx_pbe_packed *state =
+      layered ? &view->planes[0].layered_eot : &view->planes[0].eot;
+   /* Use the same dimension selection as pack_pbe without unpacking the
+    * descriptor on the render submission path. */
+   enum agx_texture_dimension dimension = translate_image_view_type(
+      view->vk.view_type, view->vk.image->samples > 1, layers > 1,
+      layered ? HK_DESC_USAGE_LAYERED_BG_EOT : HK_DESC_USAGE_BG_EOT);
    return agx_apple9_translate_pbe(
-      out, layered ? &view->planes[0].layered_eot : &view->planes[0].eot,
-      format_for_plane(view, 0), layout, base, view->vk.base_mip_level,
-      layered ? layers : 1, layered, pbe.dimension);
+      out, state, format_for_plane(view, 0), layout, base, view->vk.base_mip_level,
+      layered ? layers : 1, layered, dimension);
 }
 
 uint64_t

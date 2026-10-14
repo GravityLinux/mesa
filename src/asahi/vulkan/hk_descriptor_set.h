@@ -55,7 +55,7 @@ struct hk_sampled_image_descriptor {
          uint16_t base_level, base_layer;
          uint32_t pad;
       } apple9;
-  };
+   };
    uint8_t pad2[4];
 };
 static_assert(sizeof(struct hk_sampled_image_descriptor) == 64,
