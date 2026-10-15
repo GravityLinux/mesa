@@ -33,8 +33,25 @@ agx_apple9_libagx_nir(unsigned program, void *mem_ctx)
    const uint32_t *serialized = libagx_nir[program];
    struct blob_reader reader;
    blob_reader_init(&reader, serialized + 1, serialized[0]);
-   nir_shader *nir = nir_deserialize(mem_ctx, &agx_nir_options, &reader);
+   struct agx_apple9_libagx_metadata metadata;
+   blob_copy_bytes(&reader, &metadata, sizeof(metadata));
+   nir_function *function =
+      nir_deserialize_function(mem_ctx, &agx_nir_options, &reader);
+   assert(!reader.overrun && reader.current == reader.end);
+   nir_shader *nir = function->shader;
+   nir->info.stage = MESA_SHADER_COMPUTE;
+   nir->info.internal = true;
+   for (unsigned i = 0; i < 3; ++i)
+      nir->info.workgroup_size[i] = metadata.workgroup_size[i];
+   nir->info.shared_size = metadata.shared_size;
+   nir->scratch_size = metadata.scratch_size;
+   nir->info.float_controls_execution_mode = metadata.float_controls;
+   nir->info.api_subgroup_size = metadata.api_subgroup_size;
+   nir->info.min_subgroup_size = metadata.min_subgroup_size;
+   nir->info.max_subgroup_size = metadata.max_subgroup_size;
+   nir->info.workgroup_size_variable = metadata.variable_local_size;
    nir_shader_intrinsics_pass(nir, lower_kernel_input,
                               nir_metadata_control_flow, NULL);
+   nir_shader_gather_info(nir, function->impl);
    return nir;
 }

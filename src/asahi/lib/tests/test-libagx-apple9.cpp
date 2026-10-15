@@ -17,6 +17,7 @@
 extern "C" {
 unsigned test_libagx_num_programs(void);
 bool test_libagx_expected_to_fail(unsigned program);
+unsigned test_libagx_fast_clear_4x(void);
 }
 
 class LibagxApple9 : public testing::TestWithParam<unsigned> {
@@ -29,6 +30,14 @@ TEST_P(LibagxApple9, Compiles)
 {
    unsigned program = GetParam();
    nir_shader *nir = agx_apple9_libagx_nir(program, NULL);
+   ASSERT_EQ(nir->info.stage, MESA_SHADER_COMPUTE);
+   if (program == test_libagx_fast_clear_4x()) {
+      EXPECT_EQ(nir->info.workgroup_size[0], 32u);
+      EXPECT_EQ(nir->info.workgroup_size[1], 1u);
+      EXPECT_EQ(nir->info.workgroup_size[2], 1u);
+      EXPECT_EQ(nir->info.shared_size, 0u);
+      EXPECT_EQ(nir->scratch_size, 0u);
+   }
    struct agx_shader_part part = {};
    struct agx_apple9_compute_profile profile = {};
    const char *reason = NULL;

@@ -10,6 +10,13 @@
 
 unsigned test_libagx_num_programs(void);
 bool test_libagx_expected_to_fail(unsigned program);
+unsigned test_libagx_fast_clear_4x(void);
+
+unsigned
+test_libagx_fast_clear_4x(void)
+{
+   return LIBAGX_FAST_CLEAR(2 /* four-byte pixels */, 2 /* four samples */);
+}
 
 unsigned
 test_libagx_num_programs(void)
