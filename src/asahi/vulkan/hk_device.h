@@ -138,9 +138,10 @@ struct hk_device {
     */
    struct agx_bo *heap;
    util_once_flag heap_init_once;
-   /* HK_APPLE9_PREGFX_OVERLAP: a second heap, so consecutive renders using
-    * the heap alternate between the two and a render's pre-gfx work need not
-    * wait for the previous render's tiling to stop reading its allocations.
+   /* Pre-gfx overlap uses a second 128 MiB heap, allocated lazily. Consecutive
+    * heap-using renders alternate between the two, so a render's pre-gfx work
+    * need not wait for the previous render's tiling to stop reading its
+    * allocations. HK_APPLE9_PREGFX_OVERLAP=0 disables this default behaviour.
     */
    struct agx_bo *heap_alt;
    util_once_flag heap_alt_init_once;

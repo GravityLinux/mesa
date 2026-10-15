@@ -512,7 +512,7 @@ struct hk_cs {
    unsigned sync_stages;
    bool cdm_dirty;
 
-   /* Pre-gfx overlap (HK_APPLE9_PREGFX_OVERLAP):
+   /* Pre-gfx overlap (enabled unless HK_APPLE9_PREGFX_OVERLAP=0):
     * - heap_prev1: for a render using the geometry heap, 1 + the sync ID of
     *   the previous render in this command buffer that used the same heap
     *   (0: unknown or none, so its pre-gfx work orders conservatively);

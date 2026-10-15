@@ -1383,14 +1383,15 @@ hk_init_heap_alt(const void *data)
                                  "Geometry heap (alternate)");
 }
 
-/* HK_APPLE9_PREGFX_OVERLAP (experimental): costs a second 128 MiB geometry
- * heap (USC aperture), allocated on first use by an odd heap-using render. */
+/* Pre-gfx overlap is enabled by default; HK_APPLE9_PREGFX_OVERLAP=0 disables
+ * it. It costs a second 128 MiB geometry heap (USC aperture), allocated on
+ * first use by an odd heap-using render. */
 bool
 hk_pregfx_overlap(void)
 {
    static int enabled = -1;
    if (enabled < 0)
-      enabled = debug_get_bool_option("HK_APPLE9_PREGFX_OVERLAP", false);
+      enabled = debug_get_bool_option("HK_APPLE9_PREGFX_OVERLAP", true);
    return enabled;
 }
 
