@@ -1686,14 +1686,17 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
    /* EXT_mesh_shader runs on the compute path: task and mesh workgroups run
     * as compute kernels, then a draw of their output records. Multiview
     * repeats both per view with the view index in the root table, and the
-    * rasterization shader writes the view's layer. Mesh-shader queries stay
-    * off. HK_APPLE9_MESH_SHADER=0 hides it.
+    * rasterization shader writes the view's layer. Query counters are updated
+    * by task/mesh kernels before the deferred availability write, using the
+    * same query-pool machinery as other graphics stages.
+    * HK_APPLE9_MESH_SHADER=0 hides it.
     */
    if (debug_get_bool_option("HK_APPLE9_MESH_SHADER", true)) {
       ext->EXT_mesh_shader = true;
       feat->meshShader = true;
       feat->taskShader = true;
       feat->multiviewMeshShader = true;
+      feat->meshShaderQueries = true;
    }
 
    /* Per-vertex inputs and barycentrics of vertex and mesh pipelines are

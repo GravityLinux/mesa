@@ -79,8 +79,9 @@ hk_mesh_params(nir_builder *b)
                                 offsetof(struct libagx_mesh_params, field)),   \
                    .align_mul = bits / 8)
 
-/* Add to the 64-bit query counter at a params field, if the query is active.
- * Like other statistics, only the low word counts.
+/* Add to an active 64-bit query counter without requiring shader atomic int64.
+ * Each low-word wrap contributes one carry. Queries are observed only after
+ * the pre-raster work completes, so the two atomics need not be one transaction.
  */
 static void
 hk_mesh_count(nir_builder *b, nir_def *params, unsigned offset, nir_def *value)
@@ -88,7 +89,12 @@ hk_mesh_count(nir_builder *b, nir_def *params, unsigned offset, nir_def *value)
    nir_def *counter = nir_load_global(b, 1, 64, nir_iadd_imm(b, params, offset),
                                       .align_mul = 8);
    nir_push_if(b, nir_ine_imm(b, counter, 0));
-   nir_global_atomic(b, 32, counter, value, .atomic_op = nir_atomic_op_iadd);
+   nir_def *old = nir_global_atomic(b, 32, counter, value,
+                                  .atomic_op = nir_atomic_op_iadd);
+   nir_push_if(b, nir_ult(b, nir_iadd(b, old, value), old));
+   nir_global_atomic(b, 32, nir_iadd_imm(b, counter, 4), nir_imm_int(b, 1),
+                     .atomic_op = nir_atomic_op_iadd);
+   nir_pop_if(b, NULL);
    nir_pop_if(b, NULL);
 }
 
