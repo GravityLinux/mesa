@@ -7,6 +7,7 @@
 #include "asahi_clc.h"
 #include "asahi/compiler/agx_compile.h"
 #include "asahi/compiler/agx_nir.h"
+#include "asahi/lib/agx_apple9_libagx.h"
 #include "compiler/glsl_types.h"
 #include "compiler/spirv/nir_spirv.h"
 #include "nir.h"
@@ -331,10 +332,41 @@ main(int argc, char **argv)
                   nir_var_shader_temp | nir_var_function_temp |
                      nir_var_mem_shared | nir_var_mem_global,
                   nir_address_format_62bit_generic);
+         NIR_PASS(_, portable, nir_remove_dead_variables, nir_var_all, NULL);
+
+         /* Full-shader NIR serialization embeds shader_info verbatim, which
+          * cannot be shared by a 64-bit build tool and a 32-bit driver. These
+          * kernels have one inlined function and explicit memory accesses, so
+          * serialize that function with fixed-width kernel metadata instead.
+          * Reject additional module state rather than silently dropping it.
+          */
+         if (portable->info.stage != MESA_SHADER_COMPUTE ||
+             !exec_list_is_empty(&portable->variables) ||
+             exec_list_length(&portable->functions) != 1 ||
+             portable->constant_data_size || portable->info.uses_printf ||
+             portable->xfb_info) {
+            fprintf(stderr, "Unsupported module state in libagx kernel %s\n",
+                    libfunc->name);
+            exit(EXIT_FAILURE);
+         }
+         const struct agx_apple9_libagx_metadata metadata = {
+            .workgroup_size = {portable->info.workgroup_size[0],
+                               portable->info.workgroup_size[1],
+                               portable->info.workgroup_size[2]},
+            .shared_size = portable->info.shared_size,
+            .scratch_size = portable->scratch_size,
+            .float_controls = portable->info.float_controls_execution_mode,
+            .api_subgroup_size = portable->info.api_subgroup_size,
+            .min_subgroup_size = portable->info.min_subgroup_size,
+            .max_subgroup_size = portable->info.max_subgroup_size,
+            .variable_local_size = portable->info.workgroup_size_variable,
+         };
          struct blob serialized;
          blob_init(&serialized);
          blob_write_uint32(&serialized, 0);
-         nir_serialize(&serialized, portable, true);
+         blob_write_bytes(&serialized, &metadata, sizeof(metadata));
+         nir_serialize_function(&serialized,
+                                nir_shader_get_entrypoint(portable)->function);
          blob_overwrite_uint32(&serialized, 0, serialized.size - 4);
          nir_precomp_print_blob(fp_c, libfunc->name, "nir", v,
                                (uint32_t *)serialized.data, serialized.size, true);
