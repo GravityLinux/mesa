@@ -2160,6 +2160,16 @@ r300 driver environment variables
 Asahi driver environment variables
 ----------------------------------
 
+.. envvar:: HK_APPLE9_PREGFX_OVERLAP
+
+   Honeykrisp enables pre-graphics overlap by default. This allows a render's
+   pre-graphics work, including tessellation and geometry processing, to overlap
+   the previous render while preserving its dependencies. Set this variable to
+   ``0`` to disable overlap and use the conservative ordering.
+
+   Overlap uses an additional 128 MiB geometry heap, allocated lazily when a
+   render first needs the alternate heap.
+
 .. envvar:: ASAHI_MESA_DEBUG
 
    a comma-separated list of named flags, which do various things:
