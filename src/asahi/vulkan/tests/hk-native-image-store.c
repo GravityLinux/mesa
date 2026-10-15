@@ -5,6 +5,7 @@
 #include <string.h>
 #include "hk_descriptor_set.h"
 #include "hk_descriptor_buffer.h"
+#include "hk_image.h"
 #include "hk_image_view.h"
 #include "hk_shader.h"
 #include "compiler/nir/nir_builder.h"
@@ -12,8 +13,49 @@
 
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "failed: %s\n", #c); return 1; } } while (0)
 
+static int
+test_image_storage(void)
+{
+   struct hk_image image = {0};
+   CHECK(hk_apple9_native_store_image(&image, 0));
+
+   /* Each sparse flag must independently rule out native stores, even when
+    * there is no legacy sparse_map. This includes binding without residency.
+    */
+   for (unsigned flags = 1; flags < 8; ++flags) {
+      image.vk.create_flags =
+         ((flags & 1) ? VK_IMAGE_CREATE_SPARSE_BINDING_BIT : 0) |
+         ((flags & 2) ? VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT : 0) |
+         ((flags & 4) ? VK_IMAGE_CREATE_SPARSE_ALIASED_BIT : 0);
+      CHECK(!image.planes[0].sparse_map);
+      CHECK(!hk_apple9_native_store_image(&image, 0));
+   }
+
+   /* G16's residency table does not make its sparse layout native-addressable. */
+   struct agx_bo residency = {0};
+   image.planes[0].apple9_residency = &residency;
+   image.vk.create_flags = VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
+                           VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT;
+   CHECK(!image.planes[0].sparse_map);
+   CHECK(!hk_apple9_native_store_image(&image, 0));
+
+   /* Ordinary aliasing, mutable formats and cube compatibility remain eligible;
+    * compressed storage still takes the existing software fallback.
+    */
+   image.planes[0].apple9_residency = NULL;
+   image.vk.create_flags = VK_IMAGE_CREATE_ALIAS_BIT |
+                           VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT |
+                           VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+   CHECK(hk_apple9_native_store_image(&image, 0));
+   image.planes[0].layout.compressed = true;
+   CHECK(!hk_apple9_native_store_image(&image, 0));
+   puts("native storage: sparse layouts and VA use software stores");
+   return 0;
+}
+
 int main(void)
 {
+   CHECK(test_image_storage() == 0);
    glsl_type_singleton_init_or_ref();
    const enum pipe_format supported[] = {
       PIPE_FORMAT_R11G11B10_FLOAT, PIPE_FORMAT_R16G16B16A16_FLOAT,
