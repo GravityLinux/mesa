@@ -350,6 +350,7 @@ main(int argc, char **argv)
             exit(EXIT_FAILURE);
          }
          const struct agx_apple9_libagx_metadata metadata = {
+            .format = AGX_APPLE9_LIBAGX_FORMAT,
             .workgroup_size = {portable->info.workgroup_size[0],
                                portable->info.workgroup_size[1],
                                portable->info.workgroup_size[2]},

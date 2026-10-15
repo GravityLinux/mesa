@@ -5,6 +5,7 @@
 
 #include "asahi/compiler/agx_compile_apple9.h"
 #include "compiler/glsl_types.h"
+#include "compiler/nir/nir_serialize.h"
 #include "agx_apple9_libagx.h"
 #include "agx_apple9.h"
 #include <array>
@@ -54,6 +55,46 @@ TEST_P(LibagxApple9, Compiles)
 
 INSTANTIATE_TEST_SUITE_P(All, LibagxApple9,
                          testing::Range(0u, test_libagx_num_programs()));
+
+class LibagxBlob : public testing::Test {
+ protected:
+   static void SetUpTestSuite() { glsl_type_singleton_init_or_ref(); }
+   static void TearDownTestSuite() { glsl_type_singleton_decref(); }
+};
+
+TEST_F(LibagxBlob, RejectsOldToolBeforeFunctionDecode)
+{
+   /* The unversioned tool wrote workgroup_size[0] at the start instead. */
+   agx_apple9_libagx_metadata stale = {};
+   stale.format = 32;
+   EXPECT_DEATH(agx_apple9_libagx_deserialize(&stale, sizeof(stale), NULL),
+                "incompatible kernel blob format; rebuild asahi_clc");
+}
+
+TEST_F(LibagxBlob, RejectsTruncatedMetadata)
+{
+   uint32_t format = AGX_APPLE9_LIBAGX_FORMAT;
+   EXPECT_DEATH(agx_apple9_libagx_deserialize(&format, sizeof(format), NULL),
+                "truncated kernel metadata; rebuild asahi_clc");
+}
+
+TEST_F(LibagxBlob, RejectsTrailingFunctionData)
+{
+   nir_shader *nir = agx_apple9_libagx_nir(test_libagx_fast_clear_4x(), NULL);
+   agx_apple9_libagx_metadata metadata = {};
+   metadata.format = AGX_APPLE9_LIBAGX_FORMAT;
+   struct blob serialized;
+   blob_init(&serialized);
+   blob_write_bytes(&serialized, &metadata, sizeof(metadata));
+   nir_serialize_function(&serialized,
+                          nir_shader_get_entrypoint(nir)->function);
+   blob_write_uint32(&serialized, 0xbad);
+   EXPECT_DEATH(agx_apple9_libagx_deserialize(serialized.data, serialized.size,
+                                           NULL),
+                "invalid kernel function stream; rebuild asahi_clc");
+   blob_finish(&serialized);
+   ralloc_free(nir);
+}
 
 /* Guard both ends: these sizes are also the command allocator reservation. */
 TEST(Apple9Dispatch, PacketFootprints)

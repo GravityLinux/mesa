@@ -16,7 +16,11 @@ extern "C" {
  * metadata is followed by a NIR function stream, without shader-global state.
  * These kernel properties supplement gathered instruction information.
  */
+/* Magic "AGX" plus format version 1. Bump when the metadata or stream changes. */
+#define AGX_APPLE9_LIBAGX_FORMAT 0x41475801u
+
 struct agx_apple9_libagx_metadata {
+   uint32_t format;
    uint32_t workgroup_size[3];
    uint32_t shared_size;
    uint32_t scratch_size;
@@ -27,13 +31,19 @@ struct agx_apple9_libagx_metadata {
    uint32_t variable_local_size;
 };
 
-static_assert(sizeof(struct agx_apple9_libagx_metadata) == 40,
+static_assert(sizeof(struct agx_apple9_libagx_metadata) == 44,
               "libagx kernel metadata must be independent of pointer size");
 
 /* Deserialize a libagx program and lower its kernel inputs to UBO 0, ready
  * for agx_compile_apple9_tiny.
  */
 nir_shader *agx_apple9_libagx_nir(unsigned program, void *mem_ctx);
+
+/* Read the private build-tool format, rejecting stale or incomplete blobs in
+ * release builds too. data excludes the generated array's byte-count word.
+ */
+nir_shader *agx_apple9_libagx_deserialize(const void *data, size_t size,
+                                       void *mem_ctx);
 
 #ifdef __cplusplus
 }

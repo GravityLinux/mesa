@@ -26,18 +26,44 @@ lower_kernel_input(nir_builder *b, nir_intrinsic_instr *intr,
    return true;
 }
 
+static void
+invalid_blob(const char *reason)
+{
+   fprintf(stderr,
+           "Apple9 libagx: %s; rebuild asahi_clc and regenerate "
+           "libagx shaders\n",
+           reason);
+   abort();
+}
+
 nir_shader *
 agx_apple9_libagx_nir(unsigned program, void *mem_ctx)
 {
    assert(program < LIBAGX_NUM_PROGRAMS);
    const uint32_t *serialized = libagx_nir[program];
+   return agx_apple9_libagx_deserialize(serialized + 1, serialized[0], mem_ctx);
+}
+
+nir_shader *
+agx_apple9_libagx_deserialize(const void *data, size_t size, void *mem_ctx)
+{
+   if (size < sizeof(struct agx_apple9_libagx_metadata))
+      invalid_blob("truncated kernel metadata");
+
    struct blob_reader reader;
-   blob_reader_init(&reader, serialized + 1, serialized[0]);
+   blob_reader_init(&reader, data, size);
    struct agx_apple9_libagx_metadata metadata;
    blob_copy_bytes(&reader, &metadata, sizeof(metadata));
+   /* An old tool emits either shader_info or unversioned metadata here.
+    * Reject it before the function reader interprets any of its contents.
+    */
+   if (metadata.format != AGX_APPLE9_LIBAGX_FORMAT)
+      invalid_blob("incompatible kernel blob format");
+
    nir_function *function =
       nir_deserialize_function(mem_ctx, &agx_nir_options, &reader);
-   assert(!reader.overrun && reader.current == reader.end);
+   if (reader.overrun || reader.current != reader.end || !function)
+      invalid_blob("invalid kernel function stream");
    nir_shader *nir = function->shader;
    nir->info.stage = MESA_SHADER_COMPUTE;
    nir->info.internal = true;
