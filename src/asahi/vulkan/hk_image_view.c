@@ -613,6 +613,21 @@ hk_apple9_translate_storage_pbe(void *out, const struct agx_pbe_packed *state,
                                   1, false, AGX_TEXTURE_DIMENSION_2D);
 }
 
+bool
+hk_apple9_native_store_image(const struct hk_image *image, unsigned plane)
+{
+   /* Sparse images use remapped VA and mip tails; native PBE stores have not
+    * been qualified for that storage. Check creation flags, not sparse_map:
+    * G16 sparse residency uses apple9_residency instead, and sparse binding
+    * alone has neither residency table. Keep all sparse writes in software.
+    */
+   const VkImageCreateFlags sparse = VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
+                                    VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT |
+                                    VK_IMAGE_CREATE_SPARSE_ALIASED_BIT;
+   return !(image->vk.create_flags & sparse) &&
+          !image->planes[plane].layout.compressed;
+}
+
 /* Storage writes use the native representation of the existing PBE half.
  * Per-layer 2D entries keep layer selection in descriptor addressing. The
  * shader never modifies descriptors, so divergent layers cannot race. */
@@ -641,7 +656,7 @@ hk_apple9_init_storage_pbe(struct hk_device *dev, struct hk_image_view *view)
    const struct hk_image *image = container_of(view->vk.image, struct hk_image, vk);
    unsigned plane = view->planes[0].image_plane;
    const struct ail_layout *layout = &image->planes[plane].layout;
-   if (layout->compressed || image->planes[plane].sparse_map)
+   if (!hk_apple9_native_store_image(image, plane))
       return;
    unsigned count = array ? view->vk.layer_count : 1;
    simple_mtx_lock(&dev->apple9_pbe_lock);
