@@ -1,12 +1,52 @@
 /* SPDX-License-Identifier: MIT */
 #include "../hk_cmd_buffer.h"
+#include <sys/wait.h>
+#include <unistd.h>
 
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "%s:%u: %s\n", \
                           __FILE__, __LINE__, #c); return 1; } } while (0)
 
+static int
+check_overlap_default(const char *option, bool reverse)
+{
+   if (option)
+      setenv("HK_APPLE9_PREGFX_OVERLAP", option, 1);
+   else
+      unsetenv("HK_APPLE9_PREGFX_OVERLAP");
+   struct hk_device *dev = calloc(1, sizeof(*dev));
+   CHECK(dev);
+   const enum agx_chip chips[] = {AGX_CHIP_G13G, AGX_CHIP_G16G, AGX_CHIP_G14X,
+                                  AGX_CHIP_G17P, AGX_CHIP_G13X, AGX_CHIP_G16G};
+   for (unsigned i = 0; i < ARRAY_SIZE(chips); ++i) {
+      enum agx_chip chip = chips[reverse ? ARRAY_SIZE(chips) - 1 - i : i];
+      dev->dev.chip = chip;
+      bool expected = !option || !strcmp(option, "invalid")
+                         ? chip == AGX_CHIP_G16G : !strcmp(option, "1");
+      CHECK(hk_pregfx_overlap(dev) == expected);
+   }
+   free(dev);
+   return 0;
+}
+
 int
 main(void)
 {
+   /* Fresh processes isolate the cached environment option. Each checks
+    * mixed-generation devices in both orders, including explicit overrides.
+    */
+   const char *options[] = {NULL, "0", "1", "invalid"};
+   for (unsigned i = 0; i < ARRAY_SIZE(options); ++i) {
+      for (unsigned reverse = 0; reverse < 2; ++reverse) {
+         pid_t child = fork();
+         CHECK(child >= 0);
+         if (child == 0)
+            _exit(check_overlap_default(options[i], reverse));
+         int status;
+         CHECK(waitpid(child, &status, 0) == child);
+         CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+      }
+   }
+   puts("pregfx default: G16 on; G13/G14/G17 off; 0/1 override; mixed devices OK");
    setenv("HK_APPLE9_PREGFX_OVERLAP", "1", 1);
    struct hk_device *dev = calloc(1, sizeof(*dev));
    struct hk_cmd_buffer *cmd = calloc(1, sizeof(*cmd));

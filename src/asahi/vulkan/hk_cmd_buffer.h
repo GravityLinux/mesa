@@ -512,7 +512,7 @@ struct hk_cs {
    unsigned sync_stages;
    bool cdm_dirty;
 
-   /* Pre-gfx overlap (enabled unless HK_APPLE9_PREGFX_OVERLAP=0):
+   /* Pre-gfx overlap (G16 default; HK_APPLE9_PREGFX_OVERLAP overrides):
     * - heap_prev1: for a render using the geometry heap, 1 + the sync ID of
     *   the previous render in this command buffer that used the same heap
     *   (0: unknown or none, so its pre-gfx work orders conservatively);
@@ -1040,7 +1040,7 @@ void hk_render_merge_trace(const char *why, uint64_t a, uint64_t b);
 bool hk_render_merge_move_enabled(void);
 #define hk_cmd_render_merge_flush(cmd) hk_cmd_render_merge_flush_why(cmd, __func__)
 
-bool hk_pregfx_overlap(void);
+bool hk_pregfx_overlap(const struct hk_device *dev);
 uint64_t hk_heap(struct hk_cmd_buffer *cmd);
 void hk_cmd_pregfx_precise(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
 
@@ -1096,7 +1096,7 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
        * render's start (its physical position) instead of forcing full
        * ordering, see hk_cmd_pregfx_precise.
        */
-      bool precise = before_gfx && hk_pregfx_overlap() &&
+      bool precise = before_gfx && hk_pregfx_overlap(hk_cmd_buffer_device(cmd)) &&
                      cmd->current_cs.gfx &&
                      cmd->current_cs.gfx->sync_stages && !cmd->merge_pre_cs;
       /* These helpers are physically reordered around rendering. Until their
