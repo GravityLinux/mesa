@@ -1383,15 +1383,15 @@ hk_init_heap_alt(const void *data)
                                  "Geometry heap (alternate)");
 }
 
-/* Cache the override separately for the two defaults. A process can create
- * devices from different generations; its first device must not choose the
- * default for every later device. */
-DEBUG_GET_ONCE_BOOL_OPTION(pregfx_overlap_g16, "HK_APPLE9_PREGFX_OVERLAP", true)
+/* Keep the chip-specific policy selection and cached overrides independent.
+ * Both policies remain opt-in pending performance validation. */
+DEBUG_GET_ONCE_BOOL_OPTION(pregfx_overlap_g16, "HK_APPLE9_PREGFX_OVERLAP", false)
 DEBUG_GET_ONCE_BOOL_OPTION(pregfx_overlap_other, "HK_APPLE9_PREGFX_OVERLAP", false)
 
-/* Pre-gfx overlap defaults on only for G16 (Apple9), where it was validated.
- * The environment overrides either default. It costs a second 128 MiB heap
- * (USC aperture), allocated on first use by an odd heap-using render. */
+/* Keep overlap opt-in until its benefit with the normal submission policy
+ * is demonstrated. The environment overrides either device policy. Opting in
+ * costs a second 128 MiB heap (USC aperture), allocated on first use by an odd
+ * heap-using render. */
 bool
 hk_pregfx_overlap(const struct hk_device *dev)
 {

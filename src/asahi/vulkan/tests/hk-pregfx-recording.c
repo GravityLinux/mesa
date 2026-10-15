@@ -20,8 +20,7 @@ check_overlap_default(const char *option, bool reverse)
    for (unsigned i = 0; i < ARRAY_SIZE(chips); ++i) {
       enum agx_chip chip = chips[reverse ? ARRAY_SIZE(chips) - 1 - i : i];
       dev->dev.chip = chip;
-      bool expected = !option || !strcmp(option, "invalid")
-                         ? chip == AGX_CHIP_G16G : !strcmp(option, "1");
+      bool expected = option && !strcmp(option, "1");
       CHECK(hk_pregfx_overlap(dev) == expected);
    }
    free(dev);
@@ -46,7 +45,7 @@ main(void)
          CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
       }
    }
-   puts("pregfx default: G16 on; G13/G14/G17 off; 0/1 override; mixed devices OK");
+   puts("pregfx default: all chips off; 0/1 override; mixed devices OK");
    setenv("HK_APPLE9_PREGFX_OVERLAP", "1", 1);
    struct hk_device *dev = calloc(1, sizeof(*dev));
    struct hk_cmd_buffer *cmd = calloc(1, sizeof(*cmd));
