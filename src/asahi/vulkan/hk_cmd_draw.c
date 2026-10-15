@@ -1395,7 +1395,7 @@ DEBUG_GET_ONCE_BOOL_OPTION(pregfx_overlap_other, "HK_APPLE9_PREGFX_OVERLAP", fal
 bool
 hk_pregfx_overlap(const struct hk_device *dev)
 {
-   return dev->dev.params.gpu_generation == 16
+   return dev->dev.chip == AGX_CHIP_G16G
              ? debug_get_option_pregfx_overlap_g16()
              : debug_get_option_pregfx_overlap_other();
 }

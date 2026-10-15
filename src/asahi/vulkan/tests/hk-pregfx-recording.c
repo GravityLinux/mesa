@@ -15,12 +15,13 @@ check_overlap_default(const char *option, bool reverse)
       unsetenv("HK_APPLE9_PREGFX_OVERLAP");
    struct hk_device *dev = calloc(1, sizeof(*dev));
    CHECK(dev);
-   const unsigned generations[] = {13, 16, 14, 17, 13, 16};
-   for (unsigned i = 0; i < ARRAY_SIZE(generations); ++i) {
-      unsigned gen = generations[reverse ? ARRAY_SIZE(generations) - 1 - i : i];
-      dev->dev.params.gpu_generation = gen;
+   const enum agx_chip chips[] = {AGX_CHIP_G13G, AGX_CHIP_G16G, AGX_CHIP_G14X,
+                                  AGX_CHIP_G17P, AGX_CHIP_G13X, AGX_CHIP_G16G};
+   for (unsigned i = 0; i < ARRAY_SIZE(chips); ++i) {
+      enum agx_chip chip = chips[reverse ? ARRAY_SIZE(chips) - 1 - i : i];
+      dev->dev.chip = chip;
       bool expected = !option || !strcmp(option, "invalid")
-                         ? gen == 16 : !strcmp(option, "1");
+                         ? chip == AGX_CHIP_G16G : !strcmp(option, "1");
       CHECK(hk_pregfx_overlap(dev) == expected);
    }
    free(dev);
