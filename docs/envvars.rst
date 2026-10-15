@@ -2162,10 +2162,10 @@ Asahi driver environment variables
 
 .. envvar:: HK_APPLE9_PREGFX_OVERLAP
 
-   Honeykrisp enables pre-graphics overlap by default on G16 (Apple9) only.
+   Honeykrisp keeps pre-graphics overlap disabled by default.
    Overlap allows a render's pre-graphics work, including tessellation and
    geometry processing, to overlap the previous render while preserving its
-   dependencies. Set this variable to ``1`` to enable it on any generation, or
+   dependencies. Set this variable to ``1`` to opt in on any generation, or
    to ``0`` to disable it and use the conservative ordering.
 
    Overlap uses an additional 128 MiB geometry heap, allocated lazily when a
