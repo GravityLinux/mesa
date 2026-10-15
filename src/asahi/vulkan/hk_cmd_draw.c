@@ -1383,16 +1383,21 @@ hk_init_heap_alt(const void *data)
                                  "Geometry heap (alternate)");
 }
 
-/* Pre-gfx overlap is enabled by default; HK_APPLE9_PREGFX_OVERLAP=0 disables
- * it. It costs a second 128 MiB geometry heap (USC aperture), allocated on
- * first use by an odd heap-using render. */
+/* Cache the override separately for the two defaults. A process can create
+ * devices from different generations; its first device must not choose the
+ * default for every later device. */
+DEBUG_GET_ONCE_BOOL_OPTION(pregfx_overlap_g16, "HK_APPLE9_PREGFX_OVERLAP", true)
+DEBUG_GET_ONCE_BOOL_OPTION(pregfx_overlap_other, "HK_APPLE9_PREGFX_OVERLAP", false)
+
+/* Pre-gfx overlap defaults on only for G16 (Apple9), where it was validated.
+ * The environment overrides either default. It costs a second 128 MiB heap
+ * (USC aperture), allocated on first use by an odd heap-using render. */
 bool
-hk_pregfx_overlap(void)
+hk_pregfx_overlap(const struct hk_device *dev)
 {
-   static int enabled = -1;
-   if (enabled < 0)
-      enabled = debug_get_bool_option("HK_APPLE9_PREGFX_OVERLAP", true);
-   return enabled;
+   return dev->dev.params.gpu_generation == 16
+             ? debug_get_option_pregfx_overlap_g16()
+             : debug_get_option_pregfx_overlap_other();
 }
 
 uint64_t
@@ -1411,7 +1416,7 @@ hk_heap(struct hk_cmd_buffer *cmd)
     * command-buffer resubmissions. Consecutive heap-using renders alternate
     * between two heaps, costing a second 128 MiB on first alternate use.
     */
-   if (hk_pregfx_overlap()) {
+   if (hk_pregfx_overlap(dev)) {
       if (!cmd->uses_heap) {
          struct agx_bo *bo = dev->heap;
          const unsigned h = cmd->heap_renders & 1;
