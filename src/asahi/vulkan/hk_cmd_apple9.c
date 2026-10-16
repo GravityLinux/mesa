@@ -243,7 +243,9 @@ hk_apple9_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
    uint32_t launch;
    if (!agx_apple9_prepare_graphics_stage(
           &dev->dev, cmd, hk_apple9_usc_alloc, &shader, true, table,
-          textures.gpu, sampler.gpu, tile_bytes, key.samples, &launch,
+          textures.gpu, sampler.gpu,
+          agx_apple9_tile_sample_bytes(tile_bytes, key.samples), key.samples,
+          &launch,
           hk_apple9_state_uncached_alloc))
       goto fail;
    return (struct hk_bg_eot){.usc = launch};
@@ -529,6 +531,8 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
     */
    if (!gfx->render.tilebuffer.nr_samples && dyn->ms.rasterization_samples) {
       gfx->render.tilebuffer.nr_samples = dyn->ms.rasterization_samples;
+      gfx->render.tilebuffer.sample_size_B = ALIGN_POT(
+         agx_apple9_tile_sample_bytes(0, dyn->ms.rasterization_samples), 8);
       gfx->render.tilebuffer.tile_size =
          dyn->ms.rasterization_samples == 4 ? 32 * 16 : 32 * 32;
    }

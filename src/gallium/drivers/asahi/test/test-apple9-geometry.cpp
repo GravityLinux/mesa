@@ -132,3 +132,14 @@ TEST(Apple9ComputeGeometry, RoundsPartialGroupsBeyondApiAxisLimit)
       record, sizeof(record), 0x1000200000ull, &geometry));
    EXPECT_EQ(get_u32(record, 0xc0), UINT32_MAX);
 }
+
+/* As agx_build_tilebuffer_layout, multisampled zero-target renders keep a
+ * nonempty per-sample tile allocation. */
+TEST(Apple9Geometry, MultisampledZeroTargetTileAllocation)
+{
+   EXPECT_EQ(agx_apple9_tile_sample_bytes(0, 1), 0u);
+   EXPECT_EQ(agx_apple9_tile_sample_bytes(0, 2), 8u);
+   EXPECT_EQ(agx_apple9_tile_sample_bytes(0, 4), 8u);
+   EXPECT_EQ(agx_apple9_tile_sample_bytes(4, 2), 4u);
+   EXPECT_EQ(agx_apple9_tile_sample_bytes(24, 4), 24u);
+}

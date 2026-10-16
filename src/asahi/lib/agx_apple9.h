@@ -221,6 +221,17 @@ typedef struct agx_ptr (*agx_apple9_cached_alloc)(
    void *allocator, enum agx_apple9_state_type type, const void *contents,
    size_t size, size_t alignment, bool *is_new);
 
+/* Per-sample tile allocation for a fragment-stage launch or render. As in
+ * agx_build_tilebuffer_layout, multisampled renders keep a nonempty
+ * allocation even without colour targets: a large G16 2x depth-only render
+ * with zero-byte fragment launches can leave its fragment stage unretired.
+ */
+static inline unsigned
+agx_apple9_tile_sample_bytes(unsigned color_bytes, unsigned samples)
+{
+   return color_bytes || samples <= 1 ? color_bytes : 8;
+}
+
 /* Prepare one native stage independently, including background/EOT helpers.
  * The caller retains the shader BO and immutable allocation until completion.
  */
