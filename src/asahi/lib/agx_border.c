@@ -33,6 +33,21 @@ struct channel {
 static struct channel
 get_channel_info(enum pipe_format format, unsigned channel)
 {
+   const struct util_format_description *desc = util_format_description(format);
+
+   /* ASTC LDR borders use 12-bit normalized channels. sRGB alpha is still
+    * 8-bit, like the other sRGB compressed formats below. The opaque 128-bit
+    * block in the format table does not describe these decoded channels.
+    */
+   if (desc->layout == UTIL_FORMAT_LAYOUT_ASTC &&
+       !util_format_is_astc_hdr(format)) {
+      return (struct channel){
+         UTIL_FORMAT_TYPE_UNSIGNED,
+         true,
+         channel == 3 && desc->colorspace == UTIL_FORMAT_COLORSPACE_SRGB ? 8 : 12,
+      };
+   }
+
    /* Compressed formats may have packing with no PIPE equivalent, handle
     * specially.
     */
@@ -90,7 +105,6 @@ get_channel_info(enum pipe_format format, unsigned channel)
       break;
    }
 
-   const struct util_format_description *desc = util_format_description(format);
    struct util_format_channel_description chan_desc = desc->channel[channel];
    bool srgb = (desc->colorspace == UTIL_FORMAT_COLORSPACE_SRGB) &&
                (desc->swizzle[channel] <= PIPE_SWIZZLE_Z);
