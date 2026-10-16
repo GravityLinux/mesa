@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "util/u_debug.h"
 #include "agx_compile_apple9.h"
 #include "agx_apple9_ir.h"
 #include "agx_nir.h"
@@ -23,6 +24,45 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_asm, "AGX_APPLE9_ASM", NULL)
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_block_zero,
+                      "AGX_APPLE9_BLOCK_ZERO", NULL)
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_dump_binary,
+                      "AGX_APPLE9_DUMP_BINARY", NULL)
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_fold_assume_no_wrap,
+                      "AGX_APPLE9_FOLD_ASSUME_NO_WRAP", NULL)
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_gated, "AGX_APPLE9_GATED", NULL)
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_hoist_distance,
+                      "AGX_APPLE9_HOIST_DISTANCE", NULL)
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_hoist_samples,
+                      "AGX_APPLE9_HOIST_SAMPLES", NULL)
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_keep_unselected_hoists,
+                      "AGX_APPLE9_KEEP_UNSELECTED_HOISTS", NULL)
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_licm, "AGX_APPLE9_LICM", NULL)
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_licm_speculate,
+                      "AGX_APPLE9_LICM_SPECULATE", NULL)
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_address_probe,
+                      "AGX_APPLE9_NO_ADDRESS_PROBE", NULL)
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_bfe, "AGX_APPLE9_NO_BFE", NULL)
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_descriptor_hoist,
+                      "AGX_APPLE9_NO_DESCRIPTOR_HOIST", NULL)
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_loop_head_hoist,
+                      "AGX_APPLE9_NO_LOOP_HEAD_HOIST", NULL)
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_promote,
+                      "AGX_APPLE9_NO_PROMOTE", NULL)
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_sampler_hoist,
+                      "AGX_APPLE9_NO_SAMPLER_HOIST", NULL)
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_uniform_move,
+                      "AGX_APPLE9_NO_UNIFORM_MOVE", NULL)
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_preamble_span,
+                      "AGX_APPLE9_PREAMBLE_SPAN", NULL)
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_safe_hoist_stages,
+                      "AGX_APPLE9_SAFE_HOIST_STAGES", NULL)
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_stats, "AGX_APPLE9_STATS", NULL)
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_trace_final_nir,
+                      "AGX_APPLE9_TRACE_FINAL_NIR", NULL)
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_trace_nir, "AGX_APPLE9_TRACE_NIR", NULL)
 
 DEBUG_GET_ONCE_BOOL_OPTION(apple9_no_bfe, "AGX_APPLE9_NO_BFE", false)
 DEBUG_GET_ONCE_BOOL_OPTION(apple9_no_native_min_lod, "AGX_APPLE9_NO_NATIVE_MINLOD", false)
@@ -606,7 +646,7 @@ apple9_memory_address(nir_shader *nir, nir_intrinsic_instr *intr, nir_def *offse
                safe = true;
             /* EXPERIMENT ONLY: fold without a no-wrap proof, to observe
              * whether the hardware forms index + displacement in 32 bits. */
-            if (getenv("AGX_APPLE9_FOLD_ASSUME_NO_WRAP") != NULL)
+            if (debug_get_option_cached_agx_apple9_fold_assume_no_wrap() != NULL)
                safe = true;
             /* An amul cannot overflow the variable it indexes, so for an
              * in-bounds access the 32-bit sum equals the hardware's 64-bit
@@ -1188,7 +1228,7 @@ apple9_dag_zero(struct apple9_dag_lower *lower)
     * zero per block made each constant memory index rewrite the register a
     * preceding store or load was still reading, costing a wait. */
    if (lower->entry_zero != AGX_APPLE9_VREG_INVALID &&
-       !getenv("AGX_APPLE9_BLOCK_ZERO"))
+       !debug_get_option_cached_agx_apple9_block_zero())
       return lower->entry_zero;
    /* Otherwise reuse the zero only within its block, which need not dominate
     * later blocks. */
@@ -2562,7 +2602,7 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
           * (AGX_APPLE9_NO_UNIFORM_MOVE=1 keeps the zero-sourced OR). */
          static int no_move = -1;
          if (no_move < 0)
-            no_move = getenv("AGX_APPLE9_NO_UNIFORM_MOVE") != NULL;
+            no_move = debug_get_option_cached_agx_apple9_no_uniform_move() != NULL;
          if (no_move) {
             uint32_t zero = apple9_dag_zero(lower);
             value = apple9_dag_emit(lower, AGX_APPLE9_VIR_IOR_UNIFORM,
@@ -3488,7 +3528,7 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
       nir_foreach_instr(instr, block) {
          if (!apple9_instruction_is_in_subset(
                 instr, nir->info.stage != MESA_SHADER_COMPUTE)) {
-            if (getenv("AGX_APPLE9_TRACE_NIR") != NULL) {
+            if (debug_get_option_cached_agx_apple9_trace_nir() != NULL) {
                fprintf(stderr, "Apple9 unsupported instruction: ");
                nir_print_instr(instr, stderr);
                fprintf(stderr, "\n");
@@ -5436,7 +5476,7 @@ apple9_prepare_dag(nir_shader *nir)
 static unsigned
 apple9_hoist_limit(void)
 {
-   const char *env = getenv("AGX_APPLE9_HOIST_SAMPLES");
+   const char *env = debug_get_option_cached_agx_apple9_hoist_samples();
    return env ? atoi(env) : 8;
 }
 
@@ -5676,7 +5716,7 @@ agx_nir_hoist_apple9_samples(nir_shader *nir)
    unsigned limit = apple9_hoist_limit();
    /* How far ahead, in NIR instructions, to look for a sample to hoist: an
     * upper bound on how far one moves. */
-   const char *distance = getenv("AGX_APPLE9_HOIST_DISTANCE");
+   const char *distance = debug_get_option_cached_agx_apple9_hoist_distance();
    const unsigned horizon = distance ? atoi(distance) : 256;
    if (!limit || !apple9_has_samples(nir))
       return false;
@@ -5984,7 +6024,7 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
    agx_nir_hoist_apple9_derivative_sources(nir);
    if (hoist)
       agx_nir_hoist_apple9_samples(nir);
-   if (getenv("AGX_APPLE9_TRACE_FINAL_NIR") != NULL)
+   if (debug_get_option_cached_agx_apple9_trace_final_nir() != NULL)
       nir_print_shader(nir, apple9_log());
 
    struct util_dynarray loads = UTIL_DYNARRAY_INIT;
@@ -6432,7 +6472,7 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
    }
    /* List final packed bytes after branch fixups, without changing codegen.
     * A row can contain multiple instructions for an expanded VIR pseudo. */
-   if (getenv("AGX_APPLE9_ASM") != NULL) {
+   if (debug_get_option_cached_agx_apple9_asm() != NULL) {
       fprintf(apple9_log(), "%s_ASM_BEGIN stage=%u\n",
               preamble ? "APPLE9_PREAMBLE" : "APPLE9", nir->info.stage);
       for (unsigned i = 0; i < lower.program.instruction_count; ++i) {
@@ -6488,7 +6528,7 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
          }
       }
    }
-   if (getenv("AGX_APPLE9_STATS") != NULL) {
+   if (debug_get_option_cached_agx_apple9_stats() != NULL) {
       unsigned copies = 0, waits = 0, saves = 0, fills = 0;
       for (unsigned i = 0; i < lower.program.instruction_count; ++i) {
          const struct agx_apple9_vir_instr *ins = lower.program.instructions[i];
@@ -6559,7 +6599,7 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
                                   lower.per_vertex_count;
    out->info.main_size = emitter.bytes.size;
    out->info.binary_size = emitter.bytes.size;
-   if (getenv("AGX_APPLE9_DUMP_BINARY") != NULL) {
+   if (debug_get_option_cached_agx_apple9_dump_binary() != NULL) {
       fprintf(apple9_log(), "APPLE9_BINARY stage=%u size=%u ", nir->info.stage,
               (unsigned)emitter.bytes.size);
       for (unsigned i = 0; i < emitter.bytes.size; ++i)
@@ -6858,7 +6898,7 @@ apple9_uniform_constant_use(nir_alu_instr *alu, unsigned s, uint32_t *value)
    *value = nir_src_comp_as_uint(alu->src[s].src, alu->src[s].swizzle[0]);
    /* Low-bit masks select as bitfield extracts, which need no operand. */
    if (alu->op == nir_op_iand && *value && *value != UINT32_MAX &&
-       !(*value & (*value + 1)) && getenv("AGX_APPLE9_NO_BFE") == NULL)
+       !(*value & (*value + 1)) && debug_get_option_cached_agx_apple9_no_bfe() == NULL)
       return false;
    /* Packed float immediates are already free. */
    uint8_t encoded;
@@ -6866,8 +6906,7 @@ apple9_uniform_constant_use(nir_alu_instr *alu, unsigned s, uint32_t *value)
       /* Floating min/max operands, FADD/FMUL operands and the FMA addend
        * also take a fourth mantissa bit (min/max commute to operand B). */
       bool low;
-      bool wide = !agx_apple9_float_immediates_disabled() &&
-                  (alu->op != nir_op_ffma || s == 2);
+      bool wide = alu->op != nir_op_ffma || s == 2;
       return !(wide ? agx_apple9_encode_float_immediate_wide(*value, &encoded, &low)
                     : agx_apple9_encode_float_immediate(*value, &encoded));
    }
@@ -6882,8 +6921,6 @@ apple9_uniform_constant_use(nir_alu_instr *alu, unsigned s, uint32_t *value)
                 ? !agx_apple9_encode_float_immediate_wide(*value, &encoded, &low)
                 : *value > UINT8_MAX;
    }
-   if (agx_apple9_integer_immediates_disabled())
-      return true;
    switch (alu->op) {
    case nir_op_iadd:
       return *value > UINT8_MAX && -*value > UINT8_MAX;
@@ -7046,7 +7083,7 @@ apple9_preamble_cost(nir_instr *instr, const void *data)
     * AGX_APPLE9_PREAMBLE_SPAN divisor overrides it, 0 disables. */
    static int span_div = -1;
    if (unlikely(span_div < 0))
-      span_div = getenv("AGX_APPLE9_PREAMBLE_SPAN") ? atoi(getenv("AGX_APPLE9_PREAMBLE_SPAN")) : 25;
+      span_div = debug_get_option_cached_agx_apple9_preamble_span() ? atoi(debug_get_option_cached_agx_apple9_preamble_span()) : 25;
    if (span_div > 0)
       cost += (float)apple9_main_span(instr) / span_div;
    return cost;
@@ -7257,7 +7294,7 @@ apple9_block_runs_once_per_loop_entry(nir_block *block)
    return parent->type == nir_cf_node_loop &&
           parent->parent->type == nir_cf_node_function &&
           block == nir_loop_first_block(nir_cf_node_as_loop(parent)) &&
-          !getenv("AGX_APPLE9_NO_LOOP_HEAD_HOIST");
+          !debug_get_option_cached_agx_apple9_no_loop_head_hoist();
 }
 
 static bool
@@ -7316,7 +7353,7 @@ apple9_hoist_uniform_reads(nir_shader *nir, struct hash_table *original_blocks,
    /* Preamble-only reads are on for compute by default. In a large fragment
     * shader they raised register pressure. AGX_APPLE9_SAFE_HOIST_STAGES
     * selects =compute, =all or =none; hk chooses which reads qualify. */
-   const char *env = getenv("AGX_APPLE9_SAFE_HOIST_STAGES");
+   const char *env = debug_get_option_cached_agx_apple9_safe_hoist_stages();
    const char *stages = apple9_safe_reads_override > 0 ? "all"
                         : apple9_safe_reads_override == 0 ? NULL
                         : env ? env : "compute";
@@ -7330,7 +7367,7 @@ apple9_hoist_uniform_reads(nir_shader *nir, struct hash_table *original_blocks,
       /* Descriptor records read through handles (texture info, runtime
        * sampler state) are hoisted in every stage: unlike buffer reads,
        * leaving them in their branches did not save registers. */
-      .descriptor_reads = !getenv("AGX_APPLE9_NO_DESCRIPTOR_HOIST"),
+      .descriptor_reads = !debug_get_option_cached_agx_apple9_no_descriptor_hoist(),
       .state = calloc(MAX2(impl->ssa_alloc, 1), 1),
       .cursor = nir_after_block_before_jump(nir_start_block(impl)),
    };
@@ -7344,7 +7381,7 @@ apple9_hoist_uniform_reads(nir_shader *nir, struct hash_table *original_blocks,
     * compared against the original one when it spills or its setup does not
     * fit. */
    const bool alu_seeds = addresses && original_blocks &&
-                          !getenv("AGX_APPLE9_NO_SAMPLER_HOIST");
+                          !debug_get_option_cached_agx_apple9_no_sampler_hoist();
    if (alu_seeds) {
       nir_foreach_block(block, impl) {
          if (block == s.entry)
@@ -7502,7 +7539,7 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
    /* Remember where every hoisted read came from, in either trial, so a read
     * the preamble does not take returns to the branch that needed it rather
     * than running unconditionally for every thread. */
-   bool restore = hoist_addresses || !getenv("AGX_APPLE9_KEEP_UNSELECTED_HOISTS");
+   bool restore = hoist_addresses || !debug_get_option_cached_agx_apple9_keep_unselected_hoists();
    if (apple9_hoist_uniform_reads(main, restore ? original_blocks : NULL,
                                   hoist_addresses, address_hoists))
       nir_opt_cse(main);
@@ -7620,7 +7657,7 @@ apple9_preamble_trial(nir_shader *nir, struct agx_shader_part *out,
    unsigned budget = AGX_APPLE9_UNIFORM_COUNT -
       (resources->descriptor_tables ? AGX_APPLE9_GRAPHICS_ROOT_WORDS
                                    : agx_apple9_compute_preamble_base(resources->count));
-   bool promote_constants = !getenv("AGX_APPLE9_NO_PROMOTE");
+   bool promote_constants = !debug_get_option_cached_agx_apple9_no_promote();
    /* Constant stores must not discard an otherwise useful preamble when
     * they cross the code-size policy bound. Retry without them first.
     * If the extracted expressions alone exceed the bound, reduce their
@@ -7674,7 +7711,7 @@ apple9_licm_filter(nir_instr *instr, nir_loop *loop, bool dominates_exit)
        * branches for speculatable accesses. */
       return dominates_exit ||
              (nir_instr_can_speculate(instr) &&
-              getenv("AGX_APPLE9_LICM_SPECULATE"));
+              debug_get_option_cached_agx_apple9_licm_speculate());
    default:
       return false;
    }
@@ -7731,7 +7768,7 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
     * the register limit that costs far more than it saves (Lethal Company's
     * hot fragment shader quintupled its spills), so it is opt-in until it
     * has a register-pressure model. AGX_APPLE9_LICM=1 enables it. */
-   if (getenv("AGX_APPLE9_GATED")) {
+   if (debug_get_option_cached_agx_apple9_gated()) {
       /* Compile the aggressive variant (LICM and preamble-only reads) and the
        * plain one, and keep the cheaper allocation: both raise register
        * pressure, which can spill shaders already at the limit. */
@@ -7778,7 +7815,7 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
          *profile = aggressive_profile;
       return true;
    }
-   if (getenv("AGX_APPLE9_LICM") && nir_opt_licm(nir, apple9_licm_filter)) {
+   if (debug_get_option_cached_agx_apple9_licm() && nir_opt_licm(nir, apple9_licm_filter)) {
       nir_opt_cse(nir);
       nir_opt_dce(nir);
    }
@@ -7823,7 +7860,7 @@ apple9_compile_dag_tail(nir_shader *nir, struct agx_shader_part *out,
    struct agx_apple9_compute_profile original_profile = {0};
    bool have_original = false, original_ok = false, ok = false;
    bool use_original = false, address_done = false;
-   if (!getenv("AGX_APPLE9_NO_ADDRESS_PROBE")) {
+   if (!debug_get_option_cached_agx_apple9_no_address_probe()) {
       struct agx_shader_part probe = {0};
       struct apple9_dag_cost probe_cost = {0};
       char *probe_log = NULL;
@@ -8175,7 +8212,7 @@ agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
    nir_lower_alu_to_scalar(nir, NULL, NULL);
    nir_lower_all_phis_to_scalar(nir);
 
-   if (getenv("AGX_APPLE9_TRACE_NIR") != NULL)
+   if (debug_get_option_cached_agx_apple9_trace_nir() != NULL)
       nir_print_shader(nir, stderr);
 
    const char *reason = NULL;
@@ -8208,7 +8245,7 @@ agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
 unsupported:
    if (reason_out != NULL)
       *reason_out = reason;
-   if (getenv("AGX_APPLE9_TRACE_NIR") != NULL)
+   if (debug_get_option_cached_agx_apple9_trace_nir() != NULL)
       fprintf(stderr, "Apple9 compute compilation failed: %s\n",
               reason ? reason : "unknown reason");
    return false;
@@ -9620,15 +9657,12 @@ apple9_lower_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 }
 
 /* Packed colour formats with a native single-instruction pack (G16: RG11B10
- * float and RGB10A2 unorm, component 0 in the low bits); others, and
- * AGX_APPLE9_NO_PACK_FORMAT=1, use NIR's software pack. */
-DEBUG_GET_ONCE_BOOL_OPTION(apple9_no_pack_format, "AGX_APPLE9_NO_PACK_FORMAT", false)
+ * float and RGB10A2 unorm, component 0 in the low bits); others use NIR's
+ * software pack. */
 
 static nir_def *
 apple9_pack_color(nir_builder *b, enum pipe_format format, nir_def *color)
 {
-   if (debug_get_option_apple9_no_pack_format())
-      return nir_format_pack_rgba(b, format, color);
    switch (format) {
    case PIPE_FORMAT_R11G11B10_FLOAT:
       return nir_pack_format_agx(b, nir_trim_vector(b, color, 3),

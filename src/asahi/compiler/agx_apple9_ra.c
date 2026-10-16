@@ -13,6 +13,12 @@
 #include "agx_debug.h"
 #include "util/hash_table.h"
 #include "util/mesa-blake3.h"
+#include "util/u_debug.h"
+
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_parallel_ra,
+                      "AGX_APPLE9_PARALLEL_RA", NULL)
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_trace_shared_ra,
+                      "AGX_APPLE9_TRACE_SHARED_RA", NULL)
 
 /* Apple9 selection keeps its machine operands and encoding contracts. The
  * shared IR carries their SSA dataflow, including genuine CFG phis, through
@@ -314,18 +320,6 @@ static bool apple9_reads_sources_at_issue(const struct agx_apple9_vir_instr *ins
  * program. */
 static _Thread_local bool apple9_in_candidate_job;
 
-
-/* AGX_APPLE9_SPILL_WHOLE_PHIS=1 restores the shared spiller's rule that one
- * evicted phi source spills the whole phi. */
-static bool
-apple9_spill_whole_phis(void)
-{
-   static int whole = -1;
-   if (whole < 0)
-      whole = getenv("AGX_APPLE9_SPILL_WHOLE_PHIS") != NULL;
-   return whole;
-}
-
 static bool
 apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
                        const char **reason)
@@ -349,7 +343,7 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
       .preserve_source_kills = true,
       .defer_spill_lowering = true,
       .disable_occupancy_rematerialization = true,
-      .spill_partial_phi_sources = !apple9_spill_whole_phis(),
+      .spill_partial_phi_sources = true,
       .mov_imm_registers = 2 * 64,
    };
    list_inithead(&ctx->blocks);
@@ -1707,7 +1701,7 @@ apple9_allocate_candidate(struct agx_apple9_vir_program *program,
       *reason = apple9_duplicate_candidate_reason;
       goto cleanup;
    }
-   if (getenv("AGX_APPLE9_TRACE_SHARED_RA") != NULL)
+   if (debug_get_option_cached_agx_apple9_trace_shared_ra() != NULL)
       agx_print_shader(ra.ctx, stderr);
    if (!agx_ra(ra.ctx)) {
       *reason = ra.ctx->ra_error;
@@ -1949,7 +1943,7 @@ apple9_parallel_ra_enabled(void)
 {
    static int forced = -1;
    if (unlikely(forced < 0))
-      forced = getenv("AGX_APPLE9_PARALLEL_RA") ? atoi(getenv("AGX_APPLE9_PARALLEL_RA")) : 2;
+      forced = debug_get_option_cached_agx_apple9_parallel_ra() ? atoi(debug_get_option_cached_agx_apple9_parallel_ra()) : 2;
    return forced == 2 ? apple9_parallel_ra : forced != 0;
 }
 
@@ -2166,13 +2160,6 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
    }
    agx_apple9_vir_finish(&alternative);
    cost = apple9_allocation_cost(&best);
-   /* Study knob (A/B of compile time against GPU time): keep the first
-    * allocation of non-spilling programs, skipping the latency schedules. */
-   static int first_only = -1;
-   if (unlikely(first_only < 0))
-      first_only = getenv("AGX_APPLE9_FIRST_CANDIDATE") != NULL;
-   if (first_only && !cost.spills)
-      long_dependencies = 0;
    if (long_dependencies > 1) {
       /* Overlapping independent long-latency operations needs registers;
        * also offer schedules that may raise a block's peak pressure by eight

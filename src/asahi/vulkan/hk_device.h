@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include "util/u_debug.h"
 #include "asahi/lib/agx_device.h"
 #include "util/rwlock.h"
 #include "util/simple_mtx.h"
@@ -26,6 +27,9 @@
 #include "vk_device.h"
 #include "vk_meta.h"
 #include "vk_queue.h"
+
+DEBUG_GET_ONCE_OPTION(cached_hk_apple9_sparse_scratch,
+                      "HK_APPLE9_SPARSE_SCRATCH", NULL)
 
 struct hk_physical_device;
 struct vk_pipeline_cache;
@@ -224,7 +228,7 @@ static inline bool
 hk_sparse_unbound_unmapped(const struct agx_device *dev)
 {
    return dev->chip == AGX_CHIP_G16G && agx_has_soft_fault((struct agx_device *)dev) &&
-          !getenv("HK_APPLE9_SPARSE_SCRATCH");
+          !debug_get_option_cached_hk_apple9_sparse_scratch();
 }
 /* Debug only: HK_CPU_TIMING, see hk_cpu_timing.c */
 struct vk_device_dispatch_table;

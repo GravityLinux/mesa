@@ -9,6 +9,18 @@
 #include "util/hash_table.h"
 #include "util/u_memory.h"
 
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_pointer_load,
+                      "AGX_APPLE9_NO_POINTER_LOAD", NULL)
+
+DEBUG_GET_ONCE_OPTION(apple9_no_compare_literal,
+                      "AGX_APPLE9_NO_COMPARE_LITERAL", NULL)
+
+bool
+agx_apple9_compare_literals_disabled(void)
+{
+   return debug_get_option_apple9_no_compare_literal() != NULL;
+}
+
 /* Selection creates address arithmetic and packing which did not exist
  * during NIR optimization. Keep a semantic whitelist: publications, implicit
  * state, derivatives and memory operations are not ordinary scalar ALU. */
@@ -422,9 +434,7 @@ select_float_sources(struct agx_apple9_vir_instr *I,
             value ^= 0x80000000u;
          uint8_t encoded;
          bool low;
-         if (!(agx_apple9_float_immediates_disabled()
-                  ? agx_apple9_encode_float_immediate(value, &encoded)
-                  : agx_apple9_encode_float_immediate_wide(value, &encoded, &low)))
+         if (!agx_apple9_encode_float_immediate_wide(value, &encoded, &low))
             continue;
          I->op = I->op == AGX_APPLE9_VIR_FMUL ? AGX_APPLE9_VIR_FMUL_IMM
                                              : AGX_APPLE9_VIR_FADD_IMM;
@@ -541,7 +551,6 @@ inline_integer_immediates(struct agx_apple9_vir_instr *I, const bool *constant,
    unsigned arity = select ? 4 : mad ? 3 : 2;
    if (!(add || mad || logic || select) ||
        !agx_apple9_integer_immediate_encoding(I->encoding) ||
-       agx_apple9_integer_immediates_disabled() ||
        I->alu_src_uniform_mask || I->alu_src_immediate_mask ||
        I->nr_srcs != arity || I->dest_components != 1)
       return;
@@ -637,7 +646,7 @@ drop_zero_load_index(struct agx_apple9_vir_instr *I, const bool *constant,
    /* AGX_APPLE9_NO_POINTER_LOAD=1 keeps the materialized zero index. */
    static int disabled = -1;
    if (disabled < 0)
-      disabled = getenv("AGX_APPLE9_NO_POINTER_LOAD") != NULL;
+      disabled = debug_get_option_cached_agx_apple9_no_pointer_load() != NULL;
    if (disabled)
       return;
    I->encoding = AGX_APPLE9_ENC_DEVICE_LOAD_POINTER;
@@ -670,8 +679,7 @@ inline_alu_sources(struct agx_apple9_vir_instr *I, const uint16_t *uniform_read,
       I->encoding != AGX_APPLE9_ENC_HALF_COMPARE_SELECT;
    bool fma = I->op == AGX_APPLE9_VIR_FMA;
    bool minmax_float = (I->op == AGX_APPLE9_VIR_FMIN || I->op == AGX_APPLE9_VIR_FMAX) &&
-                       I->encoding == AGX_APPLE9_ENC_MINMAX_COMPACT &&
-                       !agx_apple9_float_immediates_disabled();
+                       I->encoding == AGX_APPLE9_ENC_MINMAX_COMPACT;
    bool integer = I->op == AGX_APPLE9_VIR_IADD || I->op == AGX_APPLE9_VIR_ISUB ||
                   I->op == AGX_APPLE9_VIR_IMAD;
    unsigned arity = unary ? 1 : shift ? I->nr_srcs : select ? 4 : fma || I->op == AGX_APPLE9_VIR_IMAD ? 3 : 2;
@@ -707,8 +715,7 @@ inline_alu_sources(struct agx_apple9_vir_instr *I, const uint16_t *uniform_read,
          if (I->src_neg_mask & BITFIELD_BIT(s)) literal ^= 0x80000000u;
          uint8_t encoded;
          bool low;
-         bool wide = !agx_apple9_float_immediates_disabled() &&
-                     (minmax_float || s == 2);
+         bool wide = minmax_float || s == 2;
          if (wide ? agx_apple9_encode_float_immediate_wide(literal, &encoded, &low)
                   : agx_apple9_encode_float_immediate(literal, &encoded)) {
             file[s] = AGX_APPLE9_FILE_IMMEDIATE;

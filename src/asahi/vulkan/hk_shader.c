@@ -74,6 +74,22 @@
 #include "util/u_debug.h"
 #include "vulkan/vulkan_core.h"
 
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_trace_nir, "AGX_APPLE9_TRACE_NIR", NULL)
+DEBUG_GET_ONCE_OPTION(cached_hk_apple9_dump_fragment_dir,
+                      "HK_APPLE9_DUMP_FRAGMENT_DIR", NULL)
+DEBUG_GET_ONCE_OPTION(cached_hk_apple9_eager_trace,
+                      "HK_APPLE9_EAGER_TRACE", NULL)
+DEBUG_GET_ONCE_OPTION(cached_hk_apple9_eager_variants,
+                      "HK_APPLE9_EAGER_VARIANTS", NULL)
+DEBUG_GET_ONCE_OPTION(cached_hk_apple9_no_texture_loads,
+                      "HK_APPLE9_NO_TEXTURE_LOADS", NULL)
+DEBUG_GET_ONCE_OPTION(cached_hk_apple9_pressure_stats,
+                      "HK_APPLE9_PRESSURE_STATS", NULL)
+DEBUG_GET_ONCE_OPTION(cached_hk_apple9_texel_classes,
+                      "HK_APPLE9_TEXEL_CLASSES", NULL)
+DEBUG_GET_ONCE_OPTION(cached_hk_apple9_trace_vectorize,
+                      "HK_APPLE9_TRACE_VECTORIZE", NULL)
+
 
 /* Set while a pipeline-time eager variant compiles on this thread. */
 static _Thread_local bool hk_apple9_eager_compile;
@@ -131,29 +147,22 @@ static once_flag hk_compiler_env_hash_once = ONCE_FLAG_INIT;
 static const char *const hk_codegen_env[] = {
    "AGX_MESA_DEBUG", "AGX_SPILL_COALESCE", "AGX_SPILL_NO_LOOP_HANDLING",
    "AGX_APPLE9_BLOCK_ZERO", "AGX_APPLE9_NO_COMPARE_LITERAL",
-   "AGX_APPLE9_FIRST_CANDIDATE", "AGX_APPLE9_FOLD_ASSUME_NO_WRAP",
-   "AGX_APPLE9_GATED", "AGX_APPLE9_HOIST_DISTANCE", "AGX_APPLE9_HOIST_LOADS",
+   "AGX_APPLE9_FOLD_ASSUME_NO_WRAP", "AGX_APPLE9_GATED",
+   "AGX_APPLE9_HOIST_DISTANCE", "AGX_APPLE9_HOIST_LOADS",
    "AGX_APPLE9_HOIST_SAMPLES", "AGX_APPLE9_KEEP_UNSELECTED_HOISTS",
    "AGX_APPLE9_LICM", "AGX_APPLE9_LICM_SPECULATE", "AGX_APPLE9_NO_BFE",
-   "AGX_APPLE9_NO_DESCRIPTOR_HOIST", "AGX_APPLE9_NO_FLOAT_IMM",
-   "AGX_APPLE9_NO_PACK_FORMAT",
-   "AGX_APPLE9_NO_HALF_SOURCES", "AGX_APPLE9_NO_INT_IMM",
-   "AGX_APPLE9_NO_NATIVE_MINLOD",
-   "AGX_APPLE9_NO_POINTER_LOAD",
-   "AGX_APPLE9_NO_PROMOTE", "AGX_APPLE9_NO_SAMPLER_HOIST",
-   "AGX_APPLE9_NO_UNIFORM_MOVE", "AGX_APPLE9_SPILL_WHOLE_PHIS",
+   "AGX_APPLE9_NO_DESCRIPTOR_HOIST", "AGX_APPLE9_NO_HALF_SOURCES",
+   "AGX_APPLE9_NO_POINTER_LOAD", "AGX_APPLE9_NO_PROMOTE",
+   "AGX_APPLE9_NO_SAMPLER_HOIST", "AGX_APPLE9_NO_UNIFORM_MOVE",
    "AGX_APPLE9_PREAMBLE_SPAN", "AGX_APPLE9_RA_WEBS",
-   "AGX_APPLE9_SAFE_HOIST_STAGES",
-   "HK_APPLE9_DESCRIPTOR_BUFFER", "HK_APPLE9_GS_BATCH",
-   "HK_APPLE9_KEEP_UNREAD_OUTPUTS", "HK_APPLE9_MESH_SHADER",
-   "HK_APPLE9_NO_STORE_ENCODE", "HK_APPLE9_NO_TEXTURE_LOADS",
-   "HK_APPLE9_NO_UNIFORM_SAFE_BOUNDED", "HK_APPLE9_ROBUST_MERGE_BYTES",
+   "AGX_APPLE9_SAFE_HOIST_STAGES", "HK_APPLE9_DESCRIPTOR_BUFFER",
+   "HK_APPLE9_MESH_SHADER", "HK_APPLE9_NO_STORE_ENCODE",
+   "HK_APPLE9_NO_TEXTURE_LOADS", "HK_APPLE9_ROBUST_MERGE_BYTES",
    "HK_APPLE9_SPARSE_SCRATCH", "HK_APPLE9_SPARSE_UNMAPPED_RAW",
    "HK_APPLE9_TESS_BATCH", "HK_APPLE9_TESS_SCAN_BLOCK",
-   "HK_APPLE9_TEXEL_CLASSES", "HK_APPLE9_TEXTURE_LOADS_META",
-   "HK_APPLE9_TEXTURE_LOADS_TYPED", "HK_APPLE9_UNIFORM_SAFE_CLASSES",
-   "HK_APPLE9_VECTORIZE_PEAK_SLACK", "HK_APPLE9_VECTORIZE_PRESSURE_BUDGET",
-   "HK_APPLE9_VECTORIZE_USE_WINDOW", "HK_APPLE9_VECTORIZE_WINDOW",
+   "HK_APPLE9_TEXEL_CLASSES", "HK_APPLE9_UNIFORM_SAFE_CLASSES",
+   "HK_APPLE9_VECTORIZE_PRESSURE_BUDGET", "HK_APPLE9_VECTORIZE_USE_WINDOW",
+   "HK_APPLE9_VECTORIZE_WINDOW",
 };
 
 /* Knobs that never change generated code and must not split the caches at
@@ -1225,8 +1234,7 @@ lower_load_global_bounded(nir_builder *b, nir_intrinsic_instr *intr,
     * read-only access at a uniform address is safe once per dispatch: let
     * the preamble take it. This is not general speculation; if-conversion
     * and code motion must not run it on paths that skipped it. */
-   if ((access & ACCESS_CAN_REORDER) &&
-       !getenv("HK_APPLE9_NO_UNIFORM_SAFE_BOUNDED"))
+   if (access & ACCESS_CAN_REORDER)
       access |= hk_uniform_safe(
          intr->intrinsic == nir_intrinsic_load_global_constant_bounded
             ? HK_UNIFORM_SAFE_UBO : HK_UNIFORM_SAFE_SSBO);
@@ -1368,9 +1376,6 @@ hk_apple9_peak_live_words(nir_shader *nir)
 struct hk_vectorize_policy {
    bool windowed;
 };
-
-DEBUG_GET_ONCE_NUM_OPTION(hk_apple9_vectorize_peak_slack,
-                          "HK_APPLE9_VECTORIZE_PEAK_SLACK", 0)
 
 static bool hk_apple9_vectorize_cb(unsigned align_mul, unsigned align_offset,
                                    unsigned bit_size, unsigned num_components,
@@ -2091,7 +2096,7 @@ hk_apple9_decode_texel_classes(nir_builder *b, nir_def *words, nir_def *layout,
 static unsigned
 hk_apple9_texel_class_limit(unsigned count)
 {
-   const char *env = getenv("HK_APPLE9_TEXEL_CLASSES");
+   const char *env = debug_get_option_cached_hk_apple9_texel_classes();
    return env ? MIN2((unsigned)atoi(env), count) : count;
 }
 
@@ -2427,8 +2432,7 @@ hk_outermost_loop(nir_block *block)
 static void
 hk_apple9_texture_route_loads(nir_shader *nir, struct set *safe)
 {
-   if (getenv("HK_APPLE9_NO_TEXTURE_LOADS") ||
-       (nir->info.internal && !getenv("HK_APPLE9_TEXTURE_LOADS_META")))
+   if (debug_get_option_cached_hk_apple9_no_texture_loads() || nir->info.internal)
       return;
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
    struct set *write_loops = _mesa_pointer_set_create(NULL);
@@ -3071,37 +3075,20 @@ hk_apple9_lower_storage_image(nir_builder *b, nir_intrinsic_instr *intr,
          .image_dim = dim, .image_array = array);
       inside = nir_iand(b, inside, nir_ult(b, nir_u2u32(b, intr->src[2].ssa), samples));
    }
-   /* Typed loads already decode with a known format; the texture unit only
-    * pays off for formatless ones. HK_APPLE9_TEXTURE_LOADS_TYPED measures. */
-   bool route = load && _mesa_set_search(lower->texture_loads, intr) &&
-                getenv("HK_APPLE9_TEXTURE_LOADS_TYPED");
+   /* Typed loads decode with a known format through global memory. */
    bool native = !load && hk_apple9_can_native_store(b, intr, lower->native_stores);
    bool native_array = array || cube;
-   nir_def *ok = route ? hk_apple9_native_ok(b, tex) :
-      native ? hk_apple9_native_write_ok(b, tex, native_array) : NULL;
+   nir_def *ok = native ? hk_apple9_native_write_ok(b, tex, native_array) : NULL;
    /* See hk_apple9_lower_formatless_storage: address ahead of the check. */
-   nir_def *addr = route || native ? NULL : nir_bindless_image_texel_address(b, 64, pbe, coord,
+   nir_def *addr = native ? NULL : nir_bindless_image_texel_address(b, 64, pbe, coord,
       intr->src[2].ssa, .image_dim = dim,
       .image_array = array, .format = format, .access = nir_intrinsic_access(intr));
    nir_push_if(b, inside);
    nir_def *value = NULL;
    if (load) {
-      nir_def *fetched = NULL;
-      if (route) {
-         nir_push_if(b, ok);
-         fetched = hk_apple9_texture_load(b, intr, handle, coord);
-         nir_push_else(b, NULL);
-         addr = nir_bindless_image_texel_address(b, 64, pbe, coord,
-            intr->src[2].ssa, .image_dim = dim,
-            .image_array = array, .format = format, .access = nir_intrinsic_access(intr));
-      }
       nir_def *raw = nir_load_global(b, DIV_ROUND_UP(size_B, 4), MIN2(32, size_B * 8),
          addr, .align_mul = size_B, .access = nir_intrinsic_access(intr));
       value = nir_format_unpack_rgba(b, raw, format);
-      if (route) {
-         nir_pop_if(b, NULL);
-         value = nir_if_phi(b, fetched, nir_pad_vector_imm_int(b, value, 0, 4));
-      }
    } else {
       if (native) {
          nir_push_if(b, ok);
@@ -3443,7 +3430,7 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       /* Explicit I/O builds each access's base and offset afresh. The
        * vectorizer only merges accesses sharing those definitions. */
       NIR_PASS(_, nir, nir_opt_cse);
-      if (getenv("HK_APPLE9_TRACE_VECTORIZE") &&
+      if (debug_get_option_cached_hk_apple9_trace_vectorize() &&
           nir->info.stage == MESA_SHADER_FRAGMENT)
          nir_print_shader(nir, stderr);
       /* Below the pressure budget, merge without windows, unless that
@@ -3456,11 +3443,9 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       if (!policy.windowed) {
          peak_windowed = hk_apple9_vectorized_peak(nir, true);
          peak_free = hk_apple9_vectorized_peak(nir, false);
-         policy.windowed =
-            peak_free > peak_windowed +
-                           debug_get_option_hk_apple9_vectorize_peak_slack();
+         policy.windowed = peak_free > peak_windowed;
       }
-      if (getenv("HK_APPLE9_PRESSURE_STATS"))
+      if (debug_get_option_cached_hk_apple9_pressure_stats())
          fprintf(stderr,
                  "HK_PRESSURE stage=%u peak=%u windowed=%u merged_peaks=%u/%u\n",
                  nir->info.stage, budget ? peak : hk_apple9_peak_live_words(nir),
@@ -3887,7 +3872,7 @@ hk_apple9_use_descriptor_handle(nir_builder *b, nir_tex_instr *tex,
 static bool
 hk_apple9_fragment_dump_begin(const nir_shader *nir, struct blob *blob)
 {
-   if (!getenv("HK_APPLE9_DUMP_FRAGMENT_DIR"))
+   if (!debug_get_option_cached_hk_apple9_dump_fragment_dir())
       return false;
    blob_init(blob);
    nir_serialize(blob, nir, false);
@@ -3900,7 +3885,7 @@ hk_apple9_fragment_dump_end(struct blob *nir_blob, bool compiled,
                             const struct agx_apple9_blend *blend,
                             unsigned targets, const struct agx_shader_part *part)
 {
-   const char *dir = getenv("HK_APPLE9_DUMP_FRAGMENT_DIR");
+   const char *dir = debug_get_option_cached_hk_apple9_dump_fragment_dir();
    if (compiled && dir) {
       const unsigned blends = MAX2(targets, 1);
       const uint32_t header[] = {
@@ -5067,7 +5052,7 @@ hk_apple9_compile_tes(struct hk_device *dev, nir_shader *nir,
    layout.ignore_point_size = !layout.rasterize_points;
    NIR_PASS(_, nir, poly_nir_lower_tes, true);
    hk_apple9_lower_prerast_sysvals(nir, MESA_SHADER_TESS_EVAL);
-   if (getenv("AGX_APPLE9_TRACE_NIR") != NULL)
+   if (debug_get_option_cached_agx_apple9_trace_nir() != NULL)
       nir_print_shader(nir, stderr);
    if (!agx_compile_apple9_vertex_inputs(nir, &layout, &hw->b, reason))
       return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
@@ -5106,7 +5091,7 @@ hk_apple9_compile_gs(struct hk_device *dev, nir_shader *nir,
       layout.rasterize_points = info.mode == MESA_PRIM_POINTS;
       layout.ignore_point_size = !layout.rasterize_points;
       hk_apple9_lower_prerast_sysvals(rast, MESA_SHADER_GEOMETRY);
-      if (getenv("AGX_APPLE9_TRACE_NIR") != NULL)
+      if (debug_get_option_cached_agx_apple9_trace_nir() != NULL)
          nir_print_shader(rast, stderr);
       if (agx_compile_apple9_vertex_inputs(rast, &layout, &rast_shader->b,
                                            reason))
@@ -5167,7 +5152,7 @@ hk_apple9_compile_mesh(struct hk_device *dev, nir_shader *nir,
                   hk_apple9_lower_clip_z_coeff, nir_metadata_control_flow,
                   NULL);
       }
-      if (getenv("AGX_APPLE9_TRACE_NIR") != NULL)
+      if (debug_get_option_cached_agx_apple9_trace_nir() != NULL)
          nir_print_shader(rast_nir, stderr);
       if (agx_compile_apple9_vertex_inputs(rast_nir, &layout, &rast->b, reason))
          result = hk_apple9_finish_shader(dev, rast, rast_nir);
@@ -5361,11 +5346,10 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
              !(infos[i].next_stage_mask &
                (VK_SHADER_STAGE_GEOMETRY_BIT |
                 VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT)) &&
-             !hk_per_vertex_copies_used(&per_vertex) &&
-             !getenv("HK_APPLE9_KEEP_UNREAD_OUTPUTS"))
+             !hk_per_vertex_copies_used(&per_vertex))
             hk_apple9_strip_unread_outputs(nir);
 
-         if (getenv("AGX_APPLE9_TRACE_NIR") != NULL)
+         if (debug_get_option_cached_agx_apple9_trace_nir() != NULL)
             nir_print_shader(nir, stderr);
 
          if (stage == MESA_SHADER_VERTEX) {
@@ -5763,7 +5747,7 @@ hk_apple9_eager_variant(struct hk_device *dev, uint32_t count,
          api[MESA_SHADER_VERTEX] = stub;
       }
    }
-   if (getenv("HK_APPLE9_EAGER_TRACE"))
+   if (debug_get_option_cached_hk_apple9_eager_trace())
       fprintf(stderr, "HK_APPLE9_EAGER: %u stages vs=%d fs=%d flags=%#llx\n", count,
               !!api[MESA_SHADER_VERTEX], !!api[MESA_SHADER_FRAGMENT],
               pstate ? (unsigned long long)pstate->pipeline_flags : 0ull);
@@ -5886,7 +5870,7 @@ hk_apple9_defer_graphics(struct hk_device *dev, uint32_t count,
             hk_api_shader_destroy(&dev->vk, out[i], alloc);
       }
       memset(out, 0, count * sizeof(*out));
-   } else if (getenv("HK_APPLE9_EAGER_VARIANTS")) {
+   } else if (debug_get_option_cached_hk_apple9_eager_variants()) {
       hk_apple9_eager_variant(dev, count, out, state);
    }
    return result;

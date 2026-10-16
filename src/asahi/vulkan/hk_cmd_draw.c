@@ -64,6 +64,10 @@
 #include "vk_standard_sample_locations.h"
 #include "vk_util.h"
 
+DEBUG_GET_ONCE_OPTION(cached_hk_apple9_tess_batch, "HK_APPLE9_TESS_BATCH", NULL)
+DEBUG_GET_ONCE_OPTION(cached_hk_apple9_tess_scan_block,
+                      "HK_APPLE9_TESS_SCAN_BLOCK", NULL)
+
 #define IS_DIRTY(bit) BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_##bit)
 
 #define IS_SHADER_DIRTY(bit)                                                   \
@@ -2379,7 +2383,7 @@ hk_apple9_launch_tess(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    /* HK_APPLE9_TESS_BATCH=0 turns batching off. */
    static int batch_env = -1;
    if (batch_env < 0) {
-      const char *env = getenv("HK_APPLE9_TESS_BATCH");
+      const char *env = debug_get_option_cached_hk_apple9_tess_batch();
       batch_env = !env || strcmp(env, "0") != 0;
    }
    /* Only small draws are latency-bound enough to gain from overlapping;
@@ -2419,7 +2423,7 @@ hk_apple9_launch_tess(struct hk_cmd_buffer *cmd, struct agx_draw draw)
     */
    static unsigned block_patches = 0;
    if (!block_patches) {
-      const char *env = getenv("HK_APPLE9_TESS_SCAN_BLOCK");
+      const char *env = debug_get_option_cached_hk_apple9_tess_scan_block();
       block_patches = env ? MAX2(strtoul(env, NULL, 0), 1) : 8192;
    }
    unsigned nr_patches =
@@ -2551,15 +2555,9 @@ hk_apple9_launch_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    /* Without transform feedback or queries, a small direct draw is just the
     * VS and GS passes over its own allocations: record them into the first
     * two batch lanes (as for tessellation) so consecutive draws overlap.
-    * HK_APPLE9_GS_BATCH=0 turns this off.
     */
-   static int gs_batch_env = -1;
-   if (gs_batch_env < 0) {
-      const char *env = getenv("HK_APPLE9_GS_BATCH");
-      gs_batch_env = !env || strcmp(env, "0") != 0;
-   }
    const unsigned max_batch_prims = 2048;
-   bool batch = gs_batch_env && !agx_is_indirect(draw.b) && !xfb_or_queries &&
+   bool batch = !agx_is_indirect(draw.b) && !xfb_or_queries &&
                 grid_gs.count[0] * grid_gs.count[1] <= max_batch_prims;
    if (!batch)
       hk_tess_batch_flush(cmd);

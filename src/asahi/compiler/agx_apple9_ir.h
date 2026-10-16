@@ -575,16 +575,6 @@ bool agx_apple9_encode_float_immediate(uint32_t value, uint8_t *encoded);
 bool agx_apple9_encode_float_immediate_wide(uint32_t value, uint8_t *encoded,
                                             bool *low);
 
-/* AGX_APPLE9_NO_FLOAT_IMM=1 keeps floating min/max literals and those that
- * need the fourth mantissa bit in registers and uniform words. */
-static inline bool
-agx_apple9_float_immediates_disabled(void)
-{
-   static int disabled = -1;
-   if (disabled < 0)
-      disabled = getenv("AGX_APPLE9_NO_FLOAT_IMM") != NULL;
-   return disabled;
-}
 
 /* Integer add/multiply-add, logic and select source descriptors hold an
  * 8-bit zero-extended literal; the float forms hold a packed float. */
@@ -597,16 +587,6 @@ agx_apple9_integer_immediate_encoding(enum agx_apple9_encoding encoding)
           encoding == AGX_APPLE9_ENC_SELECT_GPR_WIDE;
 }
 
-/* AGX_APPLE9_NO_INT_IMM=1 keeps integer literals in registers and uniform
- * words, as before 8-bit literal operands were selected. */
-static inline bool
-agx_apple9_integer_immediates_disabled(void)
-{
-   static int disabled = -1;
-   if (disabled < 0)
-      disabled = getenv("AGX_APPLE9_NO_INT_IMM") != NULL;
-   return disabled;
-}
 
 /* Floating min/max operand B and the FMA addend have a fourth mantissa
  * bit beside the minifloat byte; FMA operand B does not. */
@@ -623,14 +603,7 @@ agx_apple9_wide_float_immediate_slot(enum agx_apple9_encoding encoding,
 
 /* AGX_APPLE9_NO_COMPARE_LITERAL=1 keeps compare operands in registers and
  * uniform words. */
-static inline bool
-agx_apple9_compare_literals_disabled(void)
-{
-   static int disabled = -1;
-   if (disabled < 0)
-      disabled = getenv("AGX_APPLE9_NO_COMPARE_LITERAL") != NULL;
-   return disabled;
-}
+bool agx_apple9_compare_literals_disabled(void);
 
 /* Compare operand B of a select or predicate takes a literal in the byte
  * that otherwise names a uniform: a minifloat with its sign beside it for

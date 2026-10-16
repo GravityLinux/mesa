@@ -340,9 +340,6 @@ hk_queue_fence_status(struct hk_device *dev, struct hk_queue *queue)
    return status;
 }
 
-/* HK_NO_FENCE_STATUS=1 skips the per-wait fence error check (cost A/B). */
-DEBUG_GET_ONCE_BOOL_OPTION(hk_no_fence_status, "HK_NO_FENCE_STATUS", false)
-
 static VkResult
 hk_check_status(struct vk_device *device)
 {
@@ -354,8 +351,6 @@ hk_check_status(struct vk_device *device)
     * no error; there only failed submissions report device loss.
     */
    vk_foreach_queue(vk_queue, &dev->vk) {
-      if (debug_get_option_hk_no_fence_status())
-         break;
       struct hk_queue *queue = container_of(vk_queue, struct hk_queue, vk);
       int status = hk_queue_fence_status(dev, queue);
       if (status < 0) {
