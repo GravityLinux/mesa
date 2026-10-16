@@ -510,6 +510,7 @@ static const nir_shader_compiler_options agx_nir_options = {
    .lower_hadd = true,
    .has_amul = true,
    .has_isub = true,
+   .txl_lod_from_zero_gradients_is_neg_inf = true,
    .ssbo_readonly_as_constant_offset = true,
    .has_load_global_bounded = true,
    .support_16bit_alu = true,

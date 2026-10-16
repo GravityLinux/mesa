@@ -662,6 +662,11 @@ typedef struct nir_shader_compiler_options {
    /** Backend supports nir_load_pixel_coord */
    bool has_pixel_coord;
 
+   /** Fold zero-gradient txd to txl with negative-infinity LOD, preserving
+    * magnification even after positive sampler bias. The default uses zero.
+    */
+   bool txl_lod_from_zero_gradients_is_neg_inf;
+
    /** Backend supports nir_load_texture_scale and prefers it over txs for nir
     * lowerings. */
    bool has_texture_scaling;

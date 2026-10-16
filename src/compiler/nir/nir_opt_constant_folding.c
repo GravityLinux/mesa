@@ -533,10 +533,13 @@ try_fold_txd_to_txl(nir_builder *b, nir_tex_instr *tex)
    nir_steal_tex_src(tex, nir_tex_src_ddx);
    nir_steal_tex_src(tex, nir_tex_src_ddy);
 
-   /* log2(0) remains at the lowest LOD even after positive sampler bias.
-    * Substituting zero would incorrectly turn magnification into minification.
+   /* Opted-in backends preserve log2(0) through positive sampler bias.
+    * Others retain the historical zero LOD until their handling of negative
+    * infinity has been validated.
     */
-   nir_def *lod = nir_imm_float(b, -INFINITY);
+   bool neg_inf = b->shader->options &&
+                  b->shader->options->txl_lod_from_zero_gradients_is_neg_inf;
+   nir_def *lod = nir_imm_float(b, neg_inf ? -INFINITY : 0.0f);
    nir_tex_instr_add_src(tex, nir_tex_src_lod, lod);
    tex->op = nir_texop_txl;
    return true;

@@ -14011,3 +14011,44 @@ TEST(Apple9Compiler, ReadonlySsboConstantOffsetRequiresCompilerOptIn)
       }
    }
 }
+
+TEST(Apple9Compiler, ZeroGradientNegativeInfinityLodRequiresCompilerOptIn)
+{
+   EXPECT_TRUE(agx_nir_options.txl_lod_from_zero_gradients_is_neg_inf);
+   for (unsigned mode : {0u, 1u, 2u}) {
+      bool enabled = mode == 2;
+      for (unsigned backend : {0u, 1u, 2u}) {
+         nir_shader_compiler_options options = {};
+         options.txl_lod_from_zero_gradients_is_neg_inf = enabled;
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_FRAGMENT, mode ? &options : nullptr, "zero_gradient_lod_option");
+         nir_tex_instr *tex = nir_tex_instr_create(b.shader, backend ? 4 : 3);
+         tex->op = nir_texop_txd;
+         tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+         tex->dest_type = nir_type_float32;
+         tex->coord_components = 2;
+         tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, nir_imm_vec2(&b, .25, .5));
+         tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_ddx, nir_imm_vec2(&b, 0, 0));
+         tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_ddy, nir_imm_vec2(&b, 0, 0));
+         if (backend) {
+            tex->src[3] = nir_tex_src_for_ssa(
+               backend == 1 ? nir_tex_src_backend1 : nir_tex_src_backend2,
+               nir_imm_int(&b, 0));
+         }
+         nir_def_init(&tex->instr, &tex->def, 4, 32);
+         nir_builder_instr_insert(&b, &tex->instr);
+         nir_opt_constant_folding(b.shader);
+         if (backend) {
+            EXPECT_EQ(tex->op, nir_texop_txd);
+            EXPECT_LT(nir_tex_instr_src_index(tex, nir_tex_src_lod), 0);
+         } else {
+            ASSERT_EQ(tex->op, nir_texop_txl);
+            int lod = nir_tex_instr_src_index(tex, nir_tex_src_lod);
+            ASSERT_GE(lod, 0);
+            EXPECT_FLOAT_EQ(nir_src_as_float(tex->src[lod].src),
+                            enabled ? -INFINITY : 0.0f);
+         }
+         ralloc_free(b.shader);
+      }
+   }
+}
