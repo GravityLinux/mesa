@@ -512,15 +512,6 @@ struct hk_cs {
    unsigned sync_stages;
    bool cdm_dirty;
 
-   /* Pre-gfx overlap (G16 default; HK_APPLE9_PREGFX_OVERLAP overrides):
-    * - heap_prev1: for a render using the geometry heap, 1 + the sync ID of
-    *   the previous render in this command buffer that used the same heap
-    *   (0: unknown or none, so its pre-gfx work orders conservatively);
-    * - pregfx_precise: a pre-gfx stream ordered by its own dependencies
-    *   (registered at its render's start) instead of full ordering. */
-   uint32_t heap_prev1;
-   bool pregfx_precise;
-
    /* The last dispatch ended with the compute-only barrier: later compute
     * dispatches are ordered after it, but anything else (indirect grid
     * fetches, the stream end, non-Apple9 launches) needs a full flush first.
@@ -840,17 +831,8 @@ struct hk_cmd_buffer {
 
    /* Does the command buffer use the geometry heap? */
    bool uses_heap;
-   /* HK_APPLE9_PREGFX_OVERLAP: this render's heap descriptor, uploaded once
-    * per render and reset on the GPU before allocation on every execution.
-    * heap_renders counts the heap-using renders so
-    * far (in both modes; its parity picks the heap with the switch). */
-   uint64_t heap_desc;
-   /* Physical BO selected with heap_desc for this render. All heap-relative
-    * CPU-recorded bases/bounds must use this same BO. */
-   struct agx_bo *heap_bo;
+   /* Diagnostic count of heap-using renders in this command buffer. */
    uint32_t heap_renders;
-   /* 1 + the sync ID of the last render using each heap (0: none). */
-   uint32_t heap_last1[2];
    bool uses_mesh_heap;
 
    /* Query counter increments and availability writes (struct
@@ -1040,9 +1022,7 @@ void hk_render_merge_trace(const char *why, uint64_t a, uint64_t b);
 bool hk_render_merge_move_enabled(void);
 #define hk_cmd_render_merge_flush(cmd) hk_cmd_render_merge_flush_why(cmd, __func__)
 
-bool hk_pregfx_overlap(const struct hk_device *dev);
 uint64_t hk_heap(struct hk_cmd_buffer *cmd);
-void hk_cmd_pregfx_precise(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
 
 static inline struct hk_cs *
 hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
@@ -1092,18 +1072,9 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
       list_inithead(&cs->node);
 
       bool before_gfx = (ptr == &cmd->current_cs.pre_gfx);
-      /* Pre-gfx overlap: a pre-gfx stream registers its dependencies at its
-       * render's start (its physical position) instead of forcing full
-       * ordering, see hk_cmd_pregfx_precise.
-       */
-      bool precise = before_gfx && hk_pregfx_overlap(hk_cmd_buffer_device(cmd)) &&
-                     cmd->current_cs.gfx &&
-                     cmd->current_cs.gfx->sync_stages && !cmd->merge_pre_cs;
       /* These helpers are physically reordered around rendering. Until their
-       * logical operations are split out, preserve the existing full ordering.
-       */
-      cmd->sync_fallback |= (before_gfx && !precise) ||
-                            ptr == &cmd->current_cs.post_gfx;
+       * logical operations are split out, preserve full ordering. */
+      cmd->sync_fallback |= before_gfx || ptr == &cmd->current_cs.post_gfx;
 
       /* Insert into the command buffer. We usually append to the end of the
        * command buffer, except for pre-graphics streams which go right before
@@ -1121,17 +1092,10 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
 
       if (!compute)
          hk_cs_init_graphics(cmd, cs);
-
-      if (precise)
-         hk_cmd_pregfx_precise(cmd, cs);
    }
 
    assert(*ptr != NULL);
-   /* A precise pre-gfx stream's scope was registered at the whole render's
-    * start, where all of its pre-rasterization work physically executes.
-    * In-render barriers therefore cannot split that work between draws. */
-   if (!(*ptr)->pregfx_precise)
-      hk_cmd_sync_work(cmd, *ptr, stages);
+   hk_cmd_sync_work(cmd, *ptr, stages);
    return *ptr;
 }
 

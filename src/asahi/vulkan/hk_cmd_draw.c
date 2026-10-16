@@ -64,6 +64,10 @@
 #include "vk_standard_sample_locations.h"
 #include "vk_util.h"
 
+DEBUG_GET_ONCE_OPTION(cached_hk_apple9_tess_batch, "HK_APPLE9_TESS_BATCH", NULL)
+DEBUG_GET_ONCE_OPTION(cached_hk_apple9_tess_scan_block,
+                      "HK_APPLE9_TESS_SCAN_BLOCK", NULL)
+
 #define IS_DIRTY(bit) BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_##bit)
 
 #define IS_SHADER_DIRTY(bit)                                                   \
@@ -1372,34 +1376,6 @@ hk_init_heap(const void *data)
    };
 }
 
-static void
-hk_init_heap_alt(const void *data)
-{
-   struct hk_cmd_buffer *cmd = (struct hk_cmd_buffer *)data;
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
-
-   perf_debug(cmd, "Allocating second heap");
-   dev->heap_alt = agx_bo_create(&dev->dev, dev->heap->size, 0, dev->heap->flags,
-                                 "Geometry heap (alternate)");
-}
-
-/* Keep the chip-specific policy selection and cached overrides independent.
- * Both policies remain opt-in pending performance validation. */
-DEBUG_GET_ONCE_BOOL_OPTION(pregfx_overlap_g16, "HK_APPLE9_PREGFX_OVERLAP", false)
-DEBUG_GET_ONCE_BOOL_OPTION(pregfx_overlap_other, "HK_APPLE9_PREGFX_OVERLAP", false)
-
-/* Keep overlap opt-in until its benefit with the normal submission policy
- * is demonstrated. The environment overrides either device policy. Opting in
- * costs a second 128 MiB heap (USC aperture), allocated on first use by an odd
- * heap-using render. */
-bool
-hk_pregfx_overlap(const struct hk_device *dev)
-{
-   return dev->dev.chip == AGX_CHIP_G16G
-             ? debug_get_option_pregfx_overlap_g16()
-             : debug_get_option_pregfx_overlap_other();
-}
-
 uint64_t
 hk_heap(struct hk_cmd_buffer *cmd)
 {
@@ -1409,51 +1385,6 @@ hk_heap(struct hk_cmd_buffer *cmd)
    if (!dev->heap) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       return 0;
-   }
-
-   /* Pre-gfx overlap: each render gets its own heap descriptor. Reset its
-    * allocation cursor before its first use on every execution, including
-    * command-buffer resubmissions. Consecutive heap-using renders alternate
-    * between two heaps, costing a second 128 MiB on first alternate use.
-    */
-   if (hk_pregfx_overlap(dev)) {
-      if (!cmd->uses_heap) {
-         struct agx_bo *bo = dev->heap;
-         const unsigned h = cmd->heap_renders & 1;
-         if (h) {
-            util_call_once_data(&dev->heap_alt_init_once, hk_init_heap_alt, cmd);
-            bo = dev->heap_alt;
-         }
-         if (!bo) {
-            vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
-            return 0;
-         }
-         cmd->heap_renders++;
-
-         /* The render's pre-gfx work waits for the previous user of this
-          * heap, see hk_cmd_pregfx_precise. */
-         struct hk_cs *gfx = cmd->current_cs.gfx;
-         if (gfx) {
-            gfx->heap_prev1 = cmd->heap_last1[h];
-            cmd->heap_last1[h] = gfx->sync_id + 1;
-         } else {
-            cmd->heap_last1[h] = 0;
-         }
-         cmd->heap_bo = bo;
-         struct poly_heap heap = {.base = bo->va->addr, .size = bo->size};
-         cmd->heap_desc = hk_pool_upload(cmd, &heap, sizeof(heap), 16);
-         cmd->uses_heap = true;
-
-         /* The pre-gfx stream already waits for this heap's previous user.
-          * Reset there, before any tessellation/geometry allocation, so the
-          * next render can still overlap the previous render on the other
-          * heap. Without a render, ordinary compute orders conservatively.
-          */
-         libagx_write_u32(cmd, agx_1d(1),
-                         AGX_BARRIER_ALL | (gfx ? AGX_PREGFX : 0),
-                         cmd->heap_desc + offsetof(struct poly_heap, bottom), 0);
-      }
-      return cmd->heap_desc;
    }
 
    /* We need to free all allocations after each command buffer execution */
@@ -1470,15 +1401,10 @@ hk_heap(struct hk_cmd_buffer *cmd)
       cmd->uses_heap = true;
    }
 
-   cmd->heap_bo = dev->heap;
    return dev->rodata.heap;
 }
 
-/* GPU-generated index/coordinate offsets are relative to the BO in the
- * render's heap descriptor, including odd renders using the alternate heap.
- * Keep this selection at recording time: later renders change cmd->heap_bo,
- * but already recorded draws and uniforms retain their own address values.
- */
+/* GPU-generated index/coordinate offsets use the single geometry heap. */
 static struct agx_bo *
 hk_geometry_heap_bo(struct hk_cmd_buffer *cmd)
 {
@@ -1486,8 +1412,7 @@ hk_geometry_heap_bo(struct hk_cmd_buffer *cmd)
     * submitted. Keep address construction safe on those error paths. */
    if (!hk_heap(cmd))
       return NULL;
-   assert(cmd->heap_bo);
-   return cmd->heap_bo;
+   return hk_cmd_buffer_device(cmd)->heap;
 }
 
 static struct agx_draw
@@ -2458,7 +2383,7 @@ hk_apple9_launch_tess(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    /* HK_APPLE9_TESS_BATCH=0 turns batching off. */
    static int batch_env = -1;
    if (batch_env < 0) {
-      const char *env = getenv("HK_APPLE9_TESS_BATCH");
+      const char *env = debug_get_option_cached_hk_apple9_tess_batch();
       batch_env = !env || strcmp(env, "0") != 0;
    }
    /* Only small draws are latency-bound enough to gain from overlapping;
@@ -2498,7 +2423,7 @@ hk_apple9_launch_tess(struct hk_cmd_buffer *cmd, struct agx_draw draw)
     */
    static unsigned block_patches = 0;
    if (!block_patches) {
-      const char *env = getenv("HK_APPLE9_TESS_SCAN_BLOCK");
+      const char *env = debug_get_option_cached_hk_apple9_tess_scan_block();
       block_patches = env ? MAX2(strtoul(env, NULL, 0), 1) : 8192;
    }
    unsigned nr_patches =
@@ -2630,15 +2555,9 @@ hk_apple9_launch_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    /* Without transform feedback or queries, a small direct draw is just the
     * VS and GS passes over its own allocations: record them into the first
     * two batch lanes (as for tessellation) so consecutive draws overlap.
-    * HK_APPLE9_GS_BATCH=0 turns this off.
     */
-   static int gs_batch_env = -1;
-   if (gs_batch_env < 0) {
-      const char *env = getenv("HK_APPLE9_GS_BATCH");
-      gs_batch_env = !env || strcmp(env, "0") != 0;
-   }
    const unsigned max_batch_prims = 2048;
-   bool batch = gs_batch_env && !agx_is_indirect(draw.b) && !xfb_or_queries &&
+   bool batch = !agx_is_indirect(draw.b) && !xfb_or_queries &&
                 grid_gs.count[0] * grid_gs.count[1] <= max_batch_prims;
    if (!batch)
       hk_tess_batch_flush(cmd);

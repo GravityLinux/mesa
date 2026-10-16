@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "util/u_debug.h"
 #include "util/bitset.h"
 #include "util/macros.h"
 #include "util/sparse_bitset.h"
@@ -18,6 +19,8 @@
 #include "shader_enums.h"
 
 #include "test/cs2-pressure/ra-audit.h"
+
+DEBUG_GET_ONCE_OPTION(cached_agx_apple9_ra_webs, "AGX_APPLE9_RA_WEBS", NULL)
 
 /* SSA-based register allocator */
 struct phi_web_node {
@@ -348,7 +351,7 @@ pressure_web_event(struct ra_ctx *rctx, unsigned ssa, const char *event,
                    unsigned chosen, const struct agx_reg_constraint *constraint)
 {
    if (pressure_audit.ctx != rctx->shader ||
-       !getenv("AGX_APPLE9_RA_WEBS") || rctx->classes[ssa] != RA_GPR)
+       !debug_get_option_cached_agx_apple9_ra_webs() || rctx->classes[ssa] != RA_GPR)
       return;
    unsigned root = phi_web_find(rctx->phi_web, ssa);
    unsigned want = preferred_phi_register(rctx, ssa, false);

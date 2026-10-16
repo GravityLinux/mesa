@@ -61,10 +61,6 @@ struct hk_sync_event {
    uint32_t stream;
    unsigned src, dst;
    uint32_t barrier_group;
-   /* 1 + the stable ID of a stream whose completion this stream's work must
-    * also wait for (0: none). Pre-gfx overlap: a pre-gfx stream after the
-    * last render using its geometry heap, and a render after its pre-gfx. */
-   uint32_t after1;
 };
 
 struct hk_sync_stream {

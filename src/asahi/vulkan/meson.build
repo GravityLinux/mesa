@@ -160,7 +160,7 @@ if with_tests
                                inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
         dependencies : [hk_deps],
         link_with : [libhk],
-        link_args : t in ['hk-heap-resubmit', 'hk-heap-addresses'] ? ['-Wl,--wrap=hk_dispatch_precomp'] : [],
+        link_args : t == 'hk-heap-addresses' ? ['-Wl,--wrap=hk_dispatch_precomp'] : [],
       ),
       suite : ['asahi', 'honeykrisp'],
     )

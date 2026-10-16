@@ -82,16 +82,6 @@ hk_sync_resolve(struct hk_sync_state *state,
          }
          struct hk_sync_dep dep = hk_sync_work(state, ev->dst, s->engine, s->index);
          hk_sync_join(&s->wait, dep);
-         if (ev->after1) {
-            uint32_t a = hk_sync_remap(remap, stream_count, ev->after1 - 1);
-            if (a != HK_SYNC_NONE && a != id && streams[a].index) {
-               struct hk_sync_dep after = hk_sync_empty();
-               after.engine[streams[a].engine] = streams[a].index;
-               hk_sync_join(&s->wait, after);
-               if (s->engine == HK_SYNC_RENDER)
-                  hk_sync_join(&s->wait_tiling, after);
-            }
-         }
          if (ev->dst == HK_SYNC_ALL)
             hk_sync_barrier(state, HK_SYNC_ALL, HK_SYNC_ALL);
 

@@ -6,7 +6,7 @@
  */
 #include "../hk_cmd_draw.c"
 
-static unsigned failures, resets;
+static unsigned failures;
 
 #define CHECK(c)                                                               \
    do {                                                                        \
@@ -28,13 +28,6 @@ __wrap_hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
    struct hk_cs **target =
       barrier & AGX_PREGFX ? &cmd->current_cs.pre_gfx : &cmd->current_cs.cs;
    CHECK(hk_cmd_buffer_get_cs_general(cmd, target, true, HK_SYNC_ALL));
-   if (idx == LIBAGX_WRITE_U32) {
-      struct libagx_write_u32_args *reset = data;
-      CHECK(size == sizeof(*reset) && reset->value == 0);
-      CHECK(reset->address ==
-            cmd->heap_desc + offsetof(struct poly_heap, bottom));
-      resets++;
-   }
 }
 
 static void
@@ -56,20 +49,18 @@ check_draw(const char *name, unsigned render, struct agx_draw draw,
 int
 main(void)
 {
-   setenv("HK_APPLE9_PREGFX_OVERLAP", "1", 1);
    struct hk_device *dev = calloc(1, sizeof(*dev));
    struct hk_cmd_buffer *cmd = calloc(1, sizeof(*cmd));
    uint8_t *pool = calloc(1, HK_CMD_BO_SIZE);
    if (!dev || !cmd || !pool)
       return 1;
-   struct agx_va va[2] = {{.addr = 0x20000000}, {.addr = 0x30000000}};
-   /* Unequal sizes also detect a stale primary-heap bounds field. */
-   struct agx_bo bo[2] = {{.va = &va[0], .size = 128 * 1024 * 1024},
-                          {.va = &va[1], .size = 96 * 1024 * 1024}};
+   struct agx_va va = {.addr = 0x20000000};
+   struct agx_bo bo = {.va = &va, .size = 128 * 1024 * 1024};
+   struct poly_heap heap = {.base = va.addr, .size = bo.size};
    dev->dev.chip = AGX_CHIP_G16G;
-   dev->heap = &bo[0];
-   dev->heap_alt = &bo[1];
-   dev->heap_init_once.called = dev->heap_alt_init_once.called = true;
+   dev->heap = &bo;
+   dev->heap_init_once.called = true;
+   dev->rodata.heap = (uintptr_t)&heap;
    cmd->vk.base.device = &dev->vk;
    cmd->sync_events = UTIL_DYNARRAY_INIT;
    cmd->sync_remap = UTIL_DYNARRAY_INIT;
@@ -99,7 +90,7 @@ main(void)
    uint64_t descriptors[4];
    for (unsigned render = 0; render < ARRAY_SIZE(gfx); ++render) {
       /* Model the recording boundary that end_graphics uses: the next render
-       * must select a fresh heap, with stable distinct graphics stream IDs. */
+       * uses the primary heap, with stable distinct graphics stream IDs. */
       cmd->uses_heap = false;
       gfx[render] = (struct hk_cs){
          .cmd = cmd,
@@ -109,13 +100,18 @@ main(void)
       list_addtail(&gfx[render].node, &cmd->control_streams);
       util_dynarray_append(&cmd->sync_remap, gfx[render].sync_id);
       hk_cmd_sync_work(cmd, &gfx[render], HK_SYNC_GRAPHICS);
-      const struct agx_bo *selected = &bo[render & 1];
+      const struct agx_bo *selected = &bo;
       descriptors[render] = hk_heap(cmd);
       struct poly_heap *heap = (void *)(uintptr_t)descriptors[render];
       CHECK(heap->base == selected->va->addr && heap->size == selected->size);
-      CHECK(hk_heap(cmd) == descriptors[render] && resets == render + 1);
+      CHECK(hk_heap(cmd) == descriptors[render]);
+      struct hk_cs *post = cmd->current_cs.post_gfx;
+      CHECK(post && cmd->sync_fallback);
+      CHECK(util_dynarray_num_elements(&post->imm_writes, struct libagx_imm_write) == render + 1);
+      const struct libagx_imm_write *reset = util_dynarray_top_ptr(&post->imm_writes, struct libagx_imm_write);
+      CHECK(reset->address == descriptors[render] + offsetof(struct poly_heap, bottom) && reset->value == 0);
       for (unsigned i = 0; i < render; ++i)
-         CHECK(descriptors[i] != descriptors[render]);
+         CHECK(descriptors[i] == descriptors[render]);
 
       struct agx_draw direct = {.b = agx_3d(12, 1, 1)};
       check_draw("adjacency", render, hk_apple9_draw_without_adj(cmd, direct),
@@ -154,12 +150,14 @@ main(void)
       free(cmd->current_cs.pre_gfx);
       cmd->current_cs.pre_gfx = NULL;
    }
-   /* An earlier render's uploaded descriptor must retain its own heap. */
+   /* Every render uses the same immutable primary-heap descriptor. */
    for (unsigned i = 0; i < ARRAY_SIZE(gfx); ++i) {
       struct poly_heap *heap = (void *)(uintptr_t)descriptors[i];
-      CHECK(heap->base == va[i & 1].addr && heap->size == bo[i & 1].size);
+      CHECK(heap->base == va.addr && heap->size == bo.size);
    }
-   CHECK(resets == 4 && cmd->heap_renders == 4);
+   CHECK(cmd->heap_renders == 4);
+   util_dynarray_fini(&cmd->current_cs.post_gfx->imm_writes);
+   free(cmd->current_cs.post_gfx);
    util_dynarray_fini(&cmd->sync_events);
    util_dynarray_fini(&cmd->sync_remap);
    free(tcs);
