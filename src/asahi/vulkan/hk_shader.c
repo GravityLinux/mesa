@@ -5945,6 +5945,7 @@ hk_apple9_resolve_graphics(struct hk_device *dev,
       search.key.zs_self_dep |= fs->apple9_deferred->zs_self_dep;
    }
 
+retry:
    simple_mtx_lock(&dev->apple9_variants.lock);
    if (!dev->apple9_variants.ht) {
       dev->apple9_variants.ht = _mesa_hash_table_create(
@@ -5954,13 +5955,30 @@ hk_apple9_resolve_graphics(struct hk_device *dev,
       dev->apple9_variants.ht
          ? _mesa_hash_table_search(dev->apple9_variants.ht, &search)
          : NULL;
+   struct hk_apple9_variant *v;
    if (entry) {
-      struct hk_apple9_variant *v = entry->data;
+      v = entry->data;
+      if (!util_queue_fence_is_signalled(&v->ready)) {
+         simple_mtx_unlock(&dev->apple9_variants.lock);
+         util_queue_fence_wait(&v->ready);
+         goto retry;
+      }
+      if (v->result != VK_ERROR_OUT_OF_HOST_MEMORY &&
+          v->result != VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+         VkResult result = v->result;
+         if (result == VK_SUCCESS)
+            memcpy(out, v->shaders, sizeof(v->shaders));
+         simple_mtx_unlock(&dev->apple9_variants.lock);
+         return result;
+      }
+
+      /* Retry temporary allocation failures in place. Other recording threads
+       * may still be waiting on this fence, so removing/freeing the entry is
+       * unsafe. Claim the next compile while holding the table lock.
+       */
+      util_queue_fence_reset(&v->ready);
       simple_mtx_unlock(&dev->apple9_variants.lock);
-      util_queue_fence_wait(&v->ready);
-      if (v->result == VK_SUCCESS)
-         memcpy(out, v->shaders, sizeof(v->shaders));
-      return v->result;
+      goto compile;
    }
    if (!dev->apple9_variants.ht) {
       simple_mtx_unlock(&dev->apple9_variants.lock);
@@ -5970,7 +5988,7 @@ hk_apple9_resolve_graphics(struct hk_device *dev,
    /* Publish the variant before compiling, then compile without the lock:
     * a draw-time compile takes up to a second, and other recording threads
     * must not block on it for unrelated variants. */
-   struct hk_apple9_variant *v = calloc(1, sizeof(*v));
+   v = calloc(1, sizeof(*v));
    if (!v) {
       simple_mtx_unlock(&dev->apple9_variants.lock);
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
@@ -5981,6 +5999,7 @@ hk_apple9_resolve_graphics(struct hk_device *dev,
    _mesa_hash_table_insert(dev->apple9_variants.ht, v, v);
    simple_mtx_unlock(&dev->apple9_variants.lock);
 
+compile:;
    struct vk_shader_compile_info infos[HK_APPLE9_GFX_STAGES];
    unsigned stages[HK_APPLE9_GFX_STAGES];
    unsigned count = 0;
@@ -6059,8 +6078,8 @@ hk_apple9_resolve_graphics(struct hk_device *dev,
          ralloc_free(infos[i].nir);
    }
 
-   /* A failed compile stays in the table with its result, so later draws
-    * with the same state fail at once instead of recompiling. */
+   /* Keep permanent failures, but allow a later caller to retry an allocation
+    * failure once temporary memory pressure has passed. */
    if (result != VK_SUCCESS) {
       for (unsigned i = 0; i < count; ++i) {
          if (compiled[i])
@@ -6073,8 +6092,10 @@ hk_apple9_resolve_graphics(struct hk_device *dev,
       }
       memcpy(out, v->shaders, sizeof(v->shaders));
    }
+   simple_mtx_lock(&dev->apple9_variants.lock);
    v->result = result;
    util_queue_fence_signal(&v->ready);
+   simple_mtx_unlock(&dev->apple9_variants.lock);
    return result;
 }
 

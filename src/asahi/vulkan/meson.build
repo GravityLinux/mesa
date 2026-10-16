@@ -138,7 +138,7 @@ libvulkan_asahi = shared_library(
 )
 
 if with_tests
-  foreach t : ['hk-index-aperture']
+  foreach t : ['hk-index-aperture', 'hk-variant-retry']
     test(t, executable(t, 'tests/' + t + '.c',
       include_directories : [inc_gallium, inc_gallium_aux, inc_include,
                              inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
