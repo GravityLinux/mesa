@@ -1372,34 +1372,6 @@ hk_init_heap(const void *data)
    };
 }
 
-static void
-hk_init_heap_alt(const void *data)
-{
-   struct hk_cmd_buffer *cmd = (struct hk_cmd_buffer *)data;
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
-
-   perf_debug(cmd, "Allocating second heap");
-   dev->heap_alt = agx_bo_create(&dev->dev, dev->heap->size, 0, dev->heap->flags,
-                                 "Geometry heap (alternate)");
-}
-
-/* Keep the chip-specific policy selection and cached overrides independent.
- * Both policies remain opt-in pending performance validation. */
-DEBUG_GET_ONCE_BOOL_OPTION(pregfx_overlap_g16, "HK_APPLE9_PREGFX_OVERLAP", false)
-DEBUG_GET_ONCE_BOOL_OPTION(pregfx_overlap_other, "HK_APPLE9_PREGFX_OVERLAP", false)
-
-/* Keep overlap opt-in until its benefit with the normal submission policy
- * is demonstrated. The environment overrides either device policy. Opting in
- * costs a second 128 MiB heap (USC aperture), allocated on first use by an odd
- * heap-using render. */
-bool
-hk_pregfx_overlap(const struct hk_device *dev)
-{
-   return dev->dev.chip == AGX_CHIP_G16G
-             ? debug_get_option_pregfx_overlap_g16()
-             : debug_get_option_pregfx_overlap_other();
-}
-
 uint64_t
 hk_heap(struct hk_cmd_buffer *cmd)
 {
@@ -1409,51 +1381,6 @@ hk_heap(struct hk_cmd_buffer *cmd)
    if (!dev->heap) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       return 0;
-   }
-
-   /* Pre-gfx overlap: each render gets its own heap descriptor. Reset its
-    * allocation cursor before its first use on every execution, including
-    * command-buffer resubmissions. Consecutive heap-using renders alternate
-    * between two heaps, costing a second 128 MiB on first alternate use.
-    */
-   if (hk_pregfx_overlap(dev)) {
-      if (!cmd->uses_heap) {
-         struct agx_bo *bo = dev->heap;
-         const unsigned h = cmd->heap_renders & 1;
-         if (h) {
-            util_call_once_data(&dev->heap_alt_init_once, hk_init_heap_alt, cmd);
-            bo = dev->heap_alt;
-         }
-         if (!bo) {
-            vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
-            return 0;
-         }
-         cmd->heap_renders++;
-
-         /* The render's pre-gfx work waits for the previous user of this
-          * heap, see hk_cmd_pregfx_precise. */
-         struct hk_cs *gfx = cmd->current_cs.gfx;
-         if (gfx) {
-            gfx->heap_prev1 = cmd->heap_last1[h];
-            cmd->heap_last1[h] = gfx->sync_id + 1;
-         } else {
-            cmd->heap_last1[h] = 0;
-         }
-         cmd->heap_bo = bo;
-         struct poly_heap heap = {.base = bo->va->addr, .size = bo->size};
-         cmd->heap_desc = hk_pool_upload(cmd, &heap, sizeof(heap), 16);
-         cmd->uses_heap = true;
-
-         /* The pre-gfx stream already waits for this heap's previous user.
-          * Reset there, before any tessellation/geometry allocation, so the
-          * next render can still overlap the previous render on the other
-          * heap. Without a render, ordinary compute orders conservatively.
-          */
-         libagx_write_u32(cmd, agx_1d(1),
-                         AGX_BARRIER_ALL | (gfx ? AGX_PREGFX : 0),
-                         cmd->heap_desc + offsetof(struct poly_heap, bottom), 0);
-      }
-      return cmd->heap_desc;
    }
 
    /* We need to free all allocations after each command buffer execution */
@@ -1470,15 +1397,10 @@ hk_heap(struct hk_cmd_buffer *cmd)
       cmd->uses_heap = true;
    }
 
-   cmd->heap_bo = dev->heap;
    return dev->rodata.heap;
 }
 
-/* GPU-generated index/coordinate offsets are relative to the BO in the
- * render's heap descriptor, including odd renders using the alternate heap.
- * Keep this selection at recording time: later renders change cmd->heap_bo,
- * but already recorded draws and uniforms retain their own address values.
- */
+/* GPU-generated index/coordinate offsets use the single geometry heap. */
 static struct agx_bo *
 hk_geometry_heap_bo(struct hk_cmd_buffer *cmd)
 {
@@ -1486,8 +1408,7 @@ hk_geometry_heap_bo(struct hk_cmd_buffer *cmd)
     * submitted. Keep address construction safe on those error paths. */
    if (!hk_heap(cmd))
       return NULL;
-   assert(cmd->heap_bo);
-   return cmd->heap_bo;
+   return hk_cmd_buffer_device(cmd)->heap;
 }
 
 static struct agx_draw

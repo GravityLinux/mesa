@@ -6,47 +6,9 @@
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "%s:%u: %s\n", \
                           __FILE__, __LINE__, #c); return 1; } } while (0)
 
-static int
-check_overlap_default(const char *option, bool reverse)
-{
-   if (option)
-      setenv("HK_APPLE9_PREGFX_OVERLAP", option, 1);
-   else
-      unsetenv("HK_APPLE9_PREGFX_OVERLAP");
-   struct hk_device *dev = calloc(1, sizeof(*dev));
-   CHECK(dev);
-   const enum agx_chip chips[] = {AGX_CHIP_G13G, AGX_CHIP_G16G, AGX_CHIP_G14X,
-                                  AGX_CHIP_G17P, AGX_CHIP_G13X, AGX_CHIP_G16G};
-   for (unsigned i = 0; i < ARRAY_SIZE(chips); ++i) {
-      enum agx_chip chip = chips[reverse ? ARRAY_SIZE(chips) - 1 - i : i];
-      dev->dev.chip = chip;
-      bool expected = option && !strcmp(option, "1");
-      CHECK(hk_pregfx_overlap(dev) == expected);
-   }
-   free(dev);
-   return 0;
-}
-
 int
 main(void)
 {
-   /* Fresh processes isolate the cached environment option. Each checks
-    * mixed-generation devices in both orders, including explicit overrides.
-    */
-   const char *options[] = {NULL, "0", "1", "invalid"};
-   for (unsigned i = 0; i < ARRAY_SIZE(options); ++i) {
-      for (unsigned reverse = 0; reverse < 2; ++reverse) {
-         pid_t child = fork();
-         CHECK(child >= 0);
-         if (child == 0)
-            _exit(check_overlap_default(options[i], reverse));
-         int status;
-         CHECK(waitpid(child, &status, 0) == child);
-         CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
-      }
-   }
-   puts("pregfx default: all chips off; 0/1 override; mixed devices OK");
-   setenv("HK_APPLE9_PREGFX_OVERLAP", "1", 1);
    struct hk_device *dev = calloc(1, sizeof(*dev));
    struct hk_cmd_buffer *cmd = calloc(1, sizeof(*cmd));
    uint8_t *pool = calloc(1, HK_CMD_BO_SIZE);
@@ -85,12 +47,12 @@ main(void)
    cmd->merge_cs = NULL;
    struct hk_cs *pre = hk_cmd_buffer_get_cs_general(
       cmd, &cmd->current_cs.pre_gfx, true, HK_SYNC_PRE_RASTER);
-   CHECK(pre && pre->pregfx_precise && !cmd->sync_fallback);
+   CHECK(pre && cmd->sync_fallback);
    CHECK(util_dynarray_num_elements(&cmd->sync_events, struct hk_sync_event) == 3);
    ev = cmd->sync_events.data;
    CHECK(ev[0].stream == HK_SYNC_NONE);
-   CHECK(ev[1].stream == pre->sync_id);
-   CHECK(ev[2].stream == gfx.sync_id && ev[2].after1 == pre->sync_id + 1);
+   CHECK(ev[1].stream == gfx.sync_id);
+   CHECK(ev[2].stream == pre->sync_id);
    CHECK(cmd->merge_event == 1);
    CHECK(cmd->control_streams.next == &pre->node && pre->node.next == &gfx.node);
 
@@ -102,18 +64,18 @@ main(void)
    };
    for (unsigned i = 0; i < ARRAY_SIZE(streams); ++i)
       streams[i].wait = streams[i].wait_tiling = hk_sync_empty();
-   CHECK(hk_sync_resolve(&state, ev, 3, cmd->sync_remap.data, streams, 2, false));
+   /* Helpers reordered around rendering request the normal full-ordering
+    * fallback at recording time. Resolve their physical submission order. */
+   CHECK(!hk_sync_resolve(&state, ev, 3, cmd->sync_remap.data, streams, 2,
+                          cmd->sync_fallback));
    CHECK(streams[0].wait_tiling.engine[HK_SYNC_CDM] == 1);
+   CHECK(streams[1].wait.engine[HK_SYNC_RENDER] == 0);
 
-   /* A merge insertion boundary beyond the insertion point must move along
-    * with its event. Exercise the defensive boundary update independently.
-    */
-   util_dynarray_clear(&cmd->sync_events);
-   hk_cmd_sync_work(cmd, &gfx, HK_SYNC_GRAPHICS);
-   cmd->merge_event = 1;
-   struct hk_cs later = {.cmd = cmd, .type = HK_CS_CDM, .sync_id = 2};
-   hk_cmd_pregfx_precise(cmd, &later);
-   CHECK(cmd->merge_event == 2 && later.pregfx_precise);
+   /* A later request still records the additional scope on the same helper. */
+   CHECK(hk_cmd_buffer_get_cs_general(cmd, &cmd->current_cs.pre_gfx, true,
+                                     HK_SYNC_DRAW_INDIRECT) == pre);
+   CHECK(pre->sync_stages & HK_SYNC_DRAW_INDIRECT);
+   CHECK(cmd->sync_fallback && cmd->merge_event == 1);
 
    free(pre);
    util_dynarray_fini(&cmd->sync_events);

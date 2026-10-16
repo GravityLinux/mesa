@@ -138,14 +138,6 @@ struct hk_device {
     */
    struct agx_bo *heap;
    util_once_flag heap_init_once;
-   /* Pre-gfx overlap uses a second 128 MiB heap, allocated lazily. Consecutive
-    * heap-using renders alternate between the two, so a render's pre-gfx work
-    * need not wait for the previous render's tiling to stop reading its
-    * allocations. This defaults on for G16 only; HK_APPLE9_PREGFX_OVERLAP
-    * overrides the generation's default.
-    */
-   struct agx_bo *heap_alt;
-   util_once_flag heap_alt_init_once;
    struct agx_bo *mesh_heap;
    util_once_flag mesh_heap_init_once;
 
