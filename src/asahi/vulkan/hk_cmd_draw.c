@@ -2234,8 +2234,15 @@ hk_apple9_needs_index_copy(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    if (!draw.indexed || draw.index_buffer_range_B == 0)
       return false;
 
+   /* Check the whole binding, not just its base: a direct draw's firstIndex
+    * (or an indirect draw's GPU-provided firstIndex) may otherwise move the
+    * hardware pointer past the end of the USC aperture. Subtraction avoids
+    * wrapping the end of a high-VA binding.
+    */
    if (draw.index_buffer < dev->dev.shader_base ||
-       draw.index_buffer >= dev->dev.shader_base + (1ull << 32))
+       draw.index_buffer - dev->dev.shader_base >= (1ull << 32) ||
+       draw.index_buffer_range_B >
+          (1ull << 32) - (draw.index_buffer - dev->dev.shader_base))
       return true;
 
    if (!((draw.index_buffer + draw.index_buffer_range_B) & 3))
