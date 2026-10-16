@@ -6,6 +6,30 @@
 #include "agx_pack.h"
 #include "util/format/u_format.h"
 
+TEST(Border, AstcLdrChannels)
+{
+   const uint32_t rgba[] = {fui(0.125f), fui(0.25f), fui(0.5f), fui(1.0f)};
+
+   for (unsigned f = PIPE_FORMAT_NONE + 1; f < PIPE_FORMAT_COUNT; ++f) {
+      enum pipe_format format = (enum pipe_format)f;
+      const struct util_format_description *desc =
+         util_format_description(format);
+      if (!desc || desc->layout != UTIL_FORMAT_LAYOUT_ASTC ||
+          util_format_is_astc_hdr(format))
+         continue;
+
+      SCOPED_TRACE(desc->name);
+      struct agx_border_packed packed;
+      agx_pack_border(&packed, rgba, format);
+      agx_unpack(stderr, &packed, BORDER, border);
+      EXPECT_EQ(border.channel_0, 512u);
+      EXPECT_EQ(border.channel_1, 1024u);
+      EXPECT_EQ(border.channel_2, 2048u);
+      EXPECT_EQ(border.channel_3,
+                desc->colorspace == UTIL_FORMAT_COLORSPACE_SRGB ? 255u : 4095u);
+   }
+}
+
 TEST(Border, FormatChannelOrder)
 {
    /* Distinct, exactly representable UNORM4 values distinguish a four-cycle
