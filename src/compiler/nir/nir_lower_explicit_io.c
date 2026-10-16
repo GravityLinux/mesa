@@ -680,6 +680,7 @@ build_explicit_io_load(nir_builder *b, nir_intrinsic_instr *intrin,
           * passes see field offsets as offset + constant.
           */
          if (addr_format == nir_address_format_64bit_global_32bit_offset &&
+             b->shader->options->ssbo_readonly_as_constant_offset &&
              (nir_intrinsic_access(intrin) &
               (ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER)) ==
                 (ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER))
