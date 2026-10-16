@@ -280,15 +280,19 @@ hk_apple9_upload_textures(struct hk_cmd_buffer *cmd,
           &gfx->apple9_sample_positions, sizeof(uint32_t));
    uint32_t fan = first_fan;
    memcpy((uint8_t *)info + AGX_APPLE9_FIRST_FAN_OFFSET, &fan, sizeof(fan));
-   gfx->apple9_sysvals = hk_pool_upload(cmd, info, sizeof(info), 64);
+   *sysvals = hk_pool_upload(cmd, info, sizeof(info), 64);
+   if (!*sysvals)
+      return false;
+
+   /* Publish the cache and consume its inputs only after the upload succeeds. */
+   gfx->apple9_sysvals = *sysvals;
    gfx->apple9_sysvals_positions = gfx->apple9_sample_positions;
    gfx->apple9_sysvals_first_fan = first_fan;
    /* Nothing else consumes these bits on G16, whose draws do not clear the
     * dynamic state's dirty set. */
    BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_CB_BLEND_CONSTANTS);
    BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES);
-   *sysvals = gfx->apple9_sysvals;
-   return *sysvals != 0;
+   return true;
 }
 
 void
