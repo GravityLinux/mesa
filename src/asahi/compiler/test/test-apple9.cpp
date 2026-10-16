@@ -13979,3 +13979,35 @@ TEST(Apple9Compiler, NativeImageStoreUsesNormalDescriptorABI)
       ralloc_free(b.shader);
    }
 }
+
+TEST(Apple9Compiler, ReadonlySsboConstantOffsetRequiresCompilerOptIn)
+{
+   EXPECT_TRUE(agx_nir_options.ssbo_readonly_as_constant_offset);
+   for (bool enabled : {false, true}) {
+      for (unsigned access : {0u, unsigned(ACCESS_NON_WRITEABLE),
+                              unsigned(ACCESS_CAN_REORDER),
+                              unsigned(ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER)}) {
+         nir_shader_compiler_options options = {};
+         options.ssbo_readonly_as_constant_offset = enabled;
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_COMPUTE, &options, "readonly_ssbo_option");
+         nir_deref_instr *deref = nir_build_deref_cast(
+            &b, nir_imm_ivec4(&b, 0x1000, 0, 64, 16), nir_var_mem_ssbo,
+            glsl_uint_type(), 4);
+         nir_def *value = nir_load_deref_with_access(
+            &b, deref, (enum gl_access_qualifier)access);
+         nir_intrinsic_instr *store = nir_store_ssbo(
+            &b, value, nir_imm_int(&b, 0), nir_imm_int(&b, 0), .align_mul = 4);
+         ASSERT_TRUE(nir_lower_explicit_io(
+            b.shader, nir_var_mem_ssbo,
+            nir_address_format_64bit_global_32bit_offset));
+         nir_intrinsic_instr *load = nir_instr_as_intrinsic(
+            nir_def_instr(store->src[0].ssa));
+         bool constant = enabled &&
+            access == unsigned(ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER);
+         EXPECT_EQ(load->intrinsic, constant ? nir_intrinsic_load_global_constant_offset
+                                            : nir_intrinsic_load_global);
+         ralloc_free(b.shader);
+      }
+   }
+}

@@ -740,6 +740,12 @@ typedef struct nir_shader_compiler_options {
    /** Backend supports f2e4m3fn_satfn */
    bool has_f2e4m3fn_satfn;
 
+   /** Keep read-only, reorderable SSBO loads as base + 32-bit offset
+    * constant loads when lowering 64bit_global_32bit_offset addresses.
+    * Other backends keep the ordinary SSBO/global load form by default.
+    */
+   bool ssbo_readonly_as_constant_offset;
+
    /** Backend supports load_global_bounded intrinsics. */
    bool has_load_global_bounded;
 
