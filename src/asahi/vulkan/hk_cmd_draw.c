@@ -822,7 +822,8 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
          bytes += 4 * agx_apple9_color_words(formats[rt]);
          render->tilebuffer.spilled[rt] = false;
       }
-      render->tilebuffer.sample_size_B = ALIGN_POT(bytes, 8);
+      render->tilebuffer.sample_size_B = ALIGN_POT(
+         agx_apple9_tile_sample_bytes(bytes, render->tilebuffer.nr_samples), 8);
       render->tilebuffer.tile_size = render->tilebuffer.nr_samples == 4
                                        ? 32 * 16 : 32 * 32;
    }

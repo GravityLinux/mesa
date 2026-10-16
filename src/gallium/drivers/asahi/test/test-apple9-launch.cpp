@@ -241,6 +241,25 @@ TEST(Apple9Launcher, TileModesDoNotChangeEntryOrResources)
    }
 }
 
+/* Multisampled fragment launches without colour targets keep a nonempty
+ * per-sample tile allocation, as agx_build_tilebuffer_layout does. */
+TEST(Apple9Launcher, MultisampledZeroTargetLaunchesKeepTileAllocation)
+{
+   auto p = parameters();
+   std::array<uint8_t, 256> out;
+   /* agx_apple9_tile_sample_bytes(0, samples): 0 at 1x, 8 when multisampled. */
+   struct {
+      unsigned samples, bytes, low;
+   } cases[] = {{1, 0, 0x41}, {2, 8, 0x42}, {4, 8, 2}};
+   for (auto c : cases) {
+      p.samples = c.samples;
+      p.tile_bytes = c.bytes;
+      ASSERT_TRUE(agx_apple9_launch_build(out.data(), out.size(),
+                                          AGX_APPLE9_LAUNCH_FRAGMENT, &p));
+      EXPECT_EQ(out[68 - 7], c.low);
+   }
+}
+
 TEST(Apple9Launcher, PreambleTransferFollowsRootArguments)
 {
    auto p = parameters();

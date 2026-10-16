@@ -4337,7 +4337,8 @@ agx_batch_init_state(struct agx_batch *batch)
          bytes += 4 * agx_apple9_color_words(formats[rt]);
          tib->spilled[rt] = false;
       }
-      tib->sample_size_B = ALIGN_POT(bytes, 8);
+      tib->sample_size_B =
+         ALIGN_POT(agx_apple9_tile_sample_bytes(bytes, tib->nr_samples), 8);
       tib->tile_size = tib->nr_samples == 4 ? 32 * 16 : 32 * 32;
    }
 

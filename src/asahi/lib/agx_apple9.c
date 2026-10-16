@@ -1486,7 +1486,8 @@ agx_apple9_prepare_draw_alloc(
       if (!agx_apple9_prepare_graphics_stage(
              dev, usc_allocator, usc_alloc, shader, stage != 0, table,
              draw->texture_table[stage], draw->sampler_table[stage],
-             tile_bytes, samples, &draw->launch[stage], cached_alloc))
+             agx_apple9_tile_sample_bytes(tile_bytes, samples), samples,
+             &draw->launch[stage], cached_alloc))
          return false;
    }
    draw->provoking_vertex = apple9_provoking_vertex(pipeline->primitive,
