@@ -124,6 +124,8 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
    if (!mem)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
+   simple_mtx_init(&mem->index_va_lock, mtx_plain);
+   mem->index_va = NULL;
    mem->map = NULL;
    if (fd_info && fd_info->handleType) {
       assert(
@@ -246,6 +248,7 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
    return VK_SUCCESS;
 
 fail_alloc:
+   simple_mtx_destroy(&mem->index_va_lock);
    vk_device_memory_destroy(&dev->vk, pAllocator, &mem->vk);
    return result;
 }
@@ -271,9 +274,68 @@ hk_FreeMemory(VkDevice device, VkDeviceMemory _mem,
    if (mem->map)
       munmap(mem->map, mem->map_size);
 
+   hk_memory_free_index_va(dev, mem);
+   simple_mtx_destroy(&mem->index_va_lock);
    agx_bo_unreference(&dev->dev, mem->bo);
 
    vk_device_memory_destroy(&dev->vk, pAllocator, &mem->vk);
+}
+
+uint64_t
+hk_memory_index_address(struct hk_device *dev, struct hk_device_memory *mem)
+{
+   if (mem->bo->va->flags & AGX_VA_USC)
+      return mem->bo->va->addr;
+
+   if (mem->vk.size > HK_INDEX_ALIAS_ALLOCATION_MAX)
+      return 0;
+
+   simple_mtx_lock(&mem->index_va_lock);
+   if (!mem->index_va) {
+      uint64_t size = align64(mem->vk.size, AIL_PAGESIZE);
+      uint64_t charge = size + dev->dev.guard_size;
+      uint64_t used = p_atomic_read(&dev->apple9_index_alias_bytes);
+      for (;;) {
+         if (charge > HK_INDEX_ALIAS_BUDGET ||
+             used > HK_INDEX_ALIAS_BUDGET - charge) {
+            simple_mtx_unlock(&mem->index_va_lock);
+            return 0;
+         }
+         uint64_t previous = p_atomic_cmpxchg(&dev->apple9_index_alias_bytes,
+                                             used, used + charge);
+         if (previous == used)
+            break;
+         used = previous;
+      }
+      struct agx_va *va =
+         agx_va_alloc(&dev->dev, size, AIL_PAGESIZE, AGX_VA_USC, 0);
+      if (va) {
+         if (agx_bo_bind(&dev->dev, mem->bo, va->addr, size, 0,
+                         DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE) == 0)
+            mem->index_va = va;
+         else
+            agx_va_free(&dev->dev, va, true);
+      }
+      if (!mem->index_va)
+         p_atomic_add(&dev->apple9_index_alias_bytes, -((int64_t)charge));
+   }
+   uint64_t addr = mem->index_va ? mem->index_va->addr : 0;
+   simple_mtx_unlock(&mem->index_va_lock);
+
+   /* The caller uses a buffer-sized alias when sharing is unavailable. */
+   return addr;
+}
+
+void
+hk_memory_free_index_va(struct hk_device *dev, struct hk_device_memory *mem)
+{
+   if (!mem->index_va)
+      return;
+
+   uint64_t charge = mem->index_va->size_B;
+   agx_va_free(&dev->dev, mem->index_va, true);
+   p_atomic_add(&dev->apple9_index_alias_bytes, -((int64_t)charge));
+   mem->index_va = NULL;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
