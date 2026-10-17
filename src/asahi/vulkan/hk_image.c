@@ -5,9 +5,8 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_image.h"
-#include <sys/mman.h>
-#include "asahi/lib/agx_apple9.h"
 #include "asahi/layout/layout.h"
+#include "asahi/lib/agx_apple9.h"
 #include "drm-uapi/drm_fourcc.h"
 #include "util/bitscan.h"
 #include "util/format/u_format.h"
@@ -15,6 +14,7 @@
 #include "util/macros.h"
 #include "util/u_math.h"
 #include "vulkan/vulkan_core.h"
+#include <sys/mman.h>
 
 #include "agx_bo.h"
 #include "hk_buffer.h"
@@ -1584,7 +1584,8 @@ hk_image_plane_unmap(struct hk_image_plane_map *map)
 
 static void
 hk_copy_memory_to_image(struct hk_device *device, struct hk_image *dst_image,
-                        const VkMemoryToImageCopyEXT *info, bool copy_memcpy, void *map)
+                        const VkMemoryToImageCopyEXT *info, bool copy_memcpy,
+                        void *map)
 {
    unsigned plane =
       hk_plane_index(dst_image->vk.format, info->imageSubresource.aspectMask);
@@ -1652,7 +1653,8 @@ hk_CopyMemoryToImageEXT(VkDevice _device,
       unsigned plane = hk_plane_index(
          dst_image->vk.format, info->pRegions[i].imageSubresource.aspectMask);
       struct hk_image_plane_map map = {0};
-      VkResult result = hk_image_plane_map(device, &dst_image->planes[plane], &map);
+      VkResult result =
+         hk_image_plane_map(device, &dst_image->planes[plane], &map);
       if (result != VK_SUCCESS)
          return result;
 
@@ -1667,7 +1669,8 @@ hk_CopyMemoryToImageEXT(VkDevice _device,
 
 static void
 hk_copy_image_to_memory(struct hk_device *device, struct hk_image *src_image,
-                        const VkImageToMemoryCopyEXT *info, bool copy_memcpy, const void *map)
+                        const VkImageToMemoryCopyEXT *info, bool copy_memcpy,
+                        const void *map)
 {
    unsigned plane =
       hk_plane_index(src_image->vk.format, info->imageSubresource.aspectMask);
@@ -1806,8 +1809,8 @@ hk_copy_image_to_image_cpu(struct hk_device *device, struct hk_image *src_image,
       dst_layout, info->dstSubresource.mipLevel);
 
    struct hk_image_plane_map src_map = {0}, dst_map = {0};
-   VkResult result = hk_image_plane_map(device, &src_image->planes[src_plane],
-                                       &src_map);
+   VkResult result =
+      hk_image_plane_map(device, &src_image->planes[src_plane], &src_map);
    if (result != VK_SUCCESS)
       return result;
 
