@@ -83,6 +83,8 @@ if with_tests
         'tests/test-apple9-launch-template.cpp',
         'tests/test-tilebuffer.cpp',
         'tests/test-primitive-count.cpp',
+        'tests/test-poly-indirect-size.cpp',
+        'tests/poly-indirect-size.c',
       ),
       c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',

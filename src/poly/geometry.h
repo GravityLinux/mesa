@@ -387,6 +387,82 @@ poly_tcs_in_size(uint32_t vertices_in_patch, uint64_t crosslane_vs_out_mask)
 }
 
 /*
+ * Indirect draws allocate their software-stage buffers from the heap on the
+ * GPU, sized from arbitrary 32-bit draw counts. Products of those counts wrap
+ * in 32-bit arithmetic, which would allocate a small block that the vertex
+ * shader then writes past. These check, in 64-bit arithmetic, that every
+ * allocation of the indirect setup fits in limit_B heap bytes. A draw that
+ * does not fit cannot be executed and is dropped by its setup kernel.
+ */
+static inline bool
+poly_gs_indirect_fits(enum mesa_prim prim, enum poly_gs_shape shape,
+                      uint32_t max_indices, bool prefix_sum,
+                      uint32_t count_stride_B, uint32_t vertex_count,
+                      uint32_t instance_count, uint64_t vs_outputs,
+                      uint32_t limit_B)
+{
+   uint64_t vertex_B = util_bitcount64(vs_outputs) * 16;
+   uint64_t vertices = (uint64_t)vertex_count * instance_count;
+
+   if (vertex_B && vertices > limit_B / vertex_B)
+      return false;
+
+   uint64_t total_B = vertices * vertex_B;
+   bool counts = prefix_sum && count_stride_B;
+   bool indices = shape == POLY_GS_SHAPE_DYNAMIC_INDEXED && max_indices;
+
+   if (counts || indices) {
+      /* u_decomposed_prims_for_vertices takes a signed vertex count. */
+      if (vertex_count > INT32_MAX)
+         return false;
+
+      uint64_t prims =
+         (uint64_t)u_decomposed_prims_for_vertices(prim, vertex_count) *
+         instance_count;
+
+      if (counts) {
+         if (prims > limit_B / count_stride_B)
+            return false;
+
+         total_B += prims * count_stride_B;
+      }
+
+      if (indices) {
+         uint64_t prim_B = (uint64_t)max_indices * 4;
+
+         if (prims > limit_B / prim_B)
+            return false;
+
+         total_B += prims * prim_B;
+      }
+   }
+
+   return total_B <= limit_B;
+}
+
+static inline bool
+poly_tess_indirect_fits(uint32_t vertex_count, uint32_t instance_count,
+                        uint32_t input_patch_size, uint32_t tcs_stride_el,
+                        uint64_t vs_outputs, uint32_t limit_B)
+{
+   uint64_t vertex_B = util_bitcount64(vs_outputs) * 16;
+   uint64_t vertices = (uint64_t)vertex_count * instance_count;
+
+   if (vertex_B && vertices > limit_B / vertex_B)
+      return false;
+
+   /* TCS outputs, patch coordinates and counts, per unrolled patch. */
+   uint64_t patch_B = (uint64_t)tcs_stride_el * 4 + 8;
+   uint64_t patches =
+      (uint64_t)(vertex_count / input_patch_size) * instance_count;
+
+   if (patches > limit_B / patch_B)
+      return false;
+
+   return vertices * vertex_B + patches * patch_B <= limit_B;
+}
+
+/*
  * TCS out buffer layout, per-patch:
  *
  *    float tess_level_outer[4];
@@ -623,6 +699,16 @@ poly_gs_setup_indirect(uint64_t index_buffer, constant uint *draw,
    /* Determine the (primitives, instances) grid size. */
    uint vertex_count = draw[0];
    uint instance_count = draw[1];
+
+   /* A draw whose buffers cannot be allocated is dropped: with zero counts,
+    * every grid and the rasterization draw below are empty.
+    */
+   if (!poly_gs_indirect_fits(prim, shape, max_indices, is_prefix_summing,
+                              p->count_buffer_stride, vertex_count,
+                              instance_count, vs_outputs, heap->size)) {
+      vertex_count = 0;
+      instance_count = 0;
+   }
 
    poly_vertex_params_set_draw(vp, vertex_count, instance_count);
    poly_geometry_params_set_draw(p, prim, shape, max_indices,

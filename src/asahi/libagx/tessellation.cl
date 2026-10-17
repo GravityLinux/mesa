@@ -19,6 +19,17 @@ libagx_tess_setup_indirect(
    global uint32_t *tcs_statistic)
 {
    uint count = indirect[0], instance_count = indirect[1];
+
+   /* A draw whose buffers cannot be allocated is dropped: with zero counts,
+    * every grid below is empty.
+    */
+   if (!poly_tess_indirect_fits(count, instance_count, p->input_patch_size,
+                                p->tcs_stride_el, vertex_outputs,
+                                p->heap->size)) {
+      count = 0;
+      instance_count = 0;
+   }
+
    unsigned in_patches = count / p->input_patch_size;
 
    /* TCS invocation counter increments once per-patch */
