@@ -4193,7 +4193,11 @@ tc_draw_indirect(struct pipe_context *_pipe, const struct pipe_draw_info *info,
       tc_add_to_buffer_list(next, indirect->count_from_stream_output->buffer);
 
    memcpy(&p->indirect, indirect, sizeof(*indirect));
-   p->draw.start = draws[0].start;
+   /* Copy the whole draw: drivers without native stream-output-count draws
+    * read draws[0].count for count_from_stream_output, which must not be
+    * whatever an earlier call left in the batch.
+    */
+   p->draw = draws[0];
 }
 
 /* Dispatch table for tc_draw_vbo:
