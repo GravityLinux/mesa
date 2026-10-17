@@ -1544,10 +1544,10 @@ hk_plane_index(VkFormat format, VkImageAspectFlags aspect_mask)
    }
 }
 
-/* Internal host-copy pointers do not escape to the application. Do not use
- * agx_bo_map_range: that revokes the shim CPU epoch for escaping API maps.
- * Keep the existing cached mapping policy on 64-bit, but do not retain image
- * mappings across operations in the constrained 32-bit CPU address space.
+/* Keep the cached mapping policy on 64-bit, but do not retain image mappings
+ * across operations in the constrained 32-bit CPU address space. Host copies
+ * do not track shim CPU-write generations, so preserve agx_bo_map's conservative
+ * epoch revocation even though these operation-owned pointers do not escape.
  */
 struct hk_image_plane_map {
    void *base;
@@ -1567,7 +1567,7 @@ hk_image_plane_map(struct hk_device *dev, const struct hk_image_plane *plane,
          return vk_error(dev, VK_ERROR_MEMORY_MAP_FAILED);
 
       map->size = bo->size;
-      map->base = bo->dev->ops.bo_mmap(bo->dev, bo, NULL, map->size);
+      map->base = agx_bo_map_range(bo, NULL, map->size);
       if (map->base)
          map->ptr = (char *)map->base + plane->offset_B;
    }
