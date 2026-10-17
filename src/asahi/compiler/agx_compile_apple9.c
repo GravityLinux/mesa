@@ -1102,8 +1102,11 @@ struct apple9_loop_context {
    unsigned mask_depth;
 };
 
-/* Varying exports of the current block, by exported value. */
-#define APPLE9_EXPORT_MEMO 16
+/* Varying exports of the current block, by exported value. A legal shader
+ * may first write clip distances after all other outputs. Remember every
+ * publication that can fit the bank so rasterizer copies can always reuse it.
+ */
+#define APPLE9_EXPORT_MEMO AGX_APPLE9_PUBLICATION_COUNT
 struct apple9_export_memo {
    uint32_t value, export;
    bool raw;
