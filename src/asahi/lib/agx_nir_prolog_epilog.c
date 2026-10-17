@@ -69,8 +69,8 @@ line_stipple_ndc(nir_builder *b, nir_def *pos)
 /* Window-space positions recovered from NDC carry float error. Vertices are
  * snapped to a 1/256-pixel grid, so rounding to it makes a distance between
  * pixel centres an exact integer again instead of, say, 7.9999995. */
-static nir_def *
-line_stipple_snap(nir_builder *b, nir_def *x)
+nir_def *
+agx_nir_line_stipple_snap(nir_builder *b, nir_def *x)
 {
    return nir_fmul_imm(b, nir_fround_even(b, nir_fmul_imm(b, x, 256.0)),
                        1.0 / 256.0);
@@ -82,8 +82,8 @@ static nir_def *
 line_stipple_major(nir_builder *b, nir_def *ndc0, nir_def *ndc1, nir_def *scale,
                    nir_def *offset)
 {
-   nir_def *w0 = line_stipple_snap(b, nir_ffma(b, ndc0, scale, offset));
-   nir_def *w1 = line_stipple_snap(b, nir_ffma(b, ndc1, scale, offset));
+   nir_def *w0 = agx_nir_line_stipple_snap(b, nir_ffma(b, ndc0, scale, offset));
+   nir_def *w1 = agx_nir_line_stipple_snap(b, nir_ffma(b, ndc1, scale, offset));
    nir_def *d = nir_fabs(b, nir_fsub(b, w1, w0));
    return nir_fmax(b, nir_channel(b, d, 0), nir_channel(b, d, 1));
 }
@@ -211,7 +211,7 @@ agx_nir_lower_line_stipple_fs(nir_shader *fs)
 
    nir_def *scale = nir_trim_vector(b, nir_load_viewport_scale(b), 2);
    nir_def *offset = nir_trim_vector(b, nir_load_viewport_offset(b), 2);
-   nir_def *start = line_stipple_snap(
+   nir_def *start = agx_nir_line_stipple_snap(
       b, nir_ffma(b, nir_trim_vector(b, line, 2), scale, offset));
 
    nir_def *pixel = nir_fadd_imm(
@@ -221,16 +221,24 @@ agx_nir_lower_line_stipple_fs(nir_shader *fs)
    nir_def *along =
       nir_bcsel(b, x_major, nir_channel(b, dist, 0), nir_channel(b, dist, 1));
    nir_def *counter = nir_f2u32(b, nir_fadd(b, nir_channel(b, line, 2), along));
+   agx_nir_line_stipple_test(b, counter);
 
+   return nir_progress(true, b->impl, nir_metadata_control_flow);
+}
+
+/* Demote the fragment when the stipple pattern bit of its counter is clear.
+ * The pattern is the low half of the line stipple word, the factor the high.
+ */
+void
+agx_nir_line_stipple_test(nir_builder *b, nir_def *counter)
+{
    nir_def *word = nir_load_line_stipple_agx(b);
    nir_def *factor = nir_ushr_imm(b, word, 16);
    nir_def *index = nir_umod_imm(b, nir_udiv(b, counter, factor), 16);
    nir_def *bit = nir_ubitfield_extract(b, word, index, nir_imm_int(b, 1));
 
    nir_demote_if(b, nir_ieq_imm(b, bit, 0));
-   fs->info.fs.uses_discard = true;
-
-   return nir_progress(true, b->impl, nir_metadata_control_flow);
+   b->shader->info.fs.uses_discard = true;
 }
 
 static int

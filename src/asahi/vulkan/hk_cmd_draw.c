@@ -4691,6 +4691,7 @@ hk_apple9_resolve_shaders(struct hk_cmd_buffer *cmd)
       MESA_VK_DYNAMIC_CB_WRITE_MASKS,
       MESA_VK_DYNAMIC_CB_BLEND_ADVANCED,
       MESA_VK_DYNAMIC_ATTACHMENT_FEEDBACK_LOOP_ENABLE,
+      MESA_VK_DYNAMIC_RS_LINE_STIPPLE_ENABLE,
    };
    bool changed = !gfx->apple9_resolved.valid ||
                   gfx->apple9_resolved.render_gen != gfx->render_gen ||
@@ -4730,6 +4731,7 @@ hk_apple9_resolve_shaders(struct hk_cmd_buffer *cmd)
       .vi = dyn->vi,
       .ia = &dyn->ia,
       .vp = &dyn->vp,
+      .rs = &dyn->rs,
       .ms = &ms,
       .cb = &cb,
       .rp = &rp,

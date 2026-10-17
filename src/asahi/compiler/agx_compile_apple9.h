@@ -138,7 +138,12 @@ bool agx_compile_apple9_fragment(nir_shader *nir,
 #define AGX_APPLE9_COLOR_WRITE_ENABLE_OFFSET (AGX_APPLE9_FETCH_SAMPLER_INDEX_OFFSET + 4)
 /* Packed sample positions, in the PPP multisample control format. */
 #define AGX_APPLE9_SAMPLE_POSITIONS_OFFSET (AGX_APPLE9_FETCH_SAMPLER_INDEX_OFFSET + 8)
-#define AGX_APPLE9_RUNTIME_SYSVAL_SIZE (AGX_APPLE9_FETCH_SAMPLER_INDEX_OFFSET + 16)
+/* Per-viewport window transform for vertex-stage line stipple, one vec4
+ * (scale.xy, offset.xy) per viewport: window = ndc * scale + offset. */
+#define AGX_APPLE9_VIEWPORT_TABLE_OFFSET (AGX_APPLE9_FETCH_SAMPLER_INDEX_OFFSET + 16)
+#define AGX_APPLE9_VIEWPORT_TABLE_COUNT 16
+#define AGX_APPLE9_RUNTIME_SYSVAL_SIZE \
+   (AGX_APPLE9_VIEWPORT_TABLE_OFFSET + AGX_APPLE9_VIEWPORT_TABLE_COUNT * 16)
 enum agx_apple9_sampler_field {
    AGX_APPLE9_SAMP_WRAP_S, AGX_APPLE9_SAMP_WRAP_T, AGX_APPLE9_SAMP_WRAP_R,
    AGX_APPLE9_SAMP_MIN, AGX_APPLE9_SAMP_MAG, AGX_APPLE9_SAMP_MIP,

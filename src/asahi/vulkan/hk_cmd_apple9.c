@@ -555,9 +555,15 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
            gfx->apple9_fan_unrolled
          ? AGX_PRIMITIVE_TRIANGLES
          : primitives[dyn->ia.primitive_topology];
-   /* Emulated stages emit their primitives for the same provoking mode. */
+   /* Emulated stages emit their primitives for the same provoking mode.
+    * Stippled lines without them take the segment start from the first
+    * vertex, see hk_apple9_lower_line_stipple_fs. Nothing else observes the
+    * change: such fragment shaders read no flat varyings, layer or viewport
+    * index (primitive ID does not depend on the provoking vertex), and the
+    * root table keeps the API mode for transform feedback and adjacency. */
    pipeline.flatshade_first =
-      dyn->rs.provoking_vertex != VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT;
+      dyn->rs.provoking_vertex != VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT ||
+      (!emulated && shaders[1]->info.apple9_line_stipple_first);
    if (draw.indexed) {
       pipeline.index_size = agx_index_size_to_B(draw.index_size);
       uint64_t offset = agx_is_indirect(draw.b)
