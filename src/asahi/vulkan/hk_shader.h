@@ -169,6 +169,20 @@ nir_shader *hk_nir_mesh_rast(const nir_shader *mesh,
                              const struct hk_mesh_info *info,
                              const struct hk_per_vertex_copies *copies);
 
+/* Line stipple takes two generic varying slots of the last
+ * pre-rasterization stage: a flat start and counter, and a noperspective
+ * axis point. HK_APPLE9_OUTPUT_COMPONENTS matches the advertised output limit.
+ */
+#define HK_APPLE9_STIPPLE_COMPONENTS 5
+#define HK_APPLE9_OUTPUT_COMPONENTS (AGX_APPLE9_MAX_VARYING_COMPONENTS - 2)
+
+struct hk_apple9_stipple_slots {
+   unsigned start, axis;
+};
+
+struct hk_apple9_stipple_slots
+hk_apple9_line_stipple_slots(const nir_shader *last, const nir_shader *fs);
+
 struct hk_shader_info {
    uint8_t apple9_render_targets;
    /* Fragment shaders: stippled lines rasterize with the first vertex

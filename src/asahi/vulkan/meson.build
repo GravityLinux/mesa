@@ -138,7 +138,7 @@ libvulkan_asahi = shared_library(
 )
 
 if with_tests
-  foreach t : ['hk-index-aperture', 'hk-index-memory', 'hk-variant-retry', 'hk-texture-upload-failure']
+  foreach t : ['hk-index-aperture', 'hk-index-memory', 'hk-variant-retry', 'hk-texture-upload-failure', 'hk-line-stipple-limit']
     test(t, executable(t, 'tests/' + t + '.c',
       include_directories : [inc_gallium, inc_gallium_aux, inc_include,
                              inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
@@ -146,7 +146,8 @@ if with_tests
       link_args : {'hk-index-aperture': ['-Wl,--wrap=hk_dispatch_precomp'],
                    'hk-index-memory': ['-Wl,--wrap=agx_va_alloc', '-Wl,--wrap=agx_bo_bind', '-Wl,--wrap=agx_va_free'],
                    'hk-variant-retry': ['-Wl,--wrap=nir_deserialize', '-Wl,--wrap=__vk_errorf'],
-                   'hk-texture-upload-failure': ['-Wl,--wrap=hk_pool_upload']}[t]),
+                   'hk-texture-upload-failure': ['-Wl,--wrap=hk_pool_upload'],
+                   'hk-line-stipple-limit': []}[t]),
       suite : ['asahi', 'honeykrisp'])
   endforeach
   test(
