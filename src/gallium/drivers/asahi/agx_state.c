@@ -5371,11 +5371,18 @@ agx_needs_passthrough_gs(struct agx_context *ctx,
       return true;
    }
 
-   /* Apple9 carries the first-fan selector in its per-draw sysvals. */
-   if (!agx_apple9_direct_render_enabled(agx_device(ctx->base.screen)) &&
-       info->mode == MESA_PRIM_TRIANGLE_FAN &&
+   /* A first-provoking fan's flat inputs come from the second vertex of each
+    * fan triangle. The fragment shader's first-fan selector (Apple9 draw
+    * sysvals) only holds for unclipped triangles: the clipper re-forms the
+    * triangle and that vertex moves. Emit real triangles instead, except
+    * while capturing transform feedback on Apple9, whose captured vertex
+    * order must stay the fan's. */
+   if (info->mode == MESA_PRIM_TRIANGLE_FAN &&
        ctx->rast->base.flatshade_first &&
-       ctx->stage[MESA_SHADER_FRAGMENT].shader->info.inputs_flat_shaded) {
+       (ctx->rast->base.flatshade ||
+        ctx->stage[MESA_SHADER_FRAGMENT].shader->info.inputs_flat_shaded) &&
+       !(agx_apple9_direct_render_enabled(agx_device(ctx->base.screen)) &&
+         ctx->streamout.num_targets)) {
 
       perf_debug_ctx(ctx, "Using passthrough GS due to first tri fans");
       return true;
@@ -7153,7 +7160,8 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
             } else if (binding == AGX_APPLE9_GRAPHICS_SYSVAL_BINDING) {
                address = agx_apple9_upload_graphics_sysvals(
                   batch, &ctx->stage[shader], &rs->texture_mapping,
-                  info->mode == MESA_PRIM_TRIANGLE_FAN && ctx->rast->base.flatshade_first);
+                  info->mode == MESA_PRIM_TRIANGLE_FAN && !ctx->gs &&
+                     ctx->rast->base.flatshade_first);
             } else if (binding >= AGX_APPLE9_SYSVAL_UBO_BASE &&
                        binding < AGX_APPLE9_SYSVAL_UBO_BASE + AGX_NUM_SYSVAL_TABLES) {
                address = batch->uniforms.tables[binding - AGX_APPLE9_SYSVAL_UBO_BASE];
