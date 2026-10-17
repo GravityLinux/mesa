@@ -486,6 +486,10 @@ struct agx_batch {
 
    /* Attachment snapshot and immutable draw allocations live with the batch. */
    bool apple9_render_initialized;
+   /* Attachments the batch marked valid when its state was initialized
+    * (color targets 0-7, then depth, then separate stencil). A render that
+    * is never submitted restores them, see agx_batch_undo_render_writes. */
+   uint16_t attachments_were_valid;
    struct agx_pool apple9_context_pool;
    unsigned apple9_draw_count;
    struct agx_apple9_uniform_draw apple9_previous_draw;
@@ -1260,6 +1264,7 @@ struct agx_batch *agx_get_batch(struct agx_context *ctx);
 struct agx_batch *agx_get_compute_batch(struct agx_context *ctx);
 void agx_batch_reset(struct agx_context *ctx, struct agx_batch *batch);
 void agx_batch_discard(struct agx_context *ctx, struct agx_batch *batch);
+void agx_batch_undo_render_writes(struct agx_batch *batch);
 int agx_cleanup_batches(struct agx_context *ctx);
 
 void agx_batch_add_timestamp_query(struct agx_batch *batch,
