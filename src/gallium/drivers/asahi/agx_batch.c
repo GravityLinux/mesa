@@ -124,6 +124,7 @@ agx_batch_init(struct agx_context *ctx,
    } else {
       memset(batch->bo_list.set, 0, batch->bo_list.bit_count / 8);
    }
+   batch->bo_bytes = 0;
 
    batch->apple9_render_initialized = false;
    batch->attachments_were_valid = 0;

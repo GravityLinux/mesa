@@ -2901,6 +2901,15 @@ agx_screen_create(int fd, struct renderonly *ro,
    if (agx_screen->heap_memory_percent == OS_GPU_HEAP_SIZE_HEURISTIC)
       agx_screen->heap_memory_percent = 1.0f;
 
+   /* Like zink's oom flush, bound the memory one open batch can keep alive,
+    * e.g. a stream of upload-draw-delete textures that never flushes. An
+    * eighth of system memory leaves render passes with large working sets
+    * unsplit. */
+   uint64_t total_memory = 0;
+   if (!os_get_total_physical_memory(&total_memory))
+      total_memory = 8ull << 30;
+   agx_screen->batch_memory_budget = MAX2(total_memory / 8, 512ull << 20);
+
    screen->destroy = agx_destroy_screen;
    screen->get_screen_fd = agx_screen_get_fd;
    screen->get_name = agx_get_name;
