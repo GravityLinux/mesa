@@ -239,6 +239,46 @@ hk_apple9_compute_sysvals(struct hk_device *dev, void *out)
  * geometry, tessellation or mesh stage, or have stipple disabled, keep every
  * fragment: factor 1 with every pattern bit set.
  */
+/* Rasterization state the software polygon-point stage applies itself, see
+ * hk_apple9_polygon_point_gs. */
+static void
+hk_apple9_polygon_point_params(const struct hk_cmd_buffer *cmd,
+                               struct agx_apple9_polygon_point_params *p)
+{
+   const struct vk_dynamic_graphics_state *dyn =
+      &cmd->vk.dynamic_graphics_state;
+   memset(p, 0, sizeof(*p));
+   p->flags =
+      ((dyn->rs.cull_mode & VK_CULL_MODE_FRONT_BIT) ? AGX_APPLE9_PP_CULL_FRONT : 0) |
+      ((dyn->rs.cull_mode & VK_CULL_MODE_BACK_BIT) ? AGX_APPLE9_PP_CULL_BACK : 0) |
+      (dyn->rs.front_face == VK_FRONT_FACE_COUNTER_CLOCKWISE
+          ? AGX_APPLE9_PP_FRONT_CCW : 0) |
+      (vk_rasterization_state_depth_clip_enable(&dyn->rs)
+          ? AGX_APPLE9_PP_DEPTH_CLIP : 0);
+   if (dyn->rs.depth_bias.enable) {
+      VkFormat format = cmd->state.gfx.render.depth_att.vk_format;
+      bool force_unorm =
+         dyn->rs.depth_bias.representation ==
+         VK_DEPTH_BIAS_REPRESENTATION_LEAST_REPRESENTABLE_VALUE_FORCE_UNORM_EXT;
+      bool exact = dyn->rs.depth_bias.exact;
+      p->flags |= AGX_APPLE9_PP_DEPTH_BIAS;
+      p->bias_constant = dyn->rs.depth_bias.constant_factor;
+      p->bias_slope = dyn->rs.depth_bias.slope_factor;
+      p->bias_clamp = dyn->rs.depth_bias.clamp;
+      if (format == VK_FORMAT_D16_UNORM)
+         p->bias_unit = 1.0f / (exact ? 65536.0f : 32768.0f);
+      else if (force_unorm || format == VK_FORMAT_X8_D24_UNORM_PACK32 ||
+               format == VK_FORMAT_D24_UNORM_S8_UINT)
+         p->bias_unit = 1.0f / (exact ? 16777216.0f : 8388608.0f);
+      else
+         p->flags |= AGX_APPLE9_PP_DEPTH_BIAS_FLOAT;
+   }
+   if (dyn->vp.viewport_count) {
+      p->depth_range =
+         dyn->vp.viewports[0].maxDepth - dyn->vp.viewports[0].minDepth;
+   }
+}
+
 static_assert(HK_MAX_VIEWPORTS == AGX_APPLE9_VIEWPORT_TABLE_COUNT,
               "one window transform per viewport");
 
@@ -302,7 +342,11 @@ hk_apple9_upload_textures(struct hk_cmd_buffer *cmd,
    uint32_t line_stipple = hk_apple9_line_stipple_word(dyn, lines);
    float viewports[AGX_APPLE9_VIEWPORT_TABLE_COUNT][4];
    hk_apple9_viewport_table(dyn, viewports);
+   struct agx_apple9_polygon_point_params polygon_points;
+   hk_apple9_polygon_point_params(cmd, &polygon_points);
    if (gfx->apple9_sysvals &&
+       !memcmp(&gfx->apple9_sysvals_polygon_points, &polygon_points,
+               sizeof(polygon_points)) &&
        !BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_CB_BLEND_CONSTANTS) &&
        !BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES) &&
        gfx->apple9_sysvals_positions == gfx->apple9_sample_positions &&
@@ -326,6 +370,8 @@ hk_apple9_upload_textures(struct hk_cmd_buffer *cmd,
           sizeof(line_stipple));
    memcpy((uint8_t *)info + AGX_APPLE9_VIEWPORT_TABLE_OFFSET, viewports,
           sizeof(viewports));
+   memcpy((uint8_t *)info + AGX_APPLE9_POLYGON_POINT_OFFSET, &polygon_points,
+          sizeof(polygon_points));
    *sysvals = hk_pool_upload(cmd, info, sizeof(info), 64);
    if (!*sysvals)
       return false;
@@ -336,6 +382,7 @@ hk_apple9_upload_textures(struct hk_cmd_buffer *cmd,
    gfx->apple9_sysvals_first_fan = first_fan;
    gfx->apple9_sysvals_line_stipple = line_stipple;
    memcpy(gfx->apple9_sysvals_viewports, viewports, sizeof(viewports));
+   gfx->apple9_sysvals_polygon_points = polygon_points;
    /* Nothing else consumes these bits on G16, whose draws do not clear the
     * dynamic state's dirty set. */
    BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_CB_BLEND_CONSTANTS);

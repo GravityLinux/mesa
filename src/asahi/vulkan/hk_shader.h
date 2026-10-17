@@ -215,6 +215,10 @@ struct hk_shader_info {
          uint8_t per_vertex_bary[2];
          /* Varying slot of the vertex-stage line stipple start, or 0. */
          uint8_t line_stipple_start;
+         /* Polygon mode POINT is drawn by the software polygon stage, and
+          * the varying slot of the polygon's facing, or 0 when unread. */
+         bool polygon_points;
+         uint8_t polygon_face_slot;
       } fs;
 
       struct {
