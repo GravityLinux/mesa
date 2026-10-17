@@ -565,7 +565,8 @@ struct lower_line_stipple_state {
  * the other's variables. They take fixed driver locations at the top of the
  * range instead: GL varyings are capped at half of the Vulkan output
  * locations (see max_varyings in zink_screen.c), which keeps these clear of
- * every assigned slot.
+ * every assigned slot. The only internal varyings that take assigned slots
+ * are the up to two relocated clip distance vectors (lower_clip_fs).
  */
 enum zink_emulated_varying {
    ZINK_EMULATED_VARYING_STIPPLE = 1,
@@ -579,7 +580,7 @@ emulated_varying_location(const struct zink_screen *screen,
    const VkPhysicalDeviceLimits *limits = &screen->info.props.limits;
    unsigned top = MIN3(limits->maxGeometryOutputComponents / 4,
                        limits->maxFragmentInputComponents / 4, MAX_VARYING);
-   assert(top >= ZINK_EMULATED_VARYING_LINE_COORD + screen->base.caps.max_varyings);
+   assert(top >= ZINK_EMULATED_VARYING_LINE_COORD + 2 + screen->base.caps.max_varyings);
    return top - varying;
 }
 
