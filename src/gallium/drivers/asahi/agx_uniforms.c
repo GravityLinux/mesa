@@ -73,7 +73,7 @@ agx_upload_uniforms(struct agx_batch *batch)
 
    assert(_mesa_float_to_half(0.5) == 0x3800);
    batch->uniforms.clip_z_coeff =
-      (ctx->rast && !ctx->rast->base.clip_halfz) ? 0x3800 : 0x0;
+      (ctx->rast && !agx_clip_halfz(ctx)) ? 0x3800 : 0x0;
 
    batch->uniforms.sprite_mask =
       (batch->reduced_prim == MESA_PRIM_POINTS && ctx->rast)

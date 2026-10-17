@@ -1284,6 +1284,9 @@ agx_clear(struct pipe_context *pctx, unsigned buffers,
    struct agx_context *ctx = agx_context(pctx);
    struct agx_batch *batch = agx_get_batch(ctx);
 
+   /* Only the slow clear below may override clip_halfz, and it resets it. */
+   assert(!ctx->force_clip_halfz);
+
    if (unlikely(!agx_render_condition_check(ctx)))
       return;
 
@@ -1328,12 +1331,26 @@ agx_clear(struct pipe_context *pctx, unsigned buffers,
 
    /* Slow clears draw a fullscreen rectangle */
    if (slowclear) {
+      /* u_blitter passes the clear depth as vertex Z with an identity
+       * viewport. Apple9's [-1, 1] clip-Z lowering would round it (0.3
+       * becomes 0.29999995), so draw the clear in [0, W] clip space, where
+       * window Z is the value itself. */
+      bool exact_depth = agx_apple9_direct_render_enabled(agx_device(pctx->screen)) &&
+                         (slowclear & PIPE_CLEAR_DEPTH);
+      if (exact_depth) {
+         ctx->force_clip_halfz = true;
+         ctx->dirty |= AGX_DIRTY_VS_PROG | AGX_DIRTY_RS | AGX_DIRTY_VIEWPORT;
+      }
       agx_blitter_save(ctx, ctx->blitter, ASAHI_CLEAR);
       util_blitter_clear(
          ctx->blitter, ctx->framebuffer.width, ctx->framebuffer.height,
          util_framebuffer_get_num_layers(&ctx->framebuffer), slowclear, color,
          depth, stencil,
          util_framebuffer_get_num_samples(&ctx->framebuffer) > 1);
+      if (exact_depth) {
+         ctx->force_clip_halfz = false;
+         ctx->dirty |= AGX_DIRTY_VS_PROG | AGX_DIRTY_RS | AGX_DIRTY_VIEWPORT;
+      }
    }
 
    if (fastclear)
