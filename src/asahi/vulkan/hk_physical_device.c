@@ -1828,13 +1828,13 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
     * flushing arithmetic (agx_nir_lower_apple9_denorm_preserve). */
    props->shaderDenormFlushToZeroFloat32 = true;
    props->shaderDenormPreserveFloat32 = true;
-   /* The rasterized interface carries at most this many user scalars.
-    * Written clip distances also travel as ordinary varyings, and every
-    * export stays published until completion: position, user scalars, point
-    * size and the layer word share a 128-entry bank. A pre-rasterization
-    * stage is guaranteed its user outputs alongside all of them. Fragment
-    * inputs exclude them. */
-   const unsigned outputs = AGX_APPLE9_MAX_VARYING_COMPONENTS - 8 - 2;
+   /* Position uses four entries of the 128-entry publication bank. Keep two
+    * more for point size and the layer/viewport word, including when inserted
+    * by lowering. Clip distances are already ordinary varying components
+    * and count against the API output limit, so do not reserve them twice.
+    * Their rasterizer copies share the ordinary varying exports.
+    */
+   const unsigned outputs = AGX_APPLE9_MAX_VARYING_COMPONENTS - 2;
    props->maxVertexOutputComponents = outputs;
    props->maxTessellationEvaluationOutputComponents = outputs;
    props->maxGeometryOutputComponents = outputs;

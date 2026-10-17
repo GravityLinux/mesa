@@ -12487,50 +12487,52 @@ TEST(Apple9Compiler, ClipVertexSharesVaryingPublicationCapacity)
  * in D3D's register interface; their rasterizer copies share those exports.
  * Export publications stay live until completion, so position, user scalars,
  * point size and the layer word must fit the 128-entry bank: at most 114 user
- * scalars beside all eight clip distances. */
+ * scalars beside all eight clip distances, or 122 without clip distances. */
 TEST(Apple9Compiler, FullRasterInterfaceFitsUvsAndPublications)
 {
-   for (unsigned count : {64u, 96u, 114u, 115u}) {
-      nir_builder b = nir_builder_init_simple_shader(
-         MESA_SHADER_VERTEX, &agx_nir_options, "full_raster_interface");
-      b.shader->info.clip_distance_array_size = 8;
-      nir_def *zero = nir_imm_int(&b, 0);
-      nir_store_output(&b, nir_imm_vec4(&b, 0, 0, .5, 1), zero,
-         .write_mask = 15, .src_type = nir_type_float32,
-         .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
-      nir_store_output(&b, nir_imm_float(&b, 4), zero,
-         .write_mask = 1, .src_type = nir_type_float32,
-         .io_semantics = {.location = VARYING_SLOT_PSIZ, .num_slots = 1});
-      nir_store_output(&b, nir_imm_int(&b, 1), zero,
-         .write_mask = 1, .src_type = nir_type_uint32,
-         .io_semantics = {.location = VARYING_SLOT_LAYER, .num_slots = 1});
-      for (unsigned d = 0; d < 2; ++d) {
-         nir_store_output(&b, nir_imm_vec4(&b, d, .5, 1, 2), zero,
+   for (unsigned clips : {0u, 8u}) {
+      for (unsigned count : {64u, 96u, 122u - clips, 123u - clips}) {
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_VERTEX, &agx_nir_options, "full_raster_interface");
+         b.shader->info.clip_distance_array_size = clips;
+         nir_def *zero = nir_imm_int(&b, 0);
+         nir_store_output(&b, nir_imm_vec4(&b, 0, 0, .5, 1), zero,
             .write_mask = 15, .src_type = nir_type_float32,
-            .io_semantics = {.location = (uint8_t)(VARYING_SLOT_CLIP_DIST0 + d),
-                             .num_slots = 1});
-      }
-      for (unsigned i = 0; i < count; ++i) {
-         nir_store_output(&b, nir_imm_float(&b, i * .0625), zero,
-            .write_mask = 1, .component = i % 4, .src_type = nir_type_float32,
-            .io_semantics = {.location = (uint8_t)(VARYING_SLOT_VAR0 + i / 4),
-                             .num_slots = 1});
-      }
-      b.shader->info.io_lowered = true;
-      agx_shader_part out = {};
-      const char *reason = nullptr;
-      bool ok = agx_compile_apple9_vertex(b.shader, &out, &reason);
-      if (4 + count + 8 + 2 > AGX_APPLE9_PUBLICATION_COUNT) {
-         EXPECT_FALSE(ok);
+            .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+         nir_store_output(&b, nir_imm_float(&b, 4), zero,
+            .write_mask = 1, .src_type = nir_type_float32,
+            .io_semantics = {.location = VARYING_SLOT_PSIZ, .num_slots = 1});
+         nir_store_output(&b, nir_imm_int(&b, 1), zero,
+            .write_mask = 1, .src_type = nir_type_uint32,
+            .io_semantics = {.location = VARYING_SLOT_LAYER, .num_slots = 1});
+         for (unsigned d = 0; d < clips / 4; ++d) {
+            nir_store_output(&b, nir_imm_vec4(&b, d, .5, 1, 2), zero,
+               .write_mask = 15, .src_type = nir_type_float32,
+               .io_semantics = {.location = (uint8_t)(VARYING_SLOT_CLIP_DIST0 + d),
+                                .num_slots = 1});
+         }
+         for (unsigned i = 0; i < count; ++i) {
+            nir_store_output(&b, nir_imm_float(&b, i * .0625), zero,
+               .write_mask = 1, .component = i % 4, .src_type = nir_type_float32,
+               .io_semantics = {.location = (uint8_t)(VARYING_SLOT_VAR0 + i / 4),
+                                .num_slots = 1});
+         }
+         b.shader->info.io_lowered = true;
+         agx_shader_part out = {};
+         const char *reason = nullptr;
+         bool ok = agx_compile_apple9_vertex(b.shader, &out, &reason);
+         if (4 + count + clips + 2 > AGX_APPLE9_PUBLICATION_COUNT) {
+            EXPECT_FALSE(ok);
+            ralloc_free(b.shader);
+            continue;
+         }
+         ASSERT_TRUE(ok) << count << ": " << (reason ?: "");
+         EXPECT_EQ(out.info.apple9_varyings.count, count + clips);
+         EXPECT_EQ(out.info.apple9_clip_distance_count, clips);
+         EXPECT_LE(out.info.apple9_publication_count, 128u);
+         free(out.binary);
          ralloc_free(b.shader);
-         continue;
       }
-      ASSERT_TRUE(ok) << count << ": " << (reason ?: "");
-      EXPECT_EQ(out.info.apple9_varyings.count, count + 8);
-      EXPECT_EQ(out.info.apple9_clip_distance_count, 8u);
-      EXPECT_LE(out.info.apple9_publication_count, 128u);
-      free(out.binary);
-      ralloc_free(b.shader);
    }
 }
 
