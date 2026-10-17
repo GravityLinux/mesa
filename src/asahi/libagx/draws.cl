@@ -8,6 +8,26 @@
 #include "agx_pack.h"
 #include "libagx_dgc.h"
 
+/* Convert the XFB byte counter on the GPU so that the ordinary indirect
+ * draw path also handles instancing, conditional rendering and GS/TES.
+ * Subtract before dividing, saturating instead of wrapping below the offset.
+ */
+KERNEL(1)
+libagx_draw_xfb(global VkDrawIndirectCommand *out,
+                constant uint32_t *counter, uint32_t counter_offset,
+                uint32_t vertex_stride, uint32_t instance_count,
+                uint32_t first_instance)
+{
+   uint32_t bytes = *counter;
+   *out = (VkDrawIndirectCommand){
+      .vertexCount = (bytes > counter_offset ? bytes - counter_offset : 0) /
+                     vertex_stride,
+      .instanceCount = instance_count,
+      .firstVertex = 0,
+      .firstInstance = first_instance,
+   };
+}
+
 /*
  * To implement drawIndirectCount generically, we dispatch a kernel to
  * clone-and-patch the indirect buffer, predicating out draws as appropriate.

@@ -1849,6 +1849,10 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
     * all 32 API input locations without increasing the producer budget.
     */
    props->maxFragmentInputComponents = 128;
+   /* Byte-count draws use a GPU conversion to the ordinary indirect path.
+    * Qualified on G16; retain the existing exposure on older generations.
+    */
+   props->transformFeedbackDraw = true;
    props->maxComputeWorkGroupCount[0] = 65535;
 
    /* The native 4x tile layout supports 64 bytes per pixel. Four RGBA32
