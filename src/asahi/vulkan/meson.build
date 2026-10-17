@@ -262,6 +262,22 @@ devenv.append('VK_DRIVER_FILES', _dev_icd.full_path())
 
 if with_tests
   test(
+    'hk_drirc',
+    executable(
+      'hk_drirc_test',
+      [hk_drirc, 'tests/hk-drirc.cpp'],
+      include_directories : [inc_src, include_directories('.')],
+      dependencies : [idep_gtest, idep_mesautil, idep_xmlconfig],
+    ),
+    env : [
+      'DRIRC_CONFIGDIR=' + meson.current_source_dir(),
+      'HOME=' + meson.current_build_dir() / 'drirc-empty-home',
+    ],
+    suite : ['asahi', 'honeykrisp'],
+    protocol : 'gtest',
+  )
+
+  test(
     'hk_descriptor_memory',
     executable(
       'hk_descriptor_memory_test',

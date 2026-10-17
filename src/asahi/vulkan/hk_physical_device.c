@@ -243,6 +243,28 @@ hk_get_device_features(
    const struct vk_device_extension_table *supported_extensions,
    struct vk_features *features)
 {
+   bool vertex_stores = instance->drirc.misc.enable_vertex_pipeline_stores_atomics;
+
+   if (dev->chip == AGX_CHIP_G16G) {
+      /* Instance options have no device identity. Re-evaluate this feature
+       * with the family tag used by device-scoped defaults, preserving the
+       * usual user configuration and environment override precedence.
+       */
+      driOptionCache options;
+      driParseConfigFiles(&options, &instance->drirc.available_options,
+                         &(driConfigFileParseParams) {
+                            .driverName = "hk",
+                            .deviceName = "G16",
+                            .applicationName = instance->vk.app_info.app_name,
+                            .applicationVersion = instance->vk.app_info.app_version,
+                            .engineName = instance->vk.app_info.engine_name,
+                            .engineVersion = instance->vk.app_info.engine_version,
+                         });
+      vertex_stores = driQueryOptionb(
+         &options, "hk_enable_vertex_pipeline_stores_atomics");
+      driDestroyOptionCache(&options);
+   }
+
    *features = (struct vk_features){
       /* Vulkan 1.0 */
       .robustBufferAccess = true,
@@ -270,7 +292,7 @@ hk_get_device_features(
       .textureCompressionASTC_LDR = true,
       .occlusionQueryPrecise = true,
       .pipelineStatisticsQuery = true,
-      .vertexPipelineStoresAndAtomics = instance->drirc.misc.enable_vertex_pipeline_stores_atomics,
+      .vertexPipelineStoresAndAtomics = vertex_stores,
       .fragmentStoresAndAtomics = true,
       .shaderTessellationAndGeometryPointSize = true,
       .shaderImageGatherExtended = true,
