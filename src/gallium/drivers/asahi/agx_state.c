@@ -2298,6 +2298,19 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
    if (nir->info.stage == MESA_SHADER_KERNEL)
       nir->info.stage = MESA_SHADER_COMPUTE;
 
+   /* Gallium numbers vertex elements by the vertex shader's inputs_read
+    * (st_atom_array.cpp). After st's last dead-code elimination, input
+    * driver_locations can still count an input it removed, so a later input
+    * would fetch the wrong element. Derive them from inputs_read before any
+    * path uses or serializes the shader.
+    */
+   if (nir->info.stage == MESA_SHADER_VERTEX && !nir->info.io_lowered) {
+      nir_foreach_shader_in_variable(var, nir) {
+         var->data.driver_location = util_bitcount64(
+            nir->info.inputs_read & BITFIELD64_MASK(var->data.location));
+      }
+   }
+
    blob_init(&so->early_serialized_nir);
    nir_serialize(&so->early_serialized_nir, nir, true);
 
