@@ -1054,16 +1054,21 @@ agx_resource_valid(struct agx_resource *rsrc, int level)
 }
 
 static inline void *
-agx_map_texture_cpu(struct agx_resource *rsrc, unsigned level, unsigned z)
+agx_map_texture_cpu(struct agx_resource *rsrc, unsigned level, unsigned z,
+                    void *transient_map)
 {
    /* Only for synchronous tile/detile copies; this pointer must not escape.
     * Mark even reads conservatively. A revoked epoch must stay revoked. */
    struct agx_bo *bo = rsrc->bo;
    if (bo->shim_cpu_epoch && *bo->shim_cpu_epoch)
       ++*bo->shim_cpu_epoch;
-   if (!bo->_map)
-      bo->_map = bo->dev->ops.bo_mmap(bo->dev, bo, NULL, bo->size);
-   return ((uint8_t *)bo->_map) +
+   void *map = transient_map;
+   if (!map) {
+      if (!bo->_map)
+         bo->_map = bo->dev->ops.bo_mmap(bo->dev, bo, NULL, bo->size);
+      map = bo->_map;
+   }
+   return ((uint8_t *)map) +
           ail_get_layer_level_B(&rsrc->layout, z, level);
 }
 
@@ -1090,6 +1095,11 @@ void agx_legalize_compression(struct agx_context *ctx,
 struct agx_transfer {
    struct pipe_transfer base;
    void *map;
+
+   /* A 32-bit transfer owns its CPU mapping. It must not keep resources
+    * mapped for their entire GPU lifetime or invalidate another transfer. */
+   void *bo_map;
+   size_t bo_map_size;
    struct {
       struct pipe_resource *rsrc;
       struct pipe_box box;
