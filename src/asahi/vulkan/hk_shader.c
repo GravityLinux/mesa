@@ -5536,7 +5536,7 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
    mesa_shader_stage stipple_stage = MESA_SHADER_NONE;
    {
       nir_shader *pre_nir = NULL, *fs_nir = NULL;
-      nir_shader *stage_nir[MESA_SHADER_STAGES] = {NULL};
+      nir_shader *stage_nir[MESA_VULKAN_SHADER_STAGES] = {NULL};
       bool other = false;
       for (unsigned i = 0; i < count; ++i) {
          stage_nir[infos[i].stage] = infos[i].nir;
