@@ -8766,7 +8766,12 @@ agx_nir_lower_apple9_sampler_state(
          }
          const struct agx_apple9_sampler_key *state = &key[tex->sampler_index];
          bool cube = tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE;
-         if (cube && !state->seamless_cube_map) {
+         /* Comparison samples stay native: as an array layer they take the
+          * array-comparison form, whose implicit-LOD encoding returns the
+          * stored depth instead of the comparison result. 2D arrays reroute
+          * that through gradients; a cube face here keeps the native cube
+          * sample and its per-face clamp. */
+         if (cube && !state->seamless_cube_map && !tex->is_shadow) {
             /* Cube filtering always clamps the selected face on Apple9.
              * Sampling that face as an array layer restores ordinary 2D
              * wrapping when seamless cube filtering is disabled. */
