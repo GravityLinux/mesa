@@ -235,25 +235,18 @@ hk_apple9_compute_sysvals(struct hk_device *dev, void *out)
 }
 
 /* The line stipple pattern and factor of the draw, packed as the fragment
- * stipple test reads them. Draws that rasterize no lines, or have stipple
- * disabled, keep every fragment: factor 1 with every pattern bit set.
+ * stipple test reads them. Draws that rasterize no lines after any
+ * geometry, tessellation or mesh stage, or have stipple disabled, keep every
+ * fragment: factor 1 with every pattern bit set.
  */
 static_assert(HK_MAX_VIEWPORTS == AGX_APPLE9_VIEWPORT_TABLE_COUNT,
               "one window transform per viewport");
 
 static uint32_t
-hk_apple9_line_stipple_word(const struct vk_dynamic_graphics_state *dyn)
+hk_apple9_line_stipple_word(const struct vk_dynamic_graphics_state *dyn,
+                            bool lines)
 {
-   switch (dyn->ia.primitive_topology) {
-   case VK_PRIMITIVE_TOPOLOGY_LINE_LIST:
-   case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP:
-   case VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY:
-   case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY:
-      break;
-   default:
-      return 0x1ffff;
-   }
-   if (!dyn->rs.line.stipple.enable)
+   if (!lines || !dyn->rs.line.stipple.enable)
       return 0x1ffff;
    return dyn->rs.line.stipple.pattern |
           ((uint32_t)MAX2(dyn->rs.line.stipple.factor, 1) << 16);
@@ -280,7 +273,7 @@ hk_apple9_viewport_table(const struct vk_dynamic_graphics_state *dyn,
 bool
 hk_apple9_upload_textures(struct hk_cmd_buffer *cmd,
                           const struct hk_shader *shader, bool graphics,
-                          bool first_fan, uint64_t *textures,
+                          bool first_fan, bool lines, uint64_t *textures,
                           uint64_t *samplers, uint64_t *sysvals)
 {
    /* Textures and samplers are addressed through their descriptors, see
@@ -306,7 +299,7 @@ hk_apple9_upload_textures(struct hk_cmd_buffer *cmd,
     * last build. */
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
-   uint32_t line_stipple = hk_apple9_line_stipple_word(dyn);
+   uint32_t line_stipple = hk_apple9_line_stipple_word(dyn, lines);
    float viewports[AGX_APPLE9_VIEWPORT_TABLE_COUNT][4];
    hk_apple9_viewport_table(dyn, viewports);
    if (gfx->apple9_sysvals &&
@@ -369,10 +362,13 @@ hk_apple9_dispatch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       return;
    }
 
+   /* Software pre-rasterization stages read draw state from the graphics
+    * block, which extends the compute one: the vertex-stage line stipple
+    * start reads the viewport table. */
    uint64_t textures = 0, samplers = 0, sysvals = 0;
    if (shader &&
-       !hk_apple9_upload_textures(cmd, shader, false, false, &textures,
-                                  &samplers, &sysvals)) {
+       !hk_apple9_upload_textures(cmd, shader, prerast != NULL, false, false,
+                                  &textures, &samplers, &sysvals)) {
       fprintf(stderr, "Apple9 dispatch failed (2)\n");
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
