@@ -4240,6 +4240,31 @@ hk_needs_index_robustness(struct hk_cmd_buffer *cmd, struct agx_draw *draw)
    return agx_direct_draw_overreads_indices(*draw);
 }
 
+/* Direct draws through software vertex shading size the vertex output buffer
+ * on the CPU (hk_upload_vertex_params). Its 32-bit size wraps for very large
+ * draws, e.g. a vertex count of UINT32_MAX, and the vertex shader would then
+ * write past a small allocation. Such a buffer cannot be allocated anyway, so
+ * record the out-of-memory error and skip the draw.
+ */
+static bool
+hk_sw_vs_outputs_fit(struct hk_cmd_buffer *cmd, struct agx_draw draw)
+{
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+
+   if (agx_is_indirect(draw.b) || (!gfx->shaders[MESA_SHADER_GEOMETRY] &&
+                                   !gfx->shaders[MESA_SHADER_TESS_EVAL]))
+      return true;
+
+   uint64_t vertex_B = util_bitcount64(hk_bound_sw_vs(gfx)->b.info.outputs) * 16;
+   uint64_t vertices = (uint64_t)draw.b.count[0] * draw.b.count[1];
+
+   if (!vertex_B || vertices <= UINT32_MAX / vertex_B)
+      return true;
+
+   vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+   return false;
+}
+
 static void
 hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 {
@@ -4787,6 +4812,8 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
       if (cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL])
          hk_apple9_merge_tess_info(cmd);
       hk_handle_passthrough_gs(cmd, draw_);
+      if (!hk_sw_vs_outputs_fit(cmd, draw_))
+         return;
       /* Geometry and tessellation emulation decompose fans themselves. */
       cmd->state.gfx.apple9_fan_unrolled =
          dyn->ia.primitive_topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN &&
