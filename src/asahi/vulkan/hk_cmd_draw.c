@@ -5451,7 +5451,15 @@ hk_CmdDrawIndirectByteCountEXT(VkCommandBuffer commandBuffer,
                                VkDeviceSize counterBufferOffset,
                                uint32_t counterOffset, uint32_t vertexStride)
 {
-   UNREACHABLE("TODO");
+   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(hk_buffer, counter, counterBuffer);
+
+   uint64_t indirect =
+      hk_pool_alloc(cmd, sizeof(VkDrawIndirectCommand), 4).gpu;
+   libagx_draw_xfb(cmd, agx_1d(1), AGX_BARRIER_ALL | AGX_PREGFX,
+                   indirect, hk_buffer_address_ro(counter, counterBufferOffset),
+                   counterOffset, vertexStride, instanceCount, firstInstance);
+   hk_draw_indirect_inner(commandBuffer, indirect, 1, 0);
 }
 
 VKAPI_ATTR void VKAPI_CALL
