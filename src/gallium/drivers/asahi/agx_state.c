@@ -6863,6 +6863,8 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
        * (ARB_shader_viewport_layer_array) is not applied to the counter. */
       batch->uniforms.viewport_scale[0] = ctx->viewport[0].scale[0];
       batch->uniforms.viewport_scale[1] = ctx->viewport[0].scale[1];
+      batch->uniforms.viewport_offset[0] = ctx->viewport[0].translate[0];
+      batch->uniforms.viewport_offset[1] = ctx->viewport[0].translate[1];
 
       if (IS_DIRTY(QUERY)) {
          for (unsigned i = 0; i < ARRAY_SIZE(ctx->pipeline_statistics); ++i) {
