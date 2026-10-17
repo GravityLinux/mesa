@@ -1094,8 +1094,10 @@ zink_init_screen_caps(struct zink_screen *screen)
       screen->info.feats.features.sparseResidencyBuffer ? ZINK_SPARSE_BUFFER_PAGE_SIZE : 0;
 
    /* Sparse texture */
+   /* ARB_sparse_texture requires both 2D and 3D sparse textures. */
    caps->max_sparse_texture_size =
-      screen->info.feats.features.sparseResidencyImage2D ?
+      screen->info.feats.features.sparseResidencyImage2D &&
+      screen->info.feats.features.sparseResidencyImage3D ?
       caps->max_texture_2d_size : 0;
    caps->max_sparse_3d_texture_size =
       screen->info.feats.features.sparseResidencyImage3D ?
@@ -1105,10 +1107,13 @@ zink_init_screen_caps(struct zink_screen *screen)
       caps->max_texture_array_layers : 0;
    caps->sparse_texture_full_array_cube_mipmaps =
       screen->info.feats.features.sparseResidencyImage2D;
+   /* ARB_sparse_texture2 and ARB_sparse_texture_clamp require the base extension. */
    caps->query_sparse_texture_residency =
+      caps->max_sparse_texture_size &&
       screen->info.feats.features.sparseResidency2Samples &&
       screen->info.feats.features.shaderResourceResidency;
    caps->clamp_sparse_texture_lod =
+      caps->max_sparse_texture_size &&
       screen->info.feats.features.shaderResourceMinLod &&
       screen->info.feats.features.sparseResidency2Samples &&
       screen->info.feats.features.shaderResourceResidency;
