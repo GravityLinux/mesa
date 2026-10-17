@@ -423,6 +423,15 @@ hk_GetPhysicalDeviceImageFormatProperties2(
         pImageFormatInfo->tiling == VK_IMAGE_TILING_LINEAR))
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
+   /* VUID-VkImageCreateInfo-imageType-00971: 3D sparse residency requires
+    * sparseResidencyImage3D. Sparse format queries go through here too, so
+    * without this they reported 2D tile granularity for 3D images.
+    */
+   if (pImageFormatInfo->flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT &&
+       pImageFormatInfo->type == VK_IMAGE_TYPE_3D &&
+       !pdev->vk.supported_features.sparseResidencyImage3D)
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+
    /* From the Vulkan 1.3.279 spec:
     *
     *    VUID-VkImageCreateInfo-flags-09403

@@ -36,5 +36,42 @@ int main(void)
       }
    }
    puts("G16 3D format limits match native depth; other image ranges retained");
+
+   /* Sparse residency: 2D images only, matching the advertised features. */
+   pdev.dev.chip = AGX_CHIP_G16G;
+   pdev.vk.supported_features.sparseBinding = true;
+   pdev.vk.supported_features.sparseResidencyImage2D = true;
+   pdev.vk.supported_features.sparseResidencyImage3D = false;
+   for (unsigned t = 0; t < ARRAY_SIZE(types); ++t) {
+      VkPhysicalDeviceImageFormatInfo2 info = {
+         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
+         .format = VK_FORMAT_R8G8B8A8_UNORM,
+         .type = types[t],
+         .tiling = VK_IMAGE_TILING_OPTIMAL,
+         .usage = VK_IMAGE_USAGE_SAMPLED_BIT,
+         .flags = VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
+                  VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT,
+      };
+      VkImageFormatProperties2 props = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2,
+      };
+      VkResult r = hk_GetPhysicalDeviceImageFormatProperties2(
+         hk_physical_device_to_handle(&pdev), &info, &props);
+      CHECK((r == VK_SUCCESS) == (types[t] == VK_IMAGE_TYPE_2D));
+
+      VkPhysicalDeviceSparseImageFormatInfo2 sparse = {
+         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SPARSE_IMAGE_FORMAT_INFO_2,
+         .format = info.format,
+         .type = info.type,
+         .samples = VK_SAMPLE_COUNT_1_BIT,
+         .usage = info.usage,
+         .tiling = info.tiling,
+      };
+      uint32_t count = 0;
+      hk_GetPhysicalDeviceSparseImageFormatProperties2(
+         hk_physical_device_to_handle(&pdev), &sparse, &count, NULL);
+      CHECK(count == (types[t] == VK_IMAGE_TYPE_2D ? 1 : 0));
+   }
+   puts("Sparse residency format queries report 2D only");
    return 0;
 }
