@@ -241,7 +241,7 @@ lower_aaline_instr(nir_builder *b, nir_instr *instr, void *data)
    return true;
 }
 
-void
+nir_variable *
 nir_lower_aaline_fs(struct nir_shader *shader, int *varying,
                     nir_variable *stipple_counter,
                     nir_variable *stipple_pattern)
@@ -275,6 +275,7 @@ nir_lower_aaline_fs(struct nir_shader *shader, int *varying,
 
    nir_shader_instructions_pass(shader, lower_aaline_instr,
                                 nir_metadata_control_flow, &state);
+   return line_width;
 }
 
 typedef struct {
