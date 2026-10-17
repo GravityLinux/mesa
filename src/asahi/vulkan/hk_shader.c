@@ -459,6 +459,10 @@ struct hk_apple9_graphics_key {
    /* Polygon mode POINT: triangles may be drawn by the software polygon
     * stage, see hk_apple9_polygon_point_gs. */
    bool polygon_points;
+   /* A passthrough geometry shader rasterizing for a vertex stage that
+    * publishes interpolated cull planes, see hk_apple9_compile_vertex_culls.
+    * Otherwise geometry shaders publish one flat primitive cull mask. */
+   bool gs_cull_planes;
 };
 
 static bool
@@ -5413,6 +5417,36 @@ hk_apple9_compile_tcs(struct hk_device *dev, nir_shader *nir,
                                     nir->info.tess.tcs_vertices_out, reason);
 }
 
+/* Cull distances reach the fragment shader as one linear value per plane,
+ * zero where the distance is negative, when the interface has room for them:
+ * that needs no geometry stage. Interfaces at the publication limit instead
+ * publish one flat word of negative-plane bits per vertex, and a geometry
+ * stage combines it over each primitive's vertices (hk_handle_passthrough_gs);
+ * points use it directly. Sets *cull_mask to the transport used.
+ */
+static bool
+hk_apple9_compile_vertex_culls(nir_shader *nir,
+                               const struct agx_apple9_vertex_layout *vertex,
+                               struct agx_shader_part *out, bool *cull_mask,
+                               const char **reason)
+{
+   struct agx_apple9_vertex_layout layout = *vertex;
+   layout.cull_distance_mask = *cull_mask = false;
+   if (!nir->info.cull_distance_array_size)
+      return agx_compile_apple9_vertex_inputs(nir, &layout, out, reason);
+
+   nir_shader *planes = nir_shader_clone(ralloc_parent(nir), nir);
+   if (agx_compile_apple9_vertex_inputs(planes, &layout, out, NULL)) {
+      nir_shader_replace(nir, planes);
+      return true;
+   }
+   ralloc_free(planes);
+   free(out->binary);
+   memset(out, 0, sizeof(*out));
+   layout.cull_distance_mask = *cull_mask = true;
+   return agx_compile_apple9_vertex_inputs(nir, &layout, out, reason);
+}
+
 /* Evaluation shaders run as the hardware vertex program over the tessellated
  * domain, and as a software vertex program when a geometry shader or
  * transform feedback follows. Does not take ownership of nir.
@@ -5431,23 +5465,9 @@ hk_apple9_compile_tes(struct hk_device *dev, nir_shader *nir,
    sw->info.clip_distance_array_size = nir->info.clip_distance_array_size;
    sw->info.cull_distance_array_size = nir->info.cull_distance_array_size;
 
-   VkResult result = VK_SUCCESS;
-   if ((next & VK_SHADER_STAGE_GEOMETRY_BIT) || nir->xfb_info) {
-      if (nir->xfb_info) {
-         memcpy(&sw->info.xfb_info, nir->xfb_info,
-                nir_xfb_info_size(nir->xfb_info->output_count));
-         typed_memcpy(sw->info.xfb_stride, nir->info.xfb_stride, 4);
-      }
-      nir_shader *clone = nir_shader_clone(NULL, nir);
-      NIR_PASS(_, clone, poly_nir_lower_tes, false);
-      uint64_t outputs = clone->info.outputs_written;
-      NIR_PASS(_, clone, poly_nir_lower_vs_before_gs);
-      result = hk_apple9_compile_prerast(dev, clone, sw, 64, reason);
-      sw->b.info.outputs = outputs;
-      ralloc_free(clone);
-      if (result != VK_SUCCESS)
-         return result;
-   }
+   /* The software variant feeds a geometry stage: the application's, or a
+    * passthrough for transform feedback or a cull mask. */
+   nir_shader *clone = nir_shader_clone(NULL, nir);
 
    struct agx_apple9_vertex_layout layout = *vertex;
    layout.rasterize_points = nir->info.tess.point_mode;
@@ -5456,8 +5476,30 @@ hk_apple9_compile_tes(struct hk_device *dev, nir_shader *nir,
    hk_apple9_lower_prerast_sysvals(nir, MESA_SHADER_TESS_EVAL);
    if (debug_get_option_cached_agx_apple9_trace_nir() != NULL)
       nir_print_shader(nir, stderr);
-   if (!agx_compile_apple9_vertex_inputs(nir, &layout, &hw->b, reason))
+   bool cull_mask;
+   if (!hk_apple9_compile_vertex_culls(nir, &layout, &hw->b, &cull_mask,
+                                       reason)) {
+      ralloc_free(clone);
       return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
+   }
+   hw->info.cull_mask = sw->info.cull_mask = cull_mask;
+
+   VkResult result = VK_SUCCESS;
+   if ((next & VK_SHADER_STAGE_GEOMETRY_BIT) || clone->xfb_info || cull_mask) {
+      if (clone->xfb_info) {
+         memcpy(&sw->info.xfb_info, clone->xfb_info,
+                nir_xfb_info_size(clone->xfb_info->output_count));
+         typed_memcpy(sw->info.xfb_stride, clone->info.xfb_stride, 4);
+      }
+      NIR_PASS(_, clone, poly_nir_lower_tes, false);
+      uint64_t outputs = clone->info.outputs_written;
+      NIR_PASS(_, clone, poly_nir_lower_vs_before_gs);
+      result = hk_apple9_compile_prerast(dev, clone, sw, 64, reason);
+      sw->b.info.outputs = outputs;
+   }
+   ralloc_free(clone);
+   if (result != VK_SUCCESS)
+      return result;
    return hk_apple9_finish_shader(dev, hw, nir);
 }
 
@@ -5674,12 +5716,16 @@ hk_apple9_lower_gs_polygon_points(nir_shader *gs, struct hk_pp_info info,
 static VkResult
 hk_apple9_compile_gs(struct hk_device *dev, nir_shader *nir,
                      const struct agx_apple9_vertex_layout *vertex,
-                     struct hk_api_shader *obj, const char **reason)
+                     bool cull_mask, struct hk_api_shader *obj,
+                     const char **reason)
 {
    struct hk_shader *rast_shader = &obj->variants[HK_GS_VARIANT_RAST];
    nir_shader *count = NULL, *rast = NULL, *pre = NULL;
    struct poly_gs_info info = {0};
-   NIR_PASS(_, nir, poly_nir_lower_gs, &count, &rast, &pre, &info);
+   if (cull_mask)
+      NIR_PASS(_, nir, poly_nir_lower_gs_cull_mask, &count, &rast, &pre, &info);
+   else
+      NIR_PASS(_, nir, poly_nir_lower_gs, &count, &rast, &pre, &info);
 
    hk_foreach_variant(obj, variant) {
       variant->info.gs = info;
@@ -5696,6 +5742,7 @@ hk_apple9_compile_gs(struct hk_device *dev, nir_shader *nir,
                                          reason);
    if (result == VK_SUCCESS) {
       struct agx_apple9_vertex_layout layout = *vertex;
+      layout.cull_distance_mask = cull_mask;
       layout.rasterize_points = info.mode == MESA_PRIM_POINTS;
       layout.ignore_point_size = !layout.rasterize_points;
       hk_apple9_lower_prerast_sysvals(rast, MESA_SHADER_GEOMETRY);
@@ -6116,13 +6163,19 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
              * layered on a passthrough geometry shader, which consumes the
              * software vertex shader.
              */
-            if ((infos[i].next_stage_mask &
-                 (VK_SHADER_STAGE_GEOMETRY_BIT |
-                  VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT)) ||
-                nir->xfb_info || hk_per_vertex_copies_used(&per_vertex) ||
-                stipple_stage == MESA_SHADER_VERTEX ||
-                polygon_stage == MESA_SHADER_VERTEX) {
-               struct hk_shader *sw = &obj->variants[HK_VS_VARIANT_SW];
+            /* The software variant feeds a geometry stage: the
+             * application's, or a passthrough. A cull mask also needs one,
+             * which is known once the hardware variant is compiled. */
+            bool sw_needed =
+               (infos[i].next_stage_mask &
+                (VK_SHADER_STAGE_GEOMETRY_BIT |
+                 VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT)) ||
+               nir->xfb_info || hk_per_vertex_copies_used(&per_vertex) ||
+               stipple_stage == MESA_SHADER_VERTEX ||
+               polygon_stage == MESA_SHADER_VERTEX;
+            struct hk_shader *sw = &obj->variants[HK_VS_VARIANT_SW];
+            nir_shader *sw_nir = NULL;
+            if (sw_needed || nir->info.cull_distance_array_size) {
                sw->info.set_count = shader->info.set_count;
                sw->info.clip_distance_array_size =
                   nir->info.clip_distance_array_size;
@@ -6135,25 +6188,30 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
                          nir_xfb_info_size(nir->xfb_info->output_count));
                   typed_memcpy(sw->info.xfb_stride, nir->info.xfb_stride, 4);
                }
-               nir_shader *clone = nir_shader_clone(NULL, nir);
-               result = hk_apple9_compile_sw_vs(dev, clone, &key.vertex, sw,
-                                                &reason);
-               ralloc_free(clone);
-               if (result != VK_SUCCESS)
-                  goto done;
+               sw_nir = nir_shader_clone(NULL, nir);
             }
             /* Without per-vertex inputs, the hardware vertex shader writes
              * the one-hot barycentric weights itself, so non-indexed
              * triangle lists need no passthrough geometry shader. */
             if (!per_vertex.count && hk_per_vertex_copies_used(&per_vertex))
                hk_apple9_write_vertex_weights(nir, &per_vertex);
-            if (!agx_compile_apple9_vertex_inputs(nir, &key.vertex, &shader->b,
-                                                  &reason)) {
+            bool cull_mask;
+            if (!hk_apple9_compile_vertex_culls(nir, &key.vertex, &shader->b,
+                                                &cull_mask, &reason)) {
+               ralloc_free(sw_nir);
                reason = reason ?: "unsupported vertex NIR";
                result = vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
                                   "Apple9 vertex: %s", reason);
                goto done;
             }
+            shader->info.cull_mask = sw->info.cull_mask = cull_mask;
+            if (sw_needed || cull_mask) {
+               result = hk_apple9_compile_sw_vs(dev, sw_nir, &key.vertex, sw,
+                                                &reason);
+            }
+            ralloc_free(sw_nir);
+            if (result != VK_SUCCESS)
+               goto done;
             varyings = shader->b.info.apple9_varyings;
          } else if (stage == MESA_SHADER_TESS_CTRL) {
             result = hk_apple9_compile_tcs(dev, nir, shader, &reason);
@@ -6188,7 +6246,8 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
                hk_apple9_lower_gs_polygon_points(
                   nir, info, hk_device_physical(dev)->vk.properties.polygonModePointSize);
             }
-            result = hk_apple9_compile_gs(dev, nir, &key.vertex, obj, &reason);
+            result = hk_apple9_compile_gs(dev, nir, &key.vertex,
+                                          !key.gs_cull_planes, obj, &reason);
             if (result != VK_SUCCESS)
                goto done;
             varyings = shader->b.info.apple9_varyings;
@@ -6383,7 +6442,7 @@ hk_apple9_create_null_fs(struct hk_device *dev,
  */
 VkResult
 hk_apple9_compile_internal_gs(struct hk_device *dev, nir_shader *nir,
-                              const uint64_t fs_interp[2],
+                              const uint64_t fs_interp[2], bool cull_mask,
                               struct hk_api_shader **out)
 {
    const struct vk_pipeline_robustness_state rs = {
@@ -6398,9 +6457,12 @@ hk_apple9_compile_internal_gs(struct hk_device *dev, nir_shader *nir,
       .nir = nir,
       .robustness = &rs,
    };
+   struct hk_apple9_graphics_key key;
+   hk_apple9_graphics_key(&key, NULL);
+   key.gs_cull_planes = !cull_mask;
    struct vk_shader *shader = NULL;
    VkResult result =
-      hk_apple9_compile_graphics(dev, 1, &info, NULL, NULL, fs_interp, NULL, &shader);
+      hk_apple9_compile_graphics(dev, 1, &info, NULL, &key, fs_interp, NULL, &shader);
    *out = shader ? container_of(shader, struct hk_api_shader, vk) : NULL;
    return result;
 }

@@ -570,6 +570,9 @@ struct lower_gs_rast_state {
    nir_def *instance_id, *primitive_id, *output_id, *stream;
    struct lower_output_to_var_slot outputs[NUM_TOTAL_VARYING_SLOTS];
    bool points;
+   unsigned cull_base, cull_count, vertices_per_primitive;
+   nir_def *provoking_last;
+   nir_variable *cull_mask[3];
 
    nir_variable *output_strip_length, *output_strip_base, *id_in_strip;
    nir_def *xfb_count[NIR_MAX_XFB_STREAMS];
@@ -583,6 +586,39 @@ select_rast_output(nir_builder *b, nir_intrinsic_instr *intr,
    nir_def *us = nir_ieq(b, intr->src[0].ssa, state->output_id);
    us = nir_iand(b, us,
                  nir_ieq_imm(b, state->stream, nir_intrinsic_stream_id(intr)));
+
+   /* Flat values are taken from one vertex, but cull distances test all
+    * vertices. For each potential provoking vertex select the signs of its
+    * neighbours in the output strip, before the hardware clipper sees them.
+    * A strip vertex provokes at most one primitive. Incomplete end vertices
+    * have unused masks; a complete primitive never crosses EndPrimitive.
+    */
+   if (state->cull_count) {
+      nir_def *mask = nir_imm_int(b, 0);
+      for (unsigned i = 0; i < state->cull_count; ++i) {
+         unsigned c = state->cull_base + i;
+         const struct lower_output_to_var_slot *output =
+            &state->outputs[VARYING_SLOT_CLIP_DIST0 + c / 4];
+         /* Unwritten components are undefined. Choose a non-negative
+          * distance without requiring a variable for an absent output. */
+         if (!output->output_var || c % 4 >= output->nr_components)
+            continue;
+         nir_def *distance =
+            nir_channel(b, nir_load_var(b, output->output_var), c % 4);
+         mask = nir_ior(b, mask, nir_bcsel(b, nir_flt_imm(b, distance, 0.0),
+                                          nir_imm_int(b, BITFIELD_BIT(i)),
+                                          nir_imm_int(b, 0)));
+      }
+      for (unsigned v = 0; v < state->vertices_per_primitive; ++v) {
+         nir_def *offset = nir_bcsel(b, nir_i2b(b, state->provoking_last),
+                                      nir_imm_int(b, -(int)v), nir_imm_int(b, v));
+         nir_def *target = nir_iadd(b, state->output_id, offset);
+         nir_def *selected = nir_iand(b, nir_ieq(b, intr->src[0].ssa, target),
+            nir_ieq_imm(b, state->stream, nir_intrinsic_stream_id(intr)));
+         nir_def *orig = nir_load_var(b, state->cull_mask[v]);
+         nir_store_var(b, state->cull_mask[v], nir_bcsel(b, selected, mask, orig), 1);
+      }
+   }
 
    u_foreach_bit64(slot, b->shader->info.outputs_written) {
       nir_def *orig = nir_load_var(b, state->outputs[slot].selected_var);
@@ -719,7 +755,8 @@ stream_multiplier(const nir_shader *gs)
  * shades each rasterized output vertex in parallel.
  */
 static nir_shader *
-create_gs_rast_shader(const nir_shader *gs, const struct lower_gs_state *state)
+create_gs_rast_shader(const nir_shader *gs, const struct lower_gs_state *state,
+                      bool cull_mask)
 {
    /* Don't muck up the original shader */
    nir_shader *shader = nir_shader_clone(NULL, gs);
@@ -757,6 +794,17 @@ create_gs_rast_shader(const nir_shader *gs, const struct lower_gs_state *state)
       .output_strip_base = nir_local_variable_create(b->impl, T, NULL),
       .id_in_strip = nir_local_variable_create(b->impl, T, NULL),
    };
+
+   if (cull_mask && gs->info.cull_distance_array_size) {
+      rs.cull_base = gs->info.clip_distance_array_size;
+      rs.cull_count = gs->info.cull_distance_array_size;
+      rs.vertices_per_primitive = mesa_vertices_per_prim(gs->info.gs.output_primitive);
+      rs.provoking_last = nir_load_provoking_last(b);
+      for (unsigned i = 0; i < rs.vertices_per_primitive; ++i) {
+         rs.cull_mask[i] = nir_local_variable_create(b->impl, glsl_uint_type(), NULL);
+         nir_store_var(b, rs.cull_mask[i], nir_imm_int(b, 0), 1);
+      }
+   }
 
    raw_vertex_id = nir_udiv_imm(b, raw_vertex_id, stream_multiplier(gs));
 
@@ -903,6 +951,20 @@ create_gs_rast_shader(const nir_shader *gs, const struct lower_gs_state *state)
       }
    }
 
+   if (rs.cull_count) {
+      nir_def *mask = nir_load_var(b, rs.cull_mask[0]);
+      for (unsigned i = 1; i < rs.vertices_per_primitive; ++i)
+         mask = nir_iand(b, mask, nir_load_var(b, rs.cull_mask[i]));
+      nir_store_output(b, mask, nir_imm_int(b, 0), .src_type = nir_type_uint32,
+                       .write_mask = 1,
+                       .io_semantics.location = VARYING_SLOT_CULL_PRIMITIVE);
+      /* The rasterizer shader has already combined the original vertices;
+       * do not generate interpolated per-plane helpers again. Original cull
+       * distance values remain ordinary outputs and XFB is unchanged above.
+       */
+      shader->info.cull_distance_array_size = 0;
+   }
+
    /* Forward each selected output to the rasterizer */
    u_foreach_bit64(slot, shader->info.outputs_written) {
       struct lower_output_to_var_slot *output = &rs.outputs[slot];
@@ -940,6 +1002,9 @@ create_gs_rast_shader(const nir_shader *gs, const struct lower_gs_state *state)
 
       nir_lower_default_point_size(shader);
    }
+
+   if (rs.cull_count)
+      shader->info.outputs_written |= BITFIELD64_BIT(VARYING_SLOT_CULL_PRIMITIVE);
 
    return shader;
 }
@@ -1297,9 +1362,9 @@ optimize_static_topology(struct poly_gs_info *info, nir_shader *gs)
    info->shape = POLY_GS_SHAPE_STATIC_INDEXED;
 }
 
-bool
-poly_nir_lower_gs(nir_shader *gs, nir_shader **gs_count, nir_shader **gs_copy,
-                  nir_shader **pre_gs, struct poly_gs_info *info)
+static bool
+lower_gs(nir_shader *gs, nir_shader **gs_count, nir_shader **gs_copy,
+         nir_shader **pre_gs, struct poly_gs_info *info, bool cull_mask)
 {
    /* Lower I/O as assumed by the rest of GS lowering */
    if (gs->xfb_info != NULL) {
@@ -1408,7 +1473,7 @@ poly_nir_lower_gs(nir_shader *gs, nir_shader **gs_count, nir_shader **gs_copy,
    /* Ensure that outputs_written is still accurate after DCE. */
    nir_shader_gather_info(gs, nir_shader_get_entrypoint(gs));
 
-   *gs_copy = create_gs_rast_shader(gs, &gs_state);
+   *gs_copy = create_gs_rast_shader(gs, &gs_state, cull_mask);
 
    NIR_PASS(_, gs, nir_shader_intrinsics_pass, lower_id,
             nir_metadata_control_flow, NULL);
@@ -1578,4 +1643,24 @@ poly_nir_lower_vs_before_gs(struct nir_shader *vs)
    /* Lower vertex stores to memory stores */
    return nir_shader_intrinsics_pass(vs, lower_vs_before_gs,
                                      nir_metadata_control_flow, NULL);
+}
+
+/* Keep the legacy interpolated cull-distance transport for other backends. */
+bool
+poly_nir_lower_gs(nir_shader *gs, nir_shader **gs_count, nir_shader **gs_copy,
+                  nir_shader **pre_gs, struct poly_gs_info *info)
+{
+   return lower_gs(gs, gs_count, gs_copy, pre_gs, info, false);
+}
+
+/* The rasterization shader exports a flat bit per wholly negative plane in
+ * CULL_PRIMITIVE.x. The backend must discard fragments when this word is
+ * nonzero, rather than interpolating individual cull-plane signs.
+ */
+bool
+poly_nir_lower_gs_cull_mask(nir_shader *gs, nir_shader **gs_count,
+                           nir_shader **gs_copy, nir_shader **pre_gs,
+                           struct poly_gs_info *info)
+{
+   return lower_gs(gs, gs_count, gs_copy, pre_gs, info, true);
 }

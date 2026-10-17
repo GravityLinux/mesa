@@ -163,7 +163,7 @@ if with_tests
     ),
     suite : ['asahi', 'honeykrisp'],
   )
-  foreach t : ['hk-image-limits', 'hk-stage-output-limits', 'hk-pregfx-recording', 'hk-heap-resubmit', 'hk-heap-addresses', 'hk-native-image-store', 'hk-mesh-query']
+  foreach t : ['hk-image-limits', 'hk-stage-output-limits', 'hk-cull-output-limits', 'hk-pregfx-recording', 'hk-heap-resubmit', 'hk-heap-addresses', 'hk-native-image-store', 'hk-mesh-query']
     test(
       t,
       executable(

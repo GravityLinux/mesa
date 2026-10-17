@@ -10664,6 +10664,50 @@ moved:;
    nir_progress(true, impl, nir_metadata_control_flow);
 }
 
+/* A per-vertex mask for the software geometry path. It never interpolates:
+ * poly combines the original vertices' masks before rasterization, and the
+ * fragment shader reads a flat primitive mask. Hardware-only points can use
+ * the per-vertex mask directly. Keep the actual distance outputs unchanged.
+ */
+static void
+apple9_pack_cull_distance(nir_shader *nir)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   nir_builder b = nir_builder_at(nir_before_impl(impl));
+   nir_variable *mask = nir_local_variable_create(impl, glsl_uint_type(), NULL);
+   nir_store_var(&b, mask, nir_imm_int(&b, 0), 1);
+   unsigned clip = nir->info.clip_distance_array_size;
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr_safe(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic != nir_intrinsic_store_output)
+            continue;
+         unsigned loc = nir_intrinsic_io_semantics(intr).location;
+         if (loc != VARYING_SLOT_CLIP_DIST0 && loc != VARYING_SLOT_CLIP_DIST1)
+            continue;
+         unsigned c = 4 * (loc - VARYING_SLOT_CLIP_DIST0 +
+                            nir_src_as_uint(intr->src[1])) +
+                      nir_intrinsic_component(intr);
+         if (c < clip || c >= clip + nir->info.cull_distance_array_size)
+            continue;
+         unsigned bit = BITFIELD_BIT(c - clip);
+         b.cursor = nir_before_instr(instr);
+         nir_def *v = nir_bcsel(&b, nir_flt_imm(&b, intr->src[0].ssa, 0),
+                                    nir_imm_int(&b, bit), nir_imm_int(&b, 0));
+         nir_store_var(&b, mask,
+            nir_ior(&b, nir_iand_imm(&b, nir_load_var(&b, mask), ~bit), v), 1);
+      }
+   }
+   b.cursor = nir_after_impl(impl);
+   nir_store_output(&b, nir_load_var(&b, mask), nir_imm_int(&b, 0),
+      .src_type = nir_type_uint32, .write_mask = 1,
+      .io_semantics.location = VARYING_SLOT_CULL_PRIMITIVE);
+   nir->info.outputs_written |= BITFIELD64_BIT(VARYING_SLOT_CULL_PRIMITIVE);
+   nir_progress(true, impl, nir_metadata_none);
+}
+
 /* The vertex stage exports, per cull half-space, a linear varying that is
  * one where the cull distance is non-negative. A primitive is culled when
  * that plane is zero at every vertex: zero here with zero screen-space
@@ -10678,6 +10722,16 @@ apple9_lower_cull_distance_fs(nir_shader *nir,
       return;
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
    nir_builder b = nir_builder_at(nir_before_impl(impl));
+   if (producer->cull_distance_mask) {
+      nir_def *mask = nir_load_input(&b, 1, 32, nir_imm_int(&b, 0),
+         .dest_type = nir_type_uint32,
+         .io_semantics.location = VARYING_SLOT_CULL_PRIMITIVE);
+      nir_demote_if(&b, nir_ine_imm(&b, mask, 0));
+      nir->info.inputs_read |= BITFIELD64_BIT(VARYING_SLOT_CULL_PRIMITIVE);
+      nir->info.fs.uses_discard = true;
+      nir_progress(true, impl, nir_metadata_none);
+      return;
+   }
    nir_def *bary = nir_load_barycentric_pixel(&b, 32,
       .interp_mode = INTERP_MODE_NOPERSPECTIVE);
    nir_def *culled = nir_imm_false(&b);
@@ -10734,7 +10788,10 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
    if (nir->info.stage == MESA_SHADER_VERTEX &&
        nir->info.cull_distance_array_size) {
       nir_lower_io_to_scalar(nir, nir_var_shader_out, NULL, NULL);
-      agx_nir_lower_cull_distance_vs(nir);
+      if (layout && layout->cull_distance_mask)
+         apple9_pack_cull_distance(nir);
+      else
+         agx_nir_lower_cull_distance_vs(nir);
    }
    if (nir->info.stage == MESA_SHADER_FRAGMENT && producer)
       apple9_lower_cull_distance_fs(nir, producer);
@@ -10978,6 +11035,9 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
    struct agx_apple9_varying_layout varyings = {0};
    if (!apple9_collect_varyings(nir, producer, &varyings, reason))
       return false;
+   if (layout && layout->cull_distance_mask &&
+       varyings.mask[VARYING_SLOT_CULL_PRIMITIVE])
+      varyings.cull_distance_mask = true;
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       nir_shader_intrinsics_pass(nir, apple9_lower_flat_input,
                                  nir_metadata_control_flow, &varyings);
@@ -11016,6 +11076,8 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
                (layout->outputs_linear & BITFIELD64_BIT(i)) ? 2 : 0;
       }
    }
+   if (varyings.cull_distance_mask)
+      varyings.group[VARYING_SLOT_CULL_PRIMITIVE] = 1;
    bool writes_layer = nir->info.outputs_written &
                        (VARYING_BIT_LAYER | VARYING_BIT_VIEWPORT);
    if (nir->info.stage == MESA_SHADER_VERTEX && writes_layer) {

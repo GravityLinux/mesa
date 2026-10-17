@@ -143,7 +143,8 @@ struct agx_apple9_varying_layout {
     * clipper's varying counts. Values within each group use semantic order. */
    uint8_t group[64];
    uint8_t count;
-   uint8_t reserved[3];
+   bool cull_distance_mask; /* Flat, primitive-wide negative-plane bits. */
+   uint8_t reserved[2];
 };
 
 /* Software capacity of the graphics address table, separate from launcher
