@@ -11,7 +11,7 @@ Run with the i686 Asahi EGL/GLES driver on the target (native FEX on a
 
 ```
 i386-bo-maps buffer 256 0x564000 3072
-i386-bo-maps texture 150 1024 3072
+ASAHI_MESA_DEBUG=nocompress i386-bo-maps texture 150 1024 3264
 ```
 
 Arguments are mode, object count, buffer bytes or texture width, and reserved
@@ -24,7 +24,9 @@ parent/candidate comparison.
 Buffer mode maps, writes and unmaps each buffer, keeping the buffers alive.
 Sampled words are read back at the end. Retained BO maps exhaust 32-bit VA.
 
-Texture mode uses glCompressedTexSubImage2D with BC1 data. On G16 Mesa decodes
+Texture mode uses glCompressedTexSubImage2D with BC1 data. The nocompress
+setting disables lossless GPU storage compression, forcing the CPU tile-copy
+path instead of GPU-blit staging. It does not disable the BC1 input encoding. On G16 Mesa decodes
 BC1 to RGBA8 and uploads through the tiled CPU transfer path, including the
 unmap tile copy that failed in Portal. At width 1024, 150 textures use about
 675 MiB (600 MiB RGBA8 and 75 MiB compressed shadows), plus bounded transient
@@ -33,7 +35,11 @@ reservation. Every seventeenth texture is sampled by a fragment shader and
 its red, green or blue output is verified with glReadPixels. Keep enough real
 memory for the BOs; run separately from games with a scoped memory cap.
 
-Success requires every upload/map and sampled readback. A GL allocation error,
+Success requires every upload/map and sampled readback. The 3264 MiB texture reservation reaches the parent failure while the
+candidate fits in the same runtime layout. With ordinary compressed GPU
+storage both drivers can pass because the staging BO is reused.
+
+A GL allocation error,
 NULL map, failed assertion, or process fault is a failure. Parent texture
 exhaustion may fault in its void transfer-unmap callback before returning a GL
 error. Preserve that log as failure evidence rather than calling it a pass.
