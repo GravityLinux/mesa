@@ -405,6 +405,13 @@ agx_linear_allowed(const struct agx_resource *pres)
    if (util_format_is_compressed(pres->base.format))
       return false;
 
+   /* Apple9 descriptors address a single linear layer, so a linear array
+    * could be neither sampled nor reloaded as a render target. Keep arrays
+    * tiled there unless linear is explicitly required. */
+   if (pres->base.array_size > 1 && !(pres->base.bind & PIPE_BIND_LINEAR) &&
+       agx_apple9_direct_render_enabled(agx_device(pres->base.screen)))
+      return false;
+
    switch (pres->base.target) {
    /* Buffers are always linear, even with image atomics */
    case PIPE_BUFFER:
