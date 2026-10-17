@@ -14,6 +14,7 @@ hk_files = files(
   'hk_cmd_clear.c',
   'hk_cmd_dispatch.c',
   'hk_cmd_draw.c',
+  'hk_apple9_polygon_points.c',
   'hk_cmd_apple9.c',
   'hk_cmd_meta.c',
   'hk_cmd_pool.c',

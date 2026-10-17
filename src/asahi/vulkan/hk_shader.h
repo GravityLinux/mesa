@@ -89,7 +89,10 @@ struct hk_mesh_info {
    uint32_t group_stride_B;
    uint16_t max_vertices, max_primitives;
    uint8_t prim;
-   uint8_t _pad[7];
+   /* The rasterizing vertex shader draws HK_PP_MAX_VERTICES points per
+    * triangle for polygon mode POINT. */
+   uint8_t polygon_points;
+   uint8_t _pad[6];
 };
 
 /* Fragment shaders read user per-primitive varyings from the output records,
@@ -165,9 +168,12 @@ hk_per_vertex_copies_used(const struct hk_per_vertex_copies *map)
    return map->count || map->bary[0] || map->bary[1];
 }
 
+struct hk_pp_info;
 nir_shader *hk_nir_mesh_rast(const nir_shader *mesh,
                              const struct hk_mesh_info *info,
-                             const struct hk_per_vertex_copies *copies);
+                             const struct hk_per_vertex_copies *copies,
+                             const struct hk_pp_info *polygon_points,
+                             bool point_size);
 
 /* Line stipple takes two generic varying slots of the last
  * pre-rasterization stage: a flat start and counter, and a noperspective

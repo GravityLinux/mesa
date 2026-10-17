@@ -15,6 +15,7 @@
 #include "util/bitscan.h"
 #include "agx_nir.h"
 #include "asahi/libagx/mesh.h"
+#include "hk_apple9_polygon_points.h"
 #include "hk_cmd_buffer.h"
 #include "hk_shader.h"
 #include "nir_intrinsics.h"
@@ -485,11 +486,173 @@ hk_nir_lower_task_main(nir_shader *nir)
                               &state);
 }
 
+struct hk_mesh_pp {
+   const struct hk_mesh_info *info;
+   nir_def *group, *p, *index[3], *visible;
+};
+
+static nir_def *
+hk_mesh_pp_load(nir_builder *b, void *data, unsigned vertex, unsigned location,
+                unsigned offset, unsigned component, unsigned comps,
+                nir_alu_type type)
+{
+   struct hk_mesh_pp *pp = data;
+   const struct hk_mesh_info *info = pp->info;
+   bool primitive = info->primitive_slots & BITFIELD64_BIT(location);
+   nir_def *value;
+   if ((info->vertex_slots | info->primitive_slots) & BITFIELD64_BIT(location)) {
+      value = nir_load_global(
+         b, hk_mesh_slot_words(info, location), 32,
+         hk_mesh_slot(b, info, pp->group, primitive,
+                      primitive ? pp->p : pp->index[vertex], location,
+                      offset ? nir_imm_int(b, offset) : NULL),
+         .align_mul = 4);
+      value = nir_pad_vector_imm_int(b, value, 0, 4);
+   } else if (location == VARYING_SLOT_LAYER) {
+      unsigned root = hk_root_descriptor_offset(draw.view_index);
+      value = nir_pad_vector_imm_int(
+         b,
+         nir_load_ubo(b, 1, 32, nir_imm_int(b, 0), nir_imm_int(b, root),
+                      .align_mul = 4, .range_base = root, .range = 4),
+         0, 4);
+   } else {
+      value = nir_imm_vec4(b, 0.0, 0.0, 0.0, 1.0);
+   }
+
+   /* Invisible primitives lie behind the eye, and clip to nothing. */
+   if (location == VARYING_SLOT_POS) {
+      value = nir_bcsel(b, pp->visible, value,
+                        nir_imm_vec4(b, 0.0, 0.0, 0.0, -1.0));
+   }
+   return nir_channels(b, value, BITFIELD_RANGE(component, comps));
+}
+
+/* Polygon mode POINT: each triangle draws HK_PP_MAX_VERTICES points, one per
+ * vertex of the clipped polygon, the others behind the eye.
+ */
+static nir_shader *
+hk_nir_mesh_rast_pp(const nir_shader *mesh, const struct hk_mesh_info *info,
+                    const struct hk_pp_info *pp_info, bool point_size)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_VERTEX, &agx_nir_options, "%s rast points",
+      mesh->info.name ? mesh->info.name : "mesh");
+   nir_shader *s = b.shader;
+
+   unsigned per_group = MAX2(info->max_primitives, 1) * HK_PP_MAX_VERTICES;
+   nir_def *vid = nir_load_vertex_id(&b);
+   nir_def *g = nir_udiv_imm(&b, vid, per_group);
+   nir_def *rem = nir_umod_imm(&b, vid, per_group);
+   nir_def *p = nir_udiv_imm(&b, rem, HK_PP_MAX_VERTICES);
+   nir_def *point = nir_umod_imm(&b, rem, HK_PP_MAX_VERTICES);
+
+   struct hk_mesh_pp pp = {.info = info, .p = p};
+   nir_def *records = hk_mesh_param(&b, hk_mesh_params(&b), 1, 64, outputs);
+   pp.group = nir_iadd(&b, records,
+                       nir_imul_imm(&b, nir_u2u64(&b, g), info->group_stride_B));
+   nir_def *prim_count =
+      nir_load_global(&b, 1, 32, nir_iadd_imm(&b, pp.group, 4), .align_mul = 4);
+   pp.visible = nir_ult(&b, p, prim_count);
+   if (info->primitive_slots & VARYING_BIT_CULL_PRIMITIVE) {
+      nir_def *cull = nir_load_global(
+         &b, 1, 32,
+         hk_mesh_slot(&b, info, pp.group, true, p, VARYING_SLOT_CULL_PRIMITIVE,
+                      NULL),
+         .align_mul = 4);
+      pp.visible = nir_iand(&b, pp.visible, nir_ieq_imm(&b, cull, 0));
+   }
+   for (unsigned i = 0; i < 3; ++i) {
+      nir_def *index = nir_load_global(
+         &b, 1, 32,
+         nir_iadd_imm(&b,
+                      hk_mesh_slot(&b, info, pp.group, true, p,
+                                   VARYING_SLOT_PRIMITIVE_INDICES, NULL),
+                      4 * i),
+         .align_mul = 4);
+      pp.index[i] = nir_umin_imm(&b, index, MAX2(info->max_vertices, 1) - 1);
+   }
+
+   uint64_t outputs = (info->vertex_slots | info->primitive_slots) &
+                      ~(VARYING_BIT_PRIMITIVE_INDICES |
+                        VARYING_BIT_CULL_PRIMITIVE | VARYING_BIT_CLIP_DIST0 |
+                        VARYING_BIT_CLIP_DIST1 | VARYING_BIT_CULL_DIST0 |
+                        VARYING_BIT_CULL_DIST1);
+   outputs |= VARYING_BIT_POS | VARYING_BIT_LAYER;
+   uint64_t memory = 0;
+   u_foreach_bit64(slot, info->primitive_slots) {
+      if (hk_mesh_varying_in_memory(slot))
+         memory |= BITFIELD64_BIT(slot);
+   }
+   outputs &= ~memory;
+   /* Without polygonModePointSize, polygon points have size 1. */
+   if (!point_size)
+      outputs &= ~VARYING_BIT_PSIZ;
+
+   unsigned components[VARYING_SLOT_MAX] = {0};
+   u_foreach_bit64(slot, outputs)
+      components[slot] = hk_mesh_slot_words(info, slot);
+
+   struct hk_pp_info pp_out = *pp_info;
+   pp_out.outputs = outputs;
+   pp_out.output_components = components;
+   /* Per-primitive values are equal at the three corners: keep them exact. */
+   pp_out.flat |= info->primitive_slots;
+
+   nir_def *last = nir_ieq_imm(
+      &b,
+      nir_load_ubo(&b, 1, 16, nir_imm_int(&b, 0),
+                   nir_imm_int(&b, hk_root_descriptor_offset(draw.provoking)),
+                   .align_mul = 2,
+                   .range_base = hk_root_descriptor_offset(draw.provoking),
+                   .range = 2),
+      2);
+   nir_def *provoking = nir_bcsel(&b, last, nir_imm_int(&b, 2), nir_imm_int(&b, 0));
+   nir_def *prim_id =
+      (info->primitive_slots & VARYING_BIT_PRIMITIVE_ID)
+         ? hk_mesh_pp_load(&b, &pp, 0, VARYING_SLOT_PRIMITIVE_ID, 0, 0, 1,
+                           nir_type_uint32)
+         : nir_imm_int(&b, 0);
+   hk_apple9_pp_emit_triangle(&b, &pp_out, hk_mesh_pp_load, &pp, provoking,
+                              prim_id, point);
+
+   if (memory) {
+      nir_def *offset = nir_iadd_imm(
+         &b,
+         nir_iadd(&b, nir_imul_imm(&b, g, info->group_stride_B),
+                  nir_imul_imm(&b, p,
+                               hk_mesh_slot_offset_B(info, info->primitive_slots,
+                                                     64))),
+         hk_mesh_primitives_offset_B(info));
+      nir_store_output(&b, offset, nir_imm_int(&b, 0), .write_mask = 0x1,
+                       .src_type = nir_type_uint32,
+                       .io_semantics.location = HK_MESH_PRIMITIVE_SLOT,
+                       .io_semantics.num_slots = 1);
+      outputs |= BITFIELD64_BIT(HK_MESH_PRIMITIVE_SLOT);
+   }
+
+   unsigned clip = mesh->info.clip_distance_array_size;
+   unsigned cull = mesh->info.cull_distance_array_size;
+   if (clip + cull)
+      outputs |= VARYING_BIT_CLIP_DIST0 | (clip + cull > 4 ? VARYING_BIT_CLIP_DIST1 : 0);
+   if (pp_out.face_slot)
+      outputs |= BITFIELD64_BIT(pp_out.face_slot);
+   s->info.outputs_written = outputs;
+   s->info.clip_distance_array_size = clip;
+   s->info.cull_distance_array_size = cull;
+   s->info.io_lowered = true;
+   NIR_PASS(_, s, nir_lower_vars_to_ssa);
+   return s;
+}
+
 /* The hardware vertex shader rasterizing mesh records. */
 nir_shader *
 hk_nir_mesh_rast(const nir_shader *mesh, const struct hk_mesh_info *info,
-                 const struct hk_per_vertex_copies *copies)
+                 const struct hk_per_vertex_copies *copies,
+                 const struct hk_pp_info *polygon_points, bool point_size)
 {
+   if (polygon_points)
+      return hk_nir_mesh_rast_pp(mesh, info, polygon_points, point_size);
+
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_VERTEX, &agx_nir_options, "%s rast",
       mesh->info.name ? mesh->info.name : "mesh");

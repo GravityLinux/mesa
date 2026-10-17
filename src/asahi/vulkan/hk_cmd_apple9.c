@@ -479,7 +479,9 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
         dyn->ia.primitive_topology !=
            VK_PRIMITIVE_TOPOLOGY_META_RECT_LIST_MESA))
       UNSUPPORTED();
-   enum mesa_prim gs_prim = mesh  ? shaders[0]->info.mesh.prim
+   enum mesa_prim gs_prim = mesh  ? (shaders[0]->info.mesh.polygon_points
+                                        ? MESA_PRIM_POINTS
+                                        : shaders[0]->info.mesh.prim)
                             : gs  ? shaders[0]->info.gs.mode
                             : tes ? gfx->tess.prim
                             : adjacency ? u_reduced_prim(api_prim)
