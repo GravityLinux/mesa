@@ -4397,14 +4397,21 @@ agx_batch_init_state(struct agx_batch *batch)
       }
    }
 
+   batch->attachments_were_valid = 0;
    if (batch->key.zsbuf.texture) {
       unsigned level = batch->key.zsbuf.level;
       struct agx_resource *rsrc = agx_resource(batch->key.zsbuf.texture);
 
+      if (agx_resource_valid(rsrc, level))
+         batch->attachments_were_valid |= BITFIELD_BIT(PIPE_MAX_COLOR_BUFS);
       agx_batch_writes_fragment(batch, rsrc, level);
 
-      if (rsrc->separate_stencil)
+      if (rsrc->separate_stencil) {
+         if (agx_resource_valid(rsrc->separate_stencil, level))
+            batch->attachments_were_valid |=
+               BITFIELD_BIT(PIPE_MAX_COLOR_BUFS + 1);
          agx_batch_writes_fragment(batch, rsrc->separate_stencil, level);
+      }
    }
 
    for (unsigned i = 0; i < batch->key.nr_cbufs; ++i) {
@@ -4412,8 +4419,10 @@ agx_batch_init_state(struct agx_batch *batch)
          struct agx_resource *rsrc = agx_resource(batch->key.cbufs[i].texture);
          unsigned level = batch->key.cbufs[i].level;
 
-         if (agx_resource_valid(rsrc, level))
+         if (agx_resource_valid(rsrc, level)) {
             batch->load |= PIPE_CLEAR_COLOR0 << i;
+            batch->attachments_were_valid |= BITFIELD_BIT(i);
+         }
 
          agx_batch_writes_fragment(batch, rsrc, level);
          assert(agx_resource_valid(rsrc, level));
@@ -6016,14 +6025,20 @@ agx_legalize_xfb(struct agx_context *ctx)
 }
 
 /* T8132 sampling validates a 16-bit row-stride field in 16-byte units,
- * minus one. Imported layouts must be representable without a copy. */
+ * minus one. Imported layouts must be representable without a copy.
+ * Rectangle and 1D images use the 2D descriptor dimension, so a single-level,
+ * single-layer linear image of either is the same descriptor as a 2D one.
+ * Transfers stage those targets linearly with their own target. */
 static bool
 agx_apple9_native_linear_texture(struct agx_resource *rsrc)
 {
    const struct pipe_resource *src = &rsrc->base;
    uint64_t stride = rsrc->layout.linear_stride_B;
    return rsrc->layout.tiling == AIL_TILING_LINEAR &&
-          src->target == PIPE_TEXTURE_2D && !src->last_level &&
+          (src->target == PIPE_TEXTURE_2D ||
+           src->target == PIPE_TEXTURE_RECT ||
+           src->target == PIPE_TEXTURE_1D) &&
+          !src->last_level &&
           src->nr_samples <= 1 && src->array_size == 1 &&
           !rsrc->layout.compressed && stride && !(stride & 15) &&
           stride <= AGX_APPLE9_MAX_LINEAR_STRIDE &&

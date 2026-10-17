@@ -1910,6 +1910,10 @@ agx_flush_batch(struct agx_context *ctx, struct agx_batch *batch)
 
    if (batch->vdm.bo && (batch->clear || batch->initialized)) {
       has_vdm = agx_flush_render(ctx, batch, &render);
+
+      /* The render half is dropped: nothing it recorded reaches the GPU. */
+      if (!has_vdm && batch->initialized)
+         agx_batch_undo_render_writes(batch);
    }
 
    if (!has_cdm && !has_vdm) {

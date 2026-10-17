@@ -126,6 +126,7 @@ agx_batch_init(struct agx_context *ctx,
    }
 
    batch->apple9_render_initialized = false;
+   batch->attachments_were_valid = 0;
    batch->apple9_draw_count = 0;
    batch->primitive_count = 0;
 
@@ -1175,6 +1176,36 @@ agx_sync_all(struct agx_context *ctx, const char *reason)
 
    foreach_submitted(ctx, idx) {
       agx_sync_batch(ctx, &ctx->batches.slots[idx]);
+   }
+}
+
+/* A render that is recorded but never submitted wrote nothing. Its
+ * attachments were marked valid when the batch state was initialized, so
+ * restore what they were before: a later batch must not reload, sample or
+ * decompress contents that do not exist. */
+void
+agx_batch_undo_render_writes(struct agx_batch *batch)
+{
+   const struct pipe_framebuffer_state *key = &batch->key;
+
+   for (unsigned i = 0; i < key->nr_cbufs; ++i) {
+      if (key->cbufs[i].texture &&
+          !(batch->attachments_were_valid & BITFIELD_BIT(i)))
+         BITSET_CLEAR(agx_resource(key->cbufs[i].texture)->data_valid,
+                      key->cbufs[i].level);
+   }
+
+   if (key->zsbuf.texture) {
+      struct agx_resource *rsrc = agx_resource(key->zsbuf.texture);
+      unsigned level = key->zsbuf.level;
+
+      if (!(batch->attachments_were_valid &
+            BITFIELD_BIT(PIPE_MAX_COLOR_BUFS)))
+         BITSET_CLEAR(rsrc->data_valid, level);
+      if (rsrc->separate_stencil &&
+          !(batch->attachments_were_valid &
+            BITFIELD_BIT(PIPE_MAX_COLOR_BUFS + 1)))
+         BITSET_CLEAR(rsrc->separate_stencil->data_valid, level);
    }
 }
 
