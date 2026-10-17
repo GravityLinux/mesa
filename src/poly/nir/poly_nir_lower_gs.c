@@ -390,6 +390,20 @@ lower_primitive_id_in(nir_builder *b, nir_intrinsic_instr *intr, void *_)
 static bool
 lower_gs_inputs(nir_builder *b, nir_intrinsic_instr *intr, void *_)
 {
+   if (intr->intrinsic == nir_intrinsic_load_strip_position_poly) {
+      b->cursor = nir_before_instr(&intr->instr);
+      nir_def *verts = load_vertex_param(b, grid[0]);
+      nir_def *unrolled = nir_iadd(b, nir_imul(b, nir_load_instance_id(b), verts),
+                                   intr->src[0].ssa);
+      nir_def *vp = nir_load_vertex_param_buffer_poly(b);
+      nir_def *addr =
+         poly_vertex_output_address(b, vp, poly_vertex_outputs(b, vp), unrolled,
+                                    nir_imm_int(b, VARYING_SLOT_POS));
+      nir_def_replace(&intr->def, nir_load_global_constant(b, 4, 32, addr,
+                                                           .align_mul = 4));
+      return true;
+   }
+
    if (intr->intrinsic != nir_intrinsic_load_per_vertex_input)
       return false;
 

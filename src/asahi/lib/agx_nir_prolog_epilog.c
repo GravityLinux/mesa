@@ -57,6 +57,165 @@ agx_nir_lower_poly_stipple(nir_shader *s)
    return nir_progress(true, b->impl, nir_metadata_control_flow);
 }
 
+/* Window-space length along the major axis of a segment between two clip
+ * positions: the number of fragments a Bresenham line advances the stipple
+ * counter by. */
+static nir_def *
+line_stipple_ndc(nir_builder *b, nir_def *pos)
+{
+   return nir_fdiv(b, nir_trim_vector(b, pos, 2), nir_channel(b, pos, 3));
+}
+
+static nir_def *
+line_stipple_major(nir_builder *b, nir_def *ndc0, nir_def *ndc1, nir_def *scale)
+{
+   nir_def *d = nir_fabs(b, nir_fmul(b, nir_fsub(b, ndc1, ndc0), scale));
+   return nir_fmax(b, nir_channel(b, d, 0), nir_channel(b, d, 1));
+}
+
+/*
+ * GL line stipple for a line passthrough geometry shader. Every vertex of a
+ * segment carries one flat varying: the segment's first vertex in NDC, the
+ * stipple counter at that vertex, and whether the segment is x-major.
+ *
+ * The counter resets at each independent segment. For strips and loops it
+ * continues along the strip: the segment adds the major-axis lengths of the
+ * strip's earlier segments, read back from the software vertex shader's
+ * outputs. Restart is split into separate draws by the driver, so a strip here
+ * always starts at vertex 0 of its instance.
+ */
+bool
+agx_nir_lower_line_stipple_gs(nir_shader *gs, bool strip)
+{
+   assert(gs->info.stage == MESA_SHADER_GEOMETRY);
+   assert(gs->info.gs.vertices_in == 2);
+
+   nir_variable *pos_in =
+      nir_find_variable_with_location(gs, nir_var_shader_in, VARYING_SLOT_POS);
+   if (!pos_in)
+      return false;
+
+   nir_variable *out =
+      nir_variable_create(gs, nir_var_shader_out, glsl_vec4_type(),
+                          "agx_line_stipple");
+   out->data.location = AGX_LINE_STIPPLE_SLOT;
+   out->data.interpolation = INTERP_MODE_FLAT;
+   out->data.driver_location = gs->num_outputs++;
+   gs->info.outputs_written |= BITFIELD64_BIT(AGX_LINE_STIPPLE_SLOT);
+
+   nir_function_impl *impl = nir_shader_get_entrypoint(gs);
+   nir_builder b = nir_builder_at(nir_before_impl(impl));
+
+   nir_def *scale = nir_trim_vector(&b, nir_load_viewport_scale(&b), 2);
+   nir_def *ndc0 = line_stipple_ndc(&b, nir_load_array_var_imm(&b, pos_in, 0));
+   nir_def *ndc1 = line_stipple_ndc(&b, nir_load_array_var_imm(&b, pos_in, 1));
+   nir_def *d = nir_fabs(&b, nir_fmul(&b, nir_fsub(&b, ndc1, ndc0), scale));
+   nir_def *x_major =
+      nir_b2f32(&b, nir_fge(&b, nir_channel(&b, d, 0), nir_channel(&b, d, 1)));
+
+   nir_def *base = nir_imm_float(&b, 0.0);
+   if (strip) {
+      nir_variable *i = nir_local_variable_create(impl, glsl_uint_type(), NULL);
+      nir_variable *sum = nir_local_variable_create(impl, glsl_float_type(), NULL);
+      nir_store_var(&b, i, nir_imm_int(&b, 0), 1);
+      nir_store_var(&b, sum, nir_imm_float(&b, 0.0), 1);
+      nir_def *prim = nir_load_primitive_id(&b);
+      /* Indirect strips longer than the bound restart per segment here. */
+      nir_def *continuous =
+         nir_ult_imm(&b, prim, AGX_LINE_STIPPLE_MAX_STRIP_SEGMENTS);
+      nir_def *limit = nir_bcsel(&b, continuous, prim, nir_imm_int(&b, 0));
+
+      nir_push_loop(&b);
+      {
+         nir_def *j = nir_load_var(&b, i);
+         nir_break_if(&b, nir_uge(&b, j, limit));
+         nir_def *a = line_stipple_ndc(&b, nir_load_strip_position_poly(&b, j));
+         nir_def *c = line_stipple_ndc(
+            &b, nir_load_strip_position_poly(&b, nir_iadd_imm(&b, j, 1)));
+         nir_store_var(&b, sum,
+                       nir_fadd(&b, nir_load_var(&b, sum),
+                                line_stipple_major(&b, a, c, scale)),
+                       1);
+         nir_store_var(&b, i, nir_iadd_imm(&b, j, 1), 1);
+      }
+      nir_pop_loop(&b, NULL);
+      base = nir_load_var(&b, sum);
+   }
+
+   nir_def *value = nir_vec4(&b, nir_channel(&b, ndc0, 0),
+                             nir_channel(&b, ndc0, 1), base, x_major);
+
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic != nir_intrinsic_emit_vertex &&
+             intr->intrinsic != nir_intrinsic_emit_vertex_with_counter)
+            continue;
+         b.cursor = nir_before_instr(instr);
+         nir_store_var(&b, out, value, 0xf);
+      }
+   }
+
+   return nir_progress(true, impl, nir_metadata_none);
+}
+
+/*
+ * Discard fragments whose stipple bit is clear. The counter is the segment's
+ * starting counter plus the window-space distance from its first vertex along
+ * its major axis, so every fragment column (or row) advances it by one.
+ */
+bool
+agx_nir_lower_line_stipple_fs(nir_shader *fs)
+{
+   assert(fs->info.stage == MESA_SHADER_FRAGMENT);
+
+   nir_builder b_ =
+      nir_builder_at(nir_before_impl(nir_shader_get_entrypoint(fs)));
+   nir_builder *b = &b_;
+
+   nir_def *line;
+   if (fs->info.io_lowered) {
+      line = nir_load_input(
+         b, 4, 32, nir_imm_int(b, 0), .base = 0, .component = 0,
+         .dest_type = nir_type_float32,
+         .io_semantics = (nir_io_semantics){.location = AGX_LINE_STIPPLE_SLOT,
+                                            .num_slots = 1});
+   } else {
+      nir_variable *in =
+         nir_variable_create(fs, nir_var_shader_in, glsl_vec4_type(),
+                             "agx_line_stipple");
+      in->data.location = AGX_LINE_STIPPLE_SLOT;
+      in->data.interpolation = INTERP_MODE_FLAT;
+      in->data.driver_location = fs->num_inputs++;
+      line = nir_load_var(b, in);
+   }
+   fs->info.inputs_read |= BITFIELD64_BIT(AGX_LINE_STIPPLE_SLOT);
+
+   nir_def *scale = nir_trim_vector(b, nir_load_viewport_scale(b), 2);
+   nir_def *offset = nir_trim_vector(b, nir_load_viewport_offset(b), 2);
+   nir_def *start = nir_ffma(b, nir_trim_vector(b, line, 2), scale, offset);
+
+   nir_def *pixel = nir_fadd_imm(
+      b, nir_u2f32(b, nir_u2u32(b, nir_load_pixel_coord(b))), 0.5);
+   nir_def *dist = nir_fabs(b, nir_fsub(b, pixel, start));
+   nir_def *x_major = nir_fge_imm(b, nir_channel(b, line, 3), 0.5);
+   nir_def *along =
+      nir_bcsel(b, x_major, nir_channel(b, dist, 0), nir_channel(b, dist, 1));
+   nir_def *counter = nir_f2u32(b, nir_fadd(b, nir_channel(b, line, 2), along));
+
+   nir_def *word = nir_load_line_stipple_agx(b);
+   nir_def *factor = nir_ushr_imm(b, word, 16);
+   nir_def *index = nir_umod_imm(b, nir_udiv(b, counter, factor), 16);
+   nir_def *bit = nir_ubitfield_extract(b, word, index, nir_imm_int(b, 1));
+
+   nir_demote_if(b, nir_ieq_imm(b, bit, 0));
+   fs->info.fs.uses_discard = true;
+
+   return nir_progress(true, b->impl, nir_metadata_control_flow);
+}
+
 static int
 map_vs_part_uniform(nir_intrinsic_instr *intr, unsigned nr_attribs)
 {

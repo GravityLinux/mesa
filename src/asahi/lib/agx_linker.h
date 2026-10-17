@@ -272,6 +272,20 @@ void agx_nir_fs_epilog(struct nir_builder *b, const void *key_);
 void agx_nir_fs_prolog(struct nir_builder *b, const void *key_);
 bool agx_nir_lower_poly_stipple(nir_shader *s);
 
+/* Line stipple emulation: an internal passthrough GS forwards each segment's
+ * start and direction in this flat varying, and the fragment shader discards
+ * from the window-space distance along the segment's major axis. */
+#define AGX_LINE_STIPPLE_SLOT VARYING_SLOT_VAR31
+/* Strip-continuous counters loop over the strip's earlier segments, so the
+ * work per draw is quadratic in its length. Beyond this many segments per
+ * instance the counter restarts per segment instead. */
+#define AGX_LINE_STIPPLE_MAX_STRIP_SEGMENTS 1024
+/* Producers with this many user outputs leave no vec4 for the stipple
+ * varying within the 124 non-position publication components. */
+#define AGX_LINE_STIPPLE_MAX_USER_OUTPUTS 31
+bool agx_nir_lower_line_stipple_gs(nir_shader *gs, bool strip);
+bool agx_nir_lower_line_stipple_fs(nir_shader *fs);
+
 bool agx_nir_gather_vs_inputs(nir_shader *s,
                               BITSET_WORD *attrib_components_read);
 
