@@ -842,13 +842,15 @@ hk_apple9_write_vertex_weights(nir_shader *vs,
 }
 
 /*
- * Line stipple without a geometry stage. The vertex shader also exports its
- * window position, snapped to the vertex grid, twice: flat, so that a line
- * list's fragment receives its segment's first vertex, and noperspective,
- * which interpolates to a point on the ideal line. The counter is the
- * fragment's distance from the first vertex along the major axis, and the
- * interpolated point decides that axis: a wide line's fragments lie off the
- * line, where comparing the fragment's own distances could pick the wrong
+ * Line stipple. The last pre-rasterization stage exports two slots. The flat
+ * start slot holds a segment's first vertex in window space, snapped to the
+ * vertex grid, and the stipple counter there: zero for independent segments,
+ * the length of the strip so far where a geometry stage continues one. The
+ * noperspective axis slot holds the vertex's own window position, which
+ * interpolates to a point on the ideal line. The fragment's counter is the
+ * start's counter plus its distance from the start along the major axis, and
+ * the interpolated point decides that axis: a wide line's fragments lie off
+ * the line, where comparing the fragment's own distances could pick the wrong
  * one. The window transform is the vertex's own viewport's, from the runtime
  * sysvals.
  */
@@ -856,18 +858,24 @@ struct hk_apple9_stipple_slots {
    unsigned start, axis;
 };
 
-static void
-hk_apple9_write_line_stipple_start(nir_shader *vs,
-                                   struct hk_apple9_stipple_slots slots)
+/* Record the stage's latest position and viewport index outputs in
+ * variables, for the stipple start written after them. */
+struct hk_apple9_stipple_tap {
+   nir_variable *pos, *viewport;
+};
+
+static struct hk_apple9_stipple_tap
+hk_apple9_tap_position(nir_shader *s)
 {
-   nir_function_impl *impl = nir_shader_get_entrypoint(vs);
+   nir_function_impl *impl = nir_shader_get_entrypoint(s);
    nir_builder b = nir_builder_at(nir_before_impl(impl));
-   nir_variable *pos =
-      nir_local_variable_create(impl, glsl_vec4_type(), "stipple_pos");
-   nir_variable *viewport =
-      nir_local_variable_create(impl, glsl_uint_type(), "stipple_viewport");
-   nir_store_var(&b, pos, nir_imm_vec4(&b, 0.0, 0.0, 0.0, 1.0), 0xf);
-   nir_store_var(&b, viewport, nir_imm_int(&b, 0), 1);
+   struct hk_apple9_stipple_tap tap = {
+      .pos = nir_local_variable_create(impl, glsl_vec4_type(), "stipple_pos"),
+      .viewport =
+         nir_local_variable_create(impl, glsl_uint_type(), "stipple_viewport"),
+   };
+   nir_store_var(&b, tap.pos, nir_imm_vec4(&b, 0.0, 0.0, 0.0, 1.0), 0xf);
+   nir_store_var(&b, tap.viewport, nir_imm_int(&b, 0), 1);
 
    nir_foreach_block(block, impl) {
       nir_foreach_instr(instr, block) {
@@ -880,48 +888,140 @@ hk_apple9_write_line_stipple_start(nir_shader *vs,
          b.cursor = nir_after_instr(instr);
          nir_def *value = intr->src[0].ssa;
          if (location == VARYING_SLOT_POS) {
-            nir_def *v = nir_load_var(&b, pos);
+            nir_def *v = nir_load_var(&b, tap.pos);
             unsigned first = nir_intrinsic_component(intr);
             u_foreach_bit(c, nir_intrinsic_write_mask(intr)) {
                v = nir_vector_insert_imm(&b, v, nir_channel(&b, value, c),
                                          first + c);
             }
-            nir_store_var(&b, pos, v, 0xf);
+            nir_store_var(&b, tap.pos, v, 0xf);
          } else if (location == VARYING_SLOT_VIEWPORT) {
-            nir_store_var(&b, viewport, nir_channel(&b, value, 0), 1);
+            nir_store_var(&b, tap.viewport, nir_channel(&b, value, 0), 1);
          }
       }
    }
+   return tap;
+}
 
-   b.cursor = nir_after_impl(impl);
-   nir_def *p = nir_load_var(&b, pos);
+/* The snapped window position of the tapped vertex, in its own viewport. */
+static nir_def *
+hk_apple9_stipple_window(nir_builder *b, struct hk_apple9_stipple_tap tap)
+{
+   nir_def *p = nir_load_var(b, tap.pos);
    /* Vertices behind the eye clip the segment, where the counter's start is
     * implementation-dependent; keep the divide finite. */
-   nir_def *w = nir_fmax(&b, nir_channel(&b, p, 3), nir_imm_float(&b, 0x1p-16));
-   nir_def *ndc = nir_fdiv(&b, nir_trim_vector(&b, p, 2), w);
-   nir_def *index = nir_umin(&b, nir_load_var(&b, viewport),
-                             nir_imm_int(&b, AGX_APPLE9_VIEWPORT_TABLE_COUNT - 1));
+   nir_def *w = nir_fmax(b, nir_channel(b, p, 3), nir_imm_float(b, 0x1p-16));
+   nir_def *ndc = nir_fdiv(b, nir_trim_vector(b, p, 2), w);
+   nir_def *index = nir_umin(b, nir_load_var(b, tap.viewport),
+                             nir_imm_int(b, AGX_APPLE9_VIEWPORT_TABLE_COUNT - 1));
    nir_def *transform = nir_load_ubo(
-      &b, 4, 32, nir_imm_int(&b, AGX_APPLE9_GRAPHICS_SYSVAL_BINDING),
-      nir_iadd_imm(&b, nir_imul_imm(&b, index, 16),
+      b, 4, 32, nir_imm_int(b, AGX_APPLE9_GRAPHICS_SYSVAL_BINDING),
+      nir_iadd_imm(b, nir_imul_imm(b, index, 16),
                    AGX_APPLE9_VIEWPORT_TABLE_OFFSET),
       .align_mul = 16, .range_base = AGX_APPLE9_VIEWPORT_TABLE_OFFSET,
       .range = AGX_APPLE9_VIEWPORT_TABLE_COUNT * 16);
-   nir_def *window = agx_nir_line_stipple_snap(
-      &b, nir_ffma(&b, ndc, nir_channels(&b, transform, 0x3),
-                   nir_channels(&b, transform, 0xc)));
-   nir_store_output(&b, window, nir_imm_int(&b, 0), .write_mask = 0x3,
+   return agx_nir_line_stipple_snap(
+      b, nir_ffma(b, ndc, nir_channels(b, transform, 0x3),
+                  nir_channels(b, transform, 0xc)));
+}
+
+/* The start slot holds the segment's first vertex and the stipple counter
+ * there; the axis slot the vertex's own position. */
+static void
+hk_apple9_store_line_stipple(nir_builder *b, nir_shader *s,
+                             struct hk_apple9_stipple_slots slots,
+                             nir_def *start, nir_def *base, nir_def *window)
+{
+   nir_store_output(b, nir_vec3(b, nir_channel(b, start, 0),
+                                nir_channel(b, start, 1), base),
+                    nir_imm_int(b, 0), .write_mask = 0x7,
                     .src_type = nir_type_float32,
                     .io_semantics.location = slots.start,
                     .io_semantics.num_slots = 1);
-   nir_store_output(&b, window, nir_imm_int(&b, 0), .write_mask = 0x3,
+   nir_store_output(b, window, nir_imm_int(b, 0), .write_mask = 0x3,
                     .src_type = nir_type_float32,
                     .io_semantics.location = slots.axis,
                     .io_semantics.num_slots = 1);
-   vs->info.outputs_written |=
+   s->info.outputs_written |=
       BITFIELD64_BIT(slots.start) | BITFIELD64_BIT(slots.axis);
+}
+
+/* Vertex and evaluation shaders: every vertex starts its segment, with the
+ * counter at zero. Strips continue in the passthrough geometry shader. */
+static void
+hk_apple9_write_line_stipple_start(nir_shader *vs,
+                                   struct hk_apple9_stipple_slots slots)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(vs);
+   struct hk_apple9_stipple_tap tap = hk_apple9_tap_position(vs);
+   nir_builder b = nir_builder_at(nir_after_impl(impl));
+   nir_def *window = hk_apple9_stipple_window(&b, tap);
+   hk_apple9_store_line_stipple(&b, vs, slots, window, nir_imm_float(&b, 0.0),
+                                window);
    nir_progress(true, impl, nir_metadata_none);
    NIR_PASS(_, vs, nir_lower_vars_to_ssa);
+}
+
+/*
+ * Geometry shaders emitting line strips: the counter continues along each
+ * output strip and restarts at EndPrimitive. A segment's flat values come
+ * from its provoking vertex, so under the first-vertex mode each vertex
+ * carries its own position and counter, and under the last-vertex mode the
+ * previous vertex's.
+ */
+static void
+hk_apple9_write_gs_line_stipple(nir_shader *gs,
+                                struct hk_apple9_stipple_slots slots)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(gs);
+   struct hk_apple9_stipple_tap tap = hk_apple9_tap_position(gs);
+   nir_builder b = nir_builder_at(nir_before_impl(impl));
+   nir_variable *prev =
+      nir_local_variable_create(impl, glsl_vec_type(2), "stipple_prev");
+   nir_variable *prev_base =
+      nir_local_variable_create(impl, glsl_float_type(), "stipple_prev_base");
+   nir_variable *have_prev =
+      nir_local_variable_create(impl, glsl_bool_type(), "stipple_have_prev");
+   nir_store_var(&b, prev, nir_imm_vec2(&b, 0.0, 0.0), 0x3);
+   nir_store_var(&b, prev_base, nir_imm_float(&b, 0.0), 1);
+   nir_store_var(&b, have_prev, nir_imm_false(&b), 1);
+
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr_safe(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         b.cursor = nir_before_instr(instr);
+         if (intr->intrinsic == nir_intrinsic_end_primitive ||
+             intr->intrinsic == nir_intrinsic_end_primitive_with_counter) {
+            nir_store_var(&b, have_prev, nir_imm_false(&b), 1);
+            continue;
+         }
+         if (intr->intrinsic != nir_intrinsic_emit_vertex &&
+             intr->intrinsic != nir_intrinsic_emit_vertex_with_counter)
+            continue;
+         nir_def *window = hk_apple9_stipple_window(&b, tap);
+         nir_def *had = nir_load_var(&b, have_prev);
+         nir_def *p = nir_load_var(&b, prev);
+         nir_def *pb = nir_load_var(&b, prev_base);
+         nir_def *d = nir_fabs(&b, nir_fsub(&b, window, p));
+         nir_def *base = nir_bcsel(
+            &b, had,
+            nir_fadd(&b, pb, nir_fmax(&b, nir_channel(&b, d, 0),
+                                      nir_channel(&b, d, 1))),
+            nir_imm_float(&b, 0.0));
+         nir_def *last =
+            nir_iand(&b, had, nir_ine_imm(&b, nir_load_provoking_last(&b), 0));
+         hk_apple9_store_line_stipple(&b, gs, slots,
+                                      nir_bcsel(&b, last, p, window),
+                                      nir_bcsel(&b, last, pb, base), window);
+         nir_store_var(&b, prev, window, 0x3);
+         nir_store_var(&b, prev_base, base, 1);
+         nir_store_var(&b, have_prev, nir_imm_true(&b), 1);
+      }
+   }
+   nir_progress(true, impl, nir_metadata_none);
+   NIR_PASS(_, gs, nir_lower_vars_to_ssa);
 }
 
 static void
@@ -930,9 +1030,10 @@ hk_apple9_lower_line_stipple_fs(nir_shader *fs,
 {
    nir_function_impl *impl = nir_shader_get_entrypoint(fs);
    nir_builder b = nir_builder_at(nir_before_impl(impl));
-   nir_def *start = nir_load_input(
-      &b, 2, 32, nir_imm_int(&b, 0), .dest_type = nir_type_float32,
+   nir_def *line = nir_load_input(
+      &b, 3, 32, nir_imm_int(&b, 0), .dest_type = nir_type_float32,
       .io_semantics = {.location = slots.start, .num_slots = 1});
+   nir_def *start = nir_trim_vector(&b, line, 2);
    nir_def *bary = nir_load_barycentric_pixel(
       &b, 32, .interp_mode = INTERP_MODE_NOPERSPECTIVE);
    nir_def *on_line = nir_load_interpolated_input(
@@ -945,7 +1046,9 @@ hk_apple9_lower_line_stipple_fs(nir_shader *fs,
       &b, nir_u2f32(&b, nir_u2u32(&b, nir_load_pixel_coord(&b))), 0.5);
    nir_def *d = nir_fabs(&b, nir_fsub(&b, pixel, start));
    nir_def *counter = nir_f2u32(
-      &b, nir_bcsel(&b, x_major, nir_channel(&b, d, 0), nir_channel(&b, d, 1)));
+      &b, nir_fadd(&b, nir_channel(&b, line, 2),
+                   nir_bcsel(&b, x_major, nir_channel(&b, d, 0),
+                             nir_channel(&b, d, 1))));
    agx_nir_line_stipple_test(&b, counter);
    nir_progress(true, impl, nir_metadata_control_flow);
    nir_shader_gather_info(fs, impl);
@@ -5255,6 +5358,7 @@ hk_apple9_compile_mesh(struct hk_device *dev, nir_shader *nir,
                        const struct agx_apple9_vertex_layout *vertex,
                        bool clip_negative_one_to_one,
                        const struct hk_per_vertex_copies *copies,
+                       struct hk_apple9_stipple_slots stipple,
                        struct hk_api_shader *obj, const char **reason)
 {
    struct hk_shader *main = &obj->variants[HK_MESH_VARIANT_MAIN];
@@ -5285,6 +5389,8 @@ hk_apple9_compile_mesh(struct hk_device *dev, nir_shader *nir,
       struct agx_apple9_vertex_layout layout = *vertex;
       layout.rasterize_points = info.prim == MESA_PRIM_POINTS;
       layout.ignore_point_size = !layout.rasterize_points;
+      if (stipple.start)
+         hk_apple9_write_line_stipple_start(rast_nir, stipple);
       hk_apple9_lower_prerast_sysvals(rast_nir, MESA_SHADER_VERTEX);
       /* The generated vertex shader writes the rasterized position. */
       if (clip_negative_one_to_one) {
@@ -5359,10 +5465,13 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
    bool copies_from_gs = false;
    struct hk_apple9_stipple_slots stipple = {0};
    bool stipple_first = false;
+   mesa_shader_stage stipple_stage = MESA_SHADER_NONE;
    {
       nir_shader *pre_nir = NULL, *fs_nir = NULL;
+      nir_shader *stage_nir[MESA_SHADER_STAGES] = {NULL};
       bool other = false;
       for (unsigned i = 0; i < count; ++i) {
+         stage_nir[infos[i].stage] = infos[i].nir;
          if (infos[i].stage == MESA_SHADER_VERTEX ||
              infos[i].stage == MESA_SHADER_MESH)
             pre_nir = infos[i].nir;
@@ -5377,12 +5486,36 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
                                             &per_vertex))
          copies_from_gs = pre_nir->info.stage == MESA_SHADER_VERTEX;
 
-      /* Stippled lines from a vertex shader measure their counter from the
-       * segment start the vertex shader exports. Geometry and tessellation
-       * stages output their own lines. */
-      if (key.line_stipple && pre_nir &&
-          pre_nir->info.stage == MESA_SHADER_VERTEX && fs_nir && !other) {
-         stipple = hk_apple9_line_stipple_slots(pre_nir, fs_nir);
+      /* Stippled lines measure their counter from the segment start the last
+       * pre-rasterization stage exports: a vertex shader, an evaluation shader
+       * drawing isolines, or a geometry shader emitting line strips. */
+      nir_shader *last = NULL;
+      if (stage_nir[MESA_SHADER_GEOMETRY]) {
+         if (stage_nir[MESA_SHADER_GEOMETRY]->info.gs.output_primitive ==
+             MESA_PRIM_LINE_STRIP)
+            last = stage_nir[MESA_SHADER_GEOMETRY];
+      } else if (stage_nir[MESA_SHADER_TESS_EVAL]) {
+         nir_shader *tes = stage_nir[MESA_SHADER_TESS_EVAL];
+         nir_shader *tcs = stage_nir[MESA_SHADER_TESS_CTRL];
+         enum tess_primitive_mode mode = tes->info.tess._primitive_mode;
+         if (mode == TESS_PRIMITIVE_UNSPECIFIED && tcs)
+            mode = tcs->info.tess._primitive_mode;
+         bool points = tes->info.tess.point_mode ||
+                       (tcs && tcs->info.tess.point_mode);
+         if (mode == TESS_PRIMITIVE_ISOLINES && !points)
+            last = tes;
+      } else if (pre_nir && pre_nir->info.stage == MESA_SHADER_VERTEX) {
+         last = pre_nir;
+      } else if (pre_nir && pre_nir->info.stage == MESA_SHADER_MESH &&
+                 pre_nir->info.mesh.primitive_type == MESA_PRIM_LINES) {
+         /* Mesh lines are independent: the generated rasterizing vertex
+          * shader exports the start as a vertex shader does. */
+         last = pre_nir;
+      }
+      if (key.line_stipple && last && fs_nir) {
+         stipple = hk_apple9_line_stipple_slots(last, fs_nir);
+         if (stipple.start)
+            stipple_stage = last->info.stage;
          if (stipple.start) {
             hk_apple9_lower_line_stipple_fs(fs_nir, stipple);
             /* The stipple start needs the segment's first vertex. Under the
@@ -5401,9 +5534,11 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
                             ~(fs_nir->info.perspective_varyings |
                               fs_nir->info.linear_varyings) &
                             ~BITFIELD64_BIT(stipple.start);
+            /* Geometry shaders choose the start for either mode. */
             stipple_first =
-               !(flat & provoked) &&
-               !(pre_nir->info.outputs_written &
+               stipple_stage != MESA_SHADER_GEOMETRY &&
+               stipple_stage != MESA_SHADER_MESH && !(flat & provoked) &&
+               !(last->info.outputs_written &
                  (VARYING_BIT_LAYER | VARYING_BIT_VIEWPORT));
          }
       }
@@ -5545,7 +5680,7 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
                   }
                }
             }
-            if (stipple.start)
+            if (stipple_stage == MESA_SHADER_VERTEX)
                hk_apple9_write_line_stipple_start(nir, stipple);
             /* Transform feedback and flat copies of per-vertex inputs are
              * layered on a passthrough geometry shader, which consumes the
@@ -5554,7 +5689,8 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
             if ((infos[i].next_stage_mask &
                  (VK_SHADER_STAGE_GEOMETRY_BIT |
                   VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT)) ||
-                nir->xfb_info || hk_per_vertex_copies_used(&per_vertex)) {
+                nir->xfb_info || hk_per_vertex_copies_used(&per_vertex) ||
+                stipple_stage == MESA_SHADER_VERTEX) {
                struct hk_shader *sw = &obj->variants[HK_VS_VARIANT_SW];
                sw->info.set_count = shader->info.set_count;
                sw->info.clip_distance_array_size =
@@ -5594,6 +5730,8 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
                goto done;
             continue;
          } else if (stage == MESA_SHADER_TESS_EVAL) {
+            if (stipple_stage == MESA_SHADER_TESS_EVAL)
+               hk_apple9_write_line_stipple_start(nir, stipple);
             result = hk_apple9_compile_tes(dev, nir, &key.vertex, obj,
                                            infos[i].next_stage_mask, &reason);
             if (result != VK_SUCCESS)
@@ -5601,6 +5739,8 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
             varyings = shader->b.info.apple9_varyings;
             continue;
          } else if (stage == MESA_SHADER_GEOMETRY) {
+            if (stipple_stage == MESA_SHADER_GEOMETRY)
+               hk_apple9_write_gs_line_stipple(nir, stipple);
             result = hk_apple9_compile_gs(dev, nir, &key.vertex, obj, &reason);
             if (result != VK_SUCCESS)
                goto done;
@@ -5612,9 +5752,11 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
                goto done;
             continue;
          } else if (stage == MESA_SHADER_MESH) {
-            result = hk_apple9_compile_mesh(dev, nir, &key.vertex,
-                                            key.clip_negative_one_to_one,
-                                            &per_vertex, obj, &reason);
+            result = hk_apple9_compile_mesh(
+               dev, nir, &key.vertex, key.clip_negative_one_to_one, &per_vertex,
+               stipple_stage == MESA_SHADER_MESH
+                  ? stipple : (struct hk_apple9_stipple_slots){0},
+               obj, &reason);
             if (result != VK_SUCCESS)
                goto done;
             varyings = obj->variants[HK_MESH_VARIANT_RAST].b.info.apple9_varyings;
@@ -5622,6 +5764,7 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
          } else {
             shader->info.fs.interp.linear = key.vertex.outputs_linear;
             shader->info.fs.interp.flat = key.vertex.outputs_flat;
+            shader->info.fs.line_stipple_start = stipple.start;
             if (copies_from_gs) {
                shader->info.fs.per_vertex_copies = per_vertex.count;
                memcpy(shader->info.fs.per_vertex_bary, per_vertex.bary,

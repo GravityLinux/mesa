@@ -40,20 +40,20 @@ main(void)
    gfx->apple9_sysvals = 0x1000010000ull;
    gfx->apple9_sample_positions = 0x44cc;
    uint64_t textures = 0, samplers = 0, sysvals = 0;
-   CHECK(!hk_apple9_upload_textures(cmd, &shader, true, true,
+   CHECK(!hk_apple9_upload_textures(cmd, &shader, true, true, false,
                                    &textures, &samplers, &sysvals));
    CHECK(BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_CB_BLEND_CONSTANTS));
    CHECK(BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES));
    CHECK(gfx->apple9_sysvals == 0x1000010000ull);
    CHECK(gfx->apple9_sysvals_positions == 0 && !gfx->apple9_sysvals_first_fan);
    fail_upload = false;
-   CHECK(hk_apple9_upload_textures(cmd, &shader, true, true,
+   CHECK(hk_apple9_upload_textures(cmd, &shader, true, true, false,
                                   &textures, &samplers, &sysvals));
    CHECK(sysvals == 0x1000040000ull && gfx->apple9_sysvals == sysvals);
    CHECK(!BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_CB_BLEND_CONSTANTS));
    CHECK(!BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES));
    CHECK(gfx->apple9_sysvals_positions == 0x44cc && gfx->apple9_sysvals_first_fan);
-   CHECK(hk_apple9_upload_textures(cmd, &shader, true, true,
+   CHECK(hk_apple9_upload_textures(cmd, &shader, true, true, false,
                                   &textures, &samplers, &sysvals));
    CHECK(uploads == 2);
    puts("failed upload preserves dirty bits/cache; successful retry publishes once");

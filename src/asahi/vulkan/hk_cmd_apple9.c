@@ -563,7 +563,7 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
     * root table keeps the API mode for transform feedback and adjacency. */
    pipeline.flatshade_first =
       dyn->rs.provoking_vertex != VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT ||
-      (!emulated && shaders[1]->info.apple9_line_stipple_first);
+      (!mesh && !gs && !adjacency && shaders[1]->info.apple9_line_stipple_first);
    if (draw.indexed) {
       pipeline.index_size = agx_index_size_to_B(draw.index_size);
       uint64_t offset = agx_is_indirect(draw.b)
@@ -845,7 +845,7 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       t_sub = hk_cpu_sub_begin();
       bool textures_ok = hk_apple9_upload_textures(
          cmd, shaders[stage], true,
-         pipeline.primitive == AGX_PRIMITIVE_TRIANGLE_FAN,
+         pipeline.primitive == AGX_PRIMITIVE_TRIANGLE_FAN, lines,
          &record->texture_table[stage], &record->sampler_table[stage], &sysvals);
       hk_cpu_sub_end(t_sub, HK_CPU_SUB_TEXTURES);
       if (!textures_ok)

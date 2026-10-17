@@ -1750,7 +1750,11 @@ struct hk_apple9_passthrough_suffix {
    uint8_t per_vertex_location[HK_MAX_PER_VERTEX_COPIES];
    uint8_t per_vertex_copy_base[HK_MAX_PER_VERTEX_COPIES];
    uint8_t per_vertex_bary[2];
-   uint8_t _pad[5];
+   /* Line stipple start slot to continue along strips, and whether the
+    * input is a strip. */
+   uint8_t line_stipple_start;
+   uint8_t line_stipple_strip;
+   uint8_t _pad[3];
 };
 
 /* Before every emitted vertex, write the per-vertex values of the input
@@ -1817,6 +1821,77 @@ hk_apple9_write_per_vertex_copies(nir_shader *s,
    nir_progress(true, impl, nir_metadata_control_flow);
 }
 
+/*
+ * Line stipple the vertex shader's start cannot express alone. The vertex
+ * shader exports each vertex's snapped window position in the start slot,
+ * with the counter there, which the fragment shader measures its counter
+ * from, see hk_apple9_lower_line_stipple_fs. Every emitted vertex of the
+ * segment gets the segment's first vertex, so either vertex may provoke. On
+ * a strip the counter continues: it starts at the major-axis lengths of the
+ * strip's earlier segments. The lengths approximate the earlier segments'
+ * fragment counts to within one per segment, as the CTS allows; counting
+ * rounded endpoints instead failed its strip cases. Strips longer than the
+ * bound restart at each segment. With adjacency, the line is input vertices 1 and 2, and strip
+ * vertex j + 1 begins segment j.
+ */
+static void
+hk_apple9_line_stipple_gs(nir_shader *s,
+                          const struct hk_apple9_passthrough_suffix *suffix)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(s);
+   nir_builder b = nir_builder_at(nir_before_impl(impl));
+   nir_io_semantics sem = {.location = suffix->line_stipple_start,
+                           .num_slots = 1};
+   unsigned first = s->info.gs.input_primitive == MESA_PRIM_LINES_ADJACENCY;
+   nir_def *start = nir_load_per_vertex_input(
+      &b, 2, 32, nir_imm_int(&b, first), nir_imm_int(&b, 0),
+      .io_semantics = sem, .dest_type = nir_type_float32);
+   nir_def *base = nir_imm_float(&b, 0.0);
+
+   if (suffix->line_stipple_strip) {
+      nir_variable *i = nir_local_variable_create(impl, glsl_uint_type(), NULL);
+      nir_variable *sum = nir_local_variable_create(impl, glsl_float_type(), NULL);
+      nir_store_var(&b, i, nir_imm_int(&b, 0), 1);
+      nir_store_var(&b, sum, nir_imm_float(&b, 0.0), 1);
+      nir_def *prim = nir_load_primitive_id(&b);
+      nir_def *limit =
+         nir_bcsel(&b, nir_ult_imm(&b, prim, AGX_LINE_STIPPLE_MAX_STRIP_SEGMENTS),
+                   prim, nir_imm_int(&b, 0));
+      nir_push_loop(&b);
+      {
+         nir_def *j = nir_load_var(&b, i);
+         nir_break_if(&b, nir_uge(&b, j, limit));
+         nir_def *a = nir_load_strip_output_poly(
+            &b, 2, nir_iadd_imm(&b, j, first), .io_semantics = sem);
+         nir_def *c = nir_load_strip_output_poly(
+            &b, 2, nir_iadd_imm(&b, j, first + 1), .io_semantics = sem);
+         nir_def *d = nir_fabs(&b, nir_fsub(&b, c, a));
+         nir_store_var(&b, sum,
+                       nir_fadd(&b, nir_load_var(&b, sum),
+                                nir_fmax(&b, nir_channel(&b, d, 0),
+                                         nir_channel(&b, d, 1))),
+                       1);
+         nir_store_var(&b, i, nir_iadd_imm(&b, j, 1), 1);
+      }
+      nir_pop_loop(&b, NULL);
+      base = nir_load_var(&b, sum);
+   }
+
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr_safe(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic ||
+             nir_instr_as_intrinsic(instr)->intrinsic != nir_intrinsic_emit_vertex)
+            continue;
+         b.cursor = nir_before_instr(instr);
+         nir_store_output(&b, nir_vec3(&b, nir_channel(&b, start, 0),
+                                       nir_channel(&b, start, 1), base),
+                          nir_imm_int(&b, 0), .io_semantics = sem,
+                          .write_mask = 0x7, .src_type = nir_type_float32);
+      }
+   }
+   nir_progress(true, impl, nir_metadata_none);
+}
+
 static bool
 hk_apple9_trim_passthrough_output(nir_builder *b, nir_intrinsic_instr *intr,
                                   void *data)
@@ -1846,6 +1921,8 @@ hk_apple9_passthrough_gs(struct nir_builder *b, const void *key)
    if (suffix.per_vertex_copies || suffix.per_vertex_bary[0] ||
        suffix.per_vertex_bary[1])
       hk_apple9_write_per_vertex_copies(b->shader, &suffix);
+   if (suffix.line_stipple_start)
+      hk_apple9_line_stipple_gs(b->shader, &suffix);
    nir_shader_intrinsics_pass(b->shader, hk_apple9_trim_passthrough_output,
                               nir_metadata_control_flow, suffix.components);
 }
@@ -4276,11 +4353,33 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
       !draw.indexed &&
       dyn->ia.primitive_topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
+   /* Stippled strips continue their counter across segments, and the stipple
+    * start must come from each segment's first vertex: both need the
+    * passthrough geometry shader unless the vertex shader's start suffices,
+    * see hk_apple9_line_stipple_gs. */
+   const struct hk_shader *fs_stipple =
+      gfx->shaders[MESA_SHADER_FRAGMENT]
+         ? hk_only_variant(gfx->shaders[MESA_SHADER_FRAGMENT])
+         : NULL;
+   bool stipple_strip =
+      dyn->ia.primitive_topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP ||
+      dyn->ia.primitive_topology ==
+         VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY;
+   bool stipple_gs =
+      hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G && fs_stipple &&
+      !gfx->shaders[MESA_SHADER_TESS_EVAL] &&
+      fs_stipple->info.fs.line_stipple_start && dyn->rs.line.stipple.enable &&
+      (stipple_strip ||
+       (dyn->rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT &&
+        !fs_stipple->info.apple9_line_stipple_first));
+
    if (!IS_SHADER_DIRTY(VERTEX) && !IS_SHADER_DIRTY(GEOMETRY) &&
        !IS_SHADER_DIRTY(FRAGMENT) &&
-       weights_by_vs == gfx->apple9_weights_by_vs)
+       weights_by_vs == gfx->apple9_weights_by_vs &&
+       stipple_gs == gfx->apple9_stipple_gs)
       return;
    gfx->apple9_weights_by_vs = weights_by_vs;
+   gfx->apple9_stipple_gs = stipple_gs;
 
    /* If there's an application geometry shader, there's nothing to un/bind */
    if (gs && !gs->is_passthrough)
@@ -4289,7 +4388,7 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    /* Determine if we need a geometry shader to emulate XFB or adjacency */
    struct hk_shader *last_sw = hk_bound_sw_vs_before_gs(gfx);
    uint32_t xfb_outputs = last_sw->info.xfb_info.output_count;
-   bool needs_gs = xfb_outputs;
+   bool needs_gs = xfb_outputs || stipple_gs;
    for (unsigned i = 0; i < ARRAY_SIZE(gfx->pg_query); ++i)
       needs_gs |= gfx->pg_query[i] != 0;
 
@@ -4364,6 +4463,8 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
             fs ? fs->info.fs.interp.linear : 0,
          },
          .per_vertex_copies = fs ? fs->info.fs.per_vertex_copies : 0,
+         .line_stipple_start = stipple_gs ? fs->info.fs.line_stipple_start : 0,
+         .line_stipple_strip = stipple_gs && stipple_strip,
       };
       if (fs) {
          memcpy(suffix.per_vertex_location, fs->info.fs.per_vertex_location,

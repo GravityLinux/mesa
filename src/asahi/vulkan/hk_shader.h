@@ -199,6 +199,8 @@ struct hk_shader_info {
          uint8_t per_vertex_location[HK_MAX_PER_VERTEX_COPIES];
          uint8_t per_vertex_copy_base[HK_MAX_PER_VERTEX_COPIES];
          uint8_t per_vertex_bary[2];
+         /* Varying slot of the vertex-stage line stipple start, or 0. */
+         uint8_t line_stipple_start;
       } fs;
 
       struct {

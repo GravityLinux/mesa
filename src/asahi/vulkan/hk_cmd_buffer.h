@@ -327,6 +327,9 @@ struct hk_graphics_state {
    /* The bound vertex shader writes barycentric weights for this draw, a
     * non-indexed triangle list, without the passthrough geometry shader. */
    bool apple9_weights_by_vs;
+   /* The bound passthrough geometry shader continues line stipple, see
+    * hk_apple9_line_stipple_gs. */
+   bool apple9_stipple_gs;
 
    /* Vertex buffers */
    struct hk_addr_range vb[AGX_MAX_VBUFS];
@@ -1413,5 +1416,5 @@ struct hk_apple9_prerast_bindings
 hk_apple9_draw_bindings(struct hk_cmd_buffer *cmd, struct agx_draw draw);
 void hk_apple9_compute_sysvals(struct hk_device *dev, void *out);
 bool hk_apple9_upload_textures(struct hk_cmd_buffer *cmd,
-   const struct hk_shader *shader, bool graphics, bool first_fan,
+   const struct hk_shader *shader, bool graphics, bool first_fan, bool lines,
    uint64_t *textures, uint64_t *samplers, uint64_t *sysvals);
