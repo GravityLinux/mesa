@@ -8453,6 +8453,24 @@ apple9_lower_flat_input(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 static bool
 apple9_lower_fragment_uniform(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
+   if (intr->intrinsic == nir_intrinsic_load_line_stipple_agx ||
+       intr->intrinsic == nir_intrinsic_load_viewport_scale ||
+       intr->intrinsic == nir_intrinsic_load_viewport_offset) {
+      b->cursor = nir_before_instr(&intr->instr);
+      unsigned offset =
+         intr->intrinsic == nir_intrinsic_load_line_stipple_agx
+            ? AGX_APPLE9_LINE_STIPPLE_OFFSET
+         : intr->intrinsic == nir_intrinsic_load_viewport_scale
+            ? AGX_APPLE9_VIEWPORT_SCALE_OFFSET
+            : AGX_APPLE9_VIEWPORT_OFFSET_OFFSET;
+      unsigned n = intr->def.num_components;
+      nir_def *value = nir_load_ubo(b, n, 32,
+         nir_imm_int(b, AGX_APPLE9_GRAPHICS_SYSVAL_BINDING),
+         nir_imm_int(b, offset), .align_mul = 16, .range_base = offset,
+         .range = n * 4);
+      nir_def_replace(&intr->def, value);
+      return true;
+   }
    if (intr->intrinsic != nir_intrinsic_load_blend_const_color_rgba &&
        intr->intrinsic != nir_intrinsic_load_polygon_stipple_agx)
       return false;

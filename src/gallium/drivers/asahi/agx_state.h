@@ -141,6 +141,9 @@ struct PACKED agx_draw_uniforms {
    /* glPointSize value */
    float fixed_point_size;
 
+   /* Viewport 0 scale, for line stipple lengths in geometry shaders */
+   float viewport_scale[2];
+
    /* Value of the multisample control register, containing sample positions in
     * each byte (x in low nibble, y in high nibble).
     */
@@ -292,6 +295,7 @@ struct agx_uncompiled_shader {
 
    struct {
       uint64_t inputs_read;
+      uint64_t outputs_written;
       uint64_t inputs_flat_shaded;
       uint64_t inputs_linear_shaded;
       uint8_t cull_distance_size;
@@ -304,7 +308,7 @@ struct agx_uncompiled_shader {
    } info;
 
    struct hash_table *variants;
-   struct agx_uncompiled_shader *passthrough_progs[MESA_PRIM_COUNT][3][2][2];
+   struct agx_uncompiled_shader *passthrough_progs[MESA_PRIM_COUNT][3][2][2][3];
    struct agx_uncompiled_shader *passthrough_tcs[32];
 
    /* agx_fast_link_key -> agx_linked_shader */
@@ -315,6 +319,8 @@ struct agx_uncompiled_shader {
    uint8_t xfb_buffers_written;
    bool has_xfb_info;
    bool is_xfb_passthrough;
+   /* Internal passthrough GS that also forwards line stipple state */
+   bool is_line_stipple_passthrough;
 
    enum mesa_prim gs_mode;
 
@@ -554,7 +560,8 @@ struct asahi_fs_shader_key {
    uint8_t apple9_sprite_coord_enable;
    bool apple9_polygon_stipple;
    bool apple9_flatshade;
-   bool padding[3];
+   bool apple9_line_stipple;
+   bool padding[2];
    struct agx_apple9_varying_layout apple9_varyings;
    struct agx_apple9_blend apple9_blend[PIPE_MAX_COLOR_BUFS];
    struct agx_apple9_sampler_key apple9_samplers[32];
