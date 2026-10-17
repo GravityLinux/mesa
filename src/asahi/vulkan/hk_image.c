@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_image.h"
+#include "asahi/lib/agx_apple9.h"
 #include "asahi/layout/layout.h"
 #include "drm-uapi/drm_fourcc.h"
 #include "util/bitscan.h"
@@ -451,7 +452,10 @@ hk_GetPhysicalDeviceImageFormatProperties2(
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
    }
 
-   const uint32_t max_dim = 16384;
+   const uint32_t max_dim = pdev->dev.chip == AGX_CHIP_G16G &&
+                                   pImageFormatInfo->type == VK_IMAGE_TYPE_3D
+                              ? AGX_APPLE9_MAX_3D_TEXTURE_DIMENSION
+                              : 16384;
    VkExtent3D maxExtent;
    uint32_t maxArraySize;
    switch (pImageFormatInfo->type) {

@@ -6,6 +6,11 @@
 #ifndef AGX_APPLE9_H
 #define AGX_APPLE9_H
 
+/* Native 3D texture depth is an 11-bit minus-one field. Array textures have
+ * a wider layer count; their range does not apply to 3D sampling.
+ */
+#define AGX_APPLE9_MAX_3D_TEXTURE_DIMENSION 2048
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

@@ -116,6 +116,29 @@ TEST(Apple9Texture, FullAddressDoesNotOverlapFlagsOrStride)
    EXPECT_FALSE(agx_apple9_pack_texture(words, &tex));
 }
 
+TEST(Apple9Texture, ThreeDimensionalDepthHasElevenBits)
+{
+   struct AGX_TEXTURE tex = {AGX_TEXTURE_header};
+   tex.dimension = AGX_TEXTURE_DIMENSION_3D;
+   tex.layout = AGX_LAYOUT_TWIDDLED;
+   tex.width = tex.height = 2;
+   tex.address = UINT64_C(0x2fff000000);
+   uint64_t words[AGX_APPLE9_TEXTURE_TABLE_STRIDE / 8];
+   for (unsigned depth : {1u, 192u, 2047u, 2048u}) {
+      tex.depth = depth;
+      ASSERT_TRUE(agx_apple9_pack_texture(words, &tex));
+      EXPECT_EQ((words[1] >> 46) & 0x7ff, depth - 1);
+   }
+   for (unsigned depth : {2049u, 4095u, 4096u, 8192u, 16384u}) {
+      tex.depth = depth;
+      EXPECT_FALSE(agx_apple9_pack_texture(words, &tex));
+   }
+   /* Array counts use a different hardware field; retain their range. */
+   tex.dimension = AGX_TEXTURE_DIMENSION_2D_ARRAY;
+   tex.depth = 16384;
+   EXPECT_TRUE(agx_apple9_pack_texture(words, &tex));
+}
+
 TEST(Apple9Texture, LinearR32fWithHighAddress)
 {
    struct AGX_TEXTURE tex = {AGX_TEXTURE_header};
