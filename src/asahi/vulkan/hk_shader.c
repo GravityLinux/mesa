@@ -14,6 +14,7 @@
 #include "poly/geometry.h"
 #include "pipe/p_defines.h"
 #include "agx_debug.h"
+#include "hk_apple9_polygon_points.h"
 #include "asahi/compiler/agx_compile_apple9.h"
 #include "agx_device.h"
 #include "agx_helpers.h"
@@ -1211,8 +1212,10 @@ hk_apple9_polygon_point_budget(const nir_shader *last, const nir_shader *fs,
    bool reads_face =
       BITSET_TEST(fs->info.system_values_read, SYSTEM_VALUE_FRONT_FACE) ||
       (fs->info.inputs_read & VARYING_BIT_PRIMITIVE_ID);
-   bool layer = last->info.outputs_written &
-                (VARYING_BIT_LAYER | VARYING_BIT_VIEWPORT);
+   /* The vertex shader rasterizing mesh records always writes the layer. */
+   bool layer = (last->info.outputs_written &
+                 (VARYING_BIT_LAYER | VARYING_BIT_VIEWPORT)) ||
+                last->info.stage == MESA_SHADER_MESH;
    if (generic + 2 * reads_face + 1 + layer > AGX_APPLE9_MAX_VARYING_COMPONENTS)
       return false;
    if (reads_face) {
@@ -5458,6 +5461,212 @@ hk_apple9_compile_tes(struct hk_device *dev, nir_shader *nir,
    return hk_apple9_finish_shader(dev, hw, nir);
 }
 
+/* Application geometry shaders emitting triangle strips under polygon mode
+ * POINT: every output store is tapped into the current vertex, the strip's two
+ * previous vertices are kept, and each completed triangle is drawn as points
+ * by hk_apple9_pp_emit_triangle instead of being emitted.
+ */
+struct hk_gs_pp {
+   /* Per slot (clip/cull distances per element), the strip's two previous
+    * vertices and the current one, as 32-bit words. */
+   nir_variable *v[3][VARYING_SLOT_MAX + 8];
+   nir_def *odd;
+};
+
+static unsigned
+hk_gs_pp_key(unsigned location, unsigned offset)
+{
+   return location == VARYING_SLOT_CLIP_DIST0 ? VARYING_SLOT_MAX + offset
+                                              : location;
+}
+
+static nir_def *
+hk_gs_pp_load(nir_builder *b, void *data, unsigned vertex, unsigned location,
+              unsigned offset, unsigned component, unsigned comps,
+              nir_alu_type type)
+{
+   struct hk_gs_pp *pp = data;
+   unsigned k = hk_gs_pp_key(location, offset);
+   /* Odd strip triangles are wound (i + 1, i, i + 2). */
+   nir_def *value;
+   if (vertex == 2) {
+      value = nir_load_var(b, pp->v[2][k]);
+   } else {
+      nir_def *a = nir_load_var(b, pp->v[vertex][k]);
+      nir_def *c = nir_load_var(b, pp->v[vertex ^ 1][k]);
+      value = nir_bcsel(b, pp->odd, c, a);
+   }
+   return nir_channels(b, value, BITFIELD_RANGE(component, comps));
+}
+
+/* Whether a geometry shader's triangle strips can be drawn as polygon
+ * points: constant-offset 32-bit stream-0 outputs and an output count within
+ * the geometry shader's vertex limit. */
+static bool
+hk_apple9_gs_polygon_points_ok(const nir_shader *gs)
+{
+   if (gs->info.gs.output_primitive != MESA_PRIM_TRIANGLE_STRIP)
+      return false;
+   unsigned per_triangle = 3 + 3 + gs->info.clip_distance_array_size;
+   unsigned triangles =
+      gs->info.gs.vertices_out > 2 ? gs->info.gs.vertices_out - 2 : 0;
+   if (triangles * per_triangle > 1024)
+      return false;
+   nir_foreach_function_impl(impl, gs) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_store_output)
+               continue;
+            if (!nir_src_is_const(intr->src[1]) ||
+                nir_src_bit_size(intr->src[0]) != 32 ||
+                nir_intrinsic_io_semantics(intr).gs_streams ||
+                nir_intrinsic_io_semantics(intr).location >= VARYING_SLOT_MAX)
+               return false;
+         }
+      }
+   }
+   return true;
+}
+
+static void
+hk_apple9_lower_gs_polygon_points(nir_shader *gs, struct hk_pp_info info,
+                                  bool point_size)
+{
+   assert(hk_apple9_gs_polygon_points_ok(gs));
+   unsigned per_triangle = 3 + 3 + info.clip;
+   unsigned triangles =
+      gs->info.gs.vertices_out > 2 ? gs->info.gs.vertices_out - 2 : 0;
+
+   nir_function_impl *impl = nir_shader_get_entrypoint(gs);
+   unsigned components[VARYING_SLOT_MAX] = {0};
+   uint64_t written = 0;
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic != nir_intrinsic_store_output)
+            continue;
+         unsigned loc = nir_intrinsic_io_semantics(intr).location;
+         written |= BITFIELD64_BIT(loc);
+         components[loc] = MAX2(components[loc],
+                                nir_intrinsic_component(intr) +
+                                   util_last_bit(nir_intrinsic_write_mask(intr)));
+      }
+   }
+
+   struct hk_gs_pp pp = {0};
+   nir_builder b = nir_builder_at(nir_before_impl(impl));
+   for (unsigned k = 0; k < VARYING_SLOT_MAX + 8; ++k) {
+      bool used = k < VARYING_SLOT_MAX
+                     ? (written & BITFIELD64_BIT(k)) && k != VARYING_SLOT_CLIP_DIST0
+                     : (written & VARYING_BIT_CLIP_DIST0) &&
+                          k - VARYING_SLOT_MAX < DIV_ROUND_UP(info.clip + info.cull, 4);
+      if (!used)
+         continue;
+      for (unsigned i = 0; i < 3; ++i) {
+         pp.v[i][k] = nir_local_variable_create(impl, glsl_uvec4_type(), NULL);
+         nir_store_var(&b, pp.v[i][k], nir_imm_ivec4(&b, 0, 0, 0, 0), 0xf);
+      }
+   }
+   nir_variable *count =
+      nir_local_variable_create(impl, glsl_uint_type(), "pp_strip");
+   nir_store_var(&b, count, nir_imm_int(&b, 0), 1);
+
+   info.outputs = written &
+      ~(VARYING_BIT_CLIP_DIST0 | VARYING_BIT_CLIP_DIST1 |
+        VARYING_BIT_CULL_DIST0 | VARYING_BIT_CULL_DIST1 |
+        VARYING_BIT_PRIMITIVE_ID | VARYING_BIT_BOUNDING_BOX0 |
+        VARYING_BIT_BOUNDING_BOX1);
+   /* Without polygonModePointSize, polygon points have size 1. */
+   if (!point_size)
+      info.outputs &= ~VARYING_BIT_PSIZ;
+   info.output_components = components;
+
+   /* Collect first: the triangle emission adds control flow and its own
+    * emit_vertex intrinsics. */
+   struct util_dynarray todo;
+   util_dynarray_init(&todo, NULL);
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_op op = nir_instr_as_intrinsic(instr)->intrinsic;
+         if (op == nir_intrinsic_store_output || op == nir_intrinsic_emit_vertex ||
+             op == nir_intrinsic_end_primitive)
+            util_dynarray_append(&todo, nir_instr_as_intrinsic(instr));
+      }
+   }
+   util_dynarray_foreach(&todo, nir_intrinsic_instr *, it) {
+      nir_intrinsic_instr *intr = *it;
+      nir_instr *instr = &intr->instr;
+      b.cursor = nir_before_instr(instr);
+      switch (intr->intrinsic) {
+      case nir_intrinsic_store_output: {
+         unsigned k = hk_gs_pp_key(nir_intrinsic_io_semantics(intr).location,
+                                   nir_src_as_uint(intr->src[1]));
+         if (!pp.v[2][k]) {
+            nir_instr_remove(instr);
+            break;
+         }
+         unsigned first = nir_intrinsic_component(intr);
+         nir_def *value = nir_load_var(&b, pp.v[2][k]);
+         u_foreach_bit(c, nir_intrinsic_write_mask(intr)) {
+            value = nir_vector_insert_imm(
+               &b, value, nir_channel(&b, intr->src[0].ssa, c), first + c);
+         }
+         nir_store_var(&b, pp.v[2][k], value, 0xf);
+         nir_instr_remove(instr);
+         break;
+      }
+      case nir_intrinsic_end_primitive:
+         nir_store_var(&b, count, nir_imm_int(&b, 0), 1);
+         nir_instr_remove(instr);
+         break;
+      case nir_intrinsic_emit_vertex: {
+         nir_def *n = nir_load_var(&b, count);
+         nir_push_if(&b, nir_uge_imm(&b, n, 2));
+         {
+            pp.odd = nir_ine_imm(&b, nir_iand_imm(&b, n, 1), 0);
+            /* Strip triangle i provokes from vertex i, or i + 2. */
+            nir_def *last = nir_ine_imm(&b, nir_load_provoking_last(&b), 0);
+            nir_def *provoking = nir_bcsel(
+               &b, last, nir_imm_int(&b, 2),
+               nir_bcsel(&b, pp.odd, nir_imm_int(&b, 1), nir_imm_int(&b, 0)));
+            hk_apple9_pp_emit_triangle(&b, &info, hk_gs_pp_load, &pp,
+                                       provoking, nir_load_primitive_id(&b), NULL);
+         }
+         nir_pop_if(&b, NULL);
+         for (unsigned k = 0; k < VARYING_SLOT_MAX + 8; ++k) {
+            if (!pp.v[2][k])
+               continue;
+            nir_store_var(&b, pp.v[0][k], nir_load_var(&b, pp.v[1][k]), 0xf);
+            nir_store_var(&b, pp.v[1][k], nir_load_var(&b, pp.v[2][k]), 0xf);
+         }
+         nir_store_var(&b, count, nir_iadd_imm(&b, n, 1), 1);
+         nir_instr_remove(instr);
+         break;
+      }
+      default:
+         break;
+      }
+   }
+   util_dynarray_fini(&todo);
+
+   gs->info.gs.output_primitive = MESA_PRIM_POINTS;
+   gs->info.gs.vertices_out = MAX2(triangles * per_triangle, 1);
+   gs->info.outputs_written &= ~VARYING_BIT_PRIMITIVE_ID;
+   if (!point_size)
+      gs->info.outputs_written &= ~VARYING_BIT_PSIZ;
+   if (info.face_slot)
+      gs->info.outputs_written |= BITFIELD64_BIT(info.face_slot);
+   nir_progress(true, impl, nir_metadata_none);
+   NIR_PASS(_, gs, nir_lower_vars_to_ssa);
+}
+
 /* Geometry shaders run as compute kernels writing an output vertex buffer,
  * followed by an ordinary hardware vertex program that rasterizes it.
  * Does not take ownership of nir.
@@ -5514,19 +5723,23 @@ hk_apple9_compile_mesh(struct hk_device *dev, nir_shader *nir,
                        bool clip_negative_one_to_one,
                        const struct hk_per_vertex_copies *copies,
                        struct hk_apple9_stipple_slots stipple,
-                       struct hk_api_shader *obj, const char **reason)
+                       const struct hk_pp_info *polygon_points,
+                       bool point_size, struct hk_api_shader *obj,
+                       const char **reason)
 {
    struct hk_shader *main = &obj->variants[HK_MESH_VARIANT_MAIN];
    struct hk_shader *rast = &obj->variants[HK_MESH_VARIANT_RAST];
    struct hk_mesh_info info;
    hk_mesh_gather_info(nir, &info);
+   info.polygon_points = polygon_points != NULL;
 
    hk_foreach_variant(obj, variant) {
       variant->info.mesh = info;
       variant->info.set_count = main->info.set_count;
    }
 
-   nir_shader *rast_nir = hk_nir_mesh_rast(nir, &info, copies);
+   nir_shader *rast_nir = hk_nir_mesh_rast(nir, &info, copies, polygon_points,
+                                           point_size);
 
    hk_nir_lower_mesh_main(nir, &info);
    nir->info.stage = MESA_SHADER_COMPUTE;
@@ -5542,7 +5755,8 @@ hk_apple9_compile_mesh(struct hk_device *dev, nir_shader *nir,
 
    if (result == VK_SUCCESS) {
       struct agx_apple9_vertex_layout layout = *vertex;
-      layout.rasterize_points = info.prim == MESA_PRIM_POINTS;
+      layout.rasterize_points =
+         info.prim == MESA_PRIM_POINTS || info.polygon_points;
       layout.ignore_point_size = !layout.rasterize_points;
       if (stipple.start)
          hk_apple9_write_line_stipple_start(rast_nir, stipple);
@@ -5713,11 +5927,20 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
          }
       }
 
-      /* Polygon-mode points from a vertex or evaluation shader take the
-       * software polygon stage when its outputs fit; otherwise they keep the
+      /* Polygon-mode points take the software polygon stage when the last
+       * pre-rasterization stage's outputs fit: after a vertex or evaluation
+       * shader, inside a geometry shader emitting triangle strips, or in the
+       * vertex shader rasterizing mesh triangles. Otherwise they keep the
        * hardware polygon mode, a known limitation. */
+      nir_shader *mesh_nir = stage_nir[MESA_SHADER_MESH];
       nir_shader *pp_last =
-         stage_nir[MESA_SHADER_GEOMETRY] || stage_nir[MESA_SHADER_MESH] ? NULL
+         mesh_nir
+            ? (mesh_nir->info.mesh.primitive_type == MESA_PRIM_TRIANGLES &&
+                     !hk_per_vertex_copies_used(&per_vertex)
+                  ? mesh_nir : NULL)
+         : stage_nir[MESA_SHADER_GEOMETRY]
+            ? (hk_apple9_gs_polygon_points_ok(stage_nir[MESA_SHADER_GEOMETRY])
+                  ? stage_nir[MESA_SHADER_GEOMETRY] : NULL)
          : stage_nir[MESA_SHADER_TESS_EVAL] ? stage_nir[MESA_SHADER_TESS_EVAL]
          : stage_nir[MESA_SHADER_VERTEX];
       if (key.polygon_points && pp_last && fs_nir) {
@@ -5725,6 +5948,8 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
          if (stipple.start) {
             reserved = BITFIELD64_BIT(stipple.start) | BITFIELD64_BIT(stipple.axis);
          }
+         if (mesh_nir)
+            reserved |= BITFIELD64_BIT(HK_MESH_PRIMITIVE_SLOT);
          polygon_points = hk_apple9_polygon_point_budget(pp_last, fs_nir, reserved,
                                                          &polygon_face_slot);
          if (polygon_points)
@@ -5953,6 +6178,16 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
          } else if (stage == MESA_SHADER_GEOMETRY) {
             if (stipple_stage == MESA_SHADER_GEOMETRY)
                hk_apple9_write_gs_line_stipple(nir, stipple);
+            if (polygon_stage == MESA_SHADER_GEOMETRY) {
+               struct hk_pp_info info = {
+                  .clip = nir->info.clip_distance_array_size,
+                  .cull = nir->info.cull_distance_array_size,
+                  .flat = key.vertex.outputs_flat,
+                  .face_slot = polygon_face_slot,
+               };
+               hk_apple9_lower_gs_polygon_points(
+                  nir, info, hk_device_physical(dev)->vk.properties.polygonModePointSize);
+            }
             result = hk_apple9_compile_gs(dev, nir, &key.vertex, obj, &reason);
             if (result != VK_SUCCESS)
                goto done;
@@ -5964,10 +6199,18 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
                goto done;
             continue;
          } else if (stage == MESA_SHADER_MESH) {
+            struct hk_pp_info pp = {
+               .clip = nir->info.clip_distance_array_size,
+               .cull = nir->info.cull_distance_array_size,
+               .flat = key.vertex.outputs_flat,
+               .face_slot = polygon_face_slot,
+            };
             result = hk_apple9_compile_mesh(
                dev, nir, &key.vertex, key.clip_negative_one_to_one, &per_vertex,
                stipple_stage == MESA_SHADER_MESH
                   ? stipple : (struct hk_apple9_stipple_slots){0},
+               polygon_stage == MESA_SHADER_MESH ? &pp : NULL,
+               hk_device_physical(dev)->vk.properties.polygonModePointSize,
                obj, &reason);
             if (result != VK_SUCCESS)
                goto done;
