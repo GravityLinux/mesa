@@ -4485,6 +4485,7 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 
    if (!IS_SHADER_DIRTY(VERTEX) && !IS_SHADER_DIRTY(TESS_EVAL) &&
        !IS_SHADER_DIRTY(GEOMETRY) && !IS_SHADER_DIRTY(FRAGMENT) &&
+       !IS_DIRTY(IA_PRIMITIVE_TOPOLOGY) &&
        weights_by_vs == gfx->apple9_weights_by_vs &&
        stipple_gs == gfx->apple9_stipple_gs &&
        polygon_points == gfx->apple9_polygon_points)
