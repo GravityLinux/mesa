@@ -80,10 +80,11 @@ struct agx_rodata {
    uint16_t size_16;
 };
 
-/* User scalars of the cross-stage interface: 31 vectors, as Metal's on these
- * GPUs, which with position is D3D's 32-register interface. Semantic
- * locations are compacted independently of declaration order and never
- * encoded directly as hardware slot numbers. */
+/* Produced user scalars: position occupies four of the 128 publication
+ * entries. Other system outputs share the remaining bank. This is not a
+ * limit on declared fragment inputs: semantic locations are compacted
+ * independently of declaration order and never encoded directly as
+ * hardware slot numbers. */
 #define AGX_APPLE9_MAX_VARYING_COMPONENTS 124
 /* UVS slots: position, user scalars, point size, the layer/viewport word and
  * eight clip distances. */

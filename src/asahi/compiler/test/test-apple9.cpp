@@ -12585,6 +12585,83 @@ TEST(Apple9Compiler, FragmentReadsFullVaryingInterface)
    }
 }
 
+/* The API input declaration is not the compacted producer interface. A
+ * fragment may declare 32 locations even though position and other system
+ * outputs leave fewer than 128 produced user scalars. Cover both unused
+ * declarations and reads of unwritten inputs, including the highest API
+ * location/component with holes earlier in the interface.
+ */
+TEST(Apple9Compiler, FragmentDeclarationsCompactToProducerInterface)
+{
+   for (unsigned declared : {125u, 126u, 127u, 128u}) {
+      for (bool sparse : {false, true}) {
+         for (bool read_unwritten : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "declared=" << declared
+                         << " sparse=" << sparse
+                         << " read_unwritten=" << read_unwritten);
+            nir_builder vs = nir_builder_init_simple_shader(
+               MESA_SHADER_VERTEX, &agx_nir_options, "fragment_decl_producer");
+            nir_store_output(&vs, nir_imm_vec4(&vs, 0, 0, .5, 1),
+               nir_imm_int(&vs, 0), .write_mask = 15,
+               .src_type = nir_type_float32,
+               .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+            for (unsigned i = 0; i < 122; ++i) {
+               unsigned semantic = sparse && i == 121 ? declared - 1 : i;
+               nir_store_output(&vs, nir_u2f32(&vs, nir_load_vertex_id(&vs)),
+                  nir_imm_int(&vs, 0), .write_mask = 1,
+                  .component = semantic % 4, .src_type = nir_type_float32,
+                  .io_semantics = {
+                     .location = (uint8_t)(VARYING_SLOT_VAR0 + semantic / 4),
+                     .num_slots = 1});
+            }
+            vs.shader->info.io_lowered = true;
+            agx_shader_part vertex = {}, fragment = {};
+            const char *reason = nullptr;
+            ASSERT_TRUE(agx_compile_apple9_vertex(vs.shader, &vertex, &reason))
+               << (reason ?: "");
+            ASSERT_EQ(vertex.info.apple9_varyings.count, 122u);
+
+            nir_builder fs = nir_builder_init_simple_shader(
+               MESA_SHADER_FRAGMENT, &agx_nir_options, "fragment_declarations");
+            nir_def *produced = nir_imm_float(&fs, 0);
+            nir_def *unwritten = nir_imm_float(&fs, 0);
+            for (unsigned i = 0; i < declared; ++i) {
+               auto *var = nir_variable_create(fs.shader, nir_var_shader_in,
+                                               glsl_float_type(), "input");
+               var->data.location = VARYING_SLOT_VAR0 + i / 4;
+               var->data.location_frac = i % 4;
+               var->data.interpolation = INTERP_MODE_SMOOTH;
+               bool written = vertex.info.apple9_varyings.mask[
+                  var->data.location] & BITFIELD_BIT(i % 4);
+               if (written)
+                  produced = nir_fadd(&fs, produced, nir_load_var(&fs, var));
+               else if (read_unwritten)
+                  unwritten = nir_fadd(&fs, unwritten, nir_load_var(&fs, var));
+            }
+            auto *color = nir_variable_create(fs.shader, nir_var_shader_out,
+                                              glsl_vec4_type(), "color");
+            color->data.location = FRAG_RESULT_DATA0;
+            nir_store_var(&fs, color, nir_vec4(&fs, produced, unwritten,
+               nir_imm_float(&fs, 0), nir_imm_float(&fs, 1)), 15);
+            nir_shader_gather_info(fs.shader, nir_shader_get_entrypoint(fs.shader));
+            ASSERT_TRUE(agx_compile_apple9_fragment_inputs(fs.shader,
+               &vertex.info.apple9_varyings, &fragment, &reason))
+               << (reason ?: "");
+            EXPECT_EQ(fragment.info.apple9_varyings.count, 122u);
+            EXPECT_EQ(fragment.info.varyings.fs.nr_cf, 123u); /* Plus 1/W. */
+            for (unsigned i = 0; i < 32; ++i) {
+               EXPECT_EQ(fragment.info.apple9_varyings.mask[VARYING_SLOT_VAR0 + i],
+                         vertex.info.apple9_varyings.mask[VARYING_SLOT_VAR0 + i]);
+            }
+            free(vertex.binary);
+            free(fragment.binary);
+            ralloc_free(vs.shader);
+            ralloc_free(fs.shader);
+         }
+      }
+   }
+}
+
 TEST(Apple9Compiler, ClipVertexVariablePreservesShaderReads)
 {
    nir_builder b = nir_builder_init_simple_shader(

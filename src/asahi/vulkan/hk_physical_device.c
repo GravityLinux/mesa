@@ -1838,7 +1838,12 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
    props->maxVertexOutputComponents = outputs;
    props->maxTessellationEvaluationOutputComponents = outputs;
    props->maxGeometryOutputComponents = outputs;
-   props->maxFragmentInputComponents = AGX_APPLE9_MAX_VARYING_COMPONENTS;
+   /* Input declarations need not all have produced values. The fragment
+    * compiler removes unused and unwritten inputs before assigning compact
+    * coefficients from the producer's tighter export-bank layout. Expose
+    * all 32 API input locations without increasing the producer budget.
+    */
+   props->maxFragmentInputComponents = 128;
    props->maxComputeWorkGroupCount[0] = 65535;
 
    /* The native 4x tile layout supports 64 bytes per pixel. Four RGBA32
