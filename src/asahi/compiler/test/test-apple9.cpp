@@ -12282,6 +12282,91 @@ TEST_F(Apple9Completion, DependentTextureWaitsBeforeCoordinatePublication)
    EXPECT_EQ(samples, 2u);
 }
 
+TEST_F(Apple9Completion, ImageStoresConsumeTheirCoordinateAndDataPublications)
+{
+   auto zero = imm(0);
+   auto x = load(zero, 0);
+   auto y = load(zero, 1);
+   auto data = load(x, 2);
+   for (unsigned i = 0; i < 4; ++i) {
+      uint32_t xy[] = {x, y};
+      uint32_t rgba[] = {data, data, data, data};
+      ASSERT_TRUE(agx_apple9_vir_emit_image_store(&p, xy, rgba, zero));
+      uint32_t src[] = {x, y};
+      x = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IADD,
+         AGX_APPLE9_ENC_INT_ADD_EXTENDED, src, 2, 0);
+   }
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
+
+   /* Publications are not GPR SSA operands in the shared scheduler. Check
+    * the actual allocated instruction order, including slot reuse. */
+   bool published[AGX_APPLE9_PUBLICATION_COUNT] = {};
+   unsigned stores = 0;
+   for (unsigned i = 0; i < p.instruction_count; ++i) {
+      const auto *ins = p.instructions[i];
+      if (ins->op == AGX_APPLE9_VIR_PUBLICATION_TUPLE) {
+         for (unsigned c = 0; c < ins->dest_components; ++c) {
+            unsigned slot = p.phys[ins->dest + c];
+            EXPECT_FALSE(published[slot]) << "unconsumed publication overwritten";
+            published[slot] = true;
+         }
+      } else if (ins->op == AGX_APPLE9_VIR_IMAGE_STORE) {
+         for (unsigned c = 0; c < 8; ++c) {
+            unsigned slot = p.phys[ins->src[c]];
+            EXPECT_TRUE(published[slot]) << "image store precedes its parameters";
+            published[slot] = false;
+         }
+         ++stores;
+      }
+   }
+   EXPECT_EQ(stores, 4u);
+   for (bool pending : published)
+      EXPECT_FALSE(pending);
+}
+
+TEST_F(Apple9Completion, BlockImageStoresConsumeTheirCoordinatePublications)
+{
+   auto zero = imm(0);
+   auto x = load(zero, 0);
+   auto y = load(zero, 1);
+   auto offset = load(x, 2);
+   for (unsigned i = 0; i < 4; ++i) {
+      uint32_t src[] = {x, y, offset, zero};
+      ASSERT_TRUE(agx_apple9_vir_emit_block_image_store(
+         &p, src, i, 0, false, false));
+      uint32_t add[] = {x, y};
+      x = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IADD,
+         AGX_APPLE9_ENC_INT_ADD_EXTENDED, add, 2, 0);
+   }
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
+
+   bool published[AGX_APPLE9_PUBLICATION_COUNT] = {};
+   unsigned stores = 0;
+   for (unsigned i = 0; i < p.instruction_count; ++i) {
+      const auto *ins = p.instructions[i];
+      if (ins->op == AGX_APPLE9_VIR_PUBLICATION_TUPLE) {
+         for (unsigned c = 0; c < ins->dest_components; ++c) {
+            unsigned slot = p.phys[ins->dest + c];
+            EXPECT_FALSE(published[slot]);
+            published[slot] = true;
+         }
+      } else if (ins->op == AGX_APPLE9_VIR_BLOCK_IMAGE_STORE) {
+         unsigned base = p.phys[ins->src[0]];
+         for (unsigned c = 0; c < 4; ++c) {
+            EXPECT_TRUE(published[base + c])
+               << "block image store precedes its parameters";
+            published[base + c] = false;
+         }
+         ++stores;
+      }
+   }
+   EXPECT_EQ(stores, 4u);
+   for (bool pending : published)
+      EXPECT_FALSE(pending);
+}
+
 TEST_F(Apple9Completion, TexturesShareTagsWithMemoryAndRetireOnExhaustion)
 {
    auto half = imm(0x3f000000), zero = imm(0);

@@ -103,9 +103,16 @@ apple9_schedule_resources(const agx_instr *I, uint32_t *reads, uint32_t *writes)
    case AGX_APPLE9_VIR_SHARED_ATOMIC:
    case AGX_APPLE9_VIR_DEVICE_ATOMIC:
    case AGX_APPLE9_VIR_DEVICE_ATOMIC_RESULT:
+      *reads |= APPLE9_SCHED_MEMORY;
+      *writes |= APPLE9_SCHED_MEMORY;
+      return;
    case AGX_APPLE9_VIR_IMAGE_STORE:
    case AGX_APPLE9_VIR_BLOCK_IMAGE_STORE:
-      *reads |= APPLE9_SCHED_MEMORY;
+      /* Coordinates and data live in the publication file, outside GPR
+       * SSA. Keep the store after their publication and before a later
+       * publication reuses the slots. Both store encodings join the write
+       * before returning, so the publication is only borrowed at issue. */
+      *reads |= APPLE9_SCHED_MEMORY | APPLE9_SCHED_PUBLICATION;
       *writes |= APPLE9_SCHED_MEMORY;
       return;
    case AGX_APPLE9_VIR_TEXTURE_SAMPLE:
