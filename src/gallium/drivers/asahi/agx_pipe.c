@@ -32,6 +32,7 @@
 #include "util/half_float.h"
 #include "util/macros.h"
 #include "util/os_misc.h"
+#include "util/os_mman.h"
 #include "util/simple_mtx.h"
 #include "util/timespec.h"
 #include "util/u_drm.h"
@@ -1018,6 +1019,36 @@ agx_blit_to_staging(struct pipe_context *pctx, struct agx_transfer *trans)
    agx_blit(pctx, &blit);
 }
 
+/* CPU mappings consume the application's address space even after GL unmaps
+ * a transfer. In a 32-bit process, retaining every texture/buffer mapping
+ * exhausts VA long before GPU memory. Use an independent mapping owned by
+ * the transfer; persistent/coherent transfers keep it until their unmap too.
+ * The normal BO mapping may have escaped to other users and cannot be revoked.
+ */
+static void *
+agx_transfer_map_bo(struct agx_transfer *transfer, struct agx_bo *bo,
+                    bool escapes)
+{
+   if (sizeof(void *) > 4)
+      return agx_bo_map(bo);
+
+   assert(!transfer->bo_map);
+   transfer->bo_map_size = bo->size;
+   /* Tile/detile copies never expose this pointer to GL. Preserve their shim
+    * CPU epoch; only mappings that may escape must revoke epoch tracking.
+    */
+   transfer->bo_map = escapes ? agx_bo_map_range(bo, NULL, bo->size)
+                              : bo->dev->ops.bo_mmap(bo->dev, bo, NULL, bo->size);
+   return transfer->bo_map;
+}
+
+static void
+agx_transfer_unmap_bo(struct agx_transfer *transfer)
+{
+   if (transfer->bo_map)
+      os_munmap(transfer->bo_map, transfer->bo_map_size);
+}
+
 static void *
 agx_transfer_map(struct pipe_context *pctx, struct pipe_resource *resource,
                  unsigned level,
@@ -1065,6 +1096,9 @@ agx_transfer_map(struct pipe_context *pctx, struct pipe_resource *resource,
    }
 
    struct agx_transfer *transfer = CALLOC_STRUCT(agx_transfer);
+   if (!transfer)
+      return NULL;
+
    transfer->base.level = level;
    transfer->base.usage = usage;
    transfer->base.box = *box;
@@ -1104,13 +1138,16 @@ agx_transfer_map(struct pipe_context *pctx, struct pipe_resource *resource,
          void *map = pctx->texture_map(pctx, &staging->base, 0, usage,
                                        &transfer->staging.box,
                                        &transfer->staging.transfer);
-         if (map) {
-            transfer->base.stride = transfer->staging.transfer->stride;
-            transfer->base.layer_stride = transfer->staging.transfer->layer_stride;
-         }
+         if (!map)
+            goto fail;
+         transfer->base.stride = transfer->staging.transfer->stride;
+         transfer->base.layer_stride = transfer->staging.transfer->layer_stride;
          return map;
       }
-      return agx_bo_map(staging->bo);
+      void *map = agx_transfer_map_bo(transfer, staging->bo, true);
+      if (!map)
+         goto fail;
+      return map;
    }
 
    if (ail_is_level_twiddled_uncompressed(&rsrc->layout, level)) {
@@ -1124,10 +1161,19 @@ agx_transfer_map(struct pipe_context *pctx, struct pipe_resource *resource,
          rsrc->layout.format, transfer->base.stride, box->height);
 
       transfer->map = calloc(transfer->base.layer_stride, box->depth);
+      if (!transfer->map)
+         goto fail;
+
+      /* Map before returning the staging pointer so allocation failure is
+       * reported by texture_map, rather than during the void unmap callback. */
+      if (sizeof(void *) == 4 &&
+          !agx_transfer_map_bo(transfer, rsrc->bo, false))
+         goto fail;
 
       if ((usage & PIPE_MAP_READ) && agx_resource_valid(rsrc, level)) {
          for (unsigned z = 0; z < box->depth; ++z) {
-            uint8_t *map = agx_map_texture_cpu(rsrc, level, box->z + z);
+            uint8_t *map =
+               agx_map_texture_cpu(rsrc, level, box->z + z, transfer->bo_map);
             uint8_t *dst =
                (uint8_t *)transfer->map + transfer->base.layer_stride * z;
 
@@ -1155,8 +1201,20 @@ agx_transfer_map(struct pipe_context *pctx, struct pipe_resource *resource,
          (uint64_t)ail_get_linear_pixel_B(&rsrc->layout, level, box->x,
                                          box->y, box->z);
 
-      return ((uint8_t *)agx_bo_map(rsrc->bo)) + offset;
+      void *map = agx_transfer_map_bo(transfer, rsrc->bo, true);
+      if (!map)
+         goto fail;
+      return ((uint8_t *)map) + offset;
    }
+
+fail:
+   agx_transfer_unmap_bo(transfer);
+   free(transfer->map);
+   pipe_resource_reference(&transfer->staging.rsrc, NULL);
+   pipe_resource_reference(&transfer->base.resource, NULL);
+   FREE(transfer);
+   *out_transfer = NULL;
+   return NULL;
 }
 
 static void
@@ -1182,7 +1240,8 @@ agx_transfer_unmap(struct pipe_context *pctx, struct pipe_transfer *transfer)
 
       for (unsigned z = 0; z < transfer->box.depth; ++z) {
          uint8_t *map =
-            agx_map_texture_cpu(rsrc, transfer->level, transfer->box.z + z);
+            agx_map_texture_cpu(rsrc, transfer->level, transfer->box.z + z,
+                                trans->bo_map);
          uint8_t *src = (uint8_t *)trans->map + transfer->layer_stride * z;
 
          ail_tile(map, src, &rsrc->layout, transfer->level, transfer->stride,
@@ -1199,6 +1258,7 @@ agx_transfer_unmap(struct pipe_context *pctx, struct pipe_transfer *transfer)
    }
 
    /* Free the transfer */
+   agx_transfer_unmap_bo(trans);
    free(trans->map);
    pipe_resource_reference(&trans->staging.rsrc, NULL);
    pipe_resource_reference(&transfer->resource, NULL);
