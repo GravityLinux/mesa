@@ -25,7 +25,9 @@ struct hk_physical_device;
 struct hk_buffer {
    struct vk_buffer vk;
 
-   /** Reserved VA for sparse/capture buffers or native Apple9 index buffers. */
+   /** Reserved VA for sparse/capture buffers, or index buffers that cannot
+    * share an allocation alias within its size and device budget limits.
+    */
    struct agx_va *va;
    bool apple9_index_va;
 

@@ -138,12 +138,13 @@ libvulkan_asahi = shared_library(
 )
 
 if with_tests
-  foreach t : ['hk-index-aperture', 'hk-variant-retry', 'hk-texture-upload-failure']
+  foreach t : ['hk-index-aperture', 'hk-index-memory', 'hk-variant-retry', 'hk-texture-upload-failure']
     test(t, executable(t, 'tests/' + t + '.c',
       include_directories : [inc_gallium, inc_gallium_aux, inc_include,
                              inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
       dependencies : [hk_deps], link_with : [libhk],
       link_args : {'hk-index-aperture': ['-Wl,--wrap=hk_dispatch_precomp'],
+                   'hk-index-memory': ['-Wl,--wrap=agx_va_alloc', '-Wl,--wrap=agx_bo_bind', '-Wl,--wrap=agx_va_free'],
                    'hk-variant-retry': ['-Wl,--wrap=nir_deserialize', '-Wl,--wrap=__vk_errorf'],
                    'hk-texture-upload-failure': ['-Wl,--wrap=hk_pool_upload']}[t]),
       suite : ['asahi', 'honeykrisp'])

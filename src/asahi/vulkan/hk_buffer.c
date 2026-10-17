@@ -189,9 +189,9 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
    buffer->apple9_index_va = dev->dev.chip == AGX_CHIP_G16G && !sparse &&
       (buffer->vk.usage & VK_BUFFER_USAGE_2_INDEX_BUFFER_BIT);
    if (buffer->vk.size > 0 &&
-       (buffer->apple9_index_va || (buffer->vk.create_flags &
+       (buffer->vk.create_flags &
         (VK_BUFFER_CREATE_SPARSE_BINDING_BIT |
-         HK_BUFFER_CREATE_CAPTURE_REPLAY_BITS)))) {
+         HK_BUFFER_CREATE_CAPTURE_REPLAY_BITS))) {
 
       const bool bda_capture_replay =
          buffer->vk.create_flags & HK_BUFFER_CREATE_CAPTURE_REPLAY_BITS;
@@ -406,6 +406,7 @@ VKAPI_ATTR VkResult VKAPI_CALL
 hk_BindBufferMemory2(VkDevice device, uint32_t bindInfoCount,
                      const VkBindBufferMemoryInfo *pBindInfos)
 {
+   VK_FROM_HANDLE(hk_device, dev, device);
    for (uint32_t i = 0; i < bindInfoCount; ++i) {
       VK_FROM_HANDLE(hk_device_memory, mem, pBindInfos[i].memory);
       VK_FROM_HANDLE(hk_buffer, buffer, pBindInfos[i].buffer);
@@ -413,8 +414,31 @@ hk_BindBufferMemory2(VkDevice device, uint32_t bindInfoCount,
       buffer->implicit_sync_res =
          mem->implicit_sync ? mem->bo->uapi_handle : 0;
 
+      if (!buffer->va) {
+         assert(buffer->vk.device_address == 0);
+         uint64_t addr = buffer->apple9_index_va
+                            ? hk_memory_index_address(dev, mem)
+                            : 0;
+         if (!addr && buffer->apple9_index_va) {
+            /* Large allocations and a full shared-alias budget retain the
+             * old buffer-sized mapping, avoiding a copy on every draw.
+             */
+            uint64_t alignment = buffer->vk.size >= 65536 ? 65536 : AIL_PAGESIZE;
+            buffer->va = agx_va_alloc(&dev->dev,
+                                      align64(buffer->vk.size, alignment),
+                                      alignment, AGX_VA_USC, 0);
+         }
+         if (buffer->va) {
+            buffer->vk.device_address = buffer->va->addr;
+         } else {
+            /* USC exhaustion retains the draw-time index-copy fallback. */
+            if (!addr)
+               addr = mem->bo->va->addr;
+            buffer->vk.device_address = addr + pBindInfos[i].memoryOffset;
+         }
+      }
+
       if (buffer->va) {
-         VK_FROM_HANDLE(hk_device, dev, device);
          size_t size = MIN2(mem->bo->size - pBindInfos[i].memoryOffset,
                             buffer->va->size_B);
 
@@ -437,10 +461,6 @@ hk_BindBufferMemory2(VkDevice device, uint32_t bindInfoCount,
             if (ret)
                return VK_ERROR_UNKNOWN;
          }
-      } else {
-         assert(buffer->vk.device_address == 0);
-         buffer->vk.device_address =
-            mem->bo->va->addr + pBindInfos[i].memoryOffset;
       }
 
       const VkBindMemoryStatusKHR *status =

@@ -81,6 +81,8 @@ struct hk_device {
    struct agx_bo *apple9_fetch_sampler;
    /* Last G16 graphics program id handed out, see hk_shader::apple9_program_id. */
    uint64_t apple9_last_program_id;
+   /* USC space charged to shared index aliases, including allocator guards. */
+   uint64_t apple9_index_alias_bytes;
    /* Runtime sysval block of every kernel, see hk_apple9_upload_textures. */
    struct agx_bo *apple9_compute_sysvals;
 
