@@ -1586,8 +1586,8 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
       KEEP(globalPriorityQuery),
       KEEP(shaderFloatControls2),
       KEEP(bresenhamLines),
-      /* In progress: list draws without geometry stages only. */
-      .stippledBresenhamLines = debug_get_bool_option("HK_APPLE9_LINE_STIPPLE", false),
+      /* Emulated in the fragment shader, see hk_apple9_lower_line_stipple_fs. */
+      .stippledBresenhamLines = true,
       KEEP(dynamicRenderingLocalRead),
       KEEP(samplerYcbcrConversion),
       KEEP(indexTypeUint8),
@@ -1687,9 +1687,7 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
       KEEP(extendedDynamicState3SampleLocationsEnable),
       KEEP(extendedDynamicState3ProvokingVertexMode),
       KEEP(extendedDynamicState3LineRasterizationMode),
-      /* In progress with stippledBresenhamLines. */
-      .extendedDynamicState3LineStippleEnable =
-         debug_get_bool_option("HK_APPLE9_LINE_STIPPLE", false),
+      .extendedDynamicState3LineStippleEnable = true,
       .extendedDynamicState3DepthClipNegativeOneToOne = true,
       /* 2D views clamp gradient samples in hardware; other implicit samples
        * select the clamped LOD explicitly, without anisotropy. */
