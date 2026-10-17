@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_image.h"
+#include <sys/mman.h>
 #include "asahi/lib/agx_apple9.h"
 #include "asahi/layout/layout.h"
 #include "drm-uapi/drm_fourcc.h"
@@ -1468,8 +1469,12 @@ hk_image_plane_bind(struct hk_device *dev, struct hk_image_plane *plane,
       UNREACHABLE("todo");
    } else {
       plane->addr = mem->bo->va->addr + *offset_B;
-      plane->map = agx_bo_map(mem->bo) + *offset_B;
-      plane->rem = mem->bo->size - (*offset_B);
+      plane->bo = mem->bo;
+      plane->offset_B = *offset_B;
+      if (sizeof(void *) > 4) {
+         void *map = agx_bo_map(mem->bo);
+         plane->map = map ? (char *)map + *offset_B : NULL;
+      }
    }
 
    *offset_B += plane->layout.size_B;
@@ -1539,9 +1544,47 @@ hk_plane_index(VkFormat format, VkImageAspectFlags aspect_mask)
    }
 }
 
+/* Internal host-copy pointers do not escape to the application. Do not use
+ * agx_bo_map_range: that revokes the shim CPU epoch for escaping API maps.
+ * Keep the existing cached mapping policy on 64-bit, but do not retain image
+ * mappings across operations in the constrained 32-bit CPU address space.
+ */
+struct hk_image_plane_map {
+   void *base;
+   void *ptr;
+   size_t size;
+};
+
+static VkResult
+hk_image_plane_map(struct hk_device *dev, const struct hk_image_plane *plane,
+                   struct hk_image_plane_map *map)
+{
+   if (sizeof(void *) > 4) {
+      map->ptr = plane->map;
+   } else {
+      struct agx_bo *bo = plane->bo;
+      if (bo->size > SIZE_MAX)
+         return vk_error(dev, VK_ERROR_MEMORY_MAP_FAILED);
+
+      map->size = bo->size;
+      map->base = bo->dev->ops.bo_mmap(bo->dev, bo, NULL, map->size);
+      if (map->base)
+         map->ptr = (char *)map->base + plane->offset_B;
+   }
+
+   return map->ptr ? VK_SUCCESS : vk_error(dev, VK_ERROR_MEMORY_MAP_FAILED);
+}
+
+static void
+hk_image_plane_unmap(struct hk_image_plane_map *map)
+{
+   if (map->base)
+      munmap(map->base, map->size);
+}
+
 static void
 hk_copy_memory_to_image(struct hk_device *device, struct hk_image *dst_image,
-                        const VkMemoryToImageCopyEXT *info, bool copy_memcpy)
+                        const VkMemoryToImageCopyEXT *info, bool copy_memcpy, void *map)
 {
    unsigned plane =
       hk_plane_index(dst_image->vk.format, info->imageSubresource.aspectMask);
@@ -1579,7 +1622,7 @@ hk_copy_memory_to_image(struct hk_device *device, struct hk_image *dst_image,
       layout, info->imageSubresource.mipLevel);
 
    const char *src = (const char *)info->pHostPointer;
-   char *dst = (char *)dst_image->planes[plane].map + image_offset;
+   char *dst = (char *)map + image_offset;
    for (unsigned layer = 0; layer < layers;
         layer++, src += src_layer_stride, dst += dst_layer_stride) {
       if (copy_memcpy) {
@@ -1606,8 +1649,17 @@ hk_CopyMemoryToImageEXT(VkDevice _device,
    VK_FROM_HANDLE(hk_image, dst_image, info->dstImage);
 
    for (unsigned i = 0; i < info->regionCount; i++) {
+      unsigned plane = hk_plane_index(
+         dst_image->vk.format, info->pRegions[i].imageSubresource.aspectMask);
+      struct hk_image_plane_map map = {0};
+      VkResult result = hk_image_plane_map(device, &dst_image->planes[plane], &map);
+      if (result != VK_SUCCESS)
+         return result;
+
       hk_copy_memory_to_image(device, dst_image, &info->pRegions[i],
-                              info->flags & VK_HOST_IMAGE_COPY_MEMCPY_EXT);
+                              info->flags & VK_HOST_IMAGE_COPY_MEMCPY_EXT,
+                              map.ptr);
+      hk_image_plane_unmap(&map);
    }
 
    return VK_SUCCESS;
@@ -1615,7 +1667,7 @@ hk_CopyMemoryToImageEXT(VkDevice _device,
 
 static void
 hk_copy_image_to_memory(struct hk_device *device, struct hk_image *src_image,
-                        const VkImageToMemoryCopyEXT *info, bool copy_memcpy)
+                        const VkImageToMemoryCopyEXT *info, bool copy_memcpy, const void *map)
 {
    unsigned plane =
       hk_plane_index(src_image->vk.format, info->imageSubresource.aspectMask);
@@ -1658,7 +1710,7 @@ hk_copy_image_to_memory(struct hk_device *device, struct hk_image *src_image,
    bool tiled = ail_is_level_twiddled_uncompressed(
       layout, info->imageSubresource.mipLevel);
 
-   const char *src = (const char *)src_image->planes[plane].map + image_offset;
+   const char *src = (const char *)map + image_offset;
    char *dst = (char *)info->pHostPointer;
    for (unsigned layer = 0; layer < layers;
         layer++, src += src_layer_stride, dst += dst_layer_stride) {
@@ -1688,14 +1740,23 @@ hk_CopyImageToMemoryEXT(VkDevice _device,
    VK_FROM_HANDLE(hk_image, image, info->srcImage);
 
    for (unsigned i = 0; i < info->regionCount; i++) {
+      unsigned plane = hk_plane_index(
+         image->vk.format, info->pRegions[i].imageSubresource.aspectMask);
+      struct hk_image_plane_map map = {0};
+      VkResult result = hk_image_plane_map(device, &image->planes[plane], &map);
+      if (result != VK_SUCCESS)
+         return result;
+
       hk_copy_image_to_memory(device, image, &info->pRegions[i],
-                              info->flags & VK_HOST_IMAGE_COPY_MEMCPY_EXT);
+                              info->flags & VK_HOST_IMAGE_COPY_MEMCPY_EXT,
+                              map.ptr);
+      hk_image_plane_unmap(&map);
    }
 
    return VK_SUCCESS;
 }
 
-static void
+static VkResult
 hk_copy_image_to_image_cpu(struct hk_device *device, struct hk_image *src_image,
                            struct hk_image *dst_image, const VkImageCopy2 *info,
                            bool copy_memcpy)
@@ -1744,9 +1805,18 @@ hk_copy_image_to_image_cpu(struct hk_device *device, struct hk_image *src_image,
    bool dst_tiled = ail_is_level_twiddled_uncompressed(
       dst_layout, info->dstSubresource.mipLevel);
 
-   const char *src =
-      (const char *)src_image->planes[src_plane].map + src_image_offset;
-   char *dst = (char *)dst_image->planes[dst_plane].map + dst_image_offset;
+   struct hk_image_plane_map src_map = {0}, dst_map = {0};
+   VkResult result = hk_image_plane_map(device, &src_image->planes[src_plane],
+                                       &src_map);
+   if (result != VK_SUCCESS)
+      return result;
+
+   result = hk_image_plane_map(device, &dst_image->planes[dst_plane], &dst_map);
+   if (result != VK_SUCCESS)
+      goto out;
+
+   const char *src = (const char *)src_map.ptr + src_image_offset;
+   char *dst = (char *)dst_map.ptr + dst_image_offset;
    for (unsigned layer = 0; layer < layers_to_copy;
         layer++, src += src_layer_stride, dst += dst_layer_stride) {
 
@@ -1811,6 +1881,10 @@ hk_copy_image_to_image_cpu(struct hk_device *device, struct hk_image *src_image,
           * buffer.
           */
          char *temp_tile = malloc(temp_tile_size);
+         if (!temp_tile) {
+            result = vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+            goto out;
+         }
 
          for (unsigned by = src_offset.y / block_height;
               by * block_height < src_offset.y + extent.height; by++) {
@@ -1837,6 +1911,11 @@ hk_copy_image_to_image_cpu(struct hk_device *device, struct hk_image *src_image,
          free(temp_tile);
       }
    }
+
+out:
+   hk_image_plane_unmap(&dst_map);
+   hk_image_plane_unmap(&src_map);
+   return result;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -1855,15 +1934,19 @@ hk_CopyImageToImageEXT(VkDevice _device,
          u_foreach_bit(b, info.dstSubresource.aspectMask) {
             info.srcSubresource.aspectMask = BITFIELD_BIT(b);
             info.dstSubresource.aspectMask = BITFIELD_BIT(b);
-            hk_copy_image_to_image_cpu(device, src_image, dst_image, &info,
-                                       copy_memcpy);
+            VkResult result = hk_copy_image_to_image_cpu(
+               device, src_image, dst_image, &info, copy_memcpy);
+            if (result != VK_SUCCESS)
+               return result;
          }
          continue;
       }
 
-      hk_copy_image_to_image_cpu(device, src_image, dst_image,
-                                 pCopyImageToImageInfo->pRegions + i,
-                                 copy_memcpy);
+      VkResult result = hk_copy_image_to_image_cpu(
+         device, src_image, dst_image, pCopyImageToImageInfo->pRegions + i,
+         copy_memcpy);
+      if (result != VK_SUCCESS)
+         return result;
    }
 
    return VK_SUCCESS;
