@@ -234,6 +234,49 @@ hk_apple9_compute_sysvals(struct hk_device *dev, void *out)
           &fetch, sizeof(fetch));
 }
 
+/* The line stipple pattern and factor of the draw, packed as the fragment
+ * stipple test reads them. Draws that rasterize no lines, or have stipple
+ * disabled, keep every fragment: factor 1 with every pattern bit set.
+ */
+static_assert(HK_MAX_VIEWPORTS == AGX_APPLE9_VIEWPORT_TABLE_COUNT,
+              "one window transform per viewport");
+
+static uint32_t
+hk_apple9_line_stipple_word(const struct vk_dynamic_graphics_state *dyn)
+{
+   switch (dyn->ia.primitive_topology) {
+   case VK_PRIMITIVE_TOPOLOGY_LINE_LIST:
+   case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP:
+   case VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY:
+   case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY:
+      break;
+   default:
+      return 0x1ffff;
+   }
+   if (!dyn->rs.line.stipple.enable)
+      return 0x1ffff;
+   return dyn->rs.line.stipple.pattern |
+          ((uint32_t)MAX2(dyn->rs.line.stipple.factor, 1) << 16);
+}
+
+/* Window transforms of the bound viewports, for the vertex-stage stipple
+ * start: x_w = x + w/2 + ndc.x * w/2, and likewise for y with the height,
+ * which may be negative. */
+static void
+hk_apple9_viewport_table(const struct vk_dynamic_graphics_state *dyn,
+                         float table[AGX_APPLE9_VIEWPORT_TABLE_COUNT][4])
+{
+   memset(table, 0, AGX_APPLE9_VIEWPORT_TABLE_COUNT * 4 * sizeof(float));
+   unsigned count = MIN2(dyn->vp.viewport_count, AGX_APPLE9_VIEWPORT_TABLE_COUNT);
+   for (unsigned i = 0; i < count; ++i) {
+      const VkViewport *vp = &dyn->vp.viewports[i];
+      table[i][0] = vp->width * 0.5f;
+      table[i][1] = vp->height * 0.5f;
+      table[i][2] = vp->x + vp->width * 0.5f;
+      table[i][3] = vp->y + vp->height * 0.5f;
+   }
+}
+
 bool
 hk_apple9_upload_textures(struct hk_cmd_buffer *cmd,
                           const struct hk_shader *shader, bool graphics,
@@ -259,14 +302,20 @@ hk_apple9_upload_textures(struct hk_cmd_buffer *cmd,
 
    /* The graphics block holds command buffer state only: rebuild it when
     * the blend constants or write enables are set, or when the draw's
-    * sample positions or fan-ness differ from the last build. */
+    * sample positions, fan-ness, line stipple or viewports differ from the
+    * last build. */
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
+   uint32_t line_stipple = hk_apple9_line_stipple_word(dyn);
+   float viewports[AGX_APPLE9_VIEWPORT_TABLE_COUNT][4];
+   hk_apple9_viewport_table(dyn, viewports);
    if (gfx->apple9_sysvals &&
        !BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_CB_BLEND_CONSTANTS) &&
        !BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES) &&
        gfx->apple9_sysvals_positions == gfx->apple9_sample_positions &&
-       gfx->apple9_sysvals_first_fan == first_fan) {
+       gfx->apple9_sysvals_first_fan == first_fan &&
+       gfx->apple9_sysvals_line_stipple == line_stipple &&
+       !memcmp(gfx->apple9_sysvals_viewports, viewports, sizeof(viewports))) {
       *sysvals = gfx->apple9_sysvals;
       return true;
    }
@@ -280,6 +329,10 @@ hk_apple9_upload_textures(struct hk_cmd_buffer *cmd,
           &gfx->apple9_sample_positions, sizeof(uint32_t));
    uint32_t fan = first_fan;
    memcpy((uint8_t *)info + AGX_APPLE9_FIRST_FAN_OFFSET, &fan, sizeof(fan));
+   memcpy((uint8_t *)info + AGX_APPLE9_LINE_STIPPLE_OFFSET, &line_stipple,
+          sizeof(line_stipple));
+   memcpy((uint8_t *)info + AGX_APPLE9_VIEWPORT_TABLE_OFFSET, viewports,
+          sizeof(viewports));
    *sysvals = hk_pool_upload(cmd, info, sizeof(info), 64);
    if (!*sysvals)
       return false;
@@ -288,6 +341,8 @@ hk_apple9_upload_textures(struct hk_cmd_buffer *cmd,
    gfx->apple9_sysvals = *sysvals;
    gfx->apple9_sysvals_positions = gfx->apple9_sample_positions;
    gfx->apple9_sysvals_first_fan = first_fan;
+   gfx->apple9_sysvals_line_stipple = line_stipple;
+   memcpy(gfx->apple9_sysvals_viewports, viewports, sizeof(viewports));
    /* Nothing else consumes these bits on G16, whose draws do not clear the
     * dynamic state's dirty set. */
    BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_CB_BLEND_CONSTANTS);

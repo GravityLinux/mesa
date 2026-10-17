@@ -285,6 +285,10 @@ bool agx_nir_lower_poly_stipple(nir_shader *s);
 #define AGX_LINE_STIPPLE_MAX_USER_OUTPUTS 31
 bool agx_nir_lower_line_stipple_gs(nir_shader *gs, bool strip);
 bool agx_nir_lower_line_stipple_fs(nir_shader *fs);
+/* Round a window position to the 1/256-pixel vertex grid. */
+nir_def *agx_nir_line_stipple_snap(struct nir_builder *b, nir_def *x);
+/* Demote the fragment unless the stipple pattern keeps its counter. */
+void agx_nir_line_stipple_test(struct nir_builder *b, nir_def *counter);
 
 bool agx_nir_gather_vs_inputs(nir_shader *s,
                               BITSET_WORD *attrib_components_read);

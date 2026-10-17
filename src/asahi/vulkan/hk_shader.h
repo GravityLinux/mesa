@@ -171,6 +171,9 @@ nir_shader *hk_nir_mesh_rast(const nir_shader *mesh,
 
 struct hk_shader_info {
    uint8_t apple9_render_targets;
+   /* Fragment shaders: stippled lines rasterize with the first vertex
+    * provoking whatever the API mode, which no other input observes. */
+   bool apple9_line_stipple_first;
    struct agx_apple9_compute_profile apple9;
    union {
       struct {

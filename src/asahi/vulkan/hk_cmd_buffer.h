@@ -372,6 +372,8 @@ struct hk_graphics_state {
    uint64_t apple9_sysvals;
    uint32_t apple9_sysvals_positions;
    bool apple9_sysvals_first_fan;
+   uint32_t apple9_sysvals_line_stipple;
+   float apple9_sysvals_viewports[HK_MAX_VIEWPORTS][4];
 
    struct hk_index_buffer_state index;
    enum agx_primitive topology;
