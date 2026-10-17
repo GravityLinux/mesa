@@ -854,10 +854,6 @@ hk_apple9_write_vertex_weights(nir_shader *vs,
  * one. The window transform is the vertex's own viewport's, from the runtime
  * sysvals.
  */
-struct hk_apple9_stipple_slots {
-   unsigned start, axis;
-};
-
 /* Record the stage's latest position and viewport index outputs in
  * variables, for the stipple start written after them. */
 struct hk_apple9_stipple_tap {
@@ -1054,18 +1050,90 @@ hk_apple9_lower_line_stipple_fs(nir_shader *fs,
    nir_shader_gather_info(fs, impl);
 }
 
-/* The slots of the vertex-stage stipple start: the highest two generic slots
- * neither stage uses, provided four more components fit the varying budget.
- * Otherwise zero, and the line is not stippled here.
+/* Generic varying components a shader stores (outputs) or loads (inputs),
+ * per slot and component, 64-bit values counting twice. Indirectly addressed
+ * arrays count their whole slots. Clip and cull distances are ordinary output
+ * components here, as in the API limit.
  */
-static struct hk_apple9_stipple_slots
-hk_apple9_line_stipple_slots(const nir_shader *vs, const nir_shader *fs)
+static unsigned
+hk_apple9_generic_components(const nir_shader *s, bool outputs)
+{
+   uint8_t mask[32] = {0};
+   nir_foreach_function_impl(impl, s) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            unsigned bits, comps;
+            switch (intr->intrinsic) {
+            case nir_intrinsic_store_output:
+            case nir_intrinsic_store_per_vertex_output:
+            case nir_intrinsic_store_per_primitive_output:
+               if (!outputs)
+                  continue;
+               bits = nir_src_bit_size(intr->src[0]);
+               comps = nir_intrinsic_write_mask(intr);
+               break;
+            case nir_intrinsic_load_input:
+            case nir_intrinsic_load_interpolated_input:
+            case nir_intrinsic_load_per_vertex_input:
+            case nir_intrinsic_load_per_primitive_input:
+               if (outputs)
+                  continue;
+               bits = intr->def.bit_size;
+               comps = BITFIELD_MASK(intr->def.num_components);
+               break;
+            default:
+               continue;
+            }
+            nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+            if (sem.location < VARYING_SLOT_VAR0 ||
+                sem.location >= VARYING_SLOT_VAR0 + 32)
+               continue;
+            unsigned slot = sem.location - VARYING_SLOT_VAR0;
+            uint32_t m = comps << nir_intrinsic_component(intr);
+            if (bits == 64) {
+               uint32_t wide = 0;
+               u_foreach_bit(c, m)
+                  wide |= 3u << (2 * c);
+               m = wide;
+            }
+            if (sem.num_slots > 1) {
+               for (unsigned i = 0; i < sem.num_slots && slot + i < 32; ++i)
+                  mask[slot + i] = 0xf;
+            } else {
+               for (unsigned i = 0; m && slot + i < 32; ++i, m >>= 4)
+                  mask[slot + i] |= m & 0xf;
+            }
+         }
+      }
+   }
+   unsigned total = 0;
+   for (unsigned i = 0; i < 32; ++i)
+      total += util_bitcount(mask[i]);
+   if (outputs) {
+      total += s->info.clip_distance_array_size +
+               s->info.cull_distance_array_size;
+   }
+   return total;
+}
+
+/* The stipple slots: the highest two generic slots neither stage uses,
+ * provided the four stipple components fit beside both the last stage's
+ * outputs and the fragment shader's inputs within the API output limit.
+ * Otherwise zero: the line is drawn unstippled, a known limitation.
+ */
+struct hk_apple9_stipple_slots
+hk_apple9_line_stipple_slots(const nir_shader *last, const nir_shader *fs)
 {
    struct hk_apple9_stipple_slots slots = {0};
-   uint64_t used = vs->info.outputs_written | fs->info.inputs_read;
-   uint64_t generic = fs->info.inputs_read & BITFIELD64_RANGE(VARYING_SLOT_VAR0, 32);
-   if (util_bitcount64(generic) * 4 + 4 > AGX_APPLE9_MAX_VARYING_COMPONENTS - 2)
+   unsigned used_components = MAX2(hk_apple9_generic_components(last, true),
+                                   hk_apple9_generic_components(fs, false));
+   if (used_components + HK_APPLE9_STIPPLE_COMPONENTS >
+       HK_APPLE9_OUTPUT_COMPONENTS)
       return slots;
+   uint64_t used = last->info.outputs_written | fs->info.inputs_read;
    for (int k = 31; k >= 0 && !slots.axis; --k) {
       unsigned slot = VARYING_SLOT_VAR0 + k;
       if (used & BITFIELD64_BIT(slot))
@@ -5514,8 +5582,20 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
       }
       if (key.line_stipple && last && fs_nir) {
          stipple = hk_apple9_line_stipple_slots(last, fs_nir);
-         if (stipple.start)
+         if (stipple.start) {
             stipple_stage = last->info.stage;
+         } else {
+            static bool warned;
+            if (!warned) {
+               mesa_logw("Apple9: line stipple is ignored when the last "
+                         "pre-rasterization stage uses more than %u of %u "
+                         "output components or 31 generic slots",
+                         HK_APPLE9_OUTPUT_COMPONENTS -
+                            HK_APPLE9_STIPPLE_COMPONENTS,
+                         HK_APPLE9_OUTPUT_COMPONENTS);
+               warned = true;
+            }
+         }
          if (stipple.start) {
             hk_apple9_lower_line_stipple_fs(fs_nir, stipple);
             /* The stipple start needs the segment's first vertex. Under the
