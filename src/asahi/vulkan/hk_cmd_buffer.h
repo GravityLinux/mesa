@@ -330,6 +330,8 @@ struct hk_graphics_state {
    /* The bound passthrough geometry shader continues line stipple, see
     * hk_apple9_line_stipple_gs. */
    bool apple9_stipple_gs;
+   /* The bound passthrough geometry shader draws polygon points. */
+   bool apple9_polygon_points;
 
    /* Vertex buffers */
    struct hk_addr_range vb[AGX_MAX_VBUFS];
@@ -376,6 +378,7 @@ struct hk_graphics_state {
    uint32_t apple9_sysvals_positions;
    bool apple9_sysvals_first_fan;
    uint32_t apple9_sysvals_line_stipple;
+   struct agx_apple9_polygon_point_params apple9_sysvals_polygon_points;
    float apple9_sysvals_viewports[HK_MAX_VIEWPORTS][4];
 
    struct hk_index_buffer_state index;

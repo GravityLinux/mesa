@@ -142,8 +142,31 @@ bool agx_compile_apple9_fragment(nir_shader *nir,
  * (scale.xy, offset.xy) per viewport: window = ndc * scale + offset. */
 #define AGX_APPLE9_VIEWPORT_TABLE_OFFSET (AGX_APPLE9_FETCH_SAMPLER_INDEX_OFFSET + 16)
 #define AGX_APPLE9_VIEWPORT_TABLE_COUNT 16
-#define AGX_APPLE9_RUNTIME_SYSVAL_SIZE \
+/* Rasterization state for software polygon points (struct
+ * agx_apple9_polygon_point_params). */
+#define AGX_APPLE9_POLYGON_POINT_OFFSET \
    (AGX_APPLE9_VIEWPORT_TABLE_OFFSET + AGX_APPLE9_VIEWPORT_TABLE_COUNT * 16)
+#define AGX_APPLE9_RUNTIME_SYSVAL_SIZE (AGX_APPLE9_POLYGON_POINT_OFFSET + 32)
+
+enum agx_apple9_polygon_point_flags {
+   AGX_APPLE9_PP_CULL_FRONT = 1 << 0,
+   AGX_APPLE9_PP_CULL_BACK = 1 << 1,
+   AGX_APPLE9_PP_FRONT_CCW = 1 << 2,
+   AGX_APPLE9_PP_DEPTH_CLIP = 1 << 3,
+   AGX_APPLE9_PP_DEPTH_BIAS = 1 << 4,
+   /* The depth bias unit depends on the polygon's depth (float formats). */
+   AGX_APPLE9_PP_DEPTH_BIAS_FLOAT = 1 << 5,
+};
+
+struct agx_apple9_polygon_point_params {
+   uint32_t flags;
+   float bias_constant, bias_slope, bias_clamp;
+   /* Minimum resolvable depth difference of unorm formats. */
+   float bias_unit;
+   /* Viewport 0 maxDepth - minDepth. */
+   float depth_range;
+   uint32_t pad[2];
+};
 enum agx_apple9_sampler_field {
    AGX_APPLE9_SAMP_WRAP_S, AGX_APPLE9_SAMP_WRAP_T, AGX_APPLE9_SAMP_WRAP_R,
    AGX_APPLE9_SAMP_MIN, AGX_APPLE9_SAMP_MAG, AGX_APPLE9_SAMP_MIP,
