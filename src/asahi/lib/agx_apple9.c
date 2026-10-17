@@ -876,6 +876,10 @@ agx_apple9_pack_texture(void *out, const struct AGX_TEXTURE *state)
    if ((tex.address & 15) || (tex.address >> 48))
       return false;
 
+   if (tex.dimension == AGX_TEXTURE_DIMENSION_3D &&
+       tex.depth > AGX_APPLE9_MAX_3D_TEXTURE_DIMENSION)
+      return false;
+
    bool single_layer_linear = tex.layout == AGX_LAYOUT_LINEAR && tex.extended &&
       (tex.dimension == AGX_TEXTURE_DIMENSION_1D ||
        tex.dimension == AGX_TEXTURE_DIMENSION_2D ||
