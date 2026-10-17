@@ -2852,7 +2852,7 @@ agx_update_vs(struct agx_batch *batch, unsigned index_size_B)
             ctx->apple9_xfb_flatshade_first;
       }
       key.apple9_inputs.clip_halfz =
-         key.hw && !key.apple9_inputs.capture_xfb && !ctx->rast->base.clip_halfz;
+         key.hw && !key.apple9_inputs.capture_xfb && !agx_clip_halfz(ctx);
       key.apple9_inputs.clip_distance_enable = ctx->rast->base.clip_plane_enable;
       bool points = rast_prim(batch->reduced_prim, ctx->rast->base.fill_front) ==
                        MESA_PRIM_POINTS;
@@ -3029,7 +3029,7 @@ agx_update_gs(struct agx_context *ctx, const struct pipe_draw_info *info,
       /* The line stipple fragment variant reads the GS's stipple varying. */
       if (ctx->stage[MESA_SHADER_GEOMETRY].shader->is_line_stipple_passthrough)
          key.vs.apple9_fragment_inputs |= BITFIELD64_BIT(AGX_LINE_STIPPLE_SLOT);
-      key.vs.apple9_inputs.clip_halfz = !ctx->rast->base.clip_halfz;
+      key.vs.apple9_inputs.clip_halfz = !agx_clip_halfz(ctx);
       key.vs.apple9_inputs.clip_distance_enable = ctx->rast->base.clip_plane_enable;
       bool points = rast_prim(gs->gs_mode, ctx->rast->base.fill_front) ==
                        MESA_PRIM_POINTS;
@@ -4542,7 +4542,7 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
 
       agx_upload_viewport_scissor(pool, batch, &out, ctx->viewport,
                                   ctx->rast->base.scissor ? ctx->scissor : NULL,
-                                  ctx->rast->base.clip_halfz,
+                                  agx_clip_halfz(ctx),
                                   vs->b.info.nonzero_viewport);
    }
 
@@ -7024,7 +7024,7 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
       memcpy(record->viewport_scale, ctx->viewport[0].scale,
              sizeof(record->viewport_scale));
       /* The Apple9 vertex path already lowers clip Z to [0, W]. */
-      if (!ctx->rast->base.clip_halfz) {
+      if (!agx_clip_halfz(ctx)) {
          record->viewport_translate[2] -= record->viewport_scale[2];
          record->viewport_scale[2] *= 2.0f;
       }
@@ -7041,7 +7041,7 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
       record->scissor_max[1] = maxy;
       struct agx_scissor_packed scissor;
       float minz, maxz;
-      util_viewport_zmin_zmax(&ctx->viewport[0], ctx->rast->base.clip_halfz,
+      util_viewport_zmin_zmax(&ctx->viewport[0], agx_clip_halfz(ctx),
                              &minz, &maxz);
       agx_pack(&scissor, SCISSOR, cfg) {
          cfg.min_x = minx;

@@ -667,6 +667,10 @@ struct agx_context {
     * draw, where the batch must not be split. */
    unsigned draw_depth;
 
+   /* Treat clip Z as [0, W] for the next draws regardless of the bound
+    * rasterizer: Apple9 driver clears use it to store depth exactly. */
+   bool force_clip_halfz;
+
    struct agx_compiled_shader *vs, *fs, *gs, *tcs;
    struct {
       struct agx_linked_shader *vs, *fs;
@@ -1003,6 +1007,12 @@ struct agx_screen {
    uint64_t batch_memory_budget;
    bool dual_color_blend_by_location;
 };
+
+static inline bool
+agx_clip_halfz(const struct agx_context *ctx)
+{
+   return ctx->force_clip_halfz || (ctx->rast && ctx->rast->base.clip_halfz);
+}
 
 static inline struct agx_screen *
 agx_screen(struct pipe_screen *p)
