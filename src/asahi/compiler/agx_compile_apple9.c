@@ -8771,7 +8771,12 @@ agx_nir_lower_apple9_sampler_state(
           * stored depth instead of the comparison result. 2D arrays reroute
           * that through gradients; a cube face here keeps the native cube
           * sample and its per-face clamp. */
-         if (cube && !state->seamless_cube_map && !tex->is_shadow) {
+         /* Implicit-LOD samples stay native too. As an array layer, each
+          * pixel picks its own face, so a quad straddling a face edge gets a
+          * discontinuous derivative and selects too high a level; the native
+          * cube derives the LOD from the direction vector. */
+         bool implicit_lod = tex->op == nir_texop_tex || tex->op == nir_texop_txb;
+         if (cube && !state->seamless_cube_map && !tex->is_shadow && !implicit_lod) {
             /* Cube filtering always clamps the selected face on Apple9.
              * Sampling that face as an array layer restores ordinary 2D
              * wrapping when seamless cube filtering is disabled. */
