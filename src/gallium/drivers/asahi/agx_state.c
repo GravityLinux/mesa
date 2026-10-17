@@ -7334,13 +7334,22 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
              const struct pipe_draw_start_count_bias *draws, unsigned num_draws)
 {
    struct agx_context *ctx = agx_context(pctx);
+
+   /* Split a batch whose BOs already exceed the memory budget before it
+    * records more work, so it retires and releases them. */
+   if (!ctx->draw_depth && ctx->batch &&
+       ctx->batch->bo_bytes > agx_screen(pctx->screen)->batch_memory_budget)
+      agx_flush_batch_for_reason(ctx, ctx->batch, "Batch memory budget");
+
    bool saved = ctx->unknown_primitive_count;
    ctx->unknown_primitive_count |=
       indirect || (info->index_size && info->primitive_restart) ||
       info->mode == MESA_PRIM_PATCHES ||
       ctx->stage[MESA_SHADER_TESS_EVAL].shader ||
       ctx->stage[MESA_SHADER_GEOMETRY].shader;
+   ctx->draw_depth++;
    agx_draw_vbo_inner(pctx, info, drawid_offset, indirect, draws, num_draws);
+   ctx->draw_depth--;
    ctx->unknown_primitive_count = saved;
 }
 

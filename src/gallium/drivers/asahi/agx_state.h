@@ -466,6 +466,10 @@ struct agx_batch {
       unsigned bit_count;
    } bo_list;
 
+   /* Total size of the distinct BOs the batch references. The batch keeps
+    * each alive until it retires, including BOs of deleted resources. */
+   uint64_t bo_bytes;
+
    /* If true, this batch contains a shader with a potentially incoherent write
     * (e.g. image_write), needing a barrier later to access.
     */
@@ -657,6 +661,11 @@ struct agx_oq_heap;
 
 struct agx_context {
    struct pipe_context base;
+
+   /* Nesting of draw_vbo: tile helpers and driver blits draw from inside a
+    * draw, where the batch must not be split. */
+   unsigned draw_depth;
+
    struct agx_compiled_shader *vs, *fs, *gs, *tcs;
    struct {
       struct agx_linked_shader *vs, *fs;
@@ -988,6 +997,9 @@ struct agx_screen {
    struct u_rwlock destroy_lock;
 
    float heap_memory_percent;
+
+   /* Flush an open batch before a draw once its BOs exceed this. */
+   uint64_t batch_memory_budget;
    bool dual_color_blend_by_location;
 };
 
@@ -1189,6 +1201,7 @@ agx_batch_add_bo_internal(struct agx_batch *batch, struct agx_bo *bo)
     */
    agx_bo_reference(bo);
    BITSET_SET(batch->bo_list.set, bo->handle);
+   batch->bo_bytes += bo->size;
 }
 
 static inline void
