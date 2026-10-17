@@ -56,9 +56,13 @@ struct hk_image_plane {
    uint64_t addr;
    struct agx_va *va;
 
-   /* For host image copy */
+   /* Host image copy. On 32-bit, binding records the backing storage but
+    * leaves CPU VA available until an individual copy needs a mapping.
+    * The BO is owned by the bound VkDeviceMemory.
+    */
+   struct agx_bo *bo;
+   uint64_t offset_B;
    void *map;
-   uint32_t rem;
 
    /* If the image has sparse residency, its residency is tracked in this
     * secondary page table. Otherwise, this map is NULL.
