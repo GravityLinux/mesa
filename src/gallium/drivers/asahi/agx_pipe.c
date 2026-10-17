@@ -1026,14 +1026,19 @@ agx_blit_to_staging(struct pipe_context *pctx, struct agx_transfer *trans)
  * The normal BO mapping may have escaped to other users and cannot be revoked.
  */
 static void *
-agx_transfer_map_bo(struct agx_transfer *transfer, struct agx_bo *bo)
+agx_transfer_map_bo(struct agx_transfer *transfer, struct agx_bo *bo,
+                    bool escapes)
 {
    if (sizeof(void *) > 4)
       return agx_bo_map(bo);
 
    assert(!transfer->bo_map);
    transfer->bo_map_size = bo->size;
-   transfer->bo_map = agx_bo_map_range(bo, NULL, bo->size);
+   /* Tile/detile copies never expose this pointer to GL. Preserve their shim
+    * CPU epoch; only mappings that may escape must revoke epoch tracking.
+    */
+   transfer->bo_map = escapes ? agx_bo_map_range(bo, NULL, bo->size)
+                              : bo->dev->ops.bo_mmap(bo->dev, bo, NULL, bo->size);
    return transfer->bo_map;
 }
 
@@ -1139,7 +1144,7 @@ agx_transfer_map(struct pipe_context *pctx, struct pipe_resource *resource,
          transfer->base.layer_stride = transfer->staging.transfer->layer_stride;
          return map;
       }
-      void *map = agx_transfer_map_bo(transfer, staging->bo);
+      void *map = agx_transfer_map_bo(transfer, staging->bo, true);
       if (!map)
          goto fail;
       return map;
@@ -1162,7 +1167,7 @@ agx_transfer_map(struct pipe_context *pctx, struct pipe_resource *resource,
       /* Map before returning the staging pointer so allocation failure is
        * reported by texture_map, rather than during the void unmap callback. */
       if (sizeof(void *) == 4 &&
-          !agx_transfer_map_bo(transfer, rsrc->bo))
+          !agx_transfer_map_bo(transfer, rsrc->bo, false))
          goto fail;
 
       if ((usage & PIPE_MAP_READ) && agx_resource_valid(rsrc, level)) {
@@ -1196,7 +1201,7 @@ agx_transfer_map(struct pipe_context *pctx, struct pipe_resource *resource,
          (uint64_t)ail_get_linear_pixel_B(&rsrc->layout, level, box->x,
                                          box->y, box->z);
 
-      void *map = agx_transfer_map_bo(transfer, rsrc->bo);
+      void *map = agx_transfer_map_bo(transfer, rsrc->bo, true);
       if (!map)
          goto fail;
       return ((uint8_t *)map) + offset;
