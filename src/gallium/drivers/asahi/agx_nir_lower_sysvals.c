@@ -193,6 +193,9 @@ lower_intrinsic(nir_builder *b, nir_intrinsic_instr *intr,
    case nir_intrinsic_load_viewport_scale:
       return nir_pad_vector_imm_int(
          b, load_sysval_root(b, 2, 32, &u->viewport_scale), 0, 3);
+   case nir_intrinsic_load_viewport_offset:
+      return nir_pad_vector_imm_int(
+         b, load_sysval_root(b, 2, 32, &u->viewport_offset), 0, 3);
    case nir_intrinsic_load_tex_sprite_mask_agx:
       return load_sysval_root(b, 1, 16, &u->sprite_mask);
    case nir_intrinsic_load_shader_part_tests_zs_agx:

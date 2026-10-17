@@ -141,8 +141,9 @@ struct PACKED agx_draw_uniforms {
    /* glPointSize value */
    float fixed_point_size;
 
-   /* Viewport 0 scale, for line stipple lengths in geometry shaders */
+   /* Viewport 0 transform, for line stipple lengths in geometry shaders */
    float viewport_scale[2];
+   float viewport_offset[2];
 
    /* Value of the multisample control register, containing sample positions in
     * each byte (x in low nibble, y in high nibble).

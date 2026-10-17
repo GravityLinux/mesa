@@ -66,10 +66,25 @@ line_stipple_ndc(nir_builder *b, nir_def *pos)
    return nir_fdiv(b, nir_trim_vector(b, pos, 2), nir_channel(b, pos, 3));
 }
 
+/* Window-space positions recovered from NDC carry float error. Vertices are
+ * snapped to a 1/256-pixel grid, so rounding to it makes a distance between
+ * pixel centres an exact integer again instead of, say, 7.9999995. */
 static nir_def *
-line_stipple_major(nir_builder *b, nir_def *ndc0, nir_def *ndc1, nir_def *scale)
+line_stipple_snap(nir_builder *b, nir_def *x)
 {
-   nir_def *d = nir_fabs(b, nir_fmul(b, nir_fsub(b, ndc1, ndc0), scale));
+   return nir_fmul_imm(b, nir_fround_even(b, nir_fmul_imm(b, x, 256.0)),
+                       1.0 / 256.0);
+}
+
+/* Major-axis length between the snapped window positions of two vertices, so
+ * that a strip's lengths sum to its end-to-end distance. */
+static nir_def *
+line_stipple_major(nir_builder *b, nir_def *ndc0, nir_def *ndc1, nir_def *scale,
+                   nir_def *offset)
+{
+   nir_def *w0 = line_stipple_snap(b, nir_ffma(b, ndc0, scale, offset));
+   nir_def *w1 = line_stipple_snap(b, nir_ffma(b, ndc1, scale, offset));
+   nir_def *d = nir_fabs(b, nir_fsub(b, w1, w0));
    return nir_fmax(b, nir_channel(b, d, 0), nir_channel(b, d, 1));
 }
 
@@ -107,6 +122,7 @@ agx_nir_lower_line_stipple_gs(nir_shader *gs, bool strip)
    nir_builder b = nir_builder_at(nir_before_impl(impl));
 
    nir_def *scale = nir_trim_vector(&b, nir_load_viewport_scale(&b), 2);
+   nir_def *offset = nir_trim_vector(&b, nir_load_viewport_offset(&b), 2);
    nir_def *ndc0 = line_stipple_ndc(&b, nir_load_array_var_imm(&b, pos_in, 0));
    nir_def *ndc1 = line_stipple_ndc(&b, nir_load_array_var_imm(&b, pos_in, 1));
    nir_def *d = nir_fabs(&b, nir_fmul(&b, nir_fsub(&b, ndc1, ndc0), scale));
@@ -134,7 +150,7 @@ agx_nir_lower_line_stipple_gs(nir_shader *gs, bool strip)
             &b, nir_load_strip_position_poly(&b, nir_iadd_imm(&b, j, 1)));
          nir_store_var(&b, sum,
                        nir_fadd(&b, nir_load_var(&b, sum),
-                                line_stipple_major(&b, a, c, scale)),
+                                line_stipple_major(&b, a, c, scale, offset)),
                        1);
          nir_store_var(&b, i, nir_iadd_imm(&b, j, 1), 1);
       }
@@ -195,7 +211,8 @@ agx_nir_lower_line_stipple_fs(nir_shader *fs)
 
    nir_def *scale = nir_trim_vector(b, nir_load_viewport_scale(b), 2);
    nir_def *offset = nir_trim_vector(b, nir_load_viewport_offset(b), 2);
-   nir_def *start = nir_ffma(b, nir_trim_vector(b, line, 2), scale, offset);
+   nir_def *start = line_stipple_snap(
+      b, nir_ffma(b, nir_trim_vector(b, line, 2), scale, offset));
 
    nir_def *pixel = nir_fadd_imm(
       b, nir_u2f32(b, nir_u2u32(b, nir_load_pixel_coord(b))), 0.5);
