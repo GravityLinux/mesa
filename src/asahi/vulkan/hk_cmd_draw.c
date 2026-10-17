@@ -4483,8 +4483,8 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
       dyn->rs.polygon_mode == VK_POLYGON_MODE_POINT &&
       u_reduced_prim(hk_gs_in_prim(cmd)) == MESA_PRIM_TRIANGLES;
 
-   if (!IS_SHADER_DIRTY(VERTEX) && !IS_SHADER_DIRTY(GEOMETRY) &&
-       !IS_SHADER_DIRTY(FRAGMENT) &&
+   if (!IS_SHADER_DIRTY(VERTEX) && !IS_SHADER_DIRTY(TESS_EVAL) &&
+       !IS_SHADER_DIRTY(GEOMETRY) && !IS_SHADER_DIRTY(FRAGMENT) &&
        weights_by_vs == gfx->apple9_weights_by_vs &&
        stipple_gs == gfx->apple9_stipple_gs &&
        polygon_points == gfx->apple9_polygon_points)
@@ -4503,7 +4503,10 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    /* Captured vertices are the polygon's, not points: transform feedback
     * keeps the hardware polygon mode. */
    polygon_points &= !xfb_outputs;
-   bool needs_gs = xfb_outputs || stipple_gs || polygon_points;
+   bool cull_mask =
+      hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G &&
+      last_sw->info.cull_distance_array_size;
+   bool needs_gs = xfb_outputs || stipple_gs || polygon_points || cull_mask;
    for (unsigned i = 0; i < ARRAY_SIZE(gfx->pg_query); ++i)
       needs_gs |= gfx->pg_query[i] != 0;
 

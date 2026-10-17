@@ -508,6 +508,7 @@ struct agx_apple9_vertex_layout {
    bool dynamic_stride;
    bool clip_halfz;      /* Convert GL [-w,w] depth to hardware [0,w]. */
    uint8_t clip_distance_enable;
+   bool cull_distance_mask; /* Cull signs are combined by software geometry. */
    bool capture_xfb;
    bool rasterize_points;
    uint8_t xfb_mode;

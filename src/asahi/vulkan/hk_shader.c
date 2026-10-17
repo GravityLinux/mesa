@@ -5432,7 +5432,8 @@ hk_apple9_compile_tes(struct hk_device *dev, nir_shader *nir,
    sw->info.cull_distance_array_size = nir->info.cull_distance_array_size;
 
    VkResult result = VK_SUCCESS;
-   if ((next & VK_SHADER_STAGE_GEOMETRY_BIT) || nir->xfb_info) {
+   if ((next & VK_SHADER_STAGE_GEOMETRY_BIT) || nir->xfb_info ||
+       nir->info.cull_distance_array_size) {
       if (nir->xfb_info) {
          memcpy(&sw->info.xfb_info, nir->xfb_info,
                 nir_xfb_info_size(nir->xfb_info->output_count));
@@ -5450,6 +5451,7 @@ hk_apple9_compile_tes(struct hk_device *dev, nir_shader *nir,
    }
 
    struct agx_apple9_vertex_layout layout = *vertex;
+   layout.cull_distance_mask = true;
    layout.rasterize_points = nir->info.tess.point_mode;
    layout.ignore_point_size = !layout.rasterize_points;
    NIR_PASS(_, nir, poly_nir_lower_tes, true);
@@ -5679,7 +5681,7 @@ hk_apple9_compile_gs(struct hk_device *dev, nir_shader *nir,
    struct hk_shader *rast_shader = &obj->variants[HK_GS_VARIANT_RAST];
    nir_shader *count = NULL, *rast = NULL, *pre = NULL;
    struct poly_gs_info info = {0};
-   NIR_PASS(_, nir, poly_nir_lower_gs, &count, &rast, &pre, &info);
+   NIR_PASS(_, nir, poly_nir_lower_gs_cull_mask, &count, &rast, &pre, &info);
 
    hk_foreach_variant(obj, variant) {
       variant->info.gs = info;
@@ -5696,6 +5698,7 @@ hk_apple9_compile_gs(struct hk_device *dev, nir_shader *nir,
                                          reason);
    if (result == VK_SUCCESS) {
       struct agx_apple9_vertex_layout layout = *vertex;
+      layout.cull_distance_mask = true;
       layout.rasterize_points = info.mode == MESA_PRIM_POINTS;
       layout.ignore_point_size = !layout.rasterize_points;
       hk_apple9_lower_prerast_sysvals(rast, MESA_SHADER_GEOMETRY);
@@ -6119,7 +6122,8 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
             if ((infos[i].next_stage_mask &
                  (VK_SHADER_STAGE_GEOMETRY_BIT |
                   VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT)) ||
-                nir->xfb_info || hk_per_vertex_copies_used(&per_vertex) ||
+                nir->xfb_info || nir->info.cull_distance_array_size ||
+                hk_per_vertex_copies_used(&per_vertex) ||
                 stipple_stage == MESA_SHADER_VERTEX ||
                 polygon_stage == MESA_SHADER_VERTEX) {
                struct hk_shader *sw = &obj->variants[HK_VS_VARIANT_SW];
@@ -6147,7 +6151,9 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
              * triangle lists need no passthrough geometry shader. */
             if (!per_vertex.count && hk_per_vertex_copies_used(&per_vertex))
                hk_apple9_write_vertex_weights(nir, &per_vertex);
-            if (!agx_compile_apple9_vertex_inputs(nir, &key.vertex, &shader->b,
+            struct agx_apple9_vertex_layout vertex = key.vertex;
+            vertex.cull_distance_mask = true;
+            if (!agx_compile_apple9_vertex_inputs(nir, &vertex, &shader->b,
                                                   &reason)) {
                reason = reason ?: "unsupported vertex NIR";
                result = vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
