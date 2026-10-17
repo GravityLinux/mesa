@@ -1299,9 +1299,11 @@ agx_clear(struct pipe_context *pctx, unsigned buffers,
       unsigned color_fast = fastclear & PIPE_CLEAR_COLOR;
       slowclear |= color_fast;
       fastclear &= ~color_fast;
-      /* A depth/stencil-only clear also needs a complete graphics package
-       * when no draw has created one yet. */
-      if (!batch->apple9_render_initialized)
+      /* A fast depth/stencil clear needs a render with a draw in its VDM
+       * stream: it needs the graphics package, and a render whose stream is
+       * empty is never submitted (agx_flush_batch). Without one yet, clear
+       * with a draw. */
+      if (!batch->apple9_render_initialized || !batch->apple9_vdm_draws)
          slowclear |= fastclear;
    }
 
@@ -1932,8 +1934,23 @@ agx_flush_batch(struct agx_context *ctx, struct agx_batch *batch)
       has_cdm = true;
    }
 
+   /* An Apple9 render with no draw in its VDM stream hangs G16 (piglit
+    * vao-broken-attrib: the only draw was rejected after the tile helpers
+    * were prepared). Never submit one: drop it like any other render that is
+    * not submitted. Clears are drawn or follow a draw (see agx_clear), so a
+    * clear is only lost here if its own draw was rejected. */
+   bool apple9_empty =
+      agx_apple9_direct_render_enabled(agx_device(ctx->base.screen)) &&
+      batch->vdm.bo && batch->initialized && !batch->apple9_vdm_draws;
+   if (apple9_empty && batch->clear) {
+      static bool warned;
+      if (!warned) {
+         mesa_logw("Apple9: dropping a clear whose render has no draw");
+         warned = true;
+      }
+   }
    if (batch->vdm.bo && (batch->clear || batch->initialized)) {
-      has_vdm = agx_flush_render(ctx, batch, &render);
+      has_vdm = !apple9_empty && agx_flush_render(ctx, batch, &render);
 
       /* The render half is dropped: nothing it recorded reaches the GPU. */
       if (!has_vdm && batch->initialized)

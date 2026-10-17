@@ -129,6 +129,7 @@ agx_batch_init(struct agx_context *ctx,
    batch->apple9_render_initialized = false;
    batch->attachments_were_valid = 0;
    batch->apple9_draw_count = 0;
+   batch->apple9_vdm_draws = 0;
    batch->primitive_count = 0;
 
    if (agx_batch_is_compute(batch)) {
@@ -298,6 +299,7 @@ agx_batch_cleanup(struct agx_context *ctx, struct agx_batch *batch, bool reset)
    agx_bo_unreference(dev, batch->cdm.bo);
    batch->apple9_render_initialized = false;
    batch->apple9_draw_count = 0;
+   batch->apple9_vdm_draws = 0;
    agx_pool_cleanup(&batch->pool);
    agx_pool_cleanup(&batch->pipeline_pool);
    agx_pool_cleanup(&batch->apple9_context_pool);
