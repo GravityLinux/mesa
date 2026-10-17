@@ -257,6 +257,10 @@ struct hk_shader_info {
    uint8_t clip_distance_array_size;
    uint8_t cull_distance_array_size;
    uint8_t set_count;
+   /* Apple9: cull distances are published as one flat mask per vertex, which
+    * a geometry stage must combine over each primitive, rather than as
+    * interpolated per-plane values. See hk_apple9_compile_vertex_culls. */
+   bool cull_mask;
 
    /* XXX: is there a less goofy way to do this? I really don't want dynamic
     * allocation here.
@@ -609,6 +613,7 @@ hk_get_nir_options(struct vk_physical_device *vk_pdev, mesa_shader_stage stage,
 
 VkResult hk_apple9_compile_internal_gs(struct hk_device *dev, nir_shader *nir,
                                        const uint64_t fs_interp[2],
+                                       bool cull_mask,
                                        struct hk_api_shader **out);
 
 struct hk_api_shader *hk_meta_shader(struct hk_device *dev,

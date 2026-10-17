@@ -174,7 +174,7 @@ mask_semantics(void)
 // clang-format off
 int main(void)
 {
-   unsigned failed = 0, total = 0;
+   unsigned failed = 0, total = 0, planes_fit = 0, planes_total = 0;
    glsl_type_singleton_init_or_ref();
    if (!mask_semantics() || HK_APPLE9_OUTPUT_COMPONENTS != 122) return 1;
    puts("stage,api_components,point,written_size,viewport,layer,clip,cull,clips_late,compile,publications,varyings,fragment_compile,reason");
@@ -253,6 +253,25 @@ int main(void)
          hk_lower_uvs_index(rast, MESA_SHADER_GEOMETRY, 0);
          nir_shader_intrinsics_pass(rast, lower_root, nir_metadata_control_flow, NULL);
       }
+      /* Vertex and evaluation stages first try interpolated cull planes, which
+       * need no geometry stage; hk falls back to the mask only when they do
+       * not fit (hk_apple9_compile_vertex_culls). Small interfaces must fit. */
+      if (stage != 2 && culls) {
+         nir_shader *planes = nir_shader_clone(NULL, compile);
+         struct agx_apple9_vertex_layout pl = {
+            .rasterize_points = point, .ignore_point_size = !point,
+            .clip_distance_enable = 0xff,
+         };
+         struct agx_shader_part po = {0};
+         bool planes_ok = agx_compile_apple9_vertex_inputs(planes, &pl, &po, NULL);
+         if (planes_ok && (po.info.apple9_varyings.cull_distance_mask ||
+                           !po.info.apple9_varyings.mask[VARYING_SLOT_CULL_PRIMITIVE]))
+            ++failed;
+         if (budgets[t] == 32 && !planes_ok)
+            ++failed;
+         planes_fit += planes_ok; planes_total++;
+         free(po.binary); ralloc_free(planes);
+      }
       struct agx_apple9_vertex_layout layout = {
          .cull_distance_mask = true, .rasterize_points = point, .ignore_point_size = !point,
          .clip_distance_enable = 0xff,
@@ -304,7 +323,8 @@ int main(void)
          ++failed;
       free(out.binary);ralloc_free(count);ralloc_free(rast);ralloc_free(pre);ralloc_free(b.shader);
    }
-   fprintf(stderr, "compiled=%u rejected=%u total=%u\n", total-failed, failed, total);
+   fprintf(stderr, "compiled=%u rejected=%u total=%u planes_fit=%u/%u\n",
+           total-failed, failed, total, planes_fit, planes_total);
    glsl_type_singleton_decref();
    return failed ? 1 : 0;
 }

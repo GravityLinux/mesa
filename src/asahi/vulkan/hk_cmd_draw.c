@@ -1761,6 +1761,10 @@ struct hk_apple9_passthrough_suffix {
    uint8_t polygon_face_slot;
    /* polygonModePointSize: forward the shader's PointSize, else size 1. */
    uint8_t polygon_point_size;
+   /* The vertex stage publishes a flat cull mask, which the fragment shader
+    * reads: combine it over each primitive. Otherwise cull planes stay
+    * interpolated values. See hk_apple9_compile_vertex_culls. */
+   uint8_t cull_mask;
 };
 
 /* Before every emitted vertex, write the per-vertex values of the input
@@ -2062,8 +2066,8 @@ hk_build_meta_shader_locked(struct hk_device *dev, struct hk_internal_key *key,
       struct hk_apple9_passthrough_suffix suffix;
       memcpy(&suffix, (uint8_t *)key->key + key->key_size - sizeof(suffix),
              sizeof(suffix));
-      if (hk_apple9_compile_internal_gs(dev, b.shader, suffix.fs_interp, &s) !=
-          VK_SUCCESS)
+      if (hk_apple9_compile_internal_gs(dev, b.shader, suffix.fs_interp,
+                                        suffix.cull_mask, &s) != VK_SUCCESS)
          return NULL;
    } else if (hk_compile_shader(dev, &info, NULL, NULL, NULL, &s) !=
               VK_SUCCESS) {
@@ -4504,10 +4508,11 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    /* Captured vertices are the polygon's, not points: transform feedback
     * keeps the hardware polygon mode. */
    polygon_points &= !xfb_outputs;
-   bool cull_mask =
-      hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G &&
-      last_sw->info.cull_distance_array_size;
-   bool needs_gs = xfb_outputs || stipple_gs || polygon_points || cull_mask;
+   /* A per-vertex cull mask is the primitive's only for points. */
+   bool cull_mask = last_sw->info.cull_mask;
+   bool needs_gs = xfb_outputs || stipple_gs || polygon_points ||
+                   (cull_mask &&
+                    u_reduced_prim(hk_gs_in_prim(cmd)) != MESA_PRIM_POINTS);
    for (unsigned i = 0; i < ARRAY_SIZE(gfx->pg_query); ++i)
       needs_gs |= gfx->pg_query[i] != 0;
 
@@ -4588,6 +4593,7 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
          .polygon_face_slot = polygon_points ? fs->info.fs.polygon_face_slot : 0,
          .polygon_point_size = polygon_points &&
             hk_cmd_buffer_device(cmd)->vk.physical->properties.polygonModePointSize,
+         .cull_mask = cull_mask,
       };
       if (fs) {
          memcpy(suffix.per_vertex_location, fs->info.fs.per_vertex_location,
