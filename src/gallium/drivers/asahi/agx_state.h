@@ -428,6 +428,8 @@ struct agx_batch {
    uint32_t apple9_color_store_launch;
    /* Prepare background/EOT state without emitting a rasterized draw. */
    bool apple9_preparing_tile_helper;
+   /* Draws emitted into the VDM stream; tile helpers are not among them. */
+   unsigned apple9_vdm_draws;
 
    uint64_t uploaded_clear_color[PIPE_MAX_COLOR_BUFS];
    double clear_depth;

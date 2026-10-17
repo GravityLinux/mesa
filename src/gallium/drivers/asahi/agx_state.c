@@ -7255,6 +7255,7 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
             batch->vdm.current, &pipeline, draws->count, info->instance_count,
             info->index_size ? draws->index_bias : draws->start)) - sizeof(uint32_t);
       agx_batch_add_bo(batch, dev->apple9_entries);
+      ++batch->apple9_vdm_draws;
    } else {
       out = agx_encode_state(batch, batch->vdm.current);
 
