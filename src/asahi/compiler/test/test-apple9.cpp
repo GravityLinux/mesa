@@ -12536,6 +12536,62 @@ TEST(Apple9Compiler, FullRasterInterfaceFitsUvsAndPublications)
    }
 }
 
+/* The API component limit includes position and built-ins. Late clip stores
+ * must share raster copies even after more than 16 distinct publications. */
+TEST(Apple9Compiler, LateClipExportsAtAdvertisedComponentLimit)
+{
+   for (bool points : {false, true}) {
+      for (bool early : {false, true}) {
+         for (bool viewport : {false, true}) {
+            for (bool layer : {false, true}) {
+               nir_builder b = nir_builder_init_simple_shader(
+                  MESA_SHADER_VERTEX, &agx_nir_options, "late_clip_exports");
+               b.shader->info.clip_distance_array_size = 8;
+               b.shader->info.io_lowered = true;
+               b.shader->info.num_ubos = 1;
+               unsigned word = 0;
+               auto store = [&](unsigned loc, unsigned comp, unsigned n) {
+                  nir_def *v = nir_load_ubo(&b, n, 32, nir_imm_int(&b, 0),
+                     nir_imm_int(&b, word * 4), .align_mul = 4, .range = n * 4);
+                  word += n;
+                  nir_store_output(&b, v, nir_imm_int(&b, 0),
+                     .write_mask = BITFIELD_MASK(n), .component = comp,
+                     .src_type = (loc == VARYING_SLOT_VIEWPORT ||
+                                  loc == VARYING_SLOT_LAYER)
+                        ? nir_type_uint32 : nir_type_float32,
+                     .io_semantics = {.location = (uint8_t)loc, .num_slots = 1});
+               };
+               auto clips = [&]() {
+                  for (unsigned i = 0; i < 8; ++i)
+                     store(VARYING_SLOT_CLIP_DIST0 + i / 4, i % 4, 1);
+               };
+               store(VARYING_SLOT_POS, 0, 4);
+               if (early) clips();
+               unsigned users = 122 - 4 - 8 - viewport - layer;
+               for (unsigned i = 0; i < users; ++i)
+                  store(VARYING_SLOT_VAR0 + i / 4, i % 4, 1);
+               if (viewport) store(VARYING_SLOT_VIEWPORT, 0, 1);
+               if (layer) store(VARYING_SLOT_LAYER, 0, 1);
+               if (!early) clips();
+               ASSERT_EQ(word, 122u);
+               agx_apple9_vertex_layout layout = {};
+               layout.rasterize_points = points;
+               layout.ignore_point_size = !points;
+               layout.clip_distance_enable = 0xff;
+               agx_shader_part out = {};
+               const char *reason = nullptr;
+               ASSERT_TRUE(agx_compile_apple9_vertex_inputs(
+                  b.shader, &layout, &out, &reason)) << (reason ?: "");
+               EXPECT_LE(out.info.apple9_publication_count, 124u);
+               EXPECT_EQ(out.info.apple9_clip_distance_count, 8u);
+               free(out.binary);
+               ralloc_free(b.shader);
+            }
+         }
+      }
+   }
+}
+
 TEST(Apple9Compiler, FragmentReadsFullVaryingInterface)
 {
    /* 124 user scalars: coefficient indices 1..124 plus Z, within the
