@@ -429,6 +429,26 @@ agx_get_compute_batch(struct agx_context *ctx)
    return ctx->batch;
 }
 
+/* Uploads can leave ctx->batch pointing at compute (or NULL after flush),
+ * while a graphics batch still owns all the textures uploaded so far. */
+void
+agx_flush_over_budget_batches(struct agx_context *ctx)
+{
+   if (ctx->draw_depth)
+      return;
+
+   /* Flushing may draw a tile helper before the outer draw has started. */
+   ctx->draw_depth++;
+   uint64_t budget = agx_screen(ctx->base.screen)->batch_memory_budget;
+   unsigned i;
+   foreach_active(ctx, i) {
+      struct agx_batch *batch = &ctx->batches.slots[i];
+      if (batch->bo_bytes > budget)
+         agx_flush_batch_for_reason(ctx, batch, "Batch memory budget");
+   }
+   ctx->draw_depth--;
+}
+
 void
 agx_flush_all(struct agx_context *ctx, const char *reason)
 {

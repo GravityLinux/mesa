@@ -7346,11 +7346,9 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
 {
    struct agx_context *ctx = agx_context(pctx);
 
-   /* Split a batch whose BOs already exceed the memory budget before it
-    * records more work, so it retires and releases them. */
-   if (!ctx->draw_depth && ctx->batch &&
-       ctx->batch->bo_bytes > agx_screen(pctx->screen)->batch_memory_budget)
-      agx_flush_batch_for_reason(ctx, ctx->batch, "Batch memory budget");
+   /* Check all active batches: an intervening texture upload may have
+    * switched the cached batch away from the graphics batch being filled. */
+   agx_flush_over_budget_batches(ctx);
 
    bool saved = ctx->unknown_primitive_count;
    ctx->unknown_primitive_count |=
