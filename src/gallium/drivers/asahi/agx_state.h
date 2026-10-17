@@ -1237,6 +1237,8 @@ void agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
 void agx_flush_batch(struct agx_context *ctx, struct agx_batch *batch);
 void agx_flush_batch_for_reason(struct agx_context *ctx,
                                 struct agx_batch *batch, const char *reason);
+void agx_flush_over_budget_batches(struct agx_context *ctx);
+
 void agx_flush_all(struct agx_context *ctx, const char *reason);
 void agx_flush_readers(struct agx_context *ctx, struct agx_resource *rsrc,
                        const char *reason);
