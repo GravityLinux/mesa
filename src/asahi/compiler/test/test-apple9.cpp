@@ -10161,6 +10161,35 @@ TEST(Apple9Compiler, RepeatedDemotionReusesCoveragePublication)
    ralloc_free(b.shader);
 }
 
+TEST(Apple9Compiler, PixelInterlockFlagsOnlyPixelModeWithCriticalSection)
+{
+   /* 0 = sample ordered, 1 = pixel ordered, 2 = pixel unordered,
+    * 3 = pixel ordered mode without a critical section. */
+   for (unsigned mode = 0; mode < 4; ++mode) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "fragment_interlock_mode");
+      b.shader->info.fs.sample_interlock_ordered = mode == 0;
+      b.shader->info.fs.pixel_interlock_ordered = mode == 1 || mode == 3;
+      b.shader->info.fs.pixel_interlock_unordered = mode == 2;
+      if (mode != 3)
+         nir_begin_invocation_interlock(&b);
+      nir_store_output(&b, nir_imm_vec4(&b, 0.0, 0.25, 0.5, 1.0),
+         nir_imm_int(&b, 0), .write_mask = 0xf, .src_type = nir_type_float32,
+         .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+      if (mode != 3)
+         nir_end_invocation_interlock(&b);
+      b.shader->info.io_lowered = true;
+      agx_shader_part compiled = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason))
+         << mode << ": " << (reason ?: "");
+      EXPECT_EQ(compiled.info.apple9_pixel_interlock, mode == 1 || mode == 2)
+         << mode;
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
+}
+
 TEST(Apple9Compiler, DepthWritesInitializeCoverageWithoutDiscard)
 {
    nir_builder b = nir_builder_init_simple_shader(

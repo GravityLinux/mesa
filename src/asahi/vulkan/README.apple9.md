@@ -18,9 +18,15 @@ control, host image copy, pipeline binaries, sparse buffer and 2D image
 residency, image view minimum LOD, descriptor buffers, custom border colors,
 conditional rendering, primitives-generated queries, fragment shader
 barycentrics, multisampled storage images, memory budget and priority, and
-mesh and task shaders (run on the compute path), and sample fragment shader
-interlock. Pixel interlock is not advertised: the hardware orders fragments
-per sample, as blending needs, so it does not hold at 4x MSAA. Sampler min/max reduction is
+mesh and task shaders (run on the compute path), and pixel and sample
+fragment shader interlock (pixel interlock sets the fragment control "Pixel
+order" bit under MSAA; the acquire alone orders per covered sample, which at
+1x is the same thing). The bit orders whole submitted microtiles (32x16 at
+4x, 32x32 at 1x/2x), not pixels, so MSAA pixel interlock with small
+primitives can be several times slower. Measured 4x on/off for contiguous
+grids of N-pixel primitives: 1 px 11.2x, 2 px 7.9x, 4 px 6.9x, 8 px 3.4x,
+16 px 1.45x, 32 px 1.06x; large overlapping primitives cost nothing
+measurable. Sampler min/max reduction is
 not supported by the hardware either; only the vkd3d driconf fakes it for
 feature level 12_0. Pageable memory, unified image layouts and nested
 command buffers are not advertised.

@@ -1739,13 +1739,14 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
    /* Fragment shader interlock: the compiler acquires the pixel in raster
     * order at shader entry, holds it through the end of the shader and fences
     * the critical section's memory accesses before the release; such shaders
-    * request ordered tile access. The hardware orders fragments per sample,
-    * as blending needs, so this is sample interlock. Pixel interlock is not
-    * advertised: at 4x MSAA two fragments covering disjoint samples of a pixel
-    * are not ordered (Metal's raster order groups are per sample too).
+    * request ordered tile access. That orders fragments per covered sample,
+    * which is sample interlock. For pixel interlock under MSAA the draw also
+    * sets the fragment control "Pixel order" bit, which orders fragments of a
+    * pixel whatever samples they cover (at 1x the two are the same).
     */
    ext->EXT_fragment_shader_interlock = true;
    feat->fragmentShaderSampleInterlock = true;
+   feat->fragmentShaderPixelInterlock = true;
 
    /* Per-vertex inputs and barycentrics of vertex and mesh pipelines are
     * written by the stage feeding the rasterizer, exact for primitives clipped

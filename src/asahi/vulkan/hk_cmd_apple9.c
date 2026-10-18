@@ -865,6 +865,7 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    record->uses_discard = fragment->uses_discard;
    record->writes_depth = fragment->writes_depth;
    record->disable_tri_merging = fragment->disable_tri_merging;
+   record->pixel_interlock = fragment->pixel_interlock;
    record->flatshade_first = pipeline.flatshade_first;
    gfx->descriptors.root.draw.api_sample_mask = dyn->ms.sample_mask;
    gfx->descriptors.root.draw.rasterized_prim =
