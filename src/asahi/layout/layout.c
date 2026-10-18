@@ -128,8 +128,8 @@ ail_initialize_gpu_tiled(struct ail_layout *layout)
       layout->stride_el[l] = util_format_get_nblocksx(
          layout->format, u_minify(layout->width_px, l));
 
-      /* Compressed textures pad the stride in this case, except on G16 */
-      if (compressed && pad_left && !layout->compact_compressed_stride)
+      /* Compressed textures pad the stride in this case */
+      if (compressed && pad_left)
          layout->stride_el[l]++;
 
       layout->tilesize_el[l] = tilesize_el;
