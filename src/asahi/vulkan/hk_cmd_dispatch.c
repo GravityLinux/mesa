@@ -426,6 +426,10 @@ hk_apple9_dispatch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                    const struct hk_apple9_prerast_bindings *prerast)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   /* A command buffer in error is never submitted; emitting more records
+    * only adds misleading failures after the first one. */
+   if (vk_command_buffer_has_error(&cmd->vk))
+      return;
    if (!agx_is_indirect(grid) &&
        (!grid.count[0] || !grid.count[1] || !grid.count[2]))
       return;
@@ -622,6 +626,8 @@ dispatch(struct hk_cmd_buffer *cmd, struct agx_grid grid)
          desc->root.cs.group_count_addr =
             hk_predicate_indirect(cmd, desc->root.cs.group_count_addr, 3,
                                   false);
+         if (!desc->root.cs.group_count_addr)
+            return;
          grid = agx_grid_indirect(desc->root.cs.group_count_addr);
          cs = hk_cmd_buffer_get_cs(cmd, true);
          if (!cs)

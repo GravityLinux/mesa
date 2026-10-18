@@ -1557,6 +1557,8 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
 
    struct agx_ptr t = hk_pool_usc_alloc(cmd, agx_usc_size(15), 64);
    uint64_t uploaded_data = hk_pool_upload(cmd, data, data_size, 4);
+   if (!t.cpu || !uploaded_data)
+      return;
 
    agx_usc_words_precomp(t.cpu, &prog->b, uploaded_data, data_size);
 

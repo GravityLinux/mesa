@@ -1610,7 +1610,9 @@ hk_upload_geometry_params(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 
    if (!count->info.gs.prefix_sum && params.count_buffer_stride) {
       struct agx_ptr T = hk_pool_alloc(cmd, 16, 4);
-      memset(T.cpu, 0, 16);
+      /* On failure the command buffer is in error and never submitted. */
+      if (T.cpu)
+         memset(T.cpu, 0, 16);
       params.count_buffer = T.gpu;
    }
 
@@ -5024,8 +5026,11 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
       hk_cpu_sub_end(t_resolve, HK_CPU_SUB_RESOLVE);
       if (!resolved)
          return;
-      if (hk_cond_render_applies(cmd))
+      if (hk_cond_render_applies(cmd)) {
          draw_ = hk_apple9_predicate_draw(cmd, draw_);
+         if (!draw_.b.ptr)
+            return;
+      }
       draw_.restart = dyn->ia.primitive_restart_enable && draw_.indexed;
       draw_.index_size = cmd->state.gfx.index.size;
       uint64_t ia_verts = hk_pipeline_stat_addr(
@@ -5323,6 +5328,9 @@ hk_apple9_draw_mesh(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       grid_addr = hk_pool_upload(cmd, direct, 3 * sizeof(uint32_t), 4);
    if (predicated)
       grid_addr = hk_predicate_indirect(cmd, grid_addr, 3, true);
+   /* Upload or predication failed: the command buffer is in error. */
+   if (!cpu_setup && !grid_addr)
+      return;
 
    desc->root.draw.draw_id = draw_id;
 
@@ -5836,7 +5844,11 @@ uint64_t
 hk_predicate_indirect(struct hk_cmd_buffer *cmd, uint64_t in, unsigned words,
                       bool graphics)
 {
-   uint64_t out = hk_pool_alloc(cmd, words * sizeof(uint32_t), 16).gpu;
+   /* A failed allocation has already put the command buffer in error, and it
+    * will not be submitted: return 0 rather than predicating to address 0. */
+   uint64_t out = in ? hk_pool_alloc(cmd, words * sizeof(uint32_t), 16).gpu : 0;
+   if (!out)
+      return 0;
    libagx_predicate_indirect_apple9(
       cmd, agx_1d(1), AGX_BARRIER_ALL | (graphics ? AGX_PREGFX : 0), out, in,
       cmd->state.cond_render.predicate, cmd->state.cond_render.inverted, words);

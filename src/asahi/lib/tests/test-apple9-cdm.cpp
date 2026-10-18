@@ -51,3 +51,49 @@ TEST(Apple9CDM, OptionalBarrierKeepsLaunchAndOutputBounds)
       EXPECT_EQ(fenced[size / 4], 0xdeadbeefu);
    }
 }
+
+/* The emitters refuse exactly the records agx_apple9_dispatch_reject_reason
+ * names, and the reason is what hk prints for "dispatch failed (6)". */
+TEST(Apple9CDM, RejectReasonMatchesEmitters)
+{
+   agx_apple9_compute_profile profile = {};
+   profile.abi = AGX_APPLE9_COMPUTE_ABI_DIRECT_BUFFERS;
+   profile.resource_binding_count = 1;
+   profile.resource_write_mask = 1;
+   profile.local_size[0] = profile.local_size[1] = profile.local_size[2] = 1;
+   const uint64_t launch = UINT64_C(1) << 40;
+   const uint32_t global[] = {8, 1, 1}, zero_axis[] = {8, 0, 1};
+   uint32_t out[16];
+
+   EXPECT_EQ(agx_apple9_dispatch_reject_reason(launch, false, 0, global,
+                                               profile.local_size, &profile),
+             nullptr);
+   EXPECT_EQ(agx_apple9_dispatch_reject_reason(launch, true, 0x1234000, NULL,
+                                               profile.local_size, &profile),
+             nullptr);
+
+   struct {
+      bool indirect;
+      uint64_t launch, address;
+      const uint32_t *global;
+      const char *reason;
+   } cases[] = {
+      {true, launch, 0, NULL, "null indirect address"},
+      {true, launch, 0x1234002, NULL, "indirect address not 4-byte aligned"},
+      {false, launch, 0, zero_axis, "zero grid axis"},
+      {false, launch + 0x20, 0, global, "launch address not 64-byte aligned"},
+   };
+   for (const auto &c : cases) {
+      const char *reason = agx_apple9_dispatch_reject_reason(
+         c.launch, c.indirect, c.address, c.global, profile.local_size, &profile);
+      ASSERT_NE(reason, nullptr) << c.reason;
+      EXPECT_STREQ(reason, c.reason);
+      bool ok = c.indirect
+         ? agx_apple9_emit_indirect_dispatch(out, c.launch, c.address,
+                                             profile.local_size, false, &profile,
+                                             false)
+         : agx_apple9_emit_direct_dispatch(out, c.launch, c.global,
+                                           profile.local_size, &profile, false);
+      EXPECT_FALSE(ok) << c.reason;
+   }
+}
