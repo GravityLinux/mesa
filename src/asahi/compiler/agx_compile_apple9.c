@@ -47,8 +47,6 @@ DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_address_probe,
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_bfe, "AGX_APPLE9_NO_BFE", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_descriptor_hoist,
                       "AGX_APPLE9_NO_DESCRIPTOR_HOIST", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_loop_head_hoist,
-                      "AGX_APPLE9_NO_LOOP_HEAD_HOIST", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_promote,
                       "AGX_APPLE9_NO_PROMOTE", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_sampler_hoist,
@@ -7296,8 +7294,7 @@ apple9_block_runs_once_per_loop_entry(nir_block *block)
    nir_cf_node *parent = block->cf_node.parent;
    return parent->type == nir_cf_node_loop &&
           parent->parent->type == nir_cf_node_function &&
-          block == nir_loop_first_block(nir_cf_node_as_loop(parent)) &&
-          !debug_get_option_cached_agx_apple9_no_loop_head_hoist();
+          block == nir_loop_first_block(nir_cf_node_as_loop(parent));
 }
 
 static bool
