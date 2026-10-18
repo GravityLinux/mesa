@@ -345,11 +345,9 @@ hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool reads_buffers)
 
    /* Sample positions are render state (the per-render multisample control),
     * so the first application draw of a render commits them and a draw with
-    * other positions starts a new render. variableSampleLocations stays false
-    * (DXVK would then centre samples for every MultisampleEnable=FALSE draw,
-    * splitting renders), but Zink's shader-object path changes locations
-    * within a render anyway to disable GL_MULTISAMPLE, and gets correct
-    * results this way. Meta draws neither commit nor change them.
+    * other positions starts a new render. That lets them vary within a
+    * subpass (variableSampleLocations, reported to Zink only). Meta draws
+    * neither commit nor change them.
     */
    if (!cmd->in_meta) {
       unsigned samples = MAX2(render->tilebuffer.nr_samples ?:
