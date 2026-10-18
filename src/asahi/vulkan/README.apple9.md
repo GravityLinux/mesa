@@ -18,9 +18,9 @@ control, host image copy, pipeline binaries, sparse buffer and 2D image
 residency, image view minimum LOD, descriptor buffers, custom border colors,
 conditional rendering, primitives-generated queries, fragment shader
 barycentrics, multisampled storage images, memory budget and priority, and
-mesh and task shaders (run on the compute path). Fragment shader interlock is
-not advertised: the hardware orders fragments per sample, as blending needs,
-so pixel interlock at 4x MSAA is not available. Sampler min/max reduction is
+mesh and task shaders (run on the compute path), and sample fragment shader
+interlock. Pixel interlock is not advertised: the hardware orders fragments
+per sample, as blending needs, so it does not hold at 4x MSAA. Sampler min/max reduction is
 not supported by the hardware either; only the vkd3d driconf fakes it for
 feature level 12_0. Pageable memory, unified image layouts and nested
 command buffers are not advertised.
