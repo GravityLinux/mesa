@@ -156,12 +156,9 @@ static const char *const hk_codegen_env[] = {
    "AGX_APPLE9_RA_WEBS",
    "AGX_APPLE9_SAFE_HOIST_STAGES", "HK_APPLE9_DESCRIPTOR_BUFFER",
    "HK_APPLE9_MESH_SHADER",
-   "HK_APPLE9_ROBUST_MERGE_BYTES",
    "HK_APPLE9_SPARSE_SCRATCH",
    "HK_APPLE9_TESS_BATCH", "HK_APPLE9_TESS_SCAN_BLOCK",
    "HK_APPLE9_TEXEL_CLASSES", "HK_APPLE9_UNIFORM_SAFE_CLASSES",
-   "HK_APPLE9_VECTORIZE_PRESSURE_BUDGET", "HK_APPLE9_VECTORIZE_USE_WINDOW",
-   "HK_APPLE9_VECTORIZE_WINDOW",
 };
 
 /* Knobs that never change generated code and must not split the caches at
@@ -1670,7 +1667,7 @@ lower_load_global_bounded(nir_builder *b, nir_intrinsic_instr *intr,
 /* Merging loads issues the combined load at the first one, so every later
  * component stays live from there. Apple9 shaders that already reach the
  * register limit then need more copies and swaps, so only merge accesses that
- * are close together. HK_APPLE9_VECTORIZE_WINDOW overrides the distance.
+ * are close together (HK_APPLE9_VECTORIZE_WINDOW).
  */
 /* Index of the first use in the load's own block, or -1 if a use is in
  * another block or not an instruction. The vectorizer numbers each block's
@@ -1690,12 +1687,12 @@ hk_first_use_index(nir_intrinsic_instr *load)
    return first == INT64_MAX ? -1 : first;
 }
 
-DEBUG_GET_ONCE_NUM_OPTION(hk_apple9_vectorize_window,
-                          "HK_APPLE9_VECTORIZE_WINDOW", 4)
-DEBUG_GET_ONCE_NUM_OPTION(hk_apple9_vectorize_use_window,
-                          "HK_APPLE9_VECTORIZE_USE_WINDOW", 2)
-DEBUG_GET_ONCE_NUM_OPTION(hk_apple9_robust_merge_bytes,
-                          "HK_APPLE9_ROBUST_MERGE_BYTES", 16)
+/* Windowed merging joins loads at most this many instructions apart. */
+#define HK_APPLE9_VECTORIZE_WINDOW 4
+/* Robust fields merge only when their first uses are this close. */
+#define HK_APPLE9_VECTORIZE_USE_WINDOW 2
+/* Largest merged robust load, in bytes. */
+#define HK_APPLE9_ROBUST_MERGE_BYTES 16
 
 /* Peak number of live 32-bit words in a shader, from NIR liveness: a
  * backward walk of each block from its live-out set. 16-bit values count as
@@ -1779,7 +1776,7 @@ hk_apple9_peak_live_words(nir_shader *nir)
  * the first one's issue. Across DXVK they also leave most robust fields of
  * a vector or matrix as separate loads with their own bounds checks and
  * waits. So apply them only when the shader's estimated peak of live words
- * exceeds HK_APPLE9_VECTORIZE_PRESSURE_BUDGET (0 always applies them).
+ * exceeds HK_APPLE9_VECTORIZE_PRESSURE_BUDGET.
  */
 struct hk_vectorize_policy {
    bool windowed;
@@ -1809,8 +1806,8 @@ hk_apple9_vectorized_peak(const nir_shader *nir, bool windowed)
    return peak;
 }
 
-DEBUG_GET_ONCE_NUM_OPTION(hk_apple9_vectorize_pressure_budget,
-                          "HK_APPLE9_VECTORIZE_PRESSURE_BUDGET", 96)
+/* Below this peak of live 32-bit words, loads merge without windows. */
+#define HK_APPLE9_VECTORIZE_PRESSURE_BUDGET 96
 
 static bool
 hk_apple9_vectorize_cb(unsigned align_mul, unsigned align_offset,
@@ -1822,22 +1819,19 @@ hk_apple9_vectorize_cb(unsigned align_mul, unsigned align_offset,
                              hole_size, low, high, NULL))
       return false;
    const struct hk_vectorize_policy *policy = data;
-   int64_t window = policy->windowed ? debug_get_option_hk_apple9_vectorize_window()
-                                     : INT64_MAX;
+   int64_t window = policy->windowed ? HK_APPLE9_VECTORIZE_WINDOW : INT64_MAX;
    int64_t distance = (int64_t)high->instr.index - (int64_t)low->instr.index;
    if (llabs(distance) > window)
       return false;
    /* A merged load issues every field where the first one was. In shaders
     * near the register limit that keeps later fields live much longer, so
-    * only merge robust fields whose first uses are close as well.
-    * HK_APPLE9_VECTORIZE_USE_WINDOW overrides the distance. */
-   int64_t use_window = debug_get_option_hk_apple9_vectorize_use_window();
+    * only merge robust fields whose first uses are close as well. */
+   int64_t use_window = HK_APPLE9_VECTORIZE_USE_WINDOW;
    bool bounded = low->intrinsic == nir_intrinsic_load_global_bounded ||
                   low->intrinsic == nir_intrinsic_load_global_constant_bounded;
    /* Robust merges of fields whose first uses are adjacent shorten Lethal
-    * Company's light loops without extra spills at the register limit.
-    * HK_APPLE9_ROBUST_MERGE_BYTES caps the merged size. */
-   int64_t robust_bytes = debug_get_option_hk_apple9_robust_merge_bytes();
+    * Company's light loops without extra spills at the register limit. */
+   int64_t robust_bytes = HK_APPLE9_ROBUST_MERGE_BYTES;
    if (bounded && num_components * bit_size / 8 > robust_bytes)
       return false;
    if (bounded && policy->windowed) {
@@ -3842,9 +3836,9 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       /* Below the pressure budget, merge without windows, unless that
        * raises the shader's peak of live words over windowed merging.
        */
-      unsigned budget = debug_get_option_hk_apple9_vectorize_pressure_budget();
-      unsigned peak = budget ? hk_apple9_peak_live_words(nir) : 0;
-      struct hk_vectorize_policy policy = {.windowed = !budget || peak > budget};
+      unsigned peak = hk_apple9_peak_live_words(nir);
+      struct hk_vectorize_policy policy = {
+         .windowed = peak > HK_APPLE9_VECTORIZE_PRESSURE_BUDGET};
       unsigned peak_windowed = 0, peak_free = 0;
       if (!policy.windowed) {
          peak_windowed = hk_apple9_vectorized_peak(nir, true);
@@ -3854,7 +3848,7 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       if (debug_get_option_cached_hk_apple9_pressure_stats())
          fprintf(stderr,
                  "HK_PRESSURE stage=%u peak=%u windowed=%u merged_peaks=%u/%u\n",
-                 nir->info.stage, budget ? peak : hk_apple9_peak_live_words(nir),
+                 nir->info.stage, peak,
                  policy.windowed, peak_windowed, peak_free);
       NIR_PASS(_, nir, nir_opt_load_store_vectorize,
                &(const nir_load_store_vectorize_options){
