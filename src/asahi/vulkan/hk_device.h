@@ -223,9 +223,6 @@ hk_device_alloc_scratch(struct hk_device *dev, mesa_shader_stage stage,
  * sparse ranges unmapped instead of mapping the shared scratch page, whose
  * contents reads would observe. HK_APPLE9_SPARSE_SCRATCH=1 restores scratch.
  */
-/* HK_APPLE9_SPARSE_UNMAPPED_RAW, read once. */
-bool hk_sparse_unmapped_raw(void);
-
 static inline bool
 hk_sparse_unbound_unmapped(const struct agx_device *dev)
 {
