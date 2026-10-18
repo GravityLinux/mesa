@@ -446,12 +446,8 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
                         gfx->shaders[MESA_SHADER_FRAGMENT] == dev->null_fs;
    const unsigned null_samples = MAX2(gfx->render.tilebuffer.nr_samples ?:
                                       dyn->ms.rasterization_samples, 1);
-   /* HK_APPLE9_FULL_NULL_FS=1 keeps the sample-mask program (A/B). */
-   static int full_null_fs = -1;
-   if (unlikely(full_null_fs < 0))
-      full_null_fs = getenv("HK_APPLE9_FULL_NULL_FS") != NULL;
    const bool null_trivial =
-      null_fs && dev->null_fs_trivial && !full_null_fs &&
+      null_fs && dev->null_fs_trivial &&
       (dyn->ms.sample_mask & BITFIELD_MASK(null_samples)) ==
          BITFIELD_MASK(null_samples);
    struct hk_shader *shaders[] = {
