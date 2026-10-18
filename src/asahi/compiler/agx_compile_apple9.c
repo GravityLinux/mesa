@@ -42,7 +42,6 @@ DEBUG_GET_ONCE_OPTION(cached_agx_apple9_keep_unselected_hoists,
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_licm, "AGX_APPLE9_LICM", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_licm_speculate,
                       "AGX_APPLE9_LICM_SPECULATE", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_bfe, "AGX_APPLE9_NO_BFE", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_descriptor_hoist,
                       "AGX_APPLE9_NO_DESCRIPTOR_HOIST", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_promote,
@@ -60,7 +59,6 @@ DEBUG_GET_ONCE_OPTION(cached_agx_apple9_trace_final_nir,
                       "AGX_APPLE9_TRACE_FINAL_NIR", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_trace_nir, "AGX_APPLE9_TRACE_NIR", NULL)
 
-DEBUG_GET_ONCE_BOOL_OPTION(apple9_no_bfe, "AGX_APPLE9_NO_BFE", false)
 DEBUG_GET_ONCE_NUM_OPTION(apple9_hoist_loads, "AGX_APPLE9_HOIST_LOADS", 0)
 
 /* Apple9 compute compilation uses one NIR-to-VIR-to-machine pipeline. */
@@ -3221,8 +3219,7 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
             }
             /* x & (2^w - 1) and (x >> k) & (2^w - 1) are one bitfield
              * extract: the logical shift-right immediate form with a width. */
-            bool bfe = !debug_get_option_apple9_no_bfe();
-            for (unsigned i = 0; bfe && op == nir_op_iand &&
+            for (unsigned i = 0; op == nir_op_iand &&
                                  scalar.def->bit_size == 32 && i < 2; ++i) {
                uint32_t mask, amount;
                if (!apple9_const_u32(nir_scalar_chase_alu_src(scalar, i), &mask) ||
@@ -6896,7 +6893,7 @@ apple9_uniform_constant_use(nir_alu_instr *alu, unsigned s, uint32_t *value)
    *value = nir_src_comp_as_uint(alu->src[s].src, alu->src[s].swizzle[0]);
    /* Low-bit masks select as bitfield extracts, which need no operand. */
    if (alu->op == nir_op_iand && *value && *value != UINT32_MAX &&
-       !(*value & (*value + 1)) && debug_get_option_cached_agx_apple9_no_bfe() == NULL)
+       !(*value & (*value + 1)))
       return false;
    /* Packed float immediates are already free. */
    uint8_t encoded;
