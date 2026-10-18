@@ -321,10 +321,14 @@ hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
     */
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
-   /* Mesh outputs are shared by the workgroup. Without temporaries, lower
-    * component accesses before I/O lowering.
+   /* Mesh and tessellation control outputs are shared by the workgroup or
+    * patch: each invocation may write a different element, so copying whole
+    * temporaries back at the end would overwrite the other invocations'
+    * writes. Without temporaries, lower component accesses before I/O
+    * lowering.
     */
-   if (nir->info.stage == MESA_SHADER_MESH) {
+   if (nir->info.stage == MESA_SHADER_MESH ||
+       nir->info.stage == MESA_SHADER_TESS_CTRL) {
       NIR_PASS(_, nir, nir_lower_array_deref_of_vec, nir_var_shader_out, NULL,
                nir_lower_direct_array_deref_of_vec_load |
                   nir_lower_indirect_array_deref_of_vec_load |
@@ -3921,6 +3925,21 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
 
    NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
             lower_indirect_modes, UINT32_MAX);
+
+   /* nir_lower_io needs constant indices into compact arrays. Tess levels are
+    * indexed dynamically (gl_TessLevelOuter[gl_InvocationID]), so turn them
+    * into vectors and lower the component indexing, as RADV does.
+    */
+   if (nir->info.stage == MESA_SHADER_TESS_CTRL ||
+       nir->info.stage == MESA_SHADER_TESS_EVAL) {
+      NIR_PASS(_, nir, nir_lower_tess_level_array_vars_to_vec);
+      NIR_PASS(_, nir, nir_lower_array_deref_of_vec,
+               nir_var_shader_in | nir_var_shader_out, NULL,
+               nir_lower_direct_array_deref_of_vec_load |
+                  nir_lower_indirect_array_deref_of_vec_load |
+                  nir_lower_direct_array_deref_of_vec_store |
+                  nir_lower_indirect_array_deref_of_vec_store);
+   }
 
    NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
             glsl_type_size,
