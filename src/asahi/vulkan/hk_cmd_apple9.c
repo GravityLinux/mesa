@@ -703,8 +703,22 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
             dyn->rs.depth_clamp_enable ? clamp_max : 1;
       }
    }
-   if (bbox[0] >= bbox[2])
-      return;
+   if (bbox[0] >= bbox[2]) {
+      /* Every viewport scissor is empty, so nothing rasterizes. The hardware
+       * vertex program still owns pre-rasterization side effects: geometry
+       * shader stores and atomics run in its rasterization variant (poly
+       * emits a culled dummy primitive for them), and so do vertex shader
+       * stores and transform feedback. Mesh records were written as compute.
+       * Only drop draws without such effects; otherwise run against a
+       * zero-area region.
+       */
+      bool effects = gfx->xfb_enabled;
+      for (unsigned s = 0; s < MESA_SHADER_FRAGMENT && !effects; ++s)
+         effects = gfx->shaders[s] && gfx->shaders[s]->writes_memory;
+      if (!effects)
+         return;
+      bbox[0] = bbox[1] = bbox[2] = bbox[3] = 0;
+   }
    record->scissor_min[0] = bbox[0];
    record->scissor_min[1] = bbox[1];
    record->scissor_max[0] = bbox[2];
