@@ -26,8 +26,6 @@
 #include <string.h>
 
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_asm, "AGX_APPLE9_ASM", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_block_zero,
-                      "AGX_APPLE9_BLOCK_ZERO", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_dump_binary,
                       "AGX_APPLE9_DUMP_BINARY", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_fold_assume_no_wrap,
@@ -1223,8 +1221,7 @@ apple9_dag_zero(struct apple9_dag_lower *lower)
    /* One zero from the entry block serves every block. Rematerializing a
     * zero per block made each constant memory index rewrite the register a
     * preceding store or load was still reading, costing a wait. */
-   if (lower->entry_zero != AGX_APPLE9_VREG_INVALID &&
-       !debug_get_option_cached_agx_apple9_block_zero())
+   if (lower->entry_zero != AGX_APPLE9_VREG_INVALID)
       return lower->entry_zero;
    /* Otherwise reuse the zero only within its block, which need not dominate
     * later blocks. */
