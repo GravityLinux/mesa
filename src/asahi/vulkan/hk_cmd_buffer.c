@@ -792,7 +792,8 @@ hk_image_overlaps(const struct hk_image *a, const struct hk_image *b)
  * memory from a shader, so every write to the image precedes R in recording
  * order: placing the barrier ahead of R orders those writes before R, and
  * reads after the barrier in R see them. Later draws in R that write memory
- * end it first (hk_apple9_prepare_draw). */
+ * end it first (hk_apple9_prepare_draw). A barrier from R's shader stages
+ * also orders R's reads before later writes, so it ends R instead. */
 static bool
 hk_render_merge_image_barrier(struct hk_cmd_buffer *cmd, VkPipelineStageFlags2 src)
 {
@@ -815,6 +816,21 @@ hk_render_merge_image_barrier(struct hk_cmd_buffer *cmd, VkPipelineStageFlags2 s
       VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
       VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
    if (cmd->merge_feedback && (src & ~attachment_output))
+      return false;
+   /* A source in the render's shader stages covers its own texture reads,
+    * which may include the image: a later write to it must wait for the
+    * render (write-after-read), and a barrier ahead of the render orders
+    * nothing of it. Piglit arb_copy_image-formats --samples=4 re-uploads a
+    * texture its previous upload draw sampled. A finer check could keep R
+    * open when R does not sample the image, should this show in a profile. */
+   const VkPipelineStageFlags2 shaders =
+      hk_merge_graphics_stages() &
+      ~(attachment_output | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
+        VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
+        VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT |
+        VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT |
+        VK_PIPELINE_STAGE_2_CONDITIONAL_RENDERING_BIT_EXT);
+   if (hk_merge_expand_stages(src, true) & shaders)
       return false;
    for (unsigned i = 0; i < cmd->merge_key.color_count; ++i) {
       const struct vk_image *target = cmd->merge_key.image[i];
