@@ -214,6 +214,30 @@ TEST(Apple9Miptree, WideAtlasDoesNotAddTailGap)
    EXPECT_EQ(layout.tilesize_el[8].height_el, 2);
 }
 
+/* G16 host image copies of a 257x277 BC3 mip chain round-trip through GPU
+ * copies only without the G13 stride block: level 1 (32x35 blocks) is in the
+ * large miptree with left padding. */
+TEST(Apple9Miptree, CompressedLeftPaddedLevelStride)
+{
+   ail_layout layout = {
+      .width_px = 257, .height_px = 277, .depth_px = 1,
+      .sample_count_sa = 1, .levels = 9,
+      .tiling = AIL_TILING_GPU, .format = PIPE_FORMAT_DXT5_RGBA,
+   };
+   ail_make_miptree(&layout);
+   EXPECT_EQ(layout.stride_el[1], 33);
+
+   layout = (ail_layout){
+      .width_px = 257, .height_px = 277, .depth_px = 1,
+      .sample_count_sa = 1, .levels = 9,
+      .tiling = AIL_TILING_GPU, .compact_compressed_stride = true,
+      .format = PIPE_FORMAT_DXT5_RGBA,
+   };
+   ail_make_miptree(&layout);
+   EXPECT_EQ(layout.stride_el[0], 65);
+   EXPECT_EQ(layout.stride_el[1], 32);
+}
+
 
 /* Render views may select any mip and layer after allocation. All legal
  * color layouts must preserve the 16-byte descriptor address granularity. */

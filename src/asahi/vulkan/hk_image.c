@@ -958,6 +958,7 @@ hk_image_init(struct hk_device *dev, struct hk_image *image,
       image->planes[plane].layout = (struct ail_layout){
          .tiling = hk_map_tiling(dev, pCreateInfo, image->vk.drm_format_mod),
          .compressed = compressed,
+         .compact_compressed_stride = dev->dev.chip == AGX_CHIP_G16G,
          .mipmapped_z = pCreateInfo->imageType == VK_IMAGE_TYPE_3D,
          .format = hk_format_to_pipe_format(format),
 
@@ -1677,11 +1678,16 @@ hk_copy_memory_to_image(struct hk_device *device, struct hk_image *dst_image,
       if (copy_memcpy) {
          memcpy(dst, src, ail_get_level_size_B(layout, level));
       } else if (!tiled) {
+         /* Linear rows are blocks: offsets and extents are in texels. */
+         enum pipe_format format = layout->format;
          uint32_t dst_pitch = ail_get_linear_stride_B(layout, level);
-         /*TODO:comp*/
-         for (unsigned y = 0; y < extent.height; y++) {
-            memcpy(dst + dst_pitch * (y + offset.y) + offset.x * blocksize_B,
-                   src + src_pitch * y, extent.width * blocksize_B);
+         uint32_t x_el = util_format_get_nblocksx(format, offset.x);
+         uint32_t y_el = util_format_get_nblocksy(format, offset.y);
+         uint32_t w_el = util_format_get_nblocksx(format, extent.width);
+         uint32_t h_el = util_format_get_nblocksy(format, extent.height);
+         for (unsigned y = 0; y < h_el; y++) {
+            memcpy(dst + dst_pitch * (y + y_el) + x_el * blocksize_B,
+                   src + src_pitch * y, w_el * blocksize_B);
          }
       } else {
          ail_tile(dst, (void *)src, layout, level, src_pitch, offset.x,
@@ -1769,12 +1775,17 @@ hk_copy_image_to_memory(struct hk_device *device, struct hk_image *src_image,
       if (copy_memcpy) {
          memcpy(dst, src, dst_layer_stride);
       } else if (!tiled) {
-         /* TODO: comp */
+         /* Linear rows are blocks: offsets and extents are in texels. */
+         enum pipe_format format = layout->format;
          uint32_t src_pitch = ail_get_linear_stride_B(layout, level);
-         for (unsigned y = 0; y < extent.height; y++) {
+         uint32_t x_el = util_format_get_nblocksx(format, offset.x);
+         uint32_t y_el = util_format_get_nblocksy(format, offset.y);
+         uint32_t w_el = util_format_get_nblocksx(format, extent.width);
+         uint32_t h_el = util_format_get_nblocksy(format, extent.height);
+         for (unsigned y = 0; y < h_el; y++) {
             memcpy(dst + dst_pitch * y,
-                   src + src_pitch * (y + offset.y) + offset.x * blocksize_B,
-                   extent.width * blocksize_B);
+                   src + src_pitch * (y + y_el) + x_el * blocksize_B,
+                   w_el * blocksize_B);
          }
       } else {
          ail_detile((void *)src, dst, layout, info->imageSubresource.mipLevel,
@@ -1880,19 +1891,28 @@ hk_copy_image_to_image_cpu(struct hk_device *device, struct hk_image *src_image,
          assert(src_size == dst_size);
          memcpy(dst, src, src_size);
       } else if (!src_tiled && !dst_tiled) {
-         /* TODO comp */
+         /* Linear rows are blocks. The extent and source offset are in
+          * source texels, the destination offset in destination texels.
+          */
          uint32_t src_pitch =
             ail_get_linear_stride_B(src_layout, info->srcSubresource.mipLevel);
 
          uint32_t dst_pitch =
             ail_get_linear_stride_B(dst_layout, info->dstSubresource.mipLevel);
 
-         for (unsigned y = 0; y < extent.height; y++) {
-            memcpy(dst + dst_pitch * (y + dst_offset.y) +
-                      dst_offset.x * dst_block_B,
-                   src + src_pitch * (y + src_offset.y) +
-                      src_offset.x * src_block_B,
-                   extent.width * src_block_B);
+         enum pipe_format src_format = src_layout->format;
+         enum pipe_format dst_format = dst_layout->format;
+         uint32_t src_x_el = util_format_get_nblocksx(src_format, src_offset.x);
+         uint32_t src_y_el = util_format_get_nblocksy(src_format, src_offset.y);
+         uint32_t dst_x_el = util_format_get_nblocksx(dst_format, dst_offset.x);
+         uint32_t dst_y_el = util_format_get_nblocksy(dst_format, dst_offset.y);
+         uint32_t w_el = util_format_get_nblocksx(src_format, extent.width);
+         uint32_t h_el = util_format_get_nblocksy(src_format, extent.height);
+
+         for (unsigned y = 0; y < h_el; y++) {
+            memcpy(dst + dst_pitch * (y + dst_y_el) + dst_x_el * dst_block_B,
+                   src + src_pitch * (y + src_y_el) + src_x_el * src_block_B,
+                   w_el * src_block_B);
          }
       } else if (!src_tiled) {
          UNREACHABLE("todo");
