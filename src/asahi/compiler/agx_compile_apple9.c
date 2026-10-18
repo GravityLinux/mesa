@@ -29,8 +29,6 @@ DEBUG_GET_ONCE_OPTION(cached_agx_apple9_asm, "AGX_APPLE9_ASM", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_dump_binary,
                       "AGX_APPLE9_DUMP_BINARY", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_gated, "AGX_APPLE9_GATED", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_hoist_distance,
-                      "AGX_APPLE9_HOIST_DISTANCE", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_hoist_samples,
                       "AGX_APPLE9_HOIST_SAMPLES", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_licm, "AGX_APPLE9_LICM", NULL)
@@ -44,8 +42,6 @@ DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_sampler_hoist,
                       "AGX_APPLE9_NO_SAMPLER_HOIST", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_uniform_move,
                       "AGX_APPLE9_NO_UNIFORM_MOVE", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_preamble_span,
-                      "AGX_APPLE9_PREAMBLE_SPAN", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_safe_hoist_stages,
                       "AGX_APPLE9_SAFE_HOIST_STAGES", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_stats, "AGX_APPLE9_STATS", NULL)
@@ -5700,8 +5696,7 @@ agx_nir_hoist_apple9_samples(nir_shader *nir)
    unsigned limit = apple9_hoist_limit();
    /* How far ahead, in NIR instructions, to look for a sample to hoist: an
     * upper bound on how far one moves. */
-   const char *distance = debug_get_option_cached_agx_apple9_hoist_distance();
-   const unsigned horizon = distance ? atoi(distance) : 256;
+   const unsigned horizon = 256;
    if (!limit || !apple9_has_samples(nir))
       return false;
 
@@ -7063,13 +7058,8 @@ apple9_preamble_cost(nir_instr *instr, const void *data)
       return 0;
    float cost = instr->type == nir_instr_type_intrinsic ? 8 : 1;
    /* One cost unit per 25 main-program instructions of span; measured on
-    * ER's draw-time fragments (spills 4,349 -> 1,396). The
-    * AGX_APPLE9_PREAMBLE_SPAN divisor overrides it, 0 disables. */
-   static int span_div = -1;
-   if (unlikely(span_div < 0))
-      span_div = debug_get_option_cached_agx_apple9_preamble_span() ? atoi(debug_get_option_cached_agx_apple9_preamble_span()) : 25;
-   if (span_div > 0)
-      cost += (float)apple9_main_span(instr) / span_div;
+    * ER's draw-time fragments (spills 4,349 -> 1,396). */
+   cost += (float)apple9_main_span(instr) / 25;
    return cost;
 }
 
