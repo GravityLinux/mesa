@@ -1199,6 +1199,19 @@ hk_apple9_write_polygon_slot(nir_shader *s, unsigned slot)
    nir_progress(true, impl, nir_metadata_control_flow);
 }
 
+static void
+hk_apple9_write_primitive_id(nir_shader *s)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(s);
+   nir_builder b = nir_builder_at(nir_after_impl(impl));
+   nir_store_output(&b, nir_load_primitive_id(&b), nir_imm_int(&b, 0),
+                    .write_mask = 0x1, .src_type = nir_type_uint32,
+                    .io_semantics = {.location = VARYING_SLOT_PRIMITIVE_ID,
+                                     .num_slots = 1});
+   s->info.outputs_written |= VARYING_BIT_PRIMITIVE_ID;
+   nir_progress(true, impl, nir_metadata_control_flow);
+}
+
 /* Decide whether a pipeline's polygon-mode points use the software stage:
  * its rasterized points publish the stage's outputs, clip and cull distances
  * included, the polygon slot when the fragment shader reads facing or the
@@ -5895,6 +5908,7 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
    unsigned polygon_face_slot = 0;
    mesa_shader_stage polygon_stage = MESA_SHADER_NONE;
    mesa_shader_stage stipple_stage = MESA_SHADER_NONE;
+   bool tes_primitive_id = false;
    {
       nir_shader *pre_nir = NULL, *fs_nir = NULL;
       nir_shader *stage_nir[MESA_VULKAN_SHADER_STAGES] = {NULL};
@@ -5909,6 +5923,17 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
          else if (infos[i].stage != MESA_SHADER_TASK)
             other = true;
       }
+      /* After tessellation without a geometry shader, the fragment shader's
+       * primitive ID is the patch ID, numbered per instance. The hardware
+       * counts the tessellated triangles of the whole draw instead, so the
+       * evaluation shader publishes its own primitive ID (the patch ID) as
+       * the flat varying the fragment shader then reads, as RADV's
+       * export_prim_id does. */
+      tes_primitive_id =
+         stage_nir[MESA_SHADER_TESS_EVAL] && !stage_nir[MESA_SHADER_GEOMETRY] &&
+         fs_nir && (fs_nir->info.inputs_read & VARYING_BIT_PRIMITIVE_ID) &&
+         !(stage_nir[MESA_SHADER_TESS_EVAL]->info.outputs_written &
+           VARYING_BIT_PRIMITIVE_ID);
       if (pre_nir && fs_nir && !other &&
           hk_apple9_lower_per_vertex_copies(fs_nir,
                                             pre_nir->info.outputs_written,
@@ -6233,6 +6258,8 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
                hk_apple9_write_line_stipple_start(nir, stipple);
             if (polygon_stage == MESA_SHADER_TESS_EVAL && polygon_face_slot)
                hk_apple9_write_polygon_slot(nir, polygon_face_slot);
+            if (tes_primitive_id)
+               hk_apple9_write_primitive_id(nir);
             result = hk_apple9_compile_tes(
                dev, nir, &key.vertex, obj,
                infos[i].next_stage_mask |
