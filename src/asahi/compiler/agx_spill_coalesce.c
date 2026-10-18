@@ -9,6 +9,7 @@
  */
 
 #include "agx_compiler.h"
+#include "agx_debug.h"
 
 struct agx_spill_interference {
    unsigned n, stride, alloc;
@@ -260,13 +261,14 @@ agx_spill_coalesce_apply(agx_context *ctx, struct agx_spill_interference *g,
             I->src[s].reg = color[group[g->node[I->src[s].value]]];
       }
    }
-   fprintf(stderr, "AGX_SPILL_COALESCE values=%u groups=%u half_slots=%u->%u\n",
-           g->n, count, *half_slots, high);
+   if (agx_get_compiler_debug() & AGX_DBG_VERBOSE)
+      fprintf(stderr, "AGX_SPILL_COALESCE values=%u groups=%u half_slots=%u->%u\n",
+              g->n, count, *half_slots, high);
    *half_slots = high;
    success = true;
 
 out:
-   if (!success)
+   if (!success && (agx_get_compiler_debug() & AGX_DBG_VERBOSE))
       fprintf(stderr, "AGX_SPILL_COALESCE fallback values=%u half_slots=%u\n",
               g->n, *half_slots);
    ralloc_free(memctx);

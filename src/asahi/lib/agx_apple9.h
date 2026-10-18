@@ -415,6 +415,13 @@ bool agx_apple9_prepare_compute_dispatch(
  * it, the emitted launch is one uint32_t shorter; the caller supplies the next
  * dependency barrier or a final stream barrier.
  */
+/* Why the emitters below would reject a dispatch, or NULL if they accept it.
+ * global is unused for indirect dispatches. */
+const char *agx_apple9_dispatch_reject_reason(
+   uint64_t launch, bool indirect, uint64_t indirect_address,
+   const uint32_t global[3], const uint32_t local[3],
+   const struct agx_apple9_compute_profile *profile);
+
 bool agx_apple9_emit_direct_dispatch(
    void *out, uint64_t launch, const uint32_t global[3],
    const uint32_t local[3], const struct agx_apple9_compute_profile *profile,
