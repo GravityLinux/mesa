@@ -1589,6 +1589,14 @@ agx_apple9_prepare_draw_alloc(
    if (draw->disable_tri_merging || unfilled ||
        draw->object_type != AGX_OBJECT_TYPE_TRIANGLE)
       apple9_put_u32(group + 0x50, apple9_get_u32(group + 0x50) | (1u << 26));
+   /* Pixel interlock: the ordered pixel acquire orders fragments per covered
+    * sample, so under MSAA two fragments covering disjoint samples of one
+    * pixel would race. "Pixel order" (bit 23) orders them per pixel. At 1x
+    * the two orderings coincide, and the bit is costly: it orders whole
+    * submitted microtiles (32x16 at 4x), so dense small primitives serialise
+    * (2-pixel grids ~8x slower); set it only when it matters. */
+   if (draw->pixel_interlock && samples > 1)
+      apple9_put_u32(group + 0x50, apple9_get_u32(group + 0x50) | (1u << 23));
    /* Native raster packet: cull front/back bits 0/1, provoking vertex
     * bits 7/8, clipping/clamping bits 10/11, primitive MSAA bit 15, front
     * winding bit 16. */

@@ -4145,6 +4145,7 @@ hk_apple9_init_render_stage(struct hk_shader *s)
       .uses_discard = i->apple9_uses_discard,
       .writes_depth = i->depth_layout != FRAG_DEPTH_LAYOUT_UNCHANGED,
       .disable_tri_merging = i->disable_tri_merging,
+      .pixel_interlock = i->apple9_pixel_interlock,
    };
    memcpy(stage.resource_binding, i->apple9_resource_binding,
           sizeof(stage.resource_binding));

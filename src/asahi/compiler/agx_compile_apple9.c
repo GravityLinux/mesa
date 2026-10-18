@@ -6554,6 +6554,9 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
    out->info.apple9_uses_discard = nir->info.stage == MESA_SHADER_FRAGMENT &&
                                     (nir->info.fs.uses_discard || lower.writes_z ||
                                      lower.writes_s);
+   out->info.apple9_pixel_interlock = lower.interlock &&
+      (nir->info.fs.pixel_interlock_ordered ||
+       nir->info.fs.pixel_interlock_unordered);
    out->info.disable_tri_merging = nir->info.stage == MESA_SHADER_FRAGMENT &&
       (nir->info.uses_wide_subgroup_intrinsics ||
        nir->info.fs.needs_coarse_quad_helper_invocations || nir->info.writes_memory);

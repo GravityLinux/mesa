@@ -186,6 +186,8 @@ struct agx_shader_info {
    uint32_t apple9_texture_mask, apple9_sampler_mask, apple9_image_mask;
    bool apple9_uses_texel_fetch;
    bool apple9_uses_discard;
+   /* Fragment shader with pixel_interlock_{ordered,unordered}. */
+   bool apple9_pixel_interlock;
 
    union agx_varyings varyings;
 

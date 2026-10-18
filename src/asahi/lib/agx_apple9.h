@@ -82,6 +82,9 @@ struct agx_apple9_render_stage {
    bool writes_depth;
    bool reads_tile;
    bool disable_tri_merging;
+   /* Pixel interlock: order fragments per pixel (fragment control "Pixel
+    * order") instead of per covered sample. */
+   bool pixel_interlock;
 
    /* Scalar interface counts used by the bounded Apple9 stage linker. */
    uint8_t position_components;
@@ -186,6 +189,7 @@ struct agx_apple9_uniform_draw {
    bool uses_discard;
    bool writes_depth;
    bool disable_tri_merging;
+   bool pixel_interlock;
    bool flatshade_first;
    uint8_t provoking_vertex;
 };
