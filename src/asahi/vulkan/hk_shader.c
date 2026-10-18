@@ -157,7 +157,7 @@ static const char *const hk_codegen_env[] = {
    "AGX_APPLE9_NO_SAMPLER_HOIST", "AGX_APPLE9_NO_UNIFORM_MOVE",
    "AGX_APPLE9_PREAMBLE_SPAN", "AGX_APPLE9_RA_WEBS",
    "AGX_APPLE9_SAFE_HOIST_STAGES", "HK_APPLE9_DESCRIPTOR_BUFFER",
-   "HK_APPLE9_MESH_SHADER", "HK_APPLE9_NO_STORE_ENCODE",
+   "HK_APPLE9_MESH_SHADER",
    "HK_APPLE9_NO_TEXTURE_LOADS", "HK_APPLE9_ROBUST_MERGE_BYTES",
    "HK_APPLE9_SPARSE_SCRATCH", "HK_APPLE9_SPARSE_UNMAPPED_RAW",
    "HK_APPLE9_TESS_BATCH", "HK_APPLE9_TESS_SCAN_BLOCK",
@@ -2707,8 +2707,6 @@ hk_apple9_encode_texel(nir_builder *b, nir_def *value, nir_def *layout,
  * layout. The branches are uniform, and each fast arm computes exactly what
  * hk_apple9_encode_texel computes for those formats.
  */
-/* HK_APPLE9_NO_STORE_ENCODE=1 keeps every store on the layout encoder (A/B). */
-DEBUG_GET_ONCE_BOOL_OPTION(hk_apple9_no_store_encode, "HK_APPLE9_NO_STORE_ENCODE", false)
 
 nir_def *
 hk_apple9_encode_texel_fast(nir_builder *b, nir_def *value, nir_def *layout,
@@ -3054,7 +3052,7 @@ hk_apple9_lower_formatless_storage(nir_builder *b, nir_intrinsic_instr *intr,
       .align_mul = 4, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META));
    /* Storage image descriptors also name a canonical store encoding. */
    nir_def *encode = NULL;
-   if (!load && dim != GLSL_SAMPLER_DIM_BUF && !debug_get_option_hk_apple9_no_store_encode()) {
+   if (!load && dim != GLSL_SAMPLER_DIM_BUF) {
       encode = nir_load_global_constant(b, 1, 32,
          nir_iadd_imm(b, nir_load_from_texture_handle_agx(b, tex),
                       offsetof(struct hk_apple9_storage_descriptor, store_encode)),
