@@ -1742,11 +1742,13 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
     * request ordered tile access. That orders fragments per covered sample,
     * which is sample interlock. For pixel interlock under MSAA the draw also
     * sets the fragment control "Pixel order" bit, which orders fragments of a
-    * pixel whatever samples they cover (at 1x the two are the same).
+    * pixel whatever samples they cover (at 1x the two are the same). That
+    * bit orders whole microtiles, so pixel interlock is reported only where
+    * the driconf hk_enable_pixel_interlock asks for it.
     */
    ext->EXT_fragment_shader_interlock = true;
    feat->fragmentShaderSampleInterlock = true;
-   feat->fragmentShaderPixelInterlock = true;
+   feat->fragmentShaderPixelInterlock = false;
 
    /* Per-vertex inputs and barycentrics of vertex and mesh pipelines are
     * written by the stage feeding the rasterizer, exact for primitives clipped
@@ -1994,9 +1996,10 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
        * driconf asks (Zink, which needs it to disable GL_MULTISAMPLE). */
       properties.variableSampleLocations =
          instance->drirc.misc.variable_sample_locations;
-      /* Per-app escape hatch for titles hitting the dense-MSAA slow case. */
-      if (instance->drirc.misc.disable_pixel_interlock)
-         supported_features.fragmentShaderPixelInterlock = false;
+      /* Opt-in: under MSAA pixel interlock orders whole microtiles, several
+       * times slower with small primitives (README.apple9.md). */
+      supported_features.fragmentShaderPixelInterlock =
+         instance->drirc.misc.enable_pixel_interlock;
       /* Unmapped with soft faults: unbound reads are zero, writes dropped. */
       properties.sparseResidencyNonResidentStrict =
          hk_sparse_unbound_unmapped(&pdev->dev);
