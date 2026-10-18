@@ -82,8 +82,6 @@ DEBUG_GET_ONCE_OPTION(cached_hk_apple9_eager_trace,
                       "HK_APPLE9_EAGER_TRACE", NULL)
 DEBUG_GET_ONCE_OPTION(cached_hk_apple9_eager_variants,
                       "HK_APPLE9_EAGER_VARIANTS", NULL)
-DEBUG_GET_ONCE_OPTION(cached_hk_apple9_no_texture_loads,
-                      "HK_APPLE9_NO_TEXTURE_LOADS", NULL)
 DEBUG_GET_ONCE_OPTION(cached_hk_apple9_pressure_stats,
                       "HK_APPLE9_PRESSURE_STATS", NULL)
 DEBUG_GET_ONCE_OPTION(cached_hk_apple9_texel_classes,
@@ -158,7 +156,7 @@ static const char *const hk_codegen_env[] = {
    "AGX_APPLE9_PREAMBLE_SPAN", "AGX_APPLE9_RA_WEBS",
    "AGX_APPLE9_SAFE_HOIST_STAGES", "HK_APPLE9_DESCRIPTOR_BUFFER",
    "HK_APPLE9_MESH_SHADER",
-   "HK_APPLE9_NO_TEXTURE_LOADS", "HK_APPLE9_ROBUST_MERGE_BYTES",
+   "HK_APPLE9_ROBUST_MERGE_BYTES",
    "HK_APPLE9_SPARSE_SCRATCH", "HK_APPLE9_SPARSE_UNMAPPED_RAW",
    "HK_APPLE9_TESS_BATCH", "HK_APPLE9_TESS_SCAN_BLOCK",
    "HK_APPLE9_TEXEL_CLASSES", "HK_APPLE9_UNIFORM_SAFE_CLASSES",
@@ -2840,7 +2838,7 @@ hk_outermost_loop(nir_block *block)
 static void
 hk_apple9_texture_route_loads(nir_shader *nir, struct set *safe)
 {
-   if (debug_get_option_cached_hk_apple9_no_texture_loads() || nir->info.internal)
+   if (nir->info.internal)
       return;
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
    struct set *write_loops = _mesa_pointer_set_create(NULL);
