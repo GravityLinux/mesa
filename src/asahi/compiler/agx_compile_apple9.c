@@ -28,8 +28,6 @@
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_asm, "AGX_APPLE9_ASM", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_dump_binary,
                       "AGX_APPLE9_DUMP_BINARY", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_fold_assume_no_wrap,
-                      "AGX_APPLE9_FOLD_ASSUME_NO_WRAP", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_gated, "AGX_APPLE9_GATED", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_hoist_distance,
                       "AGX_APPLE9_HOIST_DISTANCE", NULL)
@@ -632,10 +630,6 @@ apple9_memory_address(nir_shader *nir, nir_intrinsic_instr *intr, nir_def *offse
             bool safe = add >= 0 &&
                !nir_addition_might_overflow(nir, bounds, other, constant);
             if (add < 0 && apple9_address_lower_bound(other) >= -add)
-               safe = true;
-            /* EXPERIMENT ONLY: fold without a no-wrap proof, to observe
-             * whether the hardware forms index + displacement in 32 bits. */
-            if (debug_get_option_cached_agx_apple9_fold_assume_no_wrap() != NULL)
                safe = true;
             /* An amul cannot overflow the variable it indexes, so for an
              * in-bounds access the 32-bit sum equals the hardware's 64-bit
