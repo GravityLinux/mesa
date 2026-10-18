@@ -234,7 +234,9 @@ agx_bg_eot_cleanup(struct agx_bg_eot_cache *cache)
    cache->dev = NULL;
 }
 
-static void
+/* Returns false when the program's USC allocation fails (the aperture is
+ * full); nothing is cached then, so a later call can retry. */
+static bool
 agx_compile_apple9_precompiled(struct agx_bg_eot_cache *cache,
                              struct agx_precompiled_shader *p, unsigned program)
 {
@@ -256,12 +258,15 @@ agx_compile_apple9_precompiled(struct agx_bg_eot_cache *cache,
    p->bo = agx_bo_create(cache->dev, part.info.binary_size, 0,
                          AGX_BO_EXEC | AGX_BO_LOW_VA | AGX_BO_WRITEBACK,
                          "Apple9 internal shader");
-   if (!p->bo)
-      abort();
+   if (!p->bo) {
+      free(part.binary);
+      return false;
+   }
    memcpy(agx_bo_map(p->bo), part.binary, part.info.binary_size);
    agx_bo_note_cpu_write(p->bo, 0, part.info.binary_size);
    p->ptr = p->bo->va->addr;
    free(part.binary);
+   return true;
 }
 
 static struct agx_precompiled_shader *
@@ -280,7 +285,10 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
       rzalloc(cache->ht, struct agx_precompiled_shader);
 
    if (cache->dev->chip == AGX_CHIP_G16G) {
-      agx_compile_apple9_precompiled(cache, p, program);
+      if (!agx_compile_apple9_precompiled(cache, p, program)) {
+         ralloc_free(p);
+         return NULL;
+      }
       p_atomic_set(&cache->precomp[program], p);
       return p;
    }

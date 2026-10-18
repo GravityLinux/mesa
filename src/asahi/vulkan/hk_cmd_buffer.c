@@ -1538,6 +1538,12 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct agx_precompiled_shader *prog = agx_get_precompiled(&dev->bg_eot, idx);
+   /* Apple9 internal programs are uploaded on first use and can fail when
+    * the USC aperture is full. */
+   if (!prog) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      return;
+   }
 
    struct hk_cs **target = (barrier & AGX_POSTGFX)  ? &cmd->current_cs.post_gfx
                            : (barrier & AGX_PREGFX) ? &cmd->current_cs.pre_gfx
