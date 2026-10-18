@@ -15,11 +15,15 @@ tessellation shaders (emulated), transform feedback, graphics pipeline libraries
 shader objects, extended dynamic state 1-3, vertex input dynamic state,
 sample locations, advanced blending, depth bias control and depth clamp
 control, host image copy, pipeline binaries, sparse buffer and 2D image
-residency, and image view minimum LOD. Extensions that would be emulated or
-only approximated (mesh shaders, primitives-generated queries, conditional
-rendering, fragment shader interlock) and those that only restate driver
-behaviour (memory priority and budget, pageable memory, unified image
-layouts, nested command buffers) are not advertised.
+residency, image view minimum LOD, descriptor buffers, custom border colors,
+conditional rendering, primitives-generated queries, fragment shader
+barycentrics, multisampled storage images, memory budget and priority, and
+mesh and task shaders (run on the compute path). Fragment shader interlock is
+not advertised: the hardware orders fragments per sample, as blending needs,
+so pixel interlock at 4x MSAA is not available. Sampler min/max reduction is
+not supported by the hardware either; only the vkd3d driconf fakes it for
+feature level 12_0. Pageable memory, unified image layouts and nested
+command buffers are not advertised.
 
 Graphics state which Apple9 compiles into shaders (vertex formats, attachment
 formats and blending, multisampling) is part of a draw-time key. Pipelines whose
@@ -30,8 +34,8 @@ programs are cached per device by their tile-buffer key.
 
 Behaviour that differs from Apple8 Honeykrisp:
 
-- Images are never compressed; Apple9 tile programs and sampling do not decode
-  compressed layouts.
+- Images are compressed as on Apple8, except RGB9E5, which Apple9's raw
+  transfer path keeps uncompressed.
 - FP32 arithmetic flushes denormals, but minimum, maximum and sign operations
   preserve them. `shaderDenormFlushToZeroFloat32` is therefore not advertised.
 - The rasterized interface carries at most 96 user scalars, which bounds the
@@ -50,12 +54,14 @@ Behaviour that differs from Apple8 Honeykrisp:
   kernel encodes that 256 KiB tile allocation with a doubled bank tag.
 - FP32 atomic addition is native in device memory, which image atomics also
   use; shared memory supports exchange but not addition.
-- Custom border colors are not supported.
-- Only gradient samples take a minimum LOD, as signed Q6 in bits 16-27 of the
-  word that carries the array layer. Fragment shaders sample 2D and 2D array
-  views with a minimum LOD (`minLod`, `shaderResourceMinLod`) through
-  gradients of the projected coordinates, scaled by the instruction's bias.
-  Other samples with a minimum LOD select an explicit LOD.
+- Custom border colors are sampled natively in the format the application
+  gives; `customBorderColorWithoutFormat` is not advertised.
+- 2D non-shadow samples without texel offsets take a minimum LOD natively, as
+  signed Q6 in bits 16-27 of the word that carries the array layer: gradient
+  samples directly, implicit and biased samples through the biased form.
+  Other samples with a minimum LOD (`minLod`, `shaderResourceMinLod`) go
+  through gradients of the projected coordinates, scaled by the instruction's
+  bias, or select an explicit LOD.
 - Hardware bounds shader-exported depth only to [0, 1]. Depth exports are
   clamped in the fragment shader to the draw's depth-clamp range (viewport 0's
   range, or the user range of `VK_EXT_depth_clamp_control`), as Metal clamps
