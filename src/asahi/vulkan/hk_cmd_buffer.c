@@ -945,12 +945,7 @@ hk_cmd_sync_barrier(struct hk_cmd_buffer *cmd,
        */
       struct hk_device *dev = hk_cmd_buffer_device(cmd);
       hk_ensure_cs_has_space(cmd, cs, AGX_CDM_BARRIER_LENGTH);
-      /* HK_APPLE9_FULL_CDM_BARRIER=1 restores the full flush, for A/B runs
-       * and bisection. */
-      static int full_barrier = -1;
-      if (full_barrier < 0)
-         full_barrier = debug_get_bool_option("HK_APPLE9_FULL_CDM_BARRIER", false);
-      if (dev->dev.chip == AGX_CHIP_G16G && !full_barrier &&
+      if (dev->dev.chip == AGX_CHIP_G16G &&
           !(dst_stages & HK_SYNC_DISPATCH_INDIRECT))
          hk_cdm_compute_barrier(dev, cs);
       else

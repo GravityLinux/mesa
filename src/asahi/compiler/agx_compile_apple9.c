@@ -26,29 +26,18 @@
 #include <string.h>
 
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_asm, "AGX_APPLE9_ASM", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_block_zero,
-                      "AGX_APPLE9_BLOCK_ZERO", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_dump_binary,
                       "AGX_APPLE9_DUMP_BINARY", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_fold_assume_no_wrap,
-                      "AGX_APPLE9_FOLD_ASSUME_NO_WRAP", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_gated, "AGX_APPLE9_GATED", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_hoist_distance,
                       "AGX_APPLE9_HOIST_DISTANCE", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_hoist_samples,
                       "AGX_APPLE9_HOIST_SAMPLES", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_keep_unselected_hoists,
-                      "AGX_APPLE9_KEEP_UNSELECTED_HOISTS", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_licm, "AGX_APPLE9_LICM", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_licm_speculate,
                       "AGX_APPLE9_LICM_SPECULATE", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_address_probe,
-                      "AGX_APPLE9_NO_ADDRESS_PROBE", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_bfe, "AGX_APPLE9_NO_BFE", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_descriptor_hoist,
                       "AGX_APPLE9_NO_DESCRIPTOR_HOIST", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_loop_head_hoist,
-                      "AGX_APPLE9_NO_LOOP_HEAD_HOIST", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_promote,
                       "AGX_APPLE9_NO_PROMOTE", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_sampler_hoist,
@@ -64,8 +53,6 @@ DEBUG_GET_ONCE_OPTION(cached_agx_apple9_trace_final_nir,
                       "AGX_APPLE9_TRACE_FINAL_NIR", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_trace_nir, "AGX_APPLE9_TRACE_NIR", NULL)
 
-DEBUG_GET_ONCE_BOOL_OPTION(apple9_no_bfe, "AGX_APPLE9_NO_BFE", false)
-DEBUG_GET_ONCE_BOOL_OPTION(apple9_no_native_min_lod, "AGX_APPLE9_NO_NATIVE_MINLOD", false)
 DEBUG_GET_ONCE_NUM_OPTION(apple9_hoist_loads, "AGX_APPLE9_HOIST_LOADS", 0)
 
 /* Apple9 compute compilation uses one NIR-to-VIR-to-machine pipeline. */
@@ -643,10 +630,6 @@ apple9_memory_address(nir_shader *nir, nir_intrinsic_instr *intr, nir_def *offse
             bool safe = add >= 0 &&
                !nir_addition_might_overflow(nir, bounds, other, constant);
             if (add < 0 && apple9_address_lower_bound(other) >= -add)
-               safe = true;
-            /* EXPERIMENT ONLY: fold without a no-wrap proof, to observe
-             * whether the hardware forms index + displacement in 32 bits. */
-            if (debug_get_option_cached_agx_apple9_fold_assume_no_wrap() != NULL)
                safe = true;
             /* An amul cannot overflow the variable it indexes, so for an
              * in-bounds access the 32-bit sum equals the hardware's 64-bit
@@ -1230,8 +1213,7 @@ apple9_dag_zero(struct apple9_dag_lower *lower)
    /* One zero from the entry block serves every block. Rematerializing a
     * zero per block made each constant memory index rewrite the register a
     * preceding store or load was still reading, costing a wait. */
-   if (lower->entry_zero != AGX_APPLE9_VREG_INVALID &&
-       !debug_get_option_cached_agx_apple9_block_zero())
+   if (lower->entry_zero != AGX_APPLE9_VREG_INVALID)
       return lower->entry_zero;
    /* Otherwise reuse the zero only within its block, which need not dominate
     * later blocks. */
@@ -3226,8 +3208,7 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
             }
             /* x & (2^w - 1) and (x >> k) & (2^w - 1) are one bitfield
              * extract: the logical shift-right immediate form with a width. */
-            bool bfe = !debug_get_option_apple9_no_bfe();
-            for (unsigned i = 0; bfe && op == nir_op_iand &&
+            for (unsigned i = 0; op == nir_op_iand &&
                                  scalar.def->bit_size == 32 && i < 2; ++i) {
                uint32_t mask, amount;
                if (!apple9_const_u32(nir_scalar_chase_alu_src(scalar, i), &mask) ||
@@ -6901,7 +6882,7 @@ apple9_uniform_constant_use(nir_alu_instr *alu, unsigned s, uint32_t *value)
    *value = nir_src_comp_as_uint(alu->src[s].src, alu->src[s].swizzle[0]);
    /* Low-bit masks select as bitfield extracts, which need no operand. */
    if (alu->op == nir_op_iand && *value && *value != UINT32_MAX &&
-       !(*value & (*value + 1)) && debug_get_option_cached_agx_apple9_no_bfe() == NULL)
+       !(*value & (*value + 1)))
       return false;
    /* Packed float immediates are already free. */
    uint8_t encoded;
@@ -7296,8 +7277,7 @@ apple9_block_runs_once_per_loop_entry(nir_block *block)
    nir_cf_node *parent = block->cf_node.parent;
    return parent->type == nir_cf_node_loop &&
           parent->parent->type == nir_cf_node_function &&
-          block == nir_loop_first_block(nir_cf_node_as_loop(parent)) &&
-          !debug_get_option_cached_agx_apple9_no_loop_head_hoist();
+          block == nir_loop_first_block(nir_cf_node_as_loop(parent));
 }
 
 static bool
@@ -7542,8 +7522,7 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
    /* Remember where every hoisted read came from, in either trial, so a read
     * the preamble does not take returns to the branch that needed it rather
     * than running unconditionally for every thread. */
-   bool restore = hoist_addresses || !debug_get_option_cached_agx_apple9_keep_unselected_hoists();
-   if (apple9_hoist_uniform_reads(main, restore ? original_blocks : NULL,
+   if (apple9_hoist_uniform_reads(main, original_blocks,
                                   hoist_addresses, address_hoists))
       nir_opt_cse(main);
    nir_function_impl *main_impl = nir_shader_get_entrypoint(main);
@@ -7574,8 +7553,7 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
    if (main)
       nir_index_instrs(nir_shader_get_entrypoint(main));
    if (main && nir_opt_preamble(main, &options, sizes)) {
-      if (restore)
-         apple9_restore_unselected_hoists(main, original_blocks);
+      apple9_restore_unselected_hoists(main, original_blocks);
       nir_function_impl *impl = nir_shader_get_preamble(main);
       /* Setup currently admits ordinary linear ALU/UBO work. Masked setup and
        * scratch have independent execution contracts and are not assumed. */
@@ -7863,7 +7841,7 @@ apple9_compile_dag_tail(nir_shader *nir, struct agx_shader_part *out,
    struct agx_apple9_compute_profile original_profile = {0};
    bool have_original = false, original_ok = false, ok = false;
    bool use_original = false, address_done = false;
-   if (!debug_get_option_cached_agx_apple9_no_address_probe()) {
+   {
       struct agx_shader_part probe = {0};
       struct apple9_dag_cost probe_cost = {0};
       char *probe_log = NULL;
@@ -8936,13 +8914,11 @@ apple9_native_min_lod(const nir_tex_instr *tex)
 }
 
 /* Implicit and biased 2D and 2D array samples with a minimum LOD have a
- * native biased form; an implicit sample is one with zero bias.
- * AGX_APPLE9_NO_NATIVE_MINLOD=1 sends them through gradients instead. */
+ * native biased form; an implicit sample is one with zero bias. */
 static bool
 apple9_native_biased_min_lod(const nir_tex_instr *tex)
 {
-   return !debug_get_option_apple9_no_native_min_lod() &&
-          apple9_native_min_lod(tex) &&
+   return apple9_native_min_lod(tex) &&
           (tex->op == nir_texop_tex || tex->op == nir_texop_txb);
 }
 

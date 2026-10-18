@@ -593,13 +593,11 @@ hk_flush_bind(struct hk_bind_builder *b)
     */
    struct drm_asahi_gem_bind_op op;
    if (!b->mem && hk_sparse_unbound_unmapped(&b->dev->dev)) {
-      /* Map the zero page read-only in both views (or leave them
-       * unmapped), see hk_bind_scratch and hk_sparse_unbound_unmapped. */
-      bool raw = hk_sparse_unmapped_raw();
+      /* Map the zero page read-only in both views, see hk_bind_scratch
+       * and hk_sparse_unbound_unmapped. */
       op = (struct drm_asahi_gem_bind_op){
-         .handle = raw ? 0 : b->dev->dev.zero_bo->uapi_handle,
-         .flags = raw ? DRM_ASAHI_BIND_UNBIND
-                      : DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_SINGLE_PAGE,
+         .handle = b->dev->dev.zero_bo->uapi_handle,
+         .flags = DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_SINGLE_PAGE,
          .addr = b->va->addr + b->resourceOffset,
          .range = b->size,
       };
