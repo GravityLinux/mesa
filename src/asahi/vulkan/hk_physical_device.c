@@ -1987,6 +1987,12 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
    if (pdev->dev.chip == AGX_CHIP_G16G) {
       hk_apple9_restrict_caps(&supported_extensions, &supported_features,
                               &properties);
+      /* Sample positions are per render and a change splits the render, so
+       * they can vary within a subpass, but DXVK would centre samples for
+       * every MultisampleEnable=FALSE draw: report it only where the
+       * driconf asks (Zink, which needs it to disable GL_MULTISAMPLE). */
+      properties.variableSampleLocations =
+         instance->drirc.misc.variable_sample_locations;
       /* Unmapped with soft faults: unbound reads are zero, writes dropped. */
       properties.sparseResidencyNonResidentStrict =
          hk_sparse_unbound_unmapped(&pdev->dev);

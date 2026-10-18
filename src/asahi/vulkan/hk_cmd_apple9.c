@@ -318,6 +318,18 @@ hk_apple9_rast_primitive(enum mesa_prim prim)
  * graphics stream also closes its pre/post compute streams and heap lifetime.
  * Reserve for every emulated multiview draw so these stay together.
  */
+/* Sample positions for a draw: the application's when enabled for this
+ * sample count, the standard ones otherwise. */
+static uint32_t
+hk_apple9_draw_sample_positions(const struct vk_dynamic_graphics_state *dyn,
+                                unsigned samples)
+{
+   return dyn->ms.sample_locations_enable && dyn->ms.sample_locations &&
+                dyn->ms.sample_locations->per_pixel == samples
+             ? hk_pack_ppp_multisamplectrl(dyn->ms.sample_locations)
+             : hk_default_sample_positions(samples);
+}
+
 bool
 hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool reads_buffers)
 {
@@ -330,6 +342,29 @@ hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool reads_buffers)
 
    const struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
    const struct hk_rendering_state *render = &cmd->state.gfx.render;
+
+   /* Sample positions are render state (the per-render multisample control),
+    * so the first application draw of a render commits them and a draw with
+    * other positions starts a new render. That lets them vary within a
+    * subpass (variableSampleLocations, reported to Zink only). Meta draws
+    * neither commit nor change them.
+    */
+   if (!cmd->in_meta) {
+      unsigned samples = MAX2(render->tilebuffer.nr_samples ?:
+                              dyn->ms.rasterization_samples, 1);
+      uint32_t positions = hk_apple9_draw_sample_positions(dyn, samples);
+      if (cs->has_sample_locations && cs->ppp_multisamplectl != positions) {
+         perf_debug(cmd, "Splitting Apple9 render: sample positions changed");
+         hk_cs_end_hint(cmd, HK_CS_END_RENDER_SPLIT);
+         hk_cmd_buffer_end_graphics(cmd);
+         cs = hk_cmd_buffer_get_cs(cmd, false);
+         if (!cs)
+            return false;
+      }
+      cs->has_sample_locations = true;
+      cs->ppp_multisamplectl = positions;
+   }
+
    unsigned views = util_bitcount(render->view_mask ?: 1);
    unsigned viewports = dyn->rs.rasterizer_discard_enable
                            ? 1 : MAX2(dyn->vp.viewport_count, 1);
@@ -605,11 +640,11 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    cs->tib = gfx->render.tilebuffer;
    const struct vk_dynamic_graphics_state *ms_dyn = &cmd->vk.dynamic_graphics_state;
    gfx->apple9_sample_positions =
-      ms_dyn->ms.sample_locations_enable && ms_dyn->ms.sample_locations &&
-            ms_dyn->ms.sample_locations->per_pixel == pipeline.samples
-         ? hk_pack_ppp_multisamplectrl(ms_dyn->ms.sample_locations)
-         : hk_default_sample_positions(pipeline.samples);
-   cs->ppp_multisamplectl = gfx->apple9_sample_positions;
+      hk_apple9_draw_sample_positions(ms_dyn, pipeline.samples);
+   /* hk_apple9_prepare_draw committed the render's positions; meta draws
+    * only fill them in for a render that has none yet. */
+   if (!cs->has_sample_locations)
+      cs->ppp_multisamplectl = gfx->apple9_sample_positions;
    hk_reserve_scratch(cmd, cs, shaders[0]);
    hk_reserve_scratch(cmd, cs, shaders[1]);
    struct agx_apple9_uniform_draw *record =
