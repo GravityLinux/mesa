@@ -20,7 +20,9 @@
 #include "agx_opcodes.h"
 
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_ra_audit, "AGX_APPLE9_RA_AUDIT", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_spill_coalesce, "AGX_SPILL_COALESCE", NULL)
+/* Coalescing noninterfering spill homes is the default; AGX_SPILL_COALESCE=0
+ * restores one home per spilled variable. */
+DEBUG_GET_ONCE_BOOL_OPTION(agx_spill_coalesce, "AGX_SPILL_COALESCE", true)
 
 struct repair_block {
    /* For a loop header, whether phis operands have been added */
@@ -260,7 +262,7 @@ agx_repair_ssa(agx_context *ctx)
 
    unsigned n = ctx->alloc;
    const bool audit = debug_get_option_cached_agx_apple9_ra_audit() != NULL;
-   struct hash_table_u64 *homes = debug_get_option_cached_agx_spill_coalesce()
+   struct hash_table_u64 *homes = debug_get_option_agx_spill_coalesce()
       ? _mesa_hash_table_u64_create(blocks) : NULL;
 
    /* Spilling breaks SSA only for the variables it reloads or
