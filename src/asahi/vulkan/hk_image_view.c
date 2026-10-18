@@ -181,6 +181,33 @@ view_denominator(struct hk_image_view *view)
    };
 }
 
+/* Width in blocks of an uncompressed alias of one level of a block-compressed
+ * image. The hardware tiles the alias from its width, so a level of the large
+ * miptree that is padded on the left needs its padded block stride: otherwise
+ * every tile row after the first lands one tile early. The descriptor has no
+ * separate stride for tiled layouts, and the wider alias would change
+ * normalized coordinates and size queries, so only driver-internal views
+ * (copies, blits, clears), which address texels explicitly, use it.
+ *
+ * Application views are deliberately excluded for now and stay mis-tiled on
+ * padded levels: fixing them needs the logical size kept in the shader (size
+ * queries, normalized coordinates, edge clamping) while the descriptor gets
+ * the padded width. Until then dEQP texel_view_compatible ...texture.astc_8x*
+ * are expected failures (src/asahi/ci/asahi-agx2-fails.txt).
+ */
+static unsigned
+alias_width_el(const struct hk_image_view *view, const struct ail_layout *layout,
+               unsigned level, unsigned denom_x)
+{
+   unsigned width_el = DIV_ROUND_UP(u_minify(layout->width_px, level), denom_x);
+
+   if (layout->tiling == AIL_TILING_GPU &&
+       (view->vk.create_flags & VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA))
+      width_el = MAX2(width_el, layout->stride_el[level]);
+
+   return width_el;
+}
+
 static enum pipe_format
 format_for_plane(const struct hk_image_view *view, unsigned view_plane)
 {
@@ -292,7 +319,7 @@ pack_texture(struct hk_image_view *view, unsigned view_plane,
          assert(view->vk.layer_count == 1);
 
          cfg.address = base_addr + ail_get_layer_level_B(layout, layer, level);
-         cfg.width = DIV_ROUND_UP(u_minify(layout->width_px, level), denom.x);
+         cfg.width = alias_width_el(view, layout, level, denom.x);
          cfg.height = DIV_ROUND_UP(u_minify(layout->height_px, level), denom.y);
          cfg.first_level = 0;
          cfg.last_level = 1;
@@ -462,8 +489,7 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
 
             cfg.buffer =
                base_addr + ail_get_layer_level_B(layout, layer, level);
-            cfg.width =
-               DIV_ROUND_UP(u_minify(layout->width_px, level), denom.x);
+            cfg.width = alias_width_el(view, layout, level, denom.x);
             cfg.height =
                DIV_ROUND_UP(u_minify(layout->height_px, level), denom.y);
             cfg.level = 0;
