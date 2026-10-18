@@ -29,8 +29,6 @@ DEBUG_GET_ONCE_OPTION(cached_agx_apple9_asm, "AGX_APPLE9_ASM", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_dump_binary,
                       "AGX_APPLE9_DUMP_BINARY", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_gated, "AGX_APPLE9_GATED", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_hoist_distance,
-                      "AGX_APPLE9_HOIST_DISTANCE", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_hoist_samples,
                       "AGX_APPLE9_HOIST_SAMPLES", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_licm, "AGX_APPLE9_LICM", NULL)
@@ -5700,8 +5698,7 @@ agx_nir_hoist_apple9_samples(nir_shader *nir)
    unsigned limit = apple9_hoist_limit();
    /* How far ahead, in NIR instructions, to look for a sample to hoist: an
     * upper bound on how far one moves. */
-   const char *distance = debug_get_option_cached_agx_apple9_hoist_distance();
-   const unsigned horizon = distance ? atoi(distance) : 256;
+   const unsigned horizon = 256;
    if (!limit || !apple9_has_samples(nir))
       return false;
 
