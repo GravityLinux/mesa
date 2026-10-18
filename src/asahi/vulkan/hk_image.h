@@ -64,6 +64,12 @@ struct hk_image_plane {
    uint64_t offset_B;
    void *map;
 
+   /* With an explicit DRM format modifier layout, the plane sits at this
+    * offset within its memory binding. Otherwise planes are consecutive.
+    */
+   bool has_explicit_offset;
+   uint64_t explicit_offset_B;
+
    /* If the image has sparse residency, its residency is tracked in this
     * secondary page table. Otherwise, this map is NULL.
     */
