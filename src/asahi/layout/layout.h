@@ -73,12 +73,6 @@ struct ail_layout {
    /** Whether compression is used. Requires a non-linear layout. */
    bool compressed;
 
-   /**
-    * G16: block-compressed levels of the large miptree keep their own stride
-    * when padded on the left. G13 adds one block of stride there.
-    */
-   bool compact_compressed_stride;
-
    /** Texture format */
    enum pipe_format format;
 

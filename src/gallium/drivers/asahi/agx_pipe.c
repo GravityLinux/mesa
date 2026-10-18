@@ -143,8 +143,6 @@ agx_resource_setup(struct agx_resource *nresource)
    nresource->layout = (struct ail_layout){
       .tiling = ail_drm_modifier_to_tiling(nresource->modifier),
       .compressed = ail_is_drm_modifier_compressed(nresource->modifier),
-      .compact_compressed_stride =
-         agx_device(templ->screen)->chip == AGX_CHIP_G16G,
       .mipmapped_z = templ->target == PIPE_TEXTURE_3D,
       .format = templ->format,
       .width_px = templ->width0,

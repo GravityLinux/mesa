@@ -958,7 +958,6 @@ hk_image_init(struct hk_device *dev, struct hk_image *image,
       image->planes[plane].layout = (struct ail_layout){
          .tiling = hk_map_tiling(dev, pCreateInfo, image->vk.drm_format_mod),
          .compressed = compressed,
-         .compact_compressed_stride = dev->dev.chip == AGX_CHIP_G16G,
          .mipmapped_z = pCreateInfo->imageType == VK_IMAGE_TYPE_3D,
          .format = hk_format_to_pipe_format(format),
 
