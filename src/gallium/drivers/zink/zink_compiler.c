@@ -2858,8 +2858,30 @@ delete_psiz_store_instr(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 }
 
 static bool
+psiz_store_not_one(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   switch (intr->intrinsic) {
+   case nir_intrinsic_store_output:
+   case nir_intrinsic_store_per_primitive_output:
+   case nir_intrinsic_store_per_vertex_output:
+      break;
+   default:
+      return false;
+   }
+   return nir_intrinsic_io_semantics(intr).location == VARYING_SLOT_PSIZ &&
+          !(nir_src_is_const(intr->src[0]) && fabs(nir_src_as_float(intr->src[0]) - 1.0) < FLT_EPSILON);
+}
+
+static bool
 delete_psiz_store(nir_shader *nir, bool one)
 {
+   /* Deleting the stores of 1.0 relies on the default size of an unwritten
+    * PointSize: when any other store remains, the vertices whose store was
+    * deleted would get an undefined size instead (e.g. a geometry shader
+    * emitting points of size 1.0 and 13.0).
+    */
+   if (one && nir_shader_intrinsics_pass(nir, psiz_store_not_one, nir_metadata_all, NULL))
+      return false;
    bool progress = nir_shader_intrinsics_pass(nir, delete_psiz_store_instr,
                                               nir_metadata_control_flow, one ? nir : NULL);
    if (progress)
