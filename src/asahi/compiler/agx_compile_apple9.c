@@ -35,8 +35,6 @@ DEBUG_GET_ONCE_OPTION(cached_agx_apple9_hoist_distance,
                       "AGX_APPLE9_HOIST_DISTANCE", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_hoist_samples,
                       "AGX_APPLE9_HOIST_SAMPLES", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_keep_unselected_hoists,
-                      "AGX_APPLE9_KEEP_UNSELECTED_HOISTS", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_licm, "AGX_APPLE9_LICM", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_licm_speculate,
                       "AGX_APPLE9_LICM_SPECULATE", NULL)
@@ -7530,8 +7528,7 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
    /* Remember where every hoisted read came from, in either trial, so a read
     * the preamble does not take returns to the branch that needed it rather
     * than running unconditionally for every thread. */
-   bool restore = hoist_addresses || !debug_get_option_cached_agx_apple9_keep_unselected_hoists();
-   if (apple9_hoist_uniform_reads(main, restore ? original_blocks : NULL,
+   if (apple9_hoist_uniform_reads(main, original_blocks,
                                   hoist_addresses, address_hoists))
       nir_opt_cse(main);
    nir_function_impl *main_impl = nir_shader_get_entrypoint(main);
@@ -7562,8 +7559,7 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
    if (main)
       nir_index_instrs(nir_shader_get_entrypoint(main));
    if (main && nir_opt_preamble(main, &options, sizes)) {
-      if (restore)
-         apple9_restore_unselected_hoists(main, original_blocks);
+      apple9_restore_unselected_hoists(main, original_blocks);
       nir_function_impl *impl = nir_shader_get_preamble(main);
       /* Setup currently admits ordinary linear ALU/UBO work. Masked setup and
        * scratch have independent execution contracts and are not assumed. */
