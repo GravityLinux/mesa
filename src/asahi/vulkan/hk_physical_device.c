@@ -1442,8 +1442,6 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
        * images are never compressed. */
       .EXT_host_image_copy = true,
       .EXT_shader_atomic_float = true,
-      /* EXT_mesh_shader stays hidden: its workgroups still run as compute
-       * rather than on the native mesh pipeline. */
       .EXT_attachment_feedback_loop_dynamic_state = true,
       .EXT_depth_clamp_zero_one = true,
       .EXT_depth_clamp_control = true,
