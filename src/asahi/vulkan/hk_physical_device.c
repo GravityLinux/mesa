@@ -1382,6 +1382,9 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
       .EXT_debug_marker = true,
       .EXT_hdr_metadata = true,
       .EXT_map_memory_placed = true,
+      /* Process usage of each heap and a budget from available system
+       * memory, as on other unified-memory drivers. */
+      .EXT_memory_budget = true,
       .EXT_shader_replicated_composites = true,
       .EXT_depth_bias_control = true,
       .EXT_depth_clip_control = true,
