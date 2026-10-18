@@ -1626,6 +1626,15 @@ create_image(struct zink_screen *screen, struct zink_resource_object *obj,
    }
    if (!success)
       return roc_fail_and_free_object;
+   /* An imported dma-buf is laid out by its modifier: falling back to any
+    * other modifier or to plain linear tiling would read it wrongly.
+    */
+   if (winsys_modifier && (ici.tiling != VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT ||
+                           mod != alloc_info->whandle->modifier)) {
+      mesa_loge("zink: cannot import dmabuf with modifier 0x%" PRIx64 " for this usage",
+                alloc_info->whandle->modifier);
+      return roc_fail_and_free_object;
+   }
 
    if (ici.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT && srgb &&
       util_format_get_nr_components(srgb) == 4 &&
