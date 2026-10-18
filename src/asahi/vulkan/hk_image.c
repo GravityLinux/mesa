@@ -314,6 +314,24 @@ hk_can_compress(const struct agx_device *dev, VkFormat format, unsigned plane,
    return true;
 }
 
+/* Whether the compressed DRM format modifier can describe an image with this
+ * usage. Feedback loops only keep hk from choosing compression for its own
+ * allocations: an image whose modifier is explicitly compressed (an imported
+ * dma-buf, or a list naming only that modifier) is compressed whatever its
+ * usage, and refusing the modifier made importers fall back to reading the
+ * compressed buffer as linear.
+ */
+static bool
+hk_can_use_compressed_modifier(const struct agx_device *dev, VkFormat format,
+                               unsigned plane, unsigned width, unsigned height,
+                               unsigned samples, VkImageCreateFlags flags,
+                               VkImageUsageFlags usage, const void *pNext)
+{
+   return hk_can_compress(dev, format, plane, width, height, samples, flags,
+                          usage & ~VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT,
+                          pNext);
+}
+
 bool
 hk_can_compress_format(const struct agx_device *dev, VkFormat format)
 {
@@ -402,7 +420,7 @@ hk_GetPhysicalDeviceImageFormatProperties2(
 
    /* A compressed modifier is a promise of a compressed layout. Image creation
     * cannot honour it for usage or flags that rule compression out, such as
-    * feedback loops or incompatible mutable formats, so do not advertise it.
+    * storage or incompatible mutable formats, so do not advertise it there.
     */
    if (pImageFormatInfo->tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
       const VkPhysicalDeviceImageDrmFormatModifierInfoEXT *mod_info =
@@ -412,10 +430,12 @@ hk_GetPhysicalDeviceImageFormatProperties2(
           mod_info->drmFormatModifier == DRM_FORMAT_MOD_APPLE_GPU_TILED_COMPRESSED) {
          unsigned planes = vk_format_get_plane_count(pImageFormatInfo->format);
          for (unsigned plane = 0; plane < planes; ++plane) {
-            if (!hk_can_compress(&pdev->dev, pImageFormatInfo->format, plane, 64,
-                                 64, 1, pImageFormatInfo->flags,
-                                 pImageFormatInfo->usage,
-                                 pImageFormatInfo->pNext))
+            if (!hk_can_use_compressed_modifier(&pdev->dev,
+                                                pImageFormatInfo->format, plane,
+                                                64, 64, 1,
+                                                pImageFormatInfo->flags,
+                                                pImageFormatInfo->usage,
+                                                pImageFormatInfo->pNext))
                return VK_ERROR_FORMAT_NOT_SUPPORTED;
          }
       }
@@ -842,12 +862,28 @@ choose_drm_format_mod(struct hk_device *dev, uint8_t plane_count,
 {
    uint64_t best_mod = UINT64_MAX;
    uint32_t best_score = 0;
-   bool can_compress = true;
+   bool can_compress = true, can_use_compressed = true;
 
    for (uint8_t plane = 0; plane < plane_count; plane++) {
       if (!hk_can_compress_create_info(dev, plane, info))
          can_compress = false;
+      if (!hk_can_use_compressed_modifier(&dev->dev, info->format, plane,
+                                          info->extent.width,
+                                          info->extent.height, info->samples,
+                                          info->flags, info->usage,
+                                          info->pNext))
+         can_use_compressed = false;
    }
+
+   /* Prefer an uncompressed modifier where compression is only avoided by
+    * policy (feedback loops), but honour a list naming only the compressed
+    * one, which the format query advertised.
+    */
+   bool other = false;
+   for (uint32_t i = 0; i < modifier_count; ++i)
+      other |= modifiers[i] != DRM_FORMAT_MOD_APPLE_GPU_TILED_COMPRESSED;
+   if (!can_compress && can_use_compressed && !other)
+      can_compress = true;
 
    for (uint32_t i = 0; i < modifier_count; ++i) {
       if (!can_compress &&
