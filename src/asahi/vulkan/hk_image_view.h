@@ -29,6 +29,11 @@ struct hk_image_view {
    struct {
       uint8_t image_plane;
 
+      /* Logical width in blocks of an uncompressed alias of a compressed level
+       * whose descriptor carries the padded stride instead, else 0.
+       */
+      uint32_t alias_width_el;
+
       struct agx_texture_packed ia, sampled, ro_storage, background,
          layered_background, emrt_texture;
 

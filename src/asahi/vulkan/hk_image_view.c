@@ -185,27 +185,36 @@ view_denominator(struct hk_image_view *view)
  * image. The hardware tiles the alias from its width, so a level of the large
  * miptree that is padded on the left needs its padded block stride: otherwise
  * every tile row after the first lands one tile early. The descriptor has no
- * separate stride for tiled layouts, and the wider alias would change
- * normalized coordinates and size queries, so only driver-internal views
- * (copies, blits, clears), which address texels explicitly, use it.
+ * separate stride for tiled layouts, so the alias is that much wider.
  *
- * Application views are deliberately excluded for now and stay mis-tiled on
- * padded levels: fixing them needs the logical size kept in the shader (size
- * queries, normalized coordinates, edge clamping) while the descriptor gets
- * the padded width. Until then dEQP texel_view_compatible ...texture.astc_8x*
- * are expected failures (src/asahi/ci/asahi-agx2-fails.txt).
+ * Driver-internal views (copies, blits, clears) address texels explicitly and
+ * use the padded width everywhere. Application views use it for everything
+ * but sampling: storage, attachments and their reloads then agree with the
+ * image's tiling, and storage size queries read the logical width kept in
+ * alias_width_el. Sampled descriptors of application views keep the logical
+ * width, so normalized coordinates and size queries stay exact, but texels
+ * after the first tile row of a padded level come from the wrong place.
+ * Correcting that would cost every sample of every non-constant descriptor,
+ * so dEQP texel_view_compatible ...texture.astc_8x* stay expected failures
+ * (src/asahi/ci/asahi-agx2-fails.txt).
  */
 static unsigned
-alias_width_el(const struct hk_image_view *view, const struct ail_layout *layout,
+alias_width_el(struct hk_image_view *view, unsigned view_plane,
+               enum hk_desc_usage usage, const struct ail_layout *layout,
                unsigned level, unsigned denom_x)
 {
    unsigned width_el = DIV_ROUND_UP(u_minify(layout->width_px, level), denom_x);
+   bool internal =
+      view->vk.create_flags & VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA;
 
-   if (layout->tiling == AIL_TILING_GPU &&
-       (view->vk.create_flags & VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA))
-      width_el = MAX2(width_el, layout->stride_el[level]);
+   if (layout->tiling != AIL_TILING_GPU ||
+       (usage == HK_DESC_USAGE_SAMPLED && !internal))
+      return width_el;
 
-   return width_el;
+   unsigned padded_el = MAX2(width_el, layout->stride_el[level]);
+   view->planes[view_plane].alias_width_el =
+      padded_el != width_el ? width_el : 0;
+   return padded_el;
 }
 
 static enum pipe_format
@@ -319,7 +328,7 @@ pack_texture(struct hk_image_view *view, unsigned view_plane,
          assert(view->vk.layer_count == 1);
 
          cfg.address = base_addr + ail_get_layer_level_B(layout, layer, level);
-         cfg.width = alias_width_el(view, layout, level, denom.x);
+         cfg.width = alias_width_el(view, view_plane, usage, layout, level, denom.x);
          cfg.height = DIV_ROUND_UP(u_minify(layout->height_px, level), denom.y);
          cfg.first_level = 0;
          cfg.last_level = 1;
@@ -489,7 +498,7 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
 
             cfg.buffer =
                base_addr + ail_get_layer_level_B(layout, layer, level);
-            cfg.width = alias_width_el(view, layout, level, denom.x);
+            cfg.width = alias_width_el(view, view_plane, usage, layout, level, denom.x);
             cfg.height =
                DIV_ROUND_UP(u_minify(layout->height_px, level), denom.y);
             cfg.level = 0;

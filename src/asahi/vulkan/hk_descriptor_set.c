@@ -252,6 +252,16 @@ hk_pack_storage_image(struct hk_device *dev, void *out,
             view->vk.base_mip_level | (view->vk.base_array_layer << 16);
          if (agx_apple9_translate_texture(ext.texture, &desc.tex))
             ext.native_ok |= HK_APPLE9_STORAGE_READ_VALID;
+         /* Native accesses keep the padded alias width. Size queries read
+          * the legacy texture: give it the logical width.
+          */
+         if (view->planes[0].alias_width_el) {
+            agx_unpack(NULL, &ext.common.tex, TEXTURE, t);
+            t.width = view->planes[0].alias_width_el;
+            agx_pack(&ext.common.tex, TEXTURE, cfg) {
+               cfg = t;
+            }
+         }
          ext.native_ok |= view->apple9_store_flags;
          ext.native_ok |= view->apple9_pbe_index << HK_APPLE9_STORAGE_PBE_SHIFT;
       }
