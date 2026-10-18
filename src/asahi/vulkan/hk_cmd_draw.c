@@ -577,6 +577,29 @@ hk_pack_zls_control(struct agx_zls_control_packed *packed,
  * Depth/stencil passes are not merged: their ZLS control mixes the first
  * pass's loads with the last pass's stores.
  */
+/* Whether the render pass's draws may read this attachment other than as an
+ * attachment (render->feedback). A written attachment may be read so only
+ * when feedback loop is enabled for it: the feedback loop layout, or
+ * VkAttachmentFeedbackLoopInfoEXT under unified image layouts (as RADV
+ * reads it). An attachment nothing has written yet, with LOAD_OP_NONE, may
+ * also be sampled in GENERAL. GENERAL alone is not a feedback loop, so
+ * renders in GENERAL keep barrier hoisting.
+ */
+static bool
+hk_attachment_may_be_sampled(const VkRenderingAttachmentInfo *att)
+{
+   if (!att || !att->imageView)
+      return false;
+   if (att->imageLayout == VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT)
+      return true;
+   const VkAttachmentFeedbackLoopInfoEXT *loop =
+      vk_find_struct_const(att->pNext, ATTACHMENT_FEEDBACK_LOOP_INFO_EXT);
+   if (loop && loop->feedbackLoopEnable)
+      return true;
+   return att->imageLayout == VK_IMAGE_LAYOUT_GENERAL &&
+          att->loadOp == VK_ATTACHMENT_LOAD_OP_NONE;
+}
+
 static bool
 hk_render_merge_enabled(struct hk_cmd_buffer *cmd)
 {
@@ -749,10 +772,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    for (uint32_t i = 0; i < MIN2(pRenderingInfo->colorAttachmentCount, HK_MAX_RTS); i++)
       feedback_att[2 + i] = &pRenderingInfo->pColorAttachments[i];
    for (unsigned i = 0; i < ARRAY_SIZE(feedback_att); ++i) {
-      const VkRenderingAttachmentInfo *att = feedback_att[i];
-      if (att && att->imageView &&
-          (att->imageLayout == VK_IMAGE_LAYOUT_GENERAL ||
-           att->imageLayout == VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT))
+      if (hk_attachment_may_be_sampled(feedback_att[i]))
          render->feedback = true;
    }
    render->view_mask = pRenderingInfo->viewMask;
