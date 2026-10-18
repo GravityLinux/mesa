@@ -671,6 +671,10 @@ hk_get_device_features(
       /* VK_KHR_shader_relaxed_extended_instruction */
       .shaderRelaxedExtendedInstruction = true,
 
+      /* VK_KHR_unified_image_layouts (Apple9 only) */
+      .unifiedImageLayouts = true,
+      .unifiedImageLayoutsVideo = false,
+
       /* VK_EXT_blend_operation_advanced */
       .advancedBlendCoherentOperations = true,
 
@@ -1404,6 +1408,10 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
       .EXT_shader_subgroup_vote = true,
       .VALVE_mutable_descriptor_type = true,
       .KHR_shader_relaxed_extended_instruction = true,
+      /* GENERAL is as fast as any layout: hk keeps no layout-dependent
+       * state, and feedback comes from the feedback loop state (see
+       * hk_attachment_may_be_sampled). */
+      .KHR_unified_image_layouts = true,
       .KHR_shader_subgroup_uniform_control_flow = true,
       .EXT_attachment_feedback_loop_layout = true,
       .EXT_calibrated_timestamps = true,
@@ -1648,6 +1656,7 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
       KEEP(workgroupMemoryExplicitLayout8BitAccess),
       KEEP(workgroupMemoryExplicitLayout16BitAccess),
       KEEP(attachmentFeedbackLoopLayout),
+      KEEP(unifiedImageLayouts),
       KEEP(dynamicRenderingUnusedAttachments),
       KEEP(multiDraw),
       KEEP(nonSeamlessCubeMap),
