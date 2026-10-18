@@ -400,6 +400,27 @@ hk_GetPhysicalDeviceImageFormatProperties2(
        pImageFormatInfo->type != VK_IMAGE_TYPE_2D)
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
+   /* A compressed modifier is a promise of a compressed layout. Image creation
+    * cannot honour it for usage or flags that rule compression out, such as
+    * feedback loops or incompatible mutable formats, so do not advertise it.
+    */
+   if (pImageFormatInfo->tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
+      const VkPhysicalDeviceImageDrmFormatModifierInfoEXT *mod_info =
+         vk_find_struct_const(pImageFormatInfo->pNext,
+                              PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT);
+      if (mod_info &&
+          mod_info->drmFormatModifier == DRM_FORMAT_MOD_APPLE_GPU_TILED_COMPRESSED) {
+         unsigned planes = vk_format_get_plane_count(pImageFormatInfo->format);
+         for (unsigned plane = 0; plane < planes; ++plane) {
+            if (!hk_can_compress(&pdev->dev, pImageFormatInfo->format, plane, 64,
+                                 64, 1, pImageFormatInfo->flags,
+                                 pImageFormatInfo->usage,
+                                 pImageFormatInfo->pNext))
+               return VK_ERROR_FORMAT_NOT_SUPPORTED;
+         }
+      }
+   }
+
    if (ycbcr_info && pImageFormatInfo->type != VK_IMAGE_TYPE_2D)
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
