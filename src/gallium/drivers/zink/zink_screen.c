@@ -1170,6 +1170,17 @@ zink_init_screen_caps(struct zink_screen *screen)
       caps->max_varyings = 16;
    }
 
+   /* Honeykrisp on G16 reports 122 output components: its varying bank also
+    * holds position, point size and the clip/cull distances. Halving gives 60
+    * components, below the GL 3.0 minimum of 64. Streamout scalarizes outputs
+    * in place rather than duplicating them, and the varyings Zink injects
+    * (internal GS PrimitiveID, emulated line varyings at the top of the range)
+    * still fit beside 16 vec4 of user varyings.
+    */
+   if (zink_driverid(screen) == VK_DRIVER_ID_MESA_HONEYKRISP &&
+       screen->info.props.limits.maxVertexOutputComponents >= 80)
+      caps->max_varyings = 16;
+
    caps->dmabuf =
 #if defined(HAVE_LIBDRM) && (DETECT_OS_LINUX || DETECT_OS_BSD)
       screen->info.have_KHR_external_memory_fd &&
