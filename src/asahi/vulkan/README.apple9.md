@@ -26,7 +26,8 @@ order" bit under MSAA; the acquire alone orders per covered sample, which at
 primitives can be several times slower. Measured 4x on/off for contiguous
 grids of N-pixel primitives: 1 px 11.2x, 2 px 7.9x, 4 px 6.9x, 8 px 3.4x,
 16 px 1.45x, 32 px 1.06x; large overlapping primitives cost nothing
-measurable. Sampler min/max reduction is
+measurable. The driconf `hk_disable_pixel_interlock` withdraws pixel interlock
+per app (sample interlock stays). Sampler min/max reduction is
 not supported by the hardware either; only the vkd3d driconf fakes it for
 feature level 12_0. Pageable memory, unified image layouts and nested
 command buffers are not advertised.

@@ -1994,6 +1994,9 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
        * driconf asks (Zink, which needs it to disable GL_MULTISAMPLE). */
       properties.variableSampleLocations =
          instance->drirc.misc.variable_sample_locations;
+      /* Per-app escape hatch for titles hitting the dense-MSAA slow case. */
+      if (instance->drirc.misc.disable_pixel_interlock)
+         supported_features.fragmentShaderPixelInterlock = false;
       /* Unmapped with soft faults: unbound reads are zero, writes dropped. */
       properties.sparseResidencyNonResidentStrict =
          hk_sparse_unbound_unmapped(&pdev->dev);
