@@ -1713,6 +1713,9 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
       KEEP(shaderResourceResidency),
       .attachmentFeedbackLoopDynamicState = true,
       .memoryPriority = true,
+      /* Storage images address samples through the same layout as sampled
+       * multisample images. */
+      .shaderStorageImageMultisample = true,
       .depthClampZeroOne = true,
       .depthClampControl = true,
       .maintenance10 = true,
