@@ -976,6 +976,20 @@ hk_image_init(struct hk_device *dev, struct hk_image *image,
       };
 
       ail_make_miptree(&image->planes[plane].layout);
+
+      /* Imported planes live where the exporter put them. Texture and PBE
+       * descriptors address 16-byte units; keep compressed layouts on the
+       * alignment hk gives its own planes.
+       */
+      if (mod_explicit_info &&
+          plane < mod_explicit_info->drmFormatModifierPlaneCount) {
+         uint64_t offset_B = mod_explicit_info->pPlaneLayouts[plane].offset;
+         unsigned align_B = compressed ? HK_PLANE_ALIGN_B : 16;
+         if (offset_B % align_B)
+            return VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT;
+         image->planes[plane].has_explicit_offset = true;
+         image->planes[plane].explicit_offset_B = offset_B;
+      }
    }
 
    return VK_SUCCESS;
@@ -1196,6 +1210,11 @@ hk_image_plane_add_req(struct hk_image_plane *plane, bool sparse,
    assert(util_is_power_of_two_or_zero64(plane_align_B));
 
    *align_B = MAX2(*align_B, plane_align_B);
+   if (plane->has_explicit_offset) {
+      *size_B = MAX2(*size_B, plane->explicit_offset_B + plane->layout.size_B);
+      return;
+   }
+
    *size_B = align64(*size_B, plane_align_B);
    *size_B += plane->layout.size_B;
 }
@@ -1405,7 +1424,9 @@ hk_get_image_subresource_layout(UNUSED struct hk_device *dev,
    const struct hk_image_plane *plane = &image->planes[p];
 
    uint64_t offset_B = 0;
-   if (!image->disjoint) {
+   if (plane->has_explicit_offset) {
+      offset_B = plane->explicit_offset_B;
+   } else if (!image->disjoint) {
       uint32_t align_B = 0;
       /* TODO: sparse? */
       for (unsigned plane = 0; plane < p; plane++)
@@ -1474,9 +1495,13 @@ hk_GetDeviceImageSubresourceLayoutKHR(
 
 static void
 hk_image_plane_bind(struct hk_device *dev, struct hk_image_plane *plane,
-                    struct hk_device_memory *mem, uint64_t *offset_B)
+                    struct hk_device_memory *mem, uint64_t base_B,
+                    uint64_t *offset_B)
 {
-   *offset_B = align64(*offset_B, HK_PLANE_ALIGN_B);
+   if (plane->has_explicit_offset)
+      *offset_B = base_B + plane->explicit_offset_B;
+   else
+      *offset_B = align64(*offset_B, HK_PLANE_ALIGN_B);
 
    if (plane->va) {
 #if 0
@@ -1531,10 +1556,12 @@ hk_BindImageMemory2(VkDevice device, uint32_t bindInfoCount,
             pBindInfos[i].pNext, BIND_IMAGE_PLANE_MEMORY_INFO);
          uint8_t plane =
             hk_image_aspects_to_plane(image, plane_info->planeAspect);
-         hk_image_plane_bind(dev, &image->planes[plane], mem, &offset_B);
+         hk_image_plane_bind(dev, &image->planes[plane], mem,
+                             pBindInfos[i].memoryOffset, &offset_B);
       } else {
          for (unsigned plane = 0; plane < image->plane_count; plane++) {
-            hk_image_plane_bind(dev, &image->planes[plane], mem, &offset_B);
+            hk_image_plane_bind(dev, &image->planes[plane], mem,
+                             pBindInfos[i].memoryOffset, &offset_B);
          }
       }
 
