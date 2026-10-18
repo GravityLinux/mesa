@@ -679,6 +679,46 @@ agx_apple9_set_compute_barrier(void *record, unsigned record_size)
    apple9_put_u32(tail, 0x60000160);
 }
 
+const char *
+agx_apple9_dispatch_reject_reason(
+   uint64_t launch, bool indirect, uint64_t indirect_address,
+   const uint32_t global[3], const uint32_t local[3],
+   const struct agx_apple9_compute_profile *profile)
+{
+   const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
+   if (!abi)
+      return "no compute ABI for the profile";
+   if (launch & 0x3f)
+      return "launch address not 64-byte aligned";
+   if (!apple9_compute_profile_valid(profile, abi))
+      return "invalid compute profile";
+   if (indirect) {
+      if (!abi->supports_indirect_dispatch)
+         return "ABI has no indirect dispatch";
+      if (!indirect_address)
+         return "null indirect address";
+      if (indirect_address & 3)
+         return "indirect address not 4-byte aligned";
+   } else if (!global) {
+      return "no grid";
+   }
+   if (!local)
+      return "no local size";
+   uint64_t threads = 1;
+   for (unsigned d = 0; d < 3; ++d) {
+      if (!indirect && !global[d])
+         return "zero grid axis";
+      if (!local[d])
+         return "zero local axis";
+      if (!profile->variable_local_size && local[d] != profile->local_size[d])
+         return "local size differs from the compiled one";
+      if (local[d] > 1024 / threads)
+         return "more than 1024 threads per workgroup";
+      threads *= local[d];
+   }
+   return NULL;
+}
+
 bool
 agx_apple9_emit_direct_dispatch(
    void *out, uint64_t launch, const uint32_t global[3],
@@ -686,9 +726,8 @@ agx_apple9_emit_direct_dispatch(
    bool barrier)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   if (!out || !abi || (launch & 0x3f) ||
-       !apple9_compute_profile_valid(profile, abi) ||
-       !agx_apple9_compute_grid_supported(profile, global, local))
+   if (!out ||
+       agx_apple9_dispatch_reject_reason(launch, false, 0, global, local, profile))
       return false;
 
    uint8_t *record = out;
@@ -713,20 +752,10 @@ agx_apple9_emit_indirect_dispatch(
    bool barrier)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   if (!out || !abi || !abi->supports_indirect_dispatch || !indirect ||
-       (launch & 0x3f) || (indirect & 3) ||
-       !apple9_compute_profile_valid(profile, abi))
+   if (!out ||
+       agx_apple9_dispatch_reject_reason(launch, true, indirect, NULL, local,
+                                         profile))
       return false;
-
-   uint64_t threads = 1;
-   for (unsigned d = 0; d < 3; ++d) {
-      if (!local[d] ||
-          (!profile->variable_local_size &&
-           local[d] != profile->local_size[d]) ||
-          local[d] > 1024 / threads)
-         return false;
-      threads *= local[d];
-   }
 
    uint8_t *record = out;
    uint64_t shader = ((launch >> 6) & 0xffffffffull) |

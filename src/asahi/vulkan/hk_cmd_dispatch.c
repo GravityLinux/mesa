@@ -390,6 +390,33 @@ hk_apple9_upload_textures(struct hk_cmd_buffer *cmd,
    return true;
 }
 
+/* Report why the CDM record emitter rejected a dispatch, with the values it
+ * checked, so an intermittent failure in an application log is diagnosable.
+ */
+static void
+hk_apple9_report_dispatch_reject(const char *where, struct agx_grid grid,
+                                 bool indirect_local, uint64_t launch,
+                                 const uint32_t threads[3],
+                                 const uint32_t local[3],
+                                 const struct agx_apple9_compute_profile *p)
+{
+   bool indirect = agx_is_indirect(grid);
+   const char *reason = agx_apple9_dispatch_reject_reason(
+      launch, indirect, indirect ? grid.ptr : 0, indirect ? NULL : threads,
+      local, p);
+   fprintf(stderr,
+           "Apple9 dispatch failed (6): %s %s record rejected: %s; "
+           "grid %u,%u,%u ptr 0x%" PRIx64 " local %u,%u,%u launch 0x%" PRIx64
+           " profile local %u,%u,%u variable %u resources %u\n",
+           where,
+           indirect_local ? "indirect-local" : indirect ? "indirect" : "direct",
+           reason ? reason : "(no check failed)",
+           threads[0], threads[1], threads[2], indirect ? grid.ptr : 0,
+           local[0], local[1], local[2], launch,
+           p->local_size[0], p->local_size[1], p->local_size[2],
+           p->variable_local_size, p->resource_binding_count);
+}
+
 void
 hk_apple9_dispatch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                    struct agx_bo *body,
@@ -503,7 +530,9 @@ hk_apple9_dispatch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          : agx_apple9_emit_direct_dispatch(rec, launch, geometry.threads,
                                           geometry.local, p, false);
       if (!ok) {
-         fprintf(stderr, "Apple9 dispatch failed (6)\n");
+         hk_apple9_report_dispatch_reject("batched", grid, indirect_local,
+                                          launch, geometry.threads,
+                                          geometry.local, p);
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
       }
@@ -534,7 +563,8 @@ hk_apple9_dispatch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       : agx_apple9_emit_direct_dispatch(cs->current, launch, geometry.threads,
                                        geometry.local, p, barrier);
    if (!ok) {
-      fprintf(stderr, "Apple9 dispatch failed (6)\n");
+      hk_apple9_report_dispatch_reject("stream", grid, indirect_local, launch,
+                                       geometry.threads, geometry.local, p);
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
    }
