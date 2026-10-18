@@ -42,8 +42,6 @@ DEBUG_GET_ONCE_OPTION(cached_agx_apple9_keep_unselected_hoists,
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_licm, "AGX_APPLE9_LICM", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_licm_speculate,
                       "AGX_APPLE9_LICM_SPECULATE", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_address_probe,
-                      "AGX_APPLE9_NO_ADDRESS_PROBE", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_bfe, "AGX_APPLE9_NO_BFE", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_descriptor_hoist,
                       "AGX_APPLE9_NO_DESCRIPTOR_HOIST", NULL)
@@ -7859,7 +7857,7 @@ apple9_compile_dag_tail(nir_shader *nir, struct agx_shader_part *out,
    struct agx_apple9_compute_profile original_profile = {0};
    bool have_original = false, original_ok = false, ok = false;
    bool use_original = false, address_done = false;
-   if (!debug_get_option_cached_agx_apple9_no_address_probe()) {
+   {
       struct agx_shader_part probe = {0};
       struct apple9_dag_cost probe_cost = {0};
       char *probe_log = NULL;
