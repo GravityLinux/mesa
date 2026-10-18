@@ -161,12 +161,6 @@ hk_pack_sampled_image(struct hk_device *dev, void *out,
             ip->min_lod_uint16 = desc[plane].min_lod_uint16;
             agx_apple9_translate_texture(ip->texture, &desc[plane].tex);
             hk_apple9_texture_info(ip->texture_info, &desc[plane].tex);
-            /* A padded compressed alias reports its logical width. */
-            if (info && info->imageView != VK_NULL_HANDLE) {
-               VK_FROM_HANDLE(hk_image_view, view, info->imageView);
-               if (view->planes[plane].alias_width_el)
-                  ip->texture_info[0] = view->planes[plane].alias_width_el;
-            }
          }
          if (sampled) {
             struct hk_apple9_sampler_part *sp =
