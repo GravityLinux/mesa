@@ -621,6 +621,37 @@ const nir_shader_compiler_options *
 hk_get_nir_options(struct vk_physical_device *vk_pdev, mesa_shader_stage stage,
                    UNUSED const struct vk_pipeline_robustness_state *rs);
 
+/* Core pipelines specialize immutable vertex and attachment state. Descriptor
+ * contents, draw parameters and blend constants remain GPU data. */
+struct hk_apple9_graphics_key {
+   struct agx_apple9_vertex_layout vertex;
+   struct agx_apple9_blend blend[8];
+   uint32_t targets;
+   /* Fragment output location written to each color attachment. */
+   uint8_t color_map[8];
+   /* VK_EXT_depth_clip_control: clip-space depth ranges over [-w, w]. */
+   bool clip_negative_one_to_one;
+   /* sampleShadingEnable: shade and interpolate per sample. */
+   bool sample_shading;
+   /* The depth/stencil attachment is also read as an input attachment. */
+   bool zs_self_dep;
+   /* stippledLineEnable: lines measure a stipple counter in the fragment
+    * shader, see hk_apple9_lower_line_stipple_fs. */
+   bool line_stipple;
+   /* Polygon mode POINT: triangles may be drawn by the software polygon
+    * stage, see hk_apple9_polygon_point_gs. */
+   bool polygon_points;
+   /* A passthrough geometry shader rasterizing for a vertex stage that
+    * publishes interpolated cull planes, see hk_apple9_compile_vertex_culls.
+    * Otherwise geometry shaders publish one flat primitive cull mask. */
+   bool gs_cull_planes;
+};
+
+bool hk_apple9_compile_native_mesh_program(
+   nir_shader *nir, const struct hk_apple9_graphics_key *key,
+   struct agx_shader_part *out, struct agx_apple9_mesh_body_info *info,
+   const char **reason);
+
 VkResult hk_apple9_compile_internal_gs(struct hk_device *dev, nir_shader *nir,
                                        const uint64_t fs_interp[2],
                                        bool cull_mask,

@@ -180,6 +180,18 @@ if with_tests
     )
   endforeach
   test(
+    'hk-native-mesh-options',
+    executable(
+      'hk-native-mesh-options', 'tests/hk-native-mesh-options.c',
+      include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                             inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+      dependencies : [hk_deps],
+      link_with : [libhk],
+    ),
+    env : ['HK_APPLE9_NATIVE_MESH=1', 'HK_APPLE9_NATIVE_MESH_ATTRIBUTES=1'],
+    suite : ['asahi', 'honeykrisp'],
+  )
+  test(
     'hk_sparse_residency',
     executable(
       'hk_sparse_residency',
