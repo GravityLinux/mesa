@@ -5336,6 +5336,16 @@ hk_apple9_draw_mesh(struct hk_cmd_buffer *cmd, uint32_t draw_id,
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
       }
+      /* Degenerate-index culling is exact for ordinary filled triangles.
+       * Lines, points and conservative rasterization need native compaction. */
+      if ((main->info.apple9_native.primitive_broadcast &
+           VARYING_BIT_CULL_PRIMITIVE) &&
+          (cmd->vk.dynamic_graphics_state.rs.polygon_mode != VK_POLYGON_MODE_FILL ||
+           cmd->vk.dynamic_graphics_state.rs.conservative_mode !=
+              VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT)) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+         return;
+      }
       uint64_t grid = hk_pool_upload(cmd, direct, 3 * sizeof(uint32_t), 4);
       if (grid)
          hk_apple9_draw_native_mesh(cmd, draw_id, grid);
