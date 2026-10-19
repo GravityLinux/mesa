@@ -174,6 +174,18 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_MESH_CONTROL,
    AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR,
    AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL,
+   /* A closed, call-site-specialized leaf region. Until allocation, logical
+    * execution order is CALL, callee instructions, RETURN, RESUME, continuation.
+    * All callee defs therefore interfere with caller values live across it.
+    * Layout moves the callee through RETURN out of line and assigns CALL's
+    * branch_target. RESUME restores the converged 16-lane caller mask.
+    * No hidden GPR clobber is assumed; that remains a hardware promotion gate.
+    * Nested calls, escaping callee SSA and divergent callers are unsupported. */
+   AGX_APPLE9_VIR_OBJECT_CALL,
+   AGX_APPLE9_VIR_OBJECT_RETURN,
+   AGX_APPLE9_VIR_OBJECT_RESUME,
+   /* Lane 0/1/2 publishes X/Y/Z from its allocated publication word. */
+   AGX_APPLE9_VIR_OBJECT_GRID_EXPORT,
 };
 
 /* The object-grid form is not an API workgroup barrier. */
@@ -411,6 +423,9 @@ struct agx_apple9_vir_instr {
    bool uniform_signed;
    /* Stable destination identity; byte displacement is computed at packing. */
    struct agx_apple9_block *branch_target;
+   /* A mask transition within a straight-line leaf region, rather than a
+    * NIR CFG edge. It remains an ordered effect inside the allocation block. */
+   bool local_control;
    /* Phi declaration and incoming edge uses remain SSA until packing. */
    struct agx_apple9_block *phi_block;
    struct agx_apple9_vir_instr *phi_edge;
@@ -702,6 +717,13 @@ bool agx_apple9_vir_emit_mesh_control(struct agx_apple9_vir_program *program,
 bool agx_apple9_vir_emit_mesh_submit(struct agx_apple9_vir_program *program,
                                      const uint32_t *src, unsigned components,
                                      bool release);
+
+bool agx_apple9_vir_emit_object_grid_call(struct agx_apple9_vir_program *program,
+                                         unsigned root, unsigned offset_B);
+/* After RA/scheduling, before packing. The main must end in HALT. No
+ * instructions are introduced. Returns true also when there are no calls. */
+bool agx_apple9_layout_object_calls(struct agx_apple9_vir_program *program,
+                                   const char **reason);
 
 bool agx_apple9_vir_emit_branch(struct agx_apple9_vir_program *program,
                                 enum agx_apple9_vir_opcode op,

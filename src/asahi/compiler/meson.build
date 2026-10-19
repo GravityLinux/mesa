@@ -135,6 +135,14 @@ if with_tests or with_tools.contains('drm-shim')
 endif
 
 if with_tests
+  apple9_native_object_test = executable('apple9-native-object',
+    'test/apple9-native-object.c',
+    c_args : [c_msvc_compat_args, no_override_init_args],
+    gnu_symbol_visibility : 'hidden',
+    dependencies : [idep_nir, idep_mesautil],
+    link_with : [libasahi_compiler],
+  )
+  test('apple9-native-object', apple9_native_object_test, suite : ['asahi'])
   apple9_native_mesh_test = executable('apple9-native-mesh',
     'test/apple9-native-mesh.c',
     c_args : [c_msvc_compat_args, no_override_init_args],
@@ -154,6 +162,7 @@ if with_tests
          'test/test-compact-constants.cpp',
          'test/test-apple9.cpp',
          'test/test-apple9-mesh.cpp',
+         'test/test-apple9-object.cpp',
          'test/test-apple9-opt.cpp',
          'test/test-apple9-shared-ra.cpp',
          'test/test-pressure-schedule.cpp',

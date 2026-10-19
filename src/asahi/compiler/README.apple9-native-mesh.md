@@ -162,3 +162,42 @@ mkdir -p <export-dir>
 The exported files require a native launch. They are test artifacts, not an
 asset-loader path in the driver. The metadata reports actual GPR/private-frame
 usage; it does not insert H1's experimental 64-byte frame override.
+
+## Object collective call
+
+`agx_nir_apple9_taskless_object` generates grid stores from runtime counts.
+`agx_compile_apple9_taskless_object` appends the semantic NIR operation
+`launch_mesh_workgroups_apple9_agx` after its workgroup barrier. The operation
+names a local root and byte offset for three uint32 grid counts; it has no
+physical register arguments. Selection emits a closed leaf region in logical
+execution order: OBJECT_CALL, ordinary grid-load/publication instructions,
+OBJECT_RETURN, OBJECT_RESUME. OBJECT_GRID_EXPORT consumes a normally allocated
+publication word. The scheduler treats call/return/resume as full resource
+barriers and drains pending work at each boundary. RA sees the caller and
+callee together, so all values live across the call interfere with callee
+temporaries. No call-saved bank or fixed temporary is reserved.
+
+After allocation, layout moves each callee out of line beyond the main STOP.
+The caller keeps CALL followed by RESUME; relative CALL fixups use the final
+callee block label. RETURN encodes convention-1 RET and RESUME encodes POP2.
+All operations, including the main STOP, were present before RA. Layout adds
+no instructions. No byte matching, fixed PC, padding,
+opaque token or post-RA register-bearing instruction insertion is involved.
+Leaf specialization deliberately avoids a general separate-compilation ABI.
+
+This models the provisional token-free contract in the device runner's `1366b83afc8`:
+one converged T16 object group, convention-1 CALL/RET, empty immediate-return
+mask and lanes 0–15 restored by POP2. Divergent callers, other widths, nested
+calls and scratch/spills are rejected. Hardware portability, hidden call GPR
+clobbers, frame backing/minima and arbitrary grid values remain unqualified.
+The compiler emits one program but retains `apple9_body_only`, so ordinary
+upload still rejects it. The observed object frame fields 16/16 must not be
+inferred from its zero spill requirement or reduced to zero by a future
+launch builder. No native runtime integration is enabled by this compiler work.
+
+The driver does not call `agx_compile_apple9_taskless_object`; its
+enable argument is false outside tests, and the disabled path leaves NIR and
+output untouched. The host-only `apple9-native-object` and `Apple9Object*`
+tests cover the compiler contract. Host interpretation checks our assumed
+call model; it cannot qualify the hardware ABI. Runtime staging, native
+binding and the reservation provider are separate (step-3) work.

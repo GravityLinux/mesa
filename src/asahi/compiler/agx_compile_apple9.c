@@ -1036,6 +1036,7 @@ apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
              op == nir_intrinsic_set_vertex_and_primitive_count ||
              op == nir_intrinsic_export_mesh_grid_word_apple9_agx ||
              op == nir_intrinsic_fence_mesh_grid_apple9_agx ||
+             op == nir_intrinsic_launch_mesh_workgroups_apple9_agx ||
              op == nir_intrinsic_store_local_apple9_agx ||
              op == nir_intrinsic_end_task_apple9_agx ||
              op == nir_intrinsic_load_local_apple9_agx ||
@@ -1150,6 +1151,7 @@ struct apple9_dag_lower {
    bool color_stores;
    bool tile_read;
    bool tile_write;
+   bool object_calls;
    bool tile_access;
    bool tile_coords;
    /* Fragment shader interlock holds the pixel acquired for writing. */
@@ -3396,7 +3398,8 @@ apple9_collect_buffer_map(nir_shader *nir, struct apple9_buffer_map *map,
 
          nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
          if (intr->intrinsic == nir_intrinsic_load_local_apple9_agx ||
-             intr->intrinsic == nir_intrinsic_store_local_apple9_agx)
+             intr->intrinsic == nir_intrinsic_store_local_apple9_agx ||
+             intr->intrinsic == nir_intrinsic_launch_mesh_workgroups_apple9_agx)
             map->native_root_words =
                MAX2(map->native_root_words,
                     ALIGN_POT(2 * nir_intrinsic_base(intr) + 2, 4));
@@ -4371,6 +4374,23 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
                return false;
             continue;
          }
+         if (intr->intrinsic == nir_intrinsic_launch_mesh_workgroups_apple9_agx) {
+            /* The measured contract is one converged 16-lane object group.
+             * Do not silently generalize it to divergent or nested calls. */
+            if (lower->nir->info.stage != MESA_SHADER_TASK ||
+                lower->nir->info.workgroup_size_variable ||
+                lower->nir->info.workgroup_size[0] != 16 ||
+                lower->nir->info.workgroup_size[1] != 1 ||
+                lower->nir->info.workgroup_size[2] != 1 ||
+                block->cf_node.parent->type != nir_cf_node_function ||
+                !agx_apple9_vir_emit_object_grid_call(&lower->program,
+                   nir_intrinsic_base(intr), nir_intrinsic_range_base(intr))) {
+               lower->reason = "object grid calls require a converged T16 leaf caller";
+               return false;
+            }
+            lower->object_calls = true;
+            continue;
+         }
          if (intr->intrinsic == nir_intrinsic_fence_mesh_grid_apple9_agx) {
             if (lower->nir->info.stage != MESA_SHADER_TASK ||
                 !agx_apple9_vir_emit_side_effect(
@@ -4392,7 +4412,7 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
                                AGX_APPLE9_ENC_LOGIC_EXPORT, sources, 2, 0);
             if (publication == AGX_APPLE9_VREG_INVALID ||
                 !agx_apple9_vir_emit_side_effect(
-                   &lower->program, AGX_APPLE9_VIR_VARY_STORE,
+                   &lower->program, AGX_APPLE9_VIR_OBJECT_GRID_EXPORT,
                    AGX_APPLE9_ENC_OBJECT_GRID_EXPORT, &publication, 1, 0))
                return false;
             continue;
@@ -6477,6 +6497,13 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
       goto fail;
    }
 
+   /* A callable object needs a main terminator before its out-of-line leaves.
+    * Include it in scheduling so every completion edge is visible pre-RA. */
+   if (lower.object_calls &&
+       !agx_apple9_vir_emit_side_effect(&lower.program, AGX_APPLE9_VIR_HALT,
+          AGX_APPLE9_ENC_HALT, NULL, 0, 0))
+      goto fail;
+
    agx_apple9_place_phis(&lower.program);
    lower.program.fragment_shader = nir->info.stage == MESA_SHADER_FRAGMENT;
 
@@ -6485,6 +6512,10 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
       goto fail;
    }
    if (!agx_apple9_allocate_shared(&lower.program, nir, reason))
+      goto fail;
+
+   if (lower.object_calls &&
+       !agx_apple9_layout_object_calls(&lower.program, reason))
       goto fail;
 
    if (agx_apple9_trace_enabled()) {
@@ -6603,7 +6634,8 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
       const struct agx_apple9_vir_instr *instruction =
          lower.program.instructions[i];
       if (instruction->op != AGX_APPLE9_VIR_JMP_EXEC_ANY &&
-          instruction->op != AGX_APPLE9_VIR_JMP_EXEC_NONE)
+          instruction->op != AGX_APPLE9_VIR_JMP_EXEC_NONE &&
+          instruction->op != AGX_APPLE9_VIR_OBJECT_CALL)
          continue;
 
       if (!instruction->branch_target || !instruction->branch_target->placed) {
@@ -6671,7 +6703,8 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
          fprintf(apple9_log(), "%02x", binary[i]);
       fputc('\n', apple9_log());
    }
-   apple9_emit_stop(&emitter);
+   if (!lower.object_calls)
+      apple9_emit_stop(&emitter);
    if (cost) {
       *cost = (struct apple9_dag_cost){
          .instructions = lower.program.instruction_count,
@@ -8475,6 +8508,30 @@ agx_compile_apple9_mesh_lowered(nir_shader *nir,
       return false;
    out->info.apple9_body_only = true;
    return true;
+}
+
+bool
+agx_compile_apple9_taskless_object(
+   bool enable_native_mesh, const struct agx_apple9_mesh_key *key,
+   struct agx_shader_part *out, const char **reason)
+{
+   if (!enable_native_mesh || !out || !key) {
+      if (reason)
+         *reason = "native object compilation needs the development gate and ABI";
+      return false;
+   }
+   nir_shader *body = agx_nir_apple9_taskless_object(key);
+   if (!body) {
+      if (reason)
+         *reason = "invalid native object grid ABI";
+      return false;
+   }
+   nir_builder b = nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(body)));
+   nir_launch_mesh_workgroups_apple9_agx(&b, .base = key->grid_root,
+                                        .range_base = key->grid_offset_B);
+   bool ok = agx_compile_apple9_mesh_lowered(body, key, out, reason);
+   ralloc_free(body);
+   return ok;
 }
 
 static unsigned

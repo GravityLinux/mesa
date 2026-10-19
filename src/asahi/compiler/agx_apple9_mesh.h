@@ -105,6 +105,21 @@ struct nir_builder;
 bool agx_nir_apple9_object_grid_export(struct nir_builder *b,
                                        const struct agx_apple9_mesh_key *key);
 
+/* Driver-generated taskless object body. Its draw argument points to three
+ * uint32_t mesh group counts. It stores them collectively to the grid root.
+ * The completion export is a separate function, not an inline STOP epilogue. */
+nir_shader *agx_nir_apple9_taskless_object(
+   const struct agx_apple9_mesh_key *key);
+
+/* Compile the taskless producer and a token-free collective grid call in one
+ * allocation unit. The measured width-16/convention-1/POP2 contract remains
+ * provisional pending portability and GPR-preservation results. body_only
+ * stays set: native entry, frame backing and reservation/submission are still
+ * driver promotion gates. The disabled gate neither mutates NIR nor output. */
+bool agx_compile_apple9_taskless_object(
+   bool enable_native_mesh, const struct agx_apple9_mesh_key *key,
+   struct agx_shader_part *out, const char **reason);
+
 /* Compile the lowered body through ordinary instruction selection and RA.
  * The returned binary is deliberately body-only (see info), not a production
  * native launch path. Native compilation is separate from the compute-emulated

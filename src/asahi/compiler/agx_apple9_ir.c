@@ -432,6 +432,176 @@ agx_apple9_vir_emit_side_effect(struct agx_apple9_vir_program *program,
 }
 
 bool
+agx_apple9_vir_emit_object_grid_call(struct agx_apple9_vir_program *p,
+                                    unsigned root, unsigned offset_B)
+{
+   if (!p || root >= 64 || (offset_B & 3) ||
+       offset_B > AGX_APPLE9_MAX_SHARED_BYTES - 12)
+      return false;
+
+   /* Closed leaf calls are specialized per call site and allocated together
+    * with their caller. This is logical execution order, not binary layout.
+    * The three dimensions belong to lanes 0/1/2 of the same 16-lane object
+    * group. No argument or scratch GPR is fixed by this convention.
+    *
+    * The callee's operations are the semantics of
+    * agx_nir_apple9_object_grid_export (fence, lane < 3, load, publish),
+    * re-expressed from the user-approved object-helper decode (2026-10-14)
+    * through our own encoders; nothing here is derived from the opaque mesh
+    * helper. It is written in VIR only because layout needs a single-block
+    * region; selecting it from NIR is a follow-up before productising. */
+   if (!agx_apple9_vir_emit_side_effect(p, AGX_APPLE9_VIR_OBJECT_CALL,
+          AGX_APPLE9_ENC_OBJECT_CALL, NULL, 0, 0))
+      return false;
+   uint32_t lane = agx_apple9_vir_emit(p, AGX_APPLE9_VIR_GET_SR,
+                                      AGX_APPLE9_ENC_GET_SR, NULL, 0, 0xa7);
+   uint32_t limit = agx_apple9_vir_emit(p, AGX_APPLE9_VIR_IMM,
+                                      AGX_APPLE9_ENC_MOV_IMM32, NULL, 0, 3);
+   uint32_t compare[] = {lane, limit};
+   if (lane == AGX_APPLE9_VREG_INVALID || limit == AGX_APPLE9_VREG_INVALID ||
+       !agx_apple9_vir_emit_side_effect(p, AGX_APPLE9_VIR_DEVICE_FENCE,
+          AGX_APPLE9_ENC_DEVICE_FENCE, NULL, 0, AGX_APPLE9_FENCE_OBJECT_GRID) ||
+       !agx_apple9_vir_emit_side_effect(p, AGX_APPLE9_VIR_PREDICATE_COMPARE,
+          AGX_APPLE9_ENC_PREDICATE_COMPARE_SHORT, compare, 2,
+          AGX_APPLE9_PREDICATE_ULT) ||
+       !agx_apple9_vir_emit_side_effect(p, AGX_APPLE9_VIR_EXEC_MASK_PUSH,
+          AGX_APPLE9_ENC_EXEC_MASK_PUSH, NULL, 0,
+          AGX_APPLE9_EXEC_MASK_PREDICATE(0)))
+      return false;
+   p->instructions[p->instruction_count - 1]->local_control = true;
+   uint32_t address = lane;
+   if (offset_B) {
+      uint32_t offset = agx_apple9_vir_emit(p, AGX_APPLE9_VIR_IMM,
+         AGX_APPLE9_ENC_MOV_IMM32, NULL, 0, offset_B / 4);
+      uint32_t add[] = {lane, offset};
+      if (offset == AGX_APPLE9_VREG_INVALID)
+         return false;
+      address = agx_apple9_vir_emit(p, AGX_APPLE9_VIR_IADD,
+         AGX_APPLE9_ENC_INT_ADD_EXTENDED, add, 2, 0);
+   }
+   if (address == AGX_APPLE9_VREG_INVALID)
+      return false;
+   uint32_t word = agx_apple9_vir_emit(p, AGX_APPLE9_VIR_SHARED_LOAD,
+      AGX_APPLE9_ENC_SHARED_LOAD, &address, 1, root);
+   if (word == AGX_APPLE9_VREG_INVALID)
+      return false;
+   p->instructions[p->instruction_count - 1]->producer_scoreboard_slot =
+      AGX_APPLE9_SCOREBOARD_SLOT_6;
+   uint32_t zero = agx_apple9_vir_emit(p, AGX_APPLE9_VIR_IMM,
+      AGX_APPLE9_ENC_MOV_IMM32, NULL, 0, 0);
+   if (zero == AGX_APPLE9_VREG_INVALID)
+      return false;
+   uint32_t source[] = {word, zero};
+   uint32_t publication = agx_apple9_vir_emit(p, AGX_APPLE9_VIR_IXOR,
+      AGX_APPLE9_ENC_LOGIC_EXPORT, source, 2, 0);
+   if (publication == AGX_APPLE9_VREG_INVALID ||
+       !agx_apple9_vir_emit_side_effect(p, AGX_APPLE9_VIR_OBJECT_GRID_EXPORT,
+          AGX_APPLE9_ENC_OBJECT_GRID_EXPORT, &publication, 1, 0) ||
+       !agx_apple9_vir_emit_side_effect(p, AGX_APPLE9_VIR_EXEC_MASK_POP,
+          AGX_APPLE9_ENC_EXEC_MASK_POP, NULL, 0, 0))
+      return false;
+   p->instructions[p->instruction_count - 1]->local_control = true;
+   return agx_apple9_vir_emit_side_effect(p, AGX_APPLE9_VIR_OBJECT_RETURN,
+         AGX_APPLE9_ENC_OBJECT_RETURN, NULL, 0, 0) &&
+      agx_apple9_vir_emit_side_effect(p, AGX_APPLE9_VIR_OBJECT_RESUME,
+         AGX_APPLE9_ENC_OBJECT_RESUME, NULL, 0, 0);
+}
+
+bool
+agx_apple9_layout_object_calls(struct agx_apple9_vir_program *p,
+                              const char **reason)
+{
+   /* Validate before moving anything. Each closed callee is a single logical
+    * block: its mask operations cannot escape the call. Real task functions,
+    * nested calls and spill frames require further ABI work. */
+   struct agx_apple9_vir_instr *call = NULL;
+   bool returned = false, found = false;
+   for (unsigned i = 0; i < p->instruction_count; ++i) {
+      struct agx_apple9_vir_instr *I = p->instructions[i];
+      if (returned && I->op != AGX_APPLE9_VIR_OBJECT_RESUME)
+         goto invalid;
+      switch (I->op) {
+      case AGX_APPLE9_VIR_OBJECT_CALL:
+         if (call || I->branch_target)
+            goto invalid;
+         call = I;
+         found = true;
+         break;
+      case AGX_APPLE9_VIR_OBJECT_RETURN:
+         if (!call)
+            goto invalid;
+         returned = true;
+         break;
+      case AGX_APPLE9_VIR_OBJECT_RESUME:
+         if (!returned)
+            goto invalid;
+         call = NULL;
+         returned = false;
+         break;
+      default:
+         if (call && (I->branch_target || I->op == AGX_APPLE9_VIR_HALT ||
+                      I->op == AGX_APPLE9_VIR_PHI ||
+                      I->op == AGX_APPLE9_VIR_PHI_SRC))
+            goto invalid;
+         break;
+      }
+      if (call && agx_apple9_instr_block(call) != agx_apple9_instr_block(I))
+         goto invalid;
+   }
+   if (call)
+      goto invalid;
+   if (!found)
+      return true;
+   if (!p->physical || !p->dependencies_finalized || p->scratch_size) {
+      if (reason)
+         *reason = "object calls require scheduled allocation without scratch";
+      return false;
+   }
+
+   /* STOP separates the main from its leaf functions. Every instruction,
+    * including that terminator, has already been allocated and scheduled. */
+   if (p->instructions[p->instruction_count - 1]->op != AGX_APPLE9_VIR_HALT)
+      goto invalid;
+   struct agx_apple9_block *last_main = p->last_block;
+   for (struct agx_apple9_block *b = p->blocks; b; b = b->next) {
+      struct apple9_instruction_node *node =
+         list_is_empty(&b->instructions) ? NULL :
+            list_first_entry(&b->instructions, struct apple9_instruction_node, link);
+      while (node) {
+         if (node->instruction.op == AGX_APPLE9_VIR_OBJECT_CALL) {
+            struct agx_apple9_block *callee = agx_apple9_block_create(p);
+            if (!callee)
+               return false;
+            agx_apple9_block_begin(p, callee);
+            node->instruction.branch_target = callee;
+            bool end;
+            do {
+               struct apple9_instruction_node *move =
+                  list_entry(node->link.next, struct apple9_instruction_node, link);
+               end = move->instruction.op == AGX_APPLE9_VIR_OBJECT_RETURN;
+               list_del(&move->link);
+               list_addtail(&move->link, &callee->instructions);
+               move->block = callee;
+            } while (!end);
+         }
+         node = node->link.next == &b->instructions ? NULL :
+            list_entry(node->link.next, struct apple9_instruction_node, link);
+      }
+      if (b == last_main)
+         break;
+   }
+   agx_apple9_vir_reindex(p);
+   /* Only layout changed. Control boundaries already drain dependencies. */
+   p->dependencies_finalized = true;
+   return true;
+
+invalid:
+   if (reason)
+      *reason = "invalid closed object call region";
+   return false;
+}
+
+bool
 agx_apple9_vir_emit_branch(struct agx_apple9_vir_program *program,
                            enum agx_apple9_vir_opcode op,
                            enum agx_apple9_encoding encoding,
@@ -1715,7 +1885,8 @@ apple9_vir_producer_instruction(const struct agx_apple9_vir_program *program,
 static bool
 apple9_vir_is_graphics_output(enum agx_apple9_vir_opcode op)
 {
-   return op == AGX_APPLE9_VIR_COVERAGE || op == AGX_APPLE9_VIR_DEPTH_STORE || op == AGX_APPLE9_VIR_VARY_STORE ||
+   return op == AGX_APPLE9_VIR_OBJECT_GRID_EXPORT ||
+          op == AGX_APPLE9_VIR_COVERAGE || op == AGX_APPLE9_VIR_DEPTH_STORE || op == AGX_APPLE9_VIR_VARY_STORE ||
           op == AGX_APPLE9_VIR_TILE_ACCESS ||
           op == AGX_APPLE9_VIR_TILE_STORE || op == AGX_APPLE9_VIR_TILE_FENCE ||
           op == AGX_APPLE9_VIR_BLOCK_IMAGE_STORE || op == AGX_APPLE9_VIR_IMAGE_STORE;
@@ -1724,7 +1895,10 @@ apple9_vir_is_graphics_output(enum agx_apple9_vir_opcode op)
 static bool
 apple9_vir_is_control_side_effect(enum agx_apple9_vir_opcode op)
 {
-   return op == AGX_APPLE9_VIR_MESH_CONTROL ||
+   return op == AGX_APPLE9_VIR_OBJECT_CALL ||
+          op == AGX_APPLE9_VIR_OBJECT_RETURN ||
+          op == AGX_APPLE9_VIR_OBJECT_RESUME ||
+          op == AGX_APPLE9_VIR_MESH_CONTROL ||
           op == AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR ||
           op == AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL ||
           op == AGX_APPLE9_VIR_PREDICATE_COMPARE ||
@@ -1838,6 +2012,7 @@ apple9_validate_value_files(const struct agx_apple9_vir_program *program,
                 (!table_index &&
                  (ins->op == AGX_APPLE9_VIR_COVERAGE || ins->op == AGX_APPLE9_VIR_DEPTH_STORE ||
                   ins->op == AGX_APPLE9_VIR_VARY_STORE ||
+                  ins->op == AGX_APPLE9_VIR_OBJECT_GRID_EXPORT ||
                   ins->op == AGX_APPLE9_VIR_TEXTURE_SAMPLE ||
                   ins->op == AGX_APPLE9_VIR_BLOCK_IMAGE_STORE ||
                   ins->op == AGX_APPLE9_VIR_IMAGE_STORE)))
@@ -2264,6 +2439,16 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
             valid &= instruction->encoding == AGX_APPLE9_ENC_HALT &&
                      instruction->nr_srcs == 0 && instruction->immediate == 0;
             break;
+         case AGX_APPLE9_VIR_OBJECT_CALL:
+         case AGX_APPLE9_VIR_OBJECT_RETURN:
+         case AGX_APPLE9_VIR_OBJECT_RESUME:
+            valid &= instruction->encoding ==
+               (instruction->op == AGX_APPLE9_VIR_OBJECT_CALL
+                  ? AGX_APPLE9_ENC_OBJECT_CALL
+                : instruction->op == AGX_APPLE9_VIR_OBJECT_RETURN
+                  ? AGX_APPLE9_ENC_OBJECT_RETURN : AGX_APPLE9_ENC_OBJECT_RESUME) &&
+               instruction->nr_srcs == 0 && instruction->immediate == 0;
+            break;
          case AGX_APPLE9_VIR_LOOP_MASK_POP:
             valid &= instruction->encoding == AGX_APPLE9_ENC_LOOP_MASK_POP &&
                      instruction->nr_srcs == 0 && instruction->immediate == 0;
@@ -2310,6 +2495,7 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
 
       if (instruction->op == AGX_APPLE9_VIR_COVERAGE || instruction->op == AGX_APPLE9_VIR_DEPTH_STORE ||
           instruction->op == AGX_APPLE9_VIR_VARY_STORE ||
+          instruction->op == AGX_APPLE9_VIR_OBJECT_GRID_EXPORT ||
           instruction->op == AGX_APPLE9_VIR_TILE_ACCESS ||
           instruction->op == AGX_APPLE9_VIR_TILE_STORE ||
           instruction->op == AGX_APPLE9_VIR_TILE_FENCE ||
@@ -6829,6 +7015,25 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       packed_init(packed, bytes, sizeof(bytes));
       return true;
    }
+   case AGX_APPLE9_VIR_OBJECT_CALL:
+   case AGX_APPLE9_VIR_OBJECT_RETURN:
+   case AGX_APPLE9_VIR_OBJECT_RESUME: {
+      bool call = instruction->op == AGX_APPLE9_VIR_OBJECT_CALL;
+      bool ret = instruction->op == AGX_APPLE9_VIR_OBJECT_RETURN;
+      if (instruction->encoding != (call ? AGX_APPLE9_ENC_OBJECT_CALL
+               : ret ? AGX_APPLE9_ENC_OBJECT_RETURN : AGX_APPLE9_ENC_OBJECT_RESUME) ||
+          instruction->nr_srcs || instruction->dest != AGX_APPLE9_VREG_INVALID ||
+          (!call && instruction->immediate))
+         return false;
+      uint8_t bytes[10];
+      bool ok = call ? agx_apple9_encode_call(bytes, 1, (int32_t)instruction->immediate)
+               : ret ? agx_apple9_encode_return(bytes, 1)
+                     : agx_apple9_encode_exec_pop(bytes, 2);
+      if (!ok)
+         return false;
+      packed_init(packed, bytes, call ? 10 : ret ? 4 : 6);
+      return true;
+   }
    case AGX_APPLE9_VIR_PRIVATE_LOAD:
    case AGX_APPLE9_VIR_PRIVATE_STORE: {
       bool load = instruction->op == AGX_APPLE9_VIR_PRIVATE_LOAD;
@@ -7057,18 +7262,20 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       packed_init(packed, bytes, sizeof(bytes));
       return true;
    }
+   case AGX_APPLE9_VIR_OBJECT_GRID_EXPORT: {
+      if (instruction->encoding != AGX_APPLE9_ENC_OBJECT_GRID_EXPORT ||
+          instruction->nr_srcs != 1 || instruction->immediate ||
+          instruction->dest != AGX_APPLE9_VREG_INVALID ||
+          phys[instruction->src[0]] >= AGX_APPLE9_PUBLICATION_COUNT)
+         return false;
+      /* Each of the three collective invocations publishes its grid
+       * word. This target has no UVS slot or instruction wait mask. */
+      const uint8_t bytes[] = {
+         0x57, 0x16, 0x54, phys[instruction->src[0]] << 1, 0, 0, 0x48, 0};
+      packed_init(packed, bytes, sizeof(bytes));
+      return true;
+   }
    case AGX_APPLE9_VIR_VARY_STORE: {
-      if (instruction->encoding == AGX_APPLE9_ENC_OBJECT_GRID_EXPORT) {
-         if (instruction->nr_srcs != 1 || instruction->immediate ||
-             phys[instruction->src[0]] >= AGX_APPLE9_PUBLICATION_COUNT)
-            return false;
-         /* Each of the three collective invocations publishes its grid
-          * word. This target has no UVS slot or instruction wait mask. */
-         const uint8_t bytes[] = {
-            0x57, 0x16, 0x54, phys[instruction->src[0]] << 1, 0, 0, 0x48, 0};
-         packed_init(packed, bytes, sizeof(bytes));
-         return true;
-      }
       if (instruction->encoding != AGX_APPLE9_ENC_VARY_STORE ||
           instruction->nr_srcs != 1 || instruction->immediate >= AGX_APPLE9_MAX_UVS_SLOTS ||
           phys[instruction->src[0]] >= AGX_APPLE9_PUBLICATION_COUNT)

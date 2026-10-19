@@ -1998,6 +1998,18 @@ static const struct agx_apple9_encoding_info encodings[] = {
                  2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_PUBLICATION,
                  AGX_APPLE9_EVIDENCE_HARDWARE)},
       },
+   [AGX_APPLE9_ENC_OBJECT_CALL] = {
+      .name = "object_call", .length = 10, .allocator_safe = true,
+      .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+   },
+   [AGX_APPLE9_ENC_OBJECT_RETURN] = {
+      .name = "object_return", .length = 4, .allocator_safe = true,
+      .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+   },
+   [AGX_APPLE9_ENC_OBJECT_RESUME] = {
+      .name = "object_resume", .length = 6, .allocator_safe = true,
+      .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+   },
    [AGX_APPLE9_ENC_PUBLICATION_PAIR] =
       {
          .name = "publication_pair",

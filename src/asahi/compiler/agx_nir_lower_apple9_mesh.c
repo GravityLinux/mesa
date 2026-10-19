@@ -6,6 +6,7 @@
 #include "util/bitscan.h"
 #include "util/u_dynarray.h"
 #include "agx_apple9_mesh.h"
+#include "agx_nir.h"
 
 static bool
 fail(const char **reason, const char *text)
@@ -681,4 +682,39 @@ agx_nir_apple9_object_grid_export(nir_builder *b,
    nir_export_mesh_grid_word_apple9_agx(b, word);
    nir_pop_if(b, NULL);
    return true;
+}
+
+nir_shader *
+agx_nir_apple9_taskless_object(const struct agx_apple9_mesh_key *key)
+{
+   if (!key || key->grid_root >= 64 ||
+       (key->physical_threads && key->physical_threads != 16) ||
+       2 * key->grid_root < key->reserved_uniform_words ||
+       key->grid_root == AGX_APPLE9_MESH_DRAW_UNIFORM / 2 ||
+       (key->grid_offset_B & 3) ||
+       key->grid_offset_B > AGX_APPLE9_MAX_SHARED_BYTES - 12)
+      return NULL;
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_TASK, &agx_nir_options, "apple9_taskless_object");
+   b.shader->info.workgroup_size[0] = 16;
+   b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
+   nir_push_if(&b, nir_ieq_imm(&b, nir_load_local_invocation_index(&b), 0));
+   nir_def *address = nir_pack_64_2x32(
+      &b, nir_load_native_pointer_apple9_agx(
+             &b, .base = AGX_APPLE9_MESH_DRAW_UNIFORM));
+   for (unsigned i = 0; i < 3; ++i) {
+      nir_def *count = nir_load_global(
+         &b, 1, 32, nir_iadd_imm(&b, address, 4 * i), .align_mul = 4,
+         .access = ACCESS_NON_WRITEABLE);
+      nir_store_local_apple9_agx(
+         &b, count, nir_imm_int(&b, key->grid_offset_B + 4 * i),
+         .base = key->grid_root, .bit_size = 32);
+   }
+   nir_pop_if(&b, NULL);
+   nir_barrier(&b, .execution_scope = SCOPE_WORKGROUP,
+               .memory_scope = SCOPE_WORKGROUP,
+               .memory_semantics = NIR_MEMORY_ACQ_REL,
+               .memory_modes = nir_var_mem_shared);
+   nir_validate_shader(b.shader, "Apple9 taskless object grid stores");
+   return b.shader;
 }
