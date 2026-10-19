@@ -112,6 +112,10 @@ bool agx_nir_mask_apple9_mesh_body(nir_shader *nir,
  * The caller must provide a collective helper context. This is not a valid
  * inline task epilogue: call/frame/entry setup remains unresolved. */
 struct nir_builder;
+/* Expand collective grid calls after NIR optimization and validate closed
+ * regions before selection. Returns success, including when no calls exist. */
+bool agx_nir_lower_apple9_object_calls(struct nir_shader *nir, const char **reason);
+
 bool agx_nir_apple9_object_grid_export(struct nir_builder *b,
                                        const struct agx_apple9_mesh_key *key);
 

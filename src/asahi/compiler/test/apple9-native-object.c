@@ -57,6 +57,14 @@ check_variant(unsigned root, unsigned offset, const uint32_t groups[3])
                             : 0xcd;
       CHECK(m.local[i] == expected);
    }
+   /* Execute the same ordinary NIR callee that selection now sees. */
+   CHECK(agx_nir_lower_apple9_object_calls(body, &reason));
+   nir_validate_shader(body, "expanded closed object call");
+   m.barriers = m.object_calls = m.grid_fences = m.grid_exports = 0;
+   run(body, &m);
+   CHECK(m.barriers == 1 && m.object_calls == 1);
+   CHECK(m.grid_fences == ALL_LANES && m.grid_exports == 7);
+   CHECK(!memcmp(m.grid, groups, sizeof(m.grid)));
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_TASK, &agx_nir_options, "test_object_export");
    b.shader->info.workgroup_size[0] = 16;
@@ -119,6 +127,103 @@ check_rejected_caller(unsigned width, bool divergent)
    ralloc_free(b.shader);
 }
 
+static void
+check_multiple_calls(unsigned pressure)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_TASK, &agx_nir_options, "object_calls_live_nir");
+   b.shader->info.workgroup_size[0] = 16;
+   b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
+   nir_def *address = nir_pack_64_2x32(&b,
+      nir_load_native_pointer_apple9_agx(&b, .base = AGX_APPLE9_MESH_DRAW_UNIFORM));
+   nir_def *values[40];
+   for (unsigned i = 0; i < pressure; ++i)
+      values[i] = nir_load_global(&b, 1, 32, nir_iadd_imm(&b, address, 4 * i),
+                                  .align_mul = 4);
+   nir_launch_mesh_workgroups_apple9_agx(&b, .base = 7);
+   nir_launch_mesh_workgroups_apple9_agx(&b, .base = 10, .range_base = 64);
+   /* Both a callee-to-caller CFG edge and live values across two callees. */
+   nir_push_if(&b, nir_ieq_imm(&b, nir_load_local_invocation_index(&b), 0));
+   for (unsigned i = 0; i < pressure; ++i)
+      nir_store_global(&b, values[i], nir_iadd_imm(&b, address, 256 + 4 * i),
+                       .align_mul = 4);
+   nir_pop_if(&b, NULL);
+   struct agx_apple9_mesh_key key = AGX_APPLE9_MESH_KEY;
+   struct agx_shader_part part = {0};
+   const char *reason = NULL;
+   if (!agx_compile_apple9_mesh_lowered(b.shader, &key, &part, &reason)) {
+      fprintf(stderr, "two calls: %s\n", reason);
+      exit(1);
+   }
+   unsigned calls = 0, returns = 0;
+   const uint8_t *bytes = part.binary;
+   for (unsigned i = 0; i + 10 <= part.info.binary_size; i += 2) {
+      if (!memcmp(bytes + i, "\x8f\x10\x54", 3)) {
+         CHECK(!memcmp(bytes + i + 10, "\x0f\x06\x04\x02\x00\x00", 6));
+         ++calls;
+      }
+   }
+   for (unsigned i = 0; i + 4 <= part.info.binary_size; i += 2)
+      returns += !memcmp(bytes + i, "\x8f\x12\x54\x00", 4);
+   CHECK(calls == 2 && returns == 2 && !part.info.scratch_size);
+   printf("two NIR calls: live=%u gprs=%u bytes=%u\n", pressure,
+          part.info.nr_gprs, part.info.binary_size);
+   free(part.binary);
+   ralloc_free(b.shader);
+}
+
+static void
+check_rejected_region(unsigned kind)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_TASK, &agx_nir_options, "invalid_object_region");
+   b.shader->info.workgroup_size[0] = 16;
+   b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
+   if (kind == 0) {
+      nir_end_object_call_apple9_agx(&b);
+   } else if (kind == 7) {
+      nir_def *caller = nir_load_local_invocation_index(&b);
+      nir_begin_object_call_apple9_agx(&b);
+      nir_export_mesh_grid_word_apple9_agx(&b, caller);
+      nir_end_object_call_apple9_agx(&b);
+   } else {
+      nir_begin_object_call_apple9_agx(&b);
+      if (kind == 1) {
+         nir_begin_object_call_apple9_agx(&b);
+      } else if (kind == 2) {
+         nir_push_loop(&b);
+         nir_jump(&b, nir_jump_break);
+         nir_pop_loop(&b, NULL);
+      } else if (kind == 3 || kind == 4) {
+         nir_def *value = nir_load_local_invocation_index(&b);
+         if (kind == 4)
+            value = nir_ieq_imm(&b, value, 0);
+         nir_end_object_call_apple9_agx(&b);
+         if (kind == 3) {
+            nir_export_mesh_grid_word_apple9_agx(&b, value);
+         } else {
+            nir_push_if(&b, value);
+            nir_fence_mesh_grid_apple9_agx(&b);
+            nir_pop_if(&b, NULL);
+         }
+      } else if (kind == 5) {
+         nir_push_if(&b, nir_ieq_imm(&b, nir_load_local_invocation_index(&b), 0));
+         nir_def *yes = nir_imm_int(&b, 1);
+         nir_push_else(&b, NULL);
+         nir_def *no = nir_imm_int(&b, 2);
+         nir_pop_if(&b, NULL);
+         nir_export_mesh_grid_word_apple9_agx(&b, nir_if_phi(&b, yes, no));
+      }
+      /* kind 6 deliberately leaves the region unclosed. */
+      if (kind != 3 && kind != 4 && kind != 6)
+         nir_end_object_call_apple9_agx(&b);
+   }
+   const char *reason = NULL;
+   CHECK(!agx_nir_lower_apple9_object_calls(b.shader, &reason));
+   CHECK(reason && !strcmp(reason, "invalid closed NIR object call region"));
+   ralloc_free(b.shader);
+}
+
 int
 main(void)
 {
@@ -139,6 +244,11 @@ main(void)
    key.grid_offset_B = 0;
    key.physical_threads = 32;
    CHECK(!agx_nir_apple9_taskless_object(&key));
+   for (unsigned i = 0; i < 8; ++i)
+      check_rejected_region(i);
+   check_multiple_calls(1);
+   check_multiple_calls(12);
+   check_multiple_calls(40);
    check_rejected_caller(1, false);
    check_rejected_caller(32, false);
    check_rejected_caller(16, true);

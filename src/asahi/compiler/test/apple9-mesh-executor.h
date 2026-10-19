@@ -249,6 +249,18 @@ execute(struct machine *m, struct exec_list *list, unsigned active)
       if (node->type == nir_cf_node_block) {
          nir_block *block = nir_cf_node_as_block(node);
          nir_foreach_instr(i, block) {
+            if (i->type == nir_instr_type_intrinsic) {
+               nir_intrinsic_op op = nir_instr_as_intrinsic(i)->intrinsic;
+               if (op == nir_intrinsic_begin_object_call_apple9_agx) {
+                  CHECK(active == ALL_LANES && m->barriers);
+                  m->object_calls++;
+                  m->grid_fences = m->grid_exports = 0;
+                  continue;
+               } else if (op == nir_intrinsic_end_object_call_apple9_agx) {
+                  CHECK(active == ALL_LANES && m->grid_exports == 7);
+                  continue;
+               }
+            }
             if (i->type == nir_instr_type_intrinsic &&
                 nir_instr_as_intrinsic(i)->intrinsic ==
                    nir_intrinsic_launch_mesh_workgroups_apple9_agx) {

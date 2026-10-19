@@ -416,8 +416,9 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
       if (!common)
          continue;
       if (block->nir) {
+         nir_block *exit = block->nir_exit ?: block->nir;
          for (unsigned s = 0; s < 2; ++s) {
-            nir_block *succ = block->nir->successors[s];
+            nir_block *succ = exit->successors[s];
             agx_block *next =
                apple9_shared_block(ra, apple9_nir_block(ra, succ));
             if (!next)
@@ -1391,6 +1392,7 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
    unsigned layout = 0;
    for (struct agx_apple9_block *block = program->blocks; block; block = block->next) {
       blocks[block->index]->nir = block->nir;
+      blocks[block->index]->nir_exit = block->nir_exit;
       position[block->index] = layout++;
       unsigned end = block->next ? block->next->start_index : program->instruction_count;
       struct agx_apple9_block **succ = &successors[4 * block->index];
@@ -1401,11 +1403,12 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
              last->op == AGX_APPLE9_VIR_JMP_EXEC_NONE)
             succ[1] = last->branch_target;
       }
-      for (unsigned s = 0; block->nir && s < 2; ++s) {
-         if (!block->nir->successors[s])
+      nir_block *exit = block->nir_exit ?: block->nir;
+      for (unsigned s = 0; exit && s < 2; ++s) {
+         if (!exit->successors[s])
             continue;
          struct hash_entry *entry =
-            _mesa_hash_table_search(nir_blocks, block->nir->successors[s]);
+            _mesa_hash_table_search(nir_blocks, exit->successors[s]);
          if (entry)
             succ[2 + s] = entry->data;
       }
@@ -1766,6 +1769,7 @@ apple9_allocate_candidate(struct agx_apple9_vir_program *program,
          goto cleanup;
       /* Physical scheduling follows the logical CFG's loop edges too. */
       blocks[block->index]->nir = block->nir;
+      blocks[block->index]->nir_exit = block->nir_exit;
    }
    /* Instruction indices grouped by block, in program order, for blocks
     * emitted directly from VIR. */
