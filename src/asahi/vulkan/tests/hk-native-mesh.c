@@ -119,20 +119,26 @@ check_contract(bool object, unsigned attributes)
          .ppp_viewport_offset = 0x100, .ppp_viewport_words = 10,
       };
       const uint32_t groups[] = {1, 1, 1}, wide[] = {2, 1, 1};
+      const uint32_t local[] = {16, 1, 1}, scalar[] = {1, 1, 1};
       uint32_t command[HK_APPLE9_MESH_COMMAND_BYTES / 4], before[40];
       CHECK(hk_apple9_mesh_command_build(command, sizeof(command), &pipeline,
-                                          packet, groups, true));
+                                          packet, groups, local, true));
       CHECK(!memcmp(command, packet, sizeof(packet)));
       CHECK(command[32] == (0x70000000 | (AGX_PRIMITIVE_TRIANGLES << 8)));
-      for (unsigned i = 33; i < 39; ++i)
-         CHECK(command[i] == 1);
+      for (unsigned i = 0; i < 3; ++i) {
+         CHECK(command[33 + i] == groups[i] * local[i]);
+         CHECK(command[36 + i] == local[i]);
+      }
       CHECK(command[39] == 0xc0000000);
       memcpy(before, command, sizeof(command));
       CHECK(!hk_apple9_mesh_command_build(command, sizeof(command), &pipeline,
-                                           packet, groups, false));
+                                           packet, groups, local, false));
       CHECK(!memcmp(before, command, sizeof(command)));
       CHECK(!hk_apple9_mesh_command_build(command, sizeof(command), &pipeline,
-                                           packet, wide, true));
+                                           packet, wide, local, true));
+      CHECK(!memcmp(before, command, sizeof(command)));
+      CHECK(!hk_apple9_mesh_command_build(command, sizeof(command), &pipeline,
+                                           packet, groups, scalar, true));
       CHECK(!memcmp(before, command, sizeof(command)));
       state.task_payload_size_B = 4;
       CHECK(!agx_apple9_mesh_state_build(packet, &state));
@@ -144,11 +150,56 @@ check_contract(bool object, unsigned attributes)
    ralloc_free(nir);
 }
 
+/* Feed the packet's actual physical entry width to the independent encoded
+ * mask checker. The logical size changes the NIR wrapper, never that width. */
+static void
+mask_fixtures(void)
+{
+   const unsigned sizes[] = {1, 3, 16};
+   for (unsigned i = 0; i < ARRAY_SIZE(sizes); ++i) {
+      const struct agx_apple9_mesh_key key = AGX_APPLE9_MESH_KEY;
+      nir_shader *nir = agx_nir_apple9_taskless_object(&key);
+      nir->info.workgroup_size[0] = sizes[i];
+      struct agx_shader_part part = {0};
+      struct agx_apple9_mesh_body_info info;
+      const char *reason = NULL;
+      CHECK(agx_compile_apple9_native_object(nir, true, &key, &part, &info, &reason));
+      CHECK(info.logical_size[0] == sizes[i]);
+      uint32_t local[3];
+      for (unsigned c = 0; c < 3; ++c)
+         local[c] = part.info.workgroup_size[c];
+      const uint32_t groups[] = {1, 1, 1};
+      /* Header/PPP contents do not affect the dispatch-tail/mask contract. */
+      uint32_t state[AGX_APPLE9_MESH_STATE_WORDS] = {0};
+      struct agx_apple9_render_pipeline pipeline = {
+         .ppp = 0x4000, .primitive = AGX_PRIMITIVE_TRIANGLES,
+      };
+      uint32_t command[HK_APPLE9_MESH_COMMAND_BYTES / 4];
+      CHECK(hk_apple9_mesh_command_build(command, sizeof(command), &pipeline,
+                                          state, groups, local, true));
+      printf("object-mask logical=%u physical=%u dispatch=", sizes[i], local[0]);
+      for (unsigned c = 33; c < 39; ++c)
+         printf("%s%u", c == 33 ? "" : ",", command[c]);
+      printf(" binary=");
+      for (unsigned c = 0; c < part.info.binary_size; ++c)
+         printf("%02x", ((const uint8_t *)part.binary)[c]);
+      putchar('\n');
+      free(part.binary);
+      ralloc_free(nir);
+   }
+}
+
 int
-main(void)
+main(int argc, char **argv)
 {
    CHECK(!hk_apple9_native_mesh_enabled());
    glsl_type_singleton_init_or_ref();
+   if (argc == 2 && !strcmp(argv[1], "--mask-fixtures")) {
+      mask_fixtures();
+      glsl_type_singleton_decref();
+      return 0;
+   }
+   CHECK(argc == 1);
    check_contract(false, 0);
    check_contract(false, 1);
    check_contract(false, 5);

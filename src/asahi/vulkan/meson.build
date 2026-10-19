@@ -165,19 +165,25 @@ if with_tests
     suite : ['asahi', 'honeykrisp'],
   )
   foreach t : ['hk-image-limits', 'hk-stage-output-limits', 'hk-cull-output-limits', 'hk-pregfx-recording', 'hk-heap-resubmit', 'hk-heap-addresses', 'hk-native-image-store', 'hk-mesh-query', 'hk-native-mesh']
+    contract_test = executable(
+      t,
+      'tests/' + t + '.c',
+      include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                             inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+      dependencies : [hk_deps],
+      link_with : [libhk],
+      link_args : t == 'hk-heap-addresses' ? ['-Wl,--wrap=hk_dispatch_precomp'] : [],
+    )
     test(
       t,
-      executable(
-        t,
-        'tests/' + t + '.c',
-        include_directories : [inc_gallium, inc_gallium_aux, inc_include,
-                               inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
-        dependencies : [hk_deps],
-        link_with : [libhk],
-        link_args : t == 'hk-heap-addresses' ? ['-Wl,--wrap=hk_dispatch_precomp'] : [],
-      ),
+      contract_test,
       suite : ['asahi', 'honeykrisp'],
     )
+    if t == 'hk-native-mesh'
+      test('hk-native-object-mask', prog_python,
+        args : [files('tests/check-native-object-mask.py'), contract_test],
+        suite : ['asahi', 'honeykrisp'])
+    endif
   endforeach
   test(
     'hk-native-mesh-options',

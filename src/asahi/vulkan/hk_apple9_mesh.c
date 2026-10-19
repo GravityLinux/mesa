@@ -96,11 +96,15 @@ bool
 hk_apple9_mesh_command_build(void *out, size_t capacity,
                              const struct agx_apple9_render_pipeline *p,
                              const uint32_t state[AGX_APPLE9_MESH_STATE_WORDS],
-                             const uint32_t groups[3], bool enable)
+                             const uint32_t groups[3],
+                             const uint32_t object_local_size[3], bool enable)
 {
-   if (!enable || !out || !p || !state || !groups ||
+   if (!enable || !out || !p || !state || !groups || !object_local_size ||
        capacity < HK_APPLE9_MESH_COMMAND_BYTES || groups[0] != 1 ||
-       groups[1] != 1 || groups[2] != 1 || p->primitive > 0xf || (p->ppp & 3) ||
+       groups[1] != 1 || groups[2] != 1 ||
+       object_local_size[0] != AGX_APPLE9_NATIVE_THREADS ||
+       object_local_size[1] != 1 || object_local_size[2] != 1 ||
+       p->primitive > 0xf || (p->ppp & 3) ||
        p->ppp > UINT32_MAX - AGX_APPLE9_PPP_RECORD_MAX ||
        p->ppp_viewport_words > 255 || (p->ppp_viewport_offset & 3) ||
        p->ppp_viewport_offset > AGX_APPLE9_PPP_RECORD_MAX - 12)
@@ -123,10 +127,14 @@ hk_apple9_mesh_command_build(void *out, size_t capacity,
    }
    words[at++] = p->ppp + 0xf0;
    words[at++] = 0x70000000 | (p->primitive << 8);
+   /* The dispatch tail carries total threads, then local threads. The mesh
+    * state count is independent of object entry participation. Launch the
+    * compiler's physical workgroup so ordinary mask pops can reconverge all
+    * completion lanes, even when only API lane zero runs the taskless body. */
    for (unsigned i = 0; i < 3; ++i)
-      words[at++] = groups[i];
+      words[at++] = groups[i] * object_local_size[i];
    for (unsigned i = 0; i < 3; ++i)
-      words[at++] = 1;
+      words[at++] = object_local_size[i];
    words[at++] = 0xc0000000;
    assert(at == ARRAY_SIZE(words));
    memcpy(out, words, sizeof(words));

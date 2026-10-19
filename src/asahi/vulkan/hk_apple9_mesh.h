@@ -41,4 +41,5 @@ bool hk_apple9_mesh_command_build(
    void *out, size_t capacity,
    const struct agx_apple9_render_pipeline *pipeline,
    const uint32_t state[AGX_APPLE9_MESH_STATE_WORDS],
-   const uint32_t object_groups[3], bool enable);
+   const uint32_t object_groups[3], const uint32_t object_local_size[3],
+   bool enable);

@@ -1032,12 +1032,16 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    if (native_grid) {
       uint32_t state[AGX_APPLE9_MESH_STATE_WORDS];
       const uint32_t object_groups[] = {1, 1, 1};
+      const struct hk_shader *object = &mesh->variants[HK_MESH_VARIANT_OBJECT];
+      const uint32_t object_local_size[] = {
+         object->b.info.workgroup_size[0], object->b.info.workgroup_size[1],
+         object->b.info.workgroup_size[2],
+      };
       if (!hk_apple9_prepare_native_mesh(
-             cmd, shaders[0], &mesh->variants[HK_MESH_VARIANT_OBJECT],
-             record, native_grid, state) ||
+             cmd, shaders[0], object, record, native_grid, state) ||
           !hk_apple9_mesh_command_build(
              cs->current, HK_APPLE9_MESH_COMMAND_BYTES, &pipeline, state,
-             object_groups, hk_apple9_native_mesh_enabled()))
+             object_groups, object_local_size, hk_apple9_native_mesh_enabled()))
          UNSUPPORTED();
       cs->current += HK_APPLE9_MESH_COMMAND_BYTES - 4;
       cs->apple9_native_mesh = true;
