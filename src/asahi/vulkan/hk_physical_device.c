@@ -1855,9 +1855,11 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
       props->maxTaskPayloadSize = 0;
       props->maxMeshSharedMemorySize = 0;
       props->maxMeshPayloadAndSharedMemorySize = 0;
-      props->maxMeshOutputMemorySize = 96;
-      props->maxMeshPayloadAndOutputMemorySize = 96;
-      props->maxMeshOutputComponents = 4;
+      unsigned components = 4 + (hk_apple9_native_mesh_attributes_enabled()
+                                    ? AGX_APPLE9_MAX_VARYING_COMPONENTS : 0);
+      props->maxMeshOutputMemorySize = 32 + 16 * components;
+      props->maxMeshPayloadAndOutputMemorySize = props->maxMeshOutputMemorySize;
+      props->maxMeshOutputComponents = components;
       props->maxMeshOutputVertices = 3;
       props->maxMeshOutputPrimitives = 1;
       props->maxMeshOutputLayers = 1;
