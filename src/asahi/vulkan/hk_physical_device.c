@@ -1855,9 +1855,11 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
       props->maxTaskPayloadSize = 0;
       props->maxMeshSharedMemorySize = 0;
       props->maxMeshPayloadAndSharedMemorySize = 0;
-      unsigned components = 4 + (hk_apple9_native_mesh_attributes_enabled()
-                                    ? AGX_APPLE9_MAX_VARYING_COMPONENTS : 0);
-      props->maxMeshOutputMemorySize = 32 + 16 * components;
+      /* Bound user locations by the channels left after XYZW. Position still
+       * occupies four planes in the internal local-memory allocation. */
+      unsigned components = hk_apple9_native_mesh_attributes_enabled()
+                               ? AGX_APPLE9_MAX_VARYING_COMPONENTS : 0;
+      props->maxMeshOutputMemorySize = 32 + 16 * (4 + components);
       props->maxMeshPayloadAndOutputMemorySize = props->maxMeshOutputMemorySize;
       props->maxMeshOutputComponents = components;
       props->maxMeshOutputVertices = 3;
