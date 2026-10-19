@@ -29,9 +29,10 @@ enum {
 /* Two references: one geometry allocation and one primitive-list allocation.
  * The general measured header count is n + floor(n / 3). */
 #define AGX_MESH_SHORT_ROOT_REFERENCE_COUNT 2u
-#define AGX_MESH_SHORT_ROOT_COUNT \
-   (AGX_MESH_SHORT_ROOT_REFERENCE_COUNT + AGX_MESH_SHORT_ROOT_REFERENCE_COUNT / 3)
-#define AGX_MESH_SHORT_ROOT_VALID_MASK \
+#define AGX_MESH_SHORT_ROOT_COUNT                                              \
+   (AGX_MESH_SHORT_ROOT_REFERENCE_COUNT +                                      \
+    AGX_MESH_SHORT_ROOT_REFERENCE_COUNT / 3)
+#define AGX_MESH_SHORT_ROOT_VALID_MASK                                         \
    ((1u << AGX_MESH_SHORT_ROOT_REFERENCE_COUNT) - 1)
 
 /* Semantic operands of ordinary record formation. These are compiler IR,
@@ -115,10 +116,10 @@ void agx_nir_apple9_mesh_write_short_root(nir_builder *b, nir_def *address,
  * Includes ordinary body lowering/masking and collective rendezvous. Runtime
  * destinations/state remain semantic loads; no reservation/publication
  * mechanism is invented. Failure is a compile gate, not clipping behavior. */
-bool agx_nir_lower_apple9_mesh_formation(
-   nir_shader *nir, const struct agx_apple9_mesh_key *key,
-   struct agx_apple9_mesh_body_info *info,
-   const char **reason);
+bool agx_nir_lower_apple9_mesh_formation(nir_shader *nir,
+                                         const struct agx_apple9_mesh_key *key,
+                                         struct agx_apple9_mesh_body_info *info,
+                                         const char **reason);
 
 #ifdef __cplusplus
 }

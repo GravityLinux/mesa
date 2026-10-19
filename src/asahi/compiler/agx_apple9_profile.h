@@ -34,10 +34,10 @@ enum agx_apple9_compute_abi {
  * after that padded window and extend through the last uniform word. */
 #define AGX_APPLE9_GRAPHICS_ROOT_WORDS 12
 
-/* Native task/mesh ABI v1 extends the six graphics pointer roots. Local
+/* Native task/mesh ABI extends the six graphics pointer roots. Local
  * selectors address pairs of uniform words; payload names its first word.
  * The existing groups/shared roots remain owned by the graphics ABI. */
-#define AGX_APPLE9_MESH_ABI_VERSION     4
+#define AGX_APPLE9_MESH_ABI_VERSION     5
 #define AGX_APPLE9_MESH_OUTPUT_ROOT     6
 #define AGX_APPLE9_MESH_GRID_ROOT       7
 #define AGX_APPLE9_MESH_PAYLOAD_UNIFORM 16

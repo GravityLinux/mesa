@@ -205,9 +205,12 @@ agx_nir_apple9_mesh_triangle_tokens(
 {
    nir_def *tokens = nir_imm_int(b, 0);
    for (unsigned i = 0; i < 3; ++i)
-      tokens =
-         nir_ior(b, tokens,
-                 nir_ishl_imm(b, nir_ior_imm(b, compact->id[i], AGX_MESH_OBS_COMPACT_REFERENCE_TAG), i * 8));
+      tokens = nir_ior(
+         b, tokens,
+         nir_ishl_imm(
+            b,
+            nir_ior_imm(b, compact->id[i], AGX_MESH_OBS_COMPACT_REFERENCE_TAG),
+            i * 8));
    return nir_ior(b, tokens, nir_ishl_imm(b, nir_b2i32(b, backface), 23));
 }
 
@@ -230,7 +233,8 @@ agx_nir_apple9_mesh_write_header(
    store(b, address, 16, s->fragment_launch);
    store(b, address, 20, nir_ior(b, s->depth_control, s->front_ccw));
    store(b, address, 24,
-         nir_ior(b, s->depth_face_2, nir_iand_imm(b, s->depth_face, AGX_MESH_DEPTH_FACE_LOW_MASK)));
+         nir_ior(b, s->depth_face_2,
+                 nir_iand_imm(b, s->depth_face, AGX_MESH_DEPTH_FACE_LOW_MASK)));
    nir_def *stencil = nir_test_mask(b, s->depth_control, 1 << 18);
    nir_def *scissor = nir_test_mask(b, s->depth_control, (1 << 16) | (1 << 17));
    nir_push_if(b, stencil);
@@ -258,8 +262,9 @@ agx_nir_apple9_mesh_write_short_list(nir_builder *b, nir_def *address,
    word(b, address, 0, AGX_MESH_OBS_SHORT_LIST_TAG);
    store(b, address, 4, nir_ishl_imm(b, geometry_id, 5));
    /* One surviving primitive, hence one set bit in the primitive mask. */
-   word(b, address, 8, AGX_MESH_OBS_SHORT_LIST_TAIL |
-                          (1u << AGX_MESH_SHORT_LIST_PRIMITIVE_MASK_SHIFT));
+   word(b, address, 8,
+        AGX_MESH_OBS_SHORT_LIST_TAIL |
+           (1u << AGX_MESH_SHORT_LIST_PRIMITIVE_MASK_SHIFT));
 }
 
 void
@@ -274,8 +279,8 @@ agx_nir_apple9_mesh_write_short_root(nir_builder *b, nir_def *address,
    store(b, address, 16, geometry_id);
    store(b, address, 20, nir_ishl_imm(b, list_id, 9));
    store(b, address, 24, nir_ushr_imm(b, list_id, 23));
-   word(b, address, 28, AGX_MESH_SHORT_ROOT_VALID_MASK <<
-                           AGX_MESH_ROOT_VALID_MASK_SHIFT);
+   word(b, address, 28,
+        AGX_MESH_SHORT_ROOT_VALID_MASK << AGX_MESH_ROOT_VALID_MASK_SHIFT);
 }
 
 static bool
@@ -287,7 +292,8 @@ prepare(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       b->cursor = nir_before_instr(&intr->instr);
       nir_push_if(b, nir_ieq_imm(b, nir_load_local_invocation_index(b), 0));
       /* Compiler-owned local scratch in the unused count-header word. */
-      nir_store_local_apple9_agx(b, intr->src[0].ssa, nir_imm_int(b, info->layout.primitive_count_B + 4),
+      nir_store_local_apple9_agx(b, intr->src[0].ssa,
+                                 nir_imm_int(b, info->layout.vertex_count_B),
                                  .base = key->output_root, .bit_size = 32);
       nir_pop_if(b, NULL);
       return true;
@@ -309,12 +315,11 @@ finite_normal_or_zero(nir_builder *b, nir_def *v)
       nir_ior(b, nir_ieq_imm(b, a, 0), nir_uge_imm(b, a, 0x800000)));
 }
 
-
 bool
-agx_nir_lower_apple9_mesh_formation(
-   nir_shader *nir, const struct agx_apple9_mesh_key *key,
-   struct agx_apple9_mesh_body_info *info,
-   const char **reason)
+agx_nir_lower_apple9_mesh_formation(nir_shader *nir,
+                                    const struct agx_apple9_mesh_key *key,
+                                    struct agx_apple9_mesh_body_info *info,
+                                    const char **reason)
 {
    if (nir->info.stage != MESA_SHADER_MESH || nir->info.shared_size ||
        nir->info.task_payload_size || nir->info.mesh.max_vertices_out != 3 ||
@@ -352,13 +357,13 @@ agx_nir_lower_apple9_mesh_formation(
       nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(nir)));
    rendezvous(&b);
    nir_push_if(&b, nir_ieq_imm(&b, nir_load_local_invocation_index(&b), 0));
-   nir_def *vertices = nir_load_local_apple9_agx(&b, nir_imm_int(&b, l->primitive_count_B + 4),
-                                                 .base = key->output_root);
-   nir_def *count =
-      nir_iand_imm(&b,
-                   nir_load_local_apple9_agx(&b, nir_imm_int(&b, l->primitive_count_B),
-                                             .base = key->output_root),
-                   0xffff);
+   nir_def *vertices = nir_load_local_apple9_agx(
+      &b, nir_imm_int(&b, l->vertex_count_B), .base = key->output_root);
+   nir_def *count = nir_iand_imm(
+      &b,
+      nir_load_local_apple9_agx(&b, nir_imm_int(&b, l->primitive_count_B),
+                                .base = key->output_root),
+      0xffff);
    nir_def *ready = nir_ine_imm(&b, input(&b, AGX_MESH_RESERVATION_READY), 0);
    nir_push_if(&b, ready);
    nir_def *scene = input(&b, AGX_MESH_SCENE_ADDRESS);
@@ -476,8 +481,8 @@ agx_nir_lower_apple9_mesh_formation(
    agx_nir_apple9_mesh_write_short_root(&b, input(&b, AGX_MESH_ROOT_ADDRESS),
                                         rid, gid, lid);
    store(&b, scene, 8, rid);
-   word(&b, scene, 12, AGX_MESH_SHORT_ROOT_COUNT <<
-                          AGX_MESH_SCENE_ROOT_COUNT_SHIFT);
+   word(&b, scene, 12,
+        AGX_MESH_SHORT_ROOT_COUNT << AGX_MESH_SCENE_ROOT_COUNT_SHIFT);
    fence(&b);
    store(&b, scene, 0, rid);
    word(&b, scene, 4, AGX_MESH_OBS_SCENE_ROOT_FLAGS);

@@ -135,6 +135,17 @@ if with_tests or with_tools.contains('drm-shim')
 endif
 
 if with_tests
+  apple9_native_mesh_test = executable('apple9-native-mesh',
+    'test/apple9-native-mesh.c',
+    c_args : [c_msvc_compat_args, no_override_init_args],
+    gnu_symbol_visibility : 'hidden',
+    dependencies : [idep_nir, idep_mesautil],
+    link_with : [libasahi_compiler],
+  )
+  test('apple9-native-mesh', prog_python,
+    args : [files('test/check-apple9-native-mesh.py'), apple9_native_mesh_test],
+    suite : ['asahi'],
+  )
   test(
     'agx_tests',
     executable(

@@ -6,7 +6,7 @@
 
 bool
 agx_apple9_encode_mesh(uint8_t out[6],
-                        const struct agx_apple9_mesh_instruction *ins)
+                       const struct agx_apple9_mesh_instruction *ins)
 {
    if (!out || !ins)
       return false;
@@ -28,10 +28,8 @@ agx_apple9_encode_mesh(uint8_t out[6],
           (ins->mode == AGX_APPLE9_MESH_SUBMIT_CHANNEL &&
            ins->source_gpr + 1 >= AGX_APPLE9_GPR_COUNT))
          return false;
-      word = UINT64_C(0x0006005406d7) |
-             ((uint64_t)ins->source_gpr << 24) |
-             ((uint64_t)ins->release << 31) |
-             ((uint64_t)ins->mode << 35);
+      word = UINT64_C(0x0006005406d7) | ((uint64_t)ins->source_gpr << 24) |
+             ((uint64_t)ins->release << 31) | ((uint64_t)ins->mode << 35);
       break;
    default:
       return false;
@@ -44,7 +42,7 @@ agx_apple9_encode_mesh(uint8_t out[6],
 
 bool
 agx_apple9_decode_mesh(const uint8_t in[6],
-                        struct agx_apple9_mesh_instruction *ins)
+                       struct agx_apple9_mesh_instruction *ins)
 {
    if (!in || !ins)
       return false;
@@ -53,8 +51,8 @@ agx_apple9_decode_mesh(const uint8_t in[6],
       word |= (uint64_t)in[i] << (8 * i);
 
    struct agx_apple9_mesh_instruction decoded = {0};
-   const uint64_t count_mask = (UINT64_C(255) << 24) |
-                               (UINT64_C(255) << 33) | (UINT64_C(1) << 42);
+   const uint64_t count_mask =
+      (UINT64_C(255) << 24) | (UINT64_C(255) << 33) | (UINT64_C(1) << 42);
    const uint64_t submit_mask = (UINT64_C(255) << 24) | (UINT64_C(3) << 35);
    if ((word & ~count_mask) == UINT64_C(0x300000540357)) {
       unsigned a = (word >> 24) & 255, b = (word >> 33) & 255;

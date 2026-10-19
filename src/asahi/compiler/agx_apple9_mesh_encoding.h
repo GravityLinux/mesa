@@ -43,10 +43,11 @@ struct agx_apple9_mesh_instruction {
 /* Only the observed six-byte register forms are accepted. Unknown header,
  * file/width and control bits are rejected rather than silently normalized.
  * These encode individual instructions; no executable spans are accepted. */
-bool agx_apple9_encode_mesh(uint8_t out[6],
-                           const struct agx_apple9_mesh_instruction *instruction);
+bool
+agx_apple9_encode_mesh(uint8_t out[6],
+                       const struct agx_apple9_mesh_instruction *instruction);
 bool agx_apple9_decode_mesh(const uint8_t in[6],
-                           struct agx_apple9_mesh_instruction *instruction);
+                            struct agx_apple9_mesh_instruction *instruction);
 
 #ifdef __cplusplus
 }

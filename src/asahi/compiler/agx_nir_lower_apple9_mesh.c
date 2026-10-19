@@ -74,7 +74,8 @@ validate(nir_shader *nir, const struct agx_apple9_mesh_key *key,
         key->physical_threads < logical_threads || key->physical_threads > 256))
       return fail(reason, "invalid Apple9 mesh physical workgroup width");
    if (expanded && nir->info.derivative_group != DERIVATIVE_GROUP_NONE)
-      return fail(reason, "expanded Apple9 mesh derivative groups are unsupported");
+      return fail(reason,
+                  "expanded Apple9 mesh derivative groups are unsupported");
    /* No native allocator currently separates user shared memory from the
     * local grid/output allocation. Reject both explicit IO and declarations
     * before lowering; a frontend may not have assigned shared_size yet. */
@@ -224,6 +225,7 @@ validate(nir_shader *nir, const struct agx_apple9_mesh_key *key,
     * and user values are component planes, each rounded to four vertices.
     * Culling reserves one four-byte slot per primitive before positions. */
    layout->primitive_count_B = ALIGN_POT(layout->max_primitives * 3, 16);
+   layout->vertex_count_B = layout->primitive_count_B + 4;
    layout->cull_B = layout->primitive_count_B + 16;
    layout->position_B =
       layout->cull_B + (layout->culling ? layout->max_primitives * 4 : 0);
@@ -260,10 +262,10 @@ freeze_logical_workgroup(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       return false;
    b->cursor = nir_before_instr(&intr->instr);
    nir_def *value = intr->intrinsic == nir_intrinsic_load_num_subgroups
-      ? nir_imm_int(b, DIV_ROUND_UP(threads, 32))
-      : nir_imm_ivec3(b, b->shader->info.workgroup_size[0],
-                        b->shader->info.workgroup_size[1],
-                        b->shader->info.workgroup_size[2]);
+                       ? nir_imm_int(b, DIV_ROUND_UP(threads, 32))
+                       : nir_imm_ivec3(b, b->shader->info.workgroup_size[0],
+                                       b->shader->info.workgroup_size[1],
+                                       b->shader->info.workgroup_size[2]);
    nir_def_replace(&intr->def, value);
    return true;
 }
@@ -271,15 +273,15 @@ freeze_logical_workgroup(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 /* Mask one application region, leaving the adjacent rendezvous converged.
  * Cross-region values are repaired after all regions have been extracted. */
 static void
-mask_region(nir_cursor start, nir_cursor end,
-            unsigned threads)
+mask_region(nir_cursor start, nir_cursor end, unsigned threads)
 {
    if (nir_cursors_equal(start, end))
       return;
    nir_cf_list user;
    start = nir_cf_extract(&user, start, end);
    nir_builder b = nir_builder_at(start);
-   nir_push_if(&b, nir_ult_imm(&b, nir_load_local_invocation_index(&b), threads));
+   nir_push_if(&b,
+               nir_ult_imm(&b, nir_load_local_invocation_index(&b), threads));
    b.cursor = nir_cf_reinsert(&user, b.cursor);
    nir_pop_if(&b, NULL);
 }
@@ -307,25 +309,27 @@ workgroup_rendezvous(nir_builder *b)
  * read the word after each: it can only change between rendezvous B and
  * B + 1, so they see it at k = B (racing the store) or at k = B + 1, and in
  * the first case take one more rendezvous. Each simdgroup decides on one
- * read (its first lane's), so its lanes cannot see the race differently. Both sides then meet at a final
- * rendezvous and the word is cleared. Nothing depends on how hardware treats
- * simdgroups that have exited. The word is the unused last word of the output
- * count header; it reads zero again before the body ends. */
+ * read (its first lane's), so its lanes cannot see the race differently. Both
+ * sides then meet at a final rendezvous and the word is cleared. Nothing
+ * depends on how hardware treats simdgroups that have exited. The word is the
+ * unused last word of the output count header; it reads zero again before the
+ * body ends. */
 #define NESTED_PENDING 0xffffffffu
 
 static void
-mask_nested(nir_function_impl *impl, unsigned threads,
-            unsigned root, unsigned word)
+mask_nested(nir_function_impl *impl, unsigned threads, unsigned root,
+            unsigned word)
 {
-   nir_variable *count = nir_local_variable_create(impl, glsl_uint_type(),
-                                                   "mesh_barriers");
+   nir_variable *count =
+      nir_local_variable_create(impl, glsl_uint_type(), "mesh_barriers");
    /* Count every application workgroup barrier where it executes. */
    nir_foreach_block(block, impl) {
       nir_foreach_instr(instr, block) {
          if (!is_workgroup_barrier(instr))
             continue;
          nir_builder b = nir_builder_at(nir_before_instr(instr));
-         nir_store_var(&b, count, nir_iadd_imm(&b, nir_load_var(&b, count), 1), 1);
+         nir_store_var(&b, count, nir_iadd_imm(&b, nir_load_var(&b, count), 1),
+                       1);
       }
    }
    nir_cf_list user;
@@ -353,15 +357,16 @@ mask_nested(nir_function_impl *impl, unsigned threads,
    }
    nir_push_else(&b, NULL);
    {
-      nir_variable *seen = nir_local_variable_create(impl, glsl_uint_type(),
-                                                     "mesh_rendezvous");
-      nir_variable *published = nir_local_variable_create(impl, glsl_uint_type(),
-                                                          "mesh_published");
+      nir_variable *seen =
+         nir_local_variable_create(impl, glsl_uint_type(), "mesh_rendezvous");
+      nir_variable *published =
+         nir_local_variable_create(impl, glsl_uint_type(), "mesh_published");
       nir_store_var(&b, seen, nir_imm_int(&b, 0), 1);
       nir_push_loop(&b);
       {
          workgroup_rendezvous(&b);
-         nir_store_var(&b, seen, nir_iadd_imm(&b, nir_load_var(&b, seen), 1), 1);
+         nir_store_var(&b, seen, nir_iadd_imm(&b, nir_load_var(&b, seen), 1),
+                       1);
          /* One value per simdgroup: lanes racing the store must not split. */
          nir_def *value = nir_read_first_invocation(
             &b, nir_load_local_apple9_agx(&b, offset, .base = root));
@@ -370,7 +375,8 @@ mask_nested(nir_function_impl *impl, unsigned threads,
       }
       nir_pop_loop(&b, NULL);
       /* Seen at k = B: the application still owes its closing rendezvous. */
-      nir_push_if(&b, nir_ieq(&b, nir_load_var(&b, seen), nir_load_var(&b, published)));
+      nir_push_if(
+         &b, nir_ieq(&b, nir_load_var(&b, seen), nir_load_var(&b, published)));
       workgroup_rendezvous(&b);
       nir_pop_if(&b, NULL);
    }
@@ -415,7 +421,8 @@ agx_nir_mask_apple9_mesh_body(nir_shader *nir,
       }
    }
    if (nested && !layout)
-      return fail(reason, "expanded native mesh nested barriers need the output layout");
+      return fail(
+         reason, "expanded native mesh nested barriers need the output layout");
 
    /* Flatten the physical launch without changing the application's 3D IDs,
     * WorkgroupSize, or subgroup count. Freeze newly inserted size loads too. */
@@ -537,9 +544,9 @@ lower_intrinsic(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       nir_push_if(b, nir_ieq_imm(b, nir_load_local_invocation_index(b), 0));
       /* Every supported primitive capacity fits the 16-bit logical count.
        * Its memory handoff may reserve a wider zero-extended word. */
-      nir_store_local_apple9_agx(b, nir_u2u16(b, p), nir_imm_int(b, l->primitive_count_B),
-                                .base = s->key->output_root,
-                                .bit_size = s->key->primitive_count_bits);
+      nir_store_local_apple9_agx(
+         b, nir_u2u16(b, p), nir_imm_int(b, l->primitive_count_B),
+         .base = s->key->output_root, .bit_size = s->key->primitive_count_bits);
       nir_pop_if(b, NULL);
       /* Keep both logical count SSA operands until a complete native stage
        * contract consumes them. Body compilation emits the measured primitive
