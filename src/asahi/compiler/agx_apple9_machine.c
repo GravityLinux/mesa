@@ -195,6 +195,16 @@ static const struct agx_apple9_encoding_info encodings[] = {
              AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
       },
    },
+   [AGX_APPLE9_ENC_SUBGROUP_REDUCE_UMAX] = {
+      .name = "subgroup_reduce_umax", .length = 8, .operand_count = 2,
+      .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      .operands = {
+         GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 63, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
+         GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
+      },
+   },
    [AGX_APPLE9_ENC_SUBGROUP_BROADCAST] = {
       .name = "subgroup_broadcast", .length = 10, .operand_count = 3,
       .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,

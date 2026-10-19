@@ -4524,6 +4524,30 @@ agx_apple9_pack_mov_imm(unsigned dst, unsigned value,
 }
 
 bool
+agx_apple9_pack_subgroup_reduce_umax(
+   unsigned dst_half, unsigned src_half, unsigned bit_size,
+   bool dst_cache, bool src_cache, bool src_discard,
+   struct agx_apple9_packed_instruction *packed)
+{
+   if (!packed || dst_half >= 128 || src_half >= 128 ||
+       (bit_size != 16 && bit_size != 32) ||
+       (bit_size == 32 && ((dst_half | src_half) & 1)))
+      return false;
+
+   /* T8132 authored-operation tests establish both widths, independent
+    * operands, active-mask reduction, and neighboring-half preservation.
+    * Keep the other controls in the observed normal GPR form. */
+   const uint8_t bytes[8] = {
+      0xbf, 0x03, 0x54, dst_half, 0x02 | dst_cache,
+      src_half << 1,
+      0x10 | (src_half >> 7) | (src_cache << 1) | ((bit_size == 32) << 2),
+      0x01 | (src_discard << 1),
+   };
+   packed_init(packed, bytes, sizeof(bytes));
+   return true;
+}
+
+bool
 agx_apple9_pack_mov_imm32(unsigned dst, uint32_t value,
                           struct agx_apple9_packed_instruction *packed)
 {
@@ -6749,6 +6773,19 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
          phys[instruction->src[0]] << 2, 0x16, 0x09};
       packed_init(packed, bytes, sizeof(bytes));
       return true;
+   }
+   case AGX_APPLE9_VIR_SUBGROUP_REDUCE_UMAX: {
+      if (instruction->encoding != AGX_APPLE9_ENC_SUBGROUP_REDUCE_UMAX ||
+          instruction->nr_srcs != 1 || instruction->immediate ||
+          instruction->dest == AGX_APPLE9_VREG_INVALID ||
+          phys[instruction->dest] >= 64 || phys[instruction->src[0]] >= 64)
+         return false;
+      /* SSA values occupy full GPRs. Narrow unsigned NIR inputs are zero
+       * extended before this operation; native half allocation is separate.
+       * Retain the input for later uses, including divergent reductions. */
+      return agx_apple9_pack_subgroup_reduce_umax(
+         2 * phys[instruction->dest], 2 * phys[instruction->src[0]], 32,
+         false, false, false, packed);
    }
    case AGX_APPLE9_VIR_SUBGROUP_BROADCAST: {
       if (instruction->encoding != AGX_APPLE9_ENC_SUBGROUP_BROADCAST ||

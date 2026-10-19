@@ -7256,6 +7256,70 @@ TEST(Apple9Compiler, BitfieldExtractionLowersForEveryIntegerWidth)
    }
 }
 
+TEST(Apple9Compiler, UnsignedSubgroupMaxSelectsNativeReduction)
+{
+   for (unsigned bits : {16u, 32u}) {
+      for (unsigned cluster : {0u, 4u}) {
+         nir_builder b = apple9_compute_builder("unsigned_subgroup_max");
+         b.shader->info.num_ssbos = 2;
+         nir_def *id = apple9_global_id_x(&b);
+         nir_def *word = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 1),
+                                       nir_imul_imm(&b, id, 4));
+         nir_def *input = nir_u2uN(&b, word, bits);
+         nir_def *maximum = nir_reduce(&b, input, .reduction_op = nir_op_umax,
+                                        .cluster_size = cluster);
+         /* Keep the source live across the reduction. */
+         apple9_store_output(&b, id,
+            nir_ixor(&b, nir_u2u32(&b, maximum), nir_u2u32(&b, input)));
+         agx_shader_part compiled = {};
+         const char *reason = nullptr;
+         ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, nullptr, &reason))
+            << bits << " bits, cluster=" << cluster << ": "
+            << (reason ? reason : "no diagnostic");
+         const uint8_t *binary = (const uint8_t *)compiled.binary;
+         unsigned native = 0;
+         for (unsigned off = 0; off + 8 <= compiled.info.binary_size; off += 2) {
+            if (binary[off] != 0xbf || binary[off + 1] != 3 ||
+                binary[off + 2] != 0x54)
+               continue;
+            native++;
+            EXPECT_EQ(binary[off + 3] & 1, 0); /* full GPR destination */
+            EXPECT_EQ(binary[off + 4], 2);     /* normal GPR form */
+            EXPECT_EQ(binary[off + 5] & 3, 0); /* full GPR source */
+            EXPECT_EQ(binary[off + 6], 0x14);  /* unsigned 32-bit */
+            EXPECT_EQ(binary[off + 7], 1);     /* source retained */
+         }
+         EXPECT_EQ(native, cluster == 0 ? 1u : 0u);
+         free(compiled.binary);
+         ralloc_free(b.shader);
+      }
+   }
+}
+
+TEST(Apple9Vir, SubgroupMaxTypedNormalForm)
+{
+   agx_apple9_packed_instruction p = {};
+   ASSERT_TRUE(agx_apple9_pack_subgroup_reduce_umax(7, 7, 16,
+                                                   true, false, true, &p));
+   const uint8_t high[] = {0xbf, 3, 0x54, 7, 3, 14, 0x10, 3};
+   EXPECT_EQ(p.length, sizeof(high));
+   EXPECT_EQ(memcmp(p.bytes, high, sizeof(high)), 0);
+   ASSERT_TRUE(agx_apple9_pack_subgroup_reduce_umax(10, 6, 16,
+                                                   false, false, false, &p));
+   const uint8_t low[] = {0xbf, 3, 0x54, 10, 2, 12, 0x10, 1};
+   EXPECT_EQ(memcmp(p.bytes, low, sizeof(low)), 0);
+   ASSERT_TRUE(agx_apple9_pack_subgroup_reduce_umax(10, 6, 32,
+                                                   false, false, false, &p));
+   EXPECT_EQ(p.bytes[6], 0x14);
+   EXPECT_EQ(memcmp(p.bytes, low, 6), 0);
+   EXPECT_EQ(p.bytes[7], low[7]);
+   EXPECT_FALSE(agx_apple9_pack_subgroup_reduce_umax(7, 6, 32, false, false, false, &p));
+   EXPECT_FALSE(agx_apple9_pack_subgroup_reduce_umax(6, 7, 32, false, false, false, &p));
+   EXPECT_FALSE(agx_apple9_pack_subgroup_reduce_umax(6, 6, 8, false, false, false, &p));
+   EXPECT_FALSE(agx_apple9_pack_subgroup_reduce_umax(128, 6, 16, false, false, false, &p));
+   EXPECT_FALSE(agx_apple9_pack_subgroup_reduce_umax(6, 128, 16, false, false, false, &p));
+}
+
 TEST(Apple9Compiler, IntegerSubgroupScansAndUniformBroadcast)
 {
    nir_builder b = apple9_compute_builder("apple9_subgroup_scan");
