@@ -6,13 +6,48 @@ pipeline. The gate is disabled unless explicitly enabled. It is a compiler
 entry point, not a Vulkan native draw implementation or an advertised feature.
 The existing compute-emulated Vulkan mesh path remains the default.
 
-The accepted development class is a fixed 16x1x1 workgroup, triangle topology,
+The accepted development class is a fixed API workgroup with 1..16 invocations
+(any 3D shape), launched at physical 16x1x1, triangle topology,
 maxima V3/P1, one constant `SetMeshOutputs(3, 1)`, Position only, and no task
 payload, user shared memory, culling or primitive attributes. Ordinary formation
 handles the established finite, nondegenerate, inside-clip triangle record
 class. This gate does not claim clipping or general mesh-shader support. The
 hardware validation launch must use one workgroup while workgroup scope is
 being qualified.
+
+## API invocations and physical completion
+
+The native entrypoints set `key.physical_threads = 16` and use the existing
+`agx_nir_mask_apple9_mesh_body` NIR pass. The application region executes under
+`local_invocation_index < product(declared_size)`. This excludes extra lanes
+from application loads, stores, atomics, output writes and subgroup votes.
+Local IDs are reconstructed using the declared dimensions, and WorkgroupSize
+and NumSubgroups are frozen before shader metadata changes to physical T16.
+SubgroupSize remains the architectural 32, with one partial subgroup; it is
+neither the API invocation count nor the physical launch count. API barriers
+in an expanded one-subgroup body shrink to subgroup scope. Compiler-owned
+formation and completion rendezvous remain outside the application mask.
+
+`agx_apple9_mesh_body_info.logical_size` retains the API dimensions, while the
+compiled part's `workgroup_size` describes the physical launch. NIR owns this
+separation so ordinary control-flow selection, optimization and RA see it;
+there is no special VIR lane filter or fixed register allocation. The same
+pass now handles flattening 3D groups whose total is already 16.
+
+The generated taskless object is ordinary T1 task NIR and goes through
+`agx_nir_lower_apple9_native_object`. That bounded entrypoint also accepts
+ordinary 1..16-invocation task NIR with one top-level grid launch and no payload
+or user shared memory. Only API lane 0 writes the three grid dimensions. The
+physical T16 workgroup then reconverges before its collective call, whose
+hardware export still uses lanes 0/1/2 for X/Y/Z. Masking that callee to the T1
+API lane set would lose two dimensions. The driver still does not expose or
+upload these object programs.
+
+Physical launches above 16, variable API sizes, and requested API subgroup
+sizes other than 32 reject explicitly. T32 would still be a single
+architectural subgroup, but the complete native object/mesh contract has not
+been qualified at that launch width. This work does not promote the older
+body-only experiments at wider physical widths.
 
 The normal IO and ordinary record formation prerequisites were adapted from
 our authored compiler sources at `7779b8644dc355ee214cf64f4996254711e10c55`.
@@ -165,9 +200,10 @@ usage; it does not insert H1's experimental 64-byte frame override.
 
 ## Object collective call
 
-`agx_nir_apple9_taskless_object` generates grid stores from runtime counts.
-`agx_compile_apple9_taskless_object` appends the semantic NIR operation
-`launch_mesh_workgroups_apple9_agx` after its workgroup barrier. The operation
+`agx_nir_apple9_taskless_object` generates a T1 API grid launch from runtime
+counts. `agx_compile_apple9_taskless_object` uses native object lowering to
+emit lane-zero grid stores, mask the API body, then append the semantic NIR
+operation `launch_mesh_workgroups_apple9_agx` after a physical workgroup barrier. The operation
 names a local root and byte offset for three uint32 grid counts; it has no
 physical register arguments. Selection emits a closed leaf region in logical
 execution order: OBJECT_CALL, ordinary grid-load/publication instructions,
@@ -187,7 +223,7 @@ Leaf specialization deliberately avoids a general separate-compilation ABI.
 
 This models the provisional token-free contract in the device runner's `1366b83afc8`:
 one converged T16 object group, convention-1 CALL/RET, empty immediate-return
-mask and lanes 0–15 restored by POP2. Divergent callers, other widths, nested
+mask and lanes 0–15 restored by POP2. Divergent physical callers, other physical widths, nested
 calls and scratch/spills are rejected. Hardware portability, hidden call GPR
 clobbers, frame backing/minima and arbitrary grid values remain unqualified.
 The compiler emits one program but retains `apple9_body_only`, so ordinary
@@ -201,3 +237,13 @@ output untouched. The host-only `apple9-native-object` and `Apple9Object*`
 tests cover the compiler contract. Host interpretation checks our assumed
 call model; it cannot qualify the hardware ABI. Runtime staging, native
 binding and the reservation provider are separate (step-3) work.
+
+`apple9-native-workgroup` checks all sizes 1..16 in both stages, with and
+without store/atomic instrumentation, plus six 3D shapes per stage. Its NIR
+interpreter checks active ballots, every local ID and size value, exact
+side-effect counts, untouched inactive lanes, barriers, grid ownership, and
+mesh DATA/coverage against the independent H1 source oracle. Every case also
+goes through normal selection and RA with physical T16 metadata and no spills.
+Disabled, invalid, variable and wider sizes reject. `--export <directory>`
+exports T1/T3/T16 plain and instrumented programs for hardware qualification;
+these test files do not add a driver asset-loading path.

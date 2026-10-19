@@ -251,8 +251,28 @@ check(bool object, unsigned x, unsigned y, unsigned z, bool probe,
          for (unsigned i = 0; i < 4; ++i) {
             char ext[64];
             snprintf(ext, sizeof(ext), "expected-data%u.bin", i);
-            write_file(dir, name, ext, m.region[i].data, 256);
+            /* Device arms initialize record storage to zero. The host run
+             * above used distinct poison and checked its untouched tails. */
+            uint8_t data[256] = {0};
+            for (unsigned j = 0; j < sizeof(data); ++j)
+               if (m.region[i].written[j])
+                  data[j] = m.region[i].data[j];
+            write_file(dir, name, ext, data, sizeof(data));
          }
+         uint8_t coverage[4096], pixels[16384] = {0};
+         uint32_t xyz[3][3], input[32];
+         bool dropped;
+         CHECK(source_geometry(f, xyz, &dropped) && !dropped);
+         raster(xyz, coverage);
+         for (unsigned i = 0; i < 4096; ++i)
+            pixels[4 * i] = pixels[4 * i + 3] = coverage[i] ? 255 : 0;
+         write_file(dir, name, "expected-pixels.bin", pixels, sizeof(pixels));
+         memcpy(input, f->positions, sizeof(f->positions));
+         memcpy(input + 12, f->indices, sizeof(f->indices));
+         memcpy(input + 15, f->state, sizeof(f->state));
+         memcpy(input + 23, f->viewport, sizeof(f->viewport));
+         memcpy(input + 29, f->ids, sizeof(f->ids));
+         write_file(dir, name, "reference-source.bin", input, sizeof(input));
       }
    }
    for (unsigned i = 0; i < 4; ++i) {
@@ -315,11 +335,18 @@ reject(void)
       nir_shader *n = source(object, 1, 1, 1, false);
       struct agx_apple9_mesh_body_info info;
       const char *reason = NULL;
+      n->info.api_subgroup_size = 16;
+      n->info.min_subgroup_size = n->info.max_subgroup_size = 16;
+      CHECK(!lower(n, true, &info, &reason));
+      CHECK(reason && strstr(reason, "subgroup size 32"));
+      n->info.api_subgroup_size = 32;
+      n->info.min_subgroup_size = n->info.max_subgroup_size = 32;
       unsigned before = nir_shader_get_entrypoint(n)->ssa_alloc;
       CHECK(!lower(n, false, &info, &reason));
       CHECK(strstr(reason, "disabled") &&
             nir_shader_get_entrypoint(n)->ssa_alloc == before);
       CHECK(n->info.workgroup_size[0] == 1);
+      CHECK(lower(n, true, &info, &reason));
       ralloc_free(n);
    }
 }
