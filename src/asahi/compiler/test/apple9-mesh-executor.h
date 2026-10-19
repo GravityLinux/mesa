@@ -24,6 +24,8 @@ struct machine {
    struct region region[8];
    unsigned barriers, subgroup_barriers, fences, writes;
    unsigned controls, scalars, channels[4];
+   unsigned local_root, grid_fences, grid_exports;
+   uint32_t grid[3];
 };
 
 static void *
@@ -111,6 +113,16 @@ instruction(struct machine *m, nir_instr *i, unsigned lane)
       nir_intrinsic_instr *n = nir_instr_as_intrinsic(i);
       nir_const_value *out = m->value[n->def.index][lane];
       switch (n->intrinsic) {
+      case nir_intrinsic_fence_mesh_grid_apple9_agx:
+         CHECK(!(m->grid_fences & (1u << lane)));
+         m->grid_fences |= 1u << lane;
+         break;
+      case nir_intrinsic_export_mesh_grid_word_apple9_agx:
+         CHECK(lane < 3 && m->grid_fences == ALL_LANES);
+         CHECK(!(m->grid_exports & (1u << lane)));
+         m->grid[lane] = src(m, n->src[0], lane)[0].u32;
+         m->grid_exports |= 1u << lane;
+         break;
       case nir_intrinsic_mesh_control_apple9_agx:
          CHECK(nir_intrinsic_base(n) == 1);
          CHECK(src(m, n->src[0], lane)[0].u16 == 1);
@@ -173,14 +185,16 @@ instruction(struct machine *m, nir_instr *i, unsigned lane)
       case nir_intrinsic_store_local_apple9_agx: {
          unsigned bytes = nir_intrinsic_bit_size(n) / 8;
          unsigned offset = src(m, n->src[1], lane)[0].u32;
-         CHECK(nir_intrinsic_base(n) == AGX_APPLE9_MESH_OUTPUT_ROOT);
+         CHECK(nir_intrinsic_base(n) ==
+               (m->local_root ?: AGX_APPLE9_MESH_OUTPUT_ROOT));
          CHECK(offset + bytes <= sizeof(m->local));
          memcpy(m->local + offset, src(m, n->src[0], lane), bytes);
          break;
       }
       case nir_intrinsic_load_local_apple9_agx: {
          unsigned offset = src(m, n->src[0], lane)[0].u32;
-         CHECK(nir_intrinsic_base(n) == AGX_APPLE9_MESH_OUTPUT_ROOT);
+         CHECK(nir_intrinsic_base(n) ==
+               (m->local_root ?: AGX_APPLE9_MESH_OUTPUT_ROOT));
          CHECK(offset + 4 <= sizeof(m->local));
          memcpy(out, m->local + offset, 4);
          break;

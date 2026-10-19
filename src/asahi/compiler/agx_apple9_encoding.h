@@ -63,6 +63,46 @@ agx_apple9_encode_branch(uint8_t out[10], bool any, int64_t displacement)
    return true;
 }
 
+/* Convention 1 is the measured object collective-call form. Displacements
+ * are signed, byte-addressed and relative to the instruction start, just as
+ * for branches. Other conventions have no compiler ABI yet. */
+static inline bool
+agx_apple9_encode_call(uint8_t out[10], unsigned convention,
+                      int64_t displacement)
+{
+   if (!out || convention != 1 || (displacement & 1) ||
+       displacement < -(INT64_C(1) << 47) ||
+       displacement >= (INT64_C(1) << 47))
+      return false;
+   uint8_t bytes[10] = {0x8f, (uint8_t)(convention << 4), 0x54};
+   for (unsigned byte = 0; byte < 6; ++byte)
+      bytes[3 + byte] = (uint64_t)displacement >> (8 * byte);
+   memcpy(out, bytes, sizeof(bytes));
+   return true;
+}
+
+static inline bool
+agx_apple9_encode_return(uint8_t out[4], unsigned convention)
+{
+   if (!out || convention != 1)
+      return false;
+   const uint8_t bytes[4] = {0x8f, (uint8_t)((convention << 4) | 2), 0x54, 0};
+   memcpy(out, bytes, sizeof(bytes));
+   return true;
+}
+
+/* Only the independently used one- and two-level forms are admitted. The
+ * object call ABI uses depth 2; this is sufficient, not a measured minimum. */
+static inline bool
+agx_apple9_encode_exec_pop(uint8_t out[6], unsigned depth)
+{
+   if (!out || (depth != 1 && depth != 2))
+      return false;
+   const uint8_t bytes[6] = {0x0f, 6, 4, (uint8_t)depth, 0, 0};
+   memcpy(out, bytes, sizeof(bytes));
+   return true;
+}
+
 /* Transfer one pending word to the main's argument window. A first transfer
  * waits for the table-load group on slot 2; subsequent transfers reuse it.
  * Argument word 2*i is the low half of pointer i, word 2*i+1 its high half. */

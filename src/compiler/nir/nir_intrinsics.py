@@ -3374,6 +3374,13 @@ intrinsic("end_task_apple9_agx")
 intrinsic("export_mesh_grid_word_apple9_agx", [1])
 intrinsic("fence_mesh_grid_apple9_agx")
 
+# Collectively publish the three uint32 mesh group counts stored at byte
+# RANGE_BASE in local root BASE. All 16 object invocations must participate
+# after the producer's workgroup barrier. This is a side effect, not a load or
+# a workgroup barrier itself. Selection supplies a compiler-owned leaf call;
+# it must not be speculated, duplicated or replaced with an inline export.
+intrinsic("launch_mesh_workgroups_apple9_agx", indices=[BASE, RANGE_BASE])
+
 # Semantic inputs to ordinary Apple9 mesh record formation. BASE is an
 # agx_apple9_mesh_formation_input, not a uniform slot or hardware register.
 # Runtime reservation/draw-state lowering must resolve these before emission.

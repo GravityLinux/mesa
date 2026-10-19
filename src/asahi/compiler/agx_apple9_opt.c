@@ -833,6 +833,9 @@ fold_saturate(struct agx_apple9_vir_program *p, const uint32_t *replacement)
          ++epoch;
       }
       switch (I->op) {
+      case AGX_APPLE9_VIR_OBJECT_CALL:
+      case AGX_APPLE9_VIR_OBJECT_RETURN:
+      case AGX_APPLE9_VIR_OBJECT_RESUME:
       case AGX_APPLE9_VIR_EXEC_MASK_PUSH:
       case AGX_APPLE9_VIR_EXEC_MASK_ELSE:
       case AGX_APPLE9_VIR_EXEC_MASK_POP:
@@ -1222,6 +1225,9 @@ agx_apple9_optimize_vir_with_constants(
          _mesa_hash_table_clear(expressions, NULL);
          memset(uniform_read, 0, p->value_count * sizeof(*uniform_read));
          break;
+      case AGX_APPLE9_VIR_OBJECT_CALL:
+      case AGX_APPLE9_VIR_OBJECT_RETURN:
+      case AGX_APPLE9_VIR_OBJECT_RESUME:
       case AGX_APPLE9_VIR_EXEC_MASK_PUSH:
       case AGX_APPLE9_VIR_EXEC_MASK_ELSE:
       case AGX_APPLE9_VIR_EXEC_MASK_POP:

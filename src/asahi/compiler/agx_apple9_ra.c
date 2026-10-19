@@ -296,6 +296,8 @@ apple9_publication(const struct agx_apple9_vir_instr *ins)
 static bool
 apple9_after_logical_end(const struct agx_apple9_vir_instr *ins)
 {
+   if (ins->local_control)
+      return false;
    switch (ins->op) {
    case AGX_APPLE9_VIR_EXEC_MASK_PUSH:
    case AGX_APPLE9_VIR_EXEC_MASK_ELSE:
@@ -1110,7 +1112,8 @@ apple9_can_fold_wait(const struct agx_apple9_vir_instr *ins,
    if (!reads)
       return ins->op != AGX_APPLE9_VIR_DEVICE_ATOMIC;
    if (apple9_scalar_publication(producer))
-      return ins->op == AGX_APPLE9_VIR_VARY_STORE &&
+      return (ins->op == AGX_APPLE9_VIR_VARY_STORE ||
+              ins->op == AGX_APPLE9_VIR_OBJECT_GRID_EXPORT) &&
              ins->src[0] == producer->dest;
    if (ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC &&
        (ins->atomic_discard || ins->atomic_op == AGX_APPLE9_ATOMIC_CMPXCHG ||
@@ -1178,7 +1181,10 @@ apple9_completion_barrier(const struct agx_apple9_vir_instr *ins, bool drain)
 {
    if (apple9_after_logical_end(ins))
       return drain || apple9_loop_control(ins);
-   return ins->op == AGX_APPLE9_VIR_MESH_CONTROL ||
+   return ins->op == AGX_APPLE9_VIR_OBJECT_CALL ||
+          ins->op == AGX_APPLE9_VIR_OBJECT_RETURN ||
+          ins->op == AGX_APPLE9_VIR_OBJECT_RESUME ||
+          ins->op == AGX_APPLE9_VIR_MESH_CONTROL ||
           ins->op == AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR ||
           ins->op == AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL ||
           ins->op == AGX_APPLE9_VIR_WORKGROUP_BARRIER ||
