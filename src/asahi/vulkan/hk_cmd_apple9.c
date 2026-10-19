@@ -10,6 +10,7 @@
 #include "util/u_prim.h"
 #include "vk_util.h"
 #include "hk_cmd_buffer.h"
+#include "hk_apple9_mesh.h"
 #include "hk_device.h"
 #include "hk_image.h"
 #include "hk_image_view.h"
@@ -442,9 +443,78 @@ hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool reads_buffers)
    return true;
 }
 
-void
-hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
-               struct agx_draw draw)
+/* The compiler's local roots and ordinary graphics roots share one table.
+ * No scene allocation, cursor, resource ID or alias crosses into userspace.
+ * Command-pool storage and pinned shader BOs survive command-buffer reuse. */
+static bool
+hk_apple9_prepare_native_mesh(struct hk_cmd_buffer *cmd,
+                               const struct hk_shader *mesh,
+                               const struct hk_shader *object,
+                               const struct agx_apple9_uniform_draw *draw,
+                               uint64_t grid,
+                               uint32_t state[AGX_APPLE9_MESH_STATE_WORDS])
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (!hk_apple9_native_mesh_enabled() || !grid || (grid & 3) ||
+       mesh->info.apple9_native_stage != HK_APPLE9_NATIVE_MESH ||
+       object->info.apple9_native_stage != HK_APPLE9_NATIVE_OBJECT)
+      return false;
+   struct agx_apple9_launch_parameters p[2];
+   const struct hk_shader *shaders[] = {mesh, object};
+   for (unsigned i = 0; i < 2; ++i) {
+      const struct hk_shader *shader = shaders[i];
+      if (!shader->bo ||
+          !hk_apple9_native_launch_parameters(
+             &p[i], &shader->b.info, &shader->info.apple9_native,
+             shader->info.apple9_native_stage, dev->dev.shader_base,
+             shader->bo->va->addr))
+         return false;
+      simple_mtx_lock(&dev->dev.apple9_entry_lock);
+      bool pinned = hk_apple9_pin_entry(cmd, shader->bo);
+      simple_mtx_unlock(&dev->dev.apple9_entry_lock);
+      if (!pinned)
+         return false;
+   }
+   struct agx_apple9_mesh_arguments args = {
+      .graphics = {draw->texture_table[0], draw->sampler_table[0],
+                   draw->vertex_table},
+      .output_root = HK_APPLE9_NATIVE_OUTPUT_ROOT,
+      .grid_root = HK_APPLE9_NATIVE_GRID_ROOT,
+      .draw = grid,
+   };
+   uint64_t words[AGX_APPLE9_MESH_ARGUMENT_WORDS / 2];
+   if (!agx_apple9_mesh_arguments_build(words, &args))
+      return false;
+   uint64_t arguments = hk_pool_upload(cmd, words, sizeof(words), 64);
+   struct agx_ptr launch = hk_pool_usc_alloc(
+      cmd, 2 * AGX_APPLE9_GRAPHICS_LAUNCH_SIZE, 128);
+   if (!arguments || !launch.cpu || launch.gpu < dev->dev.shader_base ||
+       launch.gpu - dev->dev.shader_base >
+          UINT32_MAX - 2 * AGX_APPLE9_GRAPHICS_LAUNCH_SIZE)
+      return false;
+   for (unsigned i = 0; i < 2; ++i) {
+      p[i].resource_table = arguments;
+      p[i].launch_address = launch.gpu + i * AGX_APPLE9_GRAPHICS_LAUNCH_SIZE;
+      if (!agx_apple9_launch_build(
+             (uint8_t *)launch.cpu + i * AGX_APPLE9_GRAPHICS_LAUNCH_SIZE,
+             AGX_APPLE9_GRAPHICS_LAUNCH_SIZE,
+             i ? AGX_APPLE9_LAUNCH_TASK : AGX_APPLE9_LAUNCH_MESH, &p[i]))
+         return false;
+   }
+   struct agx_apple9_mesh_state_parameters params = {
+      .layout = &mesh->info.apple9_native.layout,
+      .mesh_launch = agx_usc_addr(&dev->dev, launch.gpu) / 64,
+      .object_launch = agx_usc_addr(
+         &dev->dev, launch.gpu + AGX_APPLE9_GRAPHICS_LAUNCH_SIZE) / 64,
+      .threads = AGX_APPLE9_NATIVE_THREADS,
+      .has_object_stage = true,
+   };
+   return agx_apple9_mesh_state_build(state, &params);
+}
+
+static void
+hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
+                    struct agx_draw draw, uint64_t native_grid)
 {
    if (vk_command_buffer_has_error(&cmd->vk))
       return;
@@ -486,13 +556,20 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       (dyn->ms.sample_mask & BITFIELD_MASK(null_samples)) ==
          BITFIELD_MASK(null_samples);
    struct hk_shader *shaders[] = {
-      mesh  ? &mesh->variants[HK_MESH_VARIANT_RAST]
+      mesh  ? &mesh->variants[native_grid ? HK_MESH_VARIANT_MAIN
+                                         : HK_MESH_VARIANT_RAST]
       : gs  ? &gs->variants[HK_GS_VARIANT_RAST]
       : tes ? &tes->variants[HK_VS_VARIANT_HW]
             : hk_any_variant(gfx->shaders[MESA_SHADER_VERTEX]),
       hk_any_variant(null_trivial ? dev->null_fs_trivial
                      : gfx->shaders[MESA_SHADER_FRAGMENT] ?: dev->null_fs),
    };
+   if (native_grid &&
+       (!mesh || gfx->shaders[MESA_SHADER_TASK] || gs || tes ||
+        shaders[0]->info.apple9_native_stage != HK_APPLE9_NATIVE_MESH ||
+        dyn->rs.polygon_mode != VK_POLYGON_MODE_FILL ||
+        dyn->vp.depth_clip_negative_one_to_one || gfx->render.view_mask))
+      UNSUPPORTED();
    /* Geometry and tessellation have already run as compute, and draw their
     * own output topology. Adjacency primitives without a geometry shader
     * draw a generated list without the adjacent vertices.
@@ -746,6 +823,7 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       bool effects = gfx->xfb_enabled;
       for (unsigned s = 0; s < MESA_SHADER_FRAGMENT && !effects; ++s)
          effects = gfx->shaders[s] && gfx->shaders[s]->writes_memory;
+      effects |= native_grid && mesh && mesh->writes_memory;
       if (!effects)
          return;
       bbox[0] = bbox[1] = bbox[2] = bbox[3] = 0;
@@ -943,7 +1021,18 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    pipeline.vertex_launch = record->launch[0] / 0x40;
    pipeline.pipeline_word = 0x01000000;
    hk_ensure_cs_has_space(cmd, cs, 256);
-   if (agx_is_indirect(draw.b))
+   if (native_grid) {
+      uint32_t state[AGX_APPLE9_MESH_STATE_WORDS];
+      const uint32_t object_groups[] = {1, 1, 1};
+      if (!hk_apple9_prepare_native_mesh(
+             cmd, shaders[0], &mesh->variants[HK_MESH_VARIANT_OBJECT],
+             record, native_grid, state) ||
+          !hk_apple9_mesh_command_build(
+             cs->current, HK_APPLE9_MESH_COMMAND_BYTES, &pipeline, state,
+             object_groups, hk_apple9_native_mesh_enabled()))
+         UNSUPPORTED();
+      cs->current += HK_APPLE9_MESH_COMMAND_BYTES - 4;
+   } else if (agx_is_indirect(draw.b))
       cs->current =
          agx_apple9_emit_indirect_draw(cs->current, &pipeline, draw.b.ptr) - 4;
    else
@@ -954,7 +1043,8 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    if (cs->primitive_count < AGX_PRIMITIVE_COUNT_UNKNOWN) {
       agx_add_primitive_count(
          &cs->primitive_count,
-         agx_is_indirect(draw.b) || pipeline.primitive_restart || gs || tes || mesh
+         native_grid ? 1
+         : agx_is_indirect(draw.b) || pipeline.primitive_restart || gs || tes || mesh
             ? AGX_PRIMITIVE_COUNT_UNKNOWN
             : agx_count_primitives(pipeline.primitive, draw.b.count[0],
                                    draw.b.count[1]));
@@ -973,4 +1063,18 @@ unsupported:
       dyn->ia.primitive_topology);
 #undef UNSUPPORTED
    vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+}
+
+void
+hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id, struct agx_draw draw)
+{
+   hk_apple9_draw_impl(cmd, draw_id, draw, 0);
+}
+
+void
+hk_apple9_draw_native_mesh(struct hk_cmd_buffer *cmd, uint32_t draw_id,
+                            uint64_t grid)
+{
+   hk_apple9_draw_impl(cmd, draw_id,
+                       (struct agx_draw){.b = agx_3d(3, 1, 1)}, grid);
 }

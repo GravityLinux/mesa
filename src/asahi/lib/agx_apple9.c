@@ -1511,6 +1511,10 @@ agx_apple9_prepare_draw_alloc(
    }
    for (unsigned stage = 0; stage < 2; stage++) {
       const struct agx_apple9_render_stage *shader = stages[stage];
+      if (stage == 0 && shader->native_mesh) {
+         draw->launch[0] = 0;
+         continue;
+      }
       uint64_t table = stage ? draw->fragment_table : draw->vertex_table;
       if (agx_apple9_draw_reuses_launch(previous, draw, stage)) {
          draw->launch[stage] = previous->launch[stage];

@@ -1413,6 +1413,8 @@ bool hk_apple9_pin_entry(void *allocator, struct agx_bo *bo);
 /* reads_buffers: the draw's tiling reads buffer memory itself (indices or
  * indirect arguments). */
 bool hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool reads_buffers);
+void hk_apple9_draw_native_mesh(struct hk_cmd_buffer *cmd, uint32_t draw_id,
+                                uint64_t grid);
 void hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
                     struct agx_draw draw);
 struct hk_apple9_prerast_bindings

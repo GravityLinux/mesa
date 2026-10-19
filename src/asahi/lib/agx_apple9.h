@@ -72,6 +72,9 @@ struct agx_apple9_render_stage {
    uint8_t atomic_frame_size;
    uint16_t publication_count;
    bool publication_count_valid;
+   /* Native mesh uses the same raster interface/PPP serializer but supplies
+    * object/mesh launches through the mesh command packet. */
+   bool native_mesh;
    uint32_t resource_ssbo_mask, resource_write_mask;
    uint8_t resource_count;
    uint8_t resource_binding[AGX_APPLE9_MAX_GRAPHICS_BUFFERS];

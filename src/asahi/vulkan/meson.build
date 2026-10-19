@@ -16,6 +16,7 @@ hk_files = files(
   'hk_cmd_draw.c',
   'hk_apple9_polygon_points.c',
   'hk_cmd_apple9.c',
+  'hk_apple9_mesh.c',
   'hk_cmd_meta.c',
   'hk_cmd_pool.c',
   'hk_cmd_pool.h',
@@ -163,7 +164,7 @@ if with_tests
     ),
     suite : ['asahi', 'honeykrisp'],
   )
-  foreach t : ['hk-image-limits', 'hk-stage-output-limits', 'hk-cull-output-limits', 'hk-pregfx-recording', 'hk-heap-resubmit', 'hk-heap-addresses', 'hk-native-image-store', 'hk-mesh-query']
+  foreach t : ['hk-image-limits', 'hk-stage-output-limits', 'hk-cull-output-limits', 'hk-pregfx-recording', 'hk-heap-resubmit', 'hk-heap-addresses', 'hk-native-image-store', 'hk-mesh-query', 'hk-native-mesh']
     test(
       t,
       executable(

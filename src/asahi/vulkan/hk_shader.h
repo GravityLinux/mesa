@@ -19,6 +19,7 @@
 #include "agx_uvs.h"
 
 #include "hk_device.h"
+#include "hk_apple9_mesh.h"
 #include "hk_device_memory.h"
 #include "hk_private.h"
 
@@ -190,6 +191,11 @@ struct hk_apple9_stipple_slots
 hk_apple9_line_stipple_slots(const nir_shader *last, const nir_shader *fs);
 
 struct hk_shader_info {
+   /* A complete compiler contract, qualified by the gated native uploader.
+    * Kept with serialized shader metadata, never inferred from shader bytes. */
+   uint8_t apple9_native_stage;
+   struct agx_apple9_mesh_body_info apple9_native;
+
    uint8_t apple9_render_targets;
    /* Fragment shaders: stippled lines rasterize with the first vertex
     * provoking whatever the API mode, which no other input observes. */
@@ -369,6 +375,10 @@ enum hk_mesh_variant {
    HK_MESH_VARIANT_RAST,
 
    HK_MESH_VARIANTS,
+
+   /* Under the native gate the second variant is the generated object stage,
+    * instead of an emulation rasterization shader. */
+   HK_MESH_VARIANT_OBJECT = HK_MESH_VARIANT_RAST,
 };
 
 /* clang-format off */

@@ -23,6 +23,7 @@
 #include "hk_private.h"
 #include "hk_sampler.h"
 #include "hk_shader.h"
+#include "hk_apple9_mesh.h"
 #include "hk_wsi.h"
 
 #include "util/simple_mtx.h"
@@ -1741,9 +1742,9 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
    if (debug_get_bool_option("HK_APPLE9_MESH_SHADER", true)) {
       ext->EXT_mesh_shader = true;
       feat->meshShader = true;
-      feat->taskShader = true;
-      feat->multiviewMeshShader = true;
-      feat->meshShaderQueries = true;
+      feat->taskShader = !hk_apple9_native_mesh_enabled();
+      feat->multiviewMeshShader = !hk_apple9_native_mesh_enabled();
+      feat->meshShaderQueries = !hk_apple9_native_mesh_enabled();
    }
 
    /* Fragment shader interlock: the compiler acquires the pixel in raster
@@ -1841,6 +1842,29 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
    props->prefersLocalInvocationVertexOutput = false;
    props->prefersLocalInvocationPrimitiveOutput = false;
    props->prefersCompactVertexOutput = true;
+
+   /* This opt-in development class is deliberately below extension minima.
+    * These limits describe what native pipeline/draw validation accepts. */
+   if (hk_apple9_native_mesh_enabled()) {
+      props->maxMeshWorkGroupTotalCount = 1;
+      props->maxMeshWorkGroupInvocations = AGX_APPLE9_NATIVE_THREADS;
+      for (unsigned i = 0; i < 3; ++i) {
+         props->maxMeshWorkGroupCount[i] = 1;
+         props->maxMeshWorkGroupSize[i] = AGX_APPLE9_NATIVE_THREADS;
+      }
+      props->maxTaskPayloadSize = 0;
+      props->maxMeshSharedMemorySize = 0;
+      props->maxMeshPayloadAndSharedMemorySize = 0;
+      props->maxMeshOutputMemorySize = 96;
+      props->maxMeshPayloadAndOutputMemorySize = 96;
+      props->maxMeshOutputComponents = 4;
+      props->maxMeshOutputVertices = 3;
+      props->maxMeshOutputPrimitives = 1;
+      props->maxMeshOutputLayers = 1;
+      props->maxMeshMultiviewViewCount = 1;
+      props->maxPreferredMeshWorkGroupInvocations = AGX_APPLE9_NATIVE_THREADS;
+   }
+
 
    /* VK_KHR_compute_shader_derivatives: task and mesh workgroups run as
     * compute kernels with the API's linear invocation order, so linear

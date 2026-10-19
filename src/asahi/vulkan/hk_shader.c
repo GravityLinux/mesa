@@ -4155,6 +4155,7 @@ hk_apple9_init_render_stage(struct hk_shader *s)
       .preamble_size = i->apple9_preamble_size,
       .publication_count = i->apple9_publication_count,
       .publication_count_valid = true,
+      .native_mesh = s->info.apple9_native_stage == HK_APPLE9_NATIVE_MESH,
       .scratch_size = i->scratch_size,
       .atomic_frame_size = i->apple9_atomic_frame_size,
       .resource_count = i->apple9_resource_count,
@@ -4197,7 +4198,15 @@ hk_apple9_init_render_stage(struct hk_shader *s)
 static VkResult
 hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
 {
-   if (shader->b.info.apple9_body_only)
+   bool native = shader->info.apple9_native_stage != HK_APPLE9_NATIVE_NONE;
+   if ((shader->b.info.apple9_body_only || native) &&
+       !(dev->dev.chip == AGX_CHIP_G16G && hk_apple9_native_mesh_enabled() &&
+         shader->info.stage == (shader->info.apple9_native_stage ==
+                                   HK_APPLE9_NATIVE_OBJECT
+                                      ? MESA_SHADER_TASK : MESA_SHADER_MESH) &&
+         hk_apple9_native_shader_valid(&shader->b.info,
+                                       &shader->info.apple9_native,
+                                       shader->info.apple9_native_stage)))
       return vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
                        "Apple9 native stage requires its native launch contract");
    if (dev->dev.chip == AGX_CHIP_G16G) {
@@ -5878,6 +5887,44 @@ hk_apple9_compile_mesh(struct hk_device *dev, nir_shader *nir,
    return result;
 }
 
+/* A native mesh API shader owns two ordinary compiled programs. The
+ * generated object publishes the draw's mesh grid; it is not an API task shader.
+ * Both BOs use the existing shader cache, upload and destruction paths. */
+static VkResult
+hk_apple9_compile_native_mesh(struct hk_device *dev, nir_shader *nir,
+                               struct hk_api_shader *obj,
+                               const char **reason)
+{
+   struct hk_shader *mesh = &obj->variants[HK_MESH_VARIANT_MAIN];
+   struct hk_shader *object = &obj->variants[HK_MESH_VARIANT_OBJECT];
+   hk_mesh_gather_info(nir, &mesh->info.mesh);
+   mesh->info.apple9_native_stage = HK_APPLE9_NATIVE_MESH;
+   if (!agx_compile_apple9_native_mesh(nir, hk_apple9_native_mesh_enabled(),
+                                       &mesh->b, &mesh->info.apple9_native,
+                                       reason))
+      return vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
+                       "Apple9 native mesh: %s", *reason ?: "unsupported NIR");
+   VkResult result = hk_apple9_finish_shader(dev, mesh, nir);
+   if (result != VK_SUCCESS)
+      return result;
+
+   struct agx_apple9_mesh_key k = AGX_APPLE9_MESH_KEY;
+   nir_shader *generated = agx_nir_apple9_taskless_object(&k);
+   if (!generated)
+      return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+   object->info.stage = MESA_SHADER_TASK;
+   object->info.apple9_native_stage = HK_APPLE9_NATIVE_OBJECT;
+   if (!agx_compile_apple9_native_object(
+          generated, hk_apple9_native_mesh_enabled(), &k, &object->b,
+          &object->info.apple9_native, reason))
+      result = vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
+                         "Apple9 native object: %s", *reason ?: "unsupported NIR");
+   else
+      result = hk_apple9_finish_shader(dev, object, generated);
+   ralloc_free(generated);
+   return result;
+}
+
 /* Task shaders run as compute kernels writing their payloads and the grids of
  * mesh workgroups they launch.
  */
@@ -5923,6 +5970,18 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
       simple_mtx_lock(lock);
 
    memset(out, 0, count * sizeof(*out));
+   if (hk_apple9_native_mesh_enabled()) {
+      for (unsigned i = 0; i < count; ++i) {
+         if (infos[i].stage == MESA_SHADER_TASK ||
+             (infos[i].stage == MESA_SHADER_MESH &&
+              key.clip_negative_one_to_one)) {
+            reason = "native mesh does not support API task shaders or negative-one-to-one depth";
+            result = vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT, "%s", reason);
+            goto done;
+         }
+      }
+   }
+
 
    /* Per-vertex inputs are read as flat copies, written by the passthrough
     * geometry shader of vertex-shader pipelines, or by the vertex shader
@@ -6323,6 +6382,14 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
                goto done;
             continue;
          } else if (stage == MESA_SHADER_MESH) {
+            if (hk_apple9_native_mesh_enabled()) {
+               result = hk_apple9_compile_native_mesh(dev, nir, obj, &reason);
+               if (result != VK_SUCCESS)
+                  goto done;
+               varyings = shader->b.info.apple9_varyings;
+               continue;
+            }
+
             struct hk_pp_info pp = {
                .clip = nir->info.clip_distance_array_size,
                .cull = nir->info.cull_distance_array_size,
