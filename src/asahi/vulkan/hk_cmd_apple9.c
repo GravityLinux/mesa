@@ -714,6 +714,14 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    cs = hk_occlusion_prepare_draw(cmd, cs);
    if (!cs)
       return;
+   /* The paired kernel parses a leading native state and one direct draw.
+    * Reject mixed/multiple draws and unqualified render resource classes
+    * before publishing a stream that the kernel could mistake for ordinary
+    * rendering. The empty root has ample space without a stream link. */
+   if (cs->apple9_native_mesh ||
+       (native_grid && (cs->current != cs->start || pipeline.samples != 1 ||
+                        gfx->render.layer_count != 1)))
+      UNSUPPORTED();
    cs->tib = gfx->render.tilebuffer;
    const struct vk_dynamic_graphics_state *ms_dyn = &cmd->vk.dynamic_graphics_state;
    gfx->apple9_sample_positions =
@@ -1032,6 +1040,7 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
              object_groups, hk_apple9_native_mesh_enabled()))
          UNSUPPORTED();
       cs->current += HK_APPLE9_MESH_COMMAND_BYTES - 4;
+      cs->apple9_native_mesh = true;
    } else if (agx_is_indirect(draw.b))
       cs->current =
          agx_apple9_emit_indirect_draw(cs->current, &pipeline, draw.b.ptr) - 4;

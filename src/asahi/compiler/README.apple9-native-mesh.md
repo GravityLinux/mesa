@@ -3,7 +3,7 @@
 `agx_compile_apple9_native_mesh(nir, enable_native_mesh, ...)` compiles a complete
 mesh program through the ordinary NIR, VIR, allocation, scheduling and packing
 pipeline. The gate is disabled unless explicitly enabled. It is a compiler
-entry point, not a Vulkan native draw implementation or an advertised feature.
+entry point used by Honeykrisp's opt-in `HK_APPLE9_NATIVE_MESH=1` runtime.
 The existing compute-emulated Vulkan mesh path remains the default.
 
 The accepted development class is a fixed API workgroup with 1..16 invocations
@@ -40,8 +40,8 @@ ordinary 1..16-invocation task NIR with one top-level grid launch and no payload
 or user shared memory. Only API lane 0 writes the three grid dimensions. The
 physical T16 workgroup then reconverges before its collective call, whose
 hardware export still uses lanes 0/1/2 for X/Y/Z. Masking that callee to the T1
-API lane set would lose two dimensions. The driver still does not expose or
-upload these object programs.
+API lane set would lose two dimensions. The gated runtime uploads this generated
+object program alongside the mesh program; it does not expose API task shaders.
 
 Physical launches above 16, variable API sizes, and requested API subgroup
 sizes other than 32 reject explicitly. T32 would still be a single
@@ -100,9 +100,10 @@ culling and broader output families still need hardware evidence.
 The compiler reports `agx_apple9_mesh_body_info` and sets
 `agx_shader_info.apple9_body_only`. This flag means a native launch contract is
 still required, even though mesh completion is now present.
-`hk_upload_shader` rejects this flag; generic compute or graphics submission
-cannot silently run the program. No driver path selects the new API yet.
-Object entry/completion, reservation and launch integration are the next step.
+`hk_upload_shader` rejects this flag unless the gated native uploader verifies
+the stage's complete compiler metadata. Generic compute or vertex submission
+cannot run the program. Native mesh and generated object programs remain
+separate owned shader BOs, retained by every referencing command buffer.
 
 The private argument ABI is version 7:
 
@@ -216,17 +217,32 @@ clobbers, frame backing/minima and arbitrary grid values remain unqualified.
 GPR-preservation promotion gate: exercise live values across CALL/RET throughout
 the complete allocator-assigned GPR range. The observed r7 sentinels and r1-to-r3
 rename do not establish that general guarantee.
-The compiler emits one program but retains `apple9_body_only`, so ordinary
-upload still rejects it. The observed object frame fields 16/16 must not be
-inferred from its zero spill requirement or reduced to zero by a future
-launch builder. No native runtime integration is enabled by this compiler work.
+The compiler retains `apple9_body_only`; the gated driver validates the complete
+native metadata before upload. Object frames are 16/16 and mesh frames 64/64,
+independent of zero spill requirements. The runtime rejects scratch and
+returned-atomic frames pending separate qualification. The generated object has
+no caller values live after its call, so broader CALL/RET GPR preservation
+remains a promotion gate for other object programs.
 
-The driver does not call `agx_compile_apple9_taskless_object`; its
-enable argument is false outside tests, and the disabled path leaves NIR and
-output untouched. The host-only `apple9-native-object` and `Apple9Object*`
-tests cover the compiler contract. Host interpretation checks our assumed
-call model; it cannot qualify the hardware ABI. Runtime staging, native
-binding and the reservation provider are separate (step-3) work.
+Honeykrisp generates the taskless NIR and calls
+`agx_compile_apple9_native_object`. It constructs launches and mesh state from
+compiler metadata and ordinary command-pool allocations, and uses the shared
+fragment/PPP path. It accepts direct one-group draws and GPU conditional
+rendering of that grid. The paired kernel requires one native draw in its own
+stream, starting with native state, one layer and one sample; mixed/multiple
+draws in that stream reject during command recording. API task shaders,
+indirect/multigroup draws, multiview,
+non-fill polygon modes and negative-one-to-one depth reject explicitly. The
+last case still needs a native mesh equivalent of the vertex clip-halfz pass;
+it is not silently ignored. The opt-in feature limits are below extension
+minima and describe a development class, not conformant EXT_mesh_shader support.
+
+The kernel must select its native setup by parsing hardware mesh packets, own
+reservation/admission/retirement, and supply the native entry backing without
+userspace resource aliases. Existing UAPI fields keep their usual meanings.
+There is no native-mesh capability bit, so this opt-in requires an explicitly
+paired mesh-enabled kernel. Host interpretation and submission recording do
+not qualify GPU clipping, retirement or pixels.
 
 `apple9-native-workgroup` checks all sizes 1..16 in both stages, with and
 without store/atomic instrumentation, plus six 3D shapes per stage. Its NIR

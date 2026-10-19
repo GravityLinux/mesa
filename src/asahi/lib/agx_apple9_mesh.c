@@ -70,4 +70,3 @@ agx_apple9_mesh_arguments_build(uint64_t out[AGX_APPLE9_MESH_ARGUMENT_WORDS / 2]
    memcpy(out, roots, sizeof(roots));
    return true;
 }
-
