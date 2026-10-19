@@ -4,6 +4,7 @@
 #include <string.h>
 #include "compiler/nir/nir_builder.h"
 #include "util/bitscan.h"
+#include "util/hash_table.h"
 #include "util/u_dynarray.h"
 #include "agx_apple9_mesh.h"
 #include "agx_nir.h"
@@ -708,6 +709,138 @@ agx_nir_apple9_object_grid_export(nir_builder *b,
    nir_export_mesh_grid_word_apple9_agx(b, word);
    nir_pop_if(b, NULL);
    return true;
+}
+
+/* Region IDs cover both instructions and if conditions, so the validator can
+ * reject callee SSA escaping even through a condition in the caller. */
+struct object_regions {
+   struct hash_table *ids;
+   unsigned active, next;
+};
+
+static bool
+validate_object_regions(struct exec_list *list, struct object_regions *r)
+{
+   foreach_list_typed(nir_cf_node, node, node, list) {
+      if (node->type == nir_cf_node_block) {
+         nir_foreach_instr(instr, nir_cf_node_as_block(node)) {
+            nir_intrinsic_op op = instr->type == nir_instr_type_intrinsic
+                                     ? nir_instr_as_intrinsic(instr)->intrinsic
+                                     : nir_intrinsic_nop;
+            bool begin = op == nir_intrinsic_begin_object_call_apple9_agx;
+            bool end = op == nir_intrinsic_end_object_call_apple9_agx;
+            if (begin || end) {
+               if (node->parent->type != nir_cf_node_function ||
+                   (begin ? r->active != 0 : r->active == 0))
+                  return false;
+               r->active = begin ? ++r->next : 0;
+            } else if (r->active) {
+               if (instr->type == nir_instr_type_phi ||
+                   instr->type == nir_instr_type_call ||
+                   instr->type == nir_instr_type_jump)
+                  return false;
+               _mesa_hash_table_insert(r->ids, instr,
+                                       (void *)(uintptr_t)r->active);
+            }
+         }
+      } else if (node->type == nir_cf_node_if) {
+         nir_if *nif = nir_cf_node_as_if(node);
+         if (r->active)
+            _mesa_hash_table_insert(r->ids, nif,
+                                    (void *)(uintptr_t)r->active);
+         if (!validate_object_regions(&nif->then_list, r) ||
+             !validate_object_regions(&nif->else_list, r))
+            return false;
+      } else if (node->type == nir_cf_node_loop) {
+         if (r->active ||
+             !validate_object_regions(&nir_cf_node_as_loop(node)->body, r))
+            return false;
+      } else {
+         return false;
+      }
+   }
+   return true;
+}
+
+bool
+agx_nir_lower_apple9_object_calls(nir_shader *nir, const char **reason)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   struct util_dynarray calls = UTIL_DYNARRAY_INIT;
+   bool found = false;
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         bool call = intr->intrinsic == nir_intrinsic_launch_mesh_workgroups_apple9_agx;
+         if (!call && intr->intrinsic != nir_intrinsic_begin_object_call_apple9_agx &&
+                      intr->intrinsic != nir_intrinsic_end_object_call_apple9_agx)
+            continue;
+         found = true;
+         if (nir->info.stage != MESA_SHADER_TASK ||
+             nir->info.workgroup_size_variable ||
+             nir->info.workgroup_size[0] != 16 ||
+             nir->info.workgroup_size[1] != 1 ||
+             nir->info.workgroup_size[2] != 1 ||
+             block->cf_node.parent->type != nir_cf_node_function) {
+            util_dynarray_fini(&calls);
+            return fail(reason, "object grid calls require a converged T16 leaf caller");
+         }
+         if (call)
+            util_dynarray_append(&calls, intr);
+      }
+   }
+   if (!found) {
+      util_dynarray_fini(&calls);
+      return true;
+   }
+
+   /* Expand only after all NIR motion/optimization. The semantic builder owns
+    * the body; selection chooses its system values, compare and load forms. */
+   nir_builder b = nir_builder_create(impl);
+   util_dynarray_foreach(&calls, nir_intrinsic_instr *, call) {
+      const struct agx_apple9_mesh_key key = {
+         .grid_root = nir_intrinsic_base(*call),
+         .grid_offset_B = nir_intrinsic_range_base(*call),
+      };
+      b.cursor = nir_before_instr(&(*call)->instr);
+      nir_begin_object_call_apple9_agx(&b);
+      if (!agx_nir_apple9_object_grid_export(&b, &key)) {
+         util_dynarray_fini(&calls);
+         return fail(reason, "invalid object grid local storage");
+      }
+      nir_end_object_call_apple9_agx(&b);
+      nir_instr_remove(&(*call)->instr);
+   }
+   nir_progress(calls.size != 0, impl, nir_metadata_none);
+   util_dynarray_fini(&calls);
+
+   struct object_regions r = {.ids = _mesa_pointer_hash_table_create(NULL)};
+   if (!r.ids)
+      return fail(reason, "out of memory validating object call regions");
+   bool valid = validate_object_regions(&impl->body, &r) && !r.active;
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         struct hash_entry *entry = _mesa_hash_table_search(r.ids, instr);
+         nir_def *def = nir_instr_def(instr);
+         if (!def)
+            continue;
+         nir_foreach_use_including_if(use, def) {
+            const void *parent = nir_src_is_if(use)
+                                    ? (void *)nir_src_use_if(use)
+                                    : (void *)nir_src_use_instr(use);
+            struct hash_entry *consumer = _mesa_hash_table_search(r.ids, parent);
+            /* No SSA interface: inputs come from the callee's own semantic
+             * loads. This also prevents lazy selection of a caller ALU def
+             * inside the callee and later reuse of that virtual value. */
+            valid &= entry ? consumer && consumer->data == entry->data
+                           : consumer == NULL;
+         }
+      }
+   }
+   _mesa_hash_table_destroy(r.ids, NULL);
+   return valid || fail(reason, "invalid closed NIR object call region");
 }
 
 nir_shader *

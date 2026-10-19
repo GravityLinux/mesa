@@ -82,6 +82,30 @@ TEST(Apple9ObjectEncoding, GridExportPublicationField)
    EXPECT_FALSE(agx_apple9_pack_vir_instruction(&I, phys, &packed, nullptr));
 }
 
+/* Abstract clobbering leaf for the allocator/layout oracle. Grid semantics
+ * are tested through real NIR selection by apple9-native-object. */
+static bool
+emit_test_leaf(agx_apple9_vir_program *p, unsigned tag)
+{
+   if (!agx_apple9_vir_emit_side_effect(p, AGX_APPLE9_VIR_OBJECT_CALL,
+          AGX_APPLE9_ENC_OBJECT_CALL, nullptr, 0, 0))
+      return false;
+   uint32_t lane = agx_apple9_vir_emit(p, AGX_APPLE9_VIR_GET_SR,
+      AGX_APPLE9_ENC_GET_SR_ZEXT16, nullptr, 0, 0xa7);
+   uint32_t value = agx_apple9_vir_emit(p, AGX_APPLE9_VIR_IMM,
+      AGX_APPLE9_ENC_MOV_IMM32, nullptr, 0, 0x9000 + tag);
+   uint32_t sources[] = {lane, value};
+   uint32_t sum = agx_apple9_vir_emit(p, AGX_APPLE9_VIR_IADD,
+      AGX_APPLE9_ENC_INT_ADD_EXTENDED, sources, 2, 0);
+   return sum != AGX_APPLE9_VREG_INVALID &&
+      agx_apple9_vir_emit_side_effect(p, AGX_APPLE9_VIR_STORE_UNIFORM,
+         AGX_APPLE9_ENC_STORE_UNIFORM, &sum, 1, 160 + tag) &&
+      agx_apple9_vir_emit_side_effect(p, AGX_APPLE9_VIR_OBJECT_RETURN,
+         AGX_APPLE9_ENC_OBJECT_RETURN, nullptr, 0, 0) &&
+      agx_apple9_vir_emit_side_effect(p, AGX_APPLE9_VIR_OBJECT_RESUME,
+         AGX_APPLE9_ENC_OBJECT_RESUME, nullptr, 0, 0);
+}
+
 /* Execute allocated instructions through the actual out-of-line call edges.
  * This is an oracle for our compiler's liveness/control model, not evidence
  * that the hardware preserves unmentioned GPRs or has the assumed mask ABI. */
@@ -106,7 +130,7 @@ check_live_values(unsigned pressure, unsigned calls, std::set<unsigned> &lanes)
    for (unsigned i = 0; i < pressure; ++i)
       values.push_back(agx_apple9_vir_emit_device_load(&p, i, zero, &load));
    for (unsigned i = 0; i < calls; ++i)
-      ASSERT_TRUE(agx_apple9_vir_emit_object_grid_call(&p, 7 + i, 64 * i));
+      ASSERT_TRUE(emit_test_leaf(&p, i));
    for (unsigned i = 0; i < pressure; ++i)
       ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p,
          AGX_APPLE9_VIR_STORE_UNIFORM, AGX_APPLE9_ENC_STORE_UNIFORM,
@@ -170,10 +194,10 @@ check_live_values(unsigned pressure, unsigned calls, std::set<unsigned> &lanes)
    }
 
    for (unsigned lane : {0u, 1u, 2u, 15u}) {
-      uint32_t regs[AGX_APPLE9_GPR_COUNT] = {}, pub[128] = {}, uniform[256] = {};
+      uint32_t regs[AGX_APPLE9_GPR_COUNT] = {}, uniform[256] = {};
       auto input = [lane](unsigned i) { return 0xcafe0000u + 256 * lane + i; };
-      bool active = true, predicate = false;
-      unsigned pc = 0, return_pc = 0, returns = 0, resumes = 0, exports = 0;
+      bool active = true;
+      unsigned pc = 0, return_pc = 0, returns = 0, resumes = 0;
       unsigned pending = 0, steps = 0;
       while (pc < p.instruction_count && steps++ < 1000) {
          const auto *I = p.instructions[pc++];
@@ -194,32 +218,13 @@ check_live_values(unsigned pressure, unsigned calls, std::set<unsigned> &lanes)
          case AGX_APPLE9_VIR_DEVICE_LOAD: regs[I->dest] = input(I->immediate); break;
          case AGX_APPLE9_VIR_GET_SR:
             EXPECT_EQ(I->immediate, 0xa7u);
+            EXPECT_EQ(I->encoding, AGX_APPLE9_ENC_GET_SR_ZEXT16);
             lanes.insert(I->dest);
-            regs[I->dest] = lane;
+            regs[I->dest] = I->encoding == AGX_APPLE9_ENC_GET_SR_ZEXT16
+                              ? lane : (0xdead0000 | lane);
             break;
          case AGX_APPLE9_VIR_IADD: regs[I->dest] = read(0) + read(1); break;
          case AGX_APPLE9_VIR_IOR: regs[I->dest] = read(0) | read(1); break;
-         case AGX_APPLE9_VIR_IXOR:
-            if (I->encoding == AGX_APPLE9_ENC_LOGIC_EXPORT)
-               pub[I->dest] = read(0) ^ read(1);
-            else
-               regs[I->dest] = read(0) ^ read(1);
-            break;
-         case AGX_APPLE9_VIR_PREDICATE_COMPARE:
-            EXPECT_EQ(I->immediate, unsigned(AGX_APPLE9_PREDICATE_ULT));
-            predicate = read(0) < read(1);
-            break;
-         case AGX_APPLE9_VIR_EXEC_MASK_PUSH: active = predicate; break;
-         case AGX_APPLE9_VIR_EXEC_MASK_POP: active = true; break;
-         case AGX_APPLE9_VIR_SHARED_LOAD:
-            EXPECT_EQ(regs[I->src[0]], lane + 16 * (I->immediate - 7));
-            regs[I->dest] = 2 + lane;
-            break;
-         case AGX_APPLE9_VIR_OBJECT_GRID_EXPORT:
-            EXPECT_EQ(I->encoding, AGX_APPLE9_ENC_OBJECT_GRID_EXPORT);
-            EXPECT_EQ(pub[I->src[0]], 2 + lane);
-            ++exports;
-            break;
          case AGX_APPLE9_VIR_OBJECT_CALL:
             EXPECT_EQ(pending, 0u);
             EXPECT_EQ(return_pc, 0u);
@@ -239,7 +244,10 @@ check_live_values(unsigned pressure, unsigned calls, std::set<unsigned> &lanes)
             active = true;
             ++resumes;
             break;
-         case AGX_APPLE9_VIR_STORE_UNIFORM: uniform[I->immediate] = read(0); break;
+         case AGX_APPLE9_VIR_STORE_UNIFORM:
+            uniform[I->immediate] = read(0) +
+               (I->uniform_op == AGX_APPLE9_VIR_IADD ? read(1) : 0);
+            break;
          case AGX_APPLE9_VIR_DEVICE_FENCE:
             EXPECT_EQ(pending, 0u);
             break;
@@ -251,7 +259,8 @@ check_live_values(unsigned pressure, unsigned calls, std::set<unsigned> &lanes)
       EXPECT_LT(steps, 1000u);
       EXPECT_EQ(returns, calls);
       EXPECT_EQ(resumes, calls);
-      EXPECT_EQ(exports, lane < 3 ? calls : 0);
+      for (unsigned i = 0; i < calls; ++i)
+         EXPECT_EQ(uniform[160 + i], 0x9000 + i + lane);
       for (unsigned i = 0; i < pressure; ++i)
          EXPECT_EQ(uniform[32 + i], input(i)) << "live value " << i;
    }
@@ -277,7 +286,7 @@ TEST(Apple9ObjectIR, RejectsUnclosedRegionsAndScratchFrames)
    const char *reason = nullptr;
    EXPECT_FALSE(agx_apple9_layout_object_calls(&p, &reason));
    agx_apple9_vir_finish(&p);
-   ASSERT_TRUE(agx_apple9_vir_emit_object_grid_call(&p, 7, 0));
+   ASSERT_TRUE(emit_test_leaf(&p, 0));
    p.physical = p.dependencies_finalized = true;
    p.scratch_size = 16;
    EXPECT_FALSE(agx_apple9_layout_object_calls(&p, &reason));

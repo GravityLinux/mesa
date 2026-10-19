@@ -1037,6 +1037,8 @@ apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
              op == nir_intrinsic_export_mesh_grid_word_apple9_agx ||
              op == nir_intrinsic_fence_mesh_grid_apple9_agx ||
              op == nir_intrinsic_launch_mesh_workgroups_apple9_agx ||
+             op == nir_intrinsic_begin_object_call_apple9_agx ||
+             op == nir_intrinsic_end_object_call_apple9_agx ||
              op == nir_intrinsic_store_local_apple9_agx ||
              op == nir_intrinsic_end_task_apple9_agx ||
              op == nir_intrinsic_load_local_apple9_agx ||
@@ -1152,6 +1154,7 @@ struct apple9_dag_lower {
    bool tile_read;
    bool tile_write;
    bool object_calls;
+   bool object_region;
    bool tile_access;
    bool tile_coords;
    /* Fragment shader interlock holds the pixel acquired for writing. */
@@ -4374,21 +4377,29 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
                return false;
             continue;
          }
-         if (intr->intrinsic == nir_intrinsic_launch_mesh_workgroups_apple9_agx) {
-            /* The measured contract is one converged 16-lane object group.
-             * Do not silently generalize it to divergent or nested calls. */
-            if (lower->nir->info.stage != MESA_SHADER_TASK ||
-                lower->nir->info.workgroup_size_variable ||
-                lower->nir->info.workgroup_size[0] != 16 ||
-                lower->nir->info.workgroup_size[1] != 1 ||
-                lower->nir->info.workgroup_size[2] != 1 ||
-                block->cf_node.parent->type != nir_cf_node_function ||
-                !agx_apple9_vir_emit_object_grid_call(&lower->program,
-                   nir_intrinsic_base(intr), nir_intrinsic_range_base(intr))) {
-               lower->reason = "object grid calls require a converged T16 leaf caller";
+         if (intr->intrinsic == nir_intrinsic_begin_object_call_apple9_agx) {
+            if (lower->object_region ||
+                !agx_apple9_vir_emit_side_effect(&lower->program,
+                   AGX_APPLE9_VIR_OBJECT_CALL, AGX_APPLE9_ENC_OBJECT_CALL,
+                   NULL, 0, 0))
                return false;
-            }
-            lower->object_calls = true;
+            lower->object_calls = lower->object_region = true;
+            /* A closed callee must select its own system values even when
+             * caller and callee share the conservative allocation block. */
+            lower->system_block = NULL;
+            continue;
+         }
+         if (intr->intrinsic == nir_intrinsic_end_object_call_apple9_agx) {
+            if (!lower->object_region ||
+                !agx_apple9_vir_emit_side_effect(&lower->program,
+                   AGX_APPLE9_VIR_OBJECT_RETURN, AGX_APPLE9_ENC_OBJECT_RETURN,
+                   NULL, 0, 0) ||
+                !agx_apple9_vir_emit_side_effect(&lower->program,
+                   AGX_APPLE9_VIR_OBJECT_RESUME, AGX_APPLE9_ENC_OBJECT_RESUME,
+                   NULL, 0, 0))
+               return false;
+            lower->object_region = false;
+            lower->system_block = NULL;
             continue;
          }
          if (intr->intrinsic == nir_intrinsic_fence_mesh_grid_apple9_agx) {
@@ -4902,6 +4913,9 @@ apple9_emit_exec_mask(struct apple9_dag_lower *lower, bool push, bool invert)
       push ? AGX_APPLE9_VIR_EXEC_MASK_PUSH : AGX_APPLE9_VIR_EXEC_MASK_POP,
       push ? AGX_APPLE9_ENC_EXEC_MASK_PUSH : AGX_APPLE9_ENC_EXEC_MASK_POP, NULL,
       0, selector | (invert ? AGX_APPLE9_EXEC_MASK_INVERT : 0));
+   if (ok && lower->object_region)
+      lower->program.instructions[lower->program.instruction_count - 1]
+         ->local_control = true;
    if (!ok)
       lower->reason = "could not emit an Apple9 execution-mask operation";
    return ok;
@@ -4913,6 +4927,9 @@ apple9_emit_exec_mask_else(struct apple9_dag_lower *lower)
    const bool ok = agx_apple9_vir_emit_side_effect(
       &lower->program, AGX_APPLE9_VIR_EXEC_MASK_ELSE,
       AGX_APPLE9_ENC_EXEC_MASK_ELSE, NULL, 0, 0);
+   if (ok && lower->object_region)
+      lower->program.instructions[lower->program.instruction_count - 1]
+         ->local_control = true;
    if (!ok)
       lower->reason = "could not emit an Apple9 execution-mask else";
    return ok;
@@ -5167,7 +5184,7 @@ apple9_emit_skip(struct apple9_dag_lower *lower, struct exec_list *arm,
                  struct agx_apple9_block **target)
 {
    *target = NULL;
-   if (apple9_cf_list_cost(arm) <= APPLE9_SKIP_COST)
+   if (lower->object_region || apple9_cf_list_cost(arm) <= APPLE9_SKIP_COST)
       return true;
    *target = agx_apple9_block_create(&lower->program);
    if (!*target ||
@@ -5241,7 +5258,12 @@ apple9_emit_cf_list(struct apple9_dag_lower *lower,
       case nir_cf_node_block: {
          struct agx_apple9_block *block =
             lower->nir_blocks[nir_cf_node_as_block(node)->index];
-         if (!block->placed)
+         /* Closed callees cannot have PHIs, jumps or escaping SSA. Select
+          * their ordinary structured masks into one conservative RA block;
+          * the reconverged last NIR block owns its outgoing caller edges. */
+         if (lower->object_region)
+            lower->program.current_block->nir_exit = nir_cf_node_as_block(node);
+         else if (!block->placed)
             agx_apple9_block_begin(&lower->program, block);
          if (lower->zs_release_pending && !lower->loop_depth) {
             lower->zs_release_pending = false;
@@ -6207,6 +6229,8 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
    agx_nir_hoist_apple9_derivative_sources(nir);
    if (hoist)
       agx_nir_hoist_apple9_samples(nir);
+   if (!agx_nir_lower_apple9_object_calls(nir, reason))
+      return false;
    if (debug_get_option_cached_agx_apple9_trace_final_nir() != NULL)
       nir_print_shader(nir, apple9_log());
 

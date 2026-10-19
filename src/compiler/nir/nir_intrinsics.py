@@ -3381,6 +3381,12 @@ intrinsic("fence_mesh_grid_apple9_agx")
 # it must not be speculated, duplicated or replaced with an inline export.
 intrinsic("launch_mesh_workgroups_apple9_agx", indices=[BASE, RANGE_BASE])
 
+# Closed, compiler-owned object leaf region, introduced after NIR optimization.
+# Its ordinary NIR body is selected in logical execution order, allocated with
+# the caller, then moved out of line. No SSA value may cross the boundary.
+intrinsic("begin_object_call_apple9_agx")
+intrinsic("end_object_call_apple9_agx")
+
 # Semantic inputs to ordinary Apple9 mesh record formation. BASE is an
 # agx_apple9_mesh_formation_input, not a uniform slot or hardware register.
 # Runtime reservation/draw-state lowering must resolve these before emission.

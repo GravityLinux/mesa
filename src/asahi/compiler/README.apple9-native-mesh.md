@@ -205,9 +205,20 @@ counts. `agx_compile_apple9_taskless_object` uses native object lowering to
 emit lane-zero grid stores, mask the API body, then append the semantic NIR
 operation `launch_mesh_workgroups_apple9_agx` after a physical workgroup barrier. The operation
 names a local root and byte offset for three uint32 grid counts; it has no
-physical register arguments. Selection emits a closed leaf region in logical
-execution order: OBJECT_CALL, ordinary grid-load/publication instructions,
-OBJECT_RETURN, OBJECT_RESUME. OBJECT_GRID_EXPORT consumes a normally allocated
+physical register arguments. After NIR motion/optimization, it expands through
+`agx_nir_apple9_object_grid_export` between `begin_object_call_apple9_agx` and
+`end_object_call_apple9_agx`. The validator rejects unclosed/nested regions,
+loops, jumps, PHIs and any SSA crossing a region boundary (including caller
+if conditions). The leaf obtains inputs through its own semantic loads.
+Selection uses the normal system-value, predicate, shared-load and publication
+paths. Local invocation index therefore uses the normal `GET_SR_ZEXT16` read,
+including its zero-extension companion before 32-bit comparisons. System-value
+caches are invalidated at both region boundaries so a closed callee cannot
+reuse a caller's or another callee's read in the shared allocation block.
+It emits OBJECT_CALL, the selected NIR body, OBJECT_RETURN and
+OBJECT_RESUME in logical execution order. Structured callee masks carry
+`local_control` and share one conservative allocation block; its entry/exit
+NIR identities preserve the caller's incoming and outgoing CFG edges. OBJECT_GRID_EXPORT consumes a normally allocated
 publication word. The scheduler treats call/return/resume as full resource
 barriers and drains pending work at each boundary. RA sees the caller and
 callee together, so all values live across the call interfere with callee
@@ -226,6 +237,9 @@ one converged T16 object group, convention-1 CALL/RET, empty immediate-return
 mask and lanes 0–15 restored by POP2. Divergent physical callers, other physical widths, nested
 calls and scratch/spills are rejected. Hardware portability, hidden call GPR
 clobbers, frame backing/minima and arbitrary grid values remain unqualified.
+GPR-preservation promotion gate: exercise live values across CALL/RET throughout
+the complete allocator-assigned GPR range. The observed r7 sentinels and r1-to-r3
+rename do not establish that general guarantee.
 The compiler emits one program but retains `apple9_body_only`, so ordinary
 upload still rejects it. The observed object frame fields 16/16 must not be
 inferred from its zero spill requirement or reduced to zero by a future

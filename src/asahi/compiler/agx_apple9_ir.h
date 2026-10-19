@@ -520,6 +520,9 @@ struct agx_apple9_block {
    struct agx_apple9_block *next, *prev, *allocated_next;
    struct agx_apple9_vir_program *program;
    struct nir_block *nir; /* Logical CFG, distinct from execution-mask layout. */
+   /* A closed NIR call region may contain structured masks selected into this
+    * same logical block. Its last NIR block owns the outgoing caller edges. */
+   struct nir_block *nir_exit;
    struct agx_apple9_block **predecessors;
    unsigned predecessor_count;
    struct list_head instructions;
@@ -718,8 +721,6 @@ bool agx_apple9_vir_emit_mesh_submit(struct agx_apple9_vir_program *program,
                                      const uint32_t *src, unsigned components,
                                      bool release);
 
-bool agx_apple9_vir_emit_object_grid_call(struct agx_apple9_vir_program *program,
-                                         unsigned root, unsigned offset_B);
 /* After RA/scheduling, before packing. The main must end in HALT. No
  * instructions are introduced. Returns true also when there are no calls. */
 bool agx_apple9_layout_object_calls(struct agx_apple9_vir_program *program,
