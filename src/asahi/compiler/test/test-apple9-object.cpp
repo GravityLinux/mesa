@@ -4,6 +4,7 @@
 #include "agx_apple9_encoding.h"
 #include "agx_apple9_ir.h"
 #include "agx_apple9_mesh.h"
+#include "agx_apple9_dag_cache.h"
 extern "C" {
 #include "agx_nir.h"
 }
@@ -11,6 +12,29 @@ extern "C" {
 #include <gtest/gtest.h>
 #include <set>
 #include <vector>
+
+TEST(Apple9ObjectIR, ContextCacheResetClearsEveryByte)
+{
+   agx_apple9_dag_cache expected;
+   memset(&expected, 0, sizeof(expected));
+   expected.zero_vreg = AGX_APPLE9_VREG_INVALID;
+   expected.entry_zero = AGX_APPLE9_VREG_INVALID;
+   expected.perspective_reciprocal = AGX_APPLE9_VREG_INVALID;
+   memset(expected.system_vreg, 0xff, sizeof(expected.system_vreg));
+   memset(expected.binding_pointer, 0xff, sizeof(expected.binding_pointer));
+
+   /* Poison the complete object, not a list of today's members: adding a cache
+    * without clearing it must fail. Repeat to represent both region boundaries.
+    * hk-native-object-mask separately checks real compiler boundary placement
+    * and rejects a callee use of a caller-only value.
+    */
+   for (unsigned poison : {0x5au, 0xa5u}) {
+      agx_apple9_dag_cache cache;
+      memset(&cache, poison, sizeof(cache));
+      agx_apple9_dag_cache_reset(&cache);
+      EXPECT_EQ(memcmp(&cache, &expected, sizeof(cache)), 0);
+   }
+}
 
 static int64_t
 call_displacement(const uint8_t *bytes)

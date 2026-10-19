@@ -6,6 +6,7 @@
 #include "util/u_debug.h"
 #include "agx_compile_apple9.h"
 #include "agx_apple9_ir.h"
+#include "agx_apple9_dag_cache.h"
 #include "agx_apple9_mesh.h"
 #include "agx_nir.h"
 #include "agx_nir_texture.h"
@@ -1102,40 +1103,16 @@ struct apple9_loop_context {
    unsigned mask_depth;
 };
 
-/* Varying exports of the current block, by exported value. A legal shader
- * may first write clip distances after all other outputs. Remember every
- * publication that can fit the bank so rasterizer copies can always reuse it.
- */
-#define APPLE9_EXPORT_MEMO AGX_APPLE9_PUBLICATION_COUNT
-struct apple9_export_memo {
-   uint32_t value, export;
-   bool raw;
-};
-
 struct apple9_dag_lower {
    struct agx_apple9_vir_program program;
    /* Set when one export per varying store would exceed the bank. */
    bool share_exports;
-   struct apple9_export_memo export_memo[APPLE9_EXPORT_MEMO];
-   unsigned export_memo_count;
-   nir_block *export_memo_block;
+   struct agx_apple9_dag_cache cache;
    nir_shader *nir;
    uint32_t *ssa_to_vreg;
    struct agx_apple9_block **nir_blocks;
    unsigned ssa_map_count;
-   uint32_t system_vreg[256];
-   struct agx_apple9_block *system_block;
-   uint32_t zero_vreg;
-   struct agx_apple9_block *zero_block;
-   /* Entry constants dominate their own execution context. Closed object
-    * callees have no SSA inputs, including compiler-created constants. */
-   uint32_t entry_zero;
-   uint32_t object_entry_zero;
-   struct agx_apple9_block *binding_pointer_block;
-   uint32_t binding_pointer[AGX_APPLE9_MAX_GRAPHICS_BUFFERS];
-   uint32_t perspective_reciprocal;
    struct agx_apple9_interp_mask linear_mask, flat_mask;
-   struct agx_apple9_block *perspective_block;
    bool reads_z;
    bool writes_z;
    bool writes_s;
@@ -1163,6 +1140,7 @@ struct apple9_dag_lower {
    bool interlock;
    uint32_t coverage_control;
    uint32_t coverage_mask;
+   /* Immutable resource ledger; selected values live only in ssa_to_vreg. */
    struct apple9_scalar_load *loads;
    unsigned load_count;
    struct apple9_buffer_atomic *atomics;
@@ -1175,7 +1153,9 @@ struct apple9_dag_lower {
    uint32_t texture_mask, sampler_mask, image_mask;
    unsigned load_instruction_count;
    unsigned emitted_load_count;
-   nir_block *active_load_block;
+   /* Emission cursor and counts, not cached load results. Boundaries can be
+    * inside this NIR block, so retain its identity and outstanding count. */
+   nir_block *active_nir_block;
    unsigned active_load_instruction_count;
    unsigned active_emitted_load_count;
    bool structured_cf;
@@ -1228,38 +1208,58 @@ apple9_dag_imm(struct apple9_dag_lower *lower, uint32_t value)
                                       value);
 }
 
+/* NIR caller and callee can share a VIR block but have different live lanes.
+ * Every synthetic value cache belongs to the execution context, so invalidate
+ * the entire aggregate at both boundaries. Keep the instruction ledger and
+ * NIR SSA map: neither is a synthetic-value cache, and closed-region validation
+ * forbids NIR values from crossing into or out of the callee.
+ */
+static bool
+apple9_closed_context_boundary(struct apple9_dag_lower *lower, bool enter)
+{
+   agx_apple9_dag_cache_reset(&lower->cache);
+   lower->object_region = enter;
+   lower->object_calls |= enter;
+   if (enter) {
+      /* This definition dominates every callee mask. DCE removes it if unused;
+       * ordinary allocation chooses its register. After returning, use a fresh
+       * block-local zero rather than claiming dominance over the caller CFG.
+       */
+      lower->cache.entry_zero = apple9_dag_imm(lower, 0);
+      return lower->cache.entry_zero != AGX_APPLE9_VREG_INVALID;
+   }
+   return true;
+}
+
 static uint32_t
 apple9_dag_zero(struct apple9_dag_lower *lower)
 {
-   if (lower->object_region)
-      return lower->object_entry_zero;
-
    /* One zero from the entry block serves every block. Rematerializing a
     * zero per block made each constant memory index rewrite the register a
     * preceding store or load was still reading, costing a wait. */
-   if (lower->entry_zero != AGX_APPLE9_VREG_INVALID)
-      return lower->entry_zero;
+   if (lower->cache.entry_zero != AGX_APPLE9_VREG_INVALID)
+      return lower->cache.entry_zero;
    /* Otherwise reuse the zero only within its block, which need not dominate
     * later blocks. */
-   if (lower->zero_vreg == AGX_APPLE9_VREG_INVALID ||
-       lower->zero_block != lower->program.current_block) {
-      lower->zero_vreg = apple9_dag_imm(lower, 0);
-      lower->zero_block = lower->program.current_block;
+   if (lower->cache.zero_vreg == AGX_APPLE9_VREG_INVALID ||
+       lower->cache.zero_block != lower->program.current_block) {
+      lower->cache.zero_vreg = apple9_dag_imm(lower, 0);
+      lower->cache.zero_block = lower->program.current_block;
    }
-   return lower->zero_vreg;
+   return lower->cache.zero_vreg;
 }
 
 static uint32_t
 apple9_buffer_address(struct apple9_dag_lower *lower, unsigned argument)
 {
    assert(lower->buffer_table);
-   assert(argument < ARRAY_SIZE(lower->binding_pointer));
-   if (lower->binding_pointer_block != lower->program.current_block) {
-      lower->binding_pointer_block = lower->program.current_block;
-      memset(lower->binding_pointer, 0xff, sizeof(lower->binding_pointer));
+   assert(argument < ARRAY_SIZE(lower->cache.binding_pointer));
+   if (lower->cache.binding_pointer_block != lower->program.current_block) {
+      lower->cache.binding_pointer_block = lower->program.current_block;
+      memset(lower->cache.binding_pointer, 0xff, sizeof(lower->cache.binding_pointer));
    }
-   if (lower->binding_pointer[argument] != AGX_APPLE9_VREG_INVALID)
-      return lower->binding_pointer[argument];
+   if (lower->cache.binding_pointer[argument] != AGX_APPLE9_VREG_INVALID)
+      return lower->cache.binding_pointer[argument];
 
    /* The draw's binding table is immutable even when its buffers are
     * writable. Cache only that pointer, and only within its defining block. */
@@ -1278,7 +1278,7 @@ apple9_buffer_address(struct apple9_dag_lower *lower, unsigned argument)
           &lower->program, address, AGX_APPLE9_DEVICE_LOAD_HAS_NEXT,
           AGX_APPLE9_SCOREBOARD_SLOT_AUTO))
       return AGX_APPLE9_VREG_INVALID;
-   lower->binding_pointer[argument] = address;
+   lower->cache.binding_pointer[argument] = address;
    return address;
 }
 
@@ -1287,11 +1287,11 @@ apple9_dag_system(struct apple9_dag_lower *lower,
                   struct apple9_system_source system)
 {
    /* A read first emitted in one arm does not dominate sibling arms. */
-   if (lower->system_block != lower->program.current_block) {
-      lower->system_block = lower->program.current_block;
-      memset(lower->system_vreg, 0xff, sizeof(lower->system_vreg));
+   if (lower->cache.system_block != lower->program.current_block) {
+      lower->cache.system_block = lower->program.current_block;
+      memset(lower->cache.system_vreg, 0xff, sizeof(lower->cache.system_vreg));
    }
-   if (lower->system_vreg[system.selector] == AGX_APPLE9_VREG_INVALID) {
+   if (lower->cache.system_vreg[system.selector] == AGX_APPLE9_VREG_INVALID) {
       enum agx_apple9_vir_opcode op = system.global_id
                                          ? AGX_APPLE9_VIR_GET_GLOBAL_ID
                                          : AGX_APPLE9_VIR_GET_SR;
@@ -1307,11 +1307,11 @@ apple9_dag_system(struct apple9_dag_lower *lower,
 
       /* Keep the system value in SSA; allocation applies the six-bit
        * destination field shared by the short SR forms. */
-      lower->system_vreg[system.selector] =
+      lower->cache.system_vreg[system.selector] =
          apple9_dag_emit(lower, op, encoding, NULL, 0, immediate);
    }
 
-   return lower->system_vreg[system.selector];
+   return lower->cache.system_vreg[system.selector];
 }
 
 static enum agx_apple9_vir_opcode
@@ -1986,18 +1986,18 @@ apple9_emit_interpolation(struct apple9_dag_lower *lower, unsigned coefficient,
    uint32_t reciprocal;
    /* A reciprocal first emitted in one arm does not dominate sibling arms.
     * Reuse it only within the block where it was computed. */
-   if (at_position || lower->perspective_block != lower->program.current_block) {
+   if (at_position || lower->cache.perspective_block != lower->program.current_block) {
       uint32_t denominator = apple9_dag_emit(
          lower, AGX_APPLE9_VIR_ITER, encoding,
          at_position ? &position : NULL, at_position, 0);
       reciprocal = apple9_dag_emit(lower, AGX_APPLE9_VIR_FRCP,
          AGX_APPLE9_ENC_FLOAT_SPECIAL, &denominator, 1, 3);
       if (!at_position) {
-         lower->perspective_reciprocal = reciprocal;
-         lower->perspective_block = lower->program.current_block;
+         lower->cache.perspective_reciprocal = reciprocal;
+         lower->cache.perspective_block = lower->program.current_block;
       }
    } else {
-      reciprocal = lower->perspective_reciprocal;
+      reciprocal = lower->cache.perspective_reciprocal;
    }
    uint32_t value = apple9_dag_emit(
       lower, AGX_APPLE9_VIR_ITER, encoding,
@@ -2164,7 +2164,7 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
       constant = nir_scalar_as_uint(scalar);
       if (scalar.def->bit_size < 32)
          constant &= BITFIELD_MASK(scalar.def->bit_size);
-      value = constant == 0 && lower->entry_zero != AGX_APPLE9_VREG_INVALID
+      value = constant == 0 && lower->cache.entry_zero != AGX_APPLE9_VREG_INVALID
                  ? apple9_dag_zero(lower) : apple9_dag_imm(lower, constant);
    } else if (nir_def_instr_type(scalar.def) == nir_instr_type_tex) {
       nir_tex_instr *tex = nir_instr_as_tex(nir_def_instr(scalar.def));
@@ -2661,7 +2661,7 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                "Apple9 DAG load is absent from the resource ledger";
             return AGX_APPLE9_VREG_INVALID;
          }
-         if (load->block != lower->active_load_block) {
+         if (load->block != lower->active_nir_block) {
             lower->reason =
                "Apple9 DAG load escaped its active control-flow region";
             return AGX_APPLE9_VREG_INVALID;
@@ -4180,14 +4180,14 @@ apple9_emit_graphics_output(struct apple9_dag_lower *lower,
        * several UVS slots (a clip distance's varying and rasterizer copies)
        * publishes once. */
       if (lower->share_exports &&
-          lower->export_memo_block != lower->active_load_block) {
-         lower->export_memo_block = lower->active_load_block;
-         lower->export_memo_count = 0;
+          lower->cache.export_memo_block != lower->active_nir_block) {
+         lower->cache.export_memo_block = lower->active_nir_block;
+         lower->cache.export_memo_count = 0;
       }
       uint32_t exported = AGX_APPLE9_VREG_INVALID;
-      for (unsigned m = 0; lower->share_exports && m < lower->export_memo_count; ++m) {
-         if (lower->export_memo[m].value == value && lower->export_memo[m].raw == raw)
-            exported = lower->export_memo[m].export;
+      for (unsigned m = 0; lower->share_exports && m < lower->cache.export_memo_count; ++m) {
+         if (lower->cache.export_memo[m].value == value && lower->cache.export_memo[m].raw == raw)
+            exported = lower->cache.export_memo[m].publication;
       }
       if (exported == AGX_APPLE9_VREG_INVALID) {
          uint32_t scale = apple9_dag_imm(lower, raw ? 0 : fui(1.0f));
@@ -4199,9 +4199,9 @@ apple9_emit_graphics_output(struct apple9_dag_lower *lower,
             raw ? AGX_APPLE9_ENC_LOGIC_EXPORT : AGX_APPLE9_ENC_FLOAT2_EXPORT,
             sources, 2, 0);
          if (lower->share_exports && exported != AGX_APPLE9_VREG_INVALID &&
-             lower->export_memo_count < APPLE9_EXPORT_MEMO) {
-            lower->export_memo[lower->export_memo_count++] =
-               (struct apple9_export_memo){value, exported, raw};
+             lower->cache.export_memo_count < AGX_APPLE9_PUBLICATION_COUNT) {
+            lower->cache.export_memo[lower->cache.export_memo_count++] =
+               (struct agx_apple9_export_memo){value, exported, raw};
          }
       }
       value = exported;
@@ -4226,7 +4226,7 @@ static bool
 apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
                   nir_block *block)
 {
-   lower->active_load_block = block;
+   lower->active_nir_block = block;
    lower->active_load_instruction_count =
       apple9_load_instruction_count_in_block(lower, block);
    lower->active_emitted_load_count = 0;
@@ -4369,18 +4369,8 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
                    AGX_APPLE9_VIR_OBJECT_CALL, AGX_APPLE9_ENC_OBJECT_CALL,
                    NULL, 0, 0))
                return false;
-            lower->object_calls = lower->object_region = true;
-            /* A CALL may enter lanes that did not execute caller definitions.
-             * Keep the closed callee's synthetic zero local to its context,
-             * just like its NIR values and system-value reads. Emitting it
-             * here dominates every callee mask; ordinary DCE removes it if
-             * unused. No GPR or incoming launch value is prescribed. */
-            lower->object_entry_zero = apple9_dag_imm(lower, 0);
-            if (lower->object_entry_zero == AGX_APPLE9_VREG_INVALID)
+            if (!apple9_closed_context_boundary(lower, true))
                return false;
-            /* A closed callee must select its own system values even when
-             * caller and callee share the conservative allocation block. */
-            lower->system_block = NULL;
             continue;
          }
          if (intr->intrinsic == nir_intrinsic_end_object_call_apple9_agx) {
@@ -4392,9 +4382,8 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
                    AGX_APPLE9_VIR_OBJECT_RESUME, AGX_APPLE9_ENC_OBJECT_RESUME,
                    NULL, 0, 0))
                return false;
-            lower->object_region = false;
-            lower->object_entry_zero = AGX_APPLE9_VREG_INVALID;
-            lower->system_block = NULL;
+            if (!apple9_closed_context_boundary(lower, false))
+               return false;
             continue;
          }
          if (intr->intrinsic == nir_intrinsic_fence_mesh_grid_apple9_agx) {
@@ -4763,7 +4752,7 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
       return false;
    }
 
-   lower->active_load_block = NULL;
+   lower->active_nir_block = NULL;
    return true;
 }
 
@@ -6290,9 +6279,6 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
       .image_mask = image_mask,
       .sampler_mask = sampler_mask,
       .varyings = varyings,
-      .zero_vreg = AGX_APPLE9_VREG_INVALID,
-      .entry_zero = AGX_APPLE9_VREG_INVALID,
-      .object_entry_zero = AGX_APPLE9_VREG_INVALID,
       .loads = loads.data,
       .load_count =
          util_dynarray_num_elements(&loads, struct apple9_scalar_load),
@@ -6315,6 +6301,7 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
             : agx_apple9_compute_preamble_base(resources->count),
       .structured_cf = apple9_cf_list_has_control_flow(&impl->body),
    };
+   agx_apple9_dag_cache_reset(&lower.cache);
    /* Reserve depth before assigning point-coordinate coefficients, independent
     * of the order in which the DAG visits the two built-ins. */
    nir_foreach_block(block, impl) {
@@ -6356,8 +6343,6 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
          }
       }
    }
-   for (unsigned i = 0; i < ARRAY_SIZE(lower.system_vreg); ++i)
-      lower.system_vreg[i] = AGX_APPLE9_VREG_INVALID;
    for (unsigned i = 0; i < lower.load_count; ++i) {
       bool first = true;
       for (unsigned earlier = 0; earlier < i; ++earlier)
@@ -6373,7 +6358,7 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
       goto fail;
    }
    if (lower.structured_cf)
-      lower.entry_zero = lower.zero_vreg;
+      lower.cache.entry_zero = lower.cache.zero_vreg;
    /* System values are cached by selector across the whole shader. Read them
     * before divergent control flow so a first use in one arm cannot leave
     * lanes in another arm with an undefined cached value. This also applies
