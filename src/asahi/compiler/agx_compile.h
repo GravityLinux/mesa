@@ -147,6 +147,13 @@ struct agx_apple9_varying_layout {
    uint8_t reserved[2];
 };
 
+static inline unsigned
+agx_apple9_varying_group(uint64_t flat, uint64_t linear, unsigned location)
+{
+   return (flat & BITFIELD64_BIT(location)) ? 1 :
+          (linear & BITFIELD64_BIT(location)) ? 2 : 0;
+}
+
 /* Returns the packed user scalar index, excluding the four position words. */
 static inline int
 agx_apple9_varying_index(const struct agx_apple9_varying_layout *layout,

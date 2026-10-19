@@ -110,9 +110,8 @@ varying_layout(const struct agx_apple9_mesh_layout *layout,
          ++varyings->count;
       }
       if (slot < ARRAY_SIZE(varyings->mask) && varyings->mask[slot])
-         varyings->group[slot] =
-            (options->outputs_flat & BITFIELD64_BIT(slot)) ? 1 :
-            (options->outputs_linear & BITFIELD64_BIT(slot)) ? 2 : 0;
+         varyings->group[slot] = agx_apple9_varying_group(
+            options->outputs_flat, options->outputs_linear, slot);
    }
    return true;
 }

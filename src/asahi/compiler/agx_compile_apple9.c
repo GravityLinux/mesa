@@ -11354,8 +11354,8 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
    if (layout) {
       for (unsigned i = 0; i < ARRAY_SIZE(varyings.mask); ++i) {
          if (varyings.mask[i])
-            varyings.group[i] = (layout->outputs_flat & BITFIELD64_BIT(i)) ? 1 :
-               (layout->outputs_linear & BITFIELD64_BIT(i)) ? 2 : 0;
+            varyings.group[i] = agx_apple9_varying_group(
+               layout->outputs_flat, layout->outputs_linear, i);
       }
    }
    if (varyings.cull_distance_mask)
