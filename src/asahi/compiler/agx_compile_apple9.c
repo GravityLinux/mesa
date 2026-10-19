@@ -6,6 +6,7 @@
 #include "util/u_debug.h"
 #include "agx_compile_apple9.h"
 #include "agx_apple9_ir.h"
+#include "agx_apple9_mesh.h"
 #include "agx_nir.h"
 #include "agx_nir_texture.h"
 
@@ -188,6 +189,11 @@ apple9_system_source(nir_scalar scalar, struct apple9_system_source *source)
    bool global_id = false;
 
    switch (op) {
+   case nir_intrinsic_load_mesh_primitive_base_apple9_agx:
+      base = 0x62;
+      components = 2;
+      zext16 = scalar.comp == 1;
+      break;
    case nir_intrinsic_load_pixel_coord:
       base = 0xa0;
       components = 2;
@@ -1024,7 +1030,18 @@ apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
            op == nir_intrinsic_store_local_pixel_agx ||
            op == nir_intrinsic_demote || op == nir_intrinsic_demote_if))
          return true;
-      return op == nir_intrinsic_image_store_apple9_agx ||
+      return op == nir_intrinsic_mesh_control_apple9_agx ||
+             op == nir_intrinsic_mesh_submit_channel_apple9_agx ||
+             op == nir_intrinsic_mesh_submit_scalar_apple9_agx ||
+             op == nir_intrinsic_set_vertex_and_primitive_count ||
+             op == nir_intrinsic_export_mesh_grid_word_apple9_agx ||
+             op == nir_intrinsic_fence_mesh_grid_apple9_agx ||
+             op == nir_intrinsic_store_local_apple9_agx ||
+             op == nir_intrinsic_end_task_apple9_agx ||
+             op == nir_intrinsic_load_local_apple9_agx ||
+             op == nir_intrinsic_load_mesh_primitive_base_apple9_agx ||
+             op == nir_intrinsic_load_native_pointer_apple9_agx ||
+             op == nir_intrinsic_image_store_apple9_agx ||
              op == nir_intrinsic_load_global_invocation_id ||
              op == nir_intrinsic_load_workgroup_id ||
              op == nir_intrinsic_load_tile_id_agx ||
@@ -2399,6 +2416,24 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
             lower->program.instructions[lower->program.instruction_count - 1]
                ->producer_scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_6;
          }
+      } else if (intr && intr->intrinsic ==
+                            nir_intrinsic_load_native_pointer_apple9_agx) {
+         unsigned word = nir_intrinsic_base(intr) + scalar.comp;
+         if (word >= AGX_APPLE9_UNIFORM_COUNT)
+            return AGX_APPLE9_VREG_INVALID;
+         value = apple9_dag_emit(lower, AGX_APPLE9_VIR_IOR_UNIFORM,
+                                 AGX_APPLE9_ENC_UNIFORM_MOVE, NULL, 0, word);
+      } else if (intr &&
+                 intr->intrinsic == nir_intrinsic_load_local_apple9_agx) {
+         uint32_t address =
+            apple9_lower_dag_scalar(lower, nir_get_scalar(intr->src[0].ssa, 0));
+         address = apple9_dag_shift_imm(lower, nir_op_ushr, address, 2);
+         value = apple9_dag_emit(lower, AGX_APPLE9_VIR_SHARED_LOAD,
+                                 AGX_APPLE9_ENC_SHARED_LOAD, &address, 1,
+                                 nir_intrinsic_base(intr));
+         if (value != AGX_APPLE9_VREG_INVALID)
+            lower->program.instructions[lower->program.instruction_count - 1]
+               ->producer_scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_6;
       } else if (intr && intr->intrinsic == nir_intrinsic_load_shared) {
          if (scalar.def->bit_size != 32 ||
              nir_intrinsic_align_mul(intr) < 4 ||
@@ -3294,6 +3329,7 @@ struct apple9_buffer_map {
    uint32_t write_mask;
    bool writes_global;
    bool descriptor_tables;
+   unsigned native_root_words;
    struct apple9_buffer_resource resource[AGX_APPLE9_MAX_GRAPHICS_BUFFERS];
 };
 
@@ -3359,6 +3395,15 @@ apple9_collect_buffer_map(nir_shader *nir, struct apple9_buffer_map *map,
             continue;
 
          nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic == nir_intrinsic_load_local_apple9_agx ||
+             intr->intrinsic == nir_intrinsic_store_local_apple9_agx)
+            map->native_root_words =
+               MAX2(map->native_root_words,
+                    ALIGN_POT(2 * nir_intrinsic_base(intr) + 2, 4));
+         if (intr->intrinsic == nir_intrinsic_load_native_pointer_apple9_agx)
+            map->native_root_words =
+               MAX2(map->native_root_words,
+                    ALIGN_POT(nir_intrinsic_base(intr) + 2, 4));
          map->writes_global |= intr->intrinsic == nir_intrinsic_store_global_2x32 ||
                                apple9_is_global_atomic(intr->intrinsic) ||
                                intr->intrinsic == nir_intrinsic_image_store_apple9_agx;
@@ -3411,7 +3456,9 @@ apple9_collect_buffer_map(nir_shader *nir, struct apple9_buffer_map *map,
    qsort(map->resource, map->count, sizeof(map->resource[0]),
          apple9_compare_buffer_resource);
    if (nir->info.shared_size) {
-      if (nir->info.stage != MESA_SHADER_COMPUTE ||
+      if ((nir->info.stage != MESA_SHADER_COMPUTE &&
+           nir->info.stage != MESA_SHADER_TASK &&
+           nir->info.stage != MESA_SHADER_MESH) ||
           nir->info.shared_size > AGX_APPLE9_MAX_SHARED_BYTES ||
           map->count == AGX_APPLE9_COMPUTE_MAX_RESOURCES) {
          *reason = "Apple9 shared memory exceeds the supported compute allocation";
@@ -4286,6 +4333,131 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
                   return false;
             }
             lower->program.private_size = lower->nir->scratch_size;
+            continue;
+         }
+         if (intr->intrinsic == nir_intrinsic_mesh_control_apple9_agx ||
+             intr->intrinsic == nir_intrinsic_mesh_submit_channel_apple9_agx ||
+             intr->intrinsic == nir_intrinsic_mesh_submit_scalar_apple9_agx) {
+            if (lower->nir->info.stage != MESA_SHADER_MESH)
+               return false;
+            bool control = intr->intrinsic == nir_intrinsic_mesh_control_apple9_agx;
+            unsigned count = intr->intrinsic ==
+                                   nir_intrinsic_mesh_submit_scalar_apple9_agx ? 1 : 2;
+            uint32_t sources[2];
+            for (unsigned s = 0; s < count; ++s) {
+               if (nir_src_bit_size(intr->src[s]) != (control ? 16 : 32))
+                  return false;
+               sources[s] = apple9_lower_dag_scalar(
+                  lower, nir_get_scalar(intr->src[s].ssa, 0));
+               if (sources[s] == AGX_APPLE9_VREG_INVALID)
+                  return false;
+            }
+            if (control) {
+               if (nir_intrinsic_base(intr) > 1 ||
+                   !agx_apple9_vir_emit_mesh_control(&lower->program,
+                      sources[0], sources[1], nir_intrinsic_base(intr)))
+                  return false;
+            } else if (!agx_apple9_vir_emit_mesh_submit(&lower->program,
+                                                       sources, count, count == 2)) {
+               return false;
+            }
+            continue;
+         }
+         if (intr->intrinsic == nir_intrinsic_set_vertex_and_primitive_count) {
+            /* Stage-body compilation preserves logical counts in NIR for
+             * the future completion lowering. Only the separately lowered
+             * primitive-count memory publication is encoded here. */
+            if (lower->nir->info.stage != MESA_SHADER_MESH)
+               return false;
+            continue;
+         }
+         if (intr->intrinsic == nir_intrinsic_fence_mesh_grid_apple9_agx) {
+            if (lower->nir->info.stage != MESA_SHADER_TASK ||
+                !agx_apple9_vir_emit_side_effect(
+                   &lower->program, AGX_APPLE9_VIR_DEVICE_FENCE,
+                   AGX_APPLE9_ENC_DEVICE_FENCE, NULL, 0,
+                   AGX_APPLE9_FENCE_OBJECT_GRID))
+               return false;
+            continue;
+         }
+         if (intr->intrinsic ==
+             nir_intrinsic_export_mesh_grid_word_apple9_agx) {
+            if (lower->nir->info.stage != MESA_SHADER_TASK)
+               return false;
+            uint32_t value = apple9_lower_dag_scalar(
+               lower, nir_get_scalar(intr->src[0].ssa, 0));
+            uint32_t sources[] = {value, apple9_dag_zero(lower)};
+            uint32_t publication =
+               apple9_dag_emit(lower, AGX_APPLE9_VIR_IXOR,
+                               AGX_APPLE9_ENC_LOGIC_EXPORT, sources, 2, 0);
+            if (publication == AGX_APPLE9_VREG_INVALID ||
+                !agx_apple9_vir_emit_side_effect(
+                   &lower->program, AGX_APPLE9_VIR_VARY_STORE,
+                   AGX_APPLE9_ENC_OBJECT_GRID_EXPORT, &publication, 1, 0))
+               return false;
+            continue;
+         }
+         if (intr->intrinsic == nir_intrinsic_end_task_apple9_agx) {
+            if (lower->nir->info.stage != MESA_SHADER_TASK)
+               return false;
+            /* This API compiles a body only. Its required collective
+             * completion is reported in agx_apple9_mesh_body_info, never
+             * substituted with an executable native STOP epilogue. */
+            continue;
+         }
+         if (intr->intrinsic == nir_intrinsic_store_local_apple9_agx) {
+            unsigned bits = nir_intrinsic_bit_size(intr);
+            if ((bits != 8 && bits != 16 && bits != 32) ||
+                nir_src_bit_size(intr->src[0]) < 8 ||
+                nir_src_bit_size(intr->src[0]) > 32 ||
+                nir_intrinsic_base(intr) >= 64)
+               return false;
+            unsigned offset_B = 0;
+            if (intr->src[1].ssa->bit_size != 32)
+               return false;
+            enum agx_apple9_local_index_kind index_kind =
+               AGX_APPLE9_LOCAL_INDEX_NONE;
+            uint32_t address = AGX_APPLE9_VREG_INVALID;
+            if (nir_src_is_const(intr->src[1]) &&
+                nir_src_as_uint(intr->src[1]) < 8192) {
+               offset_B = nir_src_as_uint(intr->src[1]);
+            } else {
+               if (bits == 16) {
+                  lower->reason =
+                     "Apple9 dynamic 16-bit local stores are not validated";
+                  return false;
+               }
+               index_kind = AGX_APPLE9_LOCAL_INDEX_GPR;
+               address = apple9_lower_dag_scalar(
+                  lower, nir_get_scalar(intr->src[1].ssa, 0));
+               address = apple9_dag_shift_imm(lower, nir_op_ushr, address,
+                                              util_logbase2(bits / 8));
+            }
+            uint32_t sources[] = {
+               apple9_lower_dag_scalar(lower,
+                                       nir_get_scalar(intr->src[0].ssa, 0)),
+               address,
+            };
+            unsigned source_bits = nir_src_bit_size(intr->src[0]);
+            if (source_bits < bits && !nir_src_is_const(intr->src[0])) {
+               uint32_t extend[] = {sources[0], apple9_dag_imm(lower, BITFIELD_MASK(source_bits))};
+               sources[0] = apple9_dag_emit(lower, AGX_APPLE9_VIR_IAND,
+                  AGX_APPLE9_ENC_LOGIC_EXTENDED, extend, ARRAY_SIZE(extend), 0);
+            }
+            if (!agx_apple9_vir_emit_side_effect(
+                   &lower->program, AGX_APPLE9_VIR_SHARED_STORE,
+                   index_kind == AGX_APPLE9_LOCAL_INDEX_GPR
+                      ? AGX_APPLE9_ENC_LOCAL_STORE_INDEXED
+                      : AGX_APPLE9_ENC_LOCAL_STORE,
+                   sources, index_kind == AGX_APPLE9_LOCAL_INDEX_GPR ? 2 : 1,
+                   nir_intrinsic_base(intr)))
+               return false;
+            lower->program.instructions[lower->program.instruction_count - 1]
+               ->memory_bits = bits;
+            lower->program.instructions[lower->program.instruction_count - 1]
+               ->memory_offset = offset_B;
+            lower->program.instructions[lower->program.instruction_count - 1]
+               ->local_index_kind = index_kind;
             continue;
          }
          if (intr->intrinsic == nir_intrinsic_store_shared) {
@@ -6090,14 +6262,17 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
       .argument_base = resources->descriptor_tables
                           ? 2 : AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE,
       .buffer_table = resources->descriptor_tables,
-      .groups_argument = resources->descriptor_tables
-                            ? AGX_APPLE9_COMPUTE_GROUPS_ROOT : 0,
-      .shared_argument = resources->descriptor_tables
-         ? AGX_APPLE9_COMPUTE_SHARED_ARGUMENT - 2
-         : apple9_buffer_argument(resources, AGX_APPLE9_COMPUTE_RESOURCE_SHARED, 0),
-      .preamble_base = resources->descriptor_tables
-                         ? AGX_APPLE9_GRAPHICS_ROOT_WORDS
-                         : agx_apple9_compute_preamble_base(resources->count),
+      .groups_argument =
+         resources->descriptor_tables ? AGX_APPLE9_COMPUTE_GROUPS_ROOT : 0,
+      .shared_argument =
+         resources->descriptor_tables
+            ? AGX_APPLE9_COMPUTE_SHARED_ARGUMENT - 2
+            : apple9_buffer_argument(resources,
+                                     AGX_APPLE9_COMPUTE_RESOURCE_SHARED, 0),
+      .preamble_base =
+         resources->descriptor_tables
+            ? MAX2(AGX_APPLE9_GRAPHICS_ROOT_WORDS, resources->native_root_words)
+            : agx_apple9_compute_preamble_base(resources->count),
       .structured_cf = apple9_cf_list_has_control_flow(&impl->body),
    };
    /* Reserve depth before assigning point-coordinate coefficients, independent
@@ -7568,9 +7743,11 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
                                      &sizes[nir_preamble_class_general],
                                      options.preamble_storage_size[nir_preamble_class_general],
                                      &constants);
-         constants.base += resources->descriptor_tables
-            ? AGX_APPLE9_GRAPHICS_ROOT_WORDS
-            : agx_apple9_compute_preamble_base(resources->count);
+         constants.base +=
+            resources->descriptor_tables
+               ? MAX2(AGX_APPLE9_GRAPHICS_ROOT_WORDS,
+                      resources->native_root_words)
+               : agx_apple9_compute_preamble_base(resources->count);
          preamble = nir_shader_create(NULL, nir->info.stage, nir->options);
          preamble->info.stage = nir->info.stage;
          preamble->info.float_controls_execution_mode = nir->info.float_controls_execution_mode;
@@ -7640,9 +7817,11 @@ apple9_preamble_trial(nir_shader *nir, struct agx_shader_part *out,
    FILE *previous = apple9_log_stream;
    apple9_log_stream = stream;
    bool ok = false;
-   unsigned budget = AGX_APPLE9_UNIFORM_COUNT -
-      (resources->descriptor_tables ? AGX_APPLE9_GRAPHICS_ROOT_WORDS
-                                   : agx_apple9_compute_preamble_base(resources->count));
+   unsigned budget =
+      AGX_APPLE9_UNIFORM_COUNT -
+      (resources->descriptor_tables
+          ? MAX2(AGX_APPLE9_GRAPHICS_ROOT_WORDS, resources->native_root_words)
+          : agx_apple9_compute_preamble_base(resources->count));
    bool promote_constants = !debug_get_option_cached_agx_apple9_no_promote();
    /* Constant stores must not discard an otherwise useful preamble when
     * they cross the code-size policy bound. Retry without them first.
@@ -7707,13 +7886,14 @@ static bool
 apple9_compile_dag_tail(nir_shader *nir, struct agx_shader_part *out,
                         struct agx_apple9_compute_profile *profile,
                         const struct agx_apple9_varying_layout *varyings,
-                        struct apple9_dag_cost *chosen_cost, const char **reason);
+                        struct apple9_dag_cost *chosen_cost,
+                        unsigned root_words, const char **reason);
 
 static bool
 apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
-                  struct agx_apple9_compute_profile *profile,
-                  const struct agx_apple9_varying_layout *varyings,
-                  const char **reason)
+                   struct agx_apple9_compute_profile *profile,
+                   const struct agx_apple9_varying_layout *varyings,
+                   unsigned root_words, const char **reason)
 {
    /* Preamble extraction runs divergence analysis, which requires generic
     * sink pointers to have been lowered to this driver's concrete addresses.
@@ -7770,11 +7950,11 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
       apple9_safe_reads_override = 1;
       bool aggressive_ok = apple9_compile_dag_tail(
          nir, &aggressive_out, profile ? &aggressive_profile : NULL, varyings,
-         &aggressive_cost, reason);
+         &aggressive_cost, root_words, reason);
       apple9_safe_reads_override = 0;
       bool plain_ok = apple9_compile_dag_tail(
          plain, &plain_out, profile ? &plain_profile : NULL, varyings,
-         &plain_cost, reason);
+         &plain_cost, root_words, reason);
       apple9_safe_reads_override = -1;
       ralloc_free(plain);
       /* Loop-weighted spills decide: spills outside loops are cheaper than
@@ -7806,16 +7986,18 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
       nir_opt_dce(nir);
    }
    struct apple9_dag_cost cost = {0};
-   return apple9_compile_dag_tail(nir, out, profile, varyings, &cost, reason);
+   return apple9_compile_dag_tail(nir, out, profile, varyings, &cost,
+                                  root_words, reason);
 }
 
 static bool
 apple9_compile_dag_tail(nir_shader *nir, struct agx_shader_part *out,
                         struct agx_apple9_compute_profile *profile,
                         const struct agx_apple9_varying_layout *varyings,
-                        struct apple9_dag_cost *chosen_cost, const char **reason)
+                        struct apple9_dag_cost *chosen_cost,
+                        unsigned root_words, const char **reason)
 {
-   struct apple9_buffer_map resources = {0};
+   struct apple9_buffer_map resources = {.native_root_words = root_words};
    if (!apple9_collect_buffer_map(nir, &resources, reason))
       return false;
 
@@ -8157,10 +8339,11 @@ apple9_lower_subgroups(nir_shader *nir)
                               nir_metadata_control_flow, NULL);
 }
 
-bool
-agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
-                        struct agx_apple9_compute_profile *profile,
-                        const char **reason_out)
+static bool
+apple9_compile_workgroup_body(nir_shader *nir, struct agx_shader_part *out,
+                              struct agx_apple9_compute_profile *profile,
+                              const struct agx_apple9_mesh_key *native_key,
+                              const char **reason_out)
 {
    /* Make every source-level continue an ordinary structured masked region
     * ending at the loop latch. This upstream NIR pass preserves SSA and leaves
@@ -8214,7 +8397,9 @@ agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
    if (reason_out != NULL)
       *reason_out = NULL;
 
-   if (nir->info.stage != MESA_SHADER_COMPUTE) {
+   if (nir->info.stage != MESA_SHADER_COMPUTE &&
+       !(native_key && (nir->info.stage == MESA_SHADER_TASK ||
+                        nir->info.stage == MESA_SHADER_MESH))) {
       reason = "Apple9 bounded compiler supports only compute shaders";
       goto unsupported;
    }
@@ -8231,7 +8416,9 @@ agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
       }
    }
 
-   if (apple9_compile_dag(nir, out, profile, NULL, &reason))
+   if (apple9_compile_dag(
+          nir, out, profile, NULL,
+          native_key ? agx_apple9_mesh_argument_words(native_key) : 0, &reason))
       return true;
 
 unsupported:
@@ -8241,6 +8428,53 @@ unsupported:
       fprintf(stderr, "Apple9 compute compilation failed: %s\n",
               reason ? reason : "unknown reason");
    return false;
+}
+
+bool
+agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
+                        struct agx_apple9_compute_profile *profile,
+                        const char **reason)
+{
+   return apple9_compile_workgroup_body(nir, out, profile, NULL, reason);
+}
+
+bool
+agx_compile_apple9_mesh_body(nir_shader *nir,
+                             const struct agx_apple9_mesh_key *key,
+                             struct agx_shader_part *out,
+                             struct agx_apple9_mesh_body_info *info,
+                             const char **reason)
+{
+   if (!agx_nir_lower_apple9_mesh(nir, key, info, reason))
+      return false;
+   nir_lower_returns(nir);
+   if (!agx_nir_mask_apple9_mesh_body(nir, key, &info->layout, reason))
+      return false;
+   return agx_compile_apple9_mesh_lowered(nir, key, out, reason);
+}
+
+bool
+agx_compile_apple9_mesh_lowered(nir_shader *nir,
+                               const struct agx_apple9_mesh_key *key,
+                               struct agx_shader_part *out, const char **reason)
+{
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_intrinsic &&
+                nir_instr_as_intrinsic(instr)->intrinsic ==
+                   nir_intrinsic_load_mesh_formation_input_apple9_agx) {
+               if (reason)
+                  *reason = "native mesh runtime reservation/scene inputs are unresolved";
+               return false;
+            }
+         }
+      }
+   }
+   if (!apple9_compile_workgroup_body(nir, out, NULL, key, reason))
+      return false;
+   out->info.apple9_body_only = true;
+   return true;
 }
 
 static unsigned
@@ -11084,7 +11318,7 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
       nir_shader_intrinsics_pass(nir, apple9_lower_clip_distance,
                                  nir_metadata_control_flow, (void *)&state);
    }
-   if (!apple9_compile_dag(nir, out, NULL, &varyings, reason))
+   if (!apple9_compile_dag(nir, out, NULL, &varyings, 0, reason))
       return false;
    out->info.apple9_reads_tile |= preserves_color;
    return true;

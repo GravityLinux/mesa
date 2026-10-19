@@ -2252,7 +2252,8 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
             break;
          case AGX_APPLE9_VIR_DEVICE_FENCE:
             valid &= instruction->encoding == AGX_APPLE9_ENC_DEVICE_FENCE &&
-                     instruction->nr_srcs == 0 && instruction->immediate <= 1;
+                     instruction->nr_srcs == 0 &&
+                     instruction->immediate <= AGX_APPLE9_FENCE_OBJECT_GRID;
             break;
          case AGX_APPLE9_VIR_WAIT:
             valid &= instruction->encoding == AGX_APPLE9_ENC_WAIT &&
@@ -4234,6 +4235,49 @@ packed_init(struct agx_apple9_packed_instruction *packed, const uint8_t *bytes,
    memset(packed, 0, sizeof(*packed));
    memcpy(packed->bytes, bytes, length);
    packed->length = length;
+}
+
+bool
+agx_apple9_pack_local_store(unsigned data, unsigned root, unsigned index,
+                            unsigned bits,
+                            enum agx_apple9_local_index_kind index_kind,
+                            unsigned offset_B, bool retain_data,
+                            bool release_index,
+                            struct agx_apple9_packed_instruction *packed)
+{
+   if (!packed || data >= 64 || root >= 64 || index >= 64 ||
+       (bits != 8 && bits != 16 && bits != 32) ||
+       (index_kind != AGX_APPLE9_LOCAL_INDEX_NONE &&
+        index_kind != AGX_APPLE9_LOCAL_INDEX_GPR) ||
+       (index_kind == AGX_APPLE9_LOCAL_INDEX_NONE &&
+        (index || release_index)) ||
+       offset_B >= 8192)
+      return false;
+
+   /* Constant versus dynamic authored MSL index stores establish NONE/GPR,
+    * not a narrow/wide register selector. Displacements count bytes even for
+    * narrow data; GPR indices count elements. Keep both operand lifetimes
+    * separate from the data-format and index-source fields. */
+   const uint8_t bytes[14] = {
+      0xe7,
+      0x02,
+      0x54,
+      data << 1,
+      root << 2,
+      index << 2,
+      release_index ? 0x80 : 0,
+      0,
+      bits == 8    ? 0x84
+      : bits == 16 ? 0x04
+                   : 0x44,
+      0x02 | retain_data | ((offset_B & 31) << 3),
+      offset_B >> 5,
+      bits == 32 ? 0x30 : 0x10,
+      index_kind == AGX_APPLE9_LOCAL_INDEX_GPR ? 0x02 : 0,
+      0,
+   };
+   packed_init(packed, bytes, sizeof(bytes));
+   return true;
 }
 
 bool
@@ -6756,16 +6800,23 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
    }
    case AGX_APPLE9_VIR_DEVICE_FENCE: {
       if (instruction->encoding != AGX_APPLE9_ENC_DEVICE_FENCE ||
-          instruction->nr_srcs || instruction->immediate > 1 ||
+          instruction->nr_srcs ||
+          instruction->immediate > AGX_APPLE9_FENCE_OBJECT_GRID ||
           instruction->dest != AGX_APPLE9_VREG_INVALID)
          return false;
       /* A device memory fence has no execution rendezvous. It is safe in
        * divergent control flow, unlike a workgroup barrier. Immediate 1 is
        * the form Metal places at the end of a raster order group critical
        * section, before the fragment's tile release. */
-      const uint8_t bytes[] = {0x07, 0x04, 0x54,
-                               instruction->immediate ? 0xc4 : 0x84,
-                               instruction->immediate ? 0x08 : 0x0a, 0};
+      const uint8_t bytes[] = {
+         0x07,
+         0x04,
+         0x54,
+         instruction->immediate == AGX_APPLE9_FENCE_OBJECT_GRID    ? 0x44
+         : instruction->immediate == AGX_APPLE9_FENCE_RASTER_ORDER ? 0xc4
+                                                                   : 0x84,
+         instruction->immediate == AGX_APPLE9_FENCE_RASTER_ORDER ? 0x08 : 0x0a,
+         0};
       packed_init(packed, bytes, sizeof(bytes));
       return true;
    }
@@ -6844,18 +6895,36 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
    case AGX_APPLE9_VIR_SHARED_LOAD:
    case AGX_APPLE9_VIR_SHARED_STORE: {
       bool load = instruction->op == AGX_APPLE9_VIR_SHARED_LOAD;
-      if (instruction->encoding != (load ? AGX_APPLE9_ENC_SHARED_LOAD
-                                          : AGX_APPLE9_ENC_SHARED_STORE) ||
-          instruction->nr_srcs != (load ? 1 : 2) || instruction->immediate >= 64 ||
+      bool local = !load && instruction->memory_bits;
+      bool indexed =
+         !local || instruction->local_index_kind == AGX_APPLE9_LOCAL_INDEX_GPR;
+      enum agx_apple9_encoding encoding =
+         load    ? AGX_APPLE9_ENC_SHARED_LOAD
+         : local ? (indexed ? AGX_APPLE9_ENC_LOCAL_STORE_INDEXED
+                            : AGX_APPLE9_ENC_LOCAL_STORE)
+                 : AGX_APPLE9_ENC_SHARED_STORE;
+      if (instruction->encoding != encoding ||
+          instruction->nr_srcs != (load ? 1 : 1 + indexed) ||
+          instruction->immediate >= 64 ||
           instruction->dest_components != (load ? 1 : 0) ||
           (load ? instruction->dest == AGX_APPLE9_VREG_INVALID
                 : instruction->dest != AGX_APPLE9_VREG_INVALID) ||
-          (load && instruction->producer_scoreboard_slot != AGX_APPLE9_SCOREBOARD_SLOT_6))
+          (load && instruction->producer_scoreboard_slot !=
+                      AGX_APPLE9_SCOREBOARD_SLOT_6))
          return false;
       unsigned data = phys[load ? instruction->dest : instruction->src[0]];
-      unsigned index = phys[instruction->src[load ? 0 : 1]];
+      unsigned index = indexed ? phys[instruction->src[load ? 0 : 1]] : 0;
       if (data >= 64 || index >= 64)
          return false;
+      if (local) {
+         if (instruction->memory_offset < 0)
+            return false;
+         return agx_apple9_pack_local_store(
+            data, instruction->immediate, index, instruction->memory_bits,
+            instruction->local_index_kind, instruction->memory_offset,
+            instruction->live_after_mask & 1,
+            indexed && !(instruction->live_after_mask & 2), packed);
+      }
       /* Shared roots use halfword indices; word offsets occupy the low
        * half of the selected GPR. Load completion uses the shared pipeline's
        * slot-6 form. Keep it separate from the device-load token encoding. */
@@ -6989,6 +7058,17 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       return true;
    }
    case AGX_APPLE9_VIR_VARY_STORE: {
+      if (instruction->encoding == AGX_APPLE9_ENC_OBJECT_GRID_EXPORT) {
+         if (instruction->nr_srcs != 1 || instruction->immediate ||
+             phys[instruction->src[0]] >= AGX_APPLE9_PUBLICATION_COUNT)
+            return false;
+         /* Each of the three collective invocations publishes its grid
+          * word. This target has no UVS slot or instruction wait mask. */
+         const uint8_t bytes[] = {
+            0x57, 0x16, 0x54, phys[instruction->src[0]] << 1, 0, 0, 0x48, 0};
+         packed_init(packed, bytes, sizeof(bytes));
+         return true;
+      }
       if (instruction->encoding != AGX_APPLE9_ENC_VARY_STORE ||
           instruction->nr_srcs != 1 || instruction->immediate >= AGX_APPLE9_MAX_UVS_SLOTS ||
           phys[instruction->src[0]] >= AGX_APPLE9_PUBLICATION_COUNT)

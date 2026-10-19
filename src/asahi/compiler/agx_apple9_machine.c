@@ -184,6 +184,27 @@ static const struct agx_apple9_encoding_info encodings[] = {
              AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
       },
    },
+   [AGX_APPLE9_ENC_LOCAL_STORE] = {
+      .name = "local_store", .length = 14, .operand_count = 1,
+      .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      .operands = {
+         /* Preserve live data through the allocator, as for shared stores. */
+         GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_CLOBBER,
+             AGX_APPLE9_EVIDENCE_HARDWARE),
+      },
+   },
+   [AGX_APPLE9_ENC_LOCAL_STORE_INDEXED] = {
+      .name = "local_store_indexed", .length = 14, .operand_count = 2,
+      .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      .operands = {
+         GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_CLOBBER,
+             AGX_APPLE9_EVIDENCE_HARDWARE),
+         GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32, 63, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
+      },
+   },
    [AGX_APPLE9_ENC_SHARED_ATOMIC] = {
       .name = "shared_atomic", .length = 12, .operand_count = 3,
       .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
@@ -1951,6 +1972,19 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .name = "vary_store",
          .length = 8,
          .dependency_layout = AGX_APPLE9_DEPENDENCY_MASK_12_17,
+         .operand_count = 1,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .operands =
+            {GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
+                 AGX_APPLE9_PUBLICATION_COUNT - 1,
+                 2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_PUBLICATION,
+                 AGX_APPLE9_EVIDENCE_HARDWARE)},
+      },
+   [AGX_APPLE9_ENC_OBJECT_GRID_EXPORT] =
+      {
+         .name = "object_grid_export",
+         .length = 8,
          .operand_count = 1,
          .allocator_safe = true,
          .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,

@@ -23,7 +23,7 @@ agx_apple9_encode_mesh(uint8_t out[6],
              ((uint64_t)ins->control42 << 42);
       break;
    case AGX_APPLE9_MESH_SUBMIT:
-      if (ins->mode > AGX_APPLE9_MESH_SUBMIT_CHANNEL ||
+      if ((unsigned)ins->mode > AGX_APPLE9_MESH_SUBMIT_CHANNEL ||
           ins->source_gpr >= AGX_APPLE9_GPR_COUNT ||
           (ins->mode == AGX_APPLE9_MESH_SUBMIT_CHANNEL &&
            ins->source_gpr + 1 >= AGX_APPLE9_GPR_COUNT))

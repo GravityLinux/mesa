@@ -4172,6 +4172,9 @@ hk_apple9_init_render_stage(struct hk_shader *s)
 static VkResult
 hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
 {
+   if (shader->b.info.apple9_body_only)
+      return vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
+                       "Apple9 native stage requires its native launch contract");
    if (dev->dev.chip == AGX_CHIP_G16G) {
       if (!shader->code_size ||
           (shader->info.stage == MESA_SHADER_COMPUTE &&

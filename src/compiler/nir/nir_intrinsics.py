@@ -3352,3 +3352,43 @@ load("viewport_z_range_kk", [1], [], [CAN_ELIMINATE, CAN_REORDER])
 # Apple9 native storage write. src0 is a USC-relative 32-byte PBE index;
 # coordinates/data remain per-invocation values. The PBE supplies the format.
 intrinsic("image_store_apple9_agx", [1, 2, 4], indices=[ACCESS])
+
+# Apple9 native mesh/task stage-body IO. BASE names a local-root selector,
+# not a captured value or GPR. Offsets are byte offsets, and output stores
+# remain side effects across optimization and scheduling. Store offsets are
+# 32-bit byte offsets, lowered to a displacement and/or an element GPR index
+# independently of the stored data type.
+# BIT_SIZE is the access width. Wider values are truncated; narrower unsigned
+# values are zero-extended. The physical GPR width is independent of the access.
+intrinsic("store_local_apple9_agx", [1, 1], indices=[BASE, BIT_SIZE])
+intrinsic("load_local_apple9_agx", [1], 1, indices=[BASE], bit_sizes=[32], flags=[CAN_ELIMINATE])
+intrinsic("load_mesh_primitive_base_apple9_agx", dest_comp=2, bit_sizes=[32], flags=[CAN_ELIMINATE, CAN_REORDER])
+# Read a native entry pointer from the uniform pair starting at BASE.
+intrinsic("load_native_pointer_apple9_agx", dest_comp=2, indices=[BASE], bit_sizes=[32], flags=[CAN_ELIMINATE, CAN_REORDER])
+# Collective task completion remains distinct from STOP. Its final call/frame
+# ABI is not part of stage-body compilation.
+intrinsic("end_task_apple9_agx")
+
+# One invocation of the collective three-word object grid export. The final
+# task completion wrapper supplies the helper's invocation/frame contract.
+intrinsic("export_mesh_grid_word_apple9_agx", [1])
+intrinsic("fence_mesh_grid_apple9_agx")
+
+# Semantic inputs to ordinary Apple9 mesh record formation. BASE is an
+# agx_apple9_mesh_formation_input, not a uniform slot or hardware register.
+# Runtime reservation/draw-state lowering must resolve these before emission.
+intrinsic("load_mesh_formation_input_apple9_agx", dest_comp=1, indices=[BASE],
+          bit_sizes=[32, 64], flags=[CAN_ELIMINATE])
+
+# Mesh-engine side effects. None may be eliminated, reordered, duplicated or
+# speculated as an ordinary ALU expression. src0 of CONTROL is the actual
+# primitive count (u16); the hardware reads and clears its allocated halfword.
+# src1 is an explicitly provisional u16 auxiliary input. BASE is control42 in
+# the bounded register form, not a register descriptor or a capacity formula.
+intrinsic("mesh_control_apple9_agx", [1, 1], indices=[BASE])
+# Sources are (channel selector, byte offset within the local output root).
+# The compiler constructs their register tuple during normal allocation.
+intrinsic("mesh_submit_channel_apple9_agx", [1, 1])
+# The scalar input is source-derived; its general count/arity interpretation
+# remains unqualified outside the development V3/P1 triangle class.
+intrinsic("mesh_submit_scalar_apple9_agx", [1])

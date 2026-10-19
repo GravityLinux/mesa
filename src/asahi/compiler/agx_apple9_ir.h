@@ -174,6 +174,13 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL,
 };
 
+/* The object-grid form is not an API workgroup barrier. */
+enum agx_apple9_fence_mode {
+   AGX_APPLE9_FENCE_DEVICE = 0,
+   AGX_APPLE9_FENCE_RASTER_ORDER = 1,
+   AGX_APPLE9_FENCE_OBJECT_GRID = 2,
+};
+
 enum agx_apple9_unpack_norm_mode {
    AGX_APPLE9_UNPACK_SNORM16 = 2,
    AGX_APPLE9_UNPACK_SNORM8 = 3,
@@ -331,6 +338,11 @@ struct agx_apple9_device_load_contract {
 
 struct agx_apple9_block;
 
+enum agx_apple9_local_index_kind {
+   AGX_APPLE9_LOCAL_INDEX_NONE,
+   AGX_APPLE9_LOCAL_INDEX_GPR,
+};
+
 struct agx_apple9_vir_instr {
    enum agx_apple9_vir_opcode op;
    enum agx_apple9_encoding encoding;
@@ -343,6 +355,8 @@ struct agx_apple9_vir_instr {
    /* Scalar device-memory element width.  Zero is the established u32
     * default; compiler-authored narrow operations use 8 or 16 explicitly. */
    uint8_t memory_bits;
+   /* Local-output store index source, independent of data width. */
+   enum agx_apple9_local_index_kind local_index_kind;
    /* Number of scalar lanes read or written by a memory instruction.  Loads
     * also define an adjacent dest_components tuple; stores have no SSA
     * destination and carry their ordered data values in src[0..N-1]. */
@@ -861,6 +875,14 @@ agx_apple9_pack_get_global_id(unsigned dst, unsigned component,
                               struct agx_apple9_packed_instruction *packed);
 bool agx_apple9_pack_get_sr(unsigned dst, uint8_t selector, uint8_t datapath,
                             struct agx_apple9_packed_instruction *packed);
+/* Local-output stores use byte displacements and optional element indices.
+ * Narrow data occupies the low half of a word-allocated SSA value. */
+bool agx_apple9_pack_local_store(unsigned data, unsigned root, unsigned index,
+                                 unsigned bits,
+                                 enum agx_apple9_local_index_kind index_kind,
+                                 unsigned offset_B, bool retain_data,
+                                 bool release_index,
+                                 struct agx_apple9_packed_instruction *packed);
 bool
 agx_apple9_pack_get_sr_zext16(unsigned dst, uint8_t selector,
                               struct agx_apple9_packed_instruction *packed);

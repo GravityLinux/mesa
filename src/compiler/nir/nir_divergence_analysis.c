@@ -234,6 +234,8 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
       break;
 
    /* Intrinsics which are always uniform */
+   case nir_intrinsic_load_mesh_primitive_base_apple9_agx:
+   case nir_intrinsic_load_native_pointer_apple9_agx:
    case nir_intrinsic_load_preamble:
    case nir_intrinsic_load_push_constant_zink:
    case nir_intrinsic_load_work_dim:
@@ -674,6 +676,7 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
                      load_may_tear(state, instr);
       break;
 
+   case nir_intrinsic_load_local_apple9_agx:
    case nir_intrinsic_load_shared:
    case nir_intrinsic_load_shared_ir3:
    case nir_intrinsic_load_shared_nv:
