@@ -164,15 +164,26 @@ bool agx_compile_apple9_mesh_lowered(nir_shader *nir,
                                      struct agx_shader_part *out,
                                      const char **reason);
 
+/* Fragment interpolation uses the same grouped scalar order as VS output.
+ * NULL selects the position-only, zero-to-one-depth contract. */
+struct agx_apple9_native_mesh_options {
+   bool clip_halfz;
+   bool attributes;
+   uint64_t outputs_flat, outputs_linear;
+};
+
 /* Compiler-only native development gate, disabled unless explicitly enabled.
- * This accepts API sizes 1..16 at physical T16, Position/V3/P1. It emits the
- * complete mesh body, ordinary records, and all submissions in one compile.
+ * This accepts API sizes 1..16 at physical T16 and V3/P1. It emits the
+ * complete mesh body and hardware output submissions in one compile.
+ * clip_halfz converts final Z from [-W,W] to [0,W] before submission.
  * The result still requires a native launch/object contract; generic shader
  * upload rejects apple9_body_only. This does not enable a Vulkan feature. */
 bool agx_nir_lower_apple9_native_mesh(nir_shader *nir, bool enable_native_mesh,
+                                      const struct agx_apple9_native_mesh_options *options,
                                       struct agx_apple9_mesh_body_info *info,
                                       const char **reason);
 bool agx_compile_apple9_native_mesh(nir_shader *nir, bool enable_native_mesh,
+                                    const struct agx_apple9_native_mesh_options *options,
                                     struct agx_shader_part *out,
                                     struct agx_apple9_mesh_body_info *info,
                                     const char **reason);

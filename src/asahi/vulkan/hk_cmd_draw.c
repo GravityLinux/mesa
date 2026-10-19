@@ -5314,7 +5314,8 @@ hk_apple9_draw_mesh(struct hk_cmd_buffer *cmd, uint32_t draw_id,
 
    if (direct && (!direct[0] || !direct[1] || !direct[2]))
       return;
-   if (!hk_apple9_prepare_draw(cmd, !direct || count_addr))
+   bool native = hk_apple9_native_mesh_enabled();
+   if (!hk_apple9_prepare_draw(cmd, native || !direct || count_addr))
       return;
    if (!hk_apple9_resolve_shaders(cmd))
       return;
@@ -5325,6 +5326,21 @@ hk_apple9_draw_mesh(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       return;
 
    struct hk_shader *main = &mesh->variants[HK_MESH_VARIANT_MAIN];
+   if (native) {
+      /* A false GPU predicate would export a zero mesh grid. That native
+       * object completion case has not been qualified on the device yet. */
+      if (!direct || count_addr || task || direct[0] != 1 || direct[1] != 1 ||
+          direct[2] != 1 || gfx->render.view_mask ||
+          hk_cond_render_applies(cmd) ||
+          main->info.apple9_native_stage != HK_APPLE9_NATIVE_MESH) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+         return;
+      }
+      uint64_t grid = hk_pool_upload(cmd, direct, 3 * sizeof(uint32_t), 4);
+      if (grid)
+         hk_apple9_draw_native_mesh(cmd, draw_id, grid);
+      return;
+   }
    struct hk_shader *task_main = task ? hk_only_variant(task) : NULL;
    const struct hk_mesh_info *info = &main->info.mesh;
    unsigned vertices = MAX2(info->max_primitives, 1) *

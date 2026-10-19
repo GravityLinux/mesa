@@ -147,6 +147,32 @@ struct agx_apple9_varying_layout {
    uint8_t reserved[2];
 };
 
+static inline unsigned
+agx_apple9_varying_group(uint64_t flat, uint64_t linear, unsigned location)
+{
+   return (flat & BITFIELD64_BIT(location)) ? 1 :
+          (linear & BITFIELD64_BIT(location)) ? 2 : 0;
+}
+
+/* Returns the packed user scalar index, excluding the four position words. */
+static inline int
+agx_apple9_varying_index(const struct agx_apple9_varying_layout *layout,
+                     unsigned location, unsigned component)
+{
+   if (!layout || !agx_apple9_varying_supported(location) || component >= 4)
+      return -1;
+   unsigned semantic = location;
+   if (!(layout->mask[semantic] & BITFIELD_BIT(component)))
+      return -1;
+   unsigned index = util_bitcount(layout->mask[semantic] & BITFIELD_MASK(component));
+   for (unsigned i = 0; i < ARRAY_SIZE(layout->mask); ++i) {
+      if (layout->group[i] < layout->group[semantic] ||
+          (layout->group[i] == layout->group[semantic] && i < semantic))
+         index += util_bitcount(layout->mask[i]);
+   }
+   return index;
+}
+
 /* Software capacity of the graphics address table, separate from launcher
  * slots. */
 #define AGX_APPLE9_MAX_GRAPHICS_BUFFERS 32

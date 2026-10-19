@@ -1,11 +1,12 @@
 /* Copyright 2026 Asahi Linux Contributors
  * SPDX-License-Identifier: MIT
- * Host tests of normal formation NIR with independent DATA and raster checks.
+ * Host tests of local output publication and hardware mesh completion.
  */
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "agx_apple9_mesh_formation.h"
+#include "agx_apple9_mesh.h"
 #include "agx_nir.h"
 
 #define CHECK(x)                                                               \
@@ -16,14 +17,12 @@
       }                                                                        \
    } while (0)
 #include "apple9-mesh-executor.h"
-#include "mesh-formation-fixtures.h"
-#include "mesh-h1-fixtures.h"
+#include "mesh-native-fixtures.h"
 #include "mesh-clip-fixtures.h"
 
-#include "apple9-mesh-data.h"
 
 static nir_shader *
-source(const struct formation_fixture *f)
+source(const struct native_mesh_fixture *f)
 {
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_MESH, &agx_nir_options, "normal_mesh_fixture_inputs");
@@ -103,13 +102,15 @@ add_pressure(nir_shader *nir)
 static const char *export_dir;
 
 static void
-run_fixture(const struct formation_fixture *f, unsigned placement, bool ready,
-            bool pressure, bool count_drops)
+run_fixture(const struct native_mesh_fixture *f, bool pressure, bool clip_halfz)
 {
+   const struct agx_apple9_native_mesh_options options = {.clip_halfz = clip_halfz};
    struct agx_apple9_mesh_body_info info;
    const char *reason = NULL;
    nir_shader *nir = source(f);
-   CHECK(agx_nir_lower_apple9_native_mesh(nir, true, &info, &reason));
+   if (clip_halfz)
+      nir_lower_io_to_scalar(nir, nir_var_shader_out, NULL, NULL);
+   CHECK(agx_nir_lower_apple9_native_mesh(nir, true, &options, &info, &reason));
    if (pressure)
       add_pressure(nir);
    nir_lower_vars_to_ssa(nir);
@@ -124,40 +125,32 @@ run_fixture(const struct formation_fixture *f, unsigned placement, bool ready,
                                  (uint8_t *)pressure_output, pressure_written};
    m.region[5] = (struct region){PRESSURE_INPUT, sizeof(pressure_input),
                                  (uint8_t *)pressure_input, NULL};
-   uint32_t drops = 0;
-   uint8_t drops_written[4] = {0};
-   m.region[7] = (struct region){0x30000, 4, (uint8_t *)&drops, drops_written};
-   m.formation_inputs[AGX_MESH_FORMATION_DROPS_ADDRESS] =
-      count_drops ? 0x30000 : 0;
-   for (unsigned i = 0; i < 4; ++i) {
-      m.region[i] = (struct region){
-         UINT64_C(0x1200000000) + placement * 0x80000 + i * 0x10000, 256,
-         malloc(256), calloc(1, 256)};
-      CHECK(m.region[i].data && m.region[i].written);
-      memset(m.region[i].data, 0xa0 + i, 256);
-      m.formation_inputs[AGX_MESH_GEOMETRY_ADDRESS + i] = m.region[i].base;
-   }
-   for (unsigned i = 0; i < 3; ++i)
-      m.formation_inputs[AGX_MESH_GEOMETRY_ID + i] = f->ids[i];
-   for (unsigned i = 0; i < 8; ++i)
-      m.formation_inputs[AGX_MESH_FRAGMENT_LAUNCH + i] = f->state[i];
-   for (unsigned i = 0; i < 6; ++i)
-      m.formation_inputs[AGX_MESH_VIEWPORT_SCALE_X + i] = f->viewport[i];
-   m.formation_inputs[AGX_MESH_RESERVATION_READY] = ready;
-   m.region[6] = (struct region){INPUT_ADDR, sizeof(m.formation_inputs),
-                                 (uint8_t *)m.formation_inputs, NULL};
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
    m.value = calloc(impl->ssa_alloc, sizeof(*m.value));
    CHECK(m.value);
    execute(&m, &impl->body, ALL_LANES);
-   uint32_t xyz[3][3];
-   bool dropped;
-   bool formed = source_geometry(f, xyz, &dropped) && ready;
-   CHECK(drops == (ready && dropped && count_drops));
-   CHECK(m.barriers == 2 && m.fences == (formed ? 9 : 7) + 2 * pressure);
+   CHECK(m.barriers == 1 + clip_halfz && m.fences == 6 + 2 * pressure);
    CHECK(m.controls == ALL_LANES && m.scalars == 1);
-   for (unsigned c = 0; c < 4; ++c)
+   CHECK(m.writes == (pressure ? LANES * PRESSURE_VALUES : 0));
+   for (unsigned c = 0; c < 4; ++c) {
       CHECK(m.channels[c] == 7);
+      for (unsigned v = 0; v < 3; ++v) {
+         uint32_t value;
+         memcpy(&value, m.local + info.layout.position_B + 16 * c + 4 * v, 4);
+         uint32_t expected = f->positions[4 * v + c];
+         if (clip_halfz && c == 2) {
+            float z, w;
+            memcpy(&z, &f->positions[4 * v + 2], 4);
+            memcpy(&w, &f->positions[4 * v + 3], 4);
+            float converted = fmaf(-z, .5f, fmaf(w, .5f, z));
+            memcpy(&expected, &converted, 4);
+         }
+         CHECK(value == expected);
+         CHECK(m.submitted_position[v][c] == expected);
+      }
+   }
+   for (unsigned i = 0; i < 3; ++i)
+      CHECK(m.local[i] == f->indices[i]);
    if (pressure) {
       for (unsigned lane = 0; lane < LANES; ++lane)
          CHECK(!memcmp(pressure_output[lane], pressure_input,
@@ -165,33 +158,13 @@ run_fixture(const struct formation_fixture *f, unsigned placement, bool ready,
       for (unsigned i = 0; i < sizeof(pressure_written); ++i)
          CHECK(pressure_written[i]);
    }
-   unsigned lengths[4] = {0, formed ? 12 : 0, formed ? 32 : 0, ready ? 48 : 0};
-   if (formed) {
-      while (lengths[0] < 256 && m.region[0].written[lengths[0]])
-         ++lengths[0];
-      check_geometry(f, m.region[0].data, lengths[0], xyz);
-      CHECK(references_match(f, &m));
-      m.region[2].data[16] ^= 1;
-      CHECK(!references_match(f, &m));
-      m.region[2].data[16] ^= 1;
-   } else if (ready) {
-      for (unsigned i = 0; i < 48; ++i)
-         CHECK(m.region[3].data[i] == 0);
-   }
-   for (unsigned i = 0; i < 4; ++i) {
-      for (unsigned j = 0; j < 256; ++j) {
-         CHECK(m.region[i].written[j] == (j < lengths[i]));
-         if (j >= lengths[i])
-            CHECK(m.region[i].data[j] == 0xa0 + i);
-      }
-      free(m.region[i].data);
-      free(m.region[i].written);
-   }
    free(m.value);
    struct agx_shader_part code = {0};
    ralloc_free(nir);
    nir = source(f);
-   bool ok = agx_nir_lower_apple9_native_mesh(nir, true, &info, &reason);
+   if (clip_halfz)
+      nir_lower_io_to_scalar(nir, nir_var_shader_out, NULL, NULL);
+   bool ok = agx_nir_lower_apple9_native_mesh(nir, true, &options, &info, &reason);
    if (ok && pressure)
       add_pressure(nir);
    if (ok)
@@ -202,8 +175,7 @@ run_fixture(const struct formation_fixture *f, unsigned placement, bool ready,
    CHECK(code.info.apple9_body_only && code.info.binary_size);
    CHECK(!info.requires_mesh_completion && info.requires_native_entry);
    CHECK(info.layout.primitive_count_B == 16 && info.layout.local_size_B == 96);
-   if (export_dir && ready && !pressure && !placement &&
-       !strncmp(f->name, "H1_", 3)) {
+   if (export_dir && !pressure && !clip_halfz) {
       char path[1024];
       CHECK(snprintf(path, sizeof(path), "%s/%s.bin", export_dir, f->name) <
             sizeof(path));
@@ -221,29 +193,159 @@ run_fixture(const struct formation_fixture *f, unsigned placement, bool ready,
          "\"gprs\":%u,\"scratch\":%u,\"atomic_frame\":%u,"
          "\"preamble_offset\":%u,\"preamble_size\":%u,"
          "\"local_output_bytes\":%u,\"argument_words\":%u,"
-         "\"output_root\":%u,\"draw_uniform\":%u,\"abi_version\":%u,\"draw_bytes\":%zu}\n",
+         "\"output_root\":%u,\"draw_uniform\":%u,\"abi_version\":%u}\n",
          code.info.binary_size, code.info.nr_gprs, code.info.scratch_size,
          code.info.apple9_atomic_frame_size, code.info.apple9_preamble_offset,
          code.info.apple9_preamble_size, info.layout.local_size_B,
          info.argument_uniform_words, info.key.output_root,
-         AGX_APPLE9_MESH_DRAW_UNIFORM, AGX_APPLE9_MESH_ABI_VERSION,
-         sizeof(struct agx_apple9_mesh_draw));
+         AGX_APPLE9_MESH_DRAW_UNIFORM, AGX_APPLE9_MESH_ABI_VERSION);
       CHECK(!fclose(file));
    }
-   printf(
-      "fixture=%s placement=%u ready=%u pressure=%u drops=%u records=decoded units=1+4+1 "
-      "gprs=%u scratch=%u bytes=%u\n",
-      f->name, placement, ready, pressure, drops, code.info.nr_gprs,
-      code.info.scratch_size, code.info.binary_size);
+   printf("fixture=%s pressure=%u halfz=%u implicit=1 units=1+4+1 gprs=%u scratch=%u bytes=%u\n",
+          f->name, pressure, clip_halfz, code.info.nr_gprs, code.info.scratch_size,
+          code.info.binary_size);
    free(code.binary);
    ralloc_free(nir);
+}
+
+struct attribute {
+   unsigned slot, component, group;
+};
+
+static nir_shader *
+attribute_source(const struct attribute *attrs, unsigned count)
+{
+   nir_shader *nir = source(&h1_fixtures[0]);
+   nir_builder b = nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(nir)));
+   for (unsigned v = 0; v < 3; ++v) {
+      nir_push_if(&b, nir_ieq_imm(&b, nir_load_local_invocation_index(&b), v));
+      for (unsigned i = 0; i < count; ++i)
+         nir_store_per_vertex_output(
+            &b, nir_imm_int(&b, 0x3f000000 + 256 * i + v),
+            nir_imm_int(&b, v), nir_imm_int(&b, 0),
+            .component = attrs[i].component, .write_mask = 1,
+            .src_type = nir_type_float32,
+            .io_semantics = {.location = attrs[i].slot, .num_slots = 1});
+      nir_pop_if(&b, NULL);
+   }
+   return nir;
+}
+
+static void
+run_attributes(const char *name, const struct attribute *attrs, unsigned count)
+{
+   struct agx_apple9_native_mesh_options options = {.attributes = true};
+   for (unsigned i = 0; i < count; ++i) {
+      if (attrs[i].group == 1)
+         options.outputs_flat |= BITFIELD64_BIT(attrs[i].slot);
+      if (attrs[i].group == 2)
+         options.outputs_linear |= BITFIELD64_BIT(attrs[i].slot);
+   }
+   const char *reason = NULL;
+   struct agx_apple9_mesh_body_info info;
+   nir_shader *nir = attribute_source(attrs, count);
+   CHECK(agx_nir_lower_apple9_native_mesh(nir, true, &options, &info, &reason));
+   nir_lower_vars_to_ssa(nir);
+   nir_opt_dce(nir);
+   struct machine m = {0};
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   m.value = calloc(impl->ssa_alloc, sizeof(*m.value));
+   CHECK(m.value);
+   execute(&m, &impl->body, ALL_LANES);
+   CHECK(m.barriers == 1 && m.fences == 6 + count);
+   CHECK(m.controls == ALL_LANES && m.scalars == 1 && !m.writes);
+   /* Derive packed order independently of the compiler's indexing helper. */
+   unsigned channel[124];
+   for (unsigned i = 0; i < count; ++i) {
+      channel[i] = 4;
+      for (unsigned j = 0; j < count; ++j)
+         channel[i] += attrs[j].group < attrs[i].group ||
+            (attrs[j].group == attrs[i].group &&
+             (attrs[j].slot < attrs[i].slot ||
+              (attrs[j].slot == attrs[i].slot &&
+               attrs[j].component < attrs[i].component)));
+      CHECK(m.channels[channel[i]] == 7);
+      for (unsigned v = 0; v < 3; ++v)
+         CHECK(m.submitted_position[v][channel[i]] == 0x3f000000 + 256 * i + v);
+   }
+   free(m.value);
+   ralloc_free(nir);
+   nir = attribute_source(attrs, count);
+   struct agx_shader_part code = {0};
+   CHECK(agx_compile_apple9_native_mesh(nir, true, &options, &code, &info, &reason));
+   CHECK(code.info.apple9_varyings.count == count);
+   CHECK(info.layout.local_size_B == 96 + 16 * count);
+   for (unsigned i = 0; i < count; ++i) {
+      CHECK(code.info.apple9_varyings.mask[attrs[i].slot] & BITFIELD_BIT(attrs[i].component));
+      CHECK(code.info.apple9_varyings.group[attrs[i].slot] == attrs[i].group);
+   }
+   printf("fixture=%s pressure=0 halfz=0 gprs=%u channels=", name, code.info.nr_gprs);
+   for (unsigned c = 0; c < 4; ++c)
+      printf("%s%u:%u", c ? "," : "", c, 32 + 16 * c);
+   /* Publication walks local semantic order, even when channel order differs. */
+   for (unsigned slot = VARYING_SLOT_VAR0; slot <= VARYING_SLOT_VAR31; ++slot) {
+      for (unsigned c = 0; c < 4; ++c) {
+         for (unsigned i = 0; i < count; ++i) {
+            if (attrs[i].slot == slot && attrs[i].component == c)
+               printf(",%u:%u", channel[i], 32 + 16 * info.layout.vertex_component[slot][c]);
+         }
+      }
+   }
+   puts("");
+   free(code.binary);
+   ralloc_free(nir);
+   nir = attribute_source(attrs, count);
+   CHECK(!agx_compile_apple9_native_mesh(nir, true, NULL, &code, &info, &reason));
+   CHECK(!code.binary && strstr(reason, "attributes development path is disabled"));
+   ralloc_free(nir);
+}
+
+static void
+check_attributes(void)
+{
+   for (unsigned g = 0; g < 3; ++g) {
+      const struct attribute a = {VARYING_SLOT_VAR0, 0, g};
+      run_attributes(g == 0 ? "ATTR_SMOOTH" : g == 1 ? "ATTR_FLAT" : "ATTR_LINEAR", &a, 1);
+   }
+   const struct attribute mixed[] = {
+      {VARYING_SLOT_VAR0, 3, 2}, {VARYING_SLOT_VAR2, 1, 1},
+      {VARYING_SLOT_VAR4, 2, 0}, {VARYING_SLOT_VAR4, 0, 0},
+      {VARYING_SLOT_VAR7, 1, 2},
+   };
+   run_attributes("ATTR_MIXED_SPARSE", mixed, ARRAY_SIZE(mixed));
+   struct attribute wide[124];
+   for (unsigned i = 0; i < ARRAY_SIZE(wide); ++i)
+      wide[i] = (struct attribute){VARYING_SLOT_VAR0 + i / 4, i % 4, (i / 4) % 3};
+   run_attributes("ATTR_LIMIT", wide, ARRAY_SIZE(wide));
+   const struct agx_apple9_native_mesh_options options = {.attributes = true};
+   const char *reason = NULL;
+   struct agx_shader_part code = {0};
+   struct agx_apple9_mesh_body_info info;
+   for (unsigned primitive = 0; primitive < 2; ++primitive) {
+      nir_shader *nir = primitive ? source(&h1_fixtures[0])
+                                  : attribute_source(wide, ARRAY_SIZE(wide));
+      nir_builder b = nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(nir)));
+      if (primitive)
+         nir_store_per_primitive_output(
+            &b, nir_imm_float(&b, 1), nir_imm_int(&b, 0), nir_imm_int(&b, 0),
+            .write_mask = 1, .src_type = nir_type_float32,
+            .io_semantics = {.location = VARYING_SLOT_VAR0, .num_slots = 1});
+      else
+         nir_store_per_vertex_output(
+            &b, nir_imm_float(&b, 1), nir_imm_int(&b, 0), nir_imm_int(&b, 0),
+            .write_mask = 1, .src_type = nir_type_float32,
+            .io_semantics = {.location = VARYING_SLOT_VAR31, .num_slots = 1});
+      CHECK(!agx_compile_apple9_native_mesh(nir, true, &options, &code, &info, &reason));
+      CHECK(!code.binary && strstr(reason, primitive ? "primitive attributes" : "124 user"));
+      ralloc_free(nir);
+   }
 }
 
 static void
 reject_unsupported(void)
 {
    for (unsigned variant = 0; variant < 5; ++variant) {
-      struct formation_fixture f = h1_fixtures[0];
+      struct native_mesh_fixture f = h1_fixtures[0];
       if (variant == 1)
          f.primitives = 2;
       nir_shader *nir = source(&f);
@@ -256,7 +358,7 @@ reject_unsupported(void)
       struct agx_shader_part code = {0};
       struct agx_apple9_mesh_body_info info = {0};
       const char *reason = NULL;
-      CHECK(!agx_compile_apple9_native_mesh(nir, variant != 0, &code, &info,
+      CHECK(!agx_compile_apple9_native_mesh(nir, variant != 0, NULL, &code, &info,
                                             &reason));
       CHECK(!code.binary && reason);
       if (!variant)
@@ -275,37 +377,27 @@ main(int argc, char **argv)
    glsl_type_singleton_init_or_ref();
    if (clip) {
       for (unsigned i = 0; i < ARRAY_SIZE(clip_fixtures); ++i) {
-         struct formation_fixture f = h1_fixtures[0];
+         struct native_mesh_fixture f = h1_fixtures[0];
          f.name = clip_fixtures[i].name;
          memcpy(f.positions, clip_fixtures[i].positions, sizeof(f.positions));
-         /* A class drop skips explicit records, but all native completion
-          * operations must still receive the original outputs. run_fixture
-          * checks both facts; it does not simulate hardware clipping. */
-         run_fixture(&f, 0, true, false, true);
+         /* Preserve all four position components, including non-unit W.
+          * Hardware clipping is deliberately outside this host interpreter. */
+         run_fixture(&f, false, false);
       }
       glsl_type_singleton_decref();
       return 0;
    }
    reject_unsupported();
-   for (unsigned i = 0; i < ARRAY_SIZE(formation_fixtures); ++i) {
-      const struct formation_fixture *f = &formation_fixtures[i];
-      if (f->vertices != 3 || f->primitives != 1)
-         continue;
-      for (unsigned placement = 0; placement < 2; ++placement)
-         run_fixture(f, placement, true, false, true);
-   }
+   check_attributes();
    for (unsigned i = 0; i < ARRAY_SIZE(h1_fixtures); ++i)
-      for (unsigned placement = 0; placement < 2; ++placement)
-         run_fixture(&h1_fixtures[i], placement, true, false, true);
-   run_fixture(&h1_fixtures[0], 0, false, false, true);
-   run_fixture(&h1_fixtures[0], 0, true, true, true);
-   for (unsigned sign = 0; sign < 2; ++sign) {
-      struct formation_fixture boundary = h1_fixtures[0];
-      boundary.name = sign ? "CLIP_NEGATIVE_X" : "CLIP_POSITIVE_X";
-      boundary.positions[0] = as_uint(sign ? -1.0f : 1.0f);
-      run_fixture(&boundary, 0, true, false, true);
-      run_fixture(&boundary, 0, true, false, false);
-      run_fixture(&boundary, 0, false, false, true);
+      run_fixture(&h1_fixtures[i], false, false);
+   run_fixture(&h1_fixtures[0], true, false);
+   for (unsigned i = 0; i < ARRAY_SIZE(clip_fixtures); ++i) {
+      struct native_mesh_fixture f = h1_fixtures[0];
+      f.name = clip_fixtures[i].name;
+      memcpy(f.positions, clip_fixtures[i].positions, sizeof(f.positions));
+      run_fixture(&f, false, false);
+      run_fixture(&f, false, true);
    }
    glsl_type_singleton_decref();
    return 0;

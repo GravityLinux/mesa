@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 """Check complete compiler output using the existing generic ASM listing.
 
-The executable executes lowered NIR against an independent DATA decoder. This check
+The executable executes lowered NIR and checks the local output components. This check
 independently decodes the six units at emitted instruction boundaries, follows
 their allocated input definitions, and checks their enclosing execution masks.
 It is a bounded def-use check, not an emulator for the ordinary GPU program.
@@ -26,10 +26,11 @@ def opcode_names():
     return [x.removeprefix("AGX_APPLE9_VIR_") for x in names]
 
 
-def check_program(rows):
+def check_program(rows, channels=None):
+    if channels is None: channels = [[c, 32 + 16*c] for c in range(4)]
     units = [i for i, r in enumerate(rows) if r["op"].startswith("MESH_")]
     assert [rows[i]["op"] for i in units] == [
-        "MESH_CONTROL", *["MESH_SUBMIT_CHANNEL"] * 4, "MESH_SUBMIT_SCALAR"]
+        "MESH_CONTROL", *["MESH_SUBMIT_CHANNEL"] * len(channels), "MESH_SUBMIT_SCALAR"]
 
     def decoded(i):
         r = rows[i]
@@ -65,6 +66,15 @@ def check_program(rows):
                 if len(r["code"]) == 2:
                     assert r["code"][0] == (int(reg[1:]) << 4) | 12
                     assert r["code"][1] == r["imm"] < 128
+                else:
+                    code = r["code"]; dst = int(reg[1:])
+                    assert len(code) == 8 and dst < 64
+                    assert code[0] == ((dst & 15) << 4) | 12
+                    assert code[2] == ((dst >> 4) << 6) | 2 and code[1] & 128
+                    literal = ((code[1] & 127) | ((code[4] & 30) << 6) |
+                               ((code[5] & 12) << 9) | (code[6] << 13) |
+                               ((code[7] & 15) << 21) | ((code[3] & 254) << 24))
+                    assert literal == r["imm"]
                 return r["imm"]
             if r["op"] == "GET_SR":
                 assert r["imm"] == 0xA7
@@ -87,11 +97,11 @@ def check_program(rows):
         killed.discard(r["dst"])
 
     expected = [[("local", 6, 16), ("local", 6, 20)],
-                *[[c, 32 + 16 * c] for c in range(4)], [("local", 6, 20)]]
+                *channels, [("local", 6, 20)]]
     for i, want in zip(units, expected):
         assert [value(s, i) for s in decoded(i)] == want
 
-    # Ordinary formation branches have all reconverged before U0. The two
+    # The application body has reconverged before U0. The two
     # remaining masks must be lane < actual vertex count and lane == 0.
     stack, last_compare = [], None
     unit_masks = []
@@ -106,8 +116,8 @@ def check_program(rows):
         elif i in units:
             unit_masks.append(list(stack))
     assert not stack and unit_masks[0] == []
-    assert all(m == unit_masks[1] for m in unit_masks[1:5])
-    for mask, kind in [(unit_masks[1], "channel"), (unit_masks[5], "scalar")]:
+    assert all(m == unit_masks[1] for m in unit_masks[1:-1])
+    for mask, kind in [(unit_masks[1], "channel"), (unit_masks[-1], "scalar")]:
         assert len(mask) == 1
         index, push = mask[0]
         compare = rows[index]
@@ -162,6 +172,7 @@ def main():
         sys.stdout.write(run.stdout)
         sys.stderr.write(run.stderr)
         return run.returncode
+    fixtures = [x for x in run.stdout.splitlines() if x.startswith("fixture=")]
     names = opcode_names()
     rows, checked = None, []
     programs = []
@@ -170,7 +181,9 @@ def main():
             assert rows is None
             rows = []
         elif line == "APPLE9_ASM_END":
-            checked.append(check_program(rows))
+            match = re.search(r"channels=(\S+)", fixtures[len(checked)])
+            channels = [list(map(int, x.split(':'))) for x in match[1].split(',')] if match else None
+            checked.append(check_program(rows, channels))
             programs.append(rows)
             rows = None
         elif line.startswith("APPLE9_ASM offset="):
@@ -185,17 +198,31 @@ def main():
     assert rows is None and len(checked) == len(fixtures) and len(fixtures) >= 4
     assert any("fixture=H1_BASE " in x for x in fixtures)
     assert any("fixture=H1_SHIFT_X " in x for x in fixtures)
-    assert any("ready=0" in x for x in fixtures)
     base = next(i for i, x in enumerate(fixtures)
                 if "fixture=H1_BASE " in x and "pressure=0" in x)
     pressured = next(i for i, x in enumerate(fixtures) if "pressure=1" in x)
-    assert checked[base] != checked[pressured], "pressure did not change mesh RA"
+    def gprs(line):
+        return int(re.search(r"gprs=(\d+)", line).group(1))
+    assert gprs(fixtures[pressured]) > gprs(fixtures[base])
     mutation_checks(programs[base])
     mutation_checks(programs[pressured])
+    wide = next(i for i, x in enumerate(fixtures) if "fixture=ATTR_LIMIT " in x)
+    channels = [list(map(int, x.split(':'))) for x in
+                re.search(r"channels=(\S+)", fixtures[wide])[1].split(',')]
+    final_channel = max(i for i, r in enumerate(programs[wide]) if r['op'] == 'MESH_SUBMIT_CHANNEL')
+    plane = max(i for i, r in enumerate(programs[wide][:final_channel])
+                if r['op'] == 'IMM' and r['imm'] >= 128)
+    for coherent in (False, True):
+        bad = copy.deepcopy(programs[wide]);code = bytearray(bad[plane]['code']);code[1] ^= 1
+        bad[plane]['code'] = bytes(code)
+        if coherent:bad[plane]['imm'] ^= 1
+        try:check_program(bad, channels)
+        except AssertionError:pass
+        else:raise AssertionError('corrupt high plane immediate accepted')
     sys.stdout.write(run.stdout)
-    print("six allocation mutations rejected; pressured unit allocation differs")
-    print(f"checked {len(checked)} complete programs: boundaries, six units, allocated inputs, masks")
-    print("first program units (U0, channels 0..3, scalar):", " ".join(checked[0]))
+    print("six allocation and two high-plane immediate mutations rejected; live pressure increases the GPR high-water mark")
+    print(f"checked {len(checked)} complete programs: boundaries, U units, allocated inputs, masks")
+    print("first program U units:", " ".join(checked[0]))
     return 0
 
 

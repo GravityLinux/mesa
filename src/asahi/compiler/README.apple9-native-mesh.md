@@ -3,15 +3,31 @@
 `agx_compile_apple9_native_mesh(nir, enable_native_mesh, ...)` compiles a complete
 mesh program through the ordinary NIR, VIR, allocation, scheduling and packing
 pipeline. The gate is disabled unless explicitly enabled. It is a compiler
-entry point, not a Vulkan native draw implementation or an advertised feature.
+entry point used by Honeykrisp's opt-in `HK_APPLE9_NATIVE_MESH=1` runtime.
 The existing compute-emulated Vulkan mesh path remains the default.
 
 The accepted development class is a fixed API workgroup with 1..16 invocations
 (any 3D shape), launched at physical 16x1x1, triangle topology,
-maxima V3/P1, one constant `SetMeshOutputs(3, 1)`, Position only, and no task
-payload, user shared memory, culling or primitive attributes. Ordinary formation
-handles the established finite, nondegenerate, inside-clip triangle record
-class. This gate does not claim clipping or general mesh-shader support. The
+maxima V3/P1, one constant `SetMeshOutputs(3, 1)`, and no task
+payload, user shared memory, culling or primitive attributes. Position-only output
+is the default. The additional `HK_APPLE9_NATIVE_MESH_ATTRIBUTES=1` development
+gate admits up to 124 32-bit user scalars in generic varying slots, with smooth,
+flat and noperspective interpolation selected by the fragment interface. This
+attribute path is host-tested but not yet hardware-qualified.
+
+Mesh output writes/reads use component-major local planes in semantic order.
+Completion publishes each plane with the existing U channel operation; user
+channel numbers follow the ordinary VS smooth/flat/linear grouping. The compiler
+exports that same varying layout to the fragment compiler and shared PPP builder.
+The launch local allocation is the next power of two covering the output layout,
+with a 128-byte minimum. No fixed application registers, new opaque code, or
+capture-specific instruction sequences are introduced. Primitive attributes
+remain rejected because their linking-plane/device-record publication is not
+understood. Paired VS/native device arms live in `../vulkan/tests/native-attributes`.
+
+Position retains
+all four components, including non-unit W. Hardware clipping is unqualified;
+the compiler does not perform a software clip-domain drop. The
 hardware validation launch must use one workgroup while workgroup scope is
 being qualified.
 
@@ -26,7 +42,7 @@ and NumSubgroups are frozen before shader metadata changes to physical T16.
 SubgroupSize remains the architectural 32, with one partial subgroup; it is
 neither the API invocation count nor the physical launch count. API barriers
 in an expanded one-subgroup body shrink to subgroup scope. Compiler-owned
-formation and completion rendezvous remain outside the application mask.
+completion rendezvous remain outside the application mask.
 
 `agx_apple9_mesh_body_info.logical_size` retains the API dimensions, while the
 compiled part's `workgroup_size` describes the physical launch. NIR owns this
@@ -40,8 +56,8 @@ ordinary 1..16-invocation task NIR with one top-level grid launch and no payload
 or user shared memory. Only API lane 0 writes the three grid dimensions. The
 physical T16 workgroup then reconverges before its collective call, whose
 hardware export still uses lanes 0/1/2 for X/Y/Z. Masking that callee to the T1
-API lane set would lose two dimensions. The driver still does not expose or
-upload these object programs.
+API lane set would lose two dimensions. The gated runtime uploads this generated
+object program alongside the mesh program; it does not expose API task shaders.
 
 Physical launches above 16, variable API sizes, and requested API subgroup
 sizes other than 32 reject explicitly. T32 would still be a single
@@ -49,7 +65,7 @@ architectural subgroup, but the complete native object/mesh contract has not
 been qualified at that launch width. This work does not promote the older
 body-only experiments at wider physical widths.
 
-The normal IO and ordinary record formation prerequisites were adapted from
+The normal IO prerequisites were adapted from
 our authored compiler sources at `7779b8644dc355ee214cf64f4996254711e10c55`.
 They contain no ordinary native helper code. The new completion lowering does
 not call the research linker, append executable fragments, reserve physical
@@ -100,11 +116,12 @@ culling and broader output families still need hardware evidence.
 The compiler reports `agx_apple9_mesh_body_info` and sets
 `agx_shader_info.apple9_body_only`. This flag means a native launch contract is
 still required, even though mesh completion is now present.
-`hk_upload_shader` rejects this flag; generic compute or graphics submission
-cannot silently run the program. No driver path selects the new API yet.
-Object entry/completion, reservation and launch integration are the next step.
+`hk_upload_shader` rejects this flag unless the gated native uploader verifies
+the stage's complete compiler metadata. Generic compute or vertex submission
+cannot run the program. Native mesh and generated object programs remain
+separate owned shader BOs, retained by every referencing command buffer.
 
-The private argument ABI is version 6:
+The private argument ABI is version 7:
 
 | Uniform words | Meaning |
 | --- | --- |
@@ -112,29 +129,19 @@ The private argument ABI is version 6:
 | 12..13 | Mesh local-output root (selector 6) |
 | 14..15 | Object grid root (selector 7) |
 | 16..17 | Task payload pointer; unused by this class |
-| 18..19 | Pointer to `agx_apple9_mesh_draw` |
+| 18..19 | Pointer to three uint32 mesh grid counts, read by the object stage |
 
-`agx_apple9_mesh_draw` is an array of 23 little-endian 64-bit slots, in
-`agx_apple9_mesh_formation_input` enum order. Address slots use all 64 bits;
-other slots use the low 32 bits. It contains current geometry/list/root/scene
-reservations, allocation IDs, fragment and raster state, viewport values, and
-reservation readiness, and an optional device-u32 outside-class counter address
-(slot 22, byte offset 176). Zero disables counting. The complete draw is 184 bytes.
-The counter increments once per rejected triangle at the first invalid-index,
-clip-domain, or screen-range predicate, by lane zero; readiness-zero and
-zero-area rejection do not increment it. The clip predicate remains strict
-`abs(x) < w && abs(y) < w`, so `x = ±1, w = 1` is a counted class miss.
-Before any CTS subset, the runtime/harness must bind a zeroed owned counter,
-read it after completion, and report class drops separately from native failures.
-The runtime owns this read-only allocation through
-completion. These are ordinary device loads. There are no baked GPU addresses,
-kernel pool aliases, Q addresses or application descriptor assumptions.
-The kernel UAPI is unchanged. The compiler preserves all 20 argument words
-when choosing preamble publication space. When `HK_APPLE9_NATIVE_MESH` is enabled,
-Honeykrisp hashes the ABI version, draw size and shared selector/layout key into
-its compiler/device cache identity and mesh/task graphics-state cache key.
-Stage-specific output maps and capacities follow source NIR, which already keys
-shader compilation; layout algorithm changes require an ABI version bump.
+Mesh completion consumes the local output directly. It receives no scene,
+cursor, output-buffer address, resource ID, viewport state or reservation
+readiness value. The explicit DATA formatter and its descriptor were removed
+once the combined-publication and eight-scene arms established implicit
+reservation for this class. Their authored research sources remain in the
+external research archive, not in the compiler build.
+
+The kernel owns allocation, admission and retirement. No kernel UAPI change
+is required. The compiler preserves all 20 argument words when choosing
+preamble publication space. Honeykrisp includes the native ABI version and
+selector/layout key in the gated compiler and graphics-state cache identities.
 
 Local layout reports the primitive count, compiler-owned vertex count,
 Position planes and total output bytes. For this class the count offsets are
@@ -158,33 +165,19 @@ low/high halfwords, adjacent tuples, live values across destructive uses,
 0/1/2 primitive counts, allocation changes under pressure, actual spills and
 count-only side effects with pending loads.
 
-The full-program test executes 26 authored source/state fixtures at two
-placements, plus readiness-zero, 24 live values across completion, and both
-strict X clip boundaries with counting enabled/disabled and readiness-zero:
-60 complete programs. The pressured program must have genuinely different
-mesh unit register allocations. The independent DATA reader round-trips
-positions to source-derived quantized coordinates, checks raster state and
-record references, and compares software coverage masks. It accepts an
-alternative all-raw encoding, so compression choices are not an oracle. It
-rejects corrupted coordinates, references and padding. Each H1 source covers
-512 software samples. The old byte-exact v0 DATA comparisons are retained only
-as research evidence outside the build (and in commit `151c366e0b3`).
+The full-program test interprets ordinary NIR and checks all local Position
+components and primitive indices against authored inputs, including the clip
+probes. It checks the six completion operations and their lane masks, with no
+global record writes. A pressure variant keeps 24 independent values live
+across completion. Its larger GPR high-water mark verifies that allocation
+accounts for those live values.
 
-The wrapper reads the generic ASM listing at emitted instruction boundaries,
-independently decodes all six units, follows allocated input definitions and
-checks execution masks. It rejects reads of either U0 operand before
-redefinition. Six deliberately misallocated or swapped-tuple mutations across
-the normal and pressured programs must fail. The executable also checks
-untouched sentinels, unit inputs/lane masks, a disabled gate and unsupported
-count, workgroup, payload and capacity cases. Source provenance is recorded in
-`test/mesh-source-fixtures.json`.
-This is a compositional host comparison, not an emulator of the entire GPU
-instruction set or a hardware rendering result. GPU record visibility,
-retirement and pixels must still be checked against H1 on the mini. Compare
-pixels to the authored-source reference and DATA through the decoder; do not
-require v0's exact mode/base choices. The current formatter still needs a
-looped bit writer or precompiled routine and explicit code-size/GPR budgets
-before production enablement (roughly 44 KiB / 90 GPRs at this milestone).
+The wrapper decodes six units at emitted instruction boundaries and follows
+their allocated input definitions. It rejects reads of either U0 operand
+before redefinition. Six misallocated/swapped-tuple mutations must fail. The
+executable also checks the disabled gate and unsupported count, workgroup,
+payload and capacity cases. `test/mesh-source-fixtures.json` records provenance.
+These checks do not emulate hardware record formation, clipping or retirement.
 
 For an external hardware harness, the test executable can export the complete
 BASE/SHIFT_X binaries and their compiler metadata without modifying them:
@@ -240,23 +233,39 @@ clobbers, frame backing/minima and arbitrary grid values remain unqualified.
 GPR-preservation promotion gate: exercise live values across CALL/RET throughout
 the complete allocator-assigned GPR range. The observed r7 sentinels and r1-to-r3
 rename do not establish that general guarantee.
-The compiler emits one program but retains `apple9_body_only`, so ordinary
-upload still rejects it. The observed object frame fields 16/16 must not be
-inferred from its zero spill requirement or reduced to zero by a future
-launch builder. No native runtime integration is enabled by this compiler work.
+The compiler retains `apple9_body_only`; the gated driver validates the complete
+native metadata before upload. Object frames are 16/16 and mesh frames 64/64,
+independent of zero spill requirements. The runtime rejects scratch and
+returned-atomic frames pending separate qualification. The generated object has
+no caller values live after its call, so broader CALL/RET GPR preservation
+remains a promotion gate for other object programs.
 
-The driver does not call `agx_compile_apple9_taskless_object`; its
-enable argument is false outside tests, and the disabled path leaves NIR and
-output untouched. The host-only `apple9-native-object` and `Apple9Object*`
-tests cover the compiler contract. Host interpretation checks our assumed
-call model; it cannot qualify the hardware ABI. Runtime staging, native
-binding and the reservation provider are separate (step-3) work.
+Honeykrisp generates the taskless NIR and calls
+`agx_compile_apple9_native_object`. It constructs launches and mesh state from
+compiler metadata and ordinary command-pool allocations, and uses the shared
+fragment/PPP path. It accepts direct one-group draws. Conditional rendering
+rejects under the native gate until zero-grid object completion is qualified.
+The paired kernel requires one native draw in its own
+stream, starting with native state, one layer and one sample; mixed/multiple
+draws in that stream reject during command recording. API task shaders,
+indirect/multigroup draws, multiview,
+non-fill polygon modes and negative-one-to-one depth reject explicitly. The
+last case still needs a native mesh equivalent of the vertex clip-halfz pass;
+it is not silently ignored. The opt-in feature limits are below extension
+minima and describe a development class, not conformant EXT_mesh_shader support.
+
+The kernel must select its native setup by parsing hardware mesh packets, own
+reservation/admission/retirement, and supply the native entry backing without
+userspace resource aliases. Existing UAPI fields keep their usual meanings.
+There is no native-mesh capability bit, so this opt-in requires an explicitly
+paired mesh-enabled kernel. Host interpretation and submission recording do
+not qualify GPU clipping, retirement or pixels.
 
 `apple9-native-workgroup` checks all sizes 1..16 in both stages, with and
 without store/atomic instrumentation, plus six 3D shapes per stage. Its NIR
 interpreter checks active ballots, every local ID and size value, exact
 side-effect counts, untouched inactive lanes, barriers, grid ownership, and
-mesh DATA/coverage against the independent H1 source oracle. Every case also
+the absence of global record writes by plain mesh completion. Every case also
 goes through normal selection and RA with physical T16 metadata and no spills.
 Disabled, invalid, variable and wider sizes reject. `--export <directory>`
 exports T1/T3/T16 plain and instrumented programs for hardware qualification;

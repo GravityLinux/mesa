@@ -8,10 +8,18 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 enum agx_apple9_launch_stage {
    AGX_APPLE9_LAUNCH_VERTEX,
    AGX_APPLE9_LAUNCH_FRAGMENT,
    AGX_APPLE9_LAUNCH_COMPUTE,
+   /* Native absolute target and local allocation DATA model. Consumer
+    * publication/retirement still requires the client's native-contract gate. */
+   AGX_APPLE9_LAUNCH_TASK,
+   AGX_APPLE9_LAUNCH_MESH,
 };
 
 enum {
@@ -70,6 +78,7 @@ struct agx_apple9_launch_template {
    uint16_t target_at;
    /* Offset of the preamble branch, or 0 without a preamble. */
    uint16_t branch_at;
+   enum agx_apple9_launch_stage stage;
    bool valid;
 };
 
@@ -87,5 +96,9 @@ bool agx_apple9_launch_template_init(struct agx_apple9_launch_template *tmpl,
 bool agx_apple9_launch_template_emit(
    uint8_t *out, const struct agx_apple9_launch_template *tmpl,
    uint64_t resource_table, uint32_t entry_offset, uint64_t launch_address);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

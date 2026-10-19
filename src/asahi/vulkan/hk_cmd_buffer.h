@@ -257,6 +257,7 @@ struct hk_rendering_state {
    /* A stored colour attachment is linear, so buffers aliasing its memory
     * can observe the render's writes (hk_queue's tiling-wait elision). */
    bool linear_store;
+
    VkRenderingFlagBits flags;
 
    VkRect2D area;
@@ -505,6 +506,9 @@ struct hk_cs {
    uint8_t pre_raster_reads;
    /* The stream's render stores a linear colour attachment. */
    bool linear_store;
+
+   /* The paired native kernel accepts one mesh draw in a separate stream. */
+   bool apple9_native_mesh;
 
    /* enum hk_cs_end, and whether an hk meta operation created the stream. */
    uint8_t end_reason;
@@ -1413,6 +1417,8 @@ bool hk_apple9_pin_entry(void *allocator, struct agx_bo *bo);
 /* reads_buffers: the draw's tiling reads buffer memory itself (indices or
  * indirect arguments). */
 bool hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool reads_buffers);
+void hk_apple9_draw_native_mesh(struct hk_cmd_buffer *cmd, uint32_t draw_id,
+                                uint64_t grid);
 void hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
                     struct agx_draw draw);
 struct hk_apple9_prerast_bindings

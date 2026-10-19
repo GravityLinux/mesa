@@ -1127,8 +1127,10 @@ struct apple9_dag_lower {
    struct agx_apple9_block *system_block;
    uint32_t zero_vreg;
    struct agx_apple9_block *zero_block;
-   /* A zero defined in the entry block dominates every use. */
+   /* Entry constants dominate their own execution context. Closed object
+    * callees have no SSA inputs, including compiler-created constants. */
    uint32_t entry_zero;
+   uint32_t object_entry_zero;
    struct agx_apple9_block *binding_pointer_block;
    uint32_t binding_pointer[AGX_APPLE9_MAX_GRAPHICS_BUFFERS];
    uint32_t perspective_reciprocal;
@@ -1229,6 +1231,9 @@ apple9_dag_imm(struct apple9_dag_lower *lower, uint32_t value)
 static uint32_t
 apple9_dag_zero(struct apple9_dag_lower *lower)
 {
+   if (lower->object_region)
+      return lower->object_entry_zero;
+
    /* One zero from the entry block serves every block. Rematerializing a
     * zero per block made each constant memory index rewrite the register a
     * preceding store or load was still reading, costing a wait. */
@@ -1907,25 +1912,6 @@ apple9_dag_shift_variable(struct apple9_dag_lower *lower, nir_op op,
       sources, 2, 0);
 }
 
-/* Returns the packed user scalar index, excluding the four position words. */
-static int
-apple9_varying_index(const struct agx_apple9_varying_layout *layout,
-                     unsigned location, unsigned component)
-{
-   if (!layout || !agx_apple9_varying_supported(location) || component >= 4)
-      return -1;
-   unsigned semantic = location;
-   if (!(layout->mask[semantic] & BITFIELD_BIT(component)))
-      return -1;
-   unsigned index = util_bitcount(layout->mask[semantic] & BITFIELD_MASK(component));
-   for (unsigned i = 0; i < ARRAY_SIZE(layout->mask); ++i) {
-      if (layout->group[i] < layout->group[semantic] ||
-          (layout->group[i] == layout->group[semantic] && i < semantic))
-         index += util_bitcount(layout->mask[i]);
-   }
-   return index;
-}
-
 /* Coefficient tuples are one asynchronous load, even when NIR consumes
  * multiple words. Publish the entire SSA tuple for later scalar consumers. */
 static uint32_t
@@ -1939,7 +1925,7 @@ apple9_lower_coefficients(struct apple9_dag_lower *lower, nir_scalar scalar)
       return AGX_APPLE9_VREG_INVALID;
    unsigned location = nir_intrinsic_io_semantics(intr).location +
                        nir_src_as_uint(intr->src[0]);
-   int index = apple9_varying_index(lower->varyings, location,
+   int index = agx_apple9_varying_index(lower->varyings, location,
                                    nir_intrinsic_component(intr));
    if (index < 0)
       return AGX_APPLE9_VREG_INVALID;
@@ -2054,7 +2040,7 @@ apple9_lower_interpolated_input(struct apple9_dag_lower *lower,
    }
    unsigned location = nir_intrinsic_io_semantics(intr).location +
                        nir_src_as_uint(intr->src[offset]);
-   int index = apple9_varying_index(lower->varyings, location, component);
+   int index = agx_apple9_varying_index(lower->varyings, location, component);
    if (index < 0 && flat && location == VARYING_SLOT_PRIMITIVE_ID &&
        component == 0 && lower->reads_primitive_id)
       return agx_apple9_vir_emit_iter_flat(&lower->program, lower->varyings->count + 1);
@@ -2131,7 +2117,7 @@ apple9_lower_input_vertex(struct apple9_dag_lower *lower, nir_scalar scalar)
    }
    unsigned location = nir_intrinsic_io_semantics(intr).location +
                        nir_src_as_uint(intr->src[1]);
-   int index = apple9_varying_index(lower->varyings, location,
+   int index = agx_apple9_varying_index(lower->varyings, location,
                                     nir_intrinsic_component(intr) + scalar.comp);
    int slot = index < 0 ? -1 : apple9_per_vertex_slot(lower, index);
    if (slot < 0) {
@@ -4177,7 +4163,7 @@ apple9_emit_graphics_output(struct apple9_dag_lower *lower,
             return false;
          slot = 4 + lower->varyings->count;
       } else if (location != VARYING_SLOT_POS) {
-         int index = apple9_varying_index(lower->varyings, location, component);
+         int index = agx_apple9_varying_index(lower->varyings, location, component);
          if (index < 0)
             return false;
          slot = 4 + index;
@@ -4384,6 +4370,14 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
                    NULL, 0, 0))
                return false;
             lower->object_calls = lower->object_region = true;
+            /* A CALL may enter lanes that did not execute caller definitions.
+             * Keep the closed callee's synthetic zero local to its context,
+             * just like its NIR values and system-value reads. Emitting it
+             * here dominates every callee mask; ordinary DCE removes it if
+             * unused. No GPR or incoming launch value is prescribed. */
+            lower->object_entry_zero = apple9_dag_imm(lower, 0);
+            if (lower->object_entry_zero == AGX_APPLE9_VREG_INVALID)
+               return false;
             /* A closed callee must select its own system values even when
              * caller and callee share the conservative allocation block. */
             lower->system_block = NULL;
@@ -4399,6 +4393,7 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
                    NULL, 0, 0))
                return false;
             lower->object_region = false;
+            lower->object_entry_zero = AGX_APPLE9_VREG_INVALID;
             lower->system_block = NULL;
             continue;
          }
@@ -6297,6 +6292,7 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
       .varyings = varyings,
       .zero_vreg = AGX_APPLE9_VREG_INVALID,
       .entry_zero = AGX_APPLE9_VREG_INVALID,
+      .object_entry_zero = AGX_APPLE9_VREG_INVALID,
       .loads = loads.data,
       .load_count =
          util_dynarray_num_elements(&loads, struct apple9_scalar_load),
@@ -6347,7 +6343,7 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
             unsigned location = nir_intrinsic_io_semantics(intr).location +
                                 nir_src_as_uint(intr->src[1]);
             for (unsigned c = 0; c < intr->def.num_components; ++c) {
-               int index = apple9_varying_index(
+               int index = agx_apple9_varying_index(
                   varyings, location, nir_intrinsic_component(intr) + c);
                if (index < 0 || apple9_per_vertex_slot(&lower, index) >= 0)
                   continue;
@@ -8515,19 +8511,6 @@ agx_compile_apple9_mesh_lowered(nir_shader *nir,
                                const struct agx_apple9_mesh_key *key,
                                struct agx_shader_part *out, const char **reason)
 {
-   nir_foreach_function_impl(impl, nir) {
-      nir_foreach_block(block, impl) {
-         nir_foreach_instr(instr, block) {
-            if (instr->type == nir_instr_type_intrinsic &&
-                nir_instr_as_intrinsic(instr)->intrinsic ==
-                   nir_intrinsic_load_mesh_formation_input_apple9_agx) {
-               if (reason)
-                  *reason = "native mesh runtime reservation/scene inputs are unresolved";
-               return false;
-            }
-         }
-      }
-   }
    if (!apple9_compile_workgroup_body(nir, out, NULL, key, reason))
       return false;
    out->info.apple9_body_only = true;
@@ -11386,8 +11369,8 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
    if (layout) {
       for (unsigned i = 0; i < ARRAY_SIZE(varyings.mask); ++i) {
          if (varyings.mask[i])
-            varyings.group[i] = (layout->outputs_flat & BITFIELD64_BIT(i)) ? 1 :
-               (layout->outputs_linear & BITFIELD64_BIT(i)) ? 2 : 0;
+            varyings.group[i] = agx_apple9_varying_group(
+               layout->outputs_flat, layout->outputs_linear, i);
       }
    }
    if (varyings.cull_distance_mask)

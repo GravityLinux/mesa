@@ -16,7 +16,7 @@
 #include "agx_debug.h"
 #include "hk_apple9_polygon_points.h"
 #include "asahi/compiler/agx_compile_apple9.h"
-#include "asahi/compiler/agx_apple9_mesh_formation.h"
+#include "asahi/compiler/agx_apple9_mesh.h"
 #include "agx_device.h"
 #include "agx_helpers.h"
 #include "agx_nir_lower_vbo.h"
@@ -157,6 +157,7 @@ static const char *const hk_codegen_env[] = {
    "AGX_APPLE9_RA_WEBS",
    "AGX_APPLE9_SAFE_HOIST_STAGES", "HK_APPLE9_DESCRIPTOR_BUFFER",
    "HK_APPLE9_MESH_SHADER", "HK_APPLE9_NATIVE_MESH",
+   "HK_APPLE9_NATIVE_MESH_ATTRIBUTES",
    "HK_APPLE9_SPARSE_SCRATCH",
    "HK_APPLE9_TESS_BATCH", "HK_APPLE9_TESS_SCAN_BLOCK",
    "HK_APPLE9_TEXEL_CLASSES", "HK_APPLE9_UNIFORM_SAFE_CLASSES",
@@ -209,7 +210,8 @@ hk_hash_apple9_native_mesh_abi(struct mesa_blake3 *ctx)
       AGX_APPLE9_MESH_ABI_VERSION, k.reserved_uniform_words, k.output_root,
       k.primitive_count_bits, k.payload_uniform, k.grid_root, k.grid_offset_B,
       k.physical_threads, AGX_APPLE9_MESH_DRAW_UNIFORM,
-      sizeof(struct agx_apple9_mesh_draw), AGX_MESH_FORMATION_DROPS_ADDRESS,
+      AGX_APPLE9_MESH_ARGUMENT_WORDS,
+      hk_apple9_native_mesh_attributes_enabled(),
    };
    _mesa_blake3_update(ctx, abi, sizeof(abi));
 }
@@ -457,32 +459,6 @@ hk_make_feature_key(const struct vk_features *feats)
    return ((!feats || feats->customBorderColors) ? HK_FEAT_CUSTOM_BORDER : 0) |
           ((!feats || feats->minLod) ? HK_FEAT_MIN_LOD : 0);
 }
-
-/* Core pipelines specialize immutable vertex and attachment state. Descriptor
- * contents, draw parameters and blend constants remain GPU data. */
-struct hk_apple9_graphics_key {
-   struct agx_apple9_vertex_layout vertex;
-   struct agx_apple9_blend blend[8];
-   uint32_t targets;
-   /* Fragment output location written to each color attachment. */
-   uint8_t color_map[8];
-   /* VK_EXT_depth_clip_control: clip-space depth ranges over [-w, w]. */
-   bool clip_negative_one_to_one;
-   /* sampleShadingEnable: shade and interpolate per sample. */
-   bool sample_shading;
-   /* The depth/stencil attachment is also read as an input attachment. */
-   bool zs_self_dep;
-   /* stippledLineEnable: lines measure a stipple counter in the fragment
-    * shader, see hk_apple9_lower_line_stipple_fs. */
-   bool line_stipple;
-   /* Polygon mode POINT: triangles may be drawn by the software polygon
-    * stage, see hk_apple9_polygon_point_gs. */
-   bool polygon_points;
-   /* A passthrough geometry shader rasterizing for a vertex stage that
-    * publishes interpolated cull planes, see hk_apple9_compile_vertex_culls.
-    * Otherwise geometry shaders publish one flat primitive cull mask. */
-   bool gs_cull_planes;
-};
 
 static bool
 hk_apple9_lower_clip_z_coeff(nir_builder *b, nir_intrinsic_instr *intr,
@@ -4155,6 +4131,7 @@ hk_apple9_init_render_stage(struct hk_shader *s)
       .preamble_size = i->apple9_preamble_size,
       .publication_count = i->apple9_publication_count,
       .publication_count_valid = true,
+      .native_mesh = s->info.apple9_native_stage == HK_APPLE9_NATIVE_MESH,
       .scratch_size = i->scratch_size,
       .atomic_frame_size = i->apple9_atomic_frame_size,
       .resource_count = i->apple9_resource_count,
@@ -4197,7 +4174,15 @@ hk_apple9_init_render_stage(struct hk_shader *s)
 static VkResult
 hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
 {
-   if (shader->b.info.apple9_body_only)
+   bool native = shader->info.apple9_native_stage != HK_APPLE9_NATIVE_NONE;
+   if ((shader->b.info.apple9_body_only || native) &&
+       !(dev->dev.chip == AGX_CHIP_G16G && hk_apple9_native_mesh_enabled() &&
+         shader->info.stage == (shader->info.apple9_native_stage ==
+                                   HK_APPLE9_NATIVE_OBJECT
+                                      ? MESA_SHADER_TASK : MESA_SHADER_MESH) &&
+         hk_apple9_native_shader_valid(&shader->b.info,
+                                       &shader->info.apple9_native,
+                                       shader->info.apple9_native_stage)))
       return vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
                        "Apple9 native stage requires its native launch contract");
    if (dev->dev.chip == AGX_CHIP_G16G) {
@@ -5878,6 +5863,63 @@ hk_apple9_compile_mesh(struct hk_device *dev, nir_shader *nir,
    return result;
 }
 
+/* Compile the native program from the same graphics key used by the linked
+ * pipeline. Keep key translation with the compilation so hk tests exercise
+ * the production call boundary before device upload. */
+bool
+hk_apple9_compile_native_mesh_program(
+   nir_shader *nir, const struct hk_apple9_graphics_key *key,
+   struct agx_shader_part *out, struct agx_apple9_mesh_body_info *info,
+   const char **reason)
+{
+   const struct agx_apple9_native_mesh_options options = {
+      .clip_halfz = key->clip_negative_one_to_one,
+      .attributes = hk_apple9_native_mesh_attributes_enabled(),
+      .outputs_flat = key->vertex.outputs_flat,
+      .outputs_linear = key->vertex.outputs_linear,
+   };
+   return agx_compile_apple9_native_mesh(
+      nir, hk_apple9_native_mesh_enabled(), &options, out, info, reason);
+}
+
+/* A native mesh API shader owns two ordinary compiled programs. The
+ * generated object publishes the draw's mesh grid; it is not an API task shader.
+ * Both BOs use the existing shader cache, upload and destruction paths. */
+static VkResult
+hk_apple9_compile_native_mesh(struct hk_device *dev, nir_shader *nir,
+                               struct hk_api_shader *obj,
+                               const struct hk_apple9_graphics_key *key,
+                               const char **reason)
+{
+   struct hk_shader *mesh = &obj->variants[HK_MESH_VARIANT_MAIN];
+   struct hk_shader *object = &obj->variants[HK_MESH_VARIANT_OBJECT];
+   hk_mesh_gather_info(nir, &mesh->info.mesh);
+   mesh->info.apple9_native_stage = HK_APPLE9_NATIVE_MESH;
+   if (!hk_apple9_compile_native_mesh_program(
+          nir, key, &mesh->b, &mesh->info.apple9_native, reason))
+      return vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
+                       "Apple9 native mesh: %s", *reason ?: "unsupported NIR");
+   VkResult result = hk_apple9_finish_shader(dev, mesh, nir);
+   if (result != VK_SUCCESS)
+      return result;
+
+   struct agx_apple9_mesh_key k = AGX_APPLE9_MESH_KEY;
+   nir_shader *generated = agx_nir_apple9_taskless_object(&k);
+   if (!generated)
+      return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+   object->info.stage = MESA_SHADER_TASK;
+   object->info.apple9_native_stage = HK_APPLE9_NATIVE_OBJECT;
+   if (!agx_compile_apple9_native_object(
+          generated, hk_apple9_native_mesh_enabled(), &k, &object->b,
+          &object->info.apple9_native, reason))
+      result = vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
+                         "Apple9 native object: %s", *reason ?: "unsupported NIR");
+   else
+      result = hk_apple9_finish_shader(dev, object, generated);
+   ralloc_free(generated);
+   return result;
+}
+
 /* Task shaders run as compute kernels writing their payloads and the grids of
  * mesh workgroups they launch.
  */
@@ -5923,6 +5965,16 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
       simple_mtx_lock(lock);
 
    memset(out, 0, count * sizeof(*out));
+   if (hk_apple9_native_mesh_enabled()) {
+      for (unsigned i = 0; i < count; ++i) {
+         if (infos[i].stage == MESA_SHADER_TASK) {
+            reason = "native mesh does not support API task shaders";
+            result = vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT, "%s", reason);
+            goto done;
+         }
+      }
+   }
+
 
    /* Per-vertex inputs are read as flat copies, written by the passthrough
     * geometry shader of vertex-shader pipelines, or by the vertex shader
@@ -6323,6 +6375,15 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
                goto done;
             continue;
          } else if (stage == MESA_SHADER_MESH) {
+            if (hk_apple9_native_mesh_enabled()) {
+               result = hk_apple9_compile_native_mesh(
+                  dev, nir, obj, &key, &reason);
+               if (result != VK_SUCCESS)
+                  goto done;
+               varyings = shader->b.info.apple9_varyings;
+               continue;
+            }
+
             struct hk_pp_info pp = {
                .clip = nir->info.clip_distance_array_size,
                .cull = nir->info.cull_distance_array_size,

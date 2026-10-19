@@ -1,11 +1,12 @@
 /* Copyright 2026 Asahi Linux Contributors
  * SPDX-License-Identifier: MIT
- * Bounded test interpreter for the structured NIR used by mesh formation.
+ * Bounded test interpreter for the structured NIR used by native mesh completion.
  * Tests supply all memory/semantic bindings. This is not a GPU emulator.
  */
 #pragma once
 #include "compiler/nir/nir_constant_expressions.h"
-#include "agx_apple9_mesh_formation.h"
+#include "agx_apple9_mesh.h"
+#include "compiler/nir/nir_builder.h"
 
 #define LANES      16
 #define ALL_LANES  0xffff
@@ -19,11 +20,11 @@ struct region {
 struct machine {
    nir_const_value (*value)[LANES][NIR_MAX_VEC_COMPONENTS];
    nir_block *previous[LANES];
-   uint8_t local[128];
-   uint64_t formation_inputs[AGX_MESH_FORMATION_DROPS_ADDRESS + 1];
+   uint8_t local[4096];
    struct region region[8];
    unsigned barriers, subgroup_barriers, fences, writes;
-   unsigned controls, scalars, channels[4];
+   unsigned controls, scalars, channels[128];
+   uint32_t submitted_position[3][128];
    unsigned local_root, grid_fences, grid_exports;
    unsigned local_store_lanes, global_store_lanes, atomic_lanes, object_calls;
    uint32_t grid[3];
@@ -156,11 +157,14 @@ instruction(struct machine *m, nir_instr *i, unsigned lane)
          break;
       case nir_intrinsic_mesh_submit_channel_apple9_agx: {
          unsigned channel = src(m, n->src[0], lane)[0].u32;
-         CHECK(channel < 4 && lane < 3);
-         CHECK(src(m, n->src[1], lane)[0].u32 == 32 + channel * 16);
+         unsigned plane = src(m, n->src[1], lane)[0].u32;
+         CHECK(channel < 128 && lane < 3);
+         CHECK(!(plane & 15) && plane + 16 <= sizeof(m->local));
          CHECK(m->controls == ALL_LANES);
          CHECK(!(m->channels[channel] & (1u << lane)));
          m->channels[channel] |= 1u << lane;
+         memcpy(&m->submitted_position[lane][channel],
+                m->local + plane + lane * 4, 4);
          break;
       }
       case nir_intrinsic_mesh_submit_scalar_apple9_agx:
