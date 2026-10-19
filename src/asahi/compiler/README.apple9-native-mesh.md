@@ -227,8 +227,9 @@ remains a promotion gate for other object programs.
 Honeykrisp generates the taskless NIR and calls
 `agx_compile_apple9_native_object`. It constructs launches and mesh state from
 compiler metadata and ordinary command-pool allocations, and uses the shared
-fragment/PPP path. It accepts direct one-group draws and GPU conditional
-rendering of that grid. The paired kernel requires one native draw in its own
+fragment/PPP path. It accepts direct one-group draws. Conditional rendering
+rejects under the native gate until zero-grid object completion is qualified.
+The paired kernel requires one native draw in its own
 stream, starting with native state, one layer and one sample; mixed/multiple
 draws in that stream reject during command recording. API task shaders,
 indirect/multigroup draws, multiview,
