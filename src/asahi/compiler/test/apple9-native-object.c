@@ -19,6 +19,32 @@
 #include "apple9-mesh-executor.h"
 
 static void
+check_callee_local_index(const struct agx_shader_part *part, unsigned target)
+{
+   const uint8_t *bytes = part->binary;
+   bool narrow = false;
+   /* Search only the emitted callee, not the API-mask read in the caller.
+    * The 16-bit SR result must have its zero-extension companion before
+    * selection consumes it in a 32-bit comparison/address calculation. */
+   for (unsigned i = target; i + 4 <= part->info.binary_size; i += 2) {
+      if (!memcmp(bytes + i, "\x8f\x12\x54\x00", 4))
+         break;
+      if (bytes[i + 1] != 0xa7 || (bytes[i + 2] & 0x3f) != 0x10 ||
+          bytes[i + 3] != 0x06)
+         continue;
+      CHECK((bytes[i] & 15) != 0x0c);
+      if ((bytes[i] & 15) != 0x04)
+         continue;
+      CHECK(i + 8 <= part->info.binary_size);
+      CHECK(bytes[i + 4] == ((bytes[i] & 0xf0) | 0x03));
+      CHECK(bytes[i + 5] == 0 &&
+            bytes[i + 6] == (bytes[i + 2] & 0xc0) && bytes[i + 7] == 1);
+      narrow = true;
+   }
+   CHECK(narrow);
+}
+
+static void
 run(nir_shader *nir, struct machine *m)
 {
    nir_lower_vars_to_ssa(nir);
@@ -93,6 +119,7 @@ check_variant(unsigned root, unsigned offset, const uint32_t groups[3])
          raw |= (uint64_t)bytes[i + 3 + j] << (8 * j);
       int64_t target = i + ((int64_t)(raw << 16) >> 16);
       CHECK(target > i && target < part.info.binary_size);
+      check_callee_local_index(&part, target);
       CHECK(!memcmp(bytes + i + 10, "\x0f\x06\x04\x02\x00\x00", 6));
       ++calls;
    }
@@ -159,6 +186,12 @@ check_multiple_calls(unsigned pressure)
    const uint8_t *bytes = part.binary;
    for (unsigned i = 0; i + 10 <= part.info.binary_size; i += 2) {
       if (!memcmp(bytes + i, "\x8f\x10\x54", 3)) {
+         uint64_t raw = 0;
+         for (unsigned j = 0; j < 6; ++j)
+            raw |= (uint64_t)bytes[i + 3 + j] << (8 * j);
+         int64_t target = i + ((int64_t)(raw << 16) >> 16);
+         CHECK(target > i && target < part.info.binary_size);
+         check_callee_local_index(&part, target);
          CHECK(!memcmp(bytes + i + 10, "\x0f\x06\x04\x02\x00\x00", 6));
          ++calls;
       }

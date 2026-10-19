@@ -91,7 +91,7 @@ emit_test_leaf(agx_apple9_vir_program *p, unsigned tag)
           AGX_APPLE9_ENC_OBJECT_CALL, nullptr, 0, 0))
       return false;
    uint32_t lane = agx_apple9_vir_emit(p, AGX_APPLE9_VIR_GET_SR,
-      AGX_APPLE9_ENC_GET_SR, nullptr, 0, 0xa7);
+      AGX_APPLE9_ENC_GET_SR_ZEXT16, nullptr, 0, 0xa7);
    uint32_t value = agx_apple9_vir_emit(p, AGX_APPLE9_VIR_IMM,
       AGX_APPLE9_ENC_MOV_IMM32, nullptr, 0, 0x9000 + tag);
    uint32_t sources[] = {lane, value};
@@ -218,8 +218,10 @@ check_live_values(unsigned pressure, unsigned calls, std::set<unsigned> &lanes)
          case AGX_APPLE9_VIR_DEVICE_LOAD: regs[I->dest] = input(I->immediate); break;
          case AGX_APPLE9_VIR_GET_SR:
             EXPECT_EQ(I->immediate, 0xa7u);
+            EXPECT_EQ(I->encoding, AGX_APPLE9_ENC_GET_SR_ZEXT16);
             lanes.insert(I->dest);
-            regs[I->dest] = lane;
+            regs[I->dest] = I->encoding == AGX_APPLE9_ENC_GET_SR_ZEXT16
+                              ? lane : (0xdead0000 | lane);
             break;
          case AGX_APPLE9_VIR_IADD: regs[I->dest] = read(0) + read(1); break;
          case AGX_APPLE9_VIR_IOR: regs[I->dest] = read(0) | read(1); break;

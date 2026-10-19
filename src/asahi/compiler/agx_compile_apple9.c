@@ -4384,6 +4384,9 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
                    NULL, 0, 0))
                return false;
             lower->object_calls = lower->object_region = true;
+            /* A closed callee must select its own system values even when
+             * caller and callee share the conservative allocation block. */
+            lower->system_block = NULL;
             continue;
          }
          if (intr->intrinsic == nir_intrinsic_end_object_call_apple9_agx) {
@@ -4396,6 +4399,7 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
                    NULL, 0, 0))
                return false;
             lower->object_region = false;
+            lower->system_block = NULL;
             continue;
          }
          if (intr->intrinsic == nir_intrinsic_fence_mesh_grid_apple9_agx) {

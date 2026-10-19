@@ -211,7 +211,11 @@ physical register arguments. After NIR motion/optimization, it expands through
 loops, jumps, PHIs and any SSA crossing a region boundary (including caller
 if conditions). The leaf obtains inputs through its own semantic loads.
 Selection uses the normal system-value, predicate, shared-load and publication
-paths. It emits OBJECT_CALL, the selected NIR body, OBJECT_RETURN and
+paths. Local invocation index therefore uses the normal `GET_SR_ZEXT16` read,
+including its zero-extension companion before 32-bit comparisons. System-value
+caches are invalidated at both region boundaries so a closed callee cannot
+reuse a caller's or another callee's read in the shared allocation block.
+It emits OBJECT_CALL, the selected NIR body, OBJECT_RETURN and
 OBJECT_RESUME in logical execution order. Structured callee masks carry
 `local_control` and share one conservative allocation block; its entry/exit
 NIR identities preserve the caller's incoming and outgoing CFG edges. OBJECT_GRID_EXPORT consumes a normally allocated
