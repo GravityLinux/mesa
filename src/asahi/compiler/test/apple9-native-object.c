@@ -40,11 +40,17 @@ check_variant(unsigned root, unsigned offset, const uint32_t groups[3])
    key.grid_offset_B = offset;
    nir_shader *body = agx_nir_apple9_taskless_object(&key);
    CHECK(body);
+   CHECK(body->info.workgroup_size[0] == 1);
+   struct agx_apple9_mesh_body_info info;
+   const char *reason = NULL;
+   CHECK(agx_nir_lower_apple9_native_object(body, true, &key, &info, &reason));
    struct machine m = {.local_root = root};
    memset(m.local, 0xcd, sizeof(m.local));
    m.region[6] = (struct region){INPUT_ADDR, 12, (uint8_t *)groups, NULL};
    run(body, &m);
-   CHECK(m.barriers == 1 && m.grid_exports == 0);
+   CHECK(m.barriers == 1 && m.grid_exports == 7 && m.object_calls == 1);
+   CHECK(m.local_store_lanes == 1);
+   CHECK(!memcmp(m.grid, groups, sizeof(m.grid)));
    for (unsigned i = 0; i < sizeof(m.local); ++i) {
       uint8_t expected = i >= offset && i < offset + 12
                             ? ((const uint8_t *)groups)[i - offset]
@@ -56,6 +62,7 @@ check_variant(unsigned root, unsigned offset, const uint32_t groups[3])
    b.shader->info.workgroup_size[0] = 16;
    b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
    CHECK(agx_nir_apple9_object_grid_export(&b, &key));
+   m.grid_fences = m.grid_exports = 0;
    run(b.shader, &m);
    CHECK(m.grid_fences == ALL_LANES && m.grid_exports == 7);
    CHECK(!memcmp(m.grid, groups, sizeof(m.grid)));
@@ -63,7 +70,6 @@ check_variant(unsigned root, unsigned offset, const uint32_t groups[3])
    ralloc_free(b.shader);
 
    struct agx_shader_part part = {0};
-   const char *reason = NULL;
    CHECK(!agx_compile_apple9_taskless_object(false, &key, &part, &reason));
    CHECK(!part.binary && reason);
    CHECK(agx_compile_apple9_taskless_object(true, &key, &part, &reason));

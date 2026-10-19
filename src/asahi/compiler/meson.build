@@ -135,6 +135,14 @@ if with_tests or with_tools.contains('drm-shim')
 endif
 
 if with_tests
+  apple9_native_workgroup_test = executable('apple9-native-workgroup',
+    'test/apple9-native-workgroup.c',
+    c_args : [c_msvc_compat_args, no_override_init_args],
+    gnu_symbol_visibility : 'hidden',
+    dependencies : [idep_nir, idep_mesautil],
+    link_with : [libasahi_compiler],
+  )
+  test('apple9-native-workgroup', apple9_native_workgroup_test, suite : ['asahi'])
   apple9_native_object_test = executable('apple9-native-object',
     'test/apple9-native-object.c',
     c_args : [c_msvc_compat_args, no_override_init_args],

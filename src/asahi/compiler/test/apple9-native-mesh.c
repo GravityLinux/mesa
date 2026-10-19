@@ -18,6 +18,7 @@
 #include "apple9-mesh-executor.h"
 #include "mesh-formation-fixtures.h"
 #include "mesh-h1-fixtures.h"
+#include "mesh-clip-fixtures.h"
 
 #include "apple9-mesh-data.h"
 
@@ -267,10 +268,24 @@ reject_unsupported(void)
 int
 main(int argc, char **argv)
 {
-   CHECK(argc == 1 || (argc == 3 && !strcmp(argv[1], "--export")));
+   bool clip = argc == 3 && !strcmp(argv[1], "--export-clip");
+   CHECK(argc == 1 || (argc == 3 && (!strcmp(argv[1], "--export") || clip)));
    if (argc == 3)
       export_dir = argv[2];
    glsl_type_singleton_init_or_ref();
+   if (clip) {
+      for (unsigned i = 0; i < ARRAY_SIZE(clip_fixtures); ++i) {
+         struct formation_fixture f = h1_fixtures[0];
+         f.name = clip_fixtures[i].name;
+         memcpy(f.positions, clip_fixtures[i].positions, sizeof(f.positions));
+         /* A class drop skips explicit records, but all native completion
+          * operations must still receive the original outputs. run_fixture
+          * checks both facts; it does not simulate hardware clipping. */
+         run_fixture(&f, 0, true, false, true);
+      }
+      glsl_type_singleton_decref();
+      return 0;
+   }
    reject_unsupported();
    for (unsigned i = 0; i < ARRAY_SIZE(formation_fixtures); ++i) {
       const struct formation_fixture *f = &formation_fixtures[i];

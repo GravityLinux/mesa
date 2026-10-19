@@ -43,6 +43,14 @@ struct agx_apple9_mesh_key {
 
 #define AGX_APPLE9_MESH_UNUSED UINT16_MAX
 
+/* Qualified native completion width, distinct from the 32-lane subgroup.
+ * API invocations occupy its first 1..16 lanes. Wider launches need separate
+ * hardware qualification of completion and object call participation. */
+#define AGX_APPLE9_NATIVE_THREADS 16
+
+bool agx_apple9_native_workgroup_supported(const nir_shader *nir,
+                                          const char **reason);
+
 /* 32-bit component maps shared with the future launch and fragment linkers.
  * Local vertex outputs are component-major; primitive attributes are device
  * records. Indices and culling have distinct byte-addressed local regions. */
@@ -60,6 +68,8 @@ struct agx_apple9_mesh_layout {
 struct agx_apple9_mesh_body_info {
    struct agx_apple9_mesh_layout layout;
    struct agx_apple9_mesh_key key;
+   /* Declared API dimensions, before flattening to the physical launch. */
+   uint16_t logical_size[3];
    /* Unresolved pieces of the native contract. Completion lowering clears
     * its own requirement; launch integration must honor the remaining ones. */
    bool requires_native_entry;
@@ -105,9 +115,9 @@ struct nir_builder;
 bool agx_nir_apple9_object_grid_export(struct nir_builder *b,
                                        const struct agx_apple9_mesh_key *key);
 
-/* Driver-generated taskless object body. Its draw argument points to three
- * uint32_t mesh group counts. It stores them collectively to the grid root.
- * The completion export is a separate function, not an inline STOP epilogue. */
+/* Driver-generated ordinary T1 task NIR. Its draw argument points to three
+ * uint32_t mesh group counts passed to launch_mesh_workgroups. Compile through
+ * native_object to mask the body and append the physical T16 collective. */
 nir_shader *agx_nir_apple9_taskless_object(
    const struct agx_apple9_mesh_key *key);
 
@@ -119,6 +129,18 @@ nir_shader *agx_nir_apple9_taskless_object(
 bool agx_compile_apple9_taskless_object(
    bool enable_native_mesh, const struct agx_apple9_mesh_key *key,
    struct agx_shader_part *out, const char **reason);
+
+/* Bounded ordinary task NIR: one top-level grid launch, no application shared
+ * memory or payload. Mask application effects, then reconverge the physical
+ * workgroup for the collective call. Both entrypoints retain body_only. */
+bool agx_nir_lower_apple9_native_object(
+   nir_shader *nir, bool enable_native_mesh,
+   const struct agx_apple9_mesh_key *key,
+   struct agx_apple9_mesh_body_info *info, const char **reason);
+bool agx_compile_apple9_native_object(
+   nir_shader *nir, bool enable_native_mesh,
+   const struct agx_apple9_mesh_key *key, struct agx_shader_part *out,
+   struct agx_apple9_mesh_body_info *info, const char **reason);
 
 /* Compile the lowered body through ordinary instruction selection and RA.
  * The returned binary is deliberately body-only (see info), not a production
@@ -139,8 +161,8 @@ bool agx_compile_apple9_mesh_lowered(nir_shader *nir,
                                      const char **reason);
 
 /* Compiler-only native development gate, disabled unless explicitly enabled.
- * This accepts the qualified T16/Position/V3/P1 class. It emits the complete
- * mesh body, ordinary records, and all mesh submissions in a single compile.
+ * This accepts API sizes 1..16 at physical T16, Position/V3/P1. It emits the
+ * complete mesh body, ordinary records, and all submissions in one compile.
  * The result still requires a native launch/object contract; generic shader
  * upload rejects apple9_body_only. This does not enable a Vulkan feature. */
 bool agx_nir_lower_apple9_native_mesh(nir_shader *nir, bool enable_native_mesh,

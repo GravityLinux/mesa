@@ -15,14 +15,14 @@ static bool
 eligible(nir_shader *nir, const char **reason)
 {
    if (nir->info.stage != MESA_SHADER_MESH ||
-       nir->info.workgroup_size_variable || nir->info.workgroup_size[0] != 16 ||
-       nir->info.workgroup_size[1] != 1 || nir->info.workgroup_size[2] != 1 ||
        nir->info.shared_size || nir->info.task_payload_size ||
        nir->info.mesh.max_vertices_out != 3 ||
        nir->info.mesh.max_primitives_out != 1 ||
        nir->info.mesh.primitive_type != MESA_PRIM_TRIANGLES)
       return fail(reason,
-                  "native mesh development class requires T16 V3 P1 triangles");
+                  "native mesh development class requires V3 P1 triangles without shared memory or payload");
+   if (!agx_apple9_native_workgroup_supported(nir, reason))
+      return false;
 
    unsigned publications = 0;
    nir_foreach_function_impl(impl, nir) {
@@ -86,7 +86,8 @@ agx_nir_lower_apple9_native_mesh(nir_shader *nir, bool enable_native_mesh,
    if (!eligible(nir, reason))
       return false;
 
-   const struct agx_apple9_mesh_key key = AGX_APPLE9_MESH_KEY;
+   struct agx_apple9_mesh_key key = AGX_APPLE9_MESH_KEY;
+   key.physical_threads = AGX_APPLE9_NATIVE_THREADS;
    if (!agx_nir_lower_apple9_mesh_formation(nir, &key, info, reason))
       return false;
    const struct agx_apple9_mesh_layout *layout = &info->layout;

@@ -453,8 +453,11 @@ agx_apple9_vir_emit_object_grid_call(struct agx_apple9_vir_program *p,
    if (!agx_apple9_vir_emit_side_effect(p, AGX_APPLE9_VIR_OBJECT_CALL,
           AGX_APPLE9_ENC_OBJECT_CALL, NULL, 0, 0))
       return false;
+   /* Local invocation index belongs to the narrow SR class, just as in
+    * ordinary NIR selection. Complete the narrow read before a 32-bit
+    * comparison or address calculation in the collective leaf. */
    uint32_t lane = agx_apple9_vir_emit(p, AGX_APPLE9_VIR_GET_SR,
-                                      AGX_APPLE9_ENC_GET_SR, NULL, 0, 0xa7);
+                                      AGX_APPLE9_ENC_GET_SR_ZEXT16, NULL, 0, 0xa7);
    uint32_t limit = agx_apple9_vir_emit(p, AGX_APPLE9_VIR_IMM,
                                       AGX_APPLE9_ENC_MOV_IMM32, NULL, 0, 3);
    uint32_t compare[] = {lane, limit};
