@@ -1127,8 +1127,10 @@ struct apple9_dag_lower {
    struct agx_apple9_block *system_block;
    uint32_t zero_vreg;
    struct agx_apple9_block *zero_block;
-   /* A zero defined in the entry block dominates every use. */
+   /* Entry constants dominate their own execution context. Closed object
+    * callees have no SSA inputs, including compiler-created constants. */
    uint32_t entry_zero;
+   uint32_t object_entry_zero;
    struct agx_apple9_block *binding_pointer_block;
    uint32_t binding_pointer[AGX_APPLE9_MAX_GRAPHICS_BUFFERS];
    uint32_t perspective_reciprocal;
@@ -1229,6 +1231,9 @@ apple9_dag_imm(struct apple9_dag_lower *lower, uint32_t value)
 static uint32_t
 apple9_dag_zero(struct apple9_dag_lower *lower)
 {
+   if (lower->object_region)
+      return lower->object_entry_zero;
+
    /* One zero from the entry block serves every block. Rematerializing a
     * zero per block made each constant memory index rewrite the register a
     * preceding store or load was still reading, costing a wait. */
@@ -4365,6 +4370,14 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
                    NULL, 0, 0))
                return false;
             lower->object_calls = lower->object_region = true;
+            /* A CALL may enter lanes that did not execute caller definitions.
+             * Keep the closed callee's synthetic zero local to its context,
+             * just like its NIR values and system-value reads. Emitting it
+             * here dominates every callee mask; ordinary DCE removes it if
+             * unused. No GPR or incoming launch value is prescribed. */
+            lower->object_entry_zero = apple9_dag_imm(lower, 0);
+            if (lower->object_entry_zero == AGX_APPLE9_VREG_INVALID)
+               return false;
             /* A closed callee must select its own system values even when
              * caller and callee share the conservative allocation block. */
             lower->system_block = NULL;
@@ -4380,6 +4393,7 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
                    NULL, 0, 0))
                return false;
             lower->object_region = false;
+            lower->object_entry_zero = AGX_APPLE9_VREG_INVALID;
             lower->system_block = NULL;
             continue;
          }
@@ -6278,6 +6292,7 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
       .varyings = varyings,
       .zero_vreg = AGX_APPLE9_VREG_INVALID,
       .entry_zero = AGX_APPLE9_VREG_INVALID,
+      .object_entry_zero = AGX_APPLE9_VREG_INVALID,
       .loads = loads.data,
       .load_count =
          util_dynarray_num_elements(&loads, struct apple9_scalar_load),

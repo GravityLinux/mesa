@@ -112,6 +112,90 @@ def caller_mask(rows, entry_lanes):
     raise AssertionError('no collective CALL reached')
 
 
+def callee_publication(rows, lanes=32, grid=(1, 1, 1)):
+    """Start each leaf lane with undefined GPRs and follow the encoded inputs.
+
+    This checks the no-input leaf contract even for lanes absent in the caller.
+    Testing 32 abstract lanes does not assert that a token-free CALL widens.
+    """
+    call = next(r for r in rows if r['op'] == 'OBJECT_CALL')
+    target = call['offset'] + int.from_bytes(call['code'][3:9], 'little', signed=True)
+    leaf = rows[next(i for i, r in enumerate(rows) if r['offset'] == target):]
+    exported = {}
+    for lane in range(lanes):
+        regs = {}  # No caller or launch-state values, including r0.
+        active, predicate, stack = True, None, []
+        returned = False
+        for r in leaf:
+            b = r['code']; w = int.from_bytes(b, 'little'); op = r['op']
+            if op == 'EXEC_MASK_PUSH':
+                assert b == bytes.fromhex('0f055401') and predicate is not None
+                stack.append(active); active &= predicate
+                continue
+            if op == 'EXEC_MASK_POP':
+                assert b == bytes.fromhex('0f0604010000') and stack
+                active = stack.pop()
+                continue
+            if op == 'OBJECT_RETURN':
+                assert b == bytes.fromhex('8f125400') and not stack and active
+                returned = True
+                break
+            if not active:
+                continue
+            for source in r['src']:
+                assert source in regs, ('callee reads caller-only value', lane, r['offset'], source)
+            value = None
+            if op == 'IMM':
+                dst = int(r['dst'][1:])
+                assert b == bytes([(dst << 4) | 12, r['imm']])
+                value = r['imm']
+            elif op == 'GET_SR':
+                dst = int(r['dst'][1:])
+                assert b == bytes([((dst & 15) << 4) | 4, 0xa7, 0x10 | ((dst >> 4) << 6), 6,
+                                   ((dst & 15) << 4) | 3, 0, (dst >> 4) << 6, 1])
+                value = lane
+            elif op == 'PREDICATE_COMPARE':
+                assert len(b) == 6 and b[0] == 10 and b[4] & 7 == 5
+                a = ((w >> 9) & 63) | (((w >> 40) & 1) << 6)
+                literal = (b[3] & 126) | (((w >> 20) & 1) << 7) | ((w >> 36) & 1)
+                assert (w >> 41) & 1 and literal == 3 and r['src'] == [f'r{a}']
+                predicate = regs[f'r{a}'] < literal
+            elif op in ('ISHL', 'USHR'):
+                assert len(b) == 12 and r['imm'] == 2
+                assert b[0] == (0x27 if op == 'ISHL' else 0xa7)
+                value = regs[r['src'][0]]
+                value = (value << 2) & 0xffffffff if op == 'ISHL' else value >> 2
+            elif op == 'SHARED_LOAD':
+                assert len(b) == 14 and b[:3] == bytes.fromhex('670254')
+                assert r['dst'] == f'r{b[3] >> 1}' and r['src'] == [f'r{b[5] >> 2}']
+                assert b[4] == 7 * 4 and b[8:] == bytes.fromhex('440d00c00800')
+                index = regs[r['src'][0]]
+                assert index == lane and index < 3
+                value = grid[index]
+            elif op == 'IXOR':
+                assert len(b) == 10 and b[0] & 15 == 11 and b[2] & 7 == 6
+                assert b[4] & 0x40 and b[4] & 3 == 2 and b[5] & 8
+                dst = ((w >> 4) & 15) | (((w >> 22) & 3) << 4) | (((w >> 44) & 1) << 6)
+                a = ((w >> 9) & 63) | (((w >> 40) & 1) << 6)
+                c = ((w >> 25) & 63) | (((w >> 42) & 1) << 6)
+                assert r['dst'] == f'p{dst}' and r['src'] == [f'r{a}', f'r{c}']
+                # The load's pending source is consumed with a slot-6 wait.
+                assert ((w >> 45) & 7) | (((w >> 61) & 7) << 3) == 32
+                value = regs[f'r{a}'] ^ regs[f'r{c}']
+            elif op == 'OBJECT_GRID_EXPORT':
+                assert len(b) == 8 and b[:3] == bytes.fromhex('571654')
+                assert b[4:] == bytes.fromhex('00004800') and r['src'] == [f'p{b[3] >> 1}']
+                exported[lane] = regs[r['src'][0]]
+            else:
+                assert op in ('DEVICE_FENCE', 'WAIT'), op
+            if value is not None:
+                regs[r['dst']] = value
+        assert returned
+    assert exported == dict(enumerate(grid)), exported
+    return dict(callee=target, abstract_lanes=lanes, grid=list(grid), published=exported,
+                caller_gprs='undefined', closed_leaf=True)
+
+
 def main():
     env = {k: v for k, v in os.environ.items() if not k.startswith(('HK_', 'AGX_', 'NIR_'))}
     env['AGX_APPLE9_ASM'] = '1'
@@ -152,7 +236,19 @@ def main():
         try: caller_mask(bad, local)
         except AssertionError: pass
         else: raise AssertionError('missing POP mutation escaped')
-        results.append(dict(logical=int(f['logical']), entry=hex((1<<local)-1), call=hex(active), trace=trace))
+        publications = [callee_publication(rows, lanes, grid)
+                        for lanes in (16, 32) for grid in ((1, 1, 1), (0, 1, 1), (2, 3, 4))]
+        # The original caller-zero dependency must fail the no-input contract.
+        bad = copy.deepcopy(rows)
+        target = publications[0]['callee']
+        zero = next(r for r in bad if r['offset'] >= target and r['op'] == 'IMM' and r['imm'] == 0)
+        zero.update(op='WAIT', dst='-', code=bytes.fromhex('0600'))
+        try: callee_publication(bad)
+        except AssertionError as err:
+            assert err.args[0][0] == 'callee reads caller-only value', err
+        else: raise AssertionError('caller-only zero mutation escaped')
+        results.append(dict(logical=int(f['logical']), entry=hex((1<<local)-1), call=hex(active),
+                            trace=trace, publications=publications))
     print(json.dumps(dict(passed=True, hardware_execution=False, fixtures=results), indent=2))
     return 0
 
