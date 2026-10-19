@@ -5,6 +5,7 @@
 libasahi_agx_files = files(
   'agx_compile.c',
   'agx_apple9_machine.c',
+  'agx_apple9_mesh_encoding.c',
   'agx_apple9_ir.c',
   'agx_apple9_opt.c',
   'agx_apple9_ra.c',
@@ -138,6 +139,7 @@ if with_tests
       files(
          'test/test-compact-constants.cpp',
          'test/test-apple9.cpp',
+         'test/test-apple9-mesh.cpp',
          'test/test-apple9-opt.cpp',
          'test/test-apple9-shared-ra.cpp',
          'test/test-pressure-schedule.cpp',

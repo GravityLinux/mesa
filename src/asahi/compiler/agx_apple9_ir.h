@@ -165,6 +165,13 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_SPILL_LOAD,
    /* Standalone scoreboard wait; immediate is the slot mask. */
    AGX_APPLE9_VIR_WAIT,
+   /* Side-effecting mesh-engine operations. CONTROL reads/clears src0's
+    * selected primitive-count halfword; src1 is the provisional B input.
+    * SUBMIT_CHANNEL consumes the adjacent (selector, local offset) tuple.
+    * They are never ordinary ALU, even if their explicit inputs are constant. */
+   AGX_APPLE9_VIR_MESH_CONTROL,
+   AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR,
+   AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL,
 };
 
 enum agx_apple9_unpack_norm_mode {
@@ -406,6 +413,11 @@ struct agx_apple9_vir_instr {
     * register: the high half when set in src_hi_mask, sign- rather than
     * zero-extended when set in src_sext_mask. */
    uint8_t src_half_mask, src_hi_mask, src_sext_mask;
+   /* Explicit fields of the bounded mesh register forms. control42's
+    * semantics and SUBMIT's release policy are not configuration formulas.
+    * A releasing submission clobbers its source tuple; RA must preserve
+    * still-live values, independently of this encoding flag. */
+   bool mesh_control42, mesh_release;
    /* Clamp the floating result to [0, 1], mapping NaN to positive zero. */
    bool saturate;
 
@@ -667,6 +679,13 @@ bool agx_apple9_vir_emit_side_effect(struct agx_apple9_vir_program *program,
                                      enum agx_apple9_encoding encoding,
                                      const uint32_t *src, unsigned nr_srcs,
                                      uint32_t immediate);
+
+bool agx_apple9_vir_emit_mesh_control(struct agx_apple9_vir_program *program,
+                                      uint32_t primitives, uint32_t auxiliary,
+                                      bool control42);
+bool agx_apple9_vir_emit_mesh_submit(struct agx_apple9_vir_program *program,
+                                     const uint32_t *src, unsigned components,
+                                     bool release);
 
 bool agx_apple9_vir_emit_branch(struct agx_apple9_vir_program *program,
                                 enum agx_apple9_vir_opcode op,

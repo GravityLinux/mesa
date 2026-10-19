@@ -109,6 +109,40 @@ const struct agx_apple9_machine agx_apple9_machine = {
  * cache, liveness, or source-file state.
  */
 static const struct agx_apple9_encoding_info encodings[] = {
+   [AGX_APPLE9_ENC_MESH_CONTROL] = {
+      .name = "mesh_control", .length = 6, .operand_count = 2,
+      .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_BYTE_DIFF,
+      .operands = {
+         /* Whole-word allocation conservatively protects the other half.
+          * The selected halfword is read and cleared by the instruction. */
+         GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_16, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_CLOBBER,
+             AGX_APPLE9_EVIDENCE_HARDWARE),
+         GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_16, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+      },
+   },
+   [AGX_APPLE9_ENC_MESH_SUBMIT_SCALAR] = {
+      .name = "mesh_submit_scalar", .length = 6, .operand_count = 1,
+      .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_BYTE_DIFF,
+      .operands = {
+         GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_CLOBBER,
+             AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+      },
+   },
+   [AGX_APPLE9_ENC_MESH_SUBMIT_CHANNEL] = {
+      .name = "mesh_submit_channel", .length = 6, .operand_count = 2,
+      .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_BYTE_DIFF,
+      .operands = {
+         GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 94, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_CLOBBER,
+             AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+         GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_CLOBBER,
+             AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+      },
+   },
    [AGX_APPLE9_ENC_HALT] = {
       .name = "halt", .length = 4,
       .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
