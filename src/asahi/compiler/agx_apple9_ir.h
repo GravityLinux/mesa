@@ -167,6 +167,8 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_WAIT,
    /* Side-effecting mesh-engine operations. CONTROL reads/clears src0's
     * selected primitive-count halfword; src1 is the provisional B input.
+    * Both CONTROL sources and the scalar submit source conservatively clobber
+    * their allocated words, independently of the scalar release=0 encoding.
     * SUBMIT_CHANNEL consumes the adjacent (selector, local offset) tuple.
     * They are never ordinary ALU, even if their explicit inputs are constant. */
    AGX_APPLE9_VIR_MESH_CONTROL,

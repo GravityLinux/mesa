@@ -6292,7 +6292,7 @@ pack_mesh(const struct agx_apple9_vir_instr *I, const uint8_t *phys,
    if (I->op == AGX_APPLE9_VIR_MESH_CONTROL) {
       if (I->encoding != AGX_APPLE9_ENC_MESH_CONTROL || I->nr_srcs != 2 ||
           I->src_half_mask != 3 || (I->src_hi_mask & ~3u) ||
-          (I->live_after_mask & 1) || I->mesh_release)
+          I->live_after_mask || I->mesh_release)
          return false;
       mesh.kind = AGX_APPLE9_MESH_CONTROL;
       mesh.count_gpr = phys[I->src[0]];
@@ -6306,7 +6306,7 @@ pack_mesh(const struct agx_apple9_vir_instr *I, const uint8_t *phys,
                                   : AGX_APPLE9_ENC_MESH_SUBMIT_SCALAR) ||
           I->nr_srcs != (channel ? 2 : 1) || I->src_half_mask ||
           I->src_hi_mask || I->mesh_control42 ||
-          (I->mesh_release && I->live_after_mask))
+          I->live_after_mask)
          return false;
       mesh.kind = AGX_APPLE9_MESH_SUBMIT;
       mesh.source_gpr = phys[I->src[0]];

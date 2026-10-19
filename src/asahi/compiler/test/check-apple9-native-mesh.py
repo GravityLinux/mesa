@@ -3,12 +3,13 @@
 # SPDX-License-Identifier: MIT
 """Check complete compiler output using the existing generic ASM listing.
 
-The executable executes lowered NIR against retired DATA fixtures. This check
+The executable executes lowered NIR against an independent DATA decoder. This check
 independently decodes the six units at emitted instruction boundaries, follows
 their allocated input definitions, and checks their enclosing execution masks.
 It is a bounded def-use check, not an emulator for the ordinary GPU program.
 No compiler callback, replay path, or instruction-byte search is used.
 """
+import copy
 import os
 from pathlib import Path
 import re
@@ -57,10 +58,6 @@ def check_program(rows):
             r = rows[i]
             if r["op"].startswith("MESH_"):
                 clobber = decoded(i)
-                if r["op"] == "MESH_CONTROL":
-                    clobber = clobber[:1]
-                elif r["op"] == "MESH_SUBMIT_SCALAR":
-                    clobber = []
                 assert reg not in clobber, ("read of released/cleared source", reg, i)
             if r["dst"] != reg:
                 continue
@@ -81,6 +78,13 @@ def check_program(rows):
                 return ("local", r["imm"], offset)
             raise AssertionError(("unmodelled input definition", r))
         raise AssertionError(("undefined allocated input", reg, before))
+
+    # Both U0 operands are conservatively destructive. Check all subsequent
+    # ordinary reads, not just the def-use slices feeding mesh units.
+    killed = set(decoded(units[0]))
+    for r in rows[units[0] + 1:]:
+        assert not killed.intersection(r["src"]), ("post-U0 read", killed, r)
+        killed.discard(r["dst"])
 
     expected = [[("local", 6, 16), ("local", 6, 20)],
                 *[[c, 32 + 16 * c] for c in range(4)], [("local", 6, 20)]]
@@ -122,6 +126,35 @@ def check_program(rows):
     return [rows[i]["code"].hex() for i in units]
 
 
+def mutation_checks(rows):
+    control = next(i for i, r in enumerate(rows) if r["op"] == "MESH_CONTROL")
+    a, b = rows[control]["src"]
+    assert a != b
+    for coherent in (False, True):
+        bad = copy.deepcopy(rows)
+        word = int.from_bytes(bad[control]["code"], "little")
+        # Allocate B to the primitive-count register instead of vertex count.
+        word = (word & ~(255 << 33)) | (2 * int(a[1:]) << 33)
+        bad[control]["code"] = word.to_bytes(6, "little")
+        if coherent:
+            bad[control]["src"][1] = a
+        try:
+            check_program(bad)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("mis-allocation mutation escaped checker")
+    bad = copy.deepcopy(rows)
+    channel = next(r for r in bad if r["op"] == "MESH_SUBMIT_CHANNEL")
+    channel["src"].reverse()
+    try:
+        check_program(bad)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("swapped tuple mutation escaped checker")
+
+
 def main():
     run = subprocess.run(sys.argv[1:], env={**os.environ, "AGX_APPLE9_ASM": "1"},
                          capture_output=True, text=True)
@@ -131,12 +164,14 @@ def main():
         return run.returncode
     names = opcode_names()
     rows, checked = None, []
+    programs = []
     for line in run.stderr.splitlines():
         if line.startswith("APPLE9_ASM_BEGIN"):
             assert rows is None
             rows = []
         elif line == "APPLE9_ASM_END":
             checked.append(check_program(rows))
+            programs.append(rows)
             rows = None
         elif line.startswith("APPLE9_ASM offset="):
             assert rows is not None
@@ -150,7 +185,15 @@ def main():
     assert rows is None and len(checked) == len(fixtures) and len(fixtures) >= 4
     assert any("fixture=H1_BASE " in x for x in fixtures)
     assert any("fixture=H1_SHIFT_X " in x for x in fixtures)
+    assert any("ready=0" in x for x in fixtures)
+    base = next(i for i, x in enumerate(fixtures)
+                if "fixture=H1_BASE " in x and "pressure=0" in x)
+    pressured = next(i for i, x in enumerate(fixtures) if "pressure=1" in x)
+    assert checked[base] != checked[pressured], "pressure did not change mesh RA"
+    mutation_checks(programs[base])
+    mutation_checks(programs[pressured])
     sys.stdout.write(run.stdout)
+    print("six allocation mutations rejected; pressured unit allocation differs")
     print(f"checked {len(checked)} complete programs: boundaries, six units, allocated inputs, masks")
     print("first program units (U0, channels 0..3, scalar):", " ".join(checked[0]))
     return 0

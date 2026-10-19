@@ -1,7 +1,8 @@
 /* Copyright 2026 Asahi Linux Contributors
  * SPDX-License-Identifier: MIT
  * Ordinary Apple9 mesh DATA encoders. Inputs are current SSA values; captured
- * records belong exclusively to tests. Reservation/consumer binding is separate.
+ * records are not an encoding-choice oracle. Reservation/consumer binding
+ * is separate.
  */
 #include "agx_apple9_mesh_formation.h"
 #include "agx_nir.h"
@@ -22,7 +23,22 @@ static nir_def *
 input(nir_builder *b, enum agx_apple9_mesh_formation_input name)
 {
    return nir_load_mesh_formation_input_apple9_agx(
-      b, name <= AGX_MESH_SCENE_ADDRESS ? 64 : 32, .base = name);
+      b, (name <= AGX_MESH_SCENE_ADDRESS ||
+          name == AGX_MESH_FORMATION_DROPS_ADDRESS) ? 64 : 32, .base = name);
+}
+
+/* Called only by lane zero, once at the first rejected class predicate.
+ * Geometric zero-area rejection is ordinary degeneracy, not a class miss. */
+static void
+count_class_drop(nir_builder *b, nir_def *accepted)
+{
+   nir_push_if(b, nir_inot(b, accepted));
+   nir_def *counter = input(b, AGX_MESH_FORMATION_DROPS_ADDRESS);
+   nir_push_if(b, nir_ine_imm(b, counter, 0));
+   nir_global_atomic(b, 32, counter, nir_imm_int(b, 1),
+                     .atomic_op = nir_atomic_op_iadd);
+   nir_pop_if(b, NULL);
+   nir_pop_if(b, NULL);
 }
 
 static void
@@ -382,6 +398,7 @@ agx_nir_lower_apple9_mesh_formation(nir_shader *nir,
    struct agx_apple9_mesh_compaction compact =
       agx_nir_apple9_mesh_compact_triangle(&b, index);
    valid = nir_iand(&b, valid, nir_ieq_imm(&b, compact.count, 3));
+   count_class_drop(&b, valid);
    nir_push_if(&b, valid);
    nir_def *v[3][4], *p[3][3];
    nir_def *inside = nir_imm_true(&b);
@@ -404,6 +421,7 @@ agx_nir_lower_apple9_mesh_formation(nir_shader *nir,
    }
    /* Reject exceptional inputs before division and integer conversion. This
     * is a scope predicate for the known inside-clip class, not a clipper. */
+   count_class_drop(&b, inside);
    nir_push_if(&b, inside);
    nir_def *scale[3], *offset[3];
    for (unsigned c = 0; c < 3; ++c) {
@@ -425,6 +443,7 @@ agx_nir_lower_apple9_mesh_formation(nir_shader *nir,
          }
       }
    }
+   count_class_drop(&b, inside);
    nir_push_if(&b, inside);
    for (unsigned i = 0; i < 3; ++i) {
       for (unsigned c = 0; c < 2; ++c) {

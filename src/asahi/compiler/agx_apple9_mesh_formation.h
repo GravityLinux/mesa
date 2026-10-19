@@ -61,6 +61,9 @@ enum agx_apple9_mesh_formation_input {
    AGX_MESH_VIEWPORT_OFFSET_Y,
    AGX_MESH_VIEWPORT_OFFSET_Z,
    AGX_MESH_RESERVATION_READY,
+   /* Optional device u32 counter: one increment per outside-class primitive.
+    * Zero disables counting. Bind and read it before interpreting CTS blanks. */
+   AGX_MESH_FORMATION_DROPS_ADDRESS,
 };
 
 /* Development draw-data ABI: one little-endian 64-bit slot per semantic
@@ -70,7 +73,7 @@ enum agx_apple9_mesh_formation_input {
  * Destinations are current reservations; no GPU addresses or IDs are baked
  * into the program. This ABI is private and does not alter the kernel UAPI. */
 struct agx_apple9_mesh_draw {
-   uint64_t input[AGX_MESH_RESERVATION_READY + 1];
+   uint64_t input[AGX_MESH_FORMATION_DROPS_ADDRESS + 1];
 };
 
 struct agx_apple9_mesh_record_state {

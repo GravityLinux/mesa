@@ -130,9 +130,11 @@ TEST(Apple9MeshEncoding, VirPacksAllocatedHalfwordsAndAdjacentPairs)
          EXPECT_EQ(decoded.count_high, bool(halves & 1));
          EXPECT_EQ(decoded.auxiliary_gpr, 95 - a);
          EXPECT_EQ(decoded.auxiliary_high, bool(halves & 2));
-         I.live_after_mask = 1;
-         EXPECT_FALSE(
-            agx_apple9_pack_vir_instruction(&I, phys, &packed, nullptr));
+         for (unsigned live : {1u, 2u, 3u}) {
+            I.live_after_mask = live;
+            EXPECT_FALSE(
+               agx_apple9_pack_vir_instruction(&I, phys, &packed, nullptr));
+         }
       }
    }
    agx_apple9_vir_instr I = {};
@@ -200,6 +202,9 @@ TEST(Apple9MeshIR, AllocationPreservesReadClearAndTupleInputsUsedLater)
                                                 AGX_APPLE9_OPERAND_SRC0)
                            ->flags &
                         AGX_APPLE9_OPERAND_CLOBBER);
+            EXPECT_TRUE(agx_apple9_find_operand(control->encoding,
+                                                AGX_APPLE9_OPERAND_SRC1)
+                           ->flags & AGX_APPLE9_OPERAND_CLOBBER);
             uint32_t pair[] = {values[2], values[3]};
             ASSERT_TRUE(agx_apple9_vir_emit_mesh_submit(&p, pair, 2, true));
             /* Every original SSA value remains live across the destructive ops.
@@ -263,8 +268,10 @@ TEST(Apple9MeshIR, AllocationPreservesReadClearAndTupleInputsUsedLater)
                   EXPECT_EQ((regs[decoded.count_gpr] >> shift) & 65535,
                             primitive_count);
                   EXPECT_EQ(regs[decoded.auxiliary_gpr] & 65535, 3u);
-                  EXPECT_EQ(I->live_after_mask & 1, 0u);
+                  EXPECT_EQ(I->live_after_mask, 0u);
                   regs[decoded.count_gpr] &= ~(65535u << shift);
+                  /* Worst case until hardware qualifies B preservation. */
+                  regs[decoded.auxiliary_gpr] = 0xdeadbeef;
                   ++controls;
                   break;
                }

@@ -20,8 +20,8 @@ struct machine {
    nir_const_value (*value)[LANES][NIR_MAX_VEC_COMPONENTS];
    nir_block *previous[LANES];
    uint8_t local[128];
-   uint64_t formation_inputs[AGX_MESH_RESERVATION_READY + 1];
-   struct region region[7];
+   uint64_t formation_inputs[AGX_MESH_FORMATION_DROPS_ADDRESS + 1];
+   struct region region[8];
    unsigned barriers, subgroup_barriers, fences, writes;
    unsigned controls, scalars, channels[4];
 };
@@ -34,7 +34,7 @@ memory(struct machine *m, uint64_t address, unsigned size, bool write)
       if (address >= r->base && size <= r->size &&
           address - r->base <= r->size - size) {
          if (write) {
-            CHECK(i < 4);
+            CHECK(i < 5 || i == 7);
             memset(r->written + address - r->base, 1, size);
             m->writes++;
          }
@@ -151,6 +151,13 @@ instruction(struct machine *m, nir_instr *i, unsigned lane)
             memcpy(&out[c], memory(m, address + c * bytes, bytes, false),
                    bytes);
          }
+         break;
+      }
+      case nir_intrinsic_global_atomic: {
+         CHECK(nir_intrinsic_atomic_op(n) == nir_atomic_op_iadd);
+         uint32_t *counter = memory(m, src(m, n->src[0], lane)[0].u64, 4, true);
+         out[0].u32 = *counter;
+         *counter += src(m, n->src[1], lane)[0].u32;
          break;
       }
       case nir_intrinsic_store_global: {

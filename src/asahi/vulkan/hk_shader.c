@@ -16,6 +16,7 @@
 #include "agx_debug.h"
 #include "hk_apple9_polygon_points.h"
 #include "asahi/compiler/agx_compile_apple9.h"
+#include "asahi/compiler/agx_apple9_mesh_formation.h"
 #include "agx_device.h"
 #include "agx_helpers.h"
 #include "agx_nir_lower_vbo.h"
@@ -155,7 +156,7 @@ static const char *const hk_codegen_env[] = {
    "AGX_APPLE9_NO_SAMPLER_HOIST", "AGX_APPLE9_NO_UNIFORM_MOVE",
    "AGX_APPLE9_RA_WEBS",
    "AGX_APPLE9_SAFE_HOIST_STAGES", "HK_APPLE9_DESCRIPTOR_BUFFER",
-   "HK_APPLE9_MESH_SHADER",
+   "HK_APPLE9_MESH_SHADER", "HK_APPLE9_NATIVE_MESH",
    "HK_APPLE9_SPARSE_SCRATCH",
    "HK_APPLE9_TESS_BATCH", "HK_APPLE9_TESS_SCAN_BLOCK",
    "HK_APPLE9_TEXEL_CLASSES", "HK_APPLE9_UNIFORM_SAFE_CLASSES",
@@ -196,6 +197,23 @@ hk_compare_env(const void *a, const void *b)
    return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
+/* Native ABI changes invalidate both device/compiler and graphics-state
+ * caches. The source NIR already keys stage-specific output maps/capacities;
+ * this keys the shared layout contract without struct padding. Bump the ABI
+ * version when its layout algorithm or draw-slot interpretation changes. */
+static void
+hk_hash_apple9_native_mesh_abi(struct mesa_blake3 *ctx)
+{
+   const struct agx_apple9_mesh_key k = AGX_APPLE9_MESH_KEY;
+   const uint32_t abi[] = {
+      AGX_APPLE9_MESH_ABI_VERSION, k.reserved_uniform_words, k.output_root,
+      k.primitive_count_bits, k.payload_uniform, k.grid_root, k.grid_offset_B,
+      k.physical_threads, AGX_APPLE9_MESH_DRAW_UNIFORM,
+      sizeof(struct agx_apple9_mesh_draw), AGX_MESH_FORMATION_DROPS_ADDRESS,
+   };
+   _mesa_blake3_update(ctx, abi, sizeof(abi));
+}
+
 static void
 hk_compiler_env_hash_init(void)
 {
@@ -227,6 +245,8 @@ hk_compiler_env_hash_init(void)
       _mesa_blake3_update(&ctx, vars[i], len);
       _mesa_blake3_update(&ctx, "", 1);
    }
+   if (debug_get_bool_option("HK_APPLE9_NATIVE_MESH", false))
+      hk_hash_apple9_native_mesh_abi(&ctx);
    blake3_hash hash;
    _mesa_blake3_final(&ctx, hash);
    memcpy(&hk_compiler_env_hash_value, hash, sizeof(hk_compiler_env_hash_value));
@@ -1454,6 +1474,11 @@ hk_hash_graphics_state(struct vk_physical_device *device,
       const bool is_multiview = state->mv->view_mask != 0;
       _mesa_blake3_update(&blake3_ctx, &is_multiview, sizeof(is_multiview));
    }
+
+   if (pdev->dev.chip == AGX_CHIP_G16G &&
+       (stages & (VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT)) &&
+       debug_get_bool_option("HK_APPLE9_NATIVE_MESH", false))
+      hk_hash_apple9_native_mesh_abi(&blake3_ctx);
 
    enum hk_feature_key feature_key = hk_make_feature_key(features);
    _mesa_blake3_update(&blake3_ctx, &feature_key, sizeof(feature_key));
