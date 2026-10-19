@@ -8526,12 +8526,22 @@ agx_compile_apple9_taskless_object(
          *reason = "invalid native object grid ABI";
       return false;
    }
-   nir_builder b = nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(body)));
-   nir_launch_mesh_workgroups_apple9_agx(&b, .base = key->grid_root,
-                                        .range_base = key->grid_offset_B);
-   bool ok = agx_compile_apple9_mesh_lowered(body, key, out, reason);
+   struct agx_apple9_mesh_body_info info;
+   bool ok = agx_compile_apple9_native_object(body, true, key, out, &info, reason);
    ralloc_free(body);
    return ok;
+}
+
+bool
+agx_compile_apple9_native_object(
+   nir_shader *nir, bool enable_native_mesh,
+   const struct agx_apple9_mesh_key *key, struct agx_shader_part *out,
+   struct agx_apple9_mesh_body_info *info, const char **reason)
+{
+   if (!agx_nir_lower_apple9_native_object(nir, enable_native_mesh, key, info,
+                                         reason))
+      return false;
+   return agx_compile_apple9_mesh_lowered(nir, &info->key, out, reason);
 }
 
 static unsigned

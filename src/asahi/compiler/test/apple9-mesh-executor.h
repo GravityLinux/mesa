@@ -25,7 +25,9 @@ struct machine {
    unsigned barriers, subgroup_barriers, fences, writes;
    unsigned controls, scalars, channels[4];
    unsigned local_root, grid_fences, grid_exports;
+   unsigned local_store_lanes, global_store_lanes, atomic_lanes, object_calls;
    uint32_t grid[3];
+   uint64_t side_effect_address;
 };
 
 static void *
@@ -113,6 +115,28 @@ instruction(struct machine *m, nir_instr *i, unsigned lane)
       nir_intrinsic_instr *n = nir_instr_as_intrinsic(i);
       nir_const_value *out = m->value[n->def.index][lane];
       switch (n->intrinsic) {
+      case nir_intrinsic_end_task_apple9_agx:
+         break;
+      case nir_intrinsic_load_local_invocation_id:
+         out[0].u32 = lane;
+         out[1].u32 = out[2].u32 = 0;
+         break;
+      case nir_intrinsic_load_workgroup_size:
+         out[0].u32 = LANES;
+         out[1].u32 = out[2].u32 = 1;
+         break;
+      case nir_intrinsic_load_subgroup_size:
+         out[0].u32 = 32;
+         break;
+      case nir_intrinsic_load_subgroup_invocation:
+         out[0].u32 = lane;
+         break;
+      case nir_intrinsic_load_subgroup_id:
+         out[0].u32 = 0;
+         break;
+      case nir_intrinsic_load_num_subgroups:
+         out[0].u32 = 1;
+         break;
       case nir_intrinsic_fence_mesh_grid_apple9_agx:
          CHECK(!(m->grid_fences & (1u << lane)));
          m->grid_fences |= 1u << lane;
@@ -149,8 +173,11 @@ instruction(struct machine *m, nir_instr *i, unsigned lane)
          out[0].u32 = lane;
          break;
       case nir_intrinsic_load_native_pointer_apple9_agx: {
-         CHECK(nir_intrinsic_base(n) == AGX_APPLE9_MESH_DRAW_UNIFORM);
-         uint64_t address = INPUT_ADDR;
+         unsigned base = nir_intrinsic_base(n);
+         CHECK(base == AGX_APPLE9_MESH_DRAW_UNIFORM ||
+               (base == AGX_APPLE9_MESH_PAYLOAD_UNIFORM && m->side_effect_address));
+         uint64_t address = base == AGX_APPLE9_MESH_DRAW_UNIFORM
+                               ? INPUT_ADDR : m->side_effect_address;
          out[0].u32 = address;
          out[1].u32 = address >> 32;
          break;
@@ -166,6 +193,7 @@ instruction(struct machine *m, nir_instr *i, unsigned lane)
          break;
       }
       case nir_intrinsic_global_atomic: {
+         m->atomic_lanes |= 1u << lane;
          CHECK(nir_intrinsic_atomic_op(n) == nir_atomic_op_iadd);
          uint32_t *counter = memory(m, src(m, n->src[0], lane)[0].u64, 4, true);
          out[0].u32 = *counter;
@@ -173,6 +201,7 @@ instruction(struct machine *m, nir_instr *i, unsigned lane)
          break;
       }
       case nir_intrinsic_store_global: {
+         m->global_store_lanes |= 1u << lane;
          unsigned bytes = n->src[0].ssa->bit_size / 8;
          uint64_t address = src(m, n->src[1], lane)[0].u64;
          for (unsigned c = 0; c < n->src[0].ssa->num_components; ++c)
@@ -183,6 +212,7 @@ instruction(struct machine *m, nir_instr *i, unsigned lane)
          break;
       }
       case nir_intrinsic_store_local_apple9_agx: {
+         m->local_store_lanes |= 1u << lane;
          unsigned bytes = nir_intrinsic_bit_size(n) / 8;
          unsigned offset = src(m, n->src[1], lane)[0].u32;
          CHECK(nir_intrinsic_base(n) ==
@@ -219,6 +249,33 @@ execute(struct machine *m, struct exec_list *list, unsigned active)
       if (node->type == nir_cf_node_block) {
          nir_block *block = nir_cf_node_as_block(node);
          nir_foreach_instr(i, block) {
+            if (i->type == nir_instr_type_intrinsic &&
+                nir_instr_as_intrinsic(i)->intrinsic ==
+                   nir_intrinsic_launch_mesh_workgroups_apple9_agx) {
+               nir_intrinsic_instr *call = nir_instr_as_intrinsic(i);
+               CHECK(active == ALL_LANES && m->barriers);
+               CHECK(nir_intrinsic_base(call) == m->local_root);
+               CHECK(!m->object_calls++);
+               unsigned offset = nir_intrinsic_range_base(call);
+               CHECK(offset + 12 <= sizeof(m->local));
+               memcpy(m->grid, m->local + offset, sizeof(m->grid));
+               m->grid_fences = ALL_LANES;
+               m->grid_exports = 7;
+               continue;
+            }
+            if (i->type == nir_instr_type_intrinsic &&
+                nir_instr_as_intrinsic(i)->intrinsic == nir_intrinsic_ballot) {
+               nir_intrinsic_instr *ballot = nir_instr_as_intrinsic(i);
+               CHECK(ballot->def.num_components == 1 && ballot->def.bit_size == 32);
+               unsigned bits = 0;
+               for (unsigned lane = 0; lane < LANES; ++lane)
+                  if ((active & (1u << lane)) && src(m, ballot->src[0], lane)[0].b)
+                     bits |= 1u << lane;
+               for (unsigned lane = 0; lane < LANES; ++lane)
+                  if (active & (1u << lane))
+                     m->value[ballot->def.index][lane][0].u32 = bits;
+               continue;
+            }
             if (i->type == nir_instr_type_intrinsic &&
                 nir_instr_as_intrinsic(i)->intrinsic == nir_intrinsic_barrier) {
                nir_intrinsic_instr *b = nir_instr_as_intrinsic(i);

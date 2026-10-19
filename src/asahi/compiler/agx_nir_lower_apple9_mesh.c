@@ -25,6 +25,25 @@ is_workgroup_barrier(nir_instr *instr)
              SCOPE_WORKGROUP;
 }
 
+bool
+agx_apple9_native_workgroup_supported(const nir_shader *nir, const char **reason)
+{
+   if (nir->info.workgroup_size_variable)
+      return fail(reason, "native mesh/object requires a fixed API workgroup size");
+   if (nir->info.api_subgroup_size && nir->info.api_subgroup_size != 32)
+      return fail(reason, "native mesh/object requires architectural subgroup size 32");
+   unsigned threads = 1;
+   for (unsigned d = 0; d < 3; ++d) {
+      unsigned size = nir->info.workgroup_size[d];
+      if (!size || size > AGX_APPLE9_NATIVE_THREADS / threads)
+         return fail(reason,
+                     "native mesh/object supports 1..16 API invocations at "
+                     "physical T16; wider launches are unqualified");
+      threads *= size;
+   }
+   return true;
+}
+
 static bool
 is_output(nir_intrinsic_op op)
 {
@@ -70,10 +89,13 @@ validate(nir_shader *nir, const struct agx_apple9_mesh_key *key,
       logical_threads *= nir->info.workgroup_size[d];
    bool expanded = key && key->physical_threads > logical_threads;
    if (key && key->physical_threads &&
-       (nir->info.stage != MESA_SHADER_MESH ||
-        nir->info.workgroup_size_variable || !logical_threads ||
+       (nir->info.workgroup_size_variable || !logical_threads ||
         key->physical_threads < logical_threads || key->physical_threads > 256))
       return fail(reason, "invalid Apple9 mesh physical workgroup width");
+   if (key && key->physical_threads && nir->info.stage == MESA_SHADER_TASK &&
+       (key->physical_threads != AGX_APPLE9_NATIVE_THREADS ||
+        !agx_apple9_native_workgroup_supported(nir, reason)))
+      return fail(reason, "native object expansion requires physical T16 and 1..16 API invocations");
    if (expanded && nir->info.derivative_group != DERIVATIVE_GROUP_NONE)
       return fail(reason,
                   "expanded Apple9 mesh derivative groups are unsupported");
@@ -397,7 +419,9 @@ agx_nir_mask_apple9_mesh_body(nir_shader *nir,
 {
    unsigned threads = nir->info.workgroup_size[0] *
                       nir->info.workgroup_size[1] * nir->info.workgroup_size[2];
-   if (!key->physical_threads || key->physical_threads == threads)
+   if (!key->physical_threads ||
+       (key->physical_threads == threads &&
+        nir->info.workgroup_size[1] == 1 && nir->info.workgroup_size[2] == 1))
       return true;
 
    /* With every application lane in simdgroup 0, application barriers only
@@ -647,6 +671,8 @@ agx_nir_lower_apple9_mesh(nir_shader *nir,
    if (!validate(nir, key, &result.layout, reason))
       return false;
    result.key = *key;
+   memcpy(result.logical_size, nir->info.workgroup_size,
+          sizeof(result.logical_size));
    result.argument_uniform_words = agx_apple9_mesh_argument_words(key);
    result.requires_native_entry = true;
    result.requires_object_completion = nir->info.stage == MESA_SHADER_TASK;
@@ -688,7 +714,8 @@ nir_shader *
 agx_nir_apple9_taskless_object(const struct agx_apple9_mesh_key *key)
 {
    if (!key || key->grid_root >= 64 ||
-       (key->physical_threads && key->physical_threads != 16) ||
+       (key->physical_threads &&
+        key->physical_threads != AGX_APPLE9_NATIVE_THREADS) ||
        2 * key->grid_root < key->reserved_uniform_words ||
        key->grid_root == AGX_APPLE9_MESH_DRAW_UNIFORM / 2 ||
        (key->grid_offset_B & 3) ||
@@ -696,25 +723,77 @@ agx_nir_apple9_taskless_object(const struct agx_apple9_mesh_key *key)
       return NULL;
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_TASK, &agx_nir_options, "apple9_taskless_object");
-   b.shader->info.workgroup_size[0] = 16;
+   b.shader->info.workgroup_size[0] = 1;
    b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
-   nir_push_if(&b, nir_ieq_imm(&b, nir_load_local_invocation_index(&b), 0));
    nir_def *address = nir_pack_64_2x32(
       &b, nir_load_native_pointer_apple9_agx(
              &b, .base = AGX_APPLE9_MESH_DRAW_UNIFORM));
+   nir_def *count[3];
    for (unsigned i = 0; i < 3; ++i) {
-      nir_def *count = nir_load_global(
+      count[i] = nir_load_global(
          &b, 1, 32, nir_iadd_imm(&b, address, 4 * i), .align_mul = 4,
          .access = ACCESS_NON_WRITEABLE);
-      nir_store_local_apple9_agx(
-         &b, count, nir_imm_int(&b, key->grid_offset_B + 4 * i),
-         .base = key->grid_root, .bit_size = 32);
    }
-   nir_pop_if(&b, NULL);
-   nir_barrier(&b, .execution_scope = SCOPE_WORKGROUP,
-               .memory_scope = SCOPE_WORKGROUP,
-               .memory_semantics = NIR_MEMORY_ACQ_REL,
-               .memory_modes = nir_var_mem_shared);
-   nir_validate_shader(b.shader, "Apple9 taskless object grid stores");
+   nir_launch_mesh_workgroups(&b, nir_vec(&b, count, 3));
+   nir_validate_shader(b.shader, "Apple9 taskless T1 object");
    return b.shader;
+}
+
+bool
+agx_nir_lower_apple9_native_object(
+   nir_shader *nir, bool enable_native_mesh,
+   const struct agx_apple9_mesh_key *key,
+   struct agx_apple9_mesh_body_info *info, const char **reason)
+{
+   if (!enable_native_mesh)
+      return fail(reason, "native object development path is disabled");
+   if (!key || nir->info.stage != MESA_SHADER_TASK ||
+       nir->info.task_payload_size || nir->info.shared_size ||
+       (key->physical_threads &&
+        key->physical_threads != AGX_APPLE9_NATIVE_THREADS))
+      return fail(reason,
+                  "native object requires physical T16 without payload or user shared memory");
+   if (!agx_apple9_native_workgroup_supported(nir, reason))
+      return false;
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   unsigned launches = 0;
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_jump && !launches &&
+             nir_instr_as_jump(instr)->type == nir_jump_return)
+            return fail(reason, "native object return may bypass the grid launch");
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_op op = nir_instr_as_intrinsic(instr)->intrinsic;
+         if (op == nir_intrinsic_launch_mesh_workgroups) {
+            if (block->cf_node.parent != &impl->cf_node)
+               return fail(reason,
+                           "native object requires one top-level API grid launch");
+            ++launches;
+         }
+         if (op == nir_intrinsic_load_task_payload ||
+             op == nir_intrinsic_store_task_payload)
+            return fail(reason, "native object payload is unqualified");
+      }
+   }
+   if (launches != 1)
+      return fail(reason, "native object requires one top-level API grid launch");
+   struct agx_apple9_mesh_key physical = *key;
+   physical.physical_threads = AGX_APPLE9_NATIVE_THREADS;
+   if (!agx_nir_lower_apple9_mesh(nir, &physical, info, reason))
+      return false;
+   nir_lower_returns(nir);
+   if (!agx_nir_mask_apple9_mesh_body(nir, &physical, NULL, reason))
+      return false;
+   nir_builder b = nir_builder_at(nir_after_impl(impl));
+   /* Application stores (including all three grid words from API lane 0)
+    * finish before the compiler-owned collective sees physical lanes 0..15.
+    * The callee's three-word export is independent of the API lane mask. */
+   workgroup_rendezvous(&b);
+   nir_launch_mesh_workgroups_apple9_agx(&b, .base = key->grid_root,
+                                        .range_base = key->grid_offset_B);
+   info->requires_object_completion = false;
+   nir_progress(true, impl, nir_metadata_none);
+   nir_validate_shader(nir, "Apple9 native object workgroup expansion");
+   return true;
 }
