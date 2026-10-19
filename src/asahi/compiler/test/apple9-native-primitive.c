@@ -47,10 +47,12 @@ source(unsigned threads, unsigned builtin, bool collision)
       nir_imm_int(&b, 0), nir_imm_int(&b, 0), .write_mask = 1,
       .src_type = nir_type_uint32,
       .io_semantics = {.location = builtin, .num_slots = 1});
+   nir_push_if(&b, nir_ult_imm(&b, nir_channel(&b, input, 1), 2));
    nir_store_per_primitive_output(&b, nir_ine_imm(&b, nir_channel(&b, input, 1), 0),
       nir_imm_int(&b, 0), nir_imm_int(&b, 0), .write_mask = 1,
       .src_type = nir_type_bool1,
       .io_semantics = {.location = VARYING_SLOT_CULL_PRIMITIVE, .num_slots = 1});
+   nir_pop_if(&b, NULL);
    nir_pop_if(&b, NULL);
    nir_barrier(&b, .execution_scope = SCOPE_WORKGROUP, .memory_scope = SCOPE_WORKGROUP,
       .memory_semantics = NIR_MEMORY_ACQ_REL, .memory_modes = nir_var_shader_out);
@@ -84,17 +86,23 @@ check(unsigned threads, unsigned cull)
    nir_lower_vars_to_ssa(nir);
    nir_opt_dce(nir);
    struct machine m = {0};
+   /* A previous workgroup may leave arbitrary local memory. Mode 2 skips
+    * the application cull store and must retain the unculled triangle. */
+   memset(m.local, 0xa5, sizeof(m.local));
+   m.check_zero_header = info.layout.primitive_count_B + 8;
    uint32_t input[2] = {0x7fc01234, cull};
    m.region[5] = (struct region){INPUT_ADDR, sizeof(input), (uint8_t *)input, NULL};
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
    m.value = calloc(impl->ssa_alloc, sizeof(*m.value));
    CHECK(m.value);
    execute(&m, &impl->body, ALL_LANES);
-   CHECK(m.barriers + m.subgroup_barriers == 3);
+   CHECK(m.barriers + m.subgroup_barriers == 4);
    CHECK(m.controls == ALL_LANES && m.scalars == 1);
    const uint8_t indices[] = {2, 0, 1};
    for (unsigned i = 0; i < 3; ++i)
-      CHECK(m.local[i] == (cull ? 0 : indices[i]));
+      CHECK(m.local[i] == (cull == 1 ? 0 : indices[i]));
+   for (unsigned i = 0; i < 4; ++i)
+      CHECK(m.local[info.layout.primitive_count_B + 8 + i] == 0);
    for (unsigned v = 0; v < 3; ++v) {
       CHECK(m.submitted_position[v][4] == 100 + v);
       CHECK(m.submitted_position[v][5] == 37);
@@ -121,12 +129,16 @@ int main(void)
 {
    glsl_type_singleton_init_or_ref();
    for (unsigned t = 0; t < 3; ++t)
-      for (unsigned cull = 0; cull < 2; ++cull)
+      for (unsigned cull = 0; cull < 3; ++cull)
          check(t == 0 ? 1 : t == 1 ? 3 : 16, cull);
    const unsigned builtins[] = {VARYING_SLOT_LAYER, VARYING_SLOT_VIEWPORT,
                                 VARYING_SLOT_PRIMITIVE_SHADING_RATE};
-   for (unsigned k = 0; k < 6; ++k) {
+   for (unsigned k = 0; k < 8; ++k) {
       nir_shader *nir = source(1, k < 3 ? builtins[k] : VARYING_SLOT_PRIMITIVE_ID, k == 3);
+      if (k == 6)
+         nir->info.mesh.max_primitives_out = 2;
+      if (k == 7)
+         nir->info.mesh.max_vertices_out = 4;
       struct agx_apple9_native_mesh_options options = {
          .attributes = k != 4, .primitive_broadcast = k != 5,
       };
@@ -138,6 +150,6 @@ int main(void)
       ralloc_free(nir);
    }
    glsl_type_singleton_decref();
-   puts("primitive broadcast: T1/T3/T16, cull true/false, sparse raw bits, cross-lane output reads, builtin/gate/alias rejection");
+   puts("primitive broadcast: T1/T3/T16, cull true/false/untaken with poisoned local memory, header cleared before publication, sparse raw bits, cross-lane output reads, builtin/gate/alias/capacity rejection");
    return 0;
 }

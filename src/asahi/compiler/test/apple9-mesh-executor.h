@@ -29,6 +29,7 @@ struct machine {
    unsigned local_store_lanes, global_store_lanes, atomic_lanes, object_calls;
    uint32_t grid[3];
    uint64_t side_effect_address;
+   unsigned check_zero_header;
 };
 
 static void *
@@ -149,6 +150,9 @@ instruction(struct machine *m, nir_instr *i, unsigned lane)
          m->grid_exports |= 1u << lane;
          break;
       case nir_intrinsic_mesh_control_apple9_agx:
+         if (m->check_zero_header)
+            for (unsigned c = 0; c < 4; ++c)
+               CHECK(m->local[m->check_zero_header + c] == 0);
          CHECK(nir_intrinsic_base(n) == 1);
          CHECK(src(m, n->src[0], lane)[0].u16 == 1);
          CHECK(src(m, n->src[1], lane)[0].u16 == 3);

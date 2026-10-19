@@ -3953,6 +3953,9 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
                nir_lower_io_use_interpolated_input_intrinsics);
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+      /* The native gate admits only native mesh pipelines. If an emulated
+       * fallback is added under that gate, key this by the linked mesh stage
+       * so its per-primitive inputs still use the in-memory record path. */
       bool native_broadcast = dev->dev.chip == AGX_CHIP_G16G &&
                              hk_apple9_native_mesh_primitive_lowering_enabled();
       NIR_PASS(_, nir, nir_shader_intrinsics_pass,

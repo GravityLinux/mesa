@@ -151,6 +151,10 @@ static bool
 primitive_outputs(nir_shader *nir, const struct agx_apple9_mesh_key *key,
                   uint64_t *mask, const char **reason)
 {
+   if (nir->info.mesh.max_primitives_out != 1 ||
+       nir->info.mesh.max_vertices_out > 3)
+      return fail(reason, "primitive broadcast requires P1 and at most V3");
+
    uint64_t vertex = 0;
    *mask = 0;
    nir_foreach_function_impl(impl, nir) {
@@ -223,12 +227,19 @@ broadcast_primitive(nir_builder *b, const struct agx_apple9_mesh_body_info *info
    }
    nir_pop_if(b, NULL);
    if (info->primitive_broadcast & VARYING_BIT_CULL_PRIMITIVE) {
+      nir_push_if(b, nir_ieq_imm(b, lane, 0));
+      nir_def *address = nir_imm_int(b, l->primitive_count_B + 8);
       nir_def *cull = nir_load_local_apple9_agx(
-         b, nir_imm_int(b, l->primitive_count_B + 8), .base = root);
-      nir_push_if(b, nir_iand(b, nir_ieq_imm(b, lane, 0), nir_ine_imm(b, cull, 0)));
+         b, address, .base = root);
+      nir_push_if(b, nir_ine_imm(b, cull, 0));
       for (unsigned c = 0; c < 3; ++c)
          nir_store_local_apple9_agx(b, nir_imm_int(b, 0), nir_imm_int(b, c),
                                     .base = root, .bit_size = 8);
+      nir_pop_if(b, NULL);
+      /* Restore the count header before publication: the hardware's use of
+       * this word is unknown, so the compiler-owned flag must not escape. */
+      nir_store_local_apple9_agx(b, nir_imm_int(b, 0), address,
+                                 .base = root, .bit_size = 32);
       nir_pop_if(b, NULL);
    }
    nir_barrier(b, .execution_scope = SCOPE_WORKGROUP,
@@ -303,6 +314,22 @@ agx_nir_lower_apple9_native_mesh(
    nir_lower_returns(nir);
    if (!agx_nir_mask_apple9_mesh_body(nir, &key, layout, reason))
       return false;
+   if (primitive_broadcast & VARYING_BIT_CULL_PRIMITIVE) {
+      nir_builder entry =
+         nir_builder_at(nir_before_impl(nir_shader_get_entrypoint(nir)));
+      nir_push_if(&entry, nir_ieq_imm(&entry,
+                                    nir_load_local_invocation_index(&entry), 0));
+      nir_store_local_apple9_agx(
+         &entry, nir_imm_int(&entry, 0),
+         nir_imm_int(&entry, layout->primitive_count_B + 8),
+         .base = key.output_root, .bit_size = 32);
+      nir_pop_if(&entry, NULL);
+      /* All physical lanes rendezvous before any application cull store. */
+      nir_barrier(&entry, .execution_scope = SCOPE_WORKGROUP,
+                         .memory_scope = SCOPE_WORKGROUP,
+                         .memory_semantics = NIR_MEMORY_ACQ_REL,
+                         .memory_modes = nir_var_mem_shared);
+   }
    nir_builder b =
       nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(nir)));
 
