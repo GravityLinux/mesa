@@ -1054,10 +1054,13 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
                        draw.indexed ? draw.index_bias : draw.start) -
                     4;
    if (cs->primitive_count < AGX_PRIMITIVE_COUNT_UNKNOWN) {
+      /* Mesh output counts come from the shader and its child grid. The
+       * conventional draw arguments are placeholders for the native path,
+       * so keep its render-wide count unknown as for other mesh draws.
+       */
       agx_add_primitive_count(
          &cs->primitive_count,
-         native_grid ? 1
-         : agx_is_indirect(draw.b) || pipeline.primitive_restart || gs || tes || mesh
+         agx_is_indirect(draw.b) || pipeline.primitive_restart || gs || tes || mesh
             ? AGX_PRIMITIVE_COUNT_UNKNOWN
             : agx_count_primitives(pipeline.primitive, draw.b.count[0],
                                    draw.b.count[1]));
