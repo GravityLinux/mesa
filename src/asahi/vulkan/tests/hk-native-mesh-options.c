@@ -145,6 +145,28 @@ check_key(bool halfz, unsigned flat, unsigned linear)
    ralloc_free(fs);
 }
 
+static void
+check_primitive_key(void)
+{
+   CHECK(hk_apple9_native_mesh_primitive_lowering_enabled());
+   nir_shader *mesh = producer(true);
+   nir_builder b = nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(mesh)));
+   nir_store_per_primitive_output(&b, nir_imm_int(&b, 37),
+      nir_imm_int(&b, 0), nir_imm_int(&b, 0), .write_mask = 1,
+      .src_type = nir_type_uint32,
+      .io_semantics = {.location = VARYING_SLOT_PRIMITIVE_ID, .num_slots = 1});
+   struct hk_apple9_graphics_key key = {0};
+   struct agx_shader_part out = {0};
+   struct agx_apple9_mesh_body_info info;
+   const char *reason = NULL;
+   CHECK(hk_apple9_compile_native_mesh_program(mesh, &key, &out, &info, &reason));
+   CHECK(info.primitive_broadcast == VARYING_BIT_PRIMITIVE_ID);
+   CHECK(out.info.apple9_varyings.mask[VARYING_SLOT_PRIMITIVE_ID] == 1);
+   CHECK(out.info.apple9_varyings.group[VARYING_SLOT_PRIMITIVE_ID] == 1);
+   free(out.binary);
+   ralloc_free(mesh);
+}
+
 int main(void)
 {
    CHECK(hk_apple9_native_mesh_enabled());
@@ -154,6 +176,7 @@ int main(void)
       check_key(halfz, 0, 1);
       check_key(halfz, 2, 0);
    }
+   check_primitive_key();
    glsl_type_singleton_decref();
    puts("hk native key: halfz/W values and VS/mesh/FS interpolation groups pass");
    return 0;
