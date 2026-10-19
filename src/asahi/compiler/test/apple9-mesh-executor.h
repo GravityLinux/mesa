@@ -1,11 +1,12 @@
 /* Copyright 2026 Asahi Linux Contributors
  * SPDX-License-Identifier: MIT
- * Bounded test interpreter for the structured NIR used by mesh formation.
+ * Bounded test interpreter for the structured NIR used by native mesh completion.
  * Tests supply all memory/semantic bindings. This is not a GPU emulator.
  */
 #pragma once
 #include "compiler/nir/nir_constant_expressions.h"
-#include "agx_apple9_mesh_formation.h"
+#include "agx_apple9_mesh.h"
+#include "compiler/nir/nir_builder.h"
 
 #define LANES      16
 #define ALL_LANES  0xffff
@@ -20,7 +21,6 @@ struct machine {
    nir_const_value (*value)[LANES][NIR_MAX_VEC_COMPONENTS];
    nir_block *previous[LANES];
    uint8_t local[128];
-   uint64_t formation_inputs[AGX_MESH_FORMATION_DROPS_ADDRESS + 1];
    struct region region[8];
    unsigned barriers, subgroup_barriers, fences, writes;
    unsigned controls, scalars, channels[4];

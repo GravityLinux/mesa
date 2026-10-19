@@ -8515,19 +8515,6 @@ agx_compile_apple9_mesh_lowered(nir_shader *nir,
                                const struct agx_apple9_mesh_key *key,
                                struct agx_shader_part *out, const char **reason)
 {
-   nir_foreach_function_impl(impl, nir) {
-      nir_foreach_block(block, impl) {
-         nir_foreach_instr(instr, block) {
-            if (instr->type == nir_instr_type_intrinsic &&
-                nir_instr_as_intrinsic(instr)->intrinsic ==
-                   nir_intrinsic_load_mesh_formation_input_apple9_agx) {
-               if (reason)
-                  *reason = "native mesh runtime reservation/scene inputs are unresolved";
-               return false;
-            }
-         }
-      }
-   }
    if (!apple9_compile_workgroup_body(nir, out, NULL, key, reason))
       return false;
    out->info.apple9_body_only = true;

@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "agx_apple9_mesh_formation.h"
+#include "agx_apple9_mesh.h"
 #include "agx_nir.h"
 
 #define CHECK(x)                                                               \
@@ -16,10 +16,8 @@
       }                                                                        \
    } while (0)
 #include "apple9-mesh-executor.h"
-#include "mesh-formation-fixtures.h"
-#include "mesh-h1-fixtures.h"
+#include "mesh-native-fixtures.h"
 
-#include "apple9-mesh-data.h"
 
 #define Q_ADDRESS    0x40000ull
 #define Q_BYTES      2048
@@ -101,7 +99,7 @@ source(bool object, unsigned x, unsigned y, unsigned z, bool probe)
       nir_launch_mesh_workgroups(&b, nir_imm_ivec3(&b, 1, 1, 1));
       return b.shader;
    }
-   const struct formation_fixture *f = &h1_fixtures[0];
+   const struct native_mesh_fixture *f = &h1_fixtures[0];
    b.shader->info.mesh.max_vertices_out = 3;
    b.shader->info.mesh.max_primitives_out = 1;
    b.shader->info.mesh.primitive_type = MESA_PRIM_TRIANGLES;
@@ -178,23 +176,6 @@ check(bool object, unsigned x, unsigned y, unsigned z, bool probe,
       q[i] = POISON;
    q[0] = 0;
    m.region[4] = (struct region){Q_ADDRESS, Q_BYTES, (uint8_t *)q, written};
-   const struct formation_fixture *f = &h1_fixtures[0];
-   for (unsigned i = 0; i < 4; ++i) {
-      m.region[i] = (struct region){0x1200000000ull + i * 0x10000, 256,
-                                    malloc(256), calloc(1, 256)};
-      CHECK(m.region[i].data && m.region[i].written);
-      memset(m.region[i].data, 0xa0 + i, 256);
-      m.formation_inputs[AGX_MESH_GEOMETRY_ADDRESS + i] = m.region[i].base;
-   }
-   for (unsigned i = 0; i < 3; ++i)
-      m.formation_inputs[AGX_MESH_GEOMETRY_ID + i] = f->ids[i];
-   for (unsigned i = 0; i < 8; ++i)
-      m.formation_inputs[AGX_MESH_FRAGMENT_LAUNCH + i] = f->state[i];
-   for (unsigned i = 0; i < 6; ++i)
-      m.formation_inputs[AGX_MESH_VIEWPORT_SCALE_X + i] = f->viewport[i];
-   m.formation_inputs[AGX_MESH_RESERVATION_READY] = 1;
-   m.region[6] = (struct region){INPUT_ADDR, sizeof(m.formation_inputs),
-                                 (uint8_t *)m.formation_inputs, NULL};
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
    m.value = calloc(impl->ssa_alloc, sizeof(*m.value));
    CHECK(m.value);
@@ -248,15 +229,7 @@ check(bool object, unsigned x, unsigned y, unsigned z, bool probe,
       for (unsigned c = 0; c < 4; ++c)
          CHECK(m.channels[c] == 7);
       CHECK(m.local_store_lanes == ((1u << MIN2(threads, 3)) - 1));
-      CHECK(m.global_store_lanes == (probe ? mask : 1));
-      uint32_t xyz[3][3];
-      bool dropped;
-      CHECK(source_geometry(f, xyz, &dropped) && !dropped);
-      unsigned length = 0;
-      while (length < 256 && m.region[0].written[length])
-         ++length;
-      check_geometry(f, m.region[0].data, length, xyz);
-      CHECK(references_match(f, &m));
+      CHECK(m.global_store_lanes == (probe ? mask : 0));
    }
    char name[80];
    snprintf(name, sizeof(name), "%s_T%u_%ux%ux%u_%s",
@@ -265,37 +238,6 @@ check(bool object, unsigned x, unsigned y, unsigned z, bool probe,
    if (dir) {
       write_file(dir, name, "expected-q.bin", q, sizeof(q));
       write_file(dir, name, "expected-local.bin", m.local, sizeof(m.local));
-      if (!object) {
-         for (unsigned i = 0; i < 4; ++i) {
-            char ext[64];
-            snprintf(ext, sizeof(ext), "expected-data%u.bin", i);
-            /* Device arms initialize record storage to zero. The host run
-             * above used distinct poison and checked its untouched tails. */
-            uint8_t data[256] = {0};
-            for (unsigned j = 0; j < sizeof(data); ++j)
-               if (m.region[i].written[j])
-                  data[j] = m.region[i].data[j];
-            write_file(dir, name, ext, data, sizeof(data));
-         }
-         uint8_t coverage[4096], pixels[16384] = {0};
-         uint32_t xyz[3][3], input[32];
-         bool dropped;
-         CHECK(source_geometry(f, xyz, &dropped) && !dropped);
-         raster(xyz, coverage);
-         for (unsigned i = 0; i < 4096; ++i)
-            pixels[4 * i] = pixels[4 * i + 3] = coverage[i] ? 255 : 0;
-         write_file(dir, name, "expected-pixels.bin", pixels, sizeof(pixels));
-         memcpy(input, f->positions, sizeof(f->positions));
-         memcpy(input + 12, f->indices, sizeof(f->indices));
-         memcpy(input + 15, f->state, sizeof(f->state));
-         memcpy(input + 23, f->viewport, sizeof(f->viewport));
-         memcpy(input + 29, f->ids, sizeof(f->ids));
-         write_file(dir, name, "reference-source.bin", input, sizeof(input));
-      }
-   }
-   for (unsigned i = 0; i < 4; ++i) {
-      free(m.region[i].data);
-      free(m.region[i].written);
    }
    ralloc_free(nir);
    nir = source(object, x, y, z, probe);

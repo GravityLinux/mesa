@@ -3387,12 +3387,6 @@ intrinsic("launch_mesh_workgroups_apple9_agx", indices=[BASE, RANGE_BASE])
 intrinsic("begin_object_call_apple9_agx")
 intrinsic("end_object_call_apple9_agx")
 
-# Semantic inputs to ordinary Apple9 mesh record formation. BASE is an
-# agx_apple9_mesh_formation_input, not a uniform slot or hardware register.
-# Runtime reservation/draw-state lowering must resolve these before emission.
-intrinsic("load_mesh_formation_input_apple9_agx", dest_comp=1, indices=[BASE],
-          bit_sizes=[32, 64], flags=[CAN_ELIMINATE])
-
 # Mesh-engine side effects. None may be eliminated, reordered, duplicated or
 # speculated as an ordinary ALU expression. src0 of CONTROL is the actual
 # primitive count (u16); the hardware reads and clears its allocated halfword.

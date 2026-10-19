@@ -1,11 +1,11 @@
 /* Copyright 2026 Asahi Linux Contributors
  * SPDX-License-Identifier: MIT
- * Host tests of normal formation NIR with independent DATA and raster checks.
+ * Host tests of local output publication and hardware mesh completion.
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "agx_apple9_mesh_formation.h"
+#include "agx_apple9_mesh.h"
 #include "agx_nir.h"
 
 #define CHECK(x)                                                               \
@@ -16,14 +16,12 @@
       }                                                                        \
    } while (0)
 #include "apple9-mesh-executor.h"
-#include "mesh-formation-fixtures.h"
-#include "mesh-h1-fixtures.h"
+#include "mesh-native-fixtures.h"
 #include "mesh-clip-fixtures.h"
 
-#include "apple9-mesh-data.h"
 
 static nir_shader *
-source(const struct formation_fixture *f)
+source(const struct native_mesh_fixture *f)
 {
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_MESH, &agx_nir_options, "normal_mesh_fixture_inputs");
@@ -103,8 +101,7 @@ add_pressure(nir_shader *nir)
 static const char *export_dir;
 
 static void
-run_fixture(const struct formation_fixture *f, unsigned placement, bool ready,
-            bool pressure, bool count_drops)
+run_fixture(const struct native_mesh_fixture *f, bool pressure)
 {
    struct agx_apple9_mesh_body_info info;
    const char *reason = NULL;
@@ -124,68 +121,29 @@ run_fixture(const struct formation_fixture *f, unsigned placement, bool ready,
                                  (uint8_t *)pressure_output, pressure_written};
    m.region[5] = (struct region){PRESSURE_INPUT, sizeof(pressure_input),
                                  (uint8_t *)pressure_input, NULL};
-   uint32_t drops = 0;
-   uint8_t drops_written[4] = {0};
-   m.region[7] = (struct region){0x30000, 4, (uint8_t *)&drops, drops_written};
-   m.formation_inputs[AGX_MESH_FORMATION_DROPS_ADDRESS] =
-      count_drops ? 0x30000 : 0;
-   for (unsigned i = 0; i < 4; ++i) {
-      m.region[i] = (struct region){
-         UINT64_C(0x1200000000) + placement * 0x80000 + i * 0x10000, 256,
-         malloc(256), calloc(1, 256)};
-      CHECK(m.region[i].data && m.region[i].written);
-      memset(m.region[i].data, 0xa0 + i, 256);
-      m.formation_inputs[AGX_MESH_GEOMETRY_ADDRESS + i] = m.region[i].base;
-   }
-   for (unsigned i = 0; i < 3; ++i)
-      m.formation_inputs[AGX_MESH_GEOMETRY_ID + i] = f->ids[i];
-   for (unsigned i = 0; i < 8; ++i)
-      m.formation_inputs[AGX_MESH_FRAGMENT_LAUNCH + i] = f->state[i];
-   for (unsigned i = 0; i < 6; ++i)
-      m.formation_inputs[AGX_MESH_VIEWPORT_SCALE_X + i] = f->viewport[i];
-   m.formation_inputs[AGX_MESH_RESERVATION_READY] = ready;
-   m.region[6] = (struct region){INPUT_ADDR, sizeof(m.formation_inputs),
-                                 (uint8_t *)m.formation_inputs, NULL};
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
    m.value = calloc(impl->ssa_alloc, sizeof(*m.value));
    CHECK(m.value);
    execute(&m, &impl->body, ALL_LANES);
-   uint32_t xyz[3][3];
-   bool dropped;
-   bool formed = source_geometry(f, xyz, &dropped) && ready;
-   CHECK(drops == (ready && dropped && count_drops));
-   CHECK(m.barriers == 2 && m.fences == (formed ? 9 : 7) + 2 * pressure);
+   CHECK(m.barriers == 1 && m.fences == 6 + 2 * pressure);
    CHECK(m.controls == ALL_LANES && m.scalars == 1);
-   for (unsigned c = 0; c < 4; ++c)
+   CHECK(m.writes == (pressure ? LANES * PRESSURE_VALUES : 0));
+   for (unsigned c = 0; c < 4; ++c) {
       CHECK(m.channels[c] == 7);
+      for (unsigned v = 0; v < 3; ++v) {
+         uint32_t value;
+         memcpy(&value, m.local + info.layout.position_B + 16 * c + 4 * v, 4);
+         CHECK(value == f->positions[4 * v + c]);
+      }
+   }
+   for (unsigned i = 0; i < 3; ++i)
+      CHECK(m.local[i] == f->indices[i]);
    if (pressure) {
       for (unsigned lane = 0; lane < LANES; ++lane)
          CHECK(!memcmp(pressure_output[lane], pressure_input,
                        sizeof(pressure_input)));
       for (unsigned i = 0; i < sizeof(pressure_written); ++i)
          CHECK(pressure_written[i]);
-   }
-   unsigned lengths[4] = {0, formed ? 12 : 0, formed ? 32 : 0, ready ? 48 : 0};
-   if (formed) {
-      while (lengths[0] < 256 && m.region[0].written[lengths[0]])
-         ++lengths[0];
-      check_geometry(f, m.region[0].data, lengths[0], xyz);
-      CHECK(references_match(f, &m));
-      m.region[2].data[16] ^= 1;
-      CHECK(!references_match(f, &m));
-      m.region[2].data[16] ^= 1;
-   } else if (ready) {
-      for (unsigned i = 0; i < 48; ++i)
-         CHECK(m.region[3].data[i] == 0);
-   }
-   for (unsigned i = 0; i < 4; ++i) {
-      for (unsigned j = 0; j < 256; ++j) {
-         CHECK(m.region[i].written[j] == (j < lengths[i]));
-         if (j >= lengths[i])
-            CHECK(m.region[i].data[j] == 0xa0 + i);
-      }
-      free(m.region[i].data);
-      free(m.region[i].written);
    }
    free(m.value);
    struct agx_shader_part code = {0};
@@ -202,8 +160,7 @@ run_fixture(const struct formation_fixture *f, unsigned placement, bool ready,
    CHECK(code.info.apple9_body_only && code.info.binary_size);
    CHECK(!info.requires_mesh_completion && info.requires_native_entry);
    CHECK(info.layout.primitive_count_B == 16 && info.layout.local_size_B == 96);
-   if (export_dir && ready && !pressure && !placement &&
-       !strncmp(f->name, "H1_", 3)) {
+   if (export_dir && !pressure) {
       char path[1024];
       CHECK(snprintf(path, sizeof(path), "%s/%s.bin", export_dir, f->name) <
             sizeof(path));
@@ -221,20 +178,17 @@ run_fixture(const struct formation_fixture *f, unsigned placement, bool ready,
          "\"gprs\":%u,\"scratch\":%u,\"atomic_frame\":%u,"
          "\"preamble_offset\":%u,\"preamble_size\":%u,"
          "\"local_output_bytes\":%u,\"argument_words\":%u,"
-         "\"output_root\":%u,\"draw_uniform\":%u,\"abi_version\":%u,\"draw_bytes\":%zu}\n",
+         "\"output_root\":%u,\"draw_uniform\":%u,\"abi_version\":%u}\n",
          code.info.binary_size, code.info.nr_gprs, code.info.scratch_size,
          code.info.apple9_atomic_frame_size, code.info.apple9_preamble_offset,
          code.info.apple9_preamble_size, info.layout.local_size_B,
          info.argument_uniform_words, info.key.output_root,
-         AGX_APPLE9_MESH_DRAW_UNIFORM, AGX_APPLE9_MESH_ABI_VERSION,
-         sizeof(struct agx_apple9_mesh_draw));
+         AGX_APPLE9_MESH_DRAW_UNIFORM, AGX_APPLE9_MESH_ABI_VERSION);
       CHECK(!fclose(file));
    }
-   printf(
-      "fixture=%s placement=%u ready=%u pressure=%u drops=%u records=decoded units=1+4+1 "
-      "gprs=%u scratch=%u bytes=%u\n",
-      f->name, placement, ready, pressure, drops, code.info.nr_gprs,
-      code.info.scratch_size, code.info.binary_size);
+   printf("fixture=%s pressure=%u implicit=1 units=1+4+1 gprs=%u scratch=%u bytes=%u\n",
+          f->name, pressure, code.info.nr_gprs, code.info.scratch_size,
+          code.info.binary_size);
    free(code.binary);
    ralloc_free(nir);
 }
@@ -243,7 +197,7 @@ static void
 reject_unsupported(void)
 {
    for (unsigned variant = 0; variant < 5; ++variant) {
-      struct formation_fixture f = h1_fixtures[0];
+      struct native_mesh_fixture f = h1_fixtures[0];
       if (variant == 1)
          f.primitives = 2;
       nir_shader *nir = source(&f);
@@ -275,37 +229,25 @@ main(int argc, char **argv)
    glsl_type_singleton_init_or_ref();
    if (clip) {
       for (unsigned i = 0; i < ARRAY_SIZE(clip_fixtures); ++i) {
-         struct formation_fixture f = h1_fixtures[0];
+         struct native_mesh_fixture f = h1_fixtures[0];
          f.name = clip_fixtures[i].name;
          memcpy(f.positions, clip_fixtures[i].positions, sizeof(f.positions));
-         /* A class drop skips explicit records, but all native completion
-          * operations must still receive the original outputs. run_fixture
-          * checks both facts; it does not simulate hardware clipping. */
-         run_fixture(&f, 0, true, false, true);
+         /* Preserve all four position components, including non-unit W.
+          * Hardware clipping is deliberately outside this host interpreter. */
+         run_fixture(&f, false);
       }
       glsl_type_singleton_decref();
       return 0;
    }
    reject_unsupported();
-   for (unsigned i = 0; i < ARRAY_SIZE(formation_fixtures); ++i) {
-      const struct formation_fixture *f = &formation_fixtures[i];
-      if (f->vertices != 3 || f->primitives != 1)
-         continue;
-      for (unsigned placement = 0; placement < 2; ++placement)
-         run_fixture(f, placement, true, false, true);
-   }
    for (unsigned i = 0; i < ARRAY_SIZE(h1_fixtures); ++i)
-      for (unsigned placement = 0; placement < 2; ++placement)
-         run_fixture(&h1_fixtures[i], placement, true, false, true);
-   run_fixture(&h1_fixtures[0], 0, false, false, true);
-   run_fixture(&h1_fixtures[0], 0, true, true, true);
-   for (unsigned sign = 0; sign < 2; ++sign) {
-      struct formation_fixture boundary = h1_fixtures[0];
-      boundary.name = sign ? "CLIP_NEGATIVE_X" : "CLIP_POSITIVE_X";
-      boundary.positions[0] = as_uint(sign ? -1.0f : 1.0f);
-      run_fixture(&boundary, 0, true, false, true);
-      run_fixture(&boundary, 0, true, false, false);
-      run_fixture(&boundary, 0, false, false, true);
+      run_fixture(&h1_fixtures[i], false);
+   run_fixture(&h1_fixtures[0], true);
+   for (unsigned i = 0; i < ARRAY_SIZE(clip_fixtures); ++i) {
+      struct native_mesh_fixture f = h1_fixtures[0];
+      f.name = clip_fixtures[i].name;
+      memcpy(f.positions, clip_fixtures[i].positions, sizeof(f.positions));
+      run_fixture(&f, false);
    }
    glsl_type_singleton_decref();
    return 0;

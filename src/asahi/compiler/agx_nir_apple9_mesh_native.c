@@ -1,7 +1,8 @@
 /* Copyright 2026 Asahi Linux Contributors
  * SPDX-License-Identifier: MIT
  */
-#include "agx_apple9_mesh_formation.h"
+#include "agx_apple9_mesh.h"
+#include "compiler/nir/nir_builder.h"
 
 static bool
 fail(const char **reason, const char *message)
@@ -49,23 +50,29 @@ eligible(nir_shader *nir, const char **reason)
                "native mesh development class requires one count publication");
 }
 
+/* Keep the actual vertex count in compiler-owned local storage. The body
+ * lowerer leaves the count marker so completion can consume both operands. */
 static bool
-bind_draw_input(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+consume_count(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
-   if (intr->intrinsic != nir_intrinsic_load_mesh_formation_input_apple9_agx)
-      return false;
-   b->cursor = nir_before_instr(&intr->instr);
-   /* This is an internal argument-table pointer, separate from task payload
-    * and application descriptors. The runtime supplies the current draw. */
-   nir_def *draw =
-      nir_pack_64_2x32(b, nir_load_native_pointer_apple9_agx(
-                             b, .base = AGX_APPLE9_MESH_DRAW_UNIFORM));
-   unsigned offset = sizeof(uint64_t) * nir_intrinsic_base(intr);
-   nir_def *value = nir_load_global(
-      b, 1, intr->def.bit_size, nir_iadd_imm(b, draw, offset),
-      .align_mul = sizeof(uint64_t), .access = ACCESS_NON_WRITEABLE);
-   nir_def_replace(&intr->def, value);
-   return true;
+   const struct agx_apple9_mesh_body_info *info = data;
+   if (intr->intrinsic == nir_intrinsic_set_vertex_and_primitive_count) {
+      b->cursor = nir_before_instr(&intr->instr);
+      nir_push_if(b, nir_ieq_imm(b, nir_load_local_invocation_index(b), 0));
+      nir_store_local_apple9_agx(b, intr->src[0].ssa,
+                                 nir_imm_int(b, info->layout.vertex_count_B),
+                                 .base = info->key.output_root, .bit_size = 32);
+      nir_pop_if(b, NULL);
+      nir_instr_remove(&intr->instr);
+      return true;
+   }
+   /* Point size does not participate in triangle rasterization. */
+   if (intr->intrinsic == nir_intrinsic_store_per_vertex_output &&
+       nir_intrinsic_io_semantics(intr).location == VARYING_SLOT_PSIZ) {
+      nir_instr_remove(&intr->instr);
+      return true;
+   }
+   return false;
 }
 
 static void
@@ -88,13 +95,26 @@ agx_nir_lower_apple9_native_mesh(nir_shader *nir, bool enable_native_mesh,
 
    struct agx_apple9_mesh_key key = AGX_APPLE9_MESH_KEY;
    key.physical_threads = AGX_APPLE9_NATIVE_THREADS;
-   if (!agx_nir_lower_apple9_mesh_formation(nir, &key, info, reason))
+   if (!agx_nir_lower_apple9_mesh(nir, &key, info, reason))
       return false;
    const struct agx_apple9_mesh_layout *layout = &info->layout;
+   if (layout->vertex_components != 4 || layout->primitive_components ||
+       layout->culling || layout->position_B != 32 ||
+       layout->vertex_pitch_B != 16 || layout->local_size_B != 96)
+      return fail(reason, "native mesh requires Position only and no primitive attributes");
+   nir_shader_intrinsics_pass(nir, consume_count, nir_metadata_none, info);
+   nir_lower_returns(nir);
+   if (!agx_nir_mask_apple9_mesh_body(nir, &key, layout, reason))
+      return false;
    nir_builder b =
       nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(nir)));
 
-   /* Formation ends at a converged workgroup rendezvous. Counts are the
+   nir_barrier(&b, .execution_scope = SCOPE_WORKGROUP,
+               .memory_scope = SCOPE_WORKGROUP,
+               .memory_semantics = NIR_MEMORY_ACQ_REL,
+               .memory_modes = nir_var_mem_shared);
+
+   /* Counts are the
     * actual shader publication, not maxima or register-descriptor constants.
     * U0 consumes and clears its A halfword; B's wider meaning is unresolved.
     * The qualified one-triangle class supplies actual vertex count to B. */
@@ -122,7 +142,6 @@ agx_nir_lower_apple9_native_mesh(nir_shader *nir, bool enable_native_mesh,
    device_fence(&b);
    nir_pop_if(&b, NULL);
 
-   nir_shader_intrinsics_pass(nir, bind_draw_input, nir_metadata_none, NULL);
    info->requires_mesh_completion = false;
    nir_progress(true, nir_shader_get_entrypoint(nir), nir_metadata_none);
    nir_validate_shader(nir, "native Apple9 mesh completion");

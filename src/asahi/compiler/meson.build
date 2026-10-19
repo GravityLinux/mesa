@@ -11,7 +11,6 @@ libasahi_agx_files = files(
   'agx_apple9_ra.c',
   'agx_compile_apple9.c',
   'agx_nir_lower_apple9_mesh.c',
-  'agx_nir_apple9_mesh_formation.c',
   'agx_nir_apple9_mesh_native.c',
   'agx_nir_lower_apple9_texture.c',
   'agx_nir_lower_apple9_math.c',

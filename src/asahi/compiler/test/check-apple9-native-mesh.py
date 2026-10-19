@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 """Check complete compiler output using the existing generic ASM listing.
 
-The executable executes lowered NIR against an independent DATA decoder. This check
+The executable executes lowered NIR and checks the local output components. This check
 independently decodes the six units at emitted instruction boundaries, follows
 their allocated input definitions, and checks their enclosing execution masks.
 It is a bounded def-use check, not an emulator for the ordinary GPU program.
@@ -91,7 +91,7 @@ def check_program(rows):
     for i, want in zip(units, expected):
         assert [value(s, i) for s in decoded(i)] == want
 
-    # Ordinary formation branches have all reconverged before U0. The two
+    # The application body has reconverged before U0. The two
     # remaining masks must be lane < actual vertex count and lane == 0.
     stack, last_compare = [], None
     unit_masks = []
@@ -185,15 +185,16 @@ def main():
     assert rows is None and len(checked) == len(fixtures) and len(fixtures) >= 4
     assert any("fixture=H1_BASE " in x for x in fixtures)
     assert any("fixture=H1_SHIFT_X " in x for x in fixtures)
-    assert any("ready=0" in x for x in fixtures)
     base = next(i for i, x in enumerate(fixtures)
                 if "fixture=H1_BASE " in x and "pressure=0" in x)
     pressured = next(i for i, x in enumerate(fixtures) if "pressure=1" in x)
-    assert checked[base] != checked[pressured], "pressure did not change mesh RA"
+    def gprs(line):
+        return int(re.search(r"gprs=(\d+)", line).group(1))
+    assert gprs(fixtures[pressured]) > gprs(fixtures[base])
     mutation_checks(programs[base])
     mutation_checks(programs[pressured])
     sys.stdout.write(run.stdout)
-    print("six allocation mutations rejected; pressured unit allocation differs")
+    print("six allocation mutations rejected; live pressure increases the GPR high-water mark")
     print(f"checked {len(checked)} complete programs: boundaries, six units, allocated inputs, masks")
     print("first program units (U0, channels 0..3, scalar):", " ".join(checked[0]))
     return 0

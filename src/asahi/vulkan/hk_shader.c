@@ -16,7 +16,7 @@
 #include "agx_debug.h"
 #include "hk_apple9_polygon_points.h"
 #include "asahi/compiler/agx_compile_apple9.h"
-#include "asahi/compiler/agx_apple9_mesh_formation.h"
+#include "asahi/compiler/agx_apple9_mesh.h"
 #include "agx_device.h"
 #include "agx_helpers.h"
 #include "agx_nir_lower_vbo.h"
@@ -209,7 +209,7 @@ hk_hash_apple9_native_mesh_abi(struct mesa_blake3 *ctx)
       AGX_APPLE9_MESH_ABI_VERSION, k.reserved_uniform_words, k.output_root,
       k.primitive_count_bits, k.payload_uniform, k.grid_root, k.grid_offset_B,
       k.physical_threads, AGX_APPLE9_MESH_DRAW_UNIFORM,
-      sizeof(struct agx_apple9_mesh_draw), AGX_MESH_FORMATION_DROPS_ADDRESS,
+      AGX_APPLE9_MESH_ARGUMENT_WORDS,
    };
    _mesa_blake3_update(ctx, abi, sizeof(abi));
 }
