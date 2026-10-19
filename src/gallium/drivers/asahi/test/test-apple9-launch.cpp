@@ -143,7 +143,7 @@ TEST(Apple9Launcher, InvalidParametersCannotPublishPartialCode)
    };
    reject(p, AGX_APPLE9_LAUNCH_COMPUTE, 1023);
    reject(p, AGX_APPLE9_LAUNCH_VERTEX, 255);
-   reject(p, static_cast<agx_apple9_launch_stage>(3));
+   reject(p, static_cast<agx_apple9_launch_stage>(AGX_APPLE9_LAUNCH_MESH + 1));
    auto bad = p;
    bad.entry_offset++;
    reject(bad);
