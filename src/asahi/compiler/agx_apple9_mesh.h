@@ -167,12 +167,15 @@ bool agx_compile_apple9_mesh_lowered(nir_shader *nir,
 /* Compiler-only native development gate, disabled unless explicitly enabled.
  * This accepts API sizes 1..16 at physical T16, Position/V3/P1. It emits the
  * complete mesh body and hardware output submissions in one compile.
+ * clip_halfz converts final Z from [-W,W] to [0,W] before submission.
  * The result still requires a native launch/object contract; generic shader
  * upload rejects apple9_body_only. This does not enable a Vulkan feature. */
 bool agx_nir_lower_apple9_native_mesh(nir_shader *nir, bool enable_native_mesh,
+                                      bool clip_halfz,
                                       struct agx_apple9_mesh_body_info *info,
                                       const char **reason);
 bool agx_compile_apple9_native_mesh(nir_shader *nir, bool enable_native_mesh,
+                                    bool clip_halfz,
                                     struct agx_shader_part *out,
                                     struct agx_apple9_mesh_body_info *info,
                                     const char **reason);

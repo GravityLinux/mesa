@@ -46,7 +46,7 @@ check_contract(bool object)
    struct agx_apple9_mesh_body_info info = {0};
    const char *reason = NULL;
    CHECK(object ? agx_compile_apple9_native_object(nir, true, &k, &part, &info, &reason)
-                : agx_compile_apple9_native_mesh(nir, true, &part, &info, &reason));
+                : agx_compile_apple9_native_mesh(nir, true, false, &part, &info, &reason));
    enum hk_apple9_native_stage stage = object ? HK_APPLE9_NATIVE_OBJECT
                                              : HK_APPLE9_NATIVE_MESH;
    CHECK(hk_apple9_native_shader_valid(&part.info, &info, stage));

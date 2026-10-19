@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Host tests of local output publication and hardware mesh completion.
  */
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -101,12 +102,14 @@ add_pressure(nir_shader *nir)
 static const char *export_dir;
 
 static void
-run_fixture(const struct native_mesh_fixture *f, bool pressure)
+run_fixture(const struct native_mesh_fixture *f, bool pressure, bool clip_halfz)
 {
    struct agx_apple9_mesh_body_info info;
    const char *reason = NULL;
    nir_shader *nir = source(f);
-   CHECK(agx_nir_lower_apple9_native_mesh(nir, true, &info, &reason));
+   if (clip_halfz)
+      nir_lower_io_to_scalar(nir, nir_var_shader_out, NULL, NULL);
+   CHECK(agx_nir_lower_apple9_native_mesh(nir, true, clip_halfz, &info, &reason));
    if (pressure)
       add_pressure(nir);
    nir_lower_vars_to_ssa(nir);
@@ -125,7 +128,7 @@ run_fixture(const struct native_mesh_fixture *f, bool pressure)
    m.value = calloc(impl->ssa_alloc, sizeof(*m.value));
    CHECK(m.value);
    execute(&m, &impl->body, ALL_LANES);
-   CHECK(m.barriers == 1 && m.fences == 6 + 2 * pressure);
+   CHECK(m.barriers == 1 + clip_halfz && m.fences == 6 + 2 * pressure);
    CHECK(m.controls == ALL_LANES && m.scalars == 1);
    CHECK(m.writes == (pressure ? LANES * PRESSURE_VALUES : 0));
    for (unsigned c = 0; c < 4; ++c) {
@@ -133,7 +136,16 @@ run_fixture(const struct native_mesh_fixture *f, bool pressure)
       for (unsigned v = 0; v < 3; ++v) {
          uint32_t value;
          memcpy(&value, m.local + info.layout.position_B + 16 * c + 4 * v, 4);
-         CHECK(value == f->positions[4 * v + c]);
+         uint32_t expected = f->positions[4 * v + c];
+         if (clip_halfz && c == 2) {
+            float z, w;
+            memcpy(&z, &f->positions[4 * v + 2], 4);
+            memcpy(&w, &f->positions[4 * v + 3], 4);
+            float converted = fmaf(-z, .5f, fmaf(w, .5f, z));
+            memcpy(&expected, &converted, 4);
+         }
+         CHECK(value == expected);
+         CHECK(m.submitted_position[v][c] == expected);
       }
    }
    for (unsigned i = 0; i < 3; ++i)
@@ -149,7 +161,9 @@ run_fixture(const struct native_mesh_fixture *f, bool pressure)
    struct agx_shader_part code = {0};
    ralloc_free(nir);
    nir = source(f);
-   bool ok = agx_nir_lower_apple9_native_mesh(nir, true, &info, &reason);
+   if (clip_halfz)
+      nir_lower_io_to_scalar(nir, nir_var_shader_out, NULL, NULL);
+   bool ok = agx_nir_lower_apple9_native_mesh(nir, true, clip_halfz, &info, &reason);
    if (ok && pressure)
       add_pressure(nir);
    if (ok)
@@ -160,7 +174,7 @@ run_fixture(const struct native_mesh_fixture *f, bool pressure)
    CHECK(code.info.apple9_body_only && code.info.binary_size);
    CHECK(!info.requires_mesh_completion && info.requires_native_entry);
    CHECK(info.layout.primitive_count_B == 16 && info.layout.local_size_B == 96);
-   if (export_dir && !pressure) {
+   if (export_dir && !pressure && !clip_halfz) {
       char path[1024];
       CHECK(snprintf(path, sizeof(path), "%s/%s.bin", export_dir, f->name) <
             sizeof(path));
@@ -186,8 +200,8 @@ run_fixture(const struct native_mesh_fixture *f, bool pressure)
          AGX_APPLE9_MESH_DRAW_UNIFORM, AGX_APPLE9_MESH_ABI_VERSION);
       CHECK(!fclose(file));
    }
-   printf("fixture=%s pressure=%u implicit=1 units=1+4+1 gprs=%u scratch=%u bytes=%u\n",
-          f->name, pressure, code.info.nr_gprs, code.info.scratch_size,
+   printf("fixture=%s pressure=%u halfz=%u implicit=1 units=1+4+1 gprs=%u scratch=%u bytes=%u\n",
+          f->name, pressure, clip_halfz, code.info.nr_gprs, code.info.scratch_size,
           code.info.binary_size);
    free(code.binary);
    ralloc_free(nir);
@@ -210,7 +224,7 @@ reject_unsupported(void)
       struct agx_shader_part code = {0};
       struct agx_apple9_mesh_body_info info = {0};
       const char *reason = NULL;
-      CHECK(!agx_compile_apple9_native_mesh(nir, variant != 0, &code, &info,
+      CHECK(!agx_compile_apple9_native_mesh(nir, variant != 0, false, &code, &info,
                                             &reason));
       CHECK(!code.binary && reason);
       if (!variant)
@@ -234,20 +248,21 @@ main(int argc, char **argv)
          memcpy(f.positions, clip_fixtures[i].positions, sizeof(f.positions));
          /* Preserve all four position components, including non-unit W.
           * Hardware clipping is deliberately outside this host interpreter. */
-         run_fixture(&f, false);
+         run_fixture(&f, false, false);
       }
       glsl_type_singleton_decref();
       return 0;
    }
    reject_unsupported();
    for (unsigned i = 0; i < ARRAY_SIZE(h1_fixtures); ++i)
-      run_fixture(&h1_fixtures[i], false);
-   run_fixture(&h1_fixtures[0], true);
+      run_fixture(&h1_fixtures[i], false, false);
+   run_fixture(&h1_fixtures[0], true, false);
    for (unsigned i = 0; i < ARRAY_SIZE(clip_fixtures); ++i) {
       struct native_mesh_fixture f = h1_fixtures[0];
       f.name = clip_fixtures[i].name;
       memcpy(f.positions, clip_fixtures[i].positions, sizeof(f.positions));
-      run_fixture(&f, false);
+      run_fixture(&f, false, false);
+      run_fixture(&f, false, true);
    }
    glsl_type_singleton_decref();
    return 0;

@@ -5892,7 +5892,7 @@ hk_apple9_compile_mesh(struct hk_device *dev, nir_shader *nir,
  * Both BOs use the existing shader cache, upload and destruction paths. */
 static VkResult
 hk_apple9_compile_native_mesh(struct hk_device *dev, nir_shader *nir,
-                               struct hk_api_shader *obj,
+                               struct hk_api_shader *obj, bool clip_halfz,
                                const char **reason)
 {
    struct hk_shader *mesh = &obj->variants[HK_MESH_VARIANT_MAIN];
@@ -5900,6 +5900,7 @@ hk_apple9_compile_native_mesh(struct hk_device *dev, nir_shader *nir,
    hk_mesh_gather_info(nir, &mesh->info.mesh);
    mesh->info.apple9_native_stage = HK_APPLE9_NATIVE_MESH;
    if (!agx_compile_apple9_native_mesh(nir, hk_apple9_native_mesh_enabled(),
+                                       clip_halfz,
                                        &mesh->b, &mesh->info.apple9_native,
                                        reason))
       return vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
@@ -5972,10 +5973,8 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
    memset(out, 0, count * sizeof(*out));
    if (hk_apple9_native_mesh_enabled()) {
       for (unsigned i = 0; i < count; ++i) {
-         if (infos[i].stage == MESA_SHADER_TASK ||
-             (infos[i].stage == MESA_SHADER_MESH &&
-              key.clip_negative_one_to_one)) {
-            reason = "native mesh does not support API task shaders or negative-one-to-one depth";
+         if (infos[i].stage == MESA_SHADER_TASK) {
+            reason = "native mesh does not support API task shaders";
             result = vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT, "%s", reason);
             goto done;
          }
@@ -6383,7 +6382,8 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
             continue;
          } else if (stage == MESA_SHADER_MESH) {
             if (hk_apple9_native_mesh_enabled()) {
-               result = hk_apple9_compile_native_mesh(dev, nir, obj, &reason);
+               result = hk_apple9_compile_native_mesh(
+                  dev, nir, obj, key.clip_negative_one_to_one, &reason);
                if (result != VK_SUCCESS)
                   goto done;
                varyings = shader->b.info.apple9_varyings;

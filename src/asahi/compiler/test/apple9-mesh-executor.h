@@ -24,6 +24,7 @@ struct machine {
    struct region region[8];
    unsigned barriers, subgroup_barriers, fences, writes;
    unsigned controls, scalars, channels[4];
+   uint32_t submitted_position[3][4];
    unsigned local_root, grid_fences, grid_exports;
    unsigned local_store_lanes, global_store_lanes, atomic_lanes, object_calls;
    uint32_t grid[3];
@@ -161,6 +162,8 @@ instruction(struct machine *m, nir_instr *i, unsigned lane)
          CHECK(m->controls == ALL_LANES);
          CHECK(!(m->channels[channel] & (1u << lane)));
          m->channels[channel] |= 1u << lane;
+         memcpy(&m->submitted_position[lane][channel],
+                m->local + 32 + channel * 16 + lane * 4, 4);
          break;
       }
       case nir_intrinsic_mesh_submit_scalar_apple9_agx:

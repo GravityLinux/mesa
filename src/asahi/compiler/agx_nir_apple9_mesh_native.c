@@ -85,6 +85,7 @@ device_fence(nir_builder *b)
 
 bool
 agx_nir_lower_apple9_native_mesh(nir_shader *nir, bool enable_native_mesh,
+                                 bool clip_halfz,
                                  struct agx_apple9_mesh_body_info *info,
                                  const char **reason)
 {
@@ -122,11 +123,41 @@ agx_nir_lower_apple9_native_mesh(nir_shader *nir, bool enable_native_mesh,
       &b, nir_imm_int(&b, layout->primitive_count_B), .base = key.output_root);
    nir_def *vertices = nir_load_local_apple9_agx(
       &b, nir_imm_int(&b, layout->vertex_count_B), .base = key.output_root);
+   nir_def *lane = nir_load_local_invocation_index(&b);
+   if (clip_halfz) {
+      /* Convert the completed homogeneous position, after all body writes and
+       * output reads. Doing this at publication also handles scalar/partial
+       * stores and different invocations writing Z and W. Keep W unchanged:
+       * U consumes it for clipping and perspective division.
+       * This is the vertex path's c=1/2 depth conversion, not a state-word
+       * change. The body barrier above makes its final Z/W visible. */
+      nir_push_if(&b, nir_ult(&b, lane, vertices));
+      nir_def *offset = nir_imul_imm(&b, lane, 4);
+      nir_def *z_address = nir_iadd_imm(
+         &b, offset, layout->position_B + layout->vertex_pitch_B *
+                        layout->vertex_component[VARYING_SLOT_POS][2]);
+      nir_def *w_address = nir_iadd_imm(
+         &b, offset, layout->position_B + layout->vertex_pitch_B *
+                        layout->vertex_component[VARYING_SLOT_POS][3]);
+      nir_def *z = nir_load_local_apple9_agx(&b, z_address,
+                                            .base = key.output_root);
+      nir_def *w = nir_load_local_apple9_agx(&b, w_address,
+                                            .base = key.output_root);
+      nir_def *half = nir_imm_float(&b, 0.5);
+      nir_def *converted = nir_ffma_weak(
+         &b, nir_fneg(&b, z), half, nir_ffma_weak(&b, w, half, z));
+      nir_store_local_apple9_agx(&b, converted, z_address,
+                                  .base = key.output_root, .bit_size = 32);
+      nir_pop_if(&b, NULL);
+      nir_barrier(&b, .execution_scope = SCOPE_WORKGROUP,
+                  .memory_scope = SCOPE_WORKGROUP,
+                  .memory_semantics = NIR_MEMORY_ACQ_REL,
+                  .memory_modes = nir_var_mem_shared);
+   }
    nir_mesh_control_apple9_agx(&b, nir_u2u16(&b, primitives),
                                nir_u2u16(&b, vertices), .base = 1);
    device_fence(&b);
 
-   nir_def *lane = nir_load_local_invocation_index(&b);
    nir_push_if(&b, nir_ult(&b, lane, vertices));
    for (unsigned c = 0; c < 4; ++c) {
       unsigned plane =
@@ -150,12 +181,14 @@ agx_nir_lower_apple9_native_mesh(nir_shader *nir, bool enable_native_mesh,
 
 bool
 agx_compile_apple9_native_mesh(nir_shader *nir, bool enable_native_mesh,
+                                 bool clip_halfz,
                                struct agx_shader_part *out,
                                struct agx_apple9_mesh_body_info *info,
                                const char **reason)
 {
    memset(out, 0, sizeof(*out));
-   if (!agx_nir_lower_apple9_native_mesh(nir, enable_native_mesh, info, reason))
+   if (!agx_nir_lower_apple9_native_mesh(nir, enable_native_mesh, clip_halfz,
+                                         info, reason))
       return false;
    return agx_compile_apple9_mesh_lowered(nir, &info->key, out, reason);
 }
