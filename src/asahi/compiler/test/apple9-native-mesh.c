@@ -18,7 +18,7 @@
 #include "apple9-mesh-executor.h"
 #include "mesh-formation-fixtures.h"
 #include "mesh-h1-fixtures.h"
-#include "native-clip-20261019/fixtures.h"
+#include "mesh-clip-fixtures.h"
 
 #include "apple9-mesh-data.h"
 

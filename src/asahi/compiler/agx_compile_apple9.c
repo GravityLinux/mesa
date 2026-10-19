@@ -8527,6 +8527,8 @@ agx_compile_apple9_taskless_object(
       return false;
    }
    struct agx_apple9_mesh_body_info info;
+   /* The outer enable_native_mesh check above has already admitted this
+    * generated object. Keep that check before constructing or lowering NIR. */
    bool ok = agx_compile_apple9_native_object(body, true, key, out, &info, reason);
    ralloc_free(body);
    return ok;

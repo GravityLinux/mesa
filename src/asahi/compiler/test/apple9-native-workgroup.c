@@ -21,9 +21,10 @@
 
 #include "apple9-mesh-data.h"
 
-#define Q_ADDRESS 0x40000ull
-#define Q_BYTES   2048
-#define POISON    0xa5a5a5a5u
+#define Q_ADDRESS    0x40000ull
+#define Q_BYTES      2048
+#define POISON       0xa5a5a5a5u
+#define RECORD_BYTES 80
 
 /* This test owns Q in the otherwise unused payload-pointer argument. It is
  * instrumentation, not an application task payload or production ABI change.
@@ -52,15 +53,28 @@ side_effects(nir_builder *b)
       nir_load_num_subgroups(b),
       nir_ballot(b, 1, 32, nir_imm_true(b)),
    };
+   /* These collectives execute inside the API local-size mask inserted by
+    * lowering. Nonzero lane values distinguish T1/T3 from physical T16. */
+   nir_def *value = nir_iadd_imm(b, index, 1);
+   nir_def *collective[] = {
+      nir_reduce(b, value, .reduction_op = nir_op_umax, .cluster_size = 0),
+      nir_reduce(b, value, .reduction_op = nir_op_iadd, .cluster_size = 0),
+      nir_b2i32(b, nir_elect(b, 1)),
+      nir_read_first_invocation(b, nir_iadd_imm(b, index, 0x56780000)),
+   };
    nir_def *address = nir_iadd(
-      b, q, nir_u2u64(b, nir_iadd_imm(b, nir_imul_imm(b, index, 64), 256)));
+      b, q, nir_u2u64(b, nir_iadd_imm(b, nir_imul_imm(b, index, RECORD_BYTES), 256)));
    nir_global_atomic(b, 32, q, nir_imm_int(b, 1),
                      .atomic_op = nir_atomic_op_iadd);
    for (unsigned i = 0; i < ARRAY_SIZE(fields); ++i)
       nir_store_global(b, fields[i], nir_iadd_imm(b, address, 4 * i),
                        .align_mul = 4);
+   for (unsigned i = 0; i < ARRAY_SIZE(collective); ++i)
+      nir_store_global(b, collective[i], nir_iadd_imm(b, address, 52 + 4 * i),
+                       .align_mul = 4);
    /* Nested, API-uniform barrier exercises subgroup shrinking as well as
-    * values live across the barrier. Width-16 stays a workgroup barrier. */
+    * values live across the barrier. Physical completion barriers stay outside
+    * the API mask. */
    nir_push_if(b, nir_ieq_imm(b, nir_channel(b, size, 1),
                               b->shader->info.workgroup_size[1]));
    nir_barrier(b, .execution_scope = SCOPE_WORKGROUP,
@@ -192,7 +206,7 @@ check(bool object, unsigned x, unsigned y, unsigned z, bool probe,
    for (unsigned i = 4; i < 256; ++i)
       CHECK(((uint8_t *)q)[i] == 0xa5 && !written[i]);
    for (unsigned lane = 0; lane < LANES; ++lane) {
-      uint32_t expected[16] = {
+      uint32_t expected[RECORD_BYTES / 4] = {
          lane,
          lane % x,
          (lane / x) % y,
@@ -206,19 +220,23 @@ check(bool object, unsigned x, unsigned y, unsigned z, bool probe,
          1,
          mask,
          lane ^ 0x12345678,
+         threads,
+         threads * (threads + 1) / 2,
+         lane == 0,
+         0x56780000,
          POISON,
          POISON,
          POISON,
       };
-      for (unsigned c = 0; c < 16; ++c) {
-         unsigned offset = 256 + 64 * lane + 4 * c;
-         bool store = probe && lane < threads && c < 13;
+      for (unsigned c = 0; c < ARRAY_SIZE(expected); ++c) {
+         unsigned offset = 256 + RECORD_BYTES * lane + 4 * c;
+         bool store = probe && lane < threads && c < 17;
          CHECK(q[offset / 4] == (store ? expected[c] : POISON));
          for (unsigned byte = 0; byte < 4; ++byte)
             CHECK(written[offset + byte] == store);
       }
    }
-   for (unsigned i = 256 + 64 * LANES; i < Q_BYTES; ++i)
+   for (unsigned i = 256 + RECORD_BYTES * LANES; i < Q_BYTES; ++i)
       CHECK(((uint8_t *)q)[i] == 0xa5 && !written[i]);
    if (object) {
       CHECK(m.local_store_lanes == 1 && m.object_calls == 1);
@@ -299,7 +317,7 @@ check(bool object, unsigned x, unsigned y, unsigned z, bool probe,
          "{\"name\":\"%s\",\"logical_size\":[%u,%u,%u],\"physical_size\":[16,1,1],"
          "\"subgroup_size\":32,\"binary_size\":%u,\"gprs\":%u,\"scratch\":%u,"
          "\"atomic_frame\":%u,\"body_only\":true,\"probe\":%s,\"probe_pointer_uniform\":16,"
-         "\"probe_bytes\":2048,\"draw_uniform\":18,\"local_bytes\":128,\"abi_version\":%u}\n",
+         "\"probe_bytes\":2048,\"probe_record_bytes\":80,\"probe_layout_version\":2,\"draw_uniform\":18,\"local_bytes\":128,\"abi_version\":%u}\n",
          name, x, y, z, part.info.binary_size, part.info.nr_gprs,
          part.info.scratch_size, part.info.apple9_atomic_frame_size,
          probe ? "true" : "false", AGX_APPLE9_MESH_ABI_VERSION);

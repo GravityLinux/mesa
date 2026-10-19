@@ -276,6 +276,40 @@ execute(struct machine *m, struct exec_list *list, unsigned active)
                      m->value[ballot->def.index][lane][0].u32 = bits;
                continue;
             }
+            if (i->type == nir_instr_type_intrinsic) {
+               nir_intrinsic_instr *n = nir_instr_as_intrinsic(i);
+               bool reduce = n->intrinsic == nir_intrinsic_reduce;
+               bool elect = n->intrinsic == nir_intrinsic_elect;
+               bool first = n->intrinsic == nir_intrinsic_read_first_invocation;
+               if (reduce || elect || first) {
+                  CHECK(active && n->def.num_components == 1);
+                  unsigned leader = ffs(active) - 1;
+                  uint32_t value = 0;
+                  if (reduce) {
+                     CHECK(n->def.bit_size == 32 && !nir_intrinsic_cluster_size(n));
+                     nir_op op = nir_intrinsic_reduction_op(n);
+                     CHECK(op == nir_op_umax || op == nir_op_iadd);
+                     for (unsigned lane = 0; lane < LANES; ++lane) {
+                        if (!(active & (1u << lane)))
+                           continue;
+                        uint32_t v = src(m, n->src[0], lane)[0].u32;
+                        value = op == nir_op_umax ? MAX2(value, v) : value + v;
+                     }
+                  } else if (first) {
+                     CHECK(n->def.bit_size == 32);
+                     value = src(m, n->src[0], leader)[0].u32;
+                  }
+                  for (unsigned lane = 0; lane < LANES; ++lane) {
+                     if (!(active & (1u << lane)))
+                        continue;
+                     if (elect)
+                        m->value[n->def.index][lane][0].b = lane == leader;
+                     else
+                        m->value[n->def.index][lane][0].u32 = value;
+                  }
+                  continue;
+               }
+            }
             if (i->type == nir_instr_type_intrinsic &&
                 nir_instr_as_intrinsic(i)->intrinsic == nir_intrinsic_barrier) {
                nir_intrinsic_instr *b = nir_instr_as_intrinsic(i);
