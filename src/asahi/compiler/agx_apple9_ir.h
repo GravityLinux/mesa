@@ -150,6 +150,7 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_DEVICE_ATOMIC,
    AGX_APPLE9_VIR_DEVICE_ATOMIC_RESULT,
    AGX_APPLE9_VIR_SUBGROUP_SCAN_IADD,
+   AGX_APPLE9_VIR_SUBGROUP_REDUCE_UMAX,
    AGX_APPLE9_VIR_SUBGROUP_BROADCAST,
    AGX_APPLE9_VIR_SUBGROUP_BALLOT,
    AGX_APPLE9_VIR_WORKGROUP_BARRIER,
@@ -846,6 +847,12 @@ agx_apple9_pack_get_sr_zext16(unsigned dst, uint8_t selector,
                               struct agx_apple9_packed_instruction *packed);
 bool agx_apple9_pack_mov_imm(unsigned dst, unsigned value,
                              struct agx_apple9_packed_instruction *packed);
+/* Full active-SIMD unsigned maximum. Operands are half-register indices;
+ * 32-bit operands must be even. The normal GPR form preserves other halves. */
+bool agx_apple9_pack_subgroup_reduce_umax(
+   unsigned dst_half, unsigned src_half, unsigned bit_size,
+   bool dst_cache, bool src_cache, bool src_discard,
+   struct agx_apple9_packed_instruction *packed);
 bool agx_apple9_pack_mov_imm32(unsigned dst, uint32_t value,
                                struct agx_apple9_packed_instruction *packed);
 bool agx_apple9_pack_mov(unsigned dst, unsigned src,

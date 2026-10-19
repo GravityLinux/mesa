@@ -993,3 +993,49 @@ TEST(Apple9SharedRa, RejectsImpossibleConstraintWindows)
       ralloc_free(nir.shader); ralloc_free(memctx);
    }
 }
+
+TEST(Apple9SharedRa, SubgroupMaxWaitsForInputAndPreservesSource)
+{
+   nir_builder nir = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "subgroup_max_load");
+   nir_block logical = {};
+   agx_apple9_vir_program p;
+   agx_apple9_vir_init(&p);
+   auto block = agx_apple9_block_create(&p);
+   block->nir = &logical;
+   agx_apple9_block_begin(&p, block);
+   auto index = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IMM,
+      AGX_APPLE9_ENC_MOV_IMM32, nullptr, 0, 0);
+   const agx_apple9_device_load_contract contract = {
+      .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_DIRECT_GPR,
+      .flags = 0,
+      .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
+   };
+   auto loaded = agx_apple9_vir_emit_device_load(&p, 1, index, &contract);
+   auto maximum = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_SUBGROUP_REDUCE_UMAX,
+      AGX_APPLE9_ENC_SUBGROUP_REDUCE_UMAX, &loaded, 1, 0);
+   EXPECT_FALSE(agx_apple9_instr_is_pure_alu(p.instructions[p.instruction_count - 1]));
+   uint32_t src[] = {maximum, loaded};
+   auto result = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IXOR,
+      AGX_APPLE9_ENC_LOGIC_EXTENDED, src, 2, 0);
+   ASSERT_TRUE(agx_apple9_vir_emit_device_store(&p, 0, index, &result, 1, 32));
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_allocate_shared(&p, nir.shader, &reason)) << reason;
+   unsigned load_at = ~0u, wait_at = ~0u, max_at = ~0u;
+   for (unsigned i = 0; i < p.instruction_count; ++i) {
+      auto I = p.instructions[i];
+      if (I->op == AGX_APPLE9_VIR_DEVICE_LOAD) load_at = i;
+      if (I->op == AGX_APPLE9_VIR_WAIT) wait_at = i;
+      if (I->op == AGX_APPLE9_VIR_SUBGROUP_REDUCE_UMAX) {
+         max_at = i;
+         EXPECT_NE(p.phys[I->dest], p.phys[I->src[0]]);
+         EXPECT_EQ(I->scoreboard_slot, 0u);
+      }
+      agx_apple9_packed_instruction packed;
+      ASSERT_TRUE(agx_apple9_pack_vir_instruction(I, p.phys, &packed, &reason)) << reason;
+   }
+   EXPECT_LT(load_at, wait_at);
+   EXPECT_LT(wait_at, max_at);
+   agx_apple9_vir_finish(&p);
+   ralloc_free(nir.shader);
+}

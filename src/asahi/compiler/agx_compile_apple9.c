@@ -1036,6 +1036,7 @@ apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
              op == nir_intrinsic_load_subgroup_invocation ||
              op == nir_intrinsic_load_subgroup_id ||
              op == nir_intrinsic_load_subgroup_size ||
+             op == nir_intrinsic_reduce ||
              op == nir_intrinsic_inclusive_scan ||
              op == nir_intrinsic_exclusive_scan ||
              op == nir_intrinsic_read_invocation ||
@@ -2419,6 +2420,17 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
          if (value != AGX_APPLE9_VREG_INVALID)
             lower->program.instructions[lower->program.instruction_count - 1]
                ->producer_scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_6;
+      } else if (intr && intr->intrinsic == nir_intrinsic_reduce) {
+         if (scalar.def->bit_size != 32 ||
+             nir_intrinsic_reduction_op(intr) != nir_op_umax ||
+             nir_intrinsic_cluster_size(intr) != 0) {
+            lower->reason = "Apple9 native reduction requires full-subgroup unsigned maximum";
+            return AGX_APPLE9_VREG_INVALID;
+         }
+         uint32_t source = apple9_lower_dag_scalar(lower,
+            nir_get_scalar(intr->src[0].ssa, scalar.comp));
+         value = apple9_dag_emit(lower, AGX_APPLE9_VIR_SUBGROUP_REDUCE_UMAX,
+            AGX_APPLE9_ENC_SUBGROUP_REDUCE_UMAX, &source, 1, 0);
       } else if (intr && (intr->intrinsic == nir_intrinsic_inclusive_scan ||
                    intr->intrinsic == nir_intrinsic_exclusive_scan)) {
          if (scalar.def->bit_size != 32 ||
@@ -7975,10 +7987,15 @@ static bool
 apple9_lower_subgroup_filter(const nir_intrinsic_instr *intr,
                              UNUSED const void *data)
 {
-   /* Keep scans with a native implementation. */
+   if (intr->def.bit_size != 32 || intr->def.num_components != 1)
+      return true;
+
+   if (intr->intrinsic == nir_intrinsic_reduce)
+      return nir_intrinsic_reduction_op(intr) != nir_op_umax ||
+             nir_intrinsic_cluster_size(intr) != 0;
+
    return !((intr->intrinsic == nir_intrinsic_exclusive_scan ||
              intr->intrinsic == nir_intrinsic_inclusive_scan) &&
-            intr->def.bit_size == 32 && intr->def.num_components == 1 &&
             nir_intrinsic_reduction_op(intr) == nir_op_iadd);
 }
 
@@ -8070,7 +8087,7 @@ apple9_lower_compute_subgroups(nir_builder *b, nir_intrinsic_instr *intr,
 
 static void apple9_lower_textures(nir_shader *nir);
 
-/* Cross-lane operations move whole 32-bit registers. */
+/* The current SSA allocator represents cross-lane values in full GPRs. */
 static unsigned
 apple9_subgroup_width(const nir_instr *instr, UNUSED void *data)
 {
@@ -8107,7 +8124,8 @@ apple9_lower_subgroups(nir_shader *nir)
    nir_lower_bit_size(nir, apple9_subgroup_width, NULL);
    /* Subgroup operations are expressed through the native ballot and
     * simd_shuffle, which takes a per-lane source index. 32-bit integer
-    * addition scans have a native instruction and are kept.
+    * addition scans and full-subgroup unsigned maxima have native instructions
+    * and are kept. Clustered reductions still use the generic lowering.
     */
    const nir_lower_subgroups_options subgroups = {
       .filter = apple9_lower_subgroup_filter,
