@@ -66,6 +66,15 @@ def check_program(rows, channels=None):
                 if len(r["code"]) == 2:
                     assert r["code"][0] == (int(reg[1:]) << 4) | 12
                     assert r["code"][1] == r["imm"] < 128
+                else:
+                    code = r["code"]; dst = int(reg[1:])
+                    assert len(code) == 8 and dst < 64
+                    assert code[0] == ((dst & 15) << 4) | 12
+                    assert code[2] == ((dst >> 4) << 6) | 2 and code[1] & 128
+                    literal = ((code[1] & 127) | ((code[4] & 30) << 6) |
+                               ((code[5] & 12) << 9) | (code[6] << 13) |
+                               ((code[7] & 15) << 21) | ((code[3] & 254) << 24))
+                    assert literal == r["imm"]
                 return r["imm"]
             if r["op"] == "GET_SR":
                 assert r["imm"] == 0xA7
@@ -197,8 +206,21 @@ def main():
     assert gprs(fixtures[pressured]) > gprs(fixtures[base])
     mutation_checks(programs[base])
     mutation_checks(programs[pressured])
+    wide = next(i for i, x in enumerate(fixtures) if "fixture=ATTR_LIMIT " in x)
+    channels = [list(map(int, x.split(':'))) for x in
+                re.search(r"channels=(\S+)", fixtures[wide])[1].split(',')]
+    final_channel = max(i for i, r in enumerate(programs[wide]) if r['op'] == 'MESH_SUBMIT_CHANNEL')
+    plane = max(i for i, r in enumerate(programs[wide][:final_channel])
+                if r['op'] == 'IMM' and r['imm'] >= 128)
+    for coherent in (False, True):
+        bad = copy.deepcopy(programs[wide]);code = bytearray(bad[plane]['code']);code[1] ^= 1
+        bad[plane]['code'] = bytes(code)
+        if coherent:bad[plane]['imm'] ^= 1
+        try:check_program(bad, channels)
+        except AssertionError:pass
+        else:raise AssertionError('corrupt high plane immediate accepted')
     sys.stdout.write(run.stdout)
-    print("six allocation mutations rejected; live pressure increases the GPR high-water mark")
+    print("six allocation and two high-plane immediate mutations rejected; live pressure increases the GPR high-water mark")
     print(f"checked {len(checked)} complete programs: boundaries, U units, allocated inputs, masks")
     print("first program U units:", " ".join(checked[0]))
     return 0
