@@ -2404,10 +2404,12 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
 
          unsigned tuple[AGX_APPLE9_MAX_ENCODING_OPERANDS] = {0};
          unsigned tuple_count = 0;
+         const unsigned bits =
+            instruction->op == AGX_APPLE9_VIR_MESH_CONTROL ? 16 : 32;
          valid &=
             encoding_tuple(instruction, program->phys, tuple, &tuple_count) &&
             agx_apple9_encoding_accepts_gpr_tuple(instruction->encoding, tuple,
-                                                  tuple_count, 32);
+                                                  tuple_count, bits);
          if (!valid) {
             if (reason != NULL)
                *reason =
@@ -6402,7 +6404,7 @@ pack_mesh(const struct agx_apple9_vir_instr *I, const uint8_t *phys,
    if (I->op == AGX_APPLE9_VIR_MESH_CONTROL) {
       if (I->encoding != AGX_APPLE9_ENC_MESH_CONTROL || I->nr_srcs != 2 ||
           I->src_half_mask != 3 || (I->src_hi_mask & ~3u) ||
-          I->live_after_mask || I->mesh_release)
+          (I->live_after_mask & ~2u) || I->mesh_release)
          return false;
       mesh.kind = AGX_APPLE9_MESH_CONTROL;
       mesh.count_gpr = phys[I->src[0]];

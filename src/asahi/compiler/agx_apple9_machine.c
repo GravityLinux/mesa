@@ -119,10 +119,12 @@ static const struct agx_apple9_encoding_info encodings[] = {
              AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_CLOBBER,
              AGX_APPLE9_EVIDENCE_HARDWARE),
          GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_16, 95, 2,
-             /* B preservation has not been qualified. Do not keep a live
-              * vertex count in the register supplied to the instruction. */
-             AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_CLOBBER,
-             AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+             /* Qualified U0 captures preserve the selected B halfword,
+              * including low/high remaps and both control42 values. Let its
+              * normal SSA uses retain it instead of manufacturing a dead
+              * clobber copy. This does not impose a numeric register window. */
+             AGX_APPLE9_OPERAND_ALLOCATABLE,
+             AGX_APPLE9_EVIDENCE_HARDWARE),
       },
    },
    [AGX_APPLE9_ENC_MESH_SUBMIT_SCALAR] = {

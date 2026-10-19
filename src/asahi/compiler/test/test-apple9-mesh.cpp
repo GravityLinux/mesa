@@ -135,8 +135,8 @@ TEST(Apple9MeshEncoding, VirPacksAllocatedHalfwordsAndAdjacentPairs)
          EXPECT_EQ(decoded.auxiliary_high, bool(halves & 2));
          for (unsigned live : {1u, 2u, 3u}) {
             I.live_after_mask = live;
-            EXPECT_FALSE(
-               agx_apple9_pack_vir_instruction(&I, phys, &packed, nullptr));
+            EXPECT_EQ(agx_apple9_pack_vir_instruction(&I, phys, &packed, nullptr),
+                      live == 2u);
          }
       }
    }
@@ -213,9 +213,9 @@ TEST(Apple9MeshIR, AllocationPreservesReadClearAndTupleInputsUsedLater)
                                                 AGX_APPLE9_OPERAND_SRC0)
                            ->flags &
                         AGX_APPLE9_OPERAND_CLOBBER);
-            EXPECT_TRUE(agx_apple9_find_operand(control->encoding,
-                                                AGX_APPLE9_OPERAND_SRC1)
-                           ->flags & AGX_APPLE9_OPERAND_CLOBBER);
+            EXPECT_FALSE(agx_apple9_find_operand(control->encoding,
+                                                 AGX_APPLE9_OPERAND_SRC1)
+                            ->flags & AGX_APPLE9_OPERAND_CLOBBER);
             uint32_t pair[] = {values[2], values[3]};
             ASSERT_TRUE(agx_apple9_vir_emit_mesh_submit(&p, pair, true, true));
             uint32_t scalar[] = {values[1], zero};
@@ -284,10 +284,9 @@ TEST(Apple9MeshIR, AllocationPreservesReadClearAndTupleInputsUsedLater)
                   EXPECT_EQ((regs[decoded.count_gpr] >> shift) & 65535,
                             primitive_count);
                   EXPECT_EQ(regs[decoded.auxiliary_gpr] & 65535, 3u);
-                  EXPECT_EQ(I->live_after_mask, 0u);
+                  EXPECT_EQ(I->live_after_mask & ~2u, 0u);
                   regs[decoded.count_gpr] &= ~(65535u << shift);
-                  /* Worst case until hardware qualifies B preservation. */
-                  regs[decoded.auxiliary_gpr] = 0xdeadbeef;
+                  /* B remains available to its later SSA uses. */
                   ++controls;
                   break;
                }
@@ -371,6 +370,88 @@ TEST(Apple9MeshIR, CountOnlyEffectSurvivesAndDrainsLoads)
       }
    }
    EXPECT_EQ(controls, 1u);
+   agx_apple9_vir_finish(&p);
+   ralloc_free(b.shader);
+}
+
+TEST(Apple9MeshIR, AuxiliaryClassRetainsLiveValueAndDetectsClobberMutation)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_MESH, &agx_nir_options, "mesh_auxiliary_preservation");
+   nir_block logical = {};
+   agx_apple9_vir_program p;
+   agx_apple9_vir_init(&p);
+   auto block = agx_apple9_block_create(&p);
+   block->nir = &logical;
+   agx_apple9_block_begin(&p, block);
+   auto zero = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IMM,
+                                    AGX_APPLE9_ENC_MOV_IMM32, nullptr, 0, 0);
+   agx_apple9_device_load_contract load = {
+      .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_LAST_USE_GPR,
+      .flags = 0,
+      .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
+   };
+   auto a = agx_apple9_vir_emit_device_load(&p, 0, zero, &load);
+   auto v = agx_apple9_vir_emit_device_load(&p, 1, zero, &load);
+   ASSERT_TRUE(agx_apple9_vir_emit_mesh_control(&p, a, v, true));
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(
+      &p, AGX_APPLE9_VIR_STORE_UNIFORM, AGX_APPLE9_ENC_STORE_UNIFORM, &v, 1, 0));
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
+   ASSERT_TRUE(agx_apple9_validate_vir_allocation(&p, &reason)) << reason;
+
+   /* Evaluate the actual allocated instructions twice. Only the second run
+    * mutates U0's B effect to a destructive one. This must be observable: a
+    * hidden allocator clobber copy would incorrectly mask the mutation. */
+   uint32_t regs[2][AGX_APPLE9_GPR_COUNT] = {};
+   uint32_t outputs[2] = {};
+   unsigned controls = 0;
+   for (unsigned i = 0; i < p.instruction_count; ++i) {
+      auto *I = p.instructions[i];
+      for (unsigned m = 0; m < 2; ++m) {
+         switch (I->op) {
+         case AGX_APPLE9_VIR_IMM:
+            regs[m][I->dest] = I->immediate;
+            break;
+         case AGX_APPLE9_VIR_DEVICE_LOAD:
+            regs[m][I->dest] = I->immediate ? 3 : 1;
+            break;
+         case AGX_APPLE9_VIR_IOR:
+            regs[m][I->dest] = regs[m][I->src[0]] | regs[m][I->src[1]];
+            break;
+         case AGX_APPLE9_VIR_IXOR:
+            regs[m][I->dest] = regs[m][I->src[0]] ^ regs[m][I->src[1]];
+            break;
+         case AGX_APPLE9_VIR_WAIT:
+            break;
+         case AGX_APPLE9_VIR_MESH_CONTROL:
+            EXPECT_EQ(I->live_after_mask, 2u);
+            EXPECT_EQ(regs[m][I->src[1]], 3u);
+            EXPECT_NE(I->src[0], I->src[1]);
+            regs[m][I->src[0]] &= 0xffff0000u;
+            if (m)
+               regs[m][I->src[1]] = 0xdeadbeef;
+            else {
+               ++controls;
+               /* An out-of-class physical operand must still be rejected. */
+               auto saved = I->src[1];
+               I->src[1] = AGX_APPLE9_GPR_COUNT;
+               EXPECT_FALSE(agx_apple9_validate_vir_allocation(&p, &reason));
+               I->src[1] = saved;
+               EXPECT_TRUE(agx_apple9_validate_vir_allocation(&p, &reason));
+            }
+            break;
+         case AGX_APPLE9_VIR_STORE_UNIFORM:
+            outputs[m] = regs[m][I->src[0]];
+            break;
+         default:
+            FAIL() << "unhandled allocated opcode " << I->op;
+         }
+      }
+   }
+   EXPECT_EQ(controls, 1u);
+   EXPECT_EQ(outputs[0], 3u);
+   EXPECT_EQ(outputs[1], 0xdeadbeefu);
    agx_apple9_vir_finish(&p);
    ralloc_free(b.shader);
 }

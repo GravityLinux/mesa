@@ -59,6 +59,8 @@ def check_program(rows, channels=None):
             r = rows[i]
             if r["op"].startswith("MESH_"):
                 clobber = decoded(i)
+                if r["op"] == "MESH_CONTROL":
+                    clobber = clobber[:1]
                 assert reg not in clobber, ("read of released/cleared source", reg, i)
             if r["dst"] != reg:
                 continue
@@ -89,9 +91,9 @@ def check_program(rows, channels=None):
             raise AssertionError(("unmodelled input definition", r))
         raise AssertionError(("undefined allocated input", reg, before))
 
-    # Both U0 operands are conservatively destructive. Check all subsequent
-    # ordinary reads, not just the def-use slices feeding mesh units.
-    killed = set(decoded(units[0]))
+    # U0 clears A and preserves B. Check all subsequent ordinary reads of A,
+    # not just the def-use slices feeding mesh units.
+    killed = set(decoded(units[0])[:1])
     for r in rows[units[0] + 1:]:
         assert not killed.intersection(r["src"]), ("post-U0 read", killed, r)
         killed.discard(r["dst"])
