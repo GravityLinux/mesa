@@ -7,6 +7,7 @@
 
 DEBUG_GET_ONCE_BOOL_OPTION(native_mesh, "HK_APPLE9_NATIVE_MESH", false)
 DEBUG_GET_ONCE_BOOL_OPTION(native_mesh_attributes, "HK_APPLE9_NATIVE_MESH_ATTRIBUTES", false)
+DEBUG_GET_ONCE_BOOL_OPTION(native_mesh_primitive_lowering, "HK_APPLE9_NATIVE_MESH_PRIMITIVE_LOWERING", false)
 
 bool
 hk_apple9_native_mesh_attributes_enabled(void)
@@ -18,6 +19,14 @@ bool
 hk_apple9_native_mesh_enabled(void)
 {
    return debug_get_option_native_mesh();
+}
+
+bool
+hk_apple9_native_mesh_primitive_lowering_enabled(void)
+{
+   return hk_apple9_native_mesh_enabled() &&
+          hk_apple9_native_mesh_attributes_enabled() &&
+          debug_get_option_native_mesh_primitive_lowering();
 }
 
 bool

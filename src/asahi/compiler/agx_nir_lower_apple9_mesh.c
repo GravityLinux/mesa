@@ -216,7 +216,9 @@ validate(nir_shader *nir, const struct agx_apple9_mesh_key *key,
                layout->culling |= slot == VARYING_SLOT_CULL_PRIMITIVE;
                continue;
             }
-            if (slot != VARYING_SLOT_POS && slot < VARYING_SLOT_VAR0)
+            if (slot != VARYING_SLOT_POS &&
+                !(slot == VARYING_SLOT_PRIMITIVE_ID && !prim) &&
+                slot < VARYING_SLOT_VAR0)
                return fail(reason,
                            "Apple9 native output builtin is not implemented");
             unsigned bits = is_store(intr->intrinsic)
@@ -257,7 +259,9 @@ validate(nir_shader *nir, const struct agx_apple9_mesh_key *key,
    for (unsigned c = 0; c < 4; ++c)
       layout->vertex_component[VARYING_SLOT_POS][c] =
          layout->vertex_components++;
-   for (unsigned slot = VARYING_SLOT_VAR0; slot < VARYING_SLOT_MAX; ++slot) {
+   for (unsigned slot = 0; slot < VARYING_SLOT_MAX; ++slot) {
+      if (slot == VARYING_SLOT_POS)
+         continue;
       u_foreach_bit(c, vertex[slot])
          layout->vertex_component[slot][c] = layout->vertex_components++;
       u_foreach_bit(c, primitive[slot])

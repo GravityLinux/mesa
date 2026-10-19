@@ -158,6 +158,7 @@ static const char *const hk_codegen_env[] = {
    "AGX_APPLE9_SAFE_HOIST_STAGES", "HK_APPLE9_DESCRIPTOR_BUFFER",
    "HK_APPLE9_MESH_SHADER", "HK_APPLE9_NATIVE_MESH",
    "HK_APPLE9_NATIVE_MESH_ATTRIBUTES",
+   "HK_APPLE9_NATIVE_MESH_PRIMITIVE_LOWERING",
    "HK_APPLE9_SPARSE_SCRATCH",
    "HK_APPLE9_TESS_BATCH", "HK_APPLE9_TESS_SCAN_BLOCK",
    "HK_APPLE9_TEXEL_CLASSES", "HK_APPLE9_UNIFORM_SAFE_CLASSES",
@@ -3603,14 +3604,15 @@ hk_apple9_lower_image_barriers(nir_shader *nir)
  */
 static bool
 hk_lower_per_primitive_input(nir_builder *b, nir_intrinsic_instr *intr,
-                             UNUSED void *data)
+                             void *data)
 {
    if (intr->intrinsic != nir_intrinsic_load_per_primitive_input)
       return false;
 
    b->cursor = nir_before_instr(&intr->instr);
    nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
-   if (hk_mesh_varying_in_memory(sem.location)) {
+   bool native_broadcast = data && *(const bool *)data;
+   if (!native_broadcast && hk_mesh_varying_in_memory(sem.location)) {
       nir_def *record = nir_load_input(
          b, 1, 32, nir_imm_int(b, 0), .range = 1, .dest_type = nir_type_uint32,
          .io_semantics.location = HK_MESH_PRIMITIVE_SLOT,
@@ -3951,8 +3953,14 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
                nir_lower_io_use_interpolated_input_intrinsics);
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+      /* The native gate admits only native mesh pipelines. If an emulated
+       * fallback is added under that gate, key this by the linked mesh stage
+       * so its per-primitive inputs still use the in-memory record path. */
+      bool native_broadcast = dev->dev.chip == AGX_CHIP_G16G &&
+                             hk_apple9_native_mesh_primitive_lowering_enabled();
       NIR_PASS(_, nir, nir_shader_intrinsics_pass,
-               hk_lower_per_primitive_input, nir_metadata_control_flow, NULL);
+               hk_lower_per_primitive_input, nir_metadata_control_flow,
+               &native_broadcast);
    }
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
@@ -5875,6 +5883,7 @@ hk_apple9_compile_native_mesh_program(
    const struct agx_apple9_native_mesh_options options = {
       .clip_halfz = key->clip_negative_one_to_one,
       .attributes = hk_apple9_native_mesh_attributes_enabled(),
+      .primitive_broadcast = hk_apple9_native_mesh_primitive_lowering_enabled(),
       .outputs_flat = key->vertex.outputs_flat,
       .outputs_linear = key->vertex.outputs_linear,
    };

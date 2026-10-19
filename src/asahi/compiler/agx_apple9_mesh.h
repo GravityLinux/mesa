@@ -76,6 +76,8 @@ struct agx_apple9_mesh_body_info {
    bool requires_object_completion;
    bool requires_mesh_completion;
    bool uses_vertex_count;
+   /* V3/P1 primitive outputs lowered to flat planes or a local cull flag. */
+   uint64_t primitive_broadcast;
    unsigned argument_uniform_words;
 };
 
@@ -169,6 +171,8 @@ bool agx_compile_apple9_mesh_lowered(nir_shader *nir,
 struct agx_apple9_native_mesh_options {
    bool clip_halfz;
    bool attributes;
+   /* Exact single-primitive lowering; no native primitive-record ABI. */
+   bool primitive_broadcast;
    uint64_t outputs_flat, outputs_linear;
 };
 

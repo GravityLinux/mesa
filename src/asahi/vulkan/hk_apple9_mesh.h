@@ -12,6 +12,7 @@
  * native-mesh capability bit; enabling this requires the matching kernel. */
 bool hk_apple9_native_mesh_enabled(void);
 bool hk_apple9_native_mesh_attributes_enabled(void);
+bool hk_apple9_native_mesh_primitive_lowering_enabled(void);
 
 enum hk_apple9_native_stage {
    HK_APPLE9_NATIVE_NONE,

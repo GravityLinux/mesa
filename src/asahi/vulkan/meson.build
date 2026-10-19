@@ -194,7 +194,8 @@ if with_tests
       dependencies : [hk_deps],
       link_with : [libhk],
     ),
-    env : ['HK_APPLE9_NATIVE_MESH=1', 'HK_APPLE9_NATIVE_MESH_ATTRIBUTES=1'],
+    env : ['HK_APPLE9_NATIVE_MESH=1', 'HK_APPLE9_NATIVE_MESH_ATTRIBUTES=1',
+           'HK_APPLE9_NATIVE_MESH_PRIMITIVE_LOWERING=1'],
     suite : ['asahi', 'honeykrisp'],
   )
   test(
