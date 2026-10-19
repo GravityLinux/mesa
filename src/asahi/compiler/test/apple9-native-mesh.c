@@ -104,12 +104,13 @@ static const char *export_dir;
 static void
 run_fixture(const struct native_mesh_fixture *f, bool pressure, bool clip_halfz)
 {
+   const struct agx_apple9_native_mesh_options options = {.clip_halfz = clip_halfz};
    struct agx_apple9_mesh_body_info info;
    const char *reason = NULL;
    nir_shader *nir = source(f);
    if (clip_halfz)
       nir_lower_io_to_scalar(nir, nir_var_shader_out, NULL, NULL);
-   CHECK(agx_nir_lower_apple9_native_mesh(nir, true, clip_halfz, &info, &reason));
+   CHECK(agx_nir_lower_apple9_native_mesh(nir, true, &options, &info, &reason));
    if (pressure)
       add_pressure(nir);
    nir_lower_vars_to_ssa(nir);
@@ -163,7 +164,7 @@ run_fixture(const struct native_mesh_fixture *f, bool pressure, bool clip_halfz)
    nir = source(f);
    if (clip_halfz)
       nir_lower_io_to_scalar(nir, nir_var_shader_out, NULL, NULL);
-   bool ok = agx_nir_lower_apple9_native_mesh(nir, true, clip_halfz, &info, &reason);
+   bool ok = agx_nir_lower_apple9_native_mesh(nir, true, &options, &info, &reason);
    if (ok && pressure)
       add_pressure(nir);
    if (ok)
@@ -207,6 +208,139 @@ run_fixture(const struct native_mesh_fixture *f, bool pressure, bool clip_halfz)
    ralloc_free(nir);
 }
 
+struct attribute {
+   unsigned slot, component, group;
+};
+
+static nir_shader *
+attribute_source(const struct attribute *attrs, unsigned count)
+{
+   nir_shader *nir = source(&h1_fixtures[0]);
+   nir_builder b = nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(nir)));
+   for (unsigned v = 0; v < 3; ++v) {
+      nir_push_if(&b, nir_ieq_imm(&b, nir_load_local_invocation_index(&b), v));
+      for (unsigned i = 0; i < count; ++i)
+         nir_store_per_vertex_output(
+            &b, nir_imm_int(&b, 0x3f000000 + 256 * i + v),
+            nir_imm_int(&b, v), nir_imm_int(&b, 0),
+            .component = attrs[i].component, .write_mask = 1,
+            .src_type = nir_type_float32,
+            .io_semantics = {.location = attrs[i].slot, .num_slots = 1});
+      nir_pop_if(&b, NULL);
+   }
+   return nir;
+}
+
+static void
+run_attributes(const char *name, const struct attribute *attrs, unsigned count)
+{
+   struct agx_apple9_native_mesh_options options = {.attributes = true};
+   for (unsigned i = 0; i < count; ++i) {
+      if (attrs[i].group == 1)
+         options.outputs_flat |= BITFIELD64_BIT(attrs[i].slot);
+      if (attrs[i].group == 2)
+         options.outputs_linear |= BITFIELD64_BIT(attrs[i].slot);
+   }
+   const char *reason = NULL;
+   struct agx_apple9_mesh_body_info info;
+   nir_shader *nir = attribute_source(attrs, count);
+   CHECK(agx_nir_lower_apple9_native_mesh(nir, true, &options, &info, &reason));
+   nir_lower_vars_to_ssa(nir);
+   nir_opt_dce(nir);
+   struct machine m = {0};
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   m.value = calloc(impl->ssa_alloc, sizeof(*m.value));
+   CHECK(m.value);
+   execute(&m, &impl->body, ALL_LANES);
+   CHECK(m.barriers == 1 && m.fences == 6 + count);
+   CHECK(m.controls == ALL_LANES && m.scalars == 1 && !m.writes);
+   /* Derive packed order independently of the compiler's indexing helper. */
+   unsigned channel[124];
+   for (unsigned i = 0; i < count; ++i) {
+      channel[i] = 4;
+      for (unsigned j = 0; j < count; ++j)
+         channel[i] += attrs[j].group < attrs[i].group ||
+            (attrs[j].group == attrs[i].group &&
+             (attrs[j].slot < attrs[i].slot ||
+              (attrs[j].slot == attrs[i].slot &&
+               attrs[j].component < attrs[i].component)));
+      CHECK(m.channels[channel[i]] == 7);
+      for (unsigned v = 0; v < 3; ++v)
+         CHECK(m.submitted_position[v][channel[i]] == 0x3f000000 + 256 * i + v);
+   }
+   free(m.value);
+   ralloc_free(nir);
+   nir = attribute_source(attrs, count);
+   struct agx_shader_part code = {0};
+   CHECK(agx_compile_apple9_native_mesh(nir, true, &options, &code, &info, &reason));
+   CHECK(code.info.apple9_varyings.count == count);
+   CHECK(info.layout.local_size_B == 96 + 16 * count);
+   for (unsigned i = 0; i < count; ++i) {
+      CHECK(code.info.apple9_varyings.mask[attrs[i].slot] & BITFIELD_BIT(attrs[i].component));
+      CHECK(code.info.apple9_varyings.group[attrs[i].slot] == attrs[i].group);
+   }
+   printf("fixture=%s pressure=0 halfz=0 gprs=%u channels=", name, code.info.nr_gprs);
+   for (unsigned c = 0; c < 4; ++c)
+      printf("%s%u:%u", c ? "," : "", c, 32 + 16 * c);
+   /* Publication walks local semantic order, even when channel order differs. */
+   for (unsigned slot = VARYING_SLOT_VAR0; slot <= VARYING_SLOT_VAR31; ++slot) {
+      for (unsigned c = 0; c < 4; ++c) {
+         for (unsigned i = 0; i < count; ++i) {
+            if (attrs[i].slot == slot && attrs[i].component == c)
+               printf(",%u:%u", channel[i], 32 + 16 * info.layout.vertex_component[slot][c]);
+         }
+      }
+   }
+   puts("");
+   free(code.binary);
+   ralloc_free(nir);
+   nir = attribute_source(attrs, count);
+   CHECK(!agx_compile_apple9_native_mesh(nir, true, NULL, &code, &info, &reason));
+   CHECK(!code.binary && strstr(reason, "attributes development path is disabled"));
+   ralloc_free(nir);
+}
+
+static void
+check_attributes(void)
+{
+   for (unsigned g = 0; g < 3; ++g) {
+      const struct attribute a = {VARYING_SLOT_VAR0, 0, g};
+      run_attributes(g == 0 ? "ATTR_SMOOTH" : g == 1 ? "ATTR_FLAT" : "ATTR_LINEAR", &a, 1);
+   }
+   const struct attribute mixed[] = {
+      {VARYING_SLOT_VAR0, 3, 2}, {VARYING_SLOT_VAR2, 1, 1},
+      {VARYING_SLOT_VAR4, 2, 0}, {VARYING_SLOT_VAR4, 0, 0},
+      {VARYING_SLOT_VAR7, 1, 2},
+   };
+   run_attributes("ATTR_MIXED_SPARSE", mixed, ARRAY_SIZE(mixed));
+   struct attribute wide[124];
+   for (unsigned i = 0; i < ARRAY_SIZE(wide); ++i)
+      wide[i] = (struct attribute){VARYING_SLOT_VAR0 + i / 4, i % 4, (i / 4) % 3};
+   run_attributes("ATTR_LIMIT", wide, ARRAY_SIZE(wide));
+   const struct agx_apple9_native_mesh_options options = {.attributes = true};
+   const char *reason = NULL;
+   struct agx_shader_part code = {0};
+   struct agx_apple9_mesh_body_info info;
+   for (unsigned primitive = 0; primitive < 2; ++primitive) {
+      nir_shader *nir = primitive ? source(&h1_fixtures[0])
+                                  : attribute_source(wide, ARRAY_SIZE(wide));
+      nir_builder b = nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(nir)));
+      if (primitive)
+         nir_store_per_primitive_output(
+            &b, nir_imm_float(&b, 1), nir_imm_int(&b, 0), nir_imm_int(&b, 0),
+            .write_mask = 1, .src_type = nir_type_float32,
+            .io_semantics = {.location = VARYING_SLOT_VAR0, .num_slots = 1});
+      else
+         nir_store_per_vertex_output(
+            &b, nir_imm_float(&b, 1), nir_imm_int(&b, 0), nir_imm_int(&b, 0),
+            .write_mask = 1, .src_type = nir_type_float32,
+            .io_semantics = {.location = VARYING_SLOT_VAR31, .num_slots = 1});
+      CHECK(!agx_compile_apple9_native_mesh(nir, true, &options, &code, &info, &reason));
+      CHECK(!code.binary && strstr(reason, primitive ? "primitive attributes" : "124 user"));
+      ralloc_free(nir);
+   }
+}
+
 static void
 reject_unsupported(void)
 {
@@ -224,7 +358,7 @@ reject_unsupported(void)
       struct agx_shader_part code = {0};
       struct agx_apple9_mesh_body_info info = {0};
       const char *reason = NULL;
-      CHECK(!agx_compile_apple9_native_mesh(nir, variant != 0, false, &code, &info,
+      CHECK(!agx_compile_apple9_native_mesh(nir, variant != 0, NULL, &code, &info,
                                             &reason));
       CHECK(!code.binary && reason);
       if (!variant)
@@ -254,6 +388,7 @@ main(int argc, char **argv)
       return 0;
    }
    reject_unsupported();
+   check_attributes();
    for (unsigned i = 0; i < ARRAY_SIZE(h1_fixtures); ++i)
       run_fixture(&h1_fixtures[i], false, false);
    run_fixture(&h1_fixtures[0], true, false);

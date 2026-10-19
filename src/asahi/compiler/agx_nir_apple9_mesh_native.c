@@ -83,11 +83,45 @@ device_fence(nir_builder *b)
                .memory_modes = nir_var_mem_global);
 }
 
+/* Local planes stay in semantic/component order for shader output reads.
+ * U channels use the fragment linker's interpolation groups instead. */
+static bool
+varying_layout(const struct agx_apple9_mesh_layout *layout,
+               const struct agx_apple9_native_mesh_options *options,
+               struct agx_apple9_varying_layout *varyings,
+               const char **reason)
+{
+   memset(varyings, 0, sizeof(*varyings));
+   if (layout->primitive_components || layout->culling)
+      return fail(reason,
+                  "native mesh primitive attributes/culling are not implemented");
+   if (layout->vertex_components > 4 && (!options || !options->attributes))
+      return fail(reason, "native mesh attributes development path is disabled");
+   if (layout->vertex_components > 4 + AGX_APPLE9_MAX_VARYING_COMPONENTS)
+      return fail(reason, "native mesh exceeds 124 user varying scalars");
+   for (unsigned slot = VARYING_SLOT_VAR0; slot < VARYING_SLOT_MAX; ++slot) {
+      for (unsigned c = 0; c < 4; ++c) {
+         if (layout->vertex_component[slot][c] == AGX_APPLE9_MESH_UNUSED)
+            continue;
+         if (slot >= ARRAY_SIZE(varyings->mask) ||
+             !agx_apple9_varying_supported(slot))
+            return fail(reason, "native mesh varying location is unsupported");
+         varyings->mask[slot] |= BITFIELD_BIT(c);
+         ++varyings->count;
+      }
+      if (slot < ARRAY_SIZE(varyings->mask) && varyings->mask[slot])
+         varyings->group[slot] =
+            (options->outputs_flat & BITFIELD64_BIT(slot)) ? 1 :
+            (options->outputs_linear & BITFIELD64_BIT(slot)) ? 2 : 0;
+   }
+   return true;
+}
+
 bool
-agx_nir_lower_apple9_native_mesh(nir_shader *nir, bool enable_native_mesh,
-                                 bool clip_halfz,
-                                 struct agx_apple9_mesh_body_info *info,
-                                 const char **reason)
+agx_nir_lower_apple9_native_mesh(
+   nir_shader *nir, bool enable_native_mesh,
+   const struct agx_apple9_native_mesh_options *options,
+   struct agx_apple9_mesh_body_info *info, const char **reason)
 {
    if (!enable_native_mesh)
       return fail(reason, "native mesh development path is disabled");
@@ -99,10 +133,9 @@ agx_nir_lower_apple9_native_mesh(nir_shader *nir, bool enable_native_mesh,
    if (!agx_nir_lower_apple9_mesh(nir, &key, info, reason))
       return false;
    const struct agx_apple9_mesh_layout *layout = &info->layout;
-   if (layout->vertex_components != 4 || layout->primitive_components ||
-       layout->culling || layout->position_B != 32 ||
-       layout->vertex_pitch_B != 16 || layout->local_size_B != 96)
-      return fail(reason, "native mesh requires Position only and no primitive attributes");
+   struct agx_apple9_varying_layout varyings;
+   if (!varying_layout(layout, options, &varyings, reason))
+      return false;
    nir_shader_intrinsics_pass(nir, consume_count, nir_metadata_none, info);
    nir_lower_returns(nir);
    if (!agx_nir_mask_apple9_mesh_body(nir, &key, layout, reason))
@@ -124,7 +157,7 @@ agx_nir_lower_apple9_native_mesh(nir_shader *nir, bool enable_native_mesh,
    nir_def *vertices = nir_load_local_apple9_agx(
       &b, nir_imm_int(&b, layout->vertex_count_B), .base = key.output_root);
    nir_def *lane = nir_load_local_invocation_index(&b);
-   if (clip_halfz) {
+   if (options && options->clip_halfz) {
       /* Convert the completed homogeneous position, after all body writes and
        * output reads. Doing this at publication also handles scalar/partial
        * stores and different invocations writing Z and W. Keep W unchanged:
@@ -167,6 +200,16 @@ agx_nir_lower_apple9_native_mesh(nir_shader *nir, bool enable_native_mesh,
                                          nir_imm_int(&b, plane));
       device_fence(&b);
    }
+   for (unsigned slot = VARYING_SLOT_VAR0; slot < ARRAY_SIZE(varyings.mask); ++slot) {
+      u_foreach_bit(c, varyings.mask[slot]) {
+         unsigned channel = 4 + agx_apple9_varying_index(&varyings, slot, c);
+         unsigned plane = layout->position_B + layout->vertex_pitch_B *
+                             layout->vertex_component[slot][c];
+         nir_mesh_submit_channel_apple9_agx(&b, nir_imm_int(&b, channel),
+                                            nir_imm_int(&b, plane));
+         device_fence(&b);
+      }
+   }
    nir_pop_if(&b, NULL);
    nir_push_if(&b, nir_ieq_imm(&b, lane, 0));
    nir_mesh_submit_scalar_apple9_agx(&b, vertices);
@@ -180,15 +223,18 @@ agx_nir_lower_apple9_native_mesh(nir_shader *nir, bool enable_native_mesh,
 }
 
 bool
-agx_compile_apple9_native_mesh(nir_shader *nir, bool enable_native_mesh,
-                                 bool clip_halfz,
-                               struct agx_shader_part *out,
-                               struct agx_apple9_mesh_body_info *info,
-                               const char **reason)
+agx_compile_apple9_native_mesh(
+   nir_shader *nir, bool enable_native_mesh,
+   const struct agx_apple9_native_mesh_options *options,
+   struct agx_shader_part *out, struct agx_apple9_mesh_body_info *info,
+   const char **reason)
 {
    memset(out, 0, sizeof(*out));
-   if (!agx_nir_lower_apple9_native_mesh(nir, enable_native_mesh, clip_halfz,
+   if (!agx_nir_lower_apple9_native_mesh(nir, enable_native_mesh, options,
                                          info, reason))
       return false;
-   return agx_compile_apple9_mesh_lowered(nir, &info->key, out, reason);
+   if (!agx_compile_apple9_mesh_lowered(nir, &info->key, out, reason))
+      return false;
+   return varying_layout(&info->layout, options, &out->info.apple9_varyings,
+                         reason);
 }

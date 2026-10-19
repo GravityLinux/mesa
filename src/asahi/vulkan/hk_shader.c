@@ -157,6 +157,7 @@ static const char *const hk_codegen_env[] = {
    "AGX_APPLE9_RA_WEBS",
    "AGX_APPLE9_SAFE_HOIST_STAGES", "HK_APPLE9_DESCRIPTOR_BUFFER",
    "HK_APPLE9_MESH_SHADER", "HK_APPLE9_NATIVE_MESH",
+   "HK_APPLE9_NATIVE_MESH_ATTRIBUTES",
    "HK_APPLE9_SPARSE_SCRATCH",
    "HK_APPLE9_TESS_BATCH", "HK_APPLE9_TESS_SCAN_BLOCK",
    "HK_APPLE9_TEXEL_CLASSES", "HK_APPLE9_UNIFORM_SAFE_CLASSES",
@@ -210,6 +211,7 @@ hk_hash_apple9_native_mesh_abi(struct mesa_blake3 *ctx)
       k.primitive_count_bits, k.payload_uniform, k.grid_root, k.grid_offset_B,
       k.physical_threads, AGX_APPLE9_MESH_DRAW_UNIFORM,
       AGX_APPLE9_MESH_ARGUMENT_WORDS,
+      hk_apple9_native_mesh_attributes_enabled(),
    };
    _mesa_blake3_update(ctx, abi, sizeof(abi));
 }
@@ -5892,15 +5894,22 @@ hk_apple9_compile_mesh(struct hk_device *dev, nir_shader *nir,
  * Both BOs use the existing shader cache, upload and destruction paths. */
 static VkResult
 hk_apple9_compile_native_mesh(struct hk_device *dev, nir_shader *nir,
-                               struct hk_api_shader *obj, bool clip_halfz,
+                               struct hk_api_shader *obj,
+                               const struct hk_apple9_graphics_key *key,
                                const char **reason)
 {
    struct hk_shader *mesh = &obj->variants[HK_MESH_VARIANT_MAIN];
    struct hk_shader *object = &obj->variants[HK_MESH_VARIANT_OBJECT];
    hk_mesh_gather_info(nir, &mesh->info.mesh);
    mesh->info.apple9_native_stage = HK_APPLE9_NATIVE_MESH;
+   const struct agx_apple9_native_mesh_options options = {
+      .clip_halfz = key->clip_negative_one_to_one,
+      .attributes = hk_apple9_native_mesh_attributes_enabled(),
+      .outputs_flat = key->vertex.outputs_flat,
+      .outputs_linear = key->vertex.outputs_linear,
+   };
    if (!agx_compile_apple9_native_mesh(nir, hk_apple9_native_mesh_enabled(),
-                                       clip_halfz,
+                                       &options,
                                        &mesh->b, &mesh->info.apple9_native,
                                        reason))
       return vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
@@ -6383,7 +6392,7 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
          } else if (stage == MESA_SHADER_MESH) {
             if (hk_apple9_native_mesh_enabled()) {
                result = hk_apple9_compile_native_mesh(
-                  dev, nir, obj, key.clip_negative_one_to_one, &reason);
+                  dev, nir, obj, &key, &reason);
                if (result != VK_SUCCESS)
                   goto done;
                varyings = shader->b.info.apple9_varyings;

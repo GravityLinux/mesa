@@ -136,7 +136,7 @@ lower(nir_shader *nir, bool enable, struct agx_apple9_mesh_body_info *info,
    return nir->info.stage == MESA_SHADER_TASK
              ? agx_nir_lower_apple9_native_object(nir, enable, &key, info,
                                                   reason)
-             : agx_nir_lower_apple9_native_mesh(nir, enable, false, info, reason);
+             : agx_nir_lower_apple9_native_mesh(nir, enable, NULL, info, reason);
 }
 
 static void

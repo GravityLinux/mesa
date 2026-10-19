@@ -12,7 +12,7 @@
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "%u: %s\n", __LINE__, #c); exit(1); } } while (0)
 
 static nir_shader *
-mesh_source(void)
+mesh_source(unsigned attributes)
 {
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_MESH, &agx_nir_options, "native runtime contract");
@@ -30,6 +30,12 @@ mesh_source(void)
          nir_imm_int(&b, i), nir_imm_int(&b, 0),
          .write_mask = 15, .src_type = nir_type_float32,
          .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+   for (unsigned i = 0; i < attributes; ++i)
+      for (unsigned v = 0; v < 3; ++v)
+         nir_store_per_vertex_output(
+            &b, nir_imm_float(&b, i + v), nir_imm_int(&b, v), nir_imm_int(&b, 0),
+            .component = i % 4, .write_mask = 1, .src_type = nir_type_float32,
+            .io_semantics = {.location = VARYING_SLOT_VAR0 + i / 4, .num_slots = 1});
    nir_store_per_primitive_output(
       &b, nir_imm_ivec3(&b, 0, 1, 2), nir_imm_int(&b, 0), nir_imm_int(&b, 0),
       .write_mask = 7, .src_type = nir_type_uint32,
@@ -38,15 +44,16 @@ mesh_source(void)
 }
 
 static void
-check_contract(bool object)
+check_contract(bool object, unsigned attributes)
 {
    const struct agx_apple9_mesh_key k = AGX_APPLE9_MESH_KEY;
-   nir_shader *nir = object ? agx_nir_apple9_taskless_object(&k) : mesh_source();
+   nir_shader *nir = object ? agx_nir_apple9_taskless_object(&k) : mesh_source(attributes);
    struct agx_shader_part part = {0};
    struct agx_apple9_mesh_body_info info = {0};
    const char *reason = NULL;
+   const struct agx_apple9_native_mesh_options options = {.attributes = true};
    CHECK(object ? agx_compile_apple9_native_object(nir, true, &k, &part, &info, &reason)
-                : agx_compile_apple9_native_mesh(nir, true, false, &part, &info, &reason));
+                : agx_compile_apple9_native_mesh(nir, true, &options, &part, &info, &reason));
    enum hk_apple9_native_stage stage = object ? HK_APPLE9_NATIVE_OBJECT
                                              : HK_APPLE9_NATIVE_MESH;
    CHECK(hk_apple9_native_shader_valid(&part.info, &info, stage));
@@ -73,7 +80,8 @@ check_contract(bool object)
                                              stage, base, code));
    CHECK(launch.frame_extent_a == (object ? 16 : 64));
    CHECK(launch.frame_extent_b == launch.frame_extent_a);
-   CHECK(launch.threadgroup_memory_bytes == 128);
+   CHECK(launch.threadgroup_memory_bytes == (object ? 128 :
+      util_next_power_of_two(MAX2(128, 96 + 16 * attributes))));
    CHECK(launch.entry_offset == code - base);
    launch.resource_table = base + 0x445000;
    launch.launch_address = base + 0x448000;
@@ -103,9 +111,9 @@ check_contract(bool object)
       };
       uint32_t packet[AGX_APPLE9_MESH_STATE_WORDS];
       CHECK(agx_apple9_mesh_state_build(packet, &state));
-      CHECK(packet[0] == 0x40000d2c && packet[1] == 0x504);
+      CHECK(packet[0] == 0x40000d2c && packet[1] == ((5 + attributes) << 8 | (4 + attributes)));
       CHECK(packet[6] == state.object_launch && packet[8] == state.mesh_launch);
-      CHECK(packet[9] == 1 && packet[11] == 0x400810 && packet[13] == 5);
+      CHECK(packet[9] == 1 && packet[11] == 0x400810 && packet[13] == 5 + attributes);
       struct agx_apple9_render_pipeline pipeline = {
          .ppp = 0x4000, .primitive = AGX_PRIMITIVE_TRIANGLES,
          .ppp_viewport_offset = 0x100, .ppp_viewport_words = 10,
@@ -141,8 +149,11 @@ main(void)
 {
    CHECK(!hk_apple9_native_mesh_enabled());
    glsl_type_singleton_init_or_ref();
-   check_contract(false);
-   check_contract(true);
+   check_contract(false, 0);
+   check_contract(false, 1);
+   check_contract(false, 5);
+   check_contract(false, 124);
+   check_contract(true, 0);
    struct agx_apple9_mesh_arguments args = {
       .graphics = {0x1000, 0x2000, 0x3000},
       .output_root = HK_APPLE9_NATIVE_OUTPUT_ROOT,

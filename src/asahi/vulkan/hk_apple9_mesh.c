@@ -6,6 +6,13 @@
 #include <string.h>
 
 DEBUG_GET_ONCE_BOOL_OPTION(native_mesh, "HK_APPLE9_NATIVE_MESH", false)
+DEBUG_GET_ONCE_BOOL_OPTION(native_mesh_attributes, "HK_APPLE9_NATIVE_MESH_ATTRIBUTES", false)
+
+bool
+hk_apple9_native_mesh_attributes_enabled(void)
+{
+   return debug_get_option_native_mesh_attributes();
+}
 
 bool
 hk_apple9_native_mesh_enabled(void)
@@ -40,9 +47,11 @@ hk_apple9_native_shader_valid(const struct agx_shader_info *code,
              body->logical_size[2] == 1;
    const struct agx_apple9_mesh_layout *l = &body->layout;
    return l->max_vertices == 3 && l->max_primitives == 1 &&
-          l->indices_per_primitive == 3 && l->vertex_components == 4 &&
+          l->indices_per_primitive == 3 && l->vertex_components >= 4 &&
+          l->vertex_components <= 4 + AGX_APPLE9_MAX_VARYING_COMPONENTS &&
+          code->apple9_varyings.count == l->vertex_components - 4 &&
           !l->primitive_components && !l->primitive_stride_B && !l->culling &&
-          l->local_size_B == 96 && l->position_B == 32 &&
+          l->local_size_B == 32 + 16 * l->vertex_components && l->position_B == 32 &&
           l->vertex_pitch_B == 16;
 }
 
@@ -72,7 +81,11 @@ hk_apple9_native_launch_parameters(
       .publication_count = code->apple9_publication_count,
       .frame_extent_a = frame,
       .frame_extent_b = frame,
-      .threadgroup_memory_bytes = HK_APPLE9_NATIVE_LOCAL_BYTES,
+      .threadgroup_memory_bytes = stage == HK_APPLE9_NATIVE_OBJECT
+                                    ? HK_APPLE9_NATIVE_LOCAL_BYTES
+                                    : util_next_power_of_two(MAX2(
+                                         HK_APPLE9_NATIVE_LOCAL_BYTES,
+                                         body->layout.local_size_B)),
       .preamble_address = code->apple9_preamble_size
                              ? code_address + code->apple9_preamble_offset : 0,
    };

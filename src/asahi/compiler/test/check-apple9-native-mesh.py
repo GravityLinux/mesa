@@ -26,10 +26,11 @@ def opcode_names():
     return [x.removeprefix("AGX_APPLE9_VIR_") for x in names]
 
 
-def check_program(rows):
+def check_program(rows, channels=None):
+    if channels is None: channels = [[c, 32 + 16*c] for c in range(4)]
     units = [i for i, r in enumerate(rows) if r["op"].startswith("MESH_")]
     assert [rows[i]["op"] for i in units] == [
-        "MESH_CONTROL", *["MESH_SUBMIT_CHANNEL"] * 4, "MESH_SUBMIT_SCALAR"]
+        "MESH_CONTROL", *["MESH_SUBMIT_CHANNEL"] * len(channels), "MESH_SUBMIT_SCALAR"]
 
     def decoded(i):
         r = rows[i]
@@ -87,7 +88,7 @@ def check_program(rows):
         killed.discard(r["dst"])
 
     expected = [[("local", 6, 16), ("local", 6, 20)],
-                *[[c, 32 + 16 * c] for c in range(4)], [("local", 6, 20)]]
+                *channels, [("local", 6, 20)]]
     for i, want in zip(units, expected):
         assert [value(s, i) for s in decoded(i)] == want
 
@@ -106,8 +107,8 @@ def check_program(rows):
         elif i in units:
             unit_masks.append(list(stack))
     assert not stack and unit_masks[0] == []
-    assert all(m == unit_masks[1] for m in unit_masks[1:5])
-    for mask, kind in [(unit_masks[1], "channel"), (unit_masks[5], "scalar")]:
+    assert all(m == unit_masks[1] for m in unit_masks[1:-1])
+    for mask, kind in [(unit_masks[1], "channel"), (unit_masks[-1], "scalar")]:
         assert len(mask) == 1
         index, push = mask[0]
         compare = rows[index]
@@ -162,6 +163,7 @@ def main():
         sys.stdout.write(run.stdout)
         sys.stderr.write(run.stderr)
         return run.returncode
+    fixtures = [x for x in run.stdout.splitlines() if x.startswith("fixture=")]
     names = opcode_names()
     rows, checked = None, []
     programs = []
@@ -170,7 +172,9 @@ def main():
             assert rows is None
             rows = []
         elif line == "APPLE9_ASM_END":
-            checked.append(check_program(rows))
+            match = re.search(r"channels=(\S+)", fixtures[len(checked)])
+            channels = [list(map(int, x.split(':'))) for x in match[1].split(',')] if match else None
+            checked.append(check_program(rows, channels))
             programs.append(rows)
             rows = None
         elif line.startswith("APPLE9_ASM offset="):
@@ -195,8 +199,8 @@ def main():
     mutation_checks(programs[pressured])
     sys.stdout.write(run.stdout)
     print("six allocation mutations rejected; live pressure increases the GPR high-water mark")
-    print(f"checked {len(checked)} complete programs: boundaries, six units, allocated inputs, masks")
-    print("first program units (U0, channels 0..3, scalar):", " ".join(checked[0]))
+    print(f"checked {len(checked)} complete programs: boundaries, U units, allocated inputs, masks")
+    print("first program U units:", " ".join(checked[0]))
     return 0
 
 

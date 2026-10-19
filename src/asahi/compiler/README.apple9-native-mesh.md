@@ -8,8 +8,24 @@ The existing compute-emulated Vulkan mesh path remains the default.
 
 The accepted development class is a fixed API workgroup with 1..16 invocations
 (any 3D shape), launched at physical 16x1x1, triangle topology,
-maxima V3/P1, one constant `SetMeshOutputs(3, 1)`, Position only, and no task
-payload, user shared memory, culling or primitive attributes. Position retains
+maxima V3/P1, one constant `SetMeshOutputs(3, 1)`, and no task
+payload, user shared memory, culling or primitive attributes. Position-only output
+is the default. The additional `HK_APPLE9_NATIVE_MESH_ATTRIBUTES=1` development
+gate admits up to 124 32-bit user scalars in generic varying slots, with smooth,
+flat and noperspective interpolation selected by the fragment interface. This
+attribute path is host-tested but not yet hardware-qualified.
+
+Mesh output writes/reads use component-major local planes in semantic order.
+Completion publishes each plane with the existing U channel operation; user
+channel numbers follow the ordinary VS smooth/flat/linear grouping. The compiler
+exports that same varying layout to the fragment compiler and shared PPP builder.
+The launch local allocation is the next power of two covering the output layout,
+with a 128-byte minimum. No fixed application registers, new opaque code, or
+capture-specific instruction sequences are introduced. Primitive attributes
+remain rejected because their linking-plane/device-record publication is not
+understood. Paired VS/native device arms live in `../vulkan/tests/native-attributes`.
+
+Position retains
 all four components, including non-unit W. Hardware clipping is unqualified;
 the compiler does not perform a software clip-domain drop. The
 hardware validation launch must use one workgroup while workgroup scope is
