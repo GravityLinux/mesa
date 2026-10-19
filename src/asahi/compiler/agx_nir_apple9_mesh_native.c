@@ -88,10 +88,16 @@ device_fence(nir_builder *b)
  * all body writes complete. This is an ordinary flat-varying lowering, separate
  * from the unresolved native primitive-record linking plane.
  */
+struct primitive_lower {
+   uint64_t mask;
+   unsigned root, cull_B;
+};
+
 static bool
 lower_primitive_output(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
-   uint64_t mask = *(const uint64_t *)data;
+   const struct primitive_lower *lower = data;
+   uint64_t mask = lower->mask;
    bool store = intr->intrinsic == nir_intrinsic_store_per_primitive_output;
    if (!store && intr->intrinsic != nir_intrinsic_load_per_primitive_output)
       return false;
@@ -101,19 +107,33 @@ lower_primitive_output(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       return false;
 
    b->cursor = nir_before_instr(&intr->instr);
+   if (slot == VARYING_SLOT_CULL_PRIMITIVE) {
+      /* A compiler-owned word in the count header, separate from both native
+       * primitive records and the fragment compiler's CullDistance transport. */
+      nir_def *address = nir_imm_int(b, lower->cull_B);
+      if (store) {
+         nir_def *value = intr->src[0].ssa;
+         if (value->bit_size == 1)
+            value = nir_b2i32(b, value);
+         nir_store_local_apple9_agx(b, value, address,
+                                    .base = lower->root, .bit_size = 32);
+         nir_instr_remove(&intr->instr);
+      } else {
+         nir_def_replace(&intr->def,
+            nir_load_local_apple9_agx(b, address, .base = lower->root));
+      }
+      return true;
+   }
    sem.location = slot;
    sem.num_slots = 1;
    if (store) {
       nir_def *value = intr->src[0].ssa;
-      bool cull = slot == VARYING_SLOT_CULL_PRIMITIVE;
-      if (cull && value->bit_size == 1)
-         value = nir_b2i32(b, value);
       nir_store_per_vertex_output(
          b, value, nir_imm_int(b, 0), nir_imm_int(b, 0),
          .base = nir_intrinsic_base(intr), .range = 1,
          .component = nir_intrinsic_component(intr),
          .write_mask = nir_intrinsic_write_mask(intr),
-         .src_type = cull ? nir_type_uint32 : nir_intrinsic_src_type(intr),
+         .src_type = nir_intrinsic_src_type(intr),
          .io_semantics = sem);
       nir_instr_remove(&intr->instr);
    } else {
@@ -128,7 +148,8 @@ lower_primitive_output(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 }
 
 static bool
-primitive_outputs(nir_shader *nir, uint64_t *mask, const char **reason)
+primitive_outputs(nir_shader *nir, const struct agx_apple9_mesh_key *key,
+                  uint64_t *mask, const char **reason)
 {
    uint64_t vertex = 0;
    *mask = 0;
@@ -172,7 +193,11 @@ primitive_outputs(nir_shader *nir, uint64_t *mask, const char **reason)
    }
    if (*mask & vertex)
       return fail(reason, "primitive and vertex outputs cannot share a broadcast slot");
-   nir_shader_intrinsics_pass(nir, lower_primitive_output, nir_metadata_none, mask);
+   struct primitive_lower lower = {
+      .mask = *mask, .root = key->output_root,
+      .cull_B = ALIGN_POT(nir->info.mesh.max_primitives_out * 3, 16) + 8,
+   };
+   nir_shader_intrinsics_pass(nir, lower_primitive_output, nir_metadata_none, &lower);
    nir->info.per_primitive_outputs &= ~*mask;
    return true;
 }
@@ -198,9 +223,8 @@ broadcast_primitive(nir_builder *b, const struct agx_apple9_mesh_body_info *info
    }
    nir_pop_if(b, NULL);
    if (info->primitive_broadcast & VARYING_BIT_CULL_PRIMITIVE) {
-      unsigned plane = l->position_B + l->vertex_pitch_B *
-                          l->vertex_component[VARYING_SLOT_CULL_PRIMITIVE][0];
-      nir_def *cull = nir_load_local_apple9_agx(b, nir_imm_int(b, plane), .base = root);
+      nir_def *cull = nir_load_local_apple9_agx(
+         b, nir_imm_int(b, l->primitive_count_B + 8), .base = root);
       nir_push_if(b, nir_iand(b, nir_ieq_imm(b, lane, 0), nir_ine_imm(b, cull, 0)));
       for (unsigned c = 0; c < 3; ++c)
          nir_store_local_apple9_agx(b, nir_imm_int(b, 0), nir_imm_int(b, c),
@@ -261,12 +285,12 @@ agx_nir_lower_apple9_native_mesh(
    if (!eligible(nir, reason))
       return false;
 
+   struct agx_apple9_mesh_key key = AGX_APPLE9_MESH_KEY;
    uint64_t primitive_broadcast = 0;
    if (options && options->attributes && options->primitive_broadcast &&
-       !primitive_outputs(nir, &primitive_broadcast, reason))
+       !primitive_outputs(nir, &key, &primitive_broadcast, reason))
       return false;
 
-   struct agx_apple9_mesh_key key = AGX_APPLE9_MESH_KEY;
    key.physical_threads = AGX_APPLE9_NATIVE_THREADS;
    if (!agx_nir_lower_apple9_mesh(nir, &key, info, reason))
       return false;

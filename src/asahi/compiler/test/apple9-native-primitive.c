@@ -98,9 +98,8 @@ check(unsigned threads, unsigned cull)
    for (unsigned v = 0; v < 3; ++v) {
       CHECK(m.submitted_position[v][4] == 100 + v);
       CHECK(m.submitted_position[v][5] == 37);
-      CHECK(m.submitted_position[v][6] == cull);
-      CHECK(m.submitted_position[v][7] == input[0]);
-      CHECK(m.submitted_position[v][8] == (input[0] ^ 0x1234));
+      CHECK(m.submitted_position[v][6] == input[0]);
+      CHECK(m.submitted_position[v][7] == (input[0] ^ 0x1234));
    }
    free(m.value);
    ralloc_free(nir);
@@ -109,10 +108,11 @@ check(unsigned threads, unsigned cull)
    if (!agx_compile_apple9_native_mesh(nir, true, &options, &code, &info, &reason)) {
       fprintf(stderr, "compile: %s\n", reason); exit(1);
    }
-   CHECK(code.info.apple9_varyings.count == 5);
+   CHECK(code.info.apple9_varyings.count == 4);
+   CHECK(!code.info.apple9_varyings.mask[VARYING_SLOT_CULL_PRIMITIVE]);
    CHECK(code.info.apple9_varyings.group[VARYING_SLOT_VAR3] == 1);
    CHECK(code.info.apple9_varyings.group[VARYING_SLOT_PRIMITIVE_ID] == 1);
-   CHECK(info.layout.local_size_B == 176);
+   CHECK(info.layout.local_size_B == 160);
    free(code.binary);
    ralloc_free(nir);
 }

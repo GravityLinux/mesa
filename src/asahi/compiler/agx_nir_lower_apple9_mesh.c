@@ -202,7 +202,7 @@ validate(nir_shader *nir, const struct agx_apple9_mesh_key *key,
                            "Apple9 native IO slot/component is out of range");
             bool prim = is_primitive(intr->intrinsic);
             if (slot == VARYING_SLOT_PRIMITIVE_INDICES ||
-                (slot == VARYING_SLOT_CULL_PRIMITIVE && prim)) {
+                slot == VARYING_SLOT_CULL_PRIMITIVE) {
                if (!prim || !is_store(intr->intrinsic))
                   return fail(
                      reason,
@@ -218,7 +218,6 @@ validate(nir_shader *nir, const struct agx_apple9_mesh_key *key,
             }
             if (slot != VARYING_SLOT_POS &&
                 !(slot == VARYING_SLOT_PRIMITIVE_ID && !prim) &&
-                !(slot == VARYING_SLOT_CULL_PRIMITIVE && !prim) &&
                 slot < VARYING_SLOT_VAR0)
                return fail(reason,
                            "Apple9 native output builtin is not implemented");
@@ -618,7 +617,7 @@ lower_intrinsic(nir_builder *b, nir_intrinsic_instr *intr, void *data)
                nir_iadd_imm(b, nir_imul_imm(b, index, l->indices_per_primitive),
                             component + c);
             bits = 8;
-         } else if (slot == VARYING_SLOT_CULL_PRIMITIVE && prim) {
+         } else if (slot == VARYING_SLOT_CULL_PRIMITIVE) {
             offset = nir_iadd_imm(b, nir_imul_imm(b, index, 4), l->cull_B);
             bits = 8;
          } else if (prim) {

@@ -76,7 +76,7 @@ struct agx_apple9_mesh_body_info {
    bool requires_object_completion;
    bool requires_mesh_completion;
    bool uses_vertex_count;
-   /* V3/P1 primitive outputs lowered into flat vertex planes. */
+   /* V3/P1 primitive outputs lowered to flat planes or a local cull flag. */
    uint64_t primitive_broadcast;
    unsigned argument_uniform_words;
 };
