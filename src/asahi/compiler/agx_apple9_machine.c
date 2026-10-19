@@ -109,6 +109,44 @@ const struct agx_apple9_machine agx_apple9_machine = {
  * cache, liveness, or source-file state.
  */
 static const struct agx_apple9_encoding_info encodings[] = {
+   [AGX_APPLE9_ENC_MESH_CONTROL] = {
+      .name = "mesh_control", .length = 6, .operand_count = 2,
+      .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_BYTE_DIFF,
+      .operands = {
+         /* Whole-word allocation conservatively protects the other half.
+          * The selected halfword is read and cleared by the instruction. */
+         GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_16, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_CLOBBER,
+             AGX_APPLE9_EVIDENCE_HARDWARE),
+         GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_16, 95, 2,
+             /* B preservation has not been qualified. Do not keep a live
+              * vertex count in the register supplied to the instruction. */
+             AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_CLOBBER,
+             AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+      },
+   },
+   [AGX_APPLE9_ENC_MESH_SUBMIT_SCALAR] = {
+      .name = "mesh_submit_scalar", .length = 6, .operand_count = 1,
+      .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_BYTE_DIFF,
+      .operands = {
+         /* Conservative even when release=0: preservation is unqualified. */
+         GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_CLOBBER,
+             AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+      },
+   },
+   [AGX_APPLE9_ENC_MESH_SUBMIT_CHANNEL] = {
+      .name = "mesh_submit_channel", .length = 6, .operand_count = 2,
+      .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_BYTE_DIFF,
+      .operands = {
+         GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 94, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_CLOBBER,
+             AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+         GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_CLOBBER,
+             AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+      },
+   },
    [AGX_APPLE9_ENC_HALT] = {
       .name = "halt", .length = 4,
       .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
@@ -141,6 +179,27 @@ static const struct agx_apple9_encoding_info encodings[] = {
    },
    [AGX_APPLE9_ENC_SHARED_STORE] = {
       .name = "shared_store", .length = 14, .operand_count = 2,
+      .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      .operands = {
+         GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_CLOBBER,
+             AGX_APPLE9_EVIDENCE_HARDWARE),
+         GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32, 63, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
+      },
+   },
+   [AGX_APPLE9_ENC_LOCAL_STORE] = {
+      .name = "local_store", .length = 14, .operand_count = 1,
+      .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      .operands = {
+         /* Preserve live data through the allocator, as for shared stores. */
+         GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_CLOBBER,
+             AGX_APPLE9_EVIDENCE_HARDWARE),
+      },
+   },
+   [AGX_APPLE9_ENC_LOCAL_STORE_INDEXED] = {
+      .name = "local_store_indexed", .length = 14, .operand_count = 2,
       .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
       .operands = {
          GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63, 2,
@@ -1917,6 +1976,19 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .name = "vary_store",
          .length = 8,
          .dependency_layout = AGX_APPLE9_DEPENDENCY_MASK_12_17,
+         .operand_count = 1,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .operands =
+            {GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
+                 AGX_APPLE9_PUBLICATION_COUNT - 1,
+                 2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_PUBLICATION,
+                 AGX_APPLE9_EVIDENCE_HARDWARE)},
+      },
+   [AGX_APPLE9_ENC_OBJECT_GRID_EXPORT] =
+      {
+         .name = "object_grid_export",
+         .length = 8,
          .operand_count = 1,
          .allocator_safe = true,
          .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,

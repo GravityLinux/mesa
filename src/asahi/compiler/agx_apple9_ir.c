@@ -4,6 +4,7 @@
  */
 
 #include "agx_apple9_ir.h"
+#include "agx_apple9_mesh_encoding.h"
 #include "agx_compile_apple9.h"
 #include "agx_compile.h"
 #include "agx_apple9_encoding.h"
@@ -359,6 +360,45 @@ agx_apple9_vir_emit(struct agx_apple9_vir_program *program,
    for (unsigned i = 0; i < nr_srcs; ++i)
       instruction->src[i] = src[i];
    return dest;
+}
+
+bool
+agx_apple9_vir_emit_mesh_control(struct agx_apple9_vir_program *program,
+                                 uint32_t primitives, uint32_t auxiliary,
+                                 bool control42)
+{
+   const uint32_t src[] = {primitives, auxiliary};
+   if (!program || primitives >= program->value_count ||
+       auxiliary >= program->value_count ||
+       !agx_apple9_vir_emit_side_effect(program, AGX_APPLE9_VIR_MESH_CONTROL,
+                                       AGX_APPLE9_ENC_MESH_CONTROL, src, 2, 0))
+      return false;
+   struct agx_apple9_vir_instr *I = program->instructions[program->instruction_count - 1];
+   I->src_half_mask = 3;
+   I->mesh_control42 = control42;
+   return true;
+}
+
+bool
+agx_apple9_vir_emit_mesh_submit(struct agx_apple9_vir_program *program,
+                                const uint32_t *src, unsigned components,
+                                bool release)
+{
+   if (!program || !src || components < 1 || components > 2)
+      return false;
+   for (unsigned s = 0; s < components; ++s) {
+      if (src[s] >= program->value_count)
+         return false;
+   }
+   if (!agx_apple9_vir_emit_side_effect(program,
+          components == 2 ? AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL
+                          : AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR,
+          components == 2 ? AGX_APPLE9_ENC_MESH_SUBMIT_CHANNEL
+                          : AGX_APPLE9_ENC_MESH_SUBMIT_SCALAR,
+          src, components, 0))
+      return false;
+   program->instructions[program->instruction_count - 1]->mesh_release = release;
+   return true;
 }
 
 bool
@@ -1684,7 +1724,10 @@ apple9_vir_is_graphics_output(enum agx_apple9_vir_opcode op)
 static bool
 apple9_vir_is_control_side_effect(enum agx_apple9_vir_opcode op)
 {
-   return op == AGX_APPLE9_VIR_PREDICATE_COMPARE ||
+   return op == AGX_APPLE9_VIR_MESH_CONTROL ||
+          op == AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR ||
+          op == AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL ||
+          op == AGX_APPLE9_VIR_PREDICATE_COMPARE ||
           op == AGX_APPLE9_VIR_EXEC_MASK_PUSH ||
           op == AGX_APPLE9_VIR_EXEC_MASK_ELSE ||
           op == AGX_APPLE9_VIR_EXEC_MASK_POP ||
@@ -2116,6 +2159,16 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
              instruction->op == AGX_APPLE9_VIR_PREDICATE_COMPARE);
 
          switch (instruction->op) {
+         case AGX_APPLE9_VIR_MESH_CONTROL:
+         case AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR:
+         case AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL: {
+            for (unsigned s = 0; s < instruction->nr_srcs; ++s)
+               valid &= instruction->src[s] < program->value_count;
+            struct agx_apple9_packed_instruction packed;
+            valid = valid && agx_apple9_pack_vir_instruction(
+               instruction, program->phys, &packed, NULL);
+            break;
+         }
          case AGX_APPLE9_VIR_PREDICATE_COMPARE: {
             const unsigned condition = instruction->immediate & 0xff;
             const unsigned predicate_bank =
@@ -2199,7 +2252,8 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
             break;
          case AGX_APPLE9_VIR_DEVICE_FENCE:
             valid &= instruction->encoding == AGX_APPLE9_ENC_DEVICE_FENCE &&
-                     instruction->nr_srcs == 0 && instruction->immediate <= 1;
+                     instruction->nr_srcs == 0 &&
+                     instruction->immediate <= AGX_APPLE9_FENCE_OBJECT_GRID;
             break;
          case AGX_APPLE9_VIR_WAIT:
             valid &= instruction->encoding == AGX_APPLE9_ENC_WAIT &&
@@ -2877,6 +2931,9 @@ agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
          program->instructions[i]->op == AGX_APPLE9_VIR_STORE_UNIFORM ||
          program->instructions[i]->op == AGX_APPLE9_VIR_DEVICE_STORE ||
          program->instructions[i]->op == AGX_APPLE9_VIR_DEVICE_ATOMIC ||
+         program->instructions[i]->op == AGX_APPLE9_VIR_MESH_CONTROL ||
+         program->instructions[i]->op == AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR ||
+         program->instructions[i]->op == AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL ||
          apple9_vir_is_graphics_output(program->instructions[i]->op);
    if ((program->output == AGX_APPLE9_VREG_INVALID && !has_side_effect &&
         !program->fragment_shader) ||
@@ -4178,6 +4235,49 @@ packed_init(struct agx_apple9_packed_instruction *packed, const uint8_t *bytes,
    memset(packed, 0, sizeof(*packed));
    memcpy(packed->bytes, bytes, length);
    packed->length = length;
+}
+
+bool
+agx_apple9_pack_local_store(unsigned data, unsigned root, unsigned index,
+                            unsigned bits,
+                            enum agx_apple9_local_index_kind index_kind,
+                            unsigned offset_B, bool retain_data,
+                            bool release_index,
+                            struct agx_apple9_packed_instruction *packed)
+{
+   if (!packed || data >= 64 || root >= 64 || index >= 64 ||
+       (bits != 8 && bits != 16 && bits != 32) ||
+       (index_kind != AGX_APPLE9_LOCAL_INDEX_NONE &&
+        index_kind != AGX_APPLE9_LOCAL_INDEX_GPR) ||
+       (index_kind == AGX_APPLE9_LOCAL_INDEX_NONE &&
+        (index || release_index)) ||
+       offset_B >= 8192)
+      return false;
+
+   /* Constant versus dynamic authored MSL index stores establish NONE/GPR,
+    * not a narrow/wide register selector. Displacements count bytes even for
+    * narrow data; GPR indices count elements. Keep both operand lifetimes
+    * separate from the data-format and index-source fields. */
+   const uint8_t bytes[14] = {
+      0xe7,
+      0x02,
+      0x54,
+      data << 1,
+      root << 2,
+      index << 2,
+      release_index ? 0x80 : 0,
+      0,
+      bits == 8    ? 0x84
+      : bits == 16 ? 0x04
+                   : 0x44,
+      0x02 | retain_data | ((offset_B & 31) << 3),
+      offset_B >> 5,
+      bits == 32 ? 0x30 : 0x10,
+      index_kind == AGX_APPLE9_LOCAL_INDEX_GPR ? 0x02 : 0,
+      0,
+   };
+   packed_init(packed, bytes, sizeof(bytes));
+   return true;
 }
 
 bool
@@ -6179,6 +6279,52 @@ pack_predicate_compare(const struct agx_apple9_vir_instr *instruction,
 }
 
 static bool
+pack_mesh(const struct agx_apple9_vir_instr *I, const uint8_t *phys,
+          struct agx_apple9_packed_instruction *packed)
+{
+   if (!phys || I->dest != AGX_APPLE9_VREG_INVALID || I->dest_components ||
+       I->immediate || I->memory_bits || I->memory_components ||
+       I->producer_scoreboard_slot || I->src_sext_mask ||
+       I->src_abs_mask || I->src_neg_mask)
+      return false;
+
+   struct agx_apple9_mesh_instruction mesh = {0};
+   if (I->op == AGX_APPLE9_VIR_MESH_CONTROL) {
+      if (I->encoding != AGX_APPLE9_ENC_MESH_CONTROL || I->nr_srcs != 2 ||
+          I->src_half_mask != 3 || (I->src_hi_mask & ~3u) ||
+          I->live_after_mask || I->mesh_release)
+         return false;
+      mesh.kind = AGX_APPLE9_MESH_CONTROL;
+      mesh.count_gpr = phys[I->src[0]];
+      mesh.count_high = I->src_hi_mask & 1;
+      mesh.auxiliary_gpr = phys[I->src[1]];
+      mesh.auxiliary_high = I->src_hi_mask & 2;
+      mesh.control42 = I->mesh_control42;
+   } else {
+      bool channel = I->op == AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL;
+      if (I->encoding != (channel ? AGX_APPLE9_ENC_MESH_SUBMIT_CHANNEL
+                                  : AGX_APPLE9_ENC_MESH_SUBMIT_SCALAR) ||
+          I->nr_srcs != (channel ? 2 : 1) || I->src_half_mask ||
+          I->src_hi_mask || I->mesh_control42 ||
+          I->live_after_mask)
+         return false;
+      mesh.kind = AGX_APPLE9_MESH_SUBMIT;
+      mesh.source_gpr = phys[I->src[0]];
+      mesh.mode = channel ? AGX_APPLE9_MESH_SUBMIT_CHANNEL
+                          : AGX_APPLE9_MESH_SUBMIT_SCALAR;
+      mesh.release = I->mesh_release;
+      if (channel && phys[I->src[1]] != mesh.source_gpr + 1)
+         return false;
+   }
+
+   uint8_t bytes[6];
+   if (!agx_apple9_encode_mesh(bytes, &mesh))
+      return false;
+   packed_init(packed, bytes, sizeof(bytes));
+   return true;
+}
+
+static bool
 pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
                           const uint8_t *phys,
                           struct agx_apple9_packed_instruction *packed,
@@ -6188,6 +6334,10 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       *reason = NULL;
 
    switch (instruction->op) {
+   case AGX_APPLE9_VIR_MESH_CONTROL:
+   case AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR:
+   case AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL:
+      return pack_mesh(instruction, phys, packed);
    case AGX_APPLE9_VIR_UNPACK_NORM: {
       unsigned mode = instruction->immediate & 0xff;
       bool narrow = mode == AGX_APPLE9_UNPACK_UNORM8 || mode == AGX_APPLE9_UNPACK_SNORM8;
@@ -6650,16 +6800,23 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
    }
    case AGX_APPLE9_VIR_DEVICE_FENCE: {
       if (instruction->encoding != AGX_APPLE9_ENC_DEVICE_FENCE ||
-          instruction->nr_srcs || instruction->immediate > 1 ||
+          instruction->nr_srcs ||
+          instruction->immediate > AGX_APPLE9_FENCE_OBJECT_GRID ||
           instruction->dest != AGX_APPLE9_VREG_INVALID)
          return false;
       /* A device memory fence has no execution rendezvous. It is safe in
        * divergent control flow, unlike a workgroup barrier. Immediate 1 is
        * the form Metal places at the end of a raster order group critical
        * section, before the fragment's tile release. */
-      const uint8_t bytes[] = {0x07, 0x04, 0x54,
-                               instruction->immediate ? 0xc4 : 0x84,
-                               instruction->immediate ? 0x08 : 0x0a, 0};
+      const uint8_t bytes[] = {
+         0x07,
+         0x04,
+         0x54,
+         instruction->immediate == AGX_APPLE9_FENCE_OBJECT_GRID    ? 0x44
+         : instruction->immediate == AGX_APPLE9_FENCE_RASTER_ORDER ? 0xc4
+                                                                   : 0x84,
+         instruction->immediate == AGX_APPLE9_FENCE_RASTER_ORDER ? 0x08 : 0x0a,
+         0};
       packed_init(packed, bytes, sizeof(bytes));
       return true;
    }
@@ -6738,18 +6895,36 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
    case AGX_APPLE9_VIR_SHARED_LOAD:
    case AGX_APPLE9_VIR_SHARED_STORE: {
       bool load = instruction->op == AGX_APPLE9_VIR_SHARED_LOAD;
-      if (instruction->encoding != (load ? AGX_APPLE9_ENC_SHARED_LOAD
-                                          : AGX_APPLE9_ENC_SHARED_STORE) ||
-          instruction->nr_srcs != (load ? 1 : 2) || instruction->immediate >= 64 ||
+      bool local = !load && instruction->memory_bits;
+      bool indexed =
+         !local || instruction->local_index_kind == AGX_APPLE9_LOCAL_INDEX_GPR;
+      enum agx_apple9_encoding encoding =
+         load    ? AGX_APPLE9_ENC_SHARED_LOAD
+         : local ? (indexed ? AGX_APPLE9_ENC_LOCAL_STORE_INDEXED
+                            : AGX_APPLE9_ENC_LOCAL_STORE)
+                 : AGX_APPLE9_ENC_SHARED_STORE;
+      if (instruction->encoding != encoding ||
+          instruction->nr_srcs != (load ? 1 : 1 + indexed) ||
+          instruction->immediate >= 64 ||
           instruction->dest_components != (load ? 1 : 0) ||
           (load ? instruction->dest == AGX_APPLE9_VREG_INVALID
                 : instruction->dest != AGX_APPLE9_VREG_INVALID) ||
-          (load && instruction->producer_scoreboard_slot != AGX_APPLE9_SCOREBOARD_SLOT_6))
+          (load && instruction->producer_scoreboard_slot !=
+                      AGX_APPLE9_SCOREBOARD_SLOT_6))
          return false;
       unsigned data = phys[load ? instruction->dest : instruction->src[0]];
-      unsigned index = phys[instruction->src[load ? 0 : 1]];
+      unsigned index = indexed ? phys[instruction->src[load ? 0 : 1]] : 0;
       if (data >= 64 || index >= 64)
          return false;
+      if (local) {
+         if (instruction->memory_offset < 0)
+            return false;
+         return agx_apple9_pack_local_store(
+            data, instruction->immediate, index, instruction->memory_bits,
+            instruction->local_index_kind, instruction->memory_offset,
+            instruction->live_after_mask & 1,
+            indexed && !(instruction->live_after_mask & 2), packed);
+      }
       /* Shared roots use halfword indices; word offsets occupy the low
        * half of the selected GPR. Load completion uses the shared pipeline's
        * slot-6 form. Keep it separate from the device-load token encoding. */
@@ -6883,6 +7058,17 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       return true;
    }
    case AGX_APPLE9_VIR_VARY_STORE: {
+      if (instruction->encoding == AGX_APPLE9_ENC_OBJECT_GRID_EXPORT) {
+         if (instruction->nr_srcs != 1 || instruction->immediate ||
+             phys[instruction->src[0]] >= AGX_APPLE9_PUBLICATION_COUNT)
+            return false;
+         /* Each of the three collective invocations publishes its grid
+          * word. This target has no UVS slot or instruction wait mask. */
+         const uint8_t bytes[] = {
+            0x57, 0x16, 0x54, phys[instruction->src[0]] << 1, 0, 0, 0x48, 0};
+         packed_init(packed, bytes, sizeof(bytes));
+         return true;
+      }
       if (instruction->encoding != AGX_APPLE9_ENC_VARY_STORE ||
           instruction->nr_srcs != 1 || instruction->immediate >= AGX_APPLE9_MAX_UVS_SLOTS ||
           phys[instruction->src[0]] >= AGX_APPLE9_PUBLICATION_COUNT)
@@ -7699,7 +7885,8 @@ agx_apple9_pack_vir_instruction(const struct agx_apple9_vir_instr *instruction,
        instruction->op != AGX_APPLE9_VIR_FADD &&
        instruction->op != AGX_APPLE9_VIR_FSUB &&
        instruction->op != AGX_APPLE9_VIR_FMUL &&
-       instruction->op != AGX_APPLE9_VIR_FMA) {
+       instruction->op != AGX_APPLE9_VIR_FMA &&
+       instruction->op != AGX_APPLE9_VIR_MESH_CONTROL) {
       if (reason)
          *reason = "Apple9 operation does not take half-register sources";
       return false;

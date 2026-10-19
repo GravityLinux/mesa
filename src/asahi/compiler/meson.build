@@ -5,10 +5,14 @@
 libasahi_agx_files = files(
   'agx_compile.c',
   'agx_apple9_machine.c',
+  'agx_apple9_mesh_encoding.c',
   'agx_apple9_ir.c',
   'agx_apple9_opt.c',
   'agx_apple9_ra.c',
   'agx_compile_apple9.c',
+  'agx_nir_lower_apple9_mesh.c',
+  'agx_nir_apple9_mesh_formation.c',
+  'agx_nir_apple9_mesh_native.c',
   'agx_nir_lower_apple9_texture.c',
   'agx_nir_lower_apple9_math.c',
   'agx_nir_lower_apple9_preserve.c',
@@ -131,6 +135,17 @@ if with_tests or with_tools.contains('drm-shim')
 endif
 
 if with_tests
+  apple9_native_mesh_test = executable('apple9-native-mesh',
+    'test/apple9-native-mesh.c',
+    c_args : [c_msvc_compat_args, no_override_init_args],
+    gnu_symbol_visibility : 'hidden',
+    dependencies : [idep_nir, idep_mesautil],
+    link_with : [libasahi_compiler],
+  )
+  test('apple9-native-mesh', prog_python,
+    args : [files('test/check-apple9-native-mesh.py'), apple9_native_mesh_test],
+    suite : ['asahi'],
+  )
   test(
     'agx_tests',
     executable(
@@ -138,6 +153,7 @@ if with_tests
       files(
          'test/test-compact-constants.cpp',
          'test/test-apple9.cpp',
+         'test/test-apple9-mesh.cpp',
          'test/test-apple9-opt.cpp',
          'test/test-apple9-shared-ra.cpp',
          'test/test-pressure-schedule.cpp',

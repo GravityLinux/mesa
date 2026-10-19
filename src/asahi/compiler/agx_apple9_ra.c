@@ -54,7 +54,8 @@ enum apple9_schedule_resource {
    APPLE9_SCHED_PUBLICATION = BITFIELD_BIT(2),
    APPLE9_SCHED_INTERPOLATION = BITFIELD_BIT(3),
    APPLE9_SCHED_TILE = BITFIELD_BIT(4),
-   APPLE9_SCHED_ALL = BITFIELD_MASK(5),
+   APPLE9_SCHED_MESH = BITFIELD_BIT(5),
+   APPLE9_SCHED_ALL = BITFIELD_MASK(6),
 };
 
 static void
@@ -86,6 +87,15 @@ apple9_schedule_resources(const agx_instr *I, uint32_t *reads, uint32_t *writes)
        ins->op == AGX_APPLE9_VIR_PUBLICATION_TUPLE)
       *reads |= *writes = APPLE9_SCHED_PUBLICATION;
    switch (ins->op) {
+   case AGX_APPLE9_VIR_MESH_CONTROL:
+   case AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR:
+   case AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL:
+      /* Mesh publication consumes local output and externally visible
+       * formation records. Keep it ordered with both and with other mesh
+       * operations; execution-mask state is already an input above. */
+      *reads |= APPLE9_SCHED_MEMORY | APPLE9_SCHED_MESH;
+      *writes |= APPLE9_SCHED_MEMORY | APPLE9_SCHED_MESH;
+      return;
    case AGX_APPLE9_VIR_GET_GLOBAL_ID:
    case AGX_APPLE9_VIR_GET_SR:
    case AGX_APPLE9_VIR_DERIVATIVE:
@@ -187,6 +197,8 @@ apple9_identity(const struct agx_apple9_vir_instr *ins)
 static unsigned
 apple9_source_width(const struct agx_apple9_vir_instr *ins, unsigned source)
 {
+   if (ins->op == AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL && source == 0)
+      return 2;
    if ((ins->op == AGX_APPLE9_VIR_DEVICE_STORE ||
         ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC ||
         ins->op == AGX_APPLE9_VIR_SHARED_ATOMIC) && source == 0)
@@ -1166,7 +1178,10 @@ apple9_completion_barrier(const struct agx_apple9_vir_instr *ins, bool drain)
 {
    if (apple9_after_logical_end(ins))
       return drain || apple9_loop_control(ins);
-   return ins->op == AGX_APPLE9_VIR_WORKGROUP_BARRIER ||
+   return ins->op == AGX_APPLE9_VIR_MESH_CONTROL ||
+          ins->op == AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR ||
+          ins->op == AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL ||
+          ins->op == AGX_APPLE9_VIR_WORKGROUP_BARRIER ||
           ins->op == AGX_APPLE9_VIR_DEVICE_FENCE ||
           ins->op == AGX_APPLE9_VIR_HALT ||
           ins->op == AGX_APPLE9_VIR_TILE_ACCESS ||

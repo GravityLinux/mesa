@@ -165,6 +165,9 @@ struct agx_shader_info {
    /* Apple9 setup code is entered by the launcher, independently of USC
     * preshader configuration used by earlier generations. */
    uint32_t apple9_preamble_offset, apple9_preamble_size;
+   /* Native task/mesh code requiring a native entry/launch contract.
+    * Completion may already be lowered. Generic upload must reject it. */
+   bool apple9_body_only;
    bool apple9_reads_z;
    bool apple9_reads_primitive_id;
    bool apple9_reads_tile;

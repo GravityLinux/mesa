@@ -165,6 +165,22 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_SPILL_LOAD,
    /* Standalone scoreboard wait; immediate is the slot mask. */
    AGX_APPLE9_VIR_WAIT,
+   /* Side-effecting mesh-engine operations. CONTROL reads/clears src0's
+    * selected primitive-count halfword; src1 is the provisional B input.
+    * Both CONTROL sources and the scalar submit source conservatively clobber
+    * their allocated words, independently of the scalar release=0 encoding.
+    * SUBMIT_CHANNEL consumes the adjacent (selector, local offset) tuple.
+    * They are never ordinary ALU, even if their explicit inputs are constant. */
+   AGX_APPLE9_VIR_MESH_CONTROL,
+   AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR,
+   AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL,
+};
+
+/* The object-grid form is not an API workgroup barrier. */
+enum agx_apple9_fence_mode {
+   AGX_APPLE9_FENCE_DEVICE = 0,
+   AGX_APPLE9_FENCE_RASTER_ORDER = 1,
+   AGX_APPLE9_FENCE_OBJECT_GRID = 2,
 };
 
 enum agx_apple9_unpack_norm_mode {
@@ -324,6 +340,11 @@ struct agx_apple9_device_load_contract {
 
 struct agx_apple9_block;
 
+enum agx_apple9_local_index_kind {
+   AGX_APPLE9_LOCAL_INDEX_NONE,
+   AGX_APPLE9_LOCAL_INDEX_GPR,
+};
+
 struct agx_apple9_vir_instr {
    enum agx_apple9_vir_opcode op;
    enum agx_apple9_encoding encoding;
@@ -336,6 +357,8 @@ struct agx_apple9_vir_instr {
    /* Scalar device-memory element width.  Zero is the established u32
     * default; compiler-authored narrow operations use 8 or 16 explicitly. */
    uint8_t memory_bits;
+   /* Local-output store index source, independent of data width. */
+   enum agx_apple9_local_index_kind local_index_kind;
    /* Number of scalar lanes read or written by a memory instruction.  Loads
     * also define an adjacent dest_components tuple; stores have no SSA
     * destination and carry their ordered data values in src[0..N-1]. */
@@ -406,6 +429,11 @@ struct agx_apple9_vir_instr {
     * register: the high half when set in src_hi_mask, sign- rather than
     * zero-extended when set in src_sext_mask. */
    uint8_t src_half_mask, src_hi_mask, src_sext_mask;
+   /* Explicit fields of the bounded mesh register forms. control42's
+    * semantics and SUBMIT's release policy are not configuration formulas.
+    * A releasing submission clobbers its source tuple; RA must preserve
+    * still-live values, independently of this encoding flag. */
+   bool mesh_control42, mesh_release;
    /* Clamp the floating result to [0, 1], mapping NaN to positive zero. */
    bool saturate;
 
@@ -668,6 +696,13 @@ bool agx_apple9_vir_emit_side_effect(struct agx_apple9_vir_program *program,
                                      const uint32_t *src, unsigned nr_srcs,
                                      uint32_t immediate);
 
+bool agx_apple9_vir_emit_mesh_control(struct agx_apple9_vir_program *program,
+                                      uint32_t primitives, uint32_t auxiliary,
+                                      bool control42);
+bool agx_apple9_vir_emit_mesh_submit(struct agx_apple9_vir_program *program,
+                                     const uint32_t *src, unsigned components,
+                                     bool release);
+
 bool agx_apple9_vir_emit_branch(struct agx_apple9_vir_program *program,
                                 enum agx_apple9_vir_opcode op,
                                 enum agx_apple9_encoding encoding,
@@ -842,6 +877,14 @@ agx_apple9_pack_get_global_id(unsigned dst, unsigned component,
                               struct agx_apple9_packed_instruction *packed);
 bool agx_apple9_pack_get_sr(unsigned dst, uint8_t selector, uint8_t datapath,
                             struct agx_apple9_packed_instruction *packed);
+/* Local-output stores use byte displacements and optional element indices.
+ * Narrow data occupies the low half of a word-allocated SSA value. */
+bool agx_apple9_pack_local_store(unsigned data, unsigned root, unsigned index,
+                                 unsigned bits,
+                                 enum agx_apple9_local_index_kind index_kind,
+                                 unsigned offset_B, bool retain_data,
+                                 bool release_index,
+                                 struct agx_apple9_packed_instruction *packed);
 bool
 agx_apple9_pack_get_sr_zext16(unsigned dst, uint8_t selector,
                               struct agx_apple9_packed_instruction *packed);
