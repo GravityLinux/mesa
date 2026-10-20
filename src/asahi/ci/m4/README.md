@@ -56,8 +56,7 @@ routing, to catch a remap applied outside dual-source blending.
 
 ```sh
 cc dual-source.c -o dual-source -lEGL -lGL -lm
-HK_EXPERIMENTAL_APPLE9=1 ASAHI_MESA_DEBUG=nocompress \
-  dual_color_blend_by_location=true ./dual-source
+ASAHI_MESA_DEBUG=nocompress dual_color_blend_by_location=true ./dual-source
 ```
 
 Select a candidate prefix using `LD_LIBRARY_PATH` and `LIBGL_DRIVERS_PATH` as
@@ -131,9 +130,8 @@ Native evidence: `/g16/results/mesa-ci/setup-smoke2/` and
 result recording. It requires a `/deqp-vk` runtime mapping, the flattened Vulkan
 mustpass list at `mustpass/vk-main.txt`, and a separate candidate prefix containing
 `lib/libvulkan_asahi.so` and `share/vulkan/icd.d/*asahi*.json`. The manifest must
-name the candidate library by absolute path. Configure `HK_EXPERIMENTAL_APPLE9=1`
-in `environment`; inherited Vulkan and Mesa selection variables are cleared
-before that configuration is applied. Apple9 compression is enabled by default
+name the candidate library by absolute path. Inherited Vulkan and Mesa
+selection variables are cleared before the configured `environment` is applied. Apple9 compression is enabled by default
 in both drivers. Leave `ASAHI_MESA_DEBUG` unset for normal regression tests;
 use `nocompress` only for an explicit uncompressed comparison.
 
