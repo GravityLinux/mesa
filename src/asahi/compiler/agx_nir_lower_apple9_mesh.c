@@ -100,15 +100,14 @@ validate(nir_shader *nir, const struct agx_apple9_mesh_key *key,
    if (expanded && nir->info.derivative_group != DERIVATIVE_GROUP_NONE)
       return fail(reason,
                   "expanded Apple9 mesh derivative groups are unsupported");
-   /* No native allocator currently separates user shared memory from the
-    * local grid/output allocation. Reject both explicit IO and declarations
-    * before lowering; a frontend may not have assigned shared_size yet. */
-   if (nir->info.shared_size)
+   if (nir->info.shared_size && nir->info.stage != MESA_SHADER_MESH)
       return fail(reason,
-                  "Apple9 native bodies do not support user shared memory");
+                  "Apple9 native task bodies do not support user shared memory");
+   if (nir->info.shared_size > AGX_APPLE9_MAX_SHARED_BYTES)
+      return fail(reason, "Apple9 mesh shared allocation exceeds local capacity");
    nir_foreach_variable_with_modes(var, nir, nir_var_mem_shared)
       return fail(reason,
-                  "Apple9 native bodies do not support user shared memory");
+                  "Apple9 native bodies require explicit shared IO");
    /* Local root N owns uniform words 2*N and 2*N+1. Check the entire
     * fixed graphics window, including its group-count and shared roots. */
    if (!key || key->output_root >= 64 || key->grid_root >= 64 ||
@@ -148,13 +147,15 @@ validate(nir_shader *nir, const struct agx_apple9_mesh_key *key,
             if (instr->type != nir_instr_type_intrinsic)
                continue;
             nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-            if (intr->intrinsic == nir_intrinsic_load_shared ||
+            if ((intr->intrinsic == nir_intrinsic_load_shared ||
                 intr->intrinsic == nir_intrinsic_store_shared ||
                 intr->intrinsic == nir_intrinsic_shared_atomic ||
-                intr->intrinsic == nir_intrinsic_shared_atomic_swap)
+                intr->intrinsic == nir_intrinsic_shared_atomic_swap) &&
+                (!nir->info.shared_size ||
+                 nir_intrinsic_base(intr) >= nir->info.shared_size))
                return fail(
                   reason,
-                  "Apple9 native bodies do not support user shared memory");
+                  "Apple9 native shared IO requires an allocated byte range");
             payload |= intr->intrinsic == nir_intrinsic_load_task_payload ||
                        intr->intrinsic == nir_intrinsic_store_task_payload;
             local_output |=
@@ -278,6 +279,11 @@ validate(nir_shader *nir, const struct agx_apple9_mesh_key *key,
       return fail(
          reason,
          "Apple9 native output layout exceeds the measured local allocation");
+   unsigned shared_offset = ALIGN_POT(layout->local_size_B, 16);
+   if (ALIGN_POT(nir->info.shared_size, 4) >
+       AGX_APPLE9_MAX_SHARED_BYTES - shared_offset)
+      return fail(reason,
+                  "Apple9 mesh output and shared allocations exceed local capacity");
    return true;
 }
 
@@ -529,6 +535,15 @@ lower_intrinsic(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    const struct agx_apple9_mesh_layout *l = &s->info->layout;
    b->cursor = nir_before_instr(&intr->instr);
    switch (intr->intrinsic) {
+   case nir_intrinsic_load_shared:
+   case nir_intrinsic_store_shared:
+   case nir_intrinsic_shared_atomic:
+   case nir_intrinsic_shared_atomic_swap:
+      /* Preserve normal shared operations, including atomic/width lowering
+       * and memory semantics. Selection uses the native output root. */
+      nir_intrinsic_set_base(intr, nir_intrinsic_base(intr) +
+                                     s->info->shared_offset_B);
+      return true;
    case nir_intrinsic_load_task_payload: {
       nir_def *off =
          nir_iadd_imm(b, intr->src[0].ssa, nir_intrinsic_base(intr));
@@ -676,6 +691,12 @@ agx_nir_lower_apple9_mesh(nir_shader *nir,
    if (!validate(nir, key, &result.layout, reason))
       return false;
    result.key = *key;
+   result.shared_size_B = nir->info.shared_size;
+   result.shared_offset_B = result.shared_size_B
+                              ? ALIGN_POT(result.layout.local_size_B, 16) : 0;
+   result.local_allocation_B = result.shared_size_B
+      ? result.shared_offset_B + ALIGN_POT(result.shared_size_B, 4)
+      : result.layout.local_size_B;
    memcpy(result.logical_size, nir->info.workgroup_size,
           sizeof(result.logical_size));
    result.argument_uniform_words = agx_apple9_mesh_argument_words(key);
@@ -685,6 +706,10 @@ agx_nir_lower_apple9_mesh(nir_shader *nir,
    *info = result;
    struct lower s = {key, info};
    nir_shader_intrinsics_pass(nir, lower_intrinsic, nir_metadata_none, &s);
+   /* The backend's shared bound describes the physical allocation containing
+    * these rebased accesses. Zero retains the existing no-user-shared ABI. */
+   if (result.shared_size_B)
+      nir->info.shared_size = result.local_allocation_B;
    return true;
 }
 

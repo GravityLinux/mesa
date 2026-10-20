@@ -65,9 +65,15 @@ check_contract(bool object, unsigned attributes)
    bad.scratch_size = 4;
    CHECK(!hk_apple9_native_shader_valid(&bad, &info, stage));
    bad = part.info;
+   bad.local_size = 128;
+   CHECK(!hk_apple9_native_shader_valid(&bad, &info, stage));
+   bad = part.info;
    bad.workgroup_size[0] = 32;
    CHECK(!hk_apple9_native_shader_valid(&bad, &info, stage));
    struct agx_apple9_mesh_body_info wrong = info;
+   wrong.shared_size_B = 4;
+   CHECK(!hk_apple9_native_shader_valid(&part.info, &wrong, stage));
+   wrong = info;
    wrong.key.grid_offset_B = 4;
    CHECK(!hk_apple9_native_shader_valid(&part.info, &wrong, stage));
    wrong = info;
@@ -189,6 +195,37 @@ mask_fixtures(void)
    }
 }
 
+static void
+check_shared_admission(void)
+{
+   nir_shader *nir = mesh_source(0);
+   nir_builder b = nir_builder_at(nir_before_impl(nir_shader_get_entrypoint(nir)));
+   nir->info.shared_size = 28672;
+   nir_store_shared(&b, nir_imm_int(&b, 123), nir_imm_int(&b, 28668),
+                     .align_mul = 4, .write_mask = 1);
+   struct agx_shader_part part = {0};
+   struct agx_apple9_mesh_body_info info = {0};
+   const char *reason = NULL;
+   CHECK(agx_compile_apple9_native_mesh(nir, true, NULL, &part, &info, &reason));
+   CHECK(info.shared_offset_B == 96 && info.shared_size_B == 28672);
+   CHECK(info.local_allocation_B == 28768 && part.info.local_size == 28768);
+   CHECK(!hk_apple9_native_shader_valid(&part.info, &info, HK_APPLE9_NATIVE_MESH));
+   struct agx_apple9_launch_parameters launch;
+   CHECK(!hk_apple9_native_launch_parameters(&launch, &part.info, &info,
+      HK_APPLE9_NATIVE_MESH, 0, 0x1000));
+   /* Output state retains its five output rows, independent of user shared
+    * capacity. Only launch admission owns the combined-allocation gate. */
+   struct agx_apple9_mesh_state_parameters state = {
+      .layout = &info.layout, .object_launch = 0x2400, .mesh_launch = 0x2000,
+      .threads = 16, .has_object_stage = true,
+   };
+   uint32_t packet[AGX_APPLE9_MESH_STATE_WORDS];
+   CHECK(agx_apple9_mesh_state_build(packet, &state));
+   CHECK(packet[13] == 5);
+   free(part.binary);
+   ralloc_free(nir);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -205,6 +242,7 @@ main(int argc, char **argv)
    check_contract(false, 5);
    check_contract(false, 124);
    check_contract(true, 0);
+   check_shared_admission();
    struct agx_apple9_mesh_arguments args = {
       .graphics = {0x1000, 0x2000, 0x3000},
       .output_root = HK_APPLE9_NATIVE_OUTPUT_ROOT,

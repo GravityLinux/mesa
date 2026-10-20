@@ -68,6 +68,11 @@ struct agx_apple9_mesh_layout {
 struct agx_apple9_mesh_body_info {
    struct agx_apple9_mesh_layout layout;
    struct agx_apple9_mesh_key key;
+   /* User shared storage follows the output allocation on the same local
+    * root. Keep output rows separate: mesh state must not count user data as
+    * vertex planes. The allocation includes word padding for narrow accesses.
+    * Launch integration must qualify this combined allocation independently. */
+   unsigned shared_offset_B, shared_size_B, local_allocation_B;
    /* Declared API dimensions, before flattening to the physical launch. */
    uint16_t logical_size[3];
    /* Unresolved pieces of the native contract. Completion lowering clears
@@ -93,7 +98,9 @@ agx_apple9_mesh_argument_words(const struct agx_apple9_mesh_key *key)
 /* Validate supported normal mesh/task NIR and lower only the understood IO.
  * Returns success, not progress. Rejects unsupported IO before changing NIR.
  * IO must already use per-vertex/per-primitive intrinsics and explicit payload
- * offsets; dynamic vertex/primitive indices and component write masks work. */
+ * offsets; shared IO must also be explicit. Dynamic vertex/primitive indices
+ * and component write masks work. Mesh shared IO is rebased after outputs;
+ * task shared IO remains unsupported. */
 bool agx_nir_lower_apple9_mesh(nir_shader *nir,
                                const struct agx_apple9_mesh_key *key,
                                struct agx_apple9_mesh_body_info *info,

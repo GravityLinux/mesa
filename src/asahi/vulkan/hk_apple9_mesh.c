@@ -37,6 +37,8 @@ hk_apple9_native_shader_valid(const struct agx_shader_info *code,
    if (!code || !body || stage == HK_APPLE9_NATIVE_NONE ||
        stage > HK_APPLE9_NATIVE_MESH || !code->apple9_body_only ||
        !code->binary_size || code->scratch_size ||
+       /* Compiler support does not qualify the native shared allocation. */
+       code->local_size || body->shared_size_B ||
        code->apple9_atomic_frame_size || code->workgroup_size[0] != 16 ||
        code->workgroup_size[1] != 1 || code->workgroup_size[2] != 1 ||
        body->requires_mesh_completion || body->requires_object_completion ||
