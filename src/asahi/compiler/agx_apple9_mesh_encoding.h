@@ -32,7 +32,8 @@ struct agx_apple9_mesh_instruction {
     * The current compiler owns a whole GPR for each halfword operand. */
    uint8_t count_gpr, auxiliary_gpr;
    bool count_high, auxiliary_high, control42;
-   /* SUBMIT names a source or source tuple by its first 32-bit register.
+   /* SUBMIT names a contiguous pair by its first 32-bit register.
+    * SCALAR also reads base+1, whose meaning is not yet qualified.
     * CHANNEL consumes (channel selector, local plane offset). Mode CULL is
     * exposed for field decoding; the development NIR path does not emit it. */
    uint8_t source_gpr;

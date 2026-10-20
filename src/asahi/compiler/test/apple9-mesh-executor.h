@@ -173,6 +173,7 @@ instruction(struct machine *m, nir_instr *i, unsigned lane)
       }
       case nir_intrinsic_mesh_submit_scalar_apple9_agx:
          CHECK(lane == 0 && src(m, n->src[0], lane)[0].u32 == 3);
+         CHECK(src(m, n->src[1], lane)[0].u32 == 0);
          for (unsigned c = 0; c < 4; ++c)
             CHECK(m->channels[c] == 7);
          CHECK(!m->scalars++);

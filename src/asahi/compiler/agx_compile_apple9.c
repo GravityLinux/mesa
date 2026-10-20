@@ -4333,10 +4333,10 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
             if (lower->nir->info.stage != MESA_SHADER_MESH)
                return false;
             bool control = intr->intrinsic == nir_intrinsic_mesh_control_apple9_agx;
-            unsigned count = intr->intrinsic ==
-                                   nir_intrinsic_mesh_submit_scalar_apple9_agx ? 1 : 2;
+            bool channel = intr->intrinsic ==
+                              nir_intrinsic_mesh_submit_channel_apple9_agx;
             uint32_t sources[2];
-            for (unsigned s = 0; s < count; ++s) {
+            for (unsigned s = 0; s < 2; ++s) {
                if (nir_src_bit_size(intr->src[s]) != (control ? 16 : 32))
                   return false;
                sources[s] = apple9_lower_dag_scalar(
@@ -4350,7 +4350,7 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
                       sources[0], sources[1], nir_intrinsic_base(intr)))
                   return false;
             } else if (!agx_apple9_vir_emit_mesh_submit(&lower->program,
-                                                       sources, count, count == 2)) {
+                                                       sources, channel, channel)) {
                return false;
             }
             continue;

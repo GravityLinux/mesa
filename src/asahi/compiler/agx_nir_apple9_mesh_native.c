@@ -404,7 +404,9 @@ agx_nir_lower_apple9_native_mesh(
    }
    nir_pop_if(&b, NULL);
    nir_push_if(&b, nir_ieq_imm(&b, lane, 0));
-   nir_mesh_submit_scalar_apple9_agx(&b, vertices);
+   /* Hardware consumes base+1 even in scalar mode. Zero is measured safe;
+    * leaving this word to unrelated allocation can suppress all geometry. */
+   nir_mesh_submit_scalar_apple9_agx(&b, vertices, nir_imm_int(&b, 0));
    device_fence(&b);
    nir_pop_if(&b, NULL);
 

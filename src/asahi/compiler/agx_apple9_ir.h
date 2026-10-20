@@ -718,7 +718,7 @@ bool agx_apple9_vir_emit_mesh_control(struct agx_apple9_vir_program *program,
                                       uint32_t primitives, uint32_t auxiliary,
                                       bool control42);
 bool agx_apple9_vir_emit_mesh_submit(struct agx_apple9_vir_program *program,
-                                     const uint32_t *src, unsigned components,
+                                     const uint32_t src[2], bool channel,
                                      bool release);
 
 /* After RA/scheduling, before packing. The main must end in HALT. No

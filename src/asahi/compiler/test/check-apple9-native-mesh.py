@@ -49,7 +49,7 @@ def check_program(rows, channels=None):
             base, release, mode = (word >> 24) & 127, (word >> 31) & 1, (word >> 35) & 3
             channel = r["op"] == "MESH_SUBMIT_CHANNEL"
             assert mode == (2 if channel else 0) and release == channel
-            regs = [f"r{base}", f"r{base + 1}"] if channel else [f"r{base}"]
+            regs = [f"r{base}", f"r{base + 1}"]
         assert regs == r["src"], (regs, r)
         assert all(int(x[1:]) < 96 for x in regs)
         return regs
@@ -97,7 +97,7 @@ def check_program(rows, channels=None):
         killed.discard(r["dst"])
 
     expected = [[("local", 6, 16), ("local", 6, 20)],
-                *channels, [("local", 6, 20)]]
+                *channels, [("local", 6, 20), 0]]
     for i, want in zip(units, expected):
         assert [value(s, i) for s in decoded(i)] == want
 
@@ -164,6 +164,36 @@ def mutation_checks(rows):
     else:
         raise AssertionError("swapped tuple mutation escaped checker")
 
+    # Follow the scalar's second input through allocation copies to its zero
+    # definition. Removing it exposes stale/undefined storage; replacing it
+    # with 0x20 models the measured geometry-suppressing neighbor.
+    scalar = next(i for i, r in enumerate(rows) if r["op"] == "MESH_SUBMIT_SCALAR")
+    reg, before = rows[scalar]["src"][1], scalar
+    while True:
+        definition = max(i for i in range(before) if rows[i]["dst"] == reg)
+        r = rows[definition]
+        if r["op"] != "IOR":
+            break
+        assert r["src"][0] == r["src"][1]
+        reg, before = r["src"][0], definition
+    assert r["op"] == "IMM" and r["imm"] == 0
+    for mutation in ("missing-source", "undefined", "garbage"):
+        bad = copy.deepcopy(rows)
+        if mutation == "missing-source":
+            bad[scalar]["src"].pop()
+        elif mutation == "undefined":
+            del bad[definition]
+        else:
+            code = bytearray(bad[definition]["code"])
+            code[1] |= 0x20
+            bad[definition].update(code=bytes(code), imm=0x20)
+        try:
+            check_program(bad)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"scalar base+1 {mutation} mutation escaped checker")
+
 
 def main():
     run = subprocess.run(sys.argv[1:], env={**os.environ, "AGX_APPLE9_ASM": "1"},
@@ -220,7 +250,7 @@ def main():
         except AssertionError:pass
         else:raise AssertionError('corrupt high plane immediate accepted')
     sys.stdout.write(run.stdout)
-    print("six allocation and two high-plane immediate mutations rejected; live pressure increases the GPR high-water mark")
+    print("six allocation, six scalar base+1 and two high-plane immediate mutations rejected; live pressure increases the GPR high-water mark")
     print(f"checked {len(checked)} complete programs: boundaries, U units, allocated inputs, masks")
     print("first program U units:", " ".join(checked[0]))
     return 0

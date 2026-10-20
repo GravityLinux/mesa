@@ -3398,4 +3398,6 @@ intrinsic("mesh_control_apple9_agx", [1, 1], indices=[BASE])
 intrinsic("mesh_submit_channel_apple9_agx", [1, 1])
 # The scalar input is source-derived; its general count/arity interpretation
 # remains unqualified outside the development V3/P1 triangle class.
-intrinsic("mesh_submit_scalar_apple9_agx", [1])
+# Both words are read from a contiguous 32-bit register pair. src1 has no
+# qualified semantic interpretation; native completion supplies measured-safe 0.
+intrinsic("mesh_submit_scalar_apple9_agx", [1, 1])
