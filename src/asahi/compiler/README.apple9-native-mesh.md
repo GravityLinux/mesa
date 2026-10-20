@@ -84,14 +84,17 @@ There are two six-byte hardware families, represented by three compiler ops:
 | --- | --- | --- |
 | `mesh_control_apple9_agx` | primitive count and provisional B, each 16 bits; control42 | Reads and clears the selected count halfword; mesh/memory ordering |
 | `mesh_submit_channel_apple9_agx` | channel selector and local plane byte offset, each 32 bits | Consumes an adjacent register pair; mesh/memory ordering |
-| `mesh_submit_scalar_apple9_agx` | actual vertex count, 32 bits | Scalar mesh submission; mesh/memory ordering |
+| `mesh_submit_scalar_apple9_agx` | actual vertex count and an unqualified second word, each 32 bits | Consumes an adjacent register pair; scalar mesh submission; mesh/memory ordering |
 
 All are side effects and are neither eliminable nor reorderable NIR operations.
 VIR models source uses and destructive operands explicitly. A count operand
 owns a whole word conservatively, protecting any separately live companion
-half by copying before a destructive use. B is also conservatively clobbered
-until hardware qualifies preservation; the live vertex count gets a copy. The channel uses the existing tuple
-and COLLECT machinery. RA chooses all physical operands. The packer derives
+half by copying before a destructive use. Qualified U0 captures preserve the
+selected B halfword, so B is an ordinary read and its later uses keep it. Both
+submit forms use the existing tuple and COLLECT machinery. Scalar submit also
+reads base+1: T8132 renders with 0 or 3 there and suppresses all geometry with
+0x10..0x40, so native completion supplies an explicit zero. The word's meaning
+is not established. RA chooses all physical operands. The packer derives
 halfword descriptors as `2 * register + half`, and checks pair adjacency.
 Completion scheduling drains pending operations before these side effects.
 
