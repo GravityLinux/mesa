@@ -8,8 +8,10 @@
 #include "agx_apple9_mesh.h"
 #include "compiler/nir/nir_builder.h"
 
+#ifndef LANES
 #define LANES      16
-#define ALL_LANES  0xffff
+#endif
+#define ALL_LANES  (UINT32_MAX >> (32 - LANES))
 #define INPUT_ADDR 0x20000ull
 
 struct region {
@@ -173,6 +175,7 @@ instruction(struct machine *m, nir_instr *i, unsigned lane)
       }
       case nir_intrinsic_mesh_submit_scalar_apple9_agx:
          CHECK(lane == 0 && src(m, n->src[0], lane)[0].u32 == 3);
+         CHECK(src(m, n->src[1], lane)[0].u32 == 0);
          for (unsigned c = 0; c < 4; ++c)
             CHECK(m->channels[c] == 7);
          CHECK(!m->scalars++);

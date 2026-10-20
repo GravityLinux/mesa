@@ -197,7 +197,8 @@ apple9_identity(const struct agx_apple9_vir_instr *ins)
 static unsigned
 apple9_source_width(const struct agx_apple9_vir_instr *ins, unsigned source)
 {
-   if (ins->op == AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL && source == 0)
+   if ((ins->op == AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL ||
+        ins->op == AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR) && source == 0)
       return 2;
    if ((ins->op == AGX_APPLE9_VIR_DEVICE_STORE ||
         ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC ||

@@ -25,7 +25,7 @@ agx_apple9_encode_mesh(uint8_t out[6],
    case AGX_APPLE9_MESH_SUBMIT:
       if ((unsigned)ins->mode > AGX_APPLE9_MESH_SUBMIT_CHANNEL ||
           ins->source_gpr >= AGX_APPLE9_GPR_COUNT ||
-          (ins->mode == AGX_APPLE9_MESH_SUBMIT_CHANNEL &&
+          (ins->mode != AGX_APPLE9_MESH_SUBMIT_CULL &&
            ins->source_gpr + 1 >= AGX_APPLE9_GPR_COUNT))
          return false;
       word = UINT64_C(0x0006005406d7) | ((uint64_t)ins->source_gpr << 24) |
@@ -72,7 +72,7 @@ agx_apple9_decode_mesh(const uint8_t in[6],
       decoded.mode = (word >> 35) & 3;
       if (decoded.mode > AGX_APPLE9_MESH_SUBMIT_CHANNEL ||
           decoded.source_gpr >= AGX_APPLE9_GPR_COUNT ||
-          (decoded.mode == AGX_APPLE9_MESH_SUBMIT_CHANNEL &&
+          (decoded.mode != AGX_APPLE9_MESH_SUBMIT_CULL &&
            decoded.source_gpr + 1 >= AGX_APPLE9_GPR_COUNT))
          return false;
    } else {

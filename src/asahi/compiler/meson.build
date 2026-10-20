@@ -150,6 +150,14 @@ if with_tests
     link_with : [libasahi_compiler],
   )
   test('apple9-native-object', apple9_native_object_test, suite : ['asahi'])
+  apple9_limits_workgroup_test = executable('apple9-limits-workgroup',
+    'test/apple9-limits-workgroup.c',
+    c_args : [c_msvc_compat_args, no_override_init_args],
+    gnu_symbol_visibility : 'hidden',
+    dependencies : [idep_nir, idep_mesautil],
+    link_with : [libasahi_compiler],
+  )
+  test('apple9-limits-workgroup', apple9_limits_workgroup_test, suite : ['asahi'])
   apple9_native_primitive_test = executable('apple9-native-primitive',
     'test/apple9-native-primitive.c',
     c_args : [c_msvc_compat_args, no_override_init_args],

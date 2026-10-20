@@ -22,11 +22,11 @@
 
 
 static nir_shader *
-source(const struct native_mesh_fixture *f)
+source(const struct native_mesh_fixture *f, unsigned threads)
 {
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_MESH, &agx_nir_options, "normal_mesh_fixture_inputs");
-   b.shader->info.workgroup_size[0] = 16;
+   b.shader->info.workgroup_size[0] = threads;
    b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
    b.shader->info.mesh.max_vertices_out = 3;
    b.shader->info.mesh.max_primitives_out = 1;
@@ -35,7 +35,7 @@ source(const struct native_mesh_fixture *f)
                                       nir_imm_int(&b, f->primitives),
                                       nir_imm_int(&b, 0));
    for (unsigned i = 0; i < 3; ++i) {
-      nir_push_if(&b, nir_ieq_imm(&b, nir_load_local_invocation_index(&b), i));
+      nir_push_if(&b, nir_ieq_imm(&b, nir_load_local_invocation_index(&b), i % threads));
       nir_def *v[4];
       for (unsigned c = 0; c < 4; ++c)
          v[c] = nir_imm_int(&b, f->positions[4 * i + c]);
@@ -102,12 +102,13 @@ add_pressure(nir_shader *nir)
 static const char *export_dir;
 
 static void
-run_fixture(const struct native_mesh_fixture *f, bool pressure, bool clip_halfz)
+run_fixture(const struct native_mesh_fixture *f, bool pressure, bool clip_halfz,
+            unsigned threads)
 {
    const struct agx_apple9_native_mesh_options options = {.clip_halfz = clip_halfz};
    struct agx_apple9_mesh_body_info info;
    const char *reason = NULL;
-   nir_shader *nir = source(f);
+   nir_shader *nir = source(f, threads);
    if (clip_halfz)
       nir_lower_io_to_scalar(nir, nir_var_shader_out, NULL, NULL);
    CHECK(agx_nir_lower_apple9_native_mesh(nir, true, &options, &info, &reason));
@@ -161,7 +162,7 @@ run_fixture(const struct native_mesh_fixture *f, bool pressure, bool clip_halfz)
    free(m.value);
    struct agx_shader_part code = {0};
    ralloc_free(nir);
-   nir = source(f);
+   nir = source(f, threads);
    if (clip_halfz)
       nir_lower_io_to_scalar(nir, nir_var_shader_out, NULL, NULL);
    bool ok = agx_nir_lower_apple9_native_mesh(nir, true, &options, &info, &reason);
@@ -215,7 +216,7 @@ struct attribute {
 static nir_shader *
 attribute_source(const struct attribute *attrs, unsigned count)
 {
-   nir_shader *nir = source(&h1_fixtures[0]);
+   nir_shader *nir = source(&h1_fixtures[0], 16);
    nir_builder b = nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(nir)));
    for (unsigned v = 0; v < 3; ++v) {
       nir_push_if(&b, nir_ieq_imm(&b, nir_load_local_invocation_index(&b), v));
@@ -322,7 +323,7 @@ check_attributes(void)
    struct agx_shader_part code = {0};
    struct agx_apple9_mesh_body_info info;
    for (unsigned primitive = 0; primitive < 2; ++primitive) {
-      nir_shader *nir = primitive ? source(&h1_fixtures[0])
+      nir_shader *nir = primitive ? source(&h1_fixtures[0], 16)
                                   : attribute_source(wide, ARRAY_SIZE(wide));
       nir_builder b = nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(nir)));
       if (primitive)
@@ -348,7 +349,7 @@ reject_unsupported(void)
       struct native_mesh_fixture f = h1_fixtures[0];
       if (variant == 1)
          f.primitives = 2;
-      nir_shader *nir = source(&f);
+      nir_shader *nir = source(&f, 16);
       if (variant == 2)
          nir->info.workgroup_size[0] = 32;
       if (variant == 3)
@@ -382,22 +383,29 @@ main(int argc, char **argv)
          memcpy(f.positions, clip_fixtures[i].positions, sizeof(f.positions));
          /* Preserve all four position components, including non-unit W.
           * Hardware clipping is deliberately outside this host interpreter. */
-         run_fixture(&f, false, false);
+         run_fixture(&f, false, false, 16);
       }
       glsl_type_singleton_decref();
       return 0;
    }
    reject_unsupported();
    check_attributes();
+   for (unsigned threads = 1; threads < 16; ++threads) {
+      struct native_mesh_fixture f = h1_fixtures[0];
+      char name[32];
+      snprintf(name, sizeof(name), "PARTIAL_T%u", threads);
+      f.name = name;
+      run_fixture(&f, false, false, threads);
+   }
    for (unsigned i = 0; i < ARRAY_SIZE(h1_fixtures); ++i)
-      run_fixture(&h1_fixtures[i], false, false);
-   run_fixture(&h1_fixtures[0], true, false);
+      run_fixture(&h1_fixtures[i], false, false, 16);
+   run_fixture(&h1_fixtures[0], true, false, 16);
    for (unsigned i = 0; i < ARRAY_SIZE(clip_fixtures); ++i) {
       struct native_mesh_fixture f = h1_fixtures[0];
       f.name = clip_fixtures[i].name;
       memcpy(f.positions, clip_fixtures[i].positions, sizeof(f.positions));
-      run_fixture(&f, false, false);
-      run_fixture(&f, false, true);
+      run_fixture(&f, false, false, 16);
+      run_fixture(&f, false, true, 16);
    }
    glsl_type_singleton_decref();
    return 0;

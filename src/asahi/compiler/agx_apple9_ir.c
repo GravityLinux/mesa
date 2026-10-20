@@ -381,21 +381,21 @@ agx_apple9_vir_emit_mesh_control(struct agx_apple9_vir_program *program,
 
 bool
 agx_apple9_vir_emit_mesh_submit(struct agx_apple9_vir_program *program,
-                                const uint32_t *src, unsigned components,
+                                const uint32_t src[2], bool channel,
                                 bool release)
 {
-   if (!program || !src || components < 1 || components > 2)
+   if (!program || !src)
       return false;
-   for (unsigned s = 0; s < components; ++s) {
+   for (unsigned s = 0; s < 2; ++s) {
       if (src[s] >= program->value_count)
          return false;
    }
    if (!agx_apple9_vir_emit_side_effect(program,
-          components == 2 ? AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL
-                          : AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR,
-          components == 2 ? AGX_APPLE9_ENC_MESH_SUBMIT_CHANNEL
-                          : AGX_APPLE9_ENC_MESH_SUBMIT_SCALAR,
-          src, components, 0))
+          channel ? AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL
+                  : AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR,
+          channel ? AGX_APPLE9_ENC_MESH_SUBMIT_CHANNEL
+                  : AGX_APPLE9_ENC_MESH_SUBMIT_SCALAR,
+          src, 2, 0))
       return false;
    program->instructions[program->instruction_count - 1]->mesh_release = release;
    return true;
@@ -2404,10 +2404,12 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
 
          unsigned tuple[AGX_APPLE9_MAX_ENCODING_OPERANDS] = {0};
          unsigned tuple_count = 0;
+         const unsigned bits =
+            instruction->op == AGX_APPLE9_VIR_MESH_CONTROL ? 16 : 32;
          valid &=
             encoding_tuple(instruction, program->phys, tuple, &tuple_count) &&
             agx_apple9_encoding_accepts_gpr_tuple(instruction->encoding, tuple,
-                                                  tuple_count, 32);
+                                                  tuple_count, bits);
          if (!valid) {
             if (reason != NULL)
                *reason =
@@ -6402,7 +6404,7 @@ pack_mesh(const struct agx_apple9_vir_instr *I, const uint8_t *phys,
    if (I->op == AGX_APPLE9_VIR_MESH_CONTROL) {
       if (I->encoding != AGX_APPLE9_ENC_MESH_CONTROL || I->nr_srcs != 2 ||
           I->src_half_mask != 3 || (I->src_hi_mask & ~3u) ||
-          I->live_after_mask || I->mesh_release)
+          (I->live_after_mask & ~2u) || I->mesh_release)
          return false;
       mesh.kind = AGX_APPLE9_MESH_CONTROL;
       mesh.count_gpr = phys[I->src[0]];
@@ -6414,7 +6416,7 @@ pack_mesh(const struct agx_apple9_vir_instr *I, const uint8_t *phys,
       bool channel = I->op == AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL;
       if (I->encoding != (channel ? AGX_APPLE9_ENC_MESH_SUBMIT_CHANNEL
                                   : AGX_APPLE9_ENC_MESH_SUBMIT_SCALAR) ||
-          I->nr_srcs != (channel ? 2 : 1) || I->src_half_mask ||
+          I->nr_srcs != 2 || I->src_half_mask ||
           I->src_hi_mask || I->mesh_control42 ||
           I->live_after_mask)
          return false;
@@ -6423,7 +6425,7 @@ pack_mesh(const struct agx_apple9_vir_instr *I, const uint8_t *phys,
       mesh.mode = channel ? AGX_APPLE9_MESH_SUBMIT_CHANNEL
                           : AGX_APPLE9_MESH_SUBMIT_SCALAR;
       mesh.release = I->mesh_release;
-      if (channel && phys[I->src[1]] != mesh.source_gpr + 1)
+      if (phys[I->src[1]] != mesh.source_gpr + 1)
          return false;
    }
 

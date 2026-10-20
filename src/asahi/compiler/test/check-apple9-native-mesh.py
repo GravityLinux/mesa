@@ -49,7 +49,7 @@ def check_program(rows, channels=None):
             base, release, mode = (word >> 24) & 127, (word >> 31) & 1, (word >> 35) & 3
             channel = r["op"] == "MESH_SUBMIT_CHANNEL"
             assert mode == (2 if channel else 0) and release == channel
-            regs = [f"r{base}", f"r{base + 1}"] if channel else [f"r{base}"]
+            regs = [f"r{base}", f"r{base + 1}"]
         assert regs == r["src"], (regs, r)
         assert all(int(x[1:]) < 96 for x in regs)
         return regs
@@ -59,6 +59,8 @@ def check_program(rows, channels=None):
             r = rows[i]
             if r["op"].startswith("MESH_"):
                 clobber = decoded(i)
+                if r["op"] == "MESH_CONTROL":
+                    clobber = clobber[:1]
                 assert reg not in clobber, ("read of released/cleared source", reg, i)
             if r["dst"] != reg:
                 continue
@@ -89,17 +91,18 @@ def check_program(rows, channels=None):
             raise AssertionError(("unmodelled input definition", r))
         raise AssertionError(("undefined allocated input", reg, before))
 
-    # Both U0 operands are conservatively destructive. Check all subsequent
-    # ordinary reads, not just the def-use slices feeding mesh units.
-    killed = set(decoded(units[0]))
+    # U0 clears A and preserves B. Check all subsequent ordinary reads of A,
+    # not just the def-use slices feeding mesh units.
+    killed = set(decoded(units[0])[:1])
     for r in rows[units[0] + 1:]:
         assert not killed.intersection(r["src"]), ("post-U0 read", killed, r)
         killed.discard(r["dst"])
 
     expected = [[("local", 6, 16), ("local", 6, 20)],
-                *channels, [("local", 6, 20)]]
+                *channels, [("local", 6, 20), 0]]
     for i, want in zip(units, expected):
-        assert [value(s, i) for s in decoded(i)] == want
+        got = [value(s, i) for s in decoded(i)]
+        assert got == want, (rows[i]["op"], got, want)
 
     # The application body has reconverged before U0. The two
     # remaining masks must be lane < actual vertex count and lane == 0.
@@ -164,6 +167,37 @@ def mutation_checks(rows):
     else:
         raise AssertionError("swapped tuple mutation escaped checker")
 
+    # Mutate the last definition of the actual scalar neighbor, after all
+    # channel submissions. Do not change a shared zero definition that would
+    # make an earlier channel fail before testing the scalar's own contract.
+    scalar = next(i for i, r in enumerate(rows) if r["op"] == "MESH_SUBMIT_SCALAR")
+    reg = rows[scalar]["src"][1]
+    definition = max(i for i in range(scalar) if rows[i]["dst"] == reg)
+    assert definition > max(i for i, r in enumerate(rows) if r["op"] == "MESH_SUBMIT_CHANNEL")
+    for mutation in ("missing-source", "undefined", "garbage"):
+        bad = copy.deepcopy(rows)
+        if mutation == "missing-source":
+            bad[scalar]["src"].pop()
+        elif mutation == "undefined":
+            del bad[definition]
+        else:
+            # Replace only the last allocated definition with a valid IMM 0x20.
+            dst = int(reg[1:]); assert dst < 64
+            code = bytes([(dst & 15) << 4 | 12, 0xa0,
+                          (dst >> 4) << 6 | 2, 0, 0, 0, 0, 0])
+            bad[definition].update(op="IMM", src=[], code=code, imm=0x20)
+        try:
+            check_program(bad)
+        except AssertionError as error:
+            if mutation == "garbage":
+                assert error.args[0][0] == "MESH_SUBMIT_SCALAR", error
+            elif mutation == "undefined":
+                assert error.args[0][0] in ("read of released/cleared source",
+                                             "undefined allocated input"), error
+                assert error.args[0][1] == reg, error
+        else:
+            raise AssertionError(f"scalar base+1 {mutation} mutation escaped checker")
+
 
 def main():
     run = subprocess.run(sys.argv[1:], env={**os.environ, "AGX_APPLE9_ASM": "1"},
@@ -220,7 +254,7 @@ def main():
         except AssertionError:pass
         else:raise AssertionError('corrupt high plane immediate accepted')
     sys.stdout.write(run.stdout)
-    print("six allocation and two high-plane immediate mutations rejected; live pressure increases the GPR high-water mark")
+    print("six allocation, six scalar base+1 and two high-plane immediate mutations rejected; live pressure increases the GPR high-water mark")
     print(f"checked {len(checked)} complete programs: boundaries, U units, allocated inputs, masks")
     print("first program U units:", " ".join(checked[0]))
     return 0

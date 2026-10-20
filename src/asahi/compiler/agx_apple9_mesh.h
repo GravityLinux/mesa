@@ -169,6 +169,9 @@ bool agx_compile_apple9_mesh_lowered(nir_shader *nir,
 /* Fragment interpolation uses the same grouped scalar order as VS output.
  * NULL selects the position-only, zero-to-one-depth contract. */
 struct agx_apple9_native_mesh_options {
+   /* Zero uses the qualified T16 launch. T32 executes up to 128 logical
+    * invocations as serialized subgroups; the driver must qualify that launch. */
+   unsigned physical_threads;
    bool clip_halfz;
    bool attributes;
    /* Exact single-primitive lowering; no native primitive-record ABI. */
@@ -177,7 +180,8 @@ struct agx_apple9_native_mesh_options {
 };
 
 /* Compiler-only native development gate, disabled unless explicitly enabled.
- * This accepts API sizes 1..16 at physical T16 and V3/P1. It emits the
+ * This accepts API sizes 1..16 at physical T16, or 1..128 at explicit T32,
+ * and V3/P1. It emits the
  * complete mesh body and hardware output submissions in one compile.
  * clip_halfz converts final Z from [-W,W] to [0,W] before submission.
  * The result still requires a native launch/object contract; generic shader

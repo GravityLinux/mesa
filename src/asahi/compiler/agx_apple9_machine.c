@@ -119,20 +119,28 @@ static const struct agx_apple9_encoding_info encodings[] = {
              AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_CLOBBER,
              AGX_APPLE9_EVIDENCE_HARDWARE),
          GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_16, 95, 2,
-             /* B preservation has not been qualified. Do not keep a live
-              * vertex count in the register supplied to the instruction. */
-             AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_CLOBBER,
-             AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+             /* Qualified U0 captures preserve the selected B halfword,
+              * including low/high remaps and both control42 values. Let its
+              * normal SSA uses retain it instead of manufacturing a dead
+              * clobber copy. This does not impose a numeric register window. */
+             AGX_APPLE9_OPERAND_ALLOCATABLE,
+             AGX_APPLE9_EVIDENCE_HARDWARE),
       },
    },
    [AGX_APPLE9_ENC_MESH_SUBMIT_SCALAR] = {
-      .name = "mesh_submit_scalar", .length = 6, .operand_count = 1,
+      .name = "mesh_submit_scalar", .length = 6, .operand_count = 2,
       .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_BYTE_DIFF,
       .operands = {
          /* Conservative even when release=0: preservation is unqualified. */
-         GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 95, 2,
+         GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 94, 2,
              AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_CLOBBER,
              AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+         /* Implicitly addressed at base+1, explicitly tracked by allocation.
+          * 0 and 3 pass; 0x10/0x20/0x30/0x40 suppress geometry on T8132.
+          * The field meaning and preservation are still unqualified. */
+         GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32, 95, 2,
+             AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_CLOBBER,
+             AGX_APPLE9_EVIDENCE_HARDWARE),
       },
    },
    [AGX_APPLE9_ENC_MESH_SUBMIT_CHANNEL] = {
