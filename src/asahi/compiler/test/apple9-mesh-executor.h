@@ -8,8 +8,10 @@
 #include "agx_apple9_mesh.h"
 #include "compiler/nir/nir_builder.h"
 
+#ifndef LANES
 #define LANES      16
-#define ALL_LANES  0xffff
+#endif
+#define ALL_LANES  (UINT32_MAX >> (32 - LANES))
 #define INPUT_ADDR 0x20000ull
 
 struct region {

@@ -201,11 +201,11 @@ int main(void)
    const unsigned shapes[][3] = {
       {1,1,1}, {3,1,1}, {17,1,1}, {31,1,1}, {32,1,1}, {33,1,1},
       {63,1,1}, {64,1,1}, {65,1,1}, {95,1,1}, {96,1,1}, {97,1,1},
-      {127,1,1}, {128,1,1}, {3,3,3}, {3,3,7}, {4,4,4}, {5,5,5}, {1,8,16}};
+      {127,1,1}, {128,1,1}, {1,128,1}, {1,1,128}, {3,3,3}, {3,3,7}, {4,4,4}, {5,5,5}, {1,8,16}};
    for (unsigned i = 0; i < ARRAY_SIZE(shapes); ++i)
       check(shapes[i][0], shapes[i][1], shapes[i][2]);
    reject();
    glsl_type_singleton_decref();
-   puts("19 native T32 cases: partial and nested masks, subgroup operations, 3D IDs, two barrier phases, exactly-once effects, guards and one completion; 8 rejection cases");
+   puts("21 native T32 cases: partial and nested masks, subgroup operations, 3D IDs, two barrier phases, exactly-once effects, guards and one completion; 8 rejection cases");
    return 0;
 }
