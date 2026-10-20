@@ -6,10 +6,13 @@ pipeline. The gate is disabled unless explicitly enabled. It is a compiler
 entry point used by Honeykrisp's opt-in `HK_APPLE9_NATIVE_MESH=1` runtime.
 The existing compute-emulated Vulkan mesh path remains the default.
 
-The accepted development class is a fixed API workgroup with 1..16 invocations
-(any 3D shape), launched at physical 16x1x1, triangle topology,
+The accepted development class is a fixed API workgroup with 1..128 invocations
+(any 3D shape), triangle topology,
 maxima V3/P1, one constant `SetMeshOutputs(3, 1)`, and no task
-payload, user shared memory, culling or primitive attributes. Position-only output
+payload. Honeykrisp selects physical 16x1x1 for up to 16 logical invocations
+and 32x1x1 otherwise. User shared storage is supported within the combined
+32-KiB local allocation; the gated API reports 28,672 shared bytes, leaving
+room for the maximum current output layout. Position-only output
 is the default. The additional `HK_APPLE9_NATIVE_MESH_ATTRIBUTES=1` development
 gate admits up to 124 32-bit user scalars in generic varying slots, with smooth,
 flat and noperspective interpolation selected by the fragment interface. This
@@ -19,8 +22,12 @@ Mesh output writes/reads use component-major local planes in semantic order.
 Completion publishes each plane with the existing U channel operation; user
 channel numbers follow the ordinary VS smooth/flat/linear grouping. The compiler
 exports that same varying layout to the fragment compiler and shared PPP builder.
-The launch local allocation is the next power of two covering the output layout,
-with a 128-byte minimum. No fixed application registers, new opaque code, or
+User shared storage begins after the output planes at a 16-byte boundary.
+Shared metadata records the logical size, offset and padded combined size;
+output-state rows continue to describe only the output planes. The launch
+allocation is the next power of two covering both regions, with a 128-byte
+minimum. Shared accesses and atomics use the same native local root, and
+barriers retain ordinary NIR semantics. No fixed application registers, new opaque code, or
 capture-specific instruction sequences are introduced. Primitive attributes
 remain rejected because their linking-plane/device-record publication is not
 understood. Paired VS/native device arms live in `../vulkan/tests/native-attributes`.
@@ -33,7 +40,7 @@ being qualified.
 
 ## API invocations and physical completion
 
-The native entrypoints set `key.physical_threads = 16` and use the existing
+At physical T16, the entrypoints use the existing
 `agx_nir_mask_apple9_mesh_body` NIR pass. The application region executes under
 `local_invocation_index < product(declared_size)`. This excludes extra lanes
 from application loads, stores, atomics, output writes and subgroup votes.
@@ -59,11 +66,14 @@ hardware export still uses lanes 0/1/2 for X/Y/Z. Masking that callee to the T1
 API lane set would lose two dimensions. The gated runtime uploads this generated
 object program alongside the mesh program; it does not expose API task shaders.
 
-Physical launches above 16, variable API sizes, and requested API subgroup
-sizes other than 32 reject explicitly. T32 would still be a single
-architectural subgroup, but the complete native object/mesh contract has not
-been qualified at that launch width. This work does not promote the older
-body-only experiments at wider physical widths.
+For logical sizes above 32, ordinary `nir_lower_workgroup_size` serializes
+logical subgroups on physical T32 between workgroup barriers. Logical IDs,
+partial final-subgroup masks and live values across barriers are preserved.
+Completion is appended after that transformation. Physical mesh widths other
+than T16/T32, variable API sizes, and requested API subgroup sizes other than
+32 reject explicitly. The generated object remains physical T16. T32 launch
+and shared-memory runtime admission are host-tested development paths; they
+still require a paired kernel accepting T32 mesh state and device qualification.
 
 The normal IO prerequisites were adapted from
 our authored compiler sources at `7779b8644dc355ee214cf64f4996254711e10c55`.
@@ -98,7 +108,7 @@ is not established. RA chooses all physical operands. The packer derives
 halfword descriptors as `2 * register + half`, and checks pair adjacency.
 Completion scheduling drains pending operations before these side effects.
 
-The known class issues control in all 16 lanes with A = the published primitive
+The known class issues control in all physical lanes with A = the published primitive
 count and B = the published vertex count. Channels 0..3 run in lanes below the
 actual vertex count; their offsets come from the Position component map and
 pitch. The scalar submission runs in lane 0. Device fences preserve the
@@ -124,7 +134,7 @@ the stage's complete compiler metadata. Generic compute or vertex submission
 cannot run the program. Native mesh and generated object programs remain
 separate owned shader BOs, retained by every referencing command buffer.
 
-The private argument ABI is version 7:
+The private argument/metadata ABI is version 8:
 
 | Uniform words | Meaning |
 | --- | --- |
@@ -181,6 +191,15 @@ before redefinition. Six misallocated/swapped-tuple mutations must fail. The
 executable also checks the disabled gate and unsupported count, workgroup,
 payload and capacity cases. `test/mesh-source-fixtures.json` records provenance.
 These checks do not emulate hardware record formation, clipping or retirement.
+
+`apple9-native-shared` checks shared allocation, cross-logical-subgroup exchange,
+barriers, atomic return values, narrow accesses and guards through the NIR
+executor, then audits allocated instruction roots. `hk-native-mesh` validates
+combined launch allocations and rejects corrupted allocation/stage/width
+metadata without modifying the launch output. `hk-native-mesh-options` exercises
+the real driver compiler boundary for T1..T128, XYZ and mixed shapes, including
+shared storage and invalid sizes. Scratch and returned-atomic frames still
+reject at runtime; the maximum-attribute dynamic shared stress programs spill.
 
 For an external hardware harness, the test executable can export the complete
 BASE/SHIFT_X binaries and their compiler metadata without modifying them:

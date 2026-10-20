@@ -29,6 +29,46 @@ hk_apple9_native_mesh_primitive_lowering_enabled(void)
           debug_get_option_native_mesh_primitive_lowering();
 }
 
+static bool
+logical_size_valid(const uint16_t size[3], unsigned limit)
+{
+   unsigned total = 1;
+   for (unsigned i = 0; i < 3; ++i) {
+      if (!size[i] || size[i] > limit / total)
+         return false;
+      total *= size[i];
+   }
+   return true;
+}
+
+unsigned
+hk_apple9_native_mesh_threads(const uint16_t local_size[3])
+{
+   if (!local_size ||
+       !logical_size_valid(local_size, AGX_APPLE9_NATIVE_MAX_INVOCATIONS))
+      return 0;
+   return logical_size_valid(local_size, AGX_APPLE9_NATIVE_THREADS)
+             ? AGX_APPLE9_NATIVE_THREADS : AGX_APPLE9_NATIVE_SERIAL_THREADS;
+}
+
+static bool
+local_allocation_valid(const struct agx_shader_info *code,
+                       const struct agx_apple9_mesh_body_info *body)
+{
+   unsigned output = body->layout.local_size_B;
+   if (output > AGX_APPLE9_MAX_SHARED_BYTES ||
+       body->shared_size_B > AGX_APPLE9_MAX_SHARED_BYTES)
+      return false;
+   unsigned offset = body->shared_size_B ? ALIGN_POT(output, 16) : 0;
+   unsigned shared = ALIGN_POT(body->shared_size_B, 4);
+   if (shared > AGX_APPLE9_MAX_SHARED_BYTES - offset)
+      return false;
+   unsigned total = body->shared_size_B ? offset + shared : output;
+   return body->shared_offset_B == offset &&
+          body->local_allocation_B == total &&
+          code->local_size == (body->shared_size_B ? total : 0);
+}
+
 bool
 hk_apple9_native_shader_valid(const struct agx_shader_info *code,
                                const struct agx_apple9_mesh_body_info *body,
@@ -37,9 +77,7 @@ hk_apple9_native_shader_valid(const struct agx_shader_info *code,
    if (!code || !body || stage == HK_APPLE9_NATIVE_NONE ||
        stage > HK_APPLE9_NATIVE_MESH || !code->apple9_body_only ||
        !code->binary_size || code->scratch_size ||
-       /* Compiler support does not qualify the native shared allocation. */
-       code->local_size || body->shared_size_B ||
-       code->apple9_atomic_frame_size || code->workgroup_size[0] != 16 ||
+       code->apple9_atomic_frame_size ||
        code->workgroup_size[1] != 1 || code->workgroup_size[2] != 1 ||
        body->requires_mesh_completion || body->requires_object_completion ||
        body->argument_uniform_words != AGX_APPLE9_MESH_ARGUMENT_WORDS)
@@ -51,11 +89,21 @@ hk_apple9_native_shader_valid(const struct agx_shader_info *code,
        k->primitive_count_bits != expected.primitive_count_bits ||
        k->payload_uniform != expected.payload_uniform ||
        k->grid_root != expected.grid_root || k->grid_offset_B ||
-       k->physical_threads != AGX_APPLE9_NATIVE_THREADS)
+       code->workgroup_size[0] != k->physical_threads ||
+       !local_allocation_valid(code, body))
       return false;
    if (stage == HK_APPLE9_NATIVE_OBJECT)
-      return body->logical_size[0] == 1 && body->logical_size[1] == 1 &&
-             body->logical_size[2] == 1;
+      return k->physical_threads == AGX_APPLE9_NATIVE_THREADS &&
+             body->logical_size[0] == 1 && body->logical_size[1] == 1 &&
+             body->logical_size[2] == 1 && !body->shared_size_B &&
+             !body->layout.local_size_B && !code->local_size;
+   unsigned logical_limit =
+      k->physical_threads == AGX_APPLE9_NATIVE_THREADS
+         ? AGX_APPLE9_NATIVE_THREADS
+         : k->physical_threads == AGX_APPLE9_NATIVE_SERIAL_THREADS
+              ? AGX_APPLE9_NATIVE_MAX_INVOCATIONS : 0;
+   if (!logical_limit || !logical_size_valid(body->logical_size, logical_limit))
+      return false;
    const struct agx_apple9_mesh_layout *l = &body->layout;
    return l->max_vertices == 3 && l->max_primitives == 1 &&
           l->indices_per_primitive == 3 && l->vertex_components >= 4 &&
@@ -96,7 +144,7 @@ hk_apple9_native_launch_parameters(
                                     ? HK_APPLE9_NATIVE_LOCAL_BYTES
                                     : util_next_power_of_two(MAX2(
                                          HK_APPLE9_NATIVE_LOCAL_BYTES,
-                                         body->layout.local_size_B)),
+                                         body->local_allocation_B)),
       .preamble_address = code->apple9_preamble_size
                              ? code_address + code->apple9_preamble_offset : 0,
    };

@@ -26,7 +26,7 @@ eligible(nir_shader *nir, unsigned physical_threads, const char **reason)
       if (!agx_apple9_native_workgroup_supported(nir, reason))
          return false;
    } else {
-      if (physical_threads != 32)
+      if (physical_threads != AGX_APPLE9_NATIVE_SERIAL_THREADS)
          return fail(reason, "native mesh physical workgroup must be T16 or T32");
       if (nir->info.workgroup_size_variable)
          return fail(reason, "native mesh requires a fixed API workgroup size");
@@ -35,7 +35,7 @@ eligible(nir_shader *nir, unsigned physical_threads, const char **reason)
       unsigned threads = 1;
       for (unsigned d = 0; d < 3; ++d) {
          unsigned size = nir->info.workgroup_size[d];
-         if (!size || size > 128 / threads)
+         if (!size || size > AGX_APPLE9_NATIVE_MAX_INVOCATIONS / threads)
             return fail(reason, "native mesh supports 1..128 API invocations at physical T32");
          threads *= size;
       }

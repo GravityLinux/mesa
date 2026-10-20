@@ -47,6 +47,10 @@ struct agx_apple9_mesh_key {
  * API invocations occupy its first 1..16 lanes. Wider launches need separate
  * hardware qualification of completion and object call participation. */
 #define AGX_APPLE9_NATIVE_THREADS 16
+/* Logical workgroups above T16 serialize at most four 32-lane subgroups.
+ * This compiler model does not qualify physical multi-subgroup execution. */
+#define AGX_APPLE9_NATIVE_SERIAL_THREADS 32
+#define AGX_APPLE9_NATIVE_MAX_INVOCATIONS 128
 
 bool agx_apple9_native_workgroup_supported(const nir_shader *nir,
                                           const char **reason);

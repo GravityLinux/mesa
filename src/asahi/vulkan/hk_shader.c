@@ -5880,7 +5880,14 @@ hk_apple9_compile_native_mesh_program(
    struct agx_shader_part *out, struct agx_apple9_mesh_body_info *info,
    const char **reason)
 {
+   unsigned threads = hk_apple9_native_mesh_threads(nir->info.workgroup_size);
+   if (!threads) {
+      if (reason)
+         *reason = "native mesh supports 1..128 logical invocations";
+      return false;
+   }
    const struct agx_apple9_native_mesh_options options = {
+      .physical_threads = threads,
       .clip_halfz = key->clip_negative_one_to_one,
       .attributes = hk_apple9_native_mesh_attributes_enabled(),
       .primitive_broadcast = hk_apple9_native_mesh_primitive_lowering_enabled(),

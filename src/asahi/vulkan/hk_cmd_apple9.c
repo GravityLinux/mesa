@@ -506,7 +506,7 @@ hk_apple9_prepare_native_mesh(struct hk_cmd_buffer *cmd,
       .mesh_launch = agx_usc_addr(&dev->dev, launch.gpu) / 64,
       .object_launch = agx_usc_addr(
          &dev->dev, launch.gpu + AGX_APPLE9_GRAPHICS_LAUNCH_SIZE) / 64,
-      .threads = AGX_APPLE9_NATIVE_THREADS,
+      .threads = mesh->b.info.workgroup_size[0],
       .has_object_stage = true,
    };
    return agx_apple9_mesh_state_build(state, &params);

@@ -196,32 +196,92 @@ mask_fixtures(void)
 }
 
 static void
-check_shared_admission(void)
+check_bad_allocation(const struct agx_shader_info *code,
+                     const struct agx_apple9_mesh_body_info *body)
 {
-   nir_shader *nir = mesh_source(0);
+   CHECK(!hk_apple9_native_shader_valid(code, body, HK_APPLE9_NATIVE_MESH));
+   struct agx_apple9_launch_parameters launch, before;
+   memset(&before, 0xa5, sizeof(before));
+   memcpy(&launch, &before, sizeof(launch));
+   CHECK(!hk_apple9_native_launch_parameters(&launch, code, body,
+      HK_APPLE9_NATIVE_MESH, 0, 0x1000));
+   CHECK(!memcmp(&launch, &before, sizeof(launch)));
+}
+
+static void
+check_shared_admission(unsigned attributes, unsigned shared_bytes,
+                       unsigned logical_threads)
+{
+   nir_shader *nir = mesh_source(attributes);
+   nir->info.workgroup_size[0] = logical_threads;
    nir_builder b = nir_builder_at(nir_before_impl(nir_shader_get_entrypoint(nir)));
-   nir->info.shared_size = 28672;
-   nir_store_shared(&b, nir_imm_int(&b, 123), nir_imm_int(&b, 28668),
-                     .align_mul = 4, .write_mask = 1);
+   nir->info.shared_size = shared_bytes;
+   if (shared_bytes)
+      nir_store_shared(&b, nir_imm_int(&b, 123),
+         nir_imm_int(&b, (shared_bytes - 4) & ~3u),
+         .align_mul = 4, .write_mask = 1);
    struct agx_shader_part part = {0};
    struct agx_apple9_mesh_body_info info = {0};
    const char *reason = NULL;
-   CHECK(agx_compile_apple9_native_mesh(nir, true, NULL, &part, &info, &reason));
-   CHECK(info.shared_offset_B == 96 && info.shared_size_B == 28672);
-   CHECK(info.local_allocation_B == 28768 && part.info.local_size == 28768);
-   CHECK(!hk_apple9_native_shader_valid(&part.info, &info, HK_APPLE9_NATIVE_MESH));
+   unsigned threads = logical_threads <= 16 ? 16 : 32;
+   const struct agx_apple9_native_mesh_options options = {
+      .attributes = true, .physical_threads = threads,
+   };
+   CHECK(agx_compile_apple9_native_mesh(nir, true, &options, &part, &info, &reason));
+   unsigned output = 96 + 16 * attributes;
+   unsigned total = output + ALIGN_POT(shared_bytes, 4);
+   CHECK(info.shared_offset_B == (shared_bytes ? output : 0));
+   CHECK(info.shared_size_B == shared_bytes && info.local_allocation_B == total);
+   CHECK(part.info.local_size == (shared_bytes ? total : 0));
+   CHECK(hk_apple9_native_shader_valid(&part.info, &info, HK_APPLE9_NATIVE_MESH));
+   CHECK(!hk_apple9_native_shader_valid(&part.info, &info, HK_APPLE9_NATIVE_OBJECT));
    struct agx_apple9_launch_parameters launch;
-   CHECK(!hk_apple9_native_launch_parameters(&launch, &part.info, &info,
+   CHECK(hk_apple9_native_launch_parameters(&launch, &part.info, &info,
       HK_APPLE9_NATIVE_MESH, 0, 0x1000));
-   /* Output state retains its five output rows, independent of user shared
-    * capacity. Only launch admission owns the combined-allocation gate. */
+   CHECK(launch.threadgroup_memory_bytes == util_next_power_of_two(MAX2(128, total)));
+   /* User shared storage changes the launch allocation, not output rows. */
    struct agx_apple9_mesh_state_parameters state = {
       .layout = &info.layout, .object_launch = 0x2400, .mesh_launch = 0x2000,
-      .threads = 16, .has_object_stage = true,
+      .threads = part.info.workgroup_size[0], .has_object_stage = true,
    };
    uint32_t packet[AGX_APPLE9_MESH_STATE_WORDS];
    CHECK(agx_apple9_mesh_state_build(packet, &state));
-   CHECK(packet[13] == 5);
+   CHECK(packet[11] == (0x400800 | threads) && packet[13] == 5 + attributes);
+
+   struct agx_apple9_mesh_body_info bad = info;
+   bad.shared_offset_B ^= 16;
+   check_bad_allocation(&part.info, &bad);
+   bad = info;
+   bad.local_allocation_B -= 4;
+   check_bad_allocation(&part.info, &bad);
+   bad = info;
+   bad.shared_size_B = UINT32_MAX;
+   check_bad_allocation(&part.info, &bad);
+   bad = info;
+   bad.shared_size_B = 32768 - output + 1;
+   bad.local_allocation_B = output + ALIGN_POT(bad.shared_size_B, 4);
+   check_bad_allocation(&part.info, &bad);
+   bad = info;
+   bad.logical_size[0] = 0;
+   check_bad_allocation(&part.info, &bad);
+   bad = info;
+   bad.logical_size[0] = 129;
+   check_bad_allocation(&part.info, &bad);
+   bad = info;
+   bad.key.physical_threads = 64;
+   check_bad_allocation(&part.info, &bad);
+   struct agx_shader_info wrong = part.info;
+   wrong.local_size ^= 4;
+   check_bad_allocation(&wrong, &info);
+   wrong = part.info;
+   wrong.workgroup_size[0] = threads == 16 ? 32 : 16;
+   check_bad_allocation(&wrong, &info);
+   wrong = part.info;
+   wrong.scratch_size = 4;
+   check_bad_allocation(&wrong, &info);
+   wrong = part.info;
+   wrong.apple9_atomic_frame_size = 4;
+   check_bad_allocation(&wrong, &info);
    free(part.binary);
    ralloc_free(nir);
 }
@@ -242,7 +302,15 @@ main(int argc, char **argv)
    check_contract(false, 5);
    check_contract(false, 124);
    check_contract(true, 0);
-   check_shared_admission();
+   const unsigned sizes[] = {1, 16, 17, 32, 33, 64, 127, 128};
+   for (unsigned i = 0; i < ARRAY_SIZE(sizes); ++i) {
+      check_shared_admission(0, 0, sizes[i]);
+      check_shared_admission(0, 28672, sizes[i]);
+   }
+   check_shared_admission(0, 28671, 128);
+   check_shared_admission(0, 32672, 128);
+   check_shared_admission(124, 28672, 128);
+   check_shared_admission(124, 30688, 128);
    struct agx_apple9_mesh_arguments args = {
       .graphics = {0x1000, 0x2000, 0x3000},
       .output_root = HK_APPLE9_NATIVE_OUTPUT_ROOT,

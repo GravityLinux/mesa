@@ -1847,14 +1847,15 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
     * These limits describe what native pipeline/draw validation accepts. */
    if (hk_apple9_native_mesh_enabled()) {
       props->maxMeshWorkGroupTotalCount = 1;
-      props->maxMeshWorkGroupInvocations = AGX_APPLE9_NATIVE_THREADS;
+      props->maxMeshWorkGroupInvocations = AGX_APPLE9_NATIVE_MAX_INVOCATIONS;
       for (unsigned i = 0; i < 3; ++i) {
          props->maxMeshWorkGroupCount[i] = 1;
-         props->maxMeshWorkGroupSize[i] = AGX_APPLE9_NATIVE_THREADS;
+         props->maxMeshWorkGroupSize[i] = AGX_APPLE9_NATIVE_MAX_INVOCATIONS;
       }
       props->maxTaskPayloadSize = 0;
-      props->maxMeshSharedMemorySize = 0;
-      props->maxMeshPayloadAndSharedMemorySize = 0;
+      props->maxMeshSharedMemorySize = HK_APPLE9_NATIVE_SHARED_BYTES;
+      /* No task payload is admitted; both fields bound the same user region. */
+      props->maxMeshPayloadAndSharedMemorySize = HK_APPLE9_NATIVE_SHARED_BYTES;
       /* The API component limit includes Position. User locations use the
        * channels left after XYZW, while both occupy native output planes. */
       unsigned user_components = hk_apple9_native_mesh_attributes_enabled()
@@ -1867,7 +1868,7 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
       props->maxMeshOutputPrimitives = 1;
       props->maxMeshOutputLayers = 1;
       props->maxMeshMultiviewViewCount = 1;
-      props->maxPreferredMeshWorkGroupInvocations = AGX_APPLE9_NATIVE_THREADS;
+      props->maxPreferredMeshWorkGroupInvocations = AGX_APPLE9_NATIVE_SERIAL_THREADS;
    }
 
 
