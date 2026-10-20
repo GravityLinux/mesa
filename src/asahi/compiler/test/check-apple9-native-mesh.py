@@ -99,7 +99,8 @@ def check_program(rows, channels=None):
     expected = [[("local", 6, 16), ("local", 6, 20)],
                 *channels, [("local", 6, 20), 0]]
     for i, want in zip(units, expected):
-        assert [value(s, i) for s in decoded(i)] == want
+        got = [value(s, i) for s in decoded(i)]
+        assert got == want, (rows[i]["op"], got, want)
 
     # The application body has reconverged before U0. The two
     # remaining masks must be lane < actual vertex count and lane == 0.
@@ -164,19 +165,13 @@ def mutation_checks(rows):
     else:
         raise AssertionError("swapped tuple mutation escaped checker")
 
-    # Follow the scalar's second input through allocation copies to its zero
-    # definition. Removing it exposes stale/undefined storage; replacing it
-    # with 0x20 models the measured geometry-suppressing neighbor.
+    # Mutate the last definition of the actual scalar neighbor, after all
+    # channel submissions. Do not change a shared zero definition that would
+    # make an earlier channel fail before testing the scalar's own contract.
     scalar = next(i for i, r in enumerate(rows) if r["op"] == "MESH_SUBMIT_SCALAR")
-    reg, before = rows[scalar]["src"][1], scalar
-    while True:
-        definition = max(i for i in range(before) if rows[i]["dst"] == reg)
-        r = rows[definition]
-        if r["op"] != "IOR":
-            break
-        assert r["src"][0] == r["src"][1]
-        reg, before = r["src"][0], definition
-    assert r["op"] == "IMM" and r["imm"] == 0
+    reg = rows[scalar]["src"][1]
+    definition = max(i for i in range(scalar) if rows[i]["dst"] == reg)
+    assert definition > max(i for i, r in enumerate(rows) if r["op"] == "MESH_SUBMIT_CHANNEL")
     for mutation in ("missing-source", "undefined", "garbage"):
         bad = copy.deepcopy(rows)
         if mutation == "missing-source":
@@ -184,13 +179,20 @@ def mutation_checks(rows):
         elif mutation == "undefined":
             del bad[definition]
         else:
-            code = bytearray(bad[definition]["code"])
-            code[1] |= 0x20
-            bad[definition].update(code=bytes(code), imm=0x20)
+            # Replace only the last allocated definition with a valid IMM 0x20.
+            dst = int(reg[1:]); assert dst < 64
+            code = bytes([(dst & 15) << 4 | 12, 0xa0,
+                          (dst >> 4) << 6 | 2, 0, 0, 0, 0, 0])
+            bad[definition].update(op="IMM", src=[], code=code, imm=0x20)
         try:
             check_program(bad)
-        except AssertionError:
-            pass
+        except AssertionError as error:
+            if mutation == "garbage":
+                assert error.args[0][0] == "MESH_SUBMIT_SCALAR", error
+            elif mutation == "undefined":
+                assert error.args[0][0] in ("read of released/cleared source",
+                                             "undefined allocated input"), error
+                assert error.args[0][1] == reg, error
         else:
             raise AssertionError(f"scalar base+1 {mutation} mutation escaped checker")
 
