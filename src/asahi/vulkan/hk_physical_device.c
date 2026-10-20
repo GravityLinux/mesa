@@ -1861,8 +1861,15 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
       unsigned user_components = hk_apple9_native_mesh_attributes_enabled()
                                     ? AGX_APPLE9_MAX_VARYING_COMPONENTS : 0;
       unsigned components = 4 + user_components;
-      props->maxMeshOutputMemorySize = 32 + 16 * components;
-      props->maxMeshPayloadAndOutputMemorySize = props->maxMeshOutputMemorySize;
+      /* Vulkan counts the declared output interface. Compiler count words
+       * and padding to four local vertices are not API output memory.
+       * V3/P1 and granularity one bound this at three copies of the interface;
+       * per-primitive outputs consume no more than the all-vertex case. */
+      props->maxMeshOutputMemorySize = 3 * components * sizeof(uint32_t);
+      /* This combined bound is nonbinding with taskShader=false and no
+       * payload: the separate output limit still bounds every legal shader.
+       * It does not imply a contiguous local allocation of this size. */
+      props->maxMeshPayloadAndOutputMemorySize = 48128;
       props->maxMeshOutputComponents = components;
       props->maxMeshOutputVertices = 3;
       props->maxMeshOutputPrimitives = 1;
