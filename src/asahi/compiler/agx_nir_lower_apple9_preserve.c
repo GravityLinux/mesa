@@ -7,11 +7,11 @@
  * FP32 DenormPreserve for Apple9.
  *
  * Apple9 FP32 arithmetic treats subnormal inputs as signed zero and flushes
- * subnormal results (see test/fp32-denorm/RESULTS.md); bit operations (moves,
- * negate, absolute value, selects, loads and stores) keep subnormal bits. For
- * shaders that declare DenormPreserve for 32-bit floats, each affected
- * operation keeps its native instruction and takes a software path only when
- * an operand is subnormal or the native result may have been flushed.
+ * subnormal results; bit operations (moves, negate, absolute value, selects,
+ * loads and stores) keep subnormal bits. For shaders that declare
+ * DenormPreserve for 32-bit floats, each affected operation keeps its native
+ * instruction and takes a software path only when an operand is subnormal or
+ * the native result may have been flushed.
  *
  * The software path never feeds a subnormal to the hardware. It splits each
  * operand into a sign-carrying mantissa in [1, 2) and an integer exponent,

@@ -19,7 +19,7 @@
 #include "agx_opcodes.h"
 #include "shader_enums.h"
 
-#include "test/cs2-pressure/ra-audit.h"
+#include "agx_ra_audit.h"
 
 
 /* SSA-based register allocator */
