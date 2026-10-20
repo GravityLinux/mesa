@@ -176,6 +176,15 @@ validate(nir_shader *nir, const struct agx_apple9_mesh_key *key,
                 nir->info.stage != MESA_SHADER_MESH)
                return fail(reason,
                            "Apple9 mesh counts used outside a mesh stage");
+            if (intr->intrinsic ==
+                nir_intrinsic_set_vertex_and_primitive_count) {
+               if ((nir_src_is_const(intr->src[0]) &&
+                    nir_src_as_uint(intr->src[0]) > layout->max_vertices) ||
+                   (nir_src_is_const(intr->src[1]) &&
+                    nir_src_as_uint(intr->src[1]) > layout->max_primitives))
+                  return fail(reason,
+                              "Apple9 mesh counts exceed the output declaration");
+            }
             if (intr->intrinsic == nir_intrinsic_launch_mesh_workgroups &&
                 (nir->info.stage != MESA_SHADER_TASK ||
                  nir_intrinsic_base(intr)))

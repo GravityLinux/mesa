@@ -33,6 +33,7 @@ struct machine {
    uint32_t grid[3];
    uint64_t side_effect_address;
    unsigned check_zero_header;
+   unsigned count_lanes, actual_vertices, actual_primitives;
 };
 
 static void *
@@ -120,6 +121,18 @@ instruction(struct machine *m, nir_instr *i, unsigned lane)
       nir_intrinsic_instr *n = nir_instr_as_intrinsic(i);
       nir_const_value *out = m->value[n->def.index][lane];
       switch (n->intrinsic) {
+      case nir_intrinsic_set_vertex_and_primitive_count: {
+         unsigned vertices = src(m, n->src[0], lane)[0].u32;
+         unsigned primitives = src(m, n->src[1], lane)[0].u32;
+         if (m->count_lanes) {
+            CHECK(m->actual_vertices == vertices);
+            CHECK(m->actual_primitives == primitives);
+         }
+         m->actual_vertices = vertices;
+         m->actual_primitives = primitives;
+         m->count_lanes |= 1u << lane;
+         break;
+      }
       case nir_intrinsic_end_task_apple9_agx:
          break;
       case nir_intrinsic_load_local_invocation_id:
@@ -194,9 +207,12 @@ instruction(struct machine *m, nir_instr *i, unsigned lane)
          out[1].u32 = address >> 32;
          break;
       }
-      case nir_intrinsic_load_global: {
+      case nir_intrinsic_load_global:
+      case nir_intrinsic_load_global_2x32: {
          unsigned bytes = n->def.bit_size / 8;
-         uint64_t address = src(m, n->src[0], lane)[0].u64;
+         nir_const_value *pointer = src(m, n->src[0], lane);
+         uint64_t address = n->intrinsic == nir_intrinsic_load_global
+            ? pointer[0].u64 : pointer[0].u32 | ((uint64_t)pointer[1].u32 << 32);
          for (unsigned c = 0; c < n->def.num_components; ++c) {
             out[c].u64 = 0;
             memcpy(&out[c], memory(m, address + c * bytes, bytes, false),
