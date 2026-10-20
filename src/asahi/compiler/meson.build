@@ -134,6 +134,14 @@ if with_tests or with_tools.contains('drm-shim')
 endif
 
 if with_tests
+  apple9_mesh_limits_test = executable('apple9-mesh-limits',
+    'test/apple9-mesh-limits.c',
+    c_args : [c_msvc_compat_args, no_override_init_args],
+    gnu_symbol_visibility : 'hidden',
+    dependencies : [idep_nir, idep_mesautil],
+    link_with : [libasahi_compiler],
+  )
+  test('apple9-mesh-limits', apple9_mesh_limits_test, suite : ['asahi'])
   apple9_native_shared_test = executable('apple9-native-shared',
     'test/apple9-native-shared.c',
     c_args : [c_msvc_compat_args, no_override_init_args],

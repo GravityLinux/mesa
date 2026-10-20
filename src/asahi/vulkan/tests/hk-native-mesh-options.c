@@ -203,6 +203,77 @@ check_workgroup_key(const uint16_t size[3], bool shared, unsigned expected)
    ralloc_free(mesh);
 }
 
+static unsigned
+io_size(const struct glsl_type *type, bool bindless)
+{
+   return glsl_count_attribute_slots(type, false);
+}
+
+static void
+check_output_array(bool primitive, bool reverse)
+{
+   nir_shader *mesh = producer(true);
+   mesh->info.io_lowered = false;
+   const struct glsl_type *type = glsl_array_type(
+      glsl_array_type(glsl_vec4_type(), 3, 0), primitive ? 1 : 3, 0);
+   nir_variable *array = nir_variable_create(mesh, nir_var_shader_out, type,
+                                             "output_array");
+   array->data.location = VARYING_SLOT_VAR8;
+   array->data.per_primitive = primitive;
+   nir_builder b = nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(mesh)));
+   for (unsigned v = 0; v < (primitive ? 1 : 3); ++v) {
+      for (unsigned j = 0; j < 3; ++j) {
+         nir_def *index = nir_load_global(&b, 1, 32,
+            nir_imm_int64(&b, INPUT_ADDR + j * 4), .align_mul = 4);
+         nir_deref_instr *deref = nir_build_deref_array_imm(&b,
+            nir_build_deref_var(&b, array), v);
+         deref = nir_build_deref_array(&b, deref, index);
+         nir_def *values[4];
+         for (unsigned c = 0; c < 4; ++c)
+            values[c] = nir_imm_int(&b, 0x80000 + 100 * v + 10 * j + c);
+         nir_store_deref(&b, deref, nir_vec(&b, values, 4), 15);
+      }
+   }
+   /* Exercise the normal deref-to-IO passes, then the actual driver compiler
+    * boundary. The recording Vulkan regression checks pipeline wiring. */
+   CHECK(nir_lower_indirect_derefs_to_if_else_trees(
+      mesh, nir_var_shader_out, UINT32_MAX));
+   nir_lower_io(mesh, nir_var_shader_out, io_size, 0);
+   nir_opt_constant_folding(mesh);
+   nir_opt_dce(mesh);
+   nir_shader_gather_info(mesh, nir_shader_get_entrypoint(mesh));
+   const struct hk_apple9_graphics_key key = {0};
+   struct agx_shader_part part = {0};
+   struct agx_apple9_mesh_body_info info;
+   const char *reason = NULL;
+   CHECK(hk_apple9_compile_native_mesh_program(mesh, &key, &part, &info, &reason));
+   CHECK(hk_apple9_native_shader_valid(&part.info, &info, HK_APPLE9_NATIVE_MESH));
+   uint32_t indices[3];
+   for (unsigned j = 0; j < 3; ++j)
+      indices[j] = reverse ? 2 - j : j;
+   struct machine m = {0};
+   m.region[5] = (struct region){INPUT_ADDR, sizeof(indices), (uint8_t *)indices, NULL};
+   nir_function_impl *impl = nir_shader_get_entrypoint(mesh);
+   m.value = calloc(impl->ssa_alloc, sizeof(*m.value));
+   CHECK(m.value);
+   execute(&m, &impl->body, ALL_LANES);
+   for (unsigned v = 0; v < 3; ++v) {
+      for (unsigned j = 0; j < 3; ++j) {
+         for (unsigned c = 0; c < 4; ++c) {
+            unsigned slot = VARYING_SLOT_VAR8 + indices[j];
+            unsigned channel = 4 + agx_apple9_varying_index(
+               &part.info.apple9_varyings, slot, c);
+            CHECK(m.submitted_position[v][channel] ==
+                  0x80000 + 100 * (primitive ? 0 : v) + 10 * j + c);
+            CHECK(part.info.apple9_varyings.group[slot] == (primitive ? 1 : 0));
+         }
+      }
+   }
+   free(m.value);
+   free(part.binary);
+   ralloc_free(mesh);
+}
+
 int main(void)
 {
    CHECK(hk_apple9_native_mesh_enabled());
@@ -213,6 +284,9 @@ int main(void)
       check_key(halfz, 2, 0);
    }
    check_primitive_key();
+   for (unsigned primitive = 0; primitive < 2; ++primitive)
+      for (unsigned reverse = 0; reverse < 2; ++reverse)
+         check_output_array(primitive, reverse);
    const uint16_t shapes[][3] = {
       {1, 1, 1}, {16, 1, 1}, {17, 1, 1}, {32, 1, 1},
       {33, 1, 1}, {64, 1, 1}, {127, 1, 1}, {128, 1, 1},
@@ -225,6 +299,6 @@ int main(void)
          check_workgroup_key(shapes[i], shared, i < 2 ? 16 : i < 12 ? 32 : 0);
    CHECK(!hk_apple9_native_mesh_threads(NULL));
    glsl_type_singleton_decref();
-   puts("hk native key: halfz/W, interpolation, T128 shapes and shared allocation pass");
+   puts("hk native key: halfz/W, interpolation, output arrays, T128 shapes and shared allocation pass");
    return 0;
 }

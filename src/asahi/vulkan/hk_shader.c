@@ -3929,6 +3929,13 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
        nir->info.stage == MESA_SHADER_FRAGMENT)
       lower_indirect_modes |= nir_var_shader_in;
 
+   /* Native mesh links a fixed component map. Resolve indirect output-array
+    * slots while their declared bounds are still available as derefs. This
+    * also covers arrays nested inside per-vertex/per-primitive blocks. */
+   if (dev->dev.chip == AGX_CHIP_G16G &&
+       nir->info.stage == MESA_SHADER_MESH && hk_apple9_native_mesh_enabled())
+      lower_indirect_modes |= nir_var_shader_out;
+
    NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
             lower_indirect_modes, UINT32_MAX);
 
