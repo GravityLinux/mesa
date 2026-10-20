@@ -13,7 +13,7 @@ fail(const char **reason, const char *message)
 }
 
 static bool
-eligible(nir_shader *nir, const char **reason)
+eligible(nir_shader *nir, unsigned physical_threads, const char **reason)
 {
    if (nir->info.stage != MESA_SHADER_MESH ||
        nir->info.shared_size || nir->info.task_payload_size ||
@@ -22,8 +22,24 @@ eligible(nir_shader *nir, const char **reason)
        nir->info.mesh.primitive_type != MESA_PRIM_TRIANGLES)
       return fail(reason,
                   "native mesh development class requires V3 P1 triangles without shared memory or payload");
-   if (!agx_apple9_native_workgroup_supported(nir, reason))
-      return false;
+   if (physical_threads == AGX_APPLE9_NATIVE_THREADS) {
+      if (!agx_apple9_native_workgroup_supported(nir, reason))
+         return false;
+   } else {
+      if (physical_threads != 32)
+         return fail(reason, "native mesh physical workgroup must be T16 or T32");
+      if (nir->info.workgroup_size_variable)
+         return fail(reason, "native mesh requires a fixed API workgroup size");
+      if (nir->info.api_subgroup_size && nir->info.api_subgroup_size != 32)
+         return fail(reason, "native mesh requires architectural subgroup size 32");
+      unsigned threads = 1;
+      for (unsigned d = 0; d < 3; ++d) {
+         unsigned size = nir->info.workgroup_size[d];
+         if (!size || size > 128 / threads)
+            return fail(reason, "native mesh supports 1..128 API invocations at physical T32");
+         threads *= size;
+      }
+   }
 
    unsigned publications = 0;
    nir_foreach_function_impl(impl, nir) {
@@ -293,8 +309,35 @@ agx_nir_lower_apple9_native_mesh(
 {
    if (!enable_native_mesh)
       return fail(reason, "native mesh development path is disabled");
-   if (!eligible(nir, reason))
+   unsigned physical_threads = options && options->physical_threads
+                                  ? options->physical_threads
+                                  : AGX_APPLE9_NATIVE_THREADS;
+   if (!eligible(nir, physical_threads, reason))
       return false;
+
+   uint16_t logical_size[3];
+   memcpy(logical_size, nir->info.workgroup_size, sizeof(logical_size));
+   unsigned logical_threads = logical_size[0] * logical_size[1] * logical_size[2];
+   if (logical_threads > physical_threads) {
+      /* Preserve the application's subgroup width and execute its subgroups
+       * in order between workgroup barriers. The common pass supplies masks
+       * for the final partial subgroup and keeps logical IDs and values live
+       * across barriers. Completion is appended only after this transform. */
+      nir_lower_system_values(nir);
+      nir_lower_halt_to_return(nir);
+      nir_lower_returns(nir);
+      nir_lower_workgroup_size(nir, physical_threads);
+      bool progress;
+      do {
+         progress = nir_lower_vars_to_ssa(nir);
+         progress |= nir_opt_copy_prop(nir);
+         progress |= nir_opt_constant_folding(nir);
+         progress |= nir_opt_dead_cf(nir);
+         progress |= nir_opt_remove_phis(nir);
+         progress |= nir_opt_dce(nir);
+      } while (progress);
+      nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+   }
 
    struct agx_apple9_mesh_key key = AGX_APPLE9_MESH_KEY;
    uint64_t primitive_broadcast = 0;
@@ -302,9 +345,10 @@ agx_nir_lower_apple9_native_mesh(
        !primitive_outputs(nir, &key, &primitive_broadcast, reason))
       return false;
 
-   key.physical_threads = AGX_APPLE9_NATIVE_THREADS;
+   key.physical_threads = physical_threads;
    if (!agx_nir_lower_apple9_mesh(nir, &key, info, reason))
       return false;
+   memcpy(info->logical_size, logical_size, sizeof(logical_size));
    info->primitive_broadcast = primitive_broadcast;
    const struct agx_apple9_mesh_layout *layout = &info->layout;
    struct agx_apple9_varying_layout varyings;
