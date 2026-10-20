@@ -1148,7 +1148,7 @@ struct apple9_dag_lower {
    unsigned argument_base;
    bool buffer_table;
    unsigned groups_argument;
-   unsigned shared_argument;
+   unsigned shared_root;
    unsigned preamble_base;
    uint32_t texture_mask, sampler_mask, image_mask;
    unsigned load_instruction_count;
@@ -2429,7 +2429,7 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
          if (scalar.def->bit_size != 32 ||
              nir_intrinsic_align_mul(intr) < 4 ||
              (nir_intrinsic_align_offset(intr) & 3) ||
-             lower->shared_argument == UINT_MAX)
+             lower->shared_root == UINT_MAX)
             return AGX_APPLE9_VREG_INVALID;
          uint32_t address = apple9_lower_dag_scalar(lower,
             nir_get_scalar(intr->src[0].ssa, 0));
@@ -2442,7 +2442,7 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
          address = apple9_dag_shift_imm(lower, nir_op_ushr, address, 2);
          value = apple9_dag_emit(lower, AGX_APPLE9_VIR_SHARED_LOAD,
             AGX_APPLE9_ENC_SHARED_LOAD, &address, 1,
-            lower->argument_base + lower->shared_argument);
+            lower->shared_root);
          if (value != AGX_APPLE9_VREG_INVALID)
             lower->program.instructions[lower->program.instruction_count - 1]
                ->producer_scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_6;
@@ -3321,6 +3321,7 @@ struct apple9_buffer_map {
    bool writes_global;
    bool descriptor_tables;
    unsigned native_root_words;
+   const struct agx_apple9_mesh_key *native_key;
    struct apple9_buffer_resource resource[AGX_APPLE9_MAX_GRAPHICS_BUFFERS];
 };
 
@@ -4479,7 +4480,7 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
             if (intr->src[0].ssa->bit_size != 32 ||
                 nir_intrinsic_align_mul(intr) < 4 ||
                 (nir_intrinsic_align_offset(intr) & 3) ||
-                lower->shared_argument == UINT_MAX)
+                lower->shared_root == UINT_MAX)
                return false;
             uint32_t base = apple9_lower_dag_scalar(lower,
                nir_get_scalar(intr->src[1].ssa, 0));
@@ -4500,7 +4501,7 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
                };
                if (!agx_apple9_vir_emit_side_effect(&lower->program,
                       AGX_APPLE9_VIR_SHARED_STORE, AGX_APPLE9_ENC_SHARED_STORE,
-                      sources, 2, lower->argument_base + lower->shared_argument))
+                      sources, 2, lower->shared_root))
                   return false;
             }
             continue;
@@ -4513,7 +4514,7 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
                 !apple9_atomic_op(nir_intrinsic_atomic_op(intr), &operation) ||
                 (swap != (operation == AGX_APPLE9_ATOMIC_CMPXCHG)) ||
                 operation == AGX_APPLE9_ATOMIC_FADD ||
-                lower->shared_argument == UINT_MAX)
+                lower->shared_root == UINT_MAX)
                return false;
             uint32_t address = apple9_lower_dag_scalar(lower,
                nir_get_scalar(intr->src[0].ssa, 0));
@@ -4535,7 +4536,7 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
             sources[components] = address;
             uint32_t result = apple9_dag_emit(lower,
                AGX_APPLE9_VIR_SHARED_ATOMIC, AGX_APPLE9_ENC_SHARED_ATOMIC,
-               sources, components + 1, lower->argument_base + lower->shared_argument);
+               sources, components + 1, lower->shared_root);
             if (result == AGX_APPLE9_VREG_INVALID)
                return false;
             struct agx_apple9_vir_instr *atomic =
@@ -6290,17 +6291,23 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
       .buffer_table = resources->descriptor_tables,
       .groups_argument =
          resources->descriptor_tables ? AGX_APPLE9_COMPUTE_GROUPS_ROOT : 0,
-      .shared_argument =
-         resources->descriptor_tables
-            ? AGX_APPLE9_COMPUTE_SHARED_ARGUMENT - 2
-            : apple9_buffer_argument(resources,
-                                     AGX_APPLE9_COMPUTE_RESOURCE_SHARED, 0),
+      .shared_root = UINT_MAX,
       .preamble_base =
          resources->descriptor_tables
             ? MAX2(AGX_APPLE9_GRAPHICS_ROOT_WORDS, resources->native_root_words)
             : agx_apple9_compute_preamble_base(resources->count),
       .structured_cf = apple9_cf_list_has_control_flow(&impl->body),
    };
+   if (nir->info.shared_size) {
+      /* Native mesh shared offsets were rebased after the output planes.
+       * Both regions use one local root and one bounded allocation. */
+      lower.shared_root = resources->native_key
+         ? resources->native_key->output_root
+         : resources->descriptor_tables
+              ? AGX_APPLE9_COMPUTE_SHARED_ARGUMENT
+              : lower.argument_base + apple9_buffer_argument(
+                   resources, AGX_APPLE9_COMPUTE_RESOURCE_SHARED, 0);
+   }
    agx_apple9_dag_cache_reset(&lower.cache);
    /* Reserve depth before assigning point-coordinate coefficients, independent
     * of the order in which the DAG visits the two built-ins. */
@@ -6789,6 +6796,13 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
       out->info.apple9_resource_count = resource_map.count;
       out->info.apple9_resource_write_mask = resource_map.write_mask;
       for (unsigned i = 0; i < resource_map.count; ++i) {
+         /* The local allocation has an argument root, not a descriptor-table
+          * entry. It is appended after external resources by the collector. */
+         if (resource_map.resource[i].kind == AGX_APPLE9_COMPUTE_RESOURCE_SHARED) {
+            assert(i + 1 == resource_map.count);
+            --out->info.apple9_resource_count;
+            continue;
+         }
          unsigned binding = resource_map.resource[i].binding;
          out->info.apple9_resource_binding[i] = binding;
          if (resource_map.resource[i].kind == AGX_APPLE9_COMPUTE_RESOURCE_SSBO)
@@ -7925,13 +7939,15 @@ apple9_compile_dag_tail(nir_shader *nir, struct agx_shader_part *out,
                         struct agx_apple9_compute_profile *profile,
                         const struct agx_apple9_varying_layout *varyings,
                         struct apple9_dag_cost *chosen_cost,
-                        unsigned root_words, const char **reason);
+                        const struct agx_apple9_mesh_key *native_key,
+                        const char **reason);
 
 static bool
 apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
                    struct agx_apple9_compute_profile *profile,
                    const struct agx_apple9_varying_layout *varyings,
-                   unsigned root_words, const char **reason)
+                   const struct agx_apple9_mesh_key *native_key,
+                   const char **reason)
 {
    /* Preamble extraction runs divergence analysis, which requires generic
     * sink pointers to have been lowered to this driver's concrete addresses.
@@ -7988,11 +8004,11 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
       apple9_safe_reads_override = 1;
       bool aggressive_ok = apple9_compile_dag_tail(
          nir, &aggressive_out, profile ? &aggressive_profile : NULL, varyings,
-         &aggressive_cost, root_words, reason);
+         &aggressive_cost, native_key, reason);
       apple9_safe_reads_override = 0;
       bool plain_ok = apple9_compile_dag_tail(
          plain, &plain_out, profile ? &plain_profile : NULL, varyings,
-         &plain_cost, root_words, reason);
+         &plain_cost, native_key, reason);
       apple9_safe_reads_override = -1;
       ralloc_free(plain);
       /* Loop-weighted spills decide: spills outside loops are cheaper than
@@ -8025,7 +8041,7 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    }
    struct apple9_dag_cost cost = {0};
    return apple9_compile_dag_tail(nir, out, profile, varyings, &cost,
-                                  root_words, reason);
+                                  native_key, reason);
 }
 
 static bool
@@ -8033,9 +8049,14 @@ apple9_compile_dag_tail(nir_shader *nir, struct agx_shader_part *out,
                         struct agx_apple9_compute_profile *profile,
                         const struct agx_apple9_varying_layout *varyings,
                         struct apple9_dag_cost *chosen_cost,
-                        unsigned root_words, const char **reason)
+                        const struct agx_apple9_mesh_key *native_key,
+                        const char **reason)
 {
-   struct apple9_buffer_map resources = {.native_root_words = root_words};
+   struct apple9_buffer_map resources = {
+      .native_root_words = native_key
+                             ? agx_apple9_mesh_argument_words(native_key) : 0,
+      .native_key = native_key,
+   };
    if (!apple9_collect_buffer_map(nir, &resources, reason))
       return false;
 
@@ -8456,7 +8477,7 @@ apple9_compile_workgroup_body(nir_shader *nir, struct agx_shader_part *out,
 
    if (apple9_compile_dag(
           nir, out, profile, NULL,
-          native_key ? agx_apple9_mesh_argument_words(native_key) : 0, &reason))
+          native_key, &reason))
       return true;
 
 unsupported:
@@ -11379,7 +11400,7 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
       nir_shader_intrinsics_pass(nir, apple9_lower_clip_distance,
                                  nir_metadata_control_flow, (void *)&state);
    }
-   if (!apple9_compile_dag(nir, out, NULL, &varyings, 0, reason))
+   if (!apple9_compile_dag(nir, out, NULL, &varyings, NULL, reason))
       return false;
    out->info.apple9_reads_tile |= preserves_color;
    return true;

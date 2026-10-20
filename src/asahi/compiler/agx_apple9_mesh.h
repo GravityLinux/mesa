@@ -47,6 +47,10 @@ struct agx_apple9_mesh_key {
  * API invocations occupy its first 1..16 lanes. Wider launches need separate
  * hardware qualification of completion and object call participation. */
 #define AGX_APPLE9_NATIVE_THREADS 16
+/* Logical workgroups above T16 serialize at most four 32-lane subgroups.
+ * This compiler model does not qualify physical multi-subgroup execution. */
+#define AGX_APPLE9_NATIVE_SERIAL_THREADS 32
+#define AGX_APPLE9_NATIVE_MAX_INVOCATIONS 128
 
 bool agx_apple9_native_workgroup_supported(const nir_shader *nir,
                                           const char **reason);
@@ -68,6 +72,11 @@ struct agx_apple9_mesh_layout {
 struct agx_apple9_mesh_body_info {
    struct agx_apple9_mesh_layout layout;
    struct agx_apple9_mesh_key key;
+   /* User shared storage follows the output allocation on the same local
+    * root. Keep output rows separate: mesh state must not count user data as
+    * vertex planes. The allocation includes word padding for narrow accesses.
+    * Launch integration must qualify this combined allocation independently. */
+   unsigned shared_offset_B, shared_size_B, local_allocation_B;
    /* Declared API dimensions, before flattening to the physical launch. */
    uint16_t logical_size[3];
    /* Unresolved pieces of the native contract. Completion lowering clears
@@ -93,7 +102,9 @@ agx_apple9_mesh_argument_words(const struct agx_apple9_mesh_key *key)
 /* Validate supported normal mesh/task NIR and lower only the understood IO.
  * Returns success, not progress. Rejects unsupported IO before changing NIR.
  * IO must already use per-vertex/per-primitive intrinsics and explicit payload
- * offsets; dynamic vertex/primitive indices and component write masks work. */
+ * offsets; shared IO must also be explicit. Dynamic vertex/primitive indices
+ * and component write masks work. Mesh shared IO is rebased after outputs;
+ * task shared IO remains unsupported. */
 bool agx_nir_lower_apple9_mesh(nir_shader *nir,
                                const struct agx_apple9_mesh_key *key,
                                struct agx_apple9_mesh_body_info *info,

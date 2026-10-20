@@ -167,6 +167,42 @@ check_primitive_key(void)
    ralloc_free(mesh);
 }
 
+static void
+check_workgroup_key(const uint16_t size[3], bool shared, unsigned expected)
+{
+   nir_shader *mesh = producer(true);
+   memcpy(mesh->info.workgroup_size, size, sizeof(mesh->info.workgroup_size));
+   if (shared) {
+      nir_builder b = nir_builder_at(nir_before_impl(nir_shader_get_entrypoint(mesh)));
+      mesh->info.shared_size = 28672;
+      nir_store_shared(&b, nir_imm_int(&b, 123), nir_imm_int(&b, 28668),
+                        .align_mul = 4, .write_mask = 1);
+   }
+   const struct hk_apple9_graphics_key key = {0};
+   struct agx_shader_part part = {0};
+   struct agx_apple9_mesh_body_info info;
+   const char *reason = NULL;
+   CHECK(hk_apple9_native_mesh_threads(size) == expected);
+   CHECK(hk_apple9_compile_native_mesh_program(mesh, &key, &part, &info, &reason)
+         == (expected != 0));
+   if (expected) {
+      CHECK(!memcmp(info.logical_size, size, sizeof(info.logical_size)));
+      CHECK(info.key.physical_threads == expected);
+      CHECK(part.info.workgroup_size[0] == expected);
+      CHECK(part.info.workgroup_size[1] == 1 && part.info.workgroup_size[2] == 1);
+      CHECK(hk_apple9_native_shader_valid(&part.info, &info, HK_APPLE9_NATIVE_MESH));
+      struct agx_apple9_launch_parameters launch;
+      CHECK(hk_apple9_native_launch_parameters(&launch, &part.info, &info,
+         HK_APPLE9_NATIVE_MESH, 0, 0x1000));
+      CHECK(launch.threadgroup_memory_bytes == (shared ? 32768 : 256));
+      CHECK(info.shared_size_B == (shared ? 28672 : 0));
+   } else {
+      CHECK(reason && !part.binary);
+   }
+   free(part.binary);
+   ralloc_free(mesh);
+}
+
 int main(void)
 {
    CHECK(hk_apple9_native_mesh_enabled());
@@ -177,7 +213,18 @@ int main(void)
       check_key(halfz, 2, 0);
    }
    check_primitive_key();
+   const uint16_t shapes[][3] = {
+      {1, 1, 1}, {16, 1, 1}, {17, 1, 1}, {32, 1, 1},
+      {33, 1, 1}, {64, 1, 1}, {127, 1, 1}, {128, 1, 1},
+      {1, 128, 1}, {1, 1, 128}, {4, 4, 4}, {2, 4, 16},
+      {0, 1, 1}, {1, 0, 1}, {1, 1, 0}, {129, 1, 1},
+      {1, 129, 1}, {1, 1, 129}, {16, 16, 1}, {65535, 65535, 65535},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(shapes); ++i)
+      for (unsigned shared = 0; shared < 2; ++shared)
+         check_workgroup_key(shapes[i], shared, i < 2 ? 16 : i < 12 ? 32 : 0);
+   CHECK(!hk_apple9_native_mesh_threads(NULL));
    glsl_type_singleton_decref();
-   puts("hk native key: halfz/W values and VS/mesh/FS interpolation groups pass");
+   puts("hk native key: halfz/W, interpolation, T128 shapes and shared allocation pass");
    return 0;
 }

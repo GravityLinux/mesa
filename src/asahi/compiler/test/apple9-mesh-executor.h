@@ -22,7 +22,8 @@ struct region {
 struct machine {
    nir_const_value (*value)[LANES][NIR_MAX_VEC_COMPONENTS];
    nir_block *previous[LANES];
-   uint8_t local[4096];
+   uint8_t local[AGX_APPLE9_MAX_SHARED_BYTES + 16];
+   unsigned shared_begin, shared_end;
    struct region region[8];
    unsigned barriers, subgroup_barriers, fences, writes;
    unsigned controls, scalars, channels[128];
@@ -238,6 +239,44 @@ instruction(struct machine *m, nir_instr *i, unsigned lane)
                (m->local_root ?: AGX_APPLE9_MESH_OUTPUT_ROOT));
          CHECK(offset + 4 <= sizeof(m->local));
          memcpy(out, m->local + offset, 4);
+         break;
+      }
+      case nir_intrinsic_store_shared:
+      case nir_intrinsic_load_shared: {
+         bool store = n->intrinsic == nir_intrinsic_store_shared;
+         unsigned bits = store ? n->src[0].ssa->bit_size : n->def.bit_size;
+         unsigned bytes = bits / 8;
+         unsigned offset = nir_intrinsic_base(n) +
+                           src(m, n->src[store ? 1 : 0], lane)[0].u32;
+         CHECK(bytes && bytes <= 4);
+         for (unsigned c = 0; c < n->num_components; ++c) {
+            if (store && !(nir_intrinsic_write_mask(n) & BITFIELD_BIT(c)))
+               continue;
+            unsigned at = offset + bytes * c;
+            CHECK(at >= m->shared_begin && at + bytes <= m->shared_end);
+            if (store)
+               memcpy(m->local + at, &src(m, n->src[0], lane)[c], bytes);
+            else
+               memcpy(&out[c], m->local + at, bytes);
+         }
+         break;
+      }
+      case nir_intrinsic_shared_atomic:
+      case nir_intrinsic_shared_atomic_swap: {
+         unsigned offset = nir_intrinsic_base(n) + src(m, n->src[0], lane)[0].u32;
+         CHECK(n->def.bit_size == 32 && !(offset & 3));
+         CHECK(offset >= m->shared_begin && offset + 4 <= m->shared_end);
+         uint32_t old, value = src(m, n->src[1], lane)[0].u32, next;
+         memcpy(&old, m->local + offset, 4);
+         switch (nir_intrinsic_atomic_op(n)) {
+         case nir_atomic_op_iadd: next = old + value; break;
+         case nir_atomic_op_cmpxchg:
+            next = old == value ? src(m, n->src[2], lane)[0].u32 : old;
+            break;
+         default: CHECK(false); next = 0;
+         }
+         memcpy(m->local + offset, &next, 4);
+         out[0].u32 = old;
          break;
       }
       default:

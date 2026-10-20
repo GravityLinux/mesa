@@ -25,6 +25,12 @@ enum hk_apple9_native_stage {
 #define HK_APPLE9_NATIVE_LOCAL_BYTES 128
 #define HK_APPLE9_NATIVE_OUTPUT_ROOT 0
 #define HK_APPLE9_NATIVE_GRID_ROOT 64
+/* Fits alongside the entire admitted V3/P1 output interface (2080 bytes)
+ * in one 32-KiB allocation. Larger output classes need a new storage model. */
+#define HK_APPLE9_NATIVE_SHARED_BYTES 28672
+
+/* Zero rejects an invalid logical shape before any multiplication overflows. */
+unsigned hk_apple9_native_mesh_threads(const uint16_t local_size[3]);
 
 bool hk_apple9_native_shader_valid(
    const struct agx_shader_info *code,

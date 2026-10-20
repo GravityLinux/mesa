@@ -16,17 +16,17 @@ static bool
 eligible(nir_shader *nir, unsigned physical_threads, const char **reason)
 {
    if (nir->info.stage != MESA_SHADER_MESH ||
-       nir->info.shared_size || nir->info.task_payload_size ||
+       nir->info.task_payload_size ||
        nir->info.mesh.max_vertices_out != 3 ||
        nir->info.mesh.max_primitives_out != 1 ||
        nir->info.mesh.primitive_type != MESA_PRIM_TRIANGLES)
       return fail(reason,
-                  "native mesh development class requires V3 P1 triangles without shared memory or payload");
+                  "native mesh development class requires V3 P1 triangles without payload");
    if (physical_threads == AGX_APPLE9_NATIVE_THREADS) {
       if (!agx_apple9_native_workgroup_supported(nir, reason))
          return false;
    } else {
-      if (physical_threads != 32)
+      if (physical_threads != AGX_APPLE9_NATIVE_SERIAL_THREADS)
          return fail(reason, "native mesh physical workgroup must be T16 or T32");
       if (nir->info.workgroup_size_variable)
          return fail(reason, "native mesh requires a fixed API workgroup size");
@@ -35,7 +35,7 @@ eligible(nir_shader *nir, unsigned physical_threads, const char **reason)
       unsigned threads = 1;
       for (unsigned d = 0; d < 3; ++d) {
          unsigned size = nir->info.workgroup_size[d];
-         if (!size || size > 128 / threads)
+         if (!size || size > AGX_APPLE9_NATIVE_MAX_INVOCATIONS / threads)
             return fail(reason, "native mesh supports 1..128 API invocations at physical T32");
          threads *= size;
       }
@@ -314,6 +314,12 @@ agx_nir_lower_apple9_native_mesh(
                                   : AGX_APPLE9_NATIVE_THREADS;
    if (!eligible(nir, physical_threads, reason))
       return false;
+
+   nir_remove_dead_variables(nir, nir_var_mem_shared, NULL);
+   nir_lower_vars_to_explicit_types(nir, nir_var_mem_shared,
+                                    glsl_get_natural_size_align_bytes);
+   nir_lower_explicit_io(nir, nir_var_mem_shared, nir_address_format_32bit_offset);
+   nir_remove_dead_variables(nir, nir_var_mem_shared, NULL);
 
    uint16_t logical_size[3];
    memcpy(logical_size, nir->info.workgroup_size, sizeof(logical_size));
