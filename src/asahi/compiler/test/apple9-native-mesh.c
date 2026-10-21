@@ -368,6 +368,109 @@ reject_unsupported(void)
    }
 }
 
+/* Runtime counts, including a return before the publication and two static
+ * calls in mutually exclusive uniform branches. Keep inputs in memory so
+ * neither the NIR interpreter nor the compiler can fold the tested paths. */
+static nir_shader *
+conditional_counts(unsigned mode, unsigned threads)
+{
+   nir_shader *nir = source(&h1_fixtures[0], threads);
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   nir_intrinsic_instr *count = NULL;
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_intrinsic &&
+             nir_instr_as_intrinsic(instr)->intrinsic ==
+                nir_intrinsic_set_vertex_and_primitive_count)
+            count = nir_instr_as_intrinsic(instr);
+      }
+   }
+   CHECK(count);
+   nir_builder b = nir_builder_at(nir_before_instr(&count->instr));
+   nir_def *v = nir_load_global(&b, 1, 32, nir_imm_int64(&b, INPUT_ADDR),
+                                .align_mul = 4);
+   nir_def *p = nir_load_global(&b, 1, 32, nir_imm_int64(&b, INPUT_ADDR + 4),
+                                .align_mul = 4);
+   nir_def *enabled = nir_ine_imm(
+      &b, nir_load_global(&b, 1, 32, nir_imm_int64(&b, INPUT_ADDR + 8),
+                           .align_mul = 4), 0);
+   if (mode == 1) {
+      nir_push_if(&b, nir_inot(&b, enabled));
+      nir_jump(&b, nir_jump_return);
+      nir_pop_if(&b, NULL);
+   }
+   if (mode == 2) {
+      nir_push_if(&b, enabled);
+      nir_set_vertex_and_primitive_count(&b, v, p, nir_imm_int(&b, 0));
+      nir_push_else(&b, NULL);
+      nir_set_vertex_and_primitive_count(
+         &b, nir_imm_int(&b, 0), nir_imm_int(&b, 0), nir_imm_int(&b, 0));
+      nir_pop_if(&b, NULL);
+      v = nir_bcsel(&b, enabled, v, nir_imm_int(&b, 0));
+      p = nir_bcsel(&b, enabled, p, nir_imm_int(&b, 0));
+      nir_instr_remove(&count->instr);
+   } else {
+      nir_src_rewrite(&count->src[0], v);
+      nir_src_rewrite(&count->src[1], p);
+      b.cursor = nir_after_instr(&count->instr);
+   }
+   /* No output access on the empty paths, as required by the API. */
+   nir_push_if(&b, nir_ior(&b, nir_ieq_imm(&b, v, 0), nir_ieq_imm(&b, p, 0)));
+   nir_jump(&b, nir_jump_return);
+   nir_pop_if(&b, NULL);
+   nir_progress(true, impl, nir_metadata_none);
+   return nir;
+}
+
+static void
+check_conditional_counts(void)
+{
+   const uint32_t inputs[][3] = {
+      {3, 1, 1}, {0, 0, 1}, {3, 0, 1}, {3, 1, 0}, {0, 0, 0},
+   };
+   for (unsigned threads = 1; threads <= 16; threads *= 16) {
+      for (unsigned mode = 0; mode < 3; ++mode) {
+         for (unsigned i = 0; i < ARRAY_SIZE(inputs); ++i) {
+            nir_shader *nir = conditional_counts(mode, threads);
+            const char *reason = NULL;
+            struct agx_apple9_mesh_body_info info;
+            CHECK(agx_nir_lower_apple9_native_mesh(nir, true, NULL, &info,
+                                                   &reason));
+            nir_lower_vars_to_ssa(nir);
+            nir_opt_dce(nir);
+            bool enabled = !mode || inputs[i][2];
+            unsigned vertices = enabled ? inputs[i][0] : 0;
+            unsigned primitives = vertices ? inputs[i][1] : 0;
+            struct machine m = {
+               .variable_counts = true, .expected_vertices = vertices,
+               .expected_primitives = primitives,
+            };
+            /* Detect an uninitialized count on the early-return path. */
+            memset(m.local, 0xa5, sizeof(m.local));
+            m.region[5] = (struct region){INPUT_ADDR, sizeof(inputs[i]),
+                                          (uint8_t *)inputs[i], NULL};
+            nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+            m.value = calloc(impl->ssa_alloc, sizeof(*m.value));
+            CHECK(m.value);
+            execute(&m, &impl->body, ALL_LANES);
+            CHECK(m.controls == ALL_LANES && m.scalars == 1);
+            for (unsigned c = 0; c < 4; ++c)
+               CHECK(m.channels[c] == BITFIELD_MASK(vertices));
+            uint32_t stored_vertices;
+            memcpy(&stored_vertices, m.local + info.layout.vertex_count_B, 4);
+            CHECK(stored_vertices == vertices);
+            struct agx_shader_part code = {0};
+            CHECK(agx_compile_apple9_mesh_lowered(nir, &info.key, &code, &reason));
+            CHECK(code.binary && !code.info.scratch_size);
+            free(code.binary);
+            free(m.value);
+            ralloc_free(nir);
+         }
+      }
+   }
+   puts("native counts: 30 dynamic/empty/conditional paths executed and compiled");
+}
+
 int
 main(int argc, char **argv)
 {
@@ -389,6 +492,7 @@ main(int argc, char **argv)
       return 0;
    }
    reject_unsupported();
+   check_conditional_counts();
    check_attributes();
    for (unsigned threads = 1; threads < 16; ++threads) {
       struct native_mesh_fixture f = h1_fixtures[0];

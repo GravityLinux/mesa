@@ -34,6 +34,8 @@ struct machine {
    uint64_t side_effect_address;
    unsigned check_zero_header;
    unsigned count_lanes, actual_vertices, actual_primitives;
+   bool variable_counts;
+   unsigned expected_vertices, expected_primitives;
 };
 
 static void *
@@ -170,8 +172,10 @@ instruction(struct machine *m, nir_instr *i, unsigned lane)
             for (unsigned c = 0; c < 4; ++c)
                CHECK(m->local[m->check_zero_header + c] == 0);
          CHECK(nir_intrinsic_base(n) == 1);
-         CHECK(src(m, n->src[0], lane)[0].u16 == 1);
-         CHECK(src(m, n->src[1], lane)[0].u16 == 3);
+         CHECK(src(m, n->src[0], lane)[0].u16 ==
+               (m->variable_counts ? m->expected_primitives : 1));
+         CHECK(src(m, n->src[1], lane)[0].u16 ==
+               (m->variable_counts ? m->expected_vertices : 3));
          CHECK(!(m->controls & (1u << lane)));
          m->controls |= 1u << lane;
          break;
@@ -188,10 +192,12 @@ instruction(struct machine *m, nir_instr *i, unsigned lane)
          break;
       }
       case nir_intrinsic_mesh_submit_scalar_apple9_agx:
-         CHECK(lane == 0 && src(m, n->src[0], lane)[0].u32 == 3);
+         CHECK(lane == 0 && src(m, n->src[0], lane)[0].u32 ==
+               (m->variable_counts ? m->expected_vertices : 3));
          CHECK(src(m, n->src[1], lane)[0].u32 == 0);
          for (unsigned c = 0; c < 4; ++c)
-            CHECK(m->channels[c] == 7);
+            CHECK(m->channels[c] ==
+                  BITFIELD_MASK(m->variable_counts ? m->expected_vertices : 3));
          CHECK(!m->scalars++);
          break;
       case nir_intrinsic_load_local_invocation_index:
