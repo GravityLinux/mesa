@@ -1183,12 +1183,13 @@ apple9_completion_barrier(const struct agx_apple9_vir_instr *ins, bool drain)
 {
    if (apple9_after_logical_end(ins))
       return drain || apple9_loop_control(ins);
+   if (ins->encoding != AGX_APPLE9_ENC_PSEUDO &&
+       agx_apple9_encoding_info(ins->encoding)->requires_prior_completion)
+      return true;
    return ins->op == AGX_APPLE9_VIR_OBJECT_CALL ||
           ins->op == AGX_APPLE9_VIR_OBJECT_RETURN ||
           ins->op == AGX_APPLE9_VIR_OBJECT_RESUME ||
           ins->op == AGX_APPLE9_VIR_MESH_CONTROL ||
-          ins->op == AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR ||
-          ins->op == AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL ||
           ins->op == AGX_APPLE9_VIR_WORKGROUP_BARRIER ||
           ins->op == AGX_APPLE9_VIR_DEVICE_FENCE ||
           ins->op == AGX_APPLE9_VIR_HALT ||

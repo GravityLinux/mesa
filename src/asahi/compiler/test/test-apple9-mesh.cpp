@@ -374,6 +374,147 @@ TEST(Apple9MeshIR, CountOnlyEffectSurvivesAndDrainsLoads)
    ralloc_free(b.shader);
 }
 
+/* The submit must order independent memory work, even when none of its
+ * operands comes from that work. Exercise allocation and the physical
+ * dependency pass, with zero, one and several occupied slots. */
+TEST(Apple9MeshIR, SubmitsDrainIndependentProducers)
+{
+   for (bool channel : {false, true}) {
+      for (unsigned count : {0u, 1u, 2u, 6u}) {
+         SCOPED_TRACE(::testing::Message() << "channel=" << channel
+                                          << " producers=" << count);
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_MESH, &agx_nir_options, "mesh_completion_consumer");
+         nir_block logical = {};
+         agx_apple9_vir_program p;
+         agx_apple9_vir_init(&p);
+         auto block = agx_apple9_block_create(&p);
+         block->nir = &logical;
+         agx_apple9_block_begin(&p, block);
+         auto zero = agx_apple9_vir_emit(
+            &p, AGX_APPLE9_VIR_IMM, AGX_APPLE9_ENC_MOV_IMM32, nullptr, 0, 0);
+         auto one = agx_apple9_vir_emit(
+            &p, AGX_APPLE9_VIR_IMM, AGX_APPLE9_ENC_MOV_IMM32, nullptr, 0, 1);
+         agx_apple9_device_load_contract contract = {
+            .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
+            .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
+         };
+         std::vector<uint32_t> values;
+         for (unsigned i = 0; i < count; ++i)
+            values.push_back(agx_apple9_vir_emit_device_load(
+               &p, i + 1, zero, &contract));
+         uint32_t pair[] = {one, zero};
+         ASSERT_TRUE(agx_apple9_vir_emit_mesh_submit(&p, pair, channel, false));
+         for (unsigned i = 0; i < count; ++i)
+            ASSERT_TRUE(agx_apple9_vir_emit_side_effect(
+               &p, AGX_APPLE9_VIR_STORE_UNIFORM, AGX_APPLE9_ENC_STORE_UNIFORM,
+               &values[i], 1, i));
+         const char *reason = nullptr;
+         ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
+         unsigned pending = 0, issued = 0, waited = 0, submits = 0;
+         for (unsigned i = 0; i < p.instruction_count; ++i) {
+            const auto *I = p.instructions[i];
+            agx_apple9_packed_instruction packed = {};
+            ASSERT_TRUE(agx_apple9_pack_vir_instruction(I, p.phys, &packed,
+                                                      &reason)) << reason;
+            if (I->scoreboard_slot)
+               pending &= ~BITFIELD_BIT(I->scoreboard_slot - 1);
+            if (I->op == AGX_APPLE9_VIR_WAIT) {
+               EXPECT_NE(I->immediate, 0u);
+               EXPECT_EQ(I->immediate & ~pending, 0u);
+               waited |= I->immediate;
+               pending &= ~I->immediate;
+            }
+            if (I->op == AGX_APPLE9_VIR_DEVICE_LOAD) {
+               ASSERT_GE(I->producer_scoreboard_slot, 1u);
+               ASSERT_LE(I->producer_scoreboard_slot, 6u);
+               unsigned bit = BITFIELD_BIT(I->producer_scoreboard_slot - 1);
+               EXPECT_EQ(pending & bit, 0u);
+               pending |= bit;
+               issued |= bit;
+            }
+            if (I->op == AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL ||
+                I->op == AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR) {
+               ++submits;
+               EXPECT_EQ(pending, 0u);
+               EXPECT_EQ(util_bitcount(issued), count);
+               EXPECT_EQ(waited, issued);
+               EXPECT_EQ(I->scoreboard_slot, 0u);
+               EXPECT_EQ(I->producer_scoreboard_slot, 0u);
+               if (count) {
+                  ASSERT_GT(i, 0u);
+                  EXPECT_EQ(p.instructions[i - 1]->op, AGX_APPLE9_VIR_WAIT);
+                  EXPECT_EQ(p.instructions[i - 1]->immediate, issued);
+               }
+            }
+         }
+         EXPECT_EQ(submits, 1u);
+         EXPECT_EQ(pending, 0u);
+         agx_apple9_vir_finish(&p);
+         ralloc_free(b.shader);
+      }
+   }
+}
+
+/* This documents the current handoff contract without treating a pending
+ * mesh attribution experiment as proof that every input handoff is broken.
+ * The consumed load remains live as an ordinary GPR across the submit. */
+TEST(Apple9MeshIR, ConsumedLoadDoesNotCreateASubmitWait)
+{
+   for (bool channel : {false, true}) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_MESH, &agx_nir_options, "mesh_after_input_handoff");
+      nir_block logical = {};
+      agx_apple9_vir_program p;
+      agx_apple9_vir_init(&p);
+      auto block = agx_apple9_block_create(&p);
+      block->nir = &logical;
+      agx_apple9_block_begin(&p, block);
+      auto zero = agx_apple9_vir_emit(
+         &p, AGX_APPLE9_VIR_IMM, AGX_APPLE9_ENC_MOV_IMM32, nullptr, 0, 0);
+      agx_apple9_device_load_contract contract = {
+         .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
+         .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
+      };
+      auto loaded = agx_apple9_vir_emit_device_load(&p, 1, zero, &contract);
+      uint32_t src[] = {loaded, zero};
+      auto value = agx_apple9_vir_emit(
+         &p, AGX_APPLE9_VIR_IXOR, AGX_APPLE9_ENC_LOGIC_EXTENDED, src, 2, 0);
+      uint32_t pair[] = {value, zero};
+      ASSERT_TRUE(agx_apple9_vir_emit_mesh_submit(&p, pair, channel, false));
+      ASSERT_TRUE(agx_apple9_vir_emit_side_effect(
+         &p, AGX_APPLE9_VIR_STORE_UNIFORM, AGX_APPLE9_ENC_STORE_UNIFORM,
+         &loaded, 1, 0));
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
+      unsigned slot = 0, handoffs = 0, submits = 0;
+      for (unsigned i = 0; i < p.instruction_count; ++i) {
+         const auto *I = p.instructions[i];
+         agx_apple9_packed_instruction packed = {};
+         ASSERT_TRUE(agx_apple9_pack_vir_instruction(I, p.phys, &packed,
+                                                   &reason)) << reason;
+         EXPECT_NE(I->op, AGX_APPLE9_VIR_WAIT);
+         if (I->op == AGX_APPLE9_VIR_DEVICE_LOAD)
+            slot = I->producer_scoreboard_slot;
+         if (I->op == AGX_APPLE9_VIR_IXOR) {
+            ASSERT_NE(slot, 0u);
+            EXPECT_EQ(I->scoreboard_slot, slot);
+            ++handoffs;
+         }
+         if (I->op == AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL ||
+             I->op == AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR) {
+            EXPECT_EQ(handoffs, 1u);
+            EXPECT_EQ(I->scoreboard_slot, 0u);
+            ++submits;
+         }
+      }
+      EXPECT_EQ(handoffs, 1u);
+      EXPECT_EQ(submits, 1u);
+      agx_apple9_vir_finish(&p);
+      ralloc_free(b.shader);
+   }
+}
+
 TEST(Apple9MeshIR, AuxiliaryClassRetainsLiveValueAndDetectsClobberMutation)
 {
    nir_builder b = nir_builder_init_simple_shader(

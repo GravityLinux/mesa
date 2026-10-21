@@ -130,6 +130,7 @@ static const struct agx_apple9_encoding_info encodings[] = {
    [AGX_APPLE9_ENC_MESH_SUBMIT_SCALAR] = {
       .name = "mesh_submit_scalar", .length = 6, .operand_count = 2,
       .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_BYTE_DIFF,
+      .requires_prior_completion = true,
       .operands = {
          /* Conservative even when release=0: preservation is unqualified. */
          GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 94, 2,
@@ -146,6 +147,7 @@ static const struct agx_apple9_encoding_info encodings[] = {
    [AGX_APPLE9_ENC_MESH_SUBMIT_CHANNEL] = {
       .name = "mesh_submit_channel", .length = 6, .operand_count = 2,
       .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_BYTE_DIFF,
+      .requires_prior_completion = true,
       .operands = {
          GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 94, 2,
              AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_CLOBBER,

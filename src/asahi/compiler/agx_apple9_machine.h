@@ -278,6 +278,12 @@ struct agx_apple9_encoding_info {
    enum agx_apple9_evidence evidence;
    enum agx_apple9_dependency_layout dependency_layout;
 
+   /* The instruction consumes completion of all previously issued, still
+    * pending producers, independently of its GPR operands. This is a
+    * scheduling requirement, not a claim that the encoding has an input
+    * dependency field. The scheduler derives any wait from its live state. */
+   bool requires_prior_completion;
+
    /* Several native instructions each write part of the destination, so it
     * cannot share a register with a source. */
    bool split_result;
