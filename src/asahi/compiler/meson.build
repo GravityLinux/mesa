@@ -195,6 +195,10 @@ if with_tests
     args : [files('test/check-apple9-native-mesh.py'), apple9_native_mesh_test],
     suite : ['asahi'],
   )
+  test('apple9-native-mesh-counts', apple9_native_mesh_test,
+    args : ['--counts'],
+    suite : ['asahi'],
+  )
   test(
     'agx_tests',
     executable(

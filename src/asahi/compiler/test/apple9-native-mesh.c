@@ -474,6 +474,12 @@ check_conditional_counts(void)
 int
 main(int argc, char **argv)
 {
+   if (argc == 2 && !strcmp(argv[1], "--counts")) {
+      glsl_type_singleton_init_or_ref();
+      check_conditional_counts();
+      glsl_type_singleton_decref();
+      return 0;
+   }
    bool clip = argc == 3 && !strcmp(argv[1], "--export-clip");
    CHECK(argc == 1 || (argc == 3 && (!strcmp(argv[1], "--export") || clip)));
    if (argc == 3)
@@ -492,7 +498,6 @@ main(int argc, char **argv)
       return 0;
    }
    reject_unsupported();
-   check_conditional_counts();
    check_attributes();
    for (unsigned threads = 1; threads < 16; ++threads) {
       struct native_mesh_fixture f = h1_fixtures[0];
