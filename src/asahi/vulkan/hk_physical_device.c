@@ -1850,10 +1850,10 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
    /* This opt-in development class is deliberately below extension minima.
     * These limits describe what native pipeline/draw validation accepts. */
    if (hk_apple9_native_mesh_enabled()) {
-      props->maxMeshWorkGroupTotalCount = 1;
+      props->maxMeshWorkGroupTotalCount = HK_APPLE9_NATIVE_MAX_GROUP_TOTAL;
       props->maxMeshWorkGroupInvocations = AGX_APPLE9_NATIVE_MAX_INVOCATIONS;
       for (unsigned i = 0; i < 3; ++i) {
-         props->maxMeshWorkGroupCount[i] = 1;
+         props->maxMeshWorkGroupCount[i] = HK_APPLE9_NATIVE_MAX_GROUP_COUNT;
          props->maxMeshWorkGroupSize[i] = AGX_APPLE9_NATIVE_MAX_INVOCATIONS;
       }
       props->maxTaskPayloadSize = 0;

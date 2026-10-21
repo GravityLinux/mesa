@@ -286,6 +286,28 @@ check_shared_admission(unsigned attributes, unsigned shared_bytes,
    ralloc_free(nir);
 }
 
+static void
+check_child_grids(void)
+{
+   const uint32_t valid[][3] = {
+      {1, 1, 1}, {32, 1, 1}, {5, 6, 7},
+      {65535, 16, 1}, {1, 65535, 16}, {16, 1, 65535},
+      /* Exactly 2^20 - 1, with each axis below its separate limit. */
+      {1023, 1025, 1},
+   };
+   const uint32_t invalid[][3] = {
+      {0, 1, 1}, {1, 0, 1}, {1, 1, 0},
+      {65536, 1, 1}, {1, 65536, 1}, {1, 1, 65536},
+      {1024, 1024, 1}, {65535, 17, 1}, {65535, 65535, 65535},
+      {UINT32_MAX, UINT32_MAX, UINT32_MAX},
+   };
+   CHECK(!hk_apple9_native_mesh_grid_valid(NULL));
+   for (unsigned i = 0; i < ARRAY_SIZE(valid); ++i)
+      CHECK(hk_apple9_native_mesh_grid_valid(valid[i]));
+   for (unsigned i = 0; i < ARRAY_SIZE(invalid); ++i)
+      CHECK(!hk_apple9_native_mesh_grid_valid(invalid[i]));
+}
+
 int
 main(int argc, char **argv)
 {
@@ -297,6 +319,7 @@ main(int argc, char **argv)
       return 0;
    }
    CHECK(argc == 1);
+   check_child_grids();
    check_contract(false, 0);
    check_contract(false, 1);
    check_contract(false, 5);

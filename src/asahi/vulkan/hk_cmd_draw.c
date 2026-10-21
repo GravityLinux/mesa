@@ -5372,10 +5372,12 @@ hk_apple9_draw_mesh(struct hk_cmd_buffer *cmd, uint32_t draw_id,
 
    struct hk_shader *main = &mesh->variants[HK_MESH_VARIANT_MAIN];
    if (native) {
-      /* A false GPU predicate would export a zero mesh grid. That native
-       * object completion case has not been qualified on the device yet. */
-      if (!direct || count_addr || task || direct[0] != 1 || direct[1] != 1 ||
-          direct[2] != 1 || gfx->render.view_mask ||
+      /* Indirect/count draws and a false GPU predicate can export a zero
+       * child grid. That object completion case remains unqualified. Direct
+       * nonempty child grids are published by one complete physical object
+       * workgroup; they do not multiply the number of object parents. */
+      if (!direct || count_addr || task ||
+          !hk_apple9_native_mesh_grid_valid(direct) || gfx->render.view_mask ||
           hk_cond_render_applies(cmd) ||
           main->info.apple9_native_stage != HK_APPLE9_NATIVE_MESH) {
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);

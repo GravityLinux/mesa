@@ -29,6 +29,18 @@ enum hk_apple9_native_stage {
  * in one 32-KiB allocation. Larger output classes need a new storage model. */
 #define HK_APPLE9_NATIVE_SHARED_BYTES 28672
 
+/* One taskless object publishes one mesh-child grid. Apple's Metal Feature
+ * Set Tables give Apple9 a total of 2^20 - 1 mesh groups per grid. Retain the
+ * existing, more conservative Vulkan per-axis bound. These are grid limits,
+ * independent of the physical object workgroup size in the command stream.
+ * https://developer.apple.com/metal/capabilities/ */
+#define HK_APPLE9_NATIVE_MAX_GROUP_COUNT 65535u
+#define HK_APPLE9_NATIVE_MAX_GROUP_TOTAL ((1u << 20) - 1)
+
+/* Validate a nonempty direct child grid without overflowing the product.
+ * The draw entrypoint handles zero dimensions as a no-op before calling this. */
+bool hk_apple9_native_mesh_grid_valid(const uint32_t groups[3]);
+
 /* Zero rejects an invalid logical shape before any multiplication overflows. */
 unsigned hk_apple9_native_mesh_threads(const uint16_t local_size[3]);
 
