@@ -112,6 +112,10 @@ static const struct agx_apple9_encoding_info encodings[] = {
    [AGX_APPLE9_ENC_MESH_CONTROL] = {
       .name = "mesh_control", .length = 6, .operand_count = 2,
       .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_BYTE_DIFF,
+      /* T8132: post-U0 waits on either slot 1 or 2 order later mesh work.
+       * Ownership is not separated, so retire both without assigning a tag. */
+      .completion_effect_mask = 0x03,
+      .requires_prior_completion = true,
       .operands = {
          /* Whole-word allocation conservatively protects the other half.
           * The selected halfword is read and cleared by the instruction. */
@@ -160,6 +164,7 @@ static const struct agx_apple9_encoding_info encodings[] = {
    [AGX_APPLE9_ENC_HALT] = {
       .name = "halt", .length = 4,
       .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      .requires_prior_completion = true,
    },
    /* Waits for the scoreboard slots in its mask: byte 0 is 0x06 and bits
     * 10..15 hold the mask, bit i naming slot i + 1; the empty mask is a nop.
@@ -172,10 +177,12 @@ static const struct agx_apple9_encoding_info encodings[] = {
    [AGX_APPLE9_ENC_DEVICE_FENCE] = {
       .name = "device_fence", .length = 6,
       .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_BYTE_DIFF,
+      .requires_prior_completion = true,
    },
    [AGX_APPLE9_ENC_WORKGROUP_BARRIER] = {
       .name = "workgroup_barrier", .length = 6,
       .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      .requires_prior_completion = true,
    },
    [AGX_APPLE9_ENC_SHARED_LOAD] = {
       .name = "shared_load", .length = 14, .operand_count = 2,
@@ -2010,14 +2017,17 @@ static const struct agx_apple9_encoding_info encodings[] = {
       },
    [AGX_APPLE9_ENC_OBJECT_CALL] = {
       .name = "object_call", .length = 10, .allocator_safe = true,
+      .requires_prior_completion = true,
       .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
    },
    [AGX_APPLE9_ENC_OBJECT_RETURN] = {
       .name = "object_return", .length = 4, .allocator_safe = true,
+      .requires_prior_completion = true,
       .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
    },
    [AGX_APPLE9_ENC_OBJECT_RESUME] = {
       .name = "object_resume", .length = 6, .allocator_safe = true,
+      .requires_prior_completion = true,
       .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
    },
    [AGX_APPLE9_ENC_PUBLICATION_PAIR] =
@@ -2042,6 +2052,7 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .length = 6,
          .operand_count = 2,
          .allocator_safe = true,
+         .requires_prior_completion = true,
          .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
          .operands = {
             GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 62, 4,
@@ -2060,6 +2071,7 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .dependency_layout = AGX_APPLE9_DEPENDENCY_MASK_12_17,
          .operand_count = 1,
          .allocator_safe = true,
+         .requires_prior_completion = true,
          .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
          .operands = {GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63,
                           2, AGX_APPLE9_OPERAND_ALLOCATABLE,
@@ -2071,6 +2083,7 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .length = 6,
          .operand_count = 0,
          .allocator_safe = true,
+         .requires_prior_completion = true,
          .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
       },
    [AGX_APPLE9_ENC_TILE_LOAD] =
@@ -2146,6 +2159,7 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .length = 6,
          .operand_count = 0,
          .allocator_safe = true,
+         .requires_prior_completion = true,
          .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
       },
    [AGX_APPLE9_ENC_DEVICE_LOAD] =

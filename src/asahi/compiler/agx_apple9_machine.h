@@ -284,6 +284,11 @@ struct agx_apple9_encoding_info {
     * dependency field. The scheduler derives any wait from its live state. */
    bool requires_prior_completion;
 
+   /* Resultless asynchronous work, separate from GPR results and encoded
+    * producer tags. This mask is the conservative set retired together by
+    * the scheduler, not an output field in the instruction. */
+   uint8_t completion_effect_mask;
+
    /* Several native instructions each write part of the destination, so it
     * cannot share a register with a source. */
    bool split_result;

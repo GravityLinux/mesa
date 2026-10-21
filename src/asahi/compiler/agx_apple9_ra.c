@@ -957,6 +957,15 @@ struct apple9_pending {
    struct agx_apple9_vir_instr producer[APPLE9_PENDING_MERGE];
 };
 
+/* Completion effects have no result register or encoded producer tag. Keep
+ * their retirement set separate, including at CFG joins where a result on one
+ * path may overlap an effect on another. All bits of an effect retire together
+ * until hardware establishes independent ownership. */
+struct apple9_completion {
+   struct apple9_pending result[7];
+   unsigned effect_mask;
+};
+
 /* Scalar export producers complete asynchronously in the publication namespace.
  * Their completion tag is independent of the publication's storage index. */
 static bool
@@ -1022,9 +1031,11 @@ apple9_pending_result(const struct apple9_pending *p, unsigned reg)
  * the slot mask itself; it reads and writes no register. */
 static bool
 apple9_retire(struct agx_apple9_vir_program *out,
-              struct apple9_pending *pending, unsigned mask)
+              struct apple9_completion *state, unsigned mask)
 {
-   unsigned active = 0;
+   struct apple9_pending *pending = state->result;
+   unsigned active = (state->effect_mask & mask) ? state->effect_mask : 0;
+   mask |= active;
    u_foreach_bit(bit, mask) {
       if (apple9_pending_active(&pending[bit + 1]))
          active |= BITFIELD_BIT(bit);
@@ -1038,6 +1049,7 @@ apple9_retire(struct agx_apple9_vir_program *out,
       return false;
    u_foreach_bit(bit, active)
       pending[bit + 1] = (struct apple9_pending){0};
+   state->effect_mask &= ~active;
    return true;
 }
 
@@ -1183,20 +1195,8 @@ apple9_completion_barrier(const struct agx_apple9_vir_instr *ins, bool drain)
 {
    if (apple9_after_logical_end(ins))
       return drain || apple9_loop_control(ins);
-   if (ins->encoding != AGX_APPLE9_ENC_PSEUDO &&
-       agx_apple9_encoding_info(ins->encoding)->requires_prior_completion)
-      return true;
-   return ins->op == AGX_APPLE9_VIR_OBJECT_CALL ||
-          ins->op == AGX_APPLE9_VIR_OBJECT_RETURN ||
-          ins->op == AGX_APPLE9_VIR_OBJECT_RESUME ||
-          ins->op == AGX_APPLE9_VIR_MESH_CONTROL ||
-          ins->op == AGX_APPLE9_VIR_WORKGROUP_BARRIER ||
-          ins->op == AGX_APPLE9_VIR_DEVICE_FENCE ||
-          ins->op == AGX_APPLE9_VIR_HALT ||
-          ins->op == AGX_APPLE9_VIR_TILE_ACCESS ||
-          ins->op == AGX_APPLE9_VIR_TILE_FENCE ||
-          ins->op == AGX_APPLE9_VIR_COVERAGE ||
-          ins->op == AGX_APPLE9_VIR_DEPTH_STORE;
+   return ins->encoding != AGX_APPLE9_ENC_PSEUDO &&
+          agx_apple9_encoding_info(ins->encoding)->requires_prior_completion;
 }
 
 /* Memory operations read their address, index and data registers at issue.
@@ -1304,8 +1304,12 @@ apple9_same_producer(const struct agx_apple9_vir_instr *a,
 
 /* Add one path's pending producers to a successor's entry state. */
 static void
-apple9_merge_pending(struct apple9_pending *to, const struct apple9_pending *from)
+apple9_merge_pending(struct apple9_completion *to_state,
+                     const struct apple9_completion *from_state)
 {
+   to_state->effect_mask |= from_state->effect_mask;
+   struct apple9_pending *to = to_state->result;
+   const struct apple9_pending *from = from_state->result;
    for (unsigned slot = 1; slot <= 6; ++slot) {
       struct apple9_pending *t = &to[slot];
       const struct apple9_pending *f = &from[slot];
@@ -1373,7 +1377,7 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
    struct agx_apple9_block **successors = calloc(4 * count, sizeof(*successors));
    unsigned *position = calloc(count, sizeof(*position));
    bool *header = calloc(count, sizeof(*header));
-   struct apple9_pending (*entry)[7] = calloc(count, sizeof(*entry));
+   struct apple9_completion *entry = calloc(count, sizeof(*entry));
    struct hash_table *nir_blocks = _mesa_pointer_hash_table_create(NULL);
    bool success = false;
    if (!blocks || !successors || !position || !header || !entry || !nir_blocks)
@@ -1424,15 +1428,16 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
    }
    for (struct agx_apple9_block *block = program->blocks; block; block = block->next) {
       agx_apple9_block_begin(&out, blocks[block->index]);
-      struct apple9_pending pending[7] = {0};
+      struct apple9_completion state = {0};
       if (!header[block->index])
-         memcpy(pending, entry[block->index], sizeof(pending));
+         state = entry[block->index];
+      struct apple9_pending *pending = state.result;
       unsigned unknown = 0;
       for (unsigned slot = 1; slot <= 6; ++slot) {
          if (pending[slot].unknown)
             unknown |= BITFIELD_BIT(slot - 1);
       }
-      if (!apple9_retire(&out, pending, unknown))
+      if (!apple9_retire(&out, &state, unknown))
          goto cleanup;
       struct agx_apple9_block *const *succ = &successors[4 * block->index];
       bool drain = !succ[0] && !succ[1] && !succ[2] && !succ[3];
@@ -1457,7 +1462,11 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
 
          ins.scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_NONE;
          const bool barrier = apple9_completion_barrier(&ins, drain);
-         unsigned fold = 0, retire = 0;
+         unsigned fold = 0, retire = barrier ? state.effect_mask : 0;
+         /* These compound forms internally issue and wait on slot 1. */
+         if (ins.encoding == AGX_APPLE9_ENC_BLOCK_IMAGE_STORE ||
+             ins.encoding == AGX_APPLE9_ENC_IMAGE_WRITE)
+            retire |= state.effect_mask & BITFIELD_BIT(0);
          for (unsigned slot = 1; slot <= 6; ++slot) {
             const struct apple9_pending *p = &pending[slot];
             if (!apple9_pending_active(p))
@@ -1467,12 +1476,13 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
                needed |= apple9_pending_result(p, ins.src[s]);
             if (!needed)
                continue;
-            if (!fold && apple9_can_fold_pending(&ins, p))
+            if (!fold && !(state.effect_mask & BITFIELD_BIT(slot - 1)) &&
+                apple9_can_fold_pending(&ins, p))
                fold = slot;
             else
                retire |= BITFIELD_BIT(slot - 1);
          }
-         if (!apple9_retire(&out, pending, retire))
+         if (!apple9_retire(&out, &state, retire))
             goto cleanup;
          if (fold) {
             /* Logic's pending-result source is A. Its operators commute. */
@@ -1504,7 +1514,8 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
                unsigned first = ins.op == AGX_APPLE9_VIR_TEXTURE_SAMPLE ? 1 : 6;
                for (unsigned p = 0; p < 6; ++p) {
                   unsigned candidate = (first - 1 + p) % 6 + 1;
-                  if (!apple9_pending_active(&pending[candidate])) {
+                  if (!apple9_pending_active(&pending[candidate]) &&
+                      !(state.effect_mask & BITFIELD_BIT(candidate - 1))) {
                      slot = candidate;
                      break;
                   }
@@ -1521,7 +1532,7 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
                   }
                }
             }
-            if (!apple9_retire(&out, pending, BITFIELD_BIT(slot - 1)))
+            if (!apple9_retire(&out, &state, BITFIELD_BIT(slot - 1)))
                goto cleanup;
             ins.producer_scoreboard_slot = slot;
             if (ins.op == AGX_APPLE9_VIR_DEVICE_LOAD) {
@@ -1535,12 +1546,18 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
             pending[slot] = (struct apple9_pending){
                .count = 1, .latest_issue = out.instruction_count, .producer = {ins}};
          }
+         /* No multi-slot input dependency is represented by scoreboard_slot.
+          * Retire resultless effects with WAIT rather than inventing a field
+          * or reducing the conservative mask to a single encoded slot. */
+         if (ins.encoding != AGX_APPLE9_ENC_PSEUDO)
+            state.effect_mask |=
+               agx_apple9_encoding_info(ins.encoding)->completion_effect_mask;
          apple9_select_compact_alu(&ins);
          if (!apple9_emit_physical(&out, &ins))
             goto cleanup;
       }
       if (drain) {
-         if (!apple9_retire(&out, pending, BITFIELD_MASK(6)))
+         if (!apple9_retire(&out, &state, BITFIELD_MASK(6)))
             goto cleanup;
       } else {
          for (unsigned i = 0; i < 4; ++i) {
@@ -1548,7 +1565,7 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
             for (unsigned j = 0; j < i; ++j)
                repeated |= succ[j] == succ[i];
             if (succ[i] && !repeated)
-               apple9_merge_pending(entry[succ[i]->index], pending);
+               apple9_merge_pending(&entry[succ[i]->index], &state);
          }
       }
    }

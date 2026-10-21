@@ -515,6 +515,241 @@ TEST(Apple9MeshIR, ConsumedLoadDoesNotCreateASubmitWait)
    }
 }
 
+/* Exercise the physical dependency pass through normal shared allocation.
+ * U0 produces no GPR and must never acquire a fabricated encoded output tag. */
+class Apple9MeshCompletion : public ::testing::Test {
+protected:
+   nir_builder b;
+   nir_block logical[4] = {};
+   agx_apple9_vir_program p;
+   std::vector<agx_apple9_block *> blocks;
+
+   void SetUp() override
+   {
+      b = nir_builder_init_simple_shader(MESA_SHADER_MESH, &agx_nir_options,
+                                         "mesh_completion_effect");
+      agx_apple9_vir_init(&p);
+      begin(0);
+   }
+
+   void TearDown() override
+   {
+      agx_apple9_vir_finish(&p);
+      ralloc_free(b.shader);
+   }
+
+   void begin(unsigned index)
+   {
+      while (blocks.size() <= index) {
+         auto block = agx_apple9_block_create(&p);
+         block->nir = &logical[blocks.size()];
+         blocks.push_back(block);
+      }
+      agx_apple9_block_begin(&p, blocks[index]);
+   }
+
+   uint32_t imm(unsigned x)
+   {
+      return agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IMM,
+                               AGX_APPLE9_ENC_MOV_IMM32, nullptr, 0, x);
+   }
+
+   void control()
+   {
+      auto count = imm(1), auxiliary = imm(3);
+      ASSERT_TRUE(agx_apple9_vir_emit_mesh_control(&p, count, auxiliary, true));
+   }
+
+   void fence()
+   {
+      ASSERT_TRUE(agx_apple9_vir_emit_side_effect(
+         &p, AGX_APPLE9_VIR_DEVICE_FENCE, AGX_APPLE9_ENC_DEVICE_FENCE,
+         nullptr, 0, 0));
+   }
+
+   void submit(bool channel)
+   {
+      uint32_t pair[] = {imm(3), imm(0)};
+      ASSERT_TRUE(agx_apple9_vir_emit_mesh_submit(&p, pair, channel, false));
+   }
+
+   void allocate(unsigned expected_waits)
+   {
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
+      unsigned waits = 0;
+      for (unsigned i = 0; i < p.instruction_count; ++i) {
+         const auto *I = p.instructions[i];
+         agx_apple9_packed_instruction packed = {};
+         ASSERT_TRUE(agx_apple9_pack_vir_instruction(I, p.phys, &packed,
+                                                   &reason)) << reason;
+         if (I->op == AGX_APPLE9_VIR_WAIT) {
+            EXPECT_EQ(I->immediate, 0x03u);
+            ++waits;
+         }
+         if (I->op == AGX_APPLE9_VIR_MESH_CONTROL) {
+            EXPECT_EQ(I->dest, AGX_APPLE9_VREG_INVALID);
+            EXPECT_EQ(I->dest_components, 0u);
+            EXPECT_EQ(I->producer_scoreboard_slot, 0u);
+            EXPECT_EQ(I->scoreboard_slot, 0u);
+         }
+      }
+      EXPECT_EQ(waits, expected_waits);
+   }
+
+   void wait_before(enum agx_apple9_vir_opcode op, unsigned occurrence = 0)
+   {
+      for (unsigned i = 0; i < p.instruction_count; ++i) {
+         if (p.instructions[i]->op != op || occurrence--)
+            continue;
+         ASSERT_GT(i, 0u);
+         EXPECT_EQ(p.instructions[i - 1]->op, AGX_APPLE9_VIR_WAIT);
+         EXPECT_EQ(p.instructions[i - 1]->immediate, 0x03u);
+         return;
+      }
+      FAIL() << "missing consumer " << op;
+   }
+};
+
+TEST_F(Apple9MeshCompletion, FenceRetiresResultlessControl)
+{
+   control();
+   fence();
+   allocate(1);
+   wait_before(AGX_APPLE9_VIR_DEVICE_FENCE);
+}
+
+TEST_F(Apple9MeshCompletion, SubmitsRetireControlOnlyOnce)
+{
+   control();
+   submit(true);
+   submit(false);
+   allocate(1);
+   wait_before(AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL);
+}
+
+TEST_F(Apple9MeshCompletion, ScalarSubmitRetiresControl)
+{
+   control();
+   submit(false);
+   allocate(1);
+   wait_before(AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR);
+}
+
+TEST_F(Apple9MeshCompletion, AlreadyRetiredControlDoesNotWaitAgain)
+{
+   control();
+   fence();
+   begin(1);
+   submit(true);
+   fence();
+   submit(false);
+   allocate(1);
+   wait_before(AGX_APPLE9_VIR_DEVICE_FENCE);
+}
+
+TEST_F(Apple9MeshCompletion, RepeatedControlOrdersItsPredecessor)
+{
+   control();
+   control();
+   submit(false);
+   allocate(2);
+   wait_before(AGX_APPLE9_VIR_MESH_CONTROL, 1);
+   wait_before(AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR);
+}
+
+TEST_F(Apple9MeshCompletion, BothBranchArmsReachTheJoin)
+{
+   logical[0].successors[0] = &logical[1];
+   logical[0].successors[1] = &logical[2];
+   logical[1].successors[0] = &logical[3];
+   logical[2].successors[0] = &logical[3];
+   begin(1);
+   control();
+   begin(2);
+   control();
+   begin(3);
+   submit(false);
+   allocate(2);
+   wait_before(AGX_APPLE9_VIR_MESH_CONTROL, 1);
+   wait_before(AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR);
+}
+
+TEST_F(Apple9MeshCompletion, RetiredBranchArmsDoNotWaitAtTheJoin)
+{
+   logical[0].successors[0] = &logical[1];
+   logical[0].successors[1] = &logical[2];
+   logical[1].successors[0] = &logical[3];
+   logical[2].successors[0] = &logical[3];
+   begin(1);
+   control();
+   fence();
+   begin(2);
+   control();
+   fence();
+   begin(3);
+   submit(false);
+   allocate(2);
+   wait_before(AGX_APPLE9_VIR_DEVICE_FENCE);
+   wait_before(AGX_APPLE9_VIR_DEVICE_FENCE, 1);
+}
+
+TEST_F(Apple9MeshCompletion, JoinRetiresThePathBypassingAnEarlierFence)
+{
+   control();
+   logical[0].successors[0] = &logical[1];
+   logical[0].successors[1] = &logical[2];
+   logical[1].successors[0] = &logical[3];
+   logical[2].successors[0] = &logical[3];
+   begin(1);
+   fence();
+   begin(2);
+   begin(3);
+   fence();
+   submit(false);
+   allocate(2);
+   wait_before(AGX_APPLE9_VIR_DEVICE_FENCE);
+   wait_before(AGX_APPLE9_VIR_DEVICE_FENCE, 1);
+}
+
+TEST_F(Apple9MeshCompletion, BackedgeDrainsBeforeLogicalEnd)
+{
+   logical[0].successors[0] = &logical[1];
+   logical[1].successors[0] = &logical[1];
+   logical[1].successors[1] = &logical[2];
+   begin(1);
+   control();
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(
+      &p, AGX_APPLE9_VIR_JMP_EXEC_ANY, AGX_APPLE9_ENC_JMP_EXEC_ANY,
+      nullptr, 0, 0));
+   p.instructions[p.instruction_count - 1]->branch_target = blocks[1];
+   begin(2);
+   submit(false);
+   allocate(1);
+   wait_before(AGX_APPLE9_VIR_JMP_EXEC_ANY);
+}
+
+TEST_F(Apple9MeshCompletion, FixedProducerSlotRetiresTheWholeEffect)
+{
+   control();
+   auto value = agx_apple9_vir_emit(
+      &p, AGX_APPLE9_VIR_GET_SR, AGX_APPLE9_ENC_GET_DRAW_ID, nullptr, 0, 0x10dd);
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(
+      &p, AGX_APPLE9_VIR_STORE_UNIFORM, AGX_APPLE9_ENC_STORE_UNIFORM,
+      &value, 1, 0));
+   submit(false);
+   allocate(1);
+   wait_before(AGX_APPLE9_VIR_GET_SR);
+}
+
+TEST_F(Apple9MeshCompletion, EndOfProgramDrainsControl)
+{
+   control();
+   allocate(1);
+   ASSERT_GT(p.instruction_count, 0u);
+   EXPECT_EQ(p.instructions[p.instruction_count - 1]->op, AGX_APPLE9_VIR_WAIT);
+}
+
 TEST(Apple9MeshIR, AuxiliaryClassRetainsLiveValueAndDetectsClobberMutation)
 {
    nir_builder b = nir_builder_init_simple_shader(
