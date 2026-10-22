@@ -805,6 +805,31 @@ hk_render_merge_image_barrier(struct hk_cmd_buffer *cmd, VkPipelineStageFlags2 s
    if (!enabled || !image || cmd->barrier_qfot || cmd->in_meta ||
        cmd->merge_cs->merge_writes || image->planes[0].sparse_map)
       return false;
+   /* Read-only depth/stencil is immutable for this render, whether it is
+    * read through tests or texture instructions. Its final stores are omitted
+    * on G16. Keep both directions of a read-only test/texture transition ahead
+    * of the render, but never move writes, other stages, aliases or a writable
+    * aspect of the same image. Later shader writes end a hoisted render.
+    */
+   const VkPipelineStageFlags2 ds_read_stages =
+      VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+      VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
+      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+   const VkAccessFlags2 ds_read_access = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+      VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT |
+      VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+   bool read_only_ds = false;
+   for (unsigned i = 0; i < 2; ++i) {
+      if (cmd->merge_key.image[HK_MAX_RTS + i] == &image->vk) {
+         if (!(cmd->merge_key.ds_read_only & BITFIELD_BIT(i)))
+            return false;
+         read_only_ds = true;
+      }
+   }
+   if (read_only_ds && src && !(src & ~ds_read_stages) && dst_access &&
+       !(dst_access & ~ds_read_access))
+      return true;
+
    /* The barrier's execution scope covers all earlier work in its source
     * stages, not only accesses to its image. When the render's attachments
     * are in layouts that allow shader access, its passes may have read them
@@ -838,19 +863,6 @@ hk_render_merge_image_barrier(struct hk_cmd_buffer *cmd, VkPipelineStageFlags2 s
       if (!target)
          continue;
       const struct hk_image *t = container_of(target, struct hk_image, vk);
-      /* A read-only depth/stencil attachment cannot change the stored image.
-       * G16 omits its final stores, so a shader may read the existing image
-       * while this render only reads it for depth/stencil tests. Changing to a
-       * writable layout changes the merge key and ends the render first.
-       * Retain write-after-read ordering and be conservative with aliases.
-       */
-      const VkAccessFlags2 shader_read = VK_ACCESS_2_SHADER_READ_BIT |
-         VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
-      bool read_only_ds = i >= HK_MAX_RTS &&
-         (cmd->merge_key.ds_read_only & BITFIELD_BIT(i - HK_MAX_RTS));
-      if (t == image && read_only_ds && dst_access &&
-          !(dst_access & ~shader_read))
-         continue;
       if (t == image || t->planes[0].sparse_map || hk_image_overlaps(t, image))
          return false;
    }
