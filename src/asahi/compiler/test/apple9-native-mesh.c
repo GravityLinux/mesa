@@ -370,9 +370,53 @@ reject_unsupported(void)
 }
 
 
+/* Compile the raw XYZ values, GLSL-style vector equality/inequality, and
+ * independent component comparisons. The assembly checker binds distinct
+ * child and compute grids and evaluates this bounded data-flow slice. */
+static void
+check_num_workgroups(void)
+{
+   const unsigned sizes[] = {1, 16, 17, 128};
+   for (unsigned t = 0; t < ARRAY_SIZE(sizes); ++t) {
+      nir_shader *nir = source(&h1_fixtures[0], sizes[t]);
+      nir_builder b = nir_builder_at(nir_before_impl(nir_shader_get_entrypoint(nir)));
+      nir_def *groups = nir_load_num_workgroups(&b);
+      nir_def *expected = nir_imm_ivec3(&b, 5, 6, 7);
+      nir_def *values[] = {
+         nir_channel(&b, groups, 0), nir_channel(&b, groups, 1),
+         nir_channel(&b, groups, 2),
+         nir_b2i32(&b, nir_ball_iequal3(&b, groups, expected)),
+         nir_b2i32(&b, nir_bany_inequal3(&b, groups, expected)),
+         nir_b2i32(&b, nir_ieq_imm(&b, nir_channel(&b, groups, 0), 5)),
+         nir_b2i32(&b, nir_ieq_imm(&b, nir_channel(&b, groups, 1), 6)),
+         nir_b2i32(&b, nir_ieq_imm(&b, nir_channel(&b, groups, 2), 7)),
+      };
+      for (unsigned c = 0; c < ARRAY_SIZE(values); ++c)
+         nir_store_global(&b, values[c], nir_imm_int64(&b, INPUT_ADDR + 64 + 4 * c),
+                          .align_mul = 4, .access = ACCESS_VOLATILE);
+      const struct agx_apple9_native_mesh_options options = {
+         .physical_threads = sizes[t] > 16 ? 32 : 16,
+      };
+      struct agx_shader_part code = {0};
+      struct agx_apple9_mesh_body_info info;
+      const char *reason = NULL;
+      CHECK(agx_compile_apple9_native_mesh(nir, true, &options, &code, &info, &reason));
+      CHECK(code.binary && !code.info.scratch_size);
+      printf("num-workgroups logical=%u physical=%u\n", sizes[t], options.physical_threads);
+      free(code.binary);
+      ralloc_free(nir);
+   }
+}
+
 int
 main(int argc, char **argv)
 {
+   if (argc == 2 && !strcmp(argv[1], "--num-workgroups")) {
+      glsl_type_singleton_init_or_ref();
+      check_num_workgroups();
+      glsl_type_singleton_decref();
+      return 0;
+   }
    if (argc == 2 && !strcmp(argv[1], "--counts")) {
       glsl_type_singleton_init_or_ref();
       check_conditional_counts();
