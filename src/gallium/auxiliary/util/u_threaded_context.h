@@ -510,9 +510,18 @@ tc_renderpass_info_is_zsbuf_used(const struct tc_renderpass_info *info)
 static inline void
 tc_renderpass_info_reset(struct tc_renderpass_info *info)
 {
+   /* Once recording has ended, the state/partial-clear flags already bound
+    * all remaining depth/stencil writes. A driver split must discard clear
+    * and invalidate hints, but need not invent a depth/stencil write. Keep
+    * the conservative fallback if recording was only signalled to unblock
+    * the driver and future calls are not known yet.
+    */
+   bool complete = info->ended;
+   bool zsbuf_clear_partial = info->zsbuf_clear_partial;
    info->data32[0] = 0;
    info->cbuf_load = BITFIELD_MASK(8);
-   info->zsbuf_clear_partial = true;
+   info->zsbuf_clear_partial = !complete || zsbuf_clear_partial;
+   info->ended = complete;
    info->has_draw = true;
    info->has_query_ends = true;
 }
