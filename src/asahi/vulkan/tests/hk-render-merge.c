@@ -19,7 +19,7 @@ check_depth_barriers(void)
    uint8_t pool[4096] = {0}, bytes[4096] = {0};
    cmd->uploader[HK_CMD_POOL_MAIN].chunks[0].map = pool;
 
-   for (unsigned kind = 0; kind < 6; ++kind) {
+   for (unsigned kind = 0; kind < 7; ++kind) {
       struct hk_cs render = {
          .cmd = cmd, .type = HK_CS_VDM, .sync_id = 0,
          .current = bytes, .end = bytes + sizeof(bytes),
@@ -34,11 +34,13 @@ check_depth_barriers(void)
       cmd->merge_key.image[HK_MAX_RTS] = &image->vk;
       cmd->barrier_image = (kind == 0 || kind >= 3) ? image : NULL;
       cmd->merge_key.ds_read_only = kind >= 3 ? 1 : 0;
-      hk_cmd_sync_barrier(cmd, kind == 5 ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT :
+      cmd->merge_feedback = kind == 6;
+      hk_cmd_sync_barrier(cmd, kind >= 5 ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT :
                                               VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-         (kind == 2 || kind == 5) ? VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT :
+         (kind == 2 || kind >= 5) ? VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT :
                      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-         VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+         kind >= 5 ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT :
+                     VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
          (kind == 0 || kind == 3) ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT :
          kind == 4 ? VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT :
          kind == 1 ? VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT :

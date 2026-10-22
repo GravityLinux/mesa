@@ -827,7 +827,8 @@ hk_render_merge_image_barrier(struct hk_cmd_buffer *cmd, VkPipelineStageFlags2 s
       }
    }
    if (read_only_ds && src && !(src & ~ds_read_stages) && dst_access &&
-       !(dst_access & ~ds_read_access))
+       !(dst_access & ~ds_read_access) &&
+       !(cmd->merge_feedback && (src & VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT)))
       return true;
 
    /* The barrier's execution scope covers all earlier work in its source
