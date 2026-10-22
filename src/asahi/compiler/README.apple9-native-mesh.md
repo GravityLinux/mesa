@@ -11,12 +11,14 @@ The accepted development class is a fixed API workgroup with 1..128 invocations
 maxima V3/P1, runtime `SetMeshOutputs` counts within those maxima, and no task
 payload. Honeykrisp selects physical 16x1x1 for up to 16 logical invocations
 and 32x1x1 otherwise. User shared storage is supported within the combined
-32-KiB local allocation; the gated API reports 28,672 shared bytes, leaving
-room for the maximum current output layout. Position-only output
-is the default. The additional `HK_APPLE9_NATIVE_MESH_ATTRIBUTES=1` development
-gate admits up to 124 32-bit user scalars in generic varying slots, with smooth,
-flat and noperspective interpolation selected by the fragment interface. This
-attribute path is host-tested but not yet hardware-qualified.
+32-KiB local allocation. The native class reserves room for the maximum current
+output layout; the hybrid API retains emulation's public limits and falls back
+when the combined allocation cannot fit. The opt-in native path admits up to
+124 32-bit user scalars in generic varying slots, with smooth, flat and
+noperspective interpolation selected by the fragment interface.
+`HK_APPLE9_NATIVE_MESH_ATTRIBUTES=0` disables these for explicit comparisons.
+The current hybrid candidate and its qualification status are tracked in
+[the milestone log](#native-hybrid).
 
 Mesh output writes/reads use component-major local planes in semantic order.
 Completion publishes each plane with the existing U channel operation; user
@@ -28,9 +30,11 @@ output-state rows continue to describe only the output planes. The launch
 allocation is the next power of two covering both regions, with a 128-byte
 minimum. Shared accesses and atomics use the same native local root, and
 barriers retain ordinary NIR semantics. No fixed application registers, new opaque code, or
-capture-specific instruction sequences are introduced. Primitive attributes
-remain rejected because their linking-plane/device-record publication is not
-understood. Paired VS/native device arms live in `../vulkan/tests/native-attributes`.
+capture-specific instruction sequences are introduced. P1 primitive attributes
+use the qualified flat-varying broadcast lowering; set
+`HK_APPLE9_NATIVE_MESH_PRIMITIVE_LOWERING=0` for explicit comparisons. General
+primitive linking-plane/device-record publication is still unresolved.
+Paired VS/native device arms live in `../vulkan/tests/native-attributes`.
 
 Position retains
 all four components, including non-unit W. Hardware clipping is unqualified;
@@ -74,7 +78,8 @@ or user shared memory. Only API lane 0 writes the three grid dimensions. The
 physical T16 workgroup then reconverges before its collective call, whose
 hardware export still uses lanes 0/1/2 for X/Y/Z. Masking that callee to the T1
 API lane set would lose two dimensions. The gated runtime uploads this generated
-object program alongside the mesh program; it does not expose API task shaders.
+object program alongside the mesh program. API task shaders select emulation
+in the hybrid runtime.
 
 For logical sizes above 32, ordinary `nir_lower_workgroup_size` serializes
 logical subgroups on physical T32 between workgroup barriers. Logical IDs,
@@ -703,3 +708,35 @@ or cache handling. It does not execute GPU commands. The complete set of 45
 historical deferred cases and the full rejection inventory remain qualification
 work for milestone 3, after routing and properties are ready. Compiler review
 is pending; no device qualification is claimed.
+
+### Milestone 2 — candidate ready for compiler review
+
+Draw routing now resolves the pipeline before selecting a path. Native requires
+paired programs, a supported nonempty direct grid, one sample/layer, fill mode,
+no API task/geometry/tessellation stage, no multiview or predicate, and no active
+mesh/statistics/occlusion query. P1 CullPrimitive additionally excludes
+conservative rasterization. Other valid draws use the owned emulated programs;
+no GPU-resident indirect argument or predicate is read on the CPU.
+
+The common draw preparation ends a preceding native stream before any following
+draw, including ordinary vertex and meta draws. Entering native also ends a
+nonempty ordinary stream. The existing partial-render background/EOT/ZLS and
+render-continuation synchronization preserve attachments and ordering. Each
+native stream consequently has exactly one leading native draw; the packet
+emitter retains its final contract check. Secondary command buffers use the
+common command-queue replay, so they take the same selection/preparation path.
+
+Mesh/task features and limits now remain exactly those backed by emulation.
+Qualified attribute and P1 broadcast support are enabled within the explicit
+native opt-in; their diagnostic overrides remain available. The global native
+gate is still default-off and the matching kernel is still required.
+
+Host validation (2026-10-22): x86-64 and aarch64 ICD builds pass. Eight focused
+tests pass together: `hk-native-mesh-routing`, `hk-native-mesh-hybrid`,
+`hk-native-mesh-options`, `hk-native-mesh`, `hk-mesh-query`, `hk-render-merge`,
+`hk-pregfx-recording`, and `hk-constant-data`. The new routing test exercises the
+real eligibility and stream-preparation functions, including fallback states,
+empty-stream reuse, native/emulated/ordinary/meta transitions, partial attachment
+registers and continuation events. Its representative stream bytes are not a
+GPU rendering test; actual Vulkan recording and device parity remain milestone 3.
+Compiler review is pending for both candidates.

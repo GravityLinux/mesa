@@ -332,7 +332,8 @@ hk_apple9_draw_sample_positions(const struct vk_dynamic_graphics_state *dyn,
 }
 
 bool
-hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool reads_buffers)
+hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool reads_buffers,
+                         bool native_mesh)
 {
    if (vk_command_buffer_has_error(&cmd->vk))
       return false;
@@ -343,6 +344,19 @@ hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool reads_buffers)
 
    const struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
    const struct hk_rendering_state *render = &cmd->state.gfx.render;
+
+   /* The paired kernel accepts one leading native mesh draw per render.
+    * End a native stream before any next draw (including meta/ordinary VS),
+    * and end an ordinary stream before its first native draw. Existing
+    * partial-render stores/reloads and continuation dependencies preserve
+    * attachments and order; no emitted work is rerouted retroactively. */
+   if (cs->apple9_native_mesh || (native_mesh && cs->current != cs->start)) {
+      hk_cs_end_hint(cmd, HK_CS_END_RENDER_SPLIT);
+      hk_cmd_buffer_end_graphics(cmd);
+      cs = hk_cmd_buffer_get_cs(cmd, false);
+      if (!cs)
+         return false;
+   }
 
    /* Sample positions are render state (the per-render multisample control),
     * so the first application draw of a render commits them and a draw with
@@ -725,10 +739,8 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    cs = hk_occlusion_prepare_draw(cmd, cs);
    if (!cs)
       return;
-   /* The paired kernel parses a leading native state and one direct draw.
-    * Reject mixed/multiple draws and unqualified render resource classes
-    * before publishing a stream that the kernel could mistake for ordinary
-    * rendering. The empty root has ample space without a stream link. */
+   /* Selection and preparation guarantee a leading native state and one
+    * direct draw. Keep this backstop before publishing a malformed stream. */
    if (cs->apple9_native_mesh ||
        (native_grid && (cs->current != cs->start || pipeline.samples != 1 ||
                         gfx->render.layer_count != 1)))

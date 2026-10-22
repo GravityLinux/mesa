@@ -186,6 +186,17 @@ if with_tests
     endif
   endforeach
   test(
+    'hk-native-mesh-routing',
+    executable(
+      'hk-native-mesh-routing', 'tests/hk-native-mesh-routing.c',
+      include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                             inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+      dependencies : [hk_deps], link_with : [libhk],
+    ),
+    env : ['HK_APPLE9_NATIVE_MESH=1'],
+    suite : ['asahi', 'honeykrisp'],
+  )
+  test(
     'hk-native-mesh-hybrid',
     executable(
       'hk-native-mesh-hybrid', 'tests/hk-native-mesh-hybrid.c',
