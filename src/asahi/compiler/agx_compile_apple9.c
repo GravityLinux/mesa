@@ -6291,7 +6291,10 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
       .buffer_table = resources->descriptor_tables,
       /* Native mesh consumes the child grid published for the generated
        * object stage. Graphics root 3 is not the compute group-count root
-       * in this ABI; the immutable XYZ record is at the draw pointer. */
+       * in this ABI; the immutable XYZ record is at the draw pointer.
+       * Native API task shaders are currently rejected. If accepted later,
+       * mesh NumWorkGroups must read the task-launch counts here instead
+       * of the direct draw grid. */
       .groups_argument = resources->native_key &&
                                nir->info.stage == MESA_SHADER_MESH
                             ? AGX_APPLE9_MESH_DRAW_UNIFORM / 2
