@@ -547,6 +547,9 @@ hk_pack_zls_control(struct agx_zls_control_packed *packed,
    if (z) {
       zls.z_store = z->storeOp == VK_ATTACHMENT_STORE_OP_STORE ||
                     z->resolveMode != VK_RESOLVE_MODE_NONE || !last;
+      if (last && vk_image_layout_is_read_only(z->imageLayout,
+                                               VK_IMAGE_ASPECT_DEPTH_BIT))
+         zls.z_store = false;
 
       zls.z_load = z->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD || partial_render ||
                    incomplete_render_area;
@@ -555,6 +558,9 @@ hk_pack_zls_control(struct agx_zls_control_packed *packed,
    if (s) {
       zls.s_store = s->storeOp == VK_ATTACHMENT_STORE_OP_STORE ||
                     s->resolveMode != VK_RESOLVE_MODE_NONE || !last;
+      if (last && vk_image_layout_is_read_only(s->imageLayout,
+                                               VK_IMAGE_ASPECT_STENCIL_BIT))
+         zls.s_store = false;
 
       zls.s_load = s->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD || partial_render ||
                    incomplete_render_area;
@@ -619,7 +625,7 @@ hk_render_merge_key_init(struct hk_render_merge_key *key, VkRenderingFlags flags
                     uint32_t layer_count, uint32_t view_mask,
                     uint32_t color_count, struct hk_image_view *const *views,
                     struct hk_image_view *depth, struct hk_image_view *stencil,
-                    VkRect2D area)
+                    uint8_t ds_read_only, VkRect2D area)
 {
    if ((flags & (VK_RENDERING_SUSPENDING_BIT | VK_RENDERING_RESUMING_BIT |
                  VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT)) ||
@@ -634,6 +640,7 @@ hk_render_merge_key_init(struct hk_render_merge_key *key, VkRenderingFlags flags
    key->color_count = color_count;
    key->layer_count = layer_count;
    key->view_mask = view_mask;
+   key->ds_read_only = ds_read_only;
    if (depth || stencil)
       key->ds_area = area;
    for (unsigned i = 0; i < HK_MAX_RTS + 2; ++i) {
@@ -657,7 +664,7 @@ hk_render_merge_begin(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
    const VkRenderingAttachmentInfo *ds[2] = {
       info->pDepthAttachment, info->pStencilAttachment};
    struct hk_image_view *ds_views[2] = {NULL};
-   uint8_t ds_store_mask = 0;
+   uint8_t ds_store_mask = 0, ds_read_only = 0;
    for (unsigned i = 0; i < 2; ++i) {
       if (!ds[i] || !ds[i]->imageView)
          continue;
@@ -665,6 +672,9 @@ hk_render_merge_begin(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
           ds[i]->resolveMode != VK_RESOLVE_MODE_NONE)
          return false;
       ds_views[i] = hk_image_view_from_handle(ds[i]->imageView);
+      if (vk_image_layout_is_read_only(ds[i]->imageLayout,
+            i ? VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT))
+         ds_read_only |= BITFIELD_BIT(i);
       if (is_attachment_stored(ds[i]))
          ds_store_mask |= BITFIELD_BIT(i);
    }
@@ -692,7 +702,7 @@ hk_render_merge_begin(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
    return hk_render_merge_enabled(cmd) &&
           hk_render_merge_key_init(&key, info->flags, info->layerCount,
                               info->viewMask, info->colorAttachmentCount, views,
-                              ds_views[0], ds_views[1], info->renderArea) &&
+                              ds_views[0], ds_views[1], ds_read_only, info->renderArea) &&
           !memcmp(&key, &cmd->merge_key, sizeof(key));
 }
 
@@ -743,7 +753,8 @@ hk_render_merge_end(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
       render->flags & ~(render->resumed ? VK_RENDERING_RESUMING_BIT : 0),
       render->layer_count, render->view_mask,
       render->color_att_count, views,
-      render->depth_att.iview, render->stencil_att.iview, render->area);
+      render->depth_att.iview, render->stencil_att.iview,
+      render->ds_read_only, render->area);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -790,8 +801,13 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    const VkRenderingAttachmentInfo *ds[2] = {
       pRenderingInfo->pDepthAttachment, pRenderingInfo->pStencilAttachment};
    for (unsigned i = 0; i < 2; ++i) {
-      if (ds[i] && ds[i]->imageView && is_attachment_stored(ds[i]))
-         render->ds_store_mask |= BITFIELD_BIT(i);
+      if (ds[i] && ds[i]->imageView) {
+         if (is_attachment_stored(ds[i]))
+            render->ds_store_mask |= BITFIELD_BIT(i);
+         if (vk_image_layout_is_read_only(ds[i]->imageLayout,
+               i ? VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT))
+            render->ds_read_only |= BITFIELD_BIT(i);
+      }
    }
    const VkRenderingAttachmentInfo *feedback_att[HK_MAX_RTS + 2] = {
       pRenderingInfo->pDepthAttachment, pRenderingInfo->pStencilAttachment};

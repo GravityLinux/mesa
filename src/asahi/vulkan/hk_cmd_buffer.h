@@ -247,6 +247,7 @@ struct hk_rendering_state {
    uint32_t store_mask;
    /* Depth/stencil aspects whose stores must survive a merged pass. */
    uint8_t ds_store_mask;
+   uint8_t ds_read_only;
    /* An attachment is in a layout that also allows shader access (GENERAL
     * or a feedback loop): passes may read it as a texture. */
    bool feedback;
@@ -689,6 +690,7 @@ struct hk_render_merge_key {
    VkFormat format[HK_MAX_RTS + 2];
    /* Conservatively require identical depth/stencil render areas. */
    VkRect2D ds_area;
+   uint8_t ds_read_only;
    uint32_t color_count, layer_count, view_mask;
 };
 
@@ -1038,7 +1040,8 @@ bool hk_render_merge_key_init(struct hk_render_merge_key *key,
                               uint32_t view_mask, uint32_t color_count,
                               struct hk_image_view *const *views,
                               struct hk_image_view *depth,
-                              struct hk_image_view *stencil, VkRect2D area);
+                              struct hk_image_view *stencil, uint8_t ds_read_only,
+                              VkRect2D area);
 void hk_cmd_render_merge_flush_why(struct hk_cmd_buffer *cmd, const char *why);
 struct hk_cs *hk_render_merge_pre_cs(struct hk_cmd_buffer *cmd, unsigned stages);
 void hk_render_merge_trace(const char *why, uint64_t a, uint64_t b);

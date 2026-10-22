@@ -795,7 +795,8 @@ hk_image_overlaps(const struct hk_image *a, const struct hk_image *b)
  * end it first (hk_apple9_prepare_draw). A barrier from R's shader stages
  * also orders R's reads before later writes, so it ends R instead. */
 static bool
-hk_render_merge_image_barrier(struct hk_cmd_buffer *cmd, VkPipelineStageFlags2 src)
+hk_render_merge_image_barrier(struct hk_cmd_buffer *cmd, VkPipelineStageFlags2 src,
+                              VkAccessFlags2 dst_access)
 {
    static int enabled = -1;
    if (enabled < 0)
@@ -837,6 +838,19 @@ hk_render_merge_image_barrier(struct hk_cmd_buffer *cmd, VkPipelineStageFlags2 s
       if (!target)
          continue;
       const struct hk_image *t = container_of(target, struct hk_image, vk);
+      /* A read-only depth/stencil attachment cannot change the stored image.
+       * G16 omits its final stores, so a shader may read the existing image
+       * while this render only reads it for depth/stencil tests. Changing to a
+       * writable layout changes the merge key and ends the render first.
+       * Retain write-after-read ordering and be conservative with aliases.
+       */
+      const VkAccessFlags2 shader_read = VK_ACCESS_2_SHADER_READ_BIT |
+         VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+      bool read_only_ds = i >= HK_MAX_RTS &&
+         (cmd->merge_key.ds_read_only & BITFIELD_BIT(i - HK_MAX_RTS));
+      if (t == image && read_only_ds && dst_access &&
+          !(dst_access & ~shader_read))
+         continue;
       if (t == image || t->planes[0].sparse_map || hk_image_overlaps(t, image))
          return false;
    }
@@ -876,7 +890,7 @@ hk_cmd_sync_barrier(struct hk_cmd_buffer *cmd,
                       (dst_access & VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT);
       if (!ds_input && ((!cmd->in_meta &&
            hk_render_merge_barrier(src, dst, src_access, dst_access)) ||
-          (image_barrier = hk_render_merge_image_barrier(cmd, src)) ||
+          (image_barrier = hk_render_merge_image_barrier(cmd, src, dst_access)) ||
           (unrelated = hk_render_merge_move_enabled() && !cmd->in_meta &&
                        !(xsrc & cmd->merge_reach)))) {
          cmd->merge_cs->merge_hoisted |= image_barrier;

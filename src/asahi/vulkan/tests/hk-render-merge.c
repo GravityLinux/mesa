@@ -19,7 +19,7 @@ check_depth_barriers(void)
    uint8_t pool[4096] = {0}, bytes[4096] = {0};
    cmd->uploader[HK_CMD_POOL_MAIN].chunks[0].map = pool;
 
-   for (unsigned kind = 0; kind < 3; ++kind) {
+   for (unsigned kind = 0; kind < 5; ++kind) {
       struct hk_cs render = {
          .cmd = cmd, .type = HK_CS_VDM, .sync_id = 0,
          .current = bytes, .end = bytes + sizeof(bytes),
@@ -32,18 +32,20 @@ check_depth_barriers(void)
       cmd->merge_event = 0;
       cmd->merge_reach = hk_merge_graphics_stages();
       cmd->merge_key.image[HK_MAX_RTS] = &image->vk;
-      cmd->barrier_image = kind == 0 ? image : NULL;
+      cmd->barrier_image = (kind == 0 || kind >= 3) ? image : NULL;
+      cmd->merge_key.ds_read_only = kind >= 3 ? 1 : 0;
       hk_cmd_sync_barrier(cmd, VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
          kind == 2 ? VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT :
                      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
          VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-         kind == 0 ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT :
+         (kind == 0 || kind == 3) ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT :
+         kind == 4 ? VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT :
          kind == 1 ? VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT :
                      VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
       /* Sampling stored depth (including input attachments) ends the render;
        * a depth attachment -> depth attachment barrier stays in-tile. */
-      CHECK((cmd->merge_cs == &render) == (kind == 2));
-      CHECK((cmd->current_cs.gfx == &render) == (kind == 2));
+      CHECK((cmd->merge_cs == &render) == (kind == 2 || kind == 3));
+      CHECK((cmd->current_cs.gfx == &render) == (kind == 2 || kind == 3));
       cmd->merge_cs = cmd->current_cs.gfx = NULL;
    }
    util_dynarray_fini(&cmd->sync_events);
@@ -67,12 +69,12 @@ main(void)
    struct hk_image_view *colors[] = {&color};
    VkRect2D area = {.extent = {128, 128}};
    CHECK(hk_render_merge_key_init(&first, 0, 1, 0, 1, colors,
-                                   &depth, &depth, area));
+                                   &depth, &depth, 0, area));
 
    /* Distinct views of the same subresource may continue the render. */
    struct hk_image_view alias = depth;
    CHECK(hk_render_merge_key_init(&next, 0, 1, 0, 1, colors,
-                                   &alias, &alias, area));
+                                   &alias, &alias, 0, area));
    CHECK(!memcmp(&first, &next, sizeof(first)));
 
    /* Depth identity, mip, layer, format, aspect and render area all matter. */
@@ -89,20 +91,20 @@ main(void)
       default: break;
       }
       CHECK(hk_render_merge_key_init(&next, 0, 1, 0, 1, colors, &alias,
-                                      change == 6 ? NULL : &alias, altered));
+                                      change == 6 ? NULL : &alias, 0, altered));
       CHECK(memcmp(&first, &next, sizeof(first)));
    }
    CHECK(!hk_render_merge_key_init(&next, VK_RENDERING_SUSPENDING_BIT,
-                                    1, 0, 1, colors, &depth, &depth, area));
+                                    1, 0, 1, colors, &depth, &depth, 0, area));
    CHECK(!hk_render_merge_key_init(&next, 0, 1, 1, 1, colors,
-                                    &depth, &depth, area));
+                                    &depth, &depth, 0, area));
    CHECK(!hk_render_merge_key_init(&next, 0, 1, 0, 0, colors,
-                                    &depth, &depth, area));
+                                    &depth, &depth, 0, area));
 
    /* Preserve the existing colour-only render-area freedom. */
-   CHECK(hk_render_merge_key_init(&first, 0, 1, 0, 1, colors, NULL, NULL, area));
+   CHECK(hk_render_merge_key_init(&first, 0, 1, 0, 1, colors, NULL, NULL, 0, area));
    area.offset.x = 1;
-   CHECK(hk_render_merge_key_init(&next, 0, 1, 0, 1, colors, NULL, NULL, area));
+   CHECK(hk_render_merge_key_init(&next, 0, 1, 0, 1, colors, NULL, NULL, 0, area));
    CHECK(!memcmp(&first, &next, sizeof(first)));
    CHECK(!check_depth_barriers());
    puts("PASS depth/stencil render merge subresources, areas and exclusions");
