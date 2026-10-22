@@ -8,7 +8,7 @@ The existing compute-emulated Vulkan mesh path remains the default.
 
 The accepted development class is a fixed API workgroup with 1..128 invocations
 (any 3D shape), triangle topology,
-maxima V3/P1, one constant `SetMeshOutputs(3, 1)`, and no task
+maxima V3/P1, runtime `SetMeshOutputs` counts within those maxima, and no task
 payload. Honeykrisp selects physical 16x1x1 for up to 16 logical invocations
 and 32x1x1 otherwise. User shared storage is supported within the combined
 32-KiB local allocation; the gated API reports 28,672 shared bytes, leaving
@@ -35,8 +35,18 @@ understood. Paired VS/native device arms live in `../vulkan/tests/native-attribu
 Position retains
 all four components, including non-unit W. Hardware clipping is unqualified;
 the compiler does not perform a software clip-domain drop. The
-hardware validation launch must use one workgroup while workgroup scope is
-being qualified.
+hardware validation uses the opt-in paired kernel. Direct multi-workgroup child
+grids are admitted for qualification; this is not a native-mesh default change.
+
+Count publication uses the first API invocation's actual values. Uniform
+branches may contain separate static `SetMeshOutputs` calls, provided at most
+one executes per invocation as Vulkan requires. Both compiler-owned count words
+start at zero, so a uniform early return that bypasses the call emits no output.
+Returns reconverge before the physical completion barrier, including empty
+workgroups. The generic body lowering still rejects constant counts above the
+declared maxima. The host tests exercise dynamic counts, empty outputs, an early
+return before the call and mutually exclusive calls with poisoned local memory;
+hardware qualification of these additional paths remains pending.
 
 ## API invocations and physical completion
 

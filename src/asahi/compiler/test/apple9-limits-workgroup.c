@@ -9,6 +9,7 @@
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%u: %s\n", __LINE__, #x); exit(1); } } while (0)
 #define LANES 32
 #include "apple9-mesh-executor.h"
+#include "apple9-mesh-counts.h"
 
 #define WORDS 32
 #define GUARD 64
@@ -198,6 +199,7 @@ static void reject(void)
 int main(void)
 {
    glsl_type_singleton_init_or_ref();
+   check_conditional_counts();
    const unsigned shapes[][3] = {
       {1,1,1}, {3,1,1}, {17,1,1}, {31,1,1}, {32,1,1}, {33,1,1},
       {63,1,1}, {64,1,1}, {65,1,1}, {95,1,1}, {96,1,1}, {97,1,1},

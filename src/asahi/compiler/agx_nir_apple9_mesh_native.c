@@ -41,29 +41,12 @@ eligible(nir_shader *nir, unsigned physical_threads, const char **reason)
       }
    }
 
-   unsigned publications = 0;
-   nir_foreach_function_impl(impl, nir) {
-      nir_foreach_block(block, impl) {
-         nir_foreach_instr(instr, block) {
-            if (instr->type != nir_instr_type_intrinsic)
-               continue;
-            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-            if (intr->intrinsic != nir_intrinsic_set_vertex_and_primitive_count)
-               continue;
-            if (!nir_src_is_const(intr->src[0]) ||
-                !nir_src_is_const(intr->src[1]) ||
-                nir_src_as_uint(intr->src[0]) != 3 ||
-                nir_src_as_uint(intr->src[1]) != 1)
-               return fail(
-                  reason,
-                  "native mesh development class requires SetMeshOutputs(3, 1)");
-            ++publications;
-         }
-      }
-   }
-   return publications == 1 ||
-          fail(reason,
-               "native mesh development class requires one count publication");
+   /* SetMeshOutputs operands need not be constants, and mutually exclusive
+    * branches may each contain a call. The body lowerer checks constant
+    * counts against the declaration and bounds runtime counts before
+    * publishing lane zero's normalized values.
+    * Vulkan requires at most one executed call under uniform control flow. */
+   return true;
 }
 
 /* Keep the actual vertex count in compiler-owned local storage. The body
@@ -364,9 +347,24 @@ agx_nir_lower_apple9_native_mesh(
    nir_lower_returns(nir);
    if (!agx_nir_mask_apple9_mesh_body(nir, &key, layout, reason))
       return false;
+   /* A uniform return can bypass SetMeshOutputs entirely. Such a workgroup
+    * emits nothing. Initialize both count words before the application mask;
+    * only lane zero writes them, and completion reads after its workgroup
+    * barrier. No initialization of undefined output attributes is needed. */
+   nir_builder entry =
+      nir_builder_at(nir_before_impl(nir_shader_get_entrypoint(nir)));
+   nir_push_if(&entry, nir_ieq_imm(&entry,
+                                 nir_load_local_invocation_index(&entry), 0));
+   nir_store_local_apple9_agx(
+      &entry, nir_imm_int(&entry, 0),
+      nir_imm_int(&entry, layout->primitive_count_B),
+      .base = key.output_root, .bit_size = key.primitive_count_bits);
+   nir_store_local_apple9_agx(
+      &entry, nir_imm_int(&entry, 0),
+      nir_imm_int(&entry, layout->vertex_count_B),
+      .base = key.output_root, .bit_size = 32);
+   nir_pop_if(&entry, NULL);
    if (primitive_broadcast & VARYING_BIT_CULL_PRIMITIVE) {
-      nir_builder entry =
-         nir_builder_at(nir_before_impl(nir_shader_get_entrypoint(nir)));
       nir_push_if(&entry, nir_ieq_imm(&entry,
                                     nir_load_local_invocation_index(&entry), 0));
       nir_store_local_apple9_agx(

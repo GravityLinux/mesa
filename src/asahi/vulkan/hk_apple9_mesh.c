@@ -29,6 +29,22 @@ hk_apple9_native_mesh_primitive_lowering_enabled(void)
           debug_get_option_native_mesh_primitive_lowering();
 }
 
+bool
+hk_apple9_native_mesh_grid_valid(const uint32_t groups[3])
+{
+   if (!groups)
+      return false;
+
+   unsigned total = 1;
+   for (unsigned i = 0; i < 3; ++i) {
+      if (!groups[i] || groups[i] > HK_APPLE9_NATIVE_MAX_GROUP_COUNT ||
+          groups[i] > HK_APPLE9_NATIVE_MAX_GROUP_TOTAL / total)
+         return false;
+      total *= groups[i];
+   }
+   return true;
+}
+
 static bool
 logical_size_valid(const uint16_t size[3], unsigned limit)
 {

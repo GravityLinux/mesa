@@ -589,12 +589,20 @@ lower_intrinsic(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       return true;
    }
    case nir_intrinsic_set_vertex_and_primitive_count: {
-      /* Actual vertex count has no separately established native store.
-       * Retain its empty-output meaning; publish only the measured primitive
-       * count. Do not invent another header word for a vertex-count field. */
+      /* Bound runtime counts before publishing or narrowing either operand.
+       * Completion must not submit channels beyond the declared layout.
+       * Use a single empty shape even when only one input count is zero. */
       s->info->uses_vertex_count = true;
-      nir_def *p = nir_bcsel(b, nir_ieq_imm(b, intr->src[0].ssa, 0),
-                             nir_imm_int(b, 0), intr->src[1].ssa);
+      nir_def *v = nir_umin(b, intr->src[0].ssa,
+                            nir_imm_int(b, l->max_vertices));
+      nir_def *p = nir_umin(b, intr->src[1].ssa,
+                            nir_imm_int(b, l->max_primitives));
+      nir_def *nonempty = nir_iand(b, nir_ine_imm(b, v, 0),
+                                    nir_ine_imm(b, p, 0));
+      v = nir_bcsel(b, nonempty, v, nir_imm_int(b, 0));
+      p = nir_bcsel(b, nonempty, p, nir_imm_int(b, 0));
+      nir_src_rewrite(&intr->src[0], v);
+      nir_src_rewrite(&intr->src[1], p);
       nir_push_if(b, nir_ieq_imm(b, nir_load_local_invocation_index(b), 0));
       /* Every supported primitive capacity fits the 16-bit logical count.
        * Its memory handoff may reserve a wider zero-extended word. */
@@ -602,9 +610,9 @@ lower_intrinsic(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          b, nir_u2u16(b, p), nir_imm_int(b, l->primitive_count_B),
          .base = s->key->output_root, .bit_size = s->key->primitive_count_bits);
       nir_pop_if(b, NULL);
-      /* Keep both logical count SSA operands until a complete native stage
-       * contract consumes them. Body compilation emits the measured primitive
-       * store but must not silently discard the actual vertex count. */
+      /* Keep both normalized count SSA operands until a complete native stage
+       * contract consumes them. Body compilation emits the primitive store
+       * but must not silently discard the vertex count. */
       return true;
    }
    case nir_intrinsic_launch_mesh_workgroups:
