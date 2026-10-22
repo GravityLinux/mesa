@@ -527,7 +527,7 @@ if with_tests
   test('gallium-aux',
     executable(
       'gallium-aux',
-      'util/u_surface_test.cpp',
+      ['util/u_surface_test.cpp', 'util/u_tc_renderpass_test.cpp'],
       include_directories : [inc_include, inc_src, inc_gallium, inc_gallium_aux],
       link_with: libgallium,
       dependencies : [idep_gtest, idep_mesautil],
