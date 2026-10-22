@@ -3244,6 +3244,13 @@ init_driver_workarounds(struct zink_screen *screen)
       break;
    }
 
+   /* Honeykrisp can keep compatible passes in one tile render. Explicit
+    * layouts preserve read-only depth information and image-specific barriers
+    * needed to order texture reads without ending that render.
+    */
+   if (zink_driverid(screen) == VK_DRIVER_ID_MESA_HONEYKRISP)
+      screen->driver_workarounds.general_layout = false;
+
    if (zink_debug & ZINK_DEBUG_NOGENERAL)
       screen->driver_workarounds.general_layout = false;
 
