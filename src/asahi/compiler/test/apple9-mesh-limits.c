@@ -97,7 +97,8 @@ check(unsigned attributes, unsigned shared, bool cull,
    CHECK(m.value);
    execute(&m, &impl->body, ALL_LANES);
    CHECK(m.count_lanes == ALL_LANES);
-   CHECK(m.actual_vertices == vertices && m.actual_primitives == primitives);
+   CHECK(m.actual_vertices == (primitives ? vertices : 0));
+   CHECK(m.actual_primitives == (vertices ? primitives : 0));
    CHECK(!m.controls && !m.scalars);
    for (unsigned i = 0; i < vertices; ++i) {
       for (unsigned c = 0; c < 4 + attributes; ++c) {

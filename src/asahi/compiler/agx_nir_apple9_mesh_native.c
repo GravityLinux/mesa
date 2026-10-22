@@ -43,7 +43,8 @@ eligible(nir_shader *nir, unsigned physical_threads, const char **reason)
 
    /* SetMeshOutputs operands need not be constants, and mutually exclusive
     * branches may each contain a call. The body lowerer checks constant
-    * counts against the declaration and publishes lane zero's actual values.
+    * counts against the declaration and bounds runtime counts before
+    * publishing lane zero's normalized values.
     * Vulkan requires at most one executed call under uniform control flow. */
    return true;
 }
