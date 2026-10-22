@@ -218,6 +218,13 @@ a split six-bit input mask independently of their output completion tag. These
 paths fold waits into useful instructions instead of forcing identity copies.
 EXP-M4-62 records the initial native evidence and shared-RA regression tests.
 
+Native mesh control is an implicit fixed producer with no GPR result. T8132 r6
+establishes either-slot-1-or-2 completion at the first channel submit; the
+compiler selects slot 1 and folds its wait into the U input mask at bits 12..17.
+The normal scoreboard reserves both selectors while it is pending and keeps
+ordinary loads distinct. See [the U0 producer model](README.apple9-u0-producer.md)
+for CFG retirement, earlier barriers and the repeated-U0 limitation.
+
 Device loads also consume pending element indices and pointer pairs through
 the mask at bits 12..17. The former raw-system-index flag and first-index-use
 flag were individual bits of this mask, not separate address modes. Index and

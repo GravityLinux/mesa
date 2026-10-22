@@ -27,6 +27,9 @@ enum agx_apple9_mesh_submit_mode {
 
 struct agx_apple9_mesh_instruction {
    enum agx_apple9_mesh_instruction_kind kind;
+   /* U input wait mask, bits 12..17: bit i waits for ordinary slot i + 1.
+    * T8132 r6 establishes this field on CONTROL, SCALAR and CHANNEL. */
+   uint8_t input_wait_mask;
    /* CONTROL reads and clears the selected primitive-count halfword.
     * Each descriptor encodes 2*GPR+half; B's read contract remains provisional.
     * The current compiler owns a whole GPR for each halfword operand. */

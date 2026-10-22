@@ -8,7 +8,7 @@ bool
 agx_apple9_encode_mesh(uint8_t out[6],
                        const struct agx_apple9_mesh_instruction *ins)
 {
-   if (!out || !ins)
+   if (!out || !ins || ins->input_wait_mask > 0x3f)
       return false;
 
    uint64_t word;
@@ -24,6 +24,7 @@ agx_apple9_encode_mesh(uint8_t out[6],
       break;
    case AGX_APPLE9_MESH_SUBMIT:
       if ((unsigned)ins->mode > AGX_APPLE9_MESH_SUBMIT_CHANNEL ||
+          (ins->mode == AGX_APPLE9_MESH_SUBMIT_CULL && ins->input_wait_mask) ||
           ins->source_gpr >= AGX_APPLE9_GPR_COUNT ||
           (ins->mode != AGX_APPLE9_MESH_SUBMIT_CULL &&
            ins->source_gpr + 1 >= AGX_APPLE9_GPR_COUNT))
@@ -35,6 +36,7 @@ agx_apple9_encode_mesh(uint8_t out[6],
       return false;
    }
 
+   word |= (uint64_t)ins->input_wait_mask << 12;
    for (unsigned i = 0; i < 6; ++i)
       out[i] = word >> (8 * i);
    return true;
@@ -51,6 +53,8 @@ agx_apple9_decode_mesh(const uint8_t in[6],
       word |= (uint64_t)in[i] << (8 * i);
 
    struct agx_apple9_mesh_instruction decoded = {0};
+   decoded.input_wait_mask = (word >> 12) & 0x3f;
+   word &= ~(UINT64_C(0x3f) << 12);
    const uint64_t count_mask =
       (UINT64_C(255) << 24) | (UINT64_C(255) << 33) | (UINT64_C(1) << 42);
    const uint64_t submit_mask = (UINT64_C(255) << 24) | (UINT64_C(3) << 35);
@@ -71,6 +75,7 @@ agx_apple9_decode_mesh(const uint8_t in[6],
       decoded.release = (word >> 31) & 1;
       decoded.mode = (word >> 35) & 3;
       if (decoded.mode > AGX_APPLE9_MESH_SUBMIT_CHANNEL ||
+          (decoded.mode == AGX_APPLE9_MESH_SUBMIT_CULL && decoded.input_wait_mask) ||
           decoded.source_gpr >= AGX_APPLE9_GPR_COUNT ||
           (decoded.mode != AGX_APPLE9_MESH_SUBMIT_CULL &&
            decoded.source_gpr + 1 >= AGX_APPLE9_GPR_COUNT))

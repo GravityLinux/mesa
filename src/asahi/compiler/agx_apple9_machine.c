@@ -112,10 +112,12 @@ static const struct agx_apple9_encoding_info encodings[] = {
    [AGX_APPLE9_ENC_MESH_CONTROL] = {
       .name = "mesh_control", .length = 6, .operand_count = 2,
       .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_BYTE_DIFF,
-      /* T8132: post-U0 waits on either slot 1 or 2 order later mesh work.
-       * Ownership is not separated, so retire both without assigning a tag. */
-      .completion_effect_mask = 0x03,
-      .requires_prior_completion = true,
+      .dependency_layout = AGX_APPLE9_DEPENDENCY_MASK_12_17,
+      /* T8132 r6: either slot 1 or slot 2 completes U0 at the first channel
+       * submit. H4/H5 remain equivalent; choose slot 1, without claiming a
+       * hidden token count. This is an implicit producer, not an output tag. */
+      .fixed_producer_slot = 1,
+      .fixed_producer_alternates = 0x02,
       .operands = {
          /* Whole-word allocation conservatively protects the other half.
           * The selected halfword is read and cleared by the instruction. */
@@ -134,6 +136,7 @@ static const struct agx_apple9_encoding_info encodings[] = {
    [AGX_APPLE9_ENC_MESH_SUBMIT_SCALAR] = {
       .name = "mesh_submit_scalar", .length = 6, .operand_count = 2,
       .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_BYTE_DIFF,
+      .dependency_layout = AGX_APPLE9_DEPENDENCY_MASK_12_17,
       .requires_prior_completion = true,
       .operands = {
          /* Conservative even when release=0: preservation is unqualified. */
@@ -151,6 +154,7 @@ static const struct agx_apple9_encoding_info encodings[] = {
    [AGX_APPLE9_ENC_MESH_SUBMIT_CHANNEL] = {
       .name = "mesh_submit_channel", .length = 6, .operand_count = 2,
       .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_BYTE_DIFF,
+      .dependency_layout = AGX_APPLE9_DEPENDENCY_MASK_12_17,
       .requires_prior_completion = true,
       .operands = {
          GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 94, 2,
@@ -187,6 +191,7 @@ static const struct agx_apple9_encoding_info encodings[] = {
    [AGX_APPLE9_ENC_SHARED_LOAD] = {
       .name = "shared_load", .length = 14, .operand_count = 2,
       .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      .fixed_producer_slot = 6,
       .operands = {
          GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 63, 2,
              AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
@@ -229,6 +234,7 @@ static const struct agx_apple9_encoding_info encodings[] = {
    [AGX_APPLE9_ENC_SHARED_ATOMIC] = {
       .name = "shared_atomic", .length = 12, .operand_count = 3,
       .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      .fixed_producer_slot = 1,
       .operands = {
          GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 63, 2,
              AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
@@ -243,6 +249,7 @@ static const struct agx_apple9_encoding_info encodings[] = {
    [AGX_APPLE9_ENC_PRIVATE_LOAD] = {
       .name = "private_load", .length = 12, .operand_count = 2,
       .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      .fixed_producer_slot = 6,
       .operands = {
          GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 63, 2,
              AGX_APPLE9_OPERAND_ALLOCATABLE, AGX_APPLE9_EVIDENCE_HARDWARE),
@@ -1565,6 +1572,7 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .operand_count = 1,
          .allocator_safe = true,
          .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .fixed_producer_slot = 1,
          .operands =
             {GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32,
                  63, 2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_HARD_LOW,
@@ -1577,6 +1585,7 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .operand_count = 1,
          .allocator_safe = true,
          .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .fixed_producer_slot = 1,
          .operands =
             {GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32,
                  63, 2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_HARD_LOW,

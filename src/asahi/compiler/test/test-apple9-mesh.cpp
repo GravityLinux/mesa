@@ -78,7 +78,7 @@ TEST(Apple9MeshEncoding, All58CensusSingletonsRoundTrip)
 TEST(Apple9MeshEncoding, RejectsUnknownControlsAndOutOfRangeRegisters)
 {
    const uint8_t baseline[6] = {0x57, 3, 0x54, 6, 0x14, 0x34};
-   for (unsigned bit : {12u, 17u, 23u, 32u, 41u, 43u, 44u, 45u, 46u, 47u}) {
+   for (unsigned bit : {18u, 23u, 32u, 41u, 43u, 44u, 45u, 46u, 47u}) {
       uint8_t changed[6];
       memcpy(changed, baseline, 6);
       changed[bit / 8] ^= 1u << (bit % 8);
@@ -107,6 +107,86 @@ TEST(Apple9MeshEncoding, RejectsUnknownControlsAndOutOfRangeRegisters)
    EXPECT_FALSE(agx_apple9_encode_mesh(bytes, &ins));
    ins.mode = (agx_apple9_mesh_submit_mode)-1;
    EXPECT_FALSE(agx_apple9_encode_mesh(bytes, &ins));
+}
+
+TEST(Apple9MeshEncoding, UInputWaitMaskRoundTripsAllSlots)
+{
+   for (auto kind : {AGX_APPLE9_MESH_CONTROL, AGX_APPLE9_MESH_SUBMIT}) {
+      for (auto mode : {AGX_APPLE9_MESH_SUBMIT_SCALAR,
+                        AGX_APPLE9_MESH_SUBMIT_CHANNEL}) {
+         agx_apple9_mesh_instruction ins = {};
+         ins.kind = kind;
+         ins.mode = mode;
+         ins.count_gpr = 4;
+         ins.auxiliary_gpr = 7;
+         ins.source_gpr = 8;
+         uint8_t baseline[6];
+         ASSERT_TRUE(agx_apple9_encode_mesh(baseline, &ins));
+         for (unsigned mask = 0; mask < 64; ++mask) {
+            ins.input_wait_mask = mask;
+            uint8_t bytes[6];
+            ASSERT_TRUE(agx_apple9_encode_mesh(bytes, &ins));
+            EXPECT_EQ((bytes[1] >> 4) | ((bytes[2] & 3) << 4), mask);
+            agx_apple9_mesh_instruction decoded = {};
+            ASSERT_TRUE(agx_apple9_decode_mesh(bytes, &decoded));
+            EXPECT_EQ(decoded.input_wait_mask, mask);
+            bytes[1] &= 0x0f;
+            bytes[2] &= ~3;
+            EXPECT_EQ(memcmp(bytes, baseline, 6), 0);
+         }
+         ins.input_wait_mask = 64;
+         uint8_t bytes[6];
+         EXPECT_FALSE(agx_apple9_encode_mesh(bytes, &ins));
+      }
+   }
+   /* CULL has no independently qualified input-wait field. */
+   agx_apple9_mesh_instruction cull = {};
+   cull.kind = AGX_APPLE9_MESH_SUBMIT;
+   cull.mode = AGX_APPLE9_MESH_SUBMIT_CULL;
+   uint8_t bytes[6];
+   ASSERT_TRUE(agx_apple9_encode_mesh(bytes, &cull));
+   bytes[1] |= 0x10;
+   agx_apple9_mesh_instruction decoded = {};
+   EXPECT_FALSE(agx_apple9_decode_mesh(bytes, &decoded));
+   cull.input_wait_mask = 1;
+   EXPECT_FALSE(agx_apple9_encode_mesh(bytes, &cull));
+}
+
+TEST(Apple9MeshEncoding, FixedProducerDescriptorAndInputPacking)
+{
+   const auto *control = agx_apple9_encoding_info(AGX_APPLE9_ENC_MESH_CONTROL);
+   EXPECT_EQ(control->fixed_producer_slot, 1u);
+   EXPECT_EQ(control->fixed_producer_alternates, 2u);
+   EXPECT_FALSE(control->requires_prior_completion);
+   EXPECT_EQ(agx_apple9_encoding_info(AGX_APPLE9_ENC_GET_DRAW_ID)->fixed_producer_slot, 1u);
+   EXPECT_EQ(agx_apple9_encoding_info(AGX_APPLE9_ENC_SHARED_ATOMIC)->fixed_producer_slot, 1u);
+   uint8_t phys[] = {4, 5};
+   for (auto op : {AGX_APPLE9_VIR_MESH_CONTROL,
+                  AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR,
+                  AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL}) {
+      bool u0 = op == AGX_APPLE9_VIR_MESH_CONTROL;
+      agx_apple9_vir_instr I = {};
+      I.op = op;
+      I.encoding = u0 ? AGX_APPLE9_ENC_MESH_CONTROL :
+         (op == AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL ?
+          AGX_APPLE9_ENC_MESH_SUBMIT_CHANNEL : AGX_APPLE9_ENC_MESH_SUBMIT_SCALAR);
+      I.dest = AGX_APPLE9_VREG_INVALID;
+      I.nr_srcs = 2;
+      I.src[1] = 1;
+      I.src_half_mask = u0 ? 3 : 0;
+      I.producer_scoreboard_slot = u0 ? 1 : 0;
+      for (unsigned slot = 0; slot <= 6; ++slot) {
+         I.scoreboard_slot = slot;
+         agx_apple9_packed_instruction packed = {};
+         ASSERT_TRUE(agx_apple9_pack_vir_instruction(&I, phys, &packed, nullptr));
+         agx_apple9_mesh_instruction decoded = {};
+         ASSERT_TRUE(agx_apple9_decode_mesh(packed.bytes, &decoded));
+         EXPECT_EQ(decoded.input_wait_mask, slot ? BITFIELD_BIT(slot - 1) : 0);
+      }
+      I.producer_scoreboard_slot = 2;
+      agx_apple9_packed_instruction packed = {};
+      EXPECT_FALSE(agx_apple9_pack_vir_instruction(&I, phys, &packed, nullptr));
+   }
 }
 
 TEST(Apple9MeshEncoding, VirPacksAllocatedHalfwordsAndAdjacentPairs)
@@ -329,7 +409,7 @@ TEST(Apple9MeshIR, AllocationPreservesReadClearAndTupleInputsUsedLater)
    EXPECT_GT(pair_locations.size(), 1u);
 }
 
-TEST(Apple9MeshIR, CountOnlyEffectSurvivesAndDrainsLoads)
+TEST(Apple9MeshIR, CountOnlyProducerSurvivesAndDrainsInputs)
 {
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_MESH, &agx_nir_options, "mesh_count_only");
@@ -417,8 +497,11 @@ TEST(Apple9MeshIR, SubmitsDrainIndependentProducers)
             agx_apple9_packed_instruction packed = {};
             ASSERT_TRUE(agx_apple9_pack_vir_instruction(I, p.phys, &packed,
                                                       &reason)) << reason;
-            if (I->scoreboard_slot)
-               pending &= ~BITFIELD_BIT(I->scoreboard_slot - 1);
+            if (I->scoreboard_slot) {
+               unsigned mask = BITFIELD_BIT(I->scoreboard_slot - 1);
+               waited |= mask;
+               pending &= ~mask;
+            }
             if (I->op == AGX_APPLE9_VIR_WAIT) {
                EXPECT_NE(I->immediate, 0u);
                EXPECT_EQ(I->immediate & ~pending, 0u);
@@ -439,12 +522,13 @@ TEST(Apple9MeshIR, SubmitsDrainIndependentProducers)
                EXPECT_EQ(pending, 0u);
                EXPECT_EQ(util_bitcount(issued), count);
                EXPECT_EQ(waited, issued);
-               EXPECT_EQ(I->scoreboard_slot, 0u);
+               EXPECT_EQ(I->scoreboard_slot != 0, count != 0);
                EXPECT_EQ(I->producer_scoreboard_slot, 0u);
-               if (count) {
+               if (count > 1) {
                   ASSERT_GT(i, 0u);
                   EXPECT_EQ(p.instructions[i - 1]->op, AGX_APPLE9_VIR_WAIT);
-                  EXPECT_EQ(p.instructions[i - 1]->immediate, issued);
+                  EXPECT_EQ(p.instructions[i - 1]->immediate,
+                            issued & ~BITFIELD_BIT(I->scoreboard_slot - 1));
                }
             }
          }
@@ -527,7 +611,6 @@ TEST(Apple9MeshEncoding, CompletionBarriersHaveOnlyFlaggedEncodings)
       {AGX_APPLE9_VIR_OBJECT_CALL, AGX_APPLE9_ENC_OBJECT_CALL},
       {AGX_APPLE9_VIR_OBJECT_RETURN, AGX_APPLE9_ENC_OBJECT_RETURN},
       {AGX_APPLE9_VIR_OBJECT_RESUME, AGX_APPLE9_ENC_OBJECT_RESUME},
-      {AGX_APPLE9_VIR_MESH_CONTROL, AGX_APPLE9_ENC_MESH_CONTROL},
       {AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR, AGX_APPLE9_ENC_MESH_SUBMIT_SCALAR},
       {AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL, AGX_APPLE9_ENC_MESH_SUBMIT_CHANNEL},
       {AGX_APPLE9_VIR_WORKGROUP_BARRIER, AGX_APPLE9_ENC_WORKGROUP_BARRIER},
@@ -591,14 +674,14 @@ TEST(Apple9MeshEncoding, CompletionBarriersHaveOnlyFlaggedEncodings)
 class Apple9MeshCompletion : public ::testing::Test {
 protected:
    nir_builder b;
-   nir_block logical[4] = {};
+   nir_block logical[8] = {};
    agx_apple9_vir_program p;
    std::vector<agx_apple9_block *> blocks;
 
    void SetUp() override
    {
       b = nir_builder_init_simple_shader(MESA_SHADER_MESH, &agx_nir_options,
-                                         "mesh_completion_effect");
+                                         "mesh_fixed_producer");
       agx_apple9_vir_init(&p);
       begin(0);
    }
@@ -638,6 +721,12 @@ protected:
          nullptr, 0, 0));
    }
 
+   void wait(unsigned mask)
+   {
+      ASSERT_TRUE(agx_apple9_vir_emit_side_effect(
+         &p, AGX_APPLE9_VIR_WAIT, AGX_APPLE9_ENC_WAIT, nullptr, 0, mask));
+   }
+
    void submit(bool channel)
    {
       uint32_t pair[] = {imm(3), imm(0)};
@@ -646,7 +735,12 @@ protected:
 
    void allocate(unsigned expected_waits)
    {
-      allocate(std::vector<unsigned>(expected_waits, 0x03));
+      allocate(std::vector<unsigned>(expected_waits, 0x01));
+   }
+
+   void allocate(std::initializer_list<unsigned> expected_waits)
+   {
+      allocate(std::vector<unsigned>(expected_waits));
    }
 
    void allocate(const std::vector<unsigned> &expected_waits)
@@ -666,11 +760,23 @@ protected:
          if (I->op == AGX_APPLE9_VIR_MESH_CONTROL) {
             EXPECT_EQ(I->dest, AGX_APPLE9_VREG_INVALID);
             EXPECT_EQ(I->dest_components, 0u);
-            EXPECT_EQ(I->producer_scoreboard_slot, 0u);
-            EXPECT_EQ(I->scoreboard_slot, 0u);
+            EXPECT_EQ(I->producer_scoreboard_slot, 1u);
          }
       }
       EXPECT_EQ(waits, expected_waits.size());
+   }
+
+   void folded_into(enum agx_apple9_vir_opcode op, unsigned occurrence = 0,
+                    unsigned slot = 1)
+   {
+      for (unsigned i = 0; i < p.instruction_count; ++i) {
+         const auto *I = p.instructions[i];
+         if (I->op != op || occurrence--)
+            continue;
+         EXPECT_EQ(I->scoreboard_slot, slot);
+         return;
+      }
+      FAIL() << "missing consumer " << op;
    }
 
    void wait_before(enum agx_apple9_vir_opcode op, unsigned occurrence = 0)
@@ -680,7 +786,7 @@ protected:
             continue;
          ASSERT_GT(i, 0u);
          EXPECT_EQ(p.instructions[i - 1]->op, AGX_APPLE9_VIR_WAIT);
-         EXPECT_EQ(p.instructions[i - 1]->immediate, 0x03u);
+         EXPECT_EQ(p.instructions[i - 1]->immediate, 0x01u);
          return;
       }
       FAIL() << "missing consumer " << op;
@@ -700,16 +806,17 @@ TEST_F(Apple9MeshCompletion, SubmitsRetireControlOnlyOnce)
    control();
    submit(true);
    submit(false);
-   allocate(1);
-   wait_before(AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL);
+   allocate(0);
+   folded_into(AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL);
+   folded_into(AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR, 0, 0);
 }
 
 TEST_F(Apple9MeshCompletion, ScalarSubmitRetiresControl)
 {
    control();
    submit(false);
-   allocate(1);
-   wait_before(AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR);
+   allocate(0);
+   folded_into(AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR);
 }
 
 TEST_F(Apple9MeshCompletion, AlreadyRetiredControlDoesNotWaitAgain)
@@ -729,9 +836,9 @@ TEST_F(Apple9MeshCompletion, RepeatedControlOrdersItsPredecessor)
    control();
    control();
    submit(false);
-   allocate(2);
+   allocate(1);
    wait_before(AGX_APPLE9_VIR_MESH_CONTROL, 1);
-   wait_before(AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR);
+   folded_into(AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR);
 }
 
 TEST_F(Apple9MeshCompletion, BothBranchArmsReachTheJoin)
@@ -746,9 +853,9 @@ TEST_F(Apple9MeshCompletion, BothBranchArmsReachTheJoin)
    control();
    begin(3);
    submit(false);
-   allocate(2);
+   allocate(1);
    wait_before(AGX_APPLE9_VIR_MESH_CONTROL, 1);
-   wait_before(AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR);
+   folded_into(AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR);
 }
 
 TEST_F(Apple9MeshCompletion, RetiredBranchArmsDoNotWaitAtTheJoin)
@@ -768,6 +875,21 @@ TEST_F(Apple9MeshCompletion, RetiredBranchArmsDoNotWaitAtTheJoin)
    allocate(2);
    wait_before(AGX_APPLE9_VIR_DEVICE_FENCE);
    wait_before(AGX_APPLE9_VIR_DEVICE_FENCE, 1);
+}
+
+TEST_F(Apple9MeshCompletion, SkippedChannelScopeRetiresAtScalarJoin)
+{
+   control();
+   logical[0].successors[0] = &logical[1];
+   logical[0].successors[1] = &logical[2];
+   logical[1].successors[0] = &logical[2];
+   begin(1);
+   submit(true);
+   begin(2);
+   submit(false);
+   allocate(0);
+   folded_into(AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL);
+   folded_into(AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR);
 }
 
 TEST_F(Apple9MeshCompletion, JoinRetiresThePathBypassingAnEarlierFence)
@@ -805,7 +927,7 @@ TEST_F(Apple9MeshCompletion, BackedgeDrainsBeforeLogicalEnd)
    wait_before(AGX_APPLE9_VIR_JMP_EXEC_ANY);
 }
 
-TEST_F(Apple9MeshCompletion, FixedProducerSlotRetiresTheWholeEffect)
+TEST_F(Apple9MeshCompletion, FixedProducerSlotRetiresControl)
 {
    control();
    auto value = agx_apple9_vir_emit(
@@ -818,7 +940,7 @@ TEST_F(Apple9MeshCompletion, FixedProducerSlotRetiresTheWholeEffect)
    wait_before(AGX_APPLE9_VIR_GET_SR);
 }
 
-TEST_F(Apple9MeshCompletion, PendingEffectExcludesSlotsOneAndTwo)
+TEST_F(Apple9MeshCompletion, PendingControlExcludesSlotsOneAndTwo)
 {
    control();
    auto index = imm(0);
@@ -855,7 +977,7 @@ TEST_F(Apple9MeshCompletion, PendingEffectExcludesSlotsOneAndTwo)
    wait_before(AGX_APPLE9_VIR_DEVICE_FENCE);
 }
 
-TEST_F(Apple9MeshCompletion, ExhaustionRetiresTheEffectBeforeSlotReuse)
+TEST_F(Apple9MeshCompletion, ExhaustionRetiresControlBeforeSlotReuse)
 {
    control();
    auto index = imm(0);
@@ -897,10 +1019,10 @@ TEST_F(Apple9MeshCompletion, ExhaustionRetiresTheEffectBeforeSlotReuse)
    wait_before(AGX_APPLE9_VIR_DEVICE_LOAD, 4);
 }
 
-TEST_F(Apple9MeshCompletion, JoinedSlotOneResultRetiresTheWholeEffect)
+TEST_F(Apple9MeshCompletion, JoinedSlotOneResultAndControlFoldTogether)
 {
    /* The load dominates both arms. One arm bypasses U0 and keeps its result
-    * pending; the other retires it at U0 and issues the resultless effect.
+    * pending; the other retires it at U0 and issues the fixed producer.
     * The join must satisfy both possible obligations before reading it. */
    auto index = imm(0);
    agx_apple9_device_load_contract contract = {
@@ -927,20 +1049,20 @@ TEST_F(Apple9MeshCompletion, JoinedSlotOneResultRetiresTheWholeEffect)
       &p, AGX_APPLE9_VIR_STORE_UNIFORM, AGX_APPLE9_ENC_STORE_UNIFORM,
       &result, 1, 1));
    fence();
-   allocate({0x01, 0x03});
+   allocate({0x01});
    unsigned loads = 0, consumers = 0;
    for (unsigned i = 0; i < p.instruction_count; ++i) {
       const auto *I = p.instructions[i];
       if (I->op == AGX_APPLE9_VIR_DEVICE_LOAD)
          EXPECT_EQ(I->producer_scoreboard_slot, loads++ ? 1u : 6u);
       if (I->op == AGX_APPLE9_VIR_IXOR) {
-         EXPECT_EQ(I->scoreboard_slot, AGX_APPLE9_SCOREBOARD_SLOT_NONE);
+         EXPECT_EQ(I->scoreboard_slot, AGX_APPLE9_SCOREBOARD_SLOT_1);
          ++consumers;
       }
    }
    EXPECT_EQ(loads, 2u);
    EXPECT_EQ(consumers, 1u);
-   wait_before(AGX_APPLE9_VIR_IXOR);
+   folded_into(AGX_APPLE9_VIR_IXOR);
 }
 
 TEST_F(Apple9MeshCompletion, EndOfProgramDrainsControl)
@@ -949,6 +1071,130 @@ TEST_F(Apple9MeshCompletion, EndOfProgramDrainsControl)
    allocate(1);
    ASSERT_GT(p.instruction_count, 0u);
    EXPECT_EQ(p.instructions[p.instruction_count - 1]->op, AGX_APPLE9_VIR_WAIT);
+}
+
+TEST_F(Apple9MeshCompletion, StoreAndForwardExecScopeLeaveControlPending)
+{
+   control();
+   auto index = imm(0), value = imm(123);
+   ASSERT_TRUE(agx_apple9_vir_emit_device_store(&p, 0, index, &value, 1, 32));
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(
+      &p, AGX_APPLE9_VIR_EXEC_MASK_PUSH, AGX_APPLE9_ENC_EXEC_MASK_PUSH,
+      nullptr, 0, AGX_APPLE9_EXEC_MASK_PREDICATE(0)));
+   begin(1);
+   submit(true);
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(
+      &p, AGX_APPLE9_VIR_EXEC_MASK_POP, AGX_APPLE9_ENC_EXEC_MASK_POP,
+      nullptr, 0, 0));
+   allocate(0);
+   folded_into(AGX_APPLE9_VIR_DEVICE_STORE, 0, 0);
+   folded_into(AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL);
+}
+
+TEST_F(Apple9MeshCompletion, HaltBeforeSubmitRetiresControl)
+{
+   control();
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(
+      &p, AGX_APPLE9_VIR_HALT, AGX_APPLE9_ENC_HALT, nullptr, 0, 0));
+   allocate(1);
+   wait_before(AGX_APPLE9_VIR_HALT);
+}
+
+TEST_F(Apple9MeshCompletion, ExplicitSlotOneWaitRetiresControl)
+{
+   control();
+   wait(1);
+   submit(true);
+   allocate({1});
+   folded_into(AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL, 0, 0);
+}
+
+TEST_F(Apple9MeshCompletion, ExplicitSlotTwoWaitRetiresControl)
+{
+   control();
+   wait(2);
+   submit(true);
+   allocate({2});
+   folded_into(AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL, 0, 0);
+}
+
+TEST_F(Apple9MeshCompletion, WrongSlotWaitLeavesControlPending)
+{
+   control();
+   wait(4);
+   submit(true);
+   allocate({4});
+   folded_into(AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL);
+}
+
+TEST_F(Apple9MeshCompletion, JoinedSlotOneLoadSurvivesSlotTwoControlWait)
+{
+   auto index = imm(0);
+   agx_apple9_device_load_contract contract = {
+      .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
+      .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
+   };
+   auto first = agx_apple9_vir_emit_device_load(&p, 1, index, &contract);
+   logical[0].successors[0] = &logical[1];
+   begin(1);
+   auto joined = agx_apple9_vir_emit_device_load(&p, 2, index, &contract);
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(
+      &p, AGX_APPLE9_VIR_STORE_UNIFORM, AGX_APPLE9_ENC_STORE_UNIFORM,
+      &first, 1, 0));
+   logical[1].successors[0] = &logical[2];
+   logical[1].successors[1] = &logical[3];
+   logical[2].successors[0] = &logical[4];
+   logical[3].successors[0] = &logical[4];
+   begin(2);
+   begin(3);
+   control();
+   begin(4);
+   wait(2);
+   uint32_t src[] = {joined, imm(0x1234)};
+   auto result = agx_apple9_vir_emit(
+      &p, AGX_APPLE9_VIR_IXOR, AGX_APPLE9_ENC_LOGIC_EXTENDED, src, 2, 0);
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(
+      &p, AGX_APPLE9_VIR_STORE_UNIFORM, AGX_APPLE9_ENC_STORE_UNIFORM,
+      &result, 1, 1));
+   submit(true);
+   allocate({1, 2});
+   folded_into(AGX_APPLE9_VIR_IXOR);
+   folded_into(AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL, 0, 0);
+}
+
+TEST_F(Apple9MeshCompletion, JoinedSlotTwoLoadSurvivesSlotOneControlWait)
+{
+   auto index = imm(0);
+   agx_apple9_device_load_contract contract = {
+      .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
+      .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
+   };
+   uint32_t values[3];
+   for (unsigned i = 0; i < ARRAY_SIZE(values); ++i)
+      values[i] = agx_apple9_vir_emit_device_load(&p, i + 1, index, &contract);
+   for (unsigned i = 0; i < 2; ++i)
+      ASSERT_TRUE(agx_apple9_vir_emit_side_effect(
+         &p, AGX_APPLE9_VIR_STORE_UNIFORM, AGX_APPLE9_ENC_STORE_UNIFORM,
+         &values[i], 1, i));
+   logical[0].successors[0] = &logical[1];
+   logical[0].successors[1] = &logical[2];
+   logical[1].successors[0] = &logical[3];
+   logical[2].successors[0] = &logical[3];
+   begin(1);
+   begin(2);
+   control();
+   begin(3);
+   wait(1);
+   uint32_t src[] = {values[2], imm(0x1234)};
+   auto result = agx_apple9_vir_emit(
+      &p, AGX_APPLE9_VIR_IXOR, AGX_APPLE9_ENC_LOGIC_EXTENDED, src, 2, 0);
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(
+      &p, AGX_APPLE9_VIR_STORE_UNIFORM, AGX_APPLE9_ENC_STORE_UNIFORM,
+      &result, 1, 2));
+   submit(true);
+   allocate({2, 1});
+   folded_into(AGX_APPLE9_VIR_IXOR, 0, 2);
+   folded_into(AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL, 0, 0);
 }
 
 TEST(Apple9MeshIR, AuxiliaryClassRetainsLiveValueAndDetectsClobberMutation)

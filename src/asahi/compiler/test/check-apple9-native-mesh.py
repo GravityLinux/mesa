@@ -37,6 +37,11 @@ def check_program(rows, channels=None):
         code = r["code"]
         assert len(code) == 6
         word = int.from_bytes(code, "little")
+        # U input waits are ordinary scoreboard selectors. The chosen U0
+        # retirement is slot 1, folded into the first channel below.
+        slot = int(r["wait"], 0)
+        assert (word >> 12) & 63 == (1 << (slot - 1) if slot else 0)
+        word &= ~(63 << 12)
         if r["op"] == "MESH_CONTROL":
             mask = (255 << 24) | (255 << 33) | (1 << 42)
             assert word & ~mask == 0x300000540357
@@ -53,6 +58,16 @@ def check_program(rows, channels=None):
         assert regs == r["src"], (regs, r)
         assert all(int(x[1:]) < 96 for x in regs)
         return regs
+
+    assert int(rows[units[0]]["producer"], 0) == 1
+    assert int(rows[units[1]]["wait"], 0) == 1
+    assert all(int(rows[i]["wait"], 0) == 0 for i in units[2:-1])
+    # The scalar's CFG join also has an edge that skips the channel region.
+    # Keep U0 pending on that edge; its first barrier may need the same field.
+    assert int(rows[units[-1]]["wait"], 0) in (0, 1)
+    assert all(r["op"] != "DEVICE_FENCE" and
+               not (r["op"] == "WAIT" and r["imm"] & 3)
+               for r in rows[units[0] + 1:units[1]])
 
     def value(reg, before):
         for i in range(before - 1, -1, -1):
@@ -143,6 +158,20 @@ def mutation_checks(rows):
     control = next(i for i, r in enumerate(rows) if r["op"] == "MESH_CONTROL")
     a, b = rows[control]["src"]
     assert a != b
+    first_channel = next(i for i, r in enumerate(rows)
+                         if r["op"] == "MESH_SUBMIT_CHANNEL")
+    for slot in (0, 3):
+        bad = copy.deepcopy(rows)
+        row = bad[first_channel]
+        word = int.from_bytes(row["code"], "little") & ~(63 << 12)
+        row["code"] = (word | ((1 << (slot - 1) if slot else 0) << 12)).to_bytes(6, "little")
+        row["wait"] = str(slot)
+        try:
+            check_program(bad)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("missing/wrong U2 completion escaped checker")
     for coherent in (False, True):
         bad = copy.deepcopy(rows)
         word = int.from_bytes(bad[control]["code"], "little")
@@ -254,7 +283,7 @@ def main():
         except AssertionError:pass
         else:raise AssertionError('corrupt high plane immediate accepted')
     sys.stdout.write(run.stdout)
-    print("six allocation, six scalar base+1 and two high-plane immediate mutations rejected; live pressure increases the GPR high-water mark")
+    print("four U2 completion, six allocation, six scalar base+1 and two high-plane immediate mutations rejected; live pressure increases the GPR high-water mark")
     print(f"checked {len(checked)} complete programs: boundaries, U units, allocated inputs, masks")
     print("first program U units:", " ".join(checked[0]))
     return 0

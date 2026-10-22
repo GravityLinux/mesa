@@ -429,9 +429,13 @@ agx_nir_lower_apple9_native_mesh(
                   .memory_semantics = NIR_MEMORY_ACQ_REL,
                   .memory_modes = nir_var_mem_shared);
    }
+   /* Publish the completed output memory before issuing mesh allocation.
+    * U0 consumes the counts but does not write these global output planes.
+    * Keeping this fence before U0 lets the first channel submit consume U0's
+    * separate completion dependency through its measured input-wait field. */
+   device_fence(&b);
    nir_mesh_control_apple9_agx(&b, nir_u2u16(&b, primitives),
                                nir_u2u16(&b, vertices), .base = 1);
-   device_fence(&b);
 
    nir_push_if(&b, nir_ult(&b, lane, vertices));
    for (unsigned c = 0; c < 4; ++c) {

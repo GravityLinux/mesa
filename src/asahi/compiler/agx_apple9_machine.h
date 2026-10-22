@@ -278,16 +278,21 @@ struct agx_apple9_encoding_info {
    enum agx_apple9_evidence evidence;
    enum agx_apple9_dependency_layout dependency_layout;
 
+   /* Implicit producer slot, 1..6, or zero for no fixed assignment. This is
+    * scheduler metadata, not an encoded output-tag field. Existing producers
+    * with a programmable output tag continue to allocate their slot normally. */
+   uint8_t fixed_producer_slot;
+
+   /* Other slots that also complete this fixed producer. They are reserved
+    * while it is pending, but are alternative selectors, not extra waits.
+    * Ordinary producers still complete only on their own assigned slot. */
+   uint8_t fixed_producer_alternates;
+
    /* The instruction consumes completion of all previously issued, still
     * pending producers, independently of its GPR operands. This is a
     * scheduling requirement, not a claim that the encoding has an input
     * dependency field. The scheduler derives any wait from its live state. */
    bool requires_prior_completion;
-
-   /* Resultless asynchronous work, separate from GPR results and encoded
-    * producer tags. This mask is the conservative set retired together by
-    * the scheduler, not an output field in the instruction. */
-   uint8_t completion_effect_mask;
 
    /* Several native instructions each write part of the destination, so it
     * cannot share a register with a source. */

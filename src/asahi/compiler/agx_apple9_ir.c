@@ -2246,16 +2246,20 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
       }
 
       if (apple9_vir_is_control_side_effect(instruction->op)) {
+         bool mesh = instruction->op == AGX_APPLE9_VIR_MESH_CONTROL ||
+                     instruction->op == AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR ||
+                     instruction->op == AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL;
          bool valid =
             instruction->dest == AGX_APPLE9_VREG_INVALID &&
             instruction->memory_bits == 0 &&
             instruction->memory_components == 0 &&
-            instruction->producer_scoreboard_slot ==
-               AGX_APPLE9_SCOREBOARD_SLOT_NONE &&
-            /* Compares may consume a pending source; the layout check above
-             * validated their dependency field. */
+            (instruction->producer_scoreboard_slot ==
+                AGX_APPLE9_SCOREBOARD_SLOT_NONE ||
+             instruction->op == AGX_APPLE9_VIR_MESH_CONTROL) &&
+            /* Compares and U instructions may consume a pending source;
+             * the layout check above validated their dependency field. */
             (instruction->scoreboard_slot == AGX_APPLE9_SCOREBOARD_SLOT_NONE ||
-             instruction->op == AGX_APPLE9_VIR_PREDICATE_COMPARE);
+             instruction->op == AGX_APPLE9_VIR_PREDICATE_COMPARE || mesh);
 
          switch (instruction->op) {
          case AGX_APPLE9_VIR_MESH_CONTROL:
@@ -6396,13 +6400,16 @@ pack_mesh(const struct agx_apple9_vir_instr *I, const uint8_t *phys,
 {
    if (!phys || I->dest != AGX_APPLE9_VREG_INVALID || I->dest_components ||
        I->immediate || I->memory_bits || I->memory_components ||
-       I->producer_scoreboard_slot || I->src_sext_mask ||
+       I->src_sext_mask ||
        I->src_abs_mask || I->src_neg_mask)
       return false;
 
    struct agx_apple9_mesh_instruction mesh = {0};
    if (I->op == AGX_APPLE9_VIR_MESH_CONTROL) {
       if (I->encoding != AGX_APPLE9_ENC_MESH_CONTROL || I->nr_srcs != 2 ||
+          (I->producer_scoreboard_slot &&
+           I->producer_scoreboard_slot !=
+              agx_apple9_encoding_info(I->encoding)->fixed_producer_slot) ||
           I->src_half_mask != 3 || (I->src_hi_mask & ~3u) ||
           (I->live_after_mask & ~2u) || I->mesh_release)
          return false;
@@ -6416,6 +6423,7 @@ pack_mesh(const struct agx_apple9_vir_instr *I, const uint8_t *phys,
       bool channel = I->op == AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL;
       if (I->encoding != (channel ? AGX_APPLE9_ENC_MESH_SUBMIT_CHANNEL
                                   : AGX_APPLE9_ENC_MESH_SUBMIT_SCALAR) ||
+          I->producer_scoreboard_slot ||
           I->nr_srcs != 2 || I->src_half_mask ||
           I->src_hi_mask || I->mesh_control42 ||
           I->live_after_mask)
