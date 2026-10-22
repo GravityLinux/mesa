@@ -2188,6 +2188,12 @@ bool
 agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
                            nir_shader *nir, const char **reason)
 {
+   /* Reject unsafe U0 repetition before allocation or scheduling can insert
+    * waits that would disguise it as an ordered, but still unqualified, form. */
+   agx_apple9_vir_reindex(program);
+   if (!agx_apple9_validate_mesh_control(program, reason))
+      return false;
+
    /* Apple9 bypasses agx_compile_shader_nir, which initializes these flags
     * for the older backend. The shared allocator still consumes them. */
    agx_compiler_debug = agx_get_compiler_debug();

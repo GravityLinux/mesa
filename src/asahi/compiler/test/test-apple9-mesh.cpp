@@ -791,6 +791,16 @@ protected:
       }
       FAIL() << "missing consumer " << op;
    }
+
+   void rejected(const char *expected)
+   {
+      const char *reason = nullptr;
+      EXPECT_FALSE(agx_apple9_validate_vir_allocation(&p, &reason));
+      EXPECT_STREQ(reason, expected);
+      EXPECT_FALSE(agx_apple9_allocate_shared(&p, b.shader, &reason));
+      EXPECT_STREQ(reason, expected);
+      EXPECT_EQ(p.phys, nullptr);
+   }
 };
 
 TEST_F(Apple9MeshCompletion, FenceRetiresResultlessControl)
@@ -831,17 +841,24 @@ TEST_F(Apple9MeshCompletion, AlreadyRetiredControlDoesNotWaitAgain)
    wait_before(AGX_APPLE9_VIR_DEVICE_FENCE);
 }
 
-TEST_F(Apple9MeshCompletion, RepeatedControlOrdersItsPredecessor)
+TEST_F(Apple9MeshCompletion, RepeatedControlIsACompileError)
 {
    control();
    control();
    submit(false);
-   allocate(1);
-   wait_before(AGX_APPLE9_VIR_MESH_CONTROL, 1);
-   folded_into(AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR);
+   rejected("Apple9 multiple MESH_CONTROL instructions are unsafe");
 }
 
-TEST_F(Apple9MeshCompletion, BothBranchArmsReachTheJoin)
+TEST_F(Apple9MeshCompletion, FullyWaitedRepeatedControlIsACompileError)
+{
+   control();
+   wait(0x3f);
+   control();
+   wait(0x3f);
+   rejected("Apple9 multiple MESH_CONTROL instructions are unsafe");
+}
+
+TEST_F(Apple9MeshCompletion, ControlInBothBranchArmsIsACompileError)
 {
    logical[0].successors[0] = &logical[1];
    logical[0].successors[1] = &logical[2];
@@ -853,12 +870,10 @@ TEST_F(Apple9MeshCompletion, BothBranchArmsReachTheJoin)
    control();
    begin(3);
    submit(false);
-   allocate(1);
-   wait_before(AGX_APPLE9_VIR_MESH_CONTROL, 1);
-   folded_into(AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR);
+   rejected("Apple9 multiple MESH_CONTROL instructions are unsafe");
 }
 
-TEST_F(Apple9MeshCompletion, RetiredBranchArmsDoNotWaitAtTheJoin)
+TEST_F(Apple9MeshCompletion, RetiredControlInBothBranchArmsIsACompileError)
 {
    logical[0].successors[0] = &logical[1];
    logical[0].successors[1] = &logical[2];
@@ -872,9 +887,7 @@ TEST_F(Apple9MeshCompletion, RetiredBranchArmsDoNotWaitAtTheJoin)
    fence();
    begin(3);
    submit(false);
-   allocate(2);
-   wait_before(AGX_APPLE9_VIR_DEVICE_FENCE);
-   wait_before(AGX_APPLE9_VIR_DEVICE_FENCE, 1);
+   rejected("Apple9 multiple MESH_CONTROL instructions are unsafe");
 }
 
 TEST_F(Apple9MeshCompletion, SkippedChannelScopeRetiresAtScalarJoin)
@@ -910,7 +923,7 @@ TEST_F(Apple9MeshCompletion, JoinRetiresThePathBypassingAnEarlierFence)
    wait_before(AGX_APPLE9_VIR_DEVICE_FENCE, 1);
 }
 
-TEST_F(Apple9MeshCompletion, BackedgeDrainsBeforeLogicalEnd)
+TEST_F(Apple9MeshCompletion, ControlInBackedgeIsACompileError)
 {
    logical[0].successors[0] = &logical[1];
    logical[1].successors[0] = &logical[1];
@@ -923,8 +936,35 @@ TEST_F(Apple9MeshCompletion, BackedgeDrainsBeforeLogicalEnd)
    p.instructions[p.instruction_count - 1]->branch_target = blocks[1];
    begin(2);
    submit(false);
+   rejected("Apple9 MESH_CONTROL inside a loop is unsafe");
+}
+
+TEST_F(Apple9MeshCompletion, ControlInNestedNirLoopIsACompileError)
+{
+   nir_loop *loop = nir_push_loop(&b);
+   nir_push_if(&b, nir_imm_true(&b));
+   blocks[0]->nir = nir_cursor_current_block(b.cursor);
+   control();
+   nir_pop_if(&b, nullptr);
+   nir_pop_loop(&b, loop);
+   rejected("Apple9 MESH_CONTROL inside a loop is unsafe");
+}
+
+TEST_F(Apple9MeshCompletion, ControlBeforeLoopRemainsValid)
+{
+   control();
+   logical[0].successors[0] = &logical[1];
+   logical[1].successors[0] = &logical[1];
+   logical[1].successors[1] = &logical[2];
+   begin(1);
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(
+      &p, AGX_APPLE9_VIR_JMP_EXEC_ANY, AGX_APPLE9_ENC_JMP_EXEC_ANY,
+      nullptr, 0, 0));
+   p.instructions[p.instruction_count - 1]->branch_target = blocks[1];
+   begin(2);
+   submit(true);
    allocate(1);
-   wait_before(AGX_APPLE9_VIR_JMP_EXEC_ANY);
+   folded_into(AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL, 0, 0);
 }
 
 TEST_F(Apple9MeshCompletion, FixedProducerSlotRetiresControl)

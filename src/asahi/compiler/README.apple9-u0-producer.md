@@ -26,7 +26,8 @@ contracts, and both inputs are consumed at issue.
 
 U0 enters the normal pending-producer list exactly once. Its live reservation
 covers both selectors, so programmable producers cannot allocate slots 1/2
-until U0 completes. A fixed-slot collision retires it before issuing the new
+until U0 completes. This reservation is conservative: reuse of a live U0 slot
+has not been qualified. A fixed-slot collision retires it before issuing the new
 producer. Issuing U0 also resolves existing ordinary producers on either
 reserved slot. All other fixed producers retain their previous assignments.
 
@@ -57,11 +58,20 @@ not a second retirement inserted along a straight-line already-retired path.
 ## Repeated U0 and limits
 
 The fully waited double-U0 N1 r6 control timed out, and no token-count or
-rearming arm qualified. The normal lowering emits one U0. The scheduler never
-issues another while a prior one is outstanding: fixed-reservation conflict
-handling inserts completion first. This invariant does **not** qualify arbitrary
-repeated allocation, even with a wait. No replay sequence or queue-depth claim
-is introduced into the production compiler or device check kit.
+rearming arm qualified. VIR validation rejects more than one MESH_CONTROL in
+a program, even with intervening waits or mutually exclusive branches, and
+rejects U0 inside a NIR loop or a backward-branch span. The shared allocation
+entry point applies this guard before scheduling; it is a compile error, not
+an opportunity to insert a wait. Normal lowering emits one U0 outside loops.
+The scheduler's fixed-reservation ordering remains a backstop.
+
+The production-r6 device check also timed out with the racing CURRENT_U2_M00
+negative control as the oldest stalled Work. Its 16 completed CURRENT smoke
+draws passed, but the 128-trial production block was never reached. This does
+not qualify production or establish the root cause of the hang. Together with
+the double-U0 timeout, it makes the repetition guard and folded U2 wait
+correctness requirements, not performance choices. No replay sequence or
+queue-depth claim is introduced into the production compiler or device kit.
 
 The old `completion_effect_mask`, separate effect state, and unconditional
 0x03 retirement are removed. U0 is not a blanket completion barrier for
@@ -71,7 +81,7 @@ consumers remain meaningful independently of U0.
 
 The unit tests cover both alternative selectors, distinct ordinary loads at
 joins, normal folding, early barriers, explicit waits, slot collisions and
-exhaustion, repeated issue, CFG bypasses, loops and exit. Raw and VIR encoders
+exhaustion, rejected repetition and loop placement, CFG bypasses and exit. Raw and VIR encoders
 round-trip U input masks without changing operand/control bits. The complete
 native-fixture checker rejects missing/wrong U2 completion as well as its
 existing operand, tuple, halfword and pressure mutations. Compiler review and

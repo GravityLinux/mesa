@@ -1957,12 +1957,64 @@ invalid:
    return false;
 }
 
+/* Even fully waited repeated U0 timed out G16 in r6. Only one invocation,
+ * outside loops, is qualified. This is independent of scoreboard retirement:
+ * inserting a WAIT cannot make repeated allocation safe. */
+bool
+agx_apple9_validate_mesh_control(const struct agx_apple9_vir_program *program,
+                                const char **reason)
+{
+   unsigned control = UINT_MAX;
+   const char *error = NULL;
+   for (unsigned i = 0; i < program->instruction_count; ++i) {
+      const struct agx_apple9_vir_instr *ins = program->instructions[i];
+      if (ins->op != AGX_APPLE9_VIR_MESH_CONTROL)
+         continue;
+      if (control != UINT_MAX) {
+         error = "Apple9 multiple MESH_CONTROL instructions are unsafe";
+         goto fail;
+      }
+      control = i;
+      const nir_block *nir = agx_apple9_instr_block(ins)->nir;
+      for (const nir_cf_node *parent = nir ? nir->cf_node.parent : NULL;
+           parent; parent = parent->parent) {
+         if (parent->type == nir_cf_node_loop) {
+            error = "Apple9 MESH_CONTROL inside a loop is unsafe";
+            goto fail;
+         }
+      }
+   }
+
+   if (control == UINT_MAX)
+      return true;
+
+   /* Also cover directly authored VIR and physical blocks without NIR
+    * ancestry. A backward branch may repeat every instruction in its span. */
+   for (unsigned i = control; i < program->instruction_count; ++i) {
+      const struct agx_apple9_vir_instr *ins = program->instructions[i];
+      if ((ins->op == AGX_APPLE9_VIR_JMP_EXEC_ANY ||
+           ins->op == AGX_APPLE9_VIR_JMP_EXEC_NONE) &&
+          ins->branch_target && ins->branch_target->start_index <= control) {
+         error = "Apple9 MESH_CONTROL inside a loop is unsafe";
+         goto fail;
+      }
+   }
+   return true;
+
+fail:
+   if (reason)
+      *reason = error;
+   return false;
+}
+
 bool
 agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
                                    const char **reason)
 {
    if (reason != NULL)
       *reason = NULL;
+   if (!agx_apple9_validate_mesh_control(program, reason))
+      return false;
    if (program->phys == NULL || program->publication == NULL) {
       if (reason != NULL)
          *reason = "Apple9 virtual IR has not been allocated";

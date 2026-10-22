@@ -869,6 +869,10 @@ bool agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
                              const char **reason);
 
 bool
+agx_apple9_validate_mesh_control(const struct agx_apple9_vir_program *program,
+                                const char **reason);
+
+bool
 agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
                                    const char **reason);
 
