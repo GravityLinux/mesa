@@ -2978,6 +2978,15 @@ hk_cmd_bind_graphics_shader(struct hk_cmd_buffer *cmd,
    if (cmd->state.gfx.shaders[stage] == shader)
       return;
 
+   struct hk_descriptor_state *desc = &cmd->state.gfx.descriptors;
+   uint64_t data = hk_shader_constant_data(shader);
+   if (data || (desc->root_constant_stages & BITFIELD_BIT(stage))) {
+      desc->root.constant_data[stage] = data;
+      desc->root_constant_stages &= ~BITFIELD_BIT(stage);
+      if (data)
+         desc->root_constant_stages |= BITFIELD_BIT(stage);
+      desc->root_dirty = true;
+   }
    cmd->state.gfx.shaders[stage] = shader;
    cmd->state.gfx.shaders_dirty |= BITFIELD_BIT(stage);
 

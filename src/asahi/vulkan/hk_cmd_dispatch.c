@@ -42,6 +42,12 @@ hk_cmd_bind_compute_shader(struct hk_cmd_buffer *cmd,
                            struct hk_api_shader *shader)
 {
    cmd->state.cs.shader = shader;
+   struct hk_descriptor_state *desc = &cmd->state.cs.descriptors;
+   desc->root.constant_data[MESA_SHADER_COMPUTE] =
+      hk_shader_constant_data(shader);
+   desc->root_constant_stages = desc->root.constant_data[MESA_SHADER_COMPUTE]
+      ? BITFIELD_BIT(MESA_SHADER_COMPUTE) : 0;
+   desc->root_dirty = true;
 }
 
 /* The compute-only barrier: Metal's 0x160 mask orders later dispatches after

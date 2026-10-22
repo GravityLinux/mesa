@@ -1376,8 +1376,7 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
        * Roots end after the dynamic buffer slots bound so far: the 64-entry
        * table is most of the root, and layouts use a few. */
       root->root_desc_addr = 0;
-      size = hk_root_descriptor_offset(dynamic_buffers) +
-             desc->root_dynamic_count * sizeof(struct hk_buffer_address);
+      size = hk_descriptor_root_size(desc);
       if (desc->root_last_valid && desc->root_last_size == size &&
           !memcmp(root, &desc->root_last, size)) {
          root->root_desc_addr = desc->root_last_gpu;

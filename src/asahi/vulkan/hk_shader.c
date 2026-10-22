@@ -362,12 +362,41 @@ hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
    NIR_PASS(_, nir, nir_split_var_copies);
    NIR_PASS(_, nir, nir_split_struct_vars, nir_var_function_temp);
 
-   /* Optimize but allow copies because we haven't lowered them yet */
+   /* Extract immutable tables before agx_preprocess_nir lowers large local
+    * arrays to scratch. The analysis requires explicit loads/stores rather
+    * than copies. Keep the data attached to NIR through variant cloning.
+    */
+   NIR_PASS(_, nir, nir_lower_var_copies);
+   NIR_PASS(_, nir, nir_opt_constant_folding);
+   NIR_PASS(_, nir, nir_opt_large_constants, NULL, 32);
+
    struct hk_physical_device *pdev =
       container_of(vk_pdev, struct hk_physical_device, vk);
    if (pdev->dev.chip == AGX_CHIP_G16G)
       NIR_PASS(_, nir, agx_nir_lower_apple9_math);
    agx_preprocess_nir(nir);
+
+   /* Constant-offset reads can fold away after extraction. Do not upload
+    * or bind an unused blob: besides wasting storage, that would extend
+    * every draw's root for a table the program never reads.
+    */
+   if (nir->constant_data_size) {
+      bool used = false;
+      nir_foreach_function_impl(impl, nir) {
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block) {
+               used |= instr->type == nir_instr_type_intrinsic &&
+                       nir_instr_as_intrinsic(instr)->intrinsic ==
+                          nir_intrinsic_load_constant;
+            }
+         }
+      }
+      if (!used) {
+         ralloc_free(nir->constant_data);
+         nir->constant_data = NULL;
+         nir->constant_data_size = 0;
+      }
+   }
 
    NIR_PASS(_, nir, nir_lower_load_const_to_scalar);
    NIR_PASS(_, nir, nir_lower_var_copies);
@@ -3776,7 +3805,6 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_push_const,
             nir_address_format_32bit_offset);
 
-   // NIR_PASS(_, nir, nir_opt_large_constants, NULL, 32);
 
    /* Turn cache flushes into image coherency bits while we still have derefs */
    NIR_PASS(_, nir, nir_lower_memory_model);
@@ -3816,7 +3844,7 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    }
 
    NIR_PASS(_, nir, hk_nir_lower_descriptors, rs, set_layout_count,
-            set_layouts);
+            set_layouts, dev->dev.chip == AGX_CHIP_G16G);
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_global,
             nir_address_format_64bit_global);
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ssbo,
@@ -4035,7 +4063,7 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
 
 struct hk_apple9_body {
    blake3_hash hash;
-   uint32_t size;
+   uint64_t size;
    struct agx_bo *bo;
    struct list_head link;
 };
@@ -4055,10 +4083,20 @@ hk_apple9_body_equal(const void *a, const void *b)
 }
 
 static struct agx_bo *
-hk_apple9_body_bo(struct hk_device *dev, const void *code, uint32_t size)
+hk_apple9_body_bo(struct hk_device *dev, const struct hk_shader *shader)
 {
+   uint64_t data_offset = ALIGN_POT((uint64_t)shader->code_size,
+                                    HK_MIN_UBO_ALIGNMENT);
+   uint64_t size = data_offset + shader->data_size;
+   if (size > SIZE_MAX)
+      return NULL;
    struct hk_apple9_body key = {.size = size};
-   _mesa_blake3_compute(code, size, key.hash);
+   blake3_hasher hash;
+   blake3_hasher_init(&hash);
+   blake3_hasher_update(&hash, &shader->code_size, sizeof(shader->code_size));
+   blake3_hasher_update(&hash, shader->code_ptr, shader->code_size);
+   blake3_hasher_update(&hash, shader->data_ptr, shader->data_size);
+   blake3_hasher_finalize(&hash, key.hash, sizeof(key.hash));
 
    simple_mtx_lock(&dev->apple9_bodies.lock);
    if (!dev->apple9_bodies.ht) {
@@ -4083,7 +4121,16 @@ hk_apple9_body_bo(struct hk_device *dev, const void *code, uint32_t size)
                                      "Apple9 shader");
    if (!bo)
       return NULL;
-   memcpy(agx_bo_map(bo), code, size);
+   void *map = agx_bo_map(bo);
+   if (!map) {
+      agx_bo_unreference(&dev->dev, bo);
+      return NULL;
+   }
+   memset(map, 0, size);
+   memcpy(map, shader->code_ptr, shader->code_size);
+   if (shader->data_size)
+      memcpy((char *)map + data_offset,
+             shader->data_ptr, shader->data_size);
 
    struct hk_apple9_body *body = malloc(sizeof(*body));
    if (!body)
@@ -4205,9 +4252,12 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
           (shader->info.stage == MESA_SHADER_COMPUTE &&
            agx_is_shader_empty(&shader->b)))
          return VK_SUCCESS;
-      shader->bo = hk_apple9_body_bo(dev, shader->code_ptr, shader->code_size);
+      shader->bo = hk_apple9_body_bo(dev, shader);
       if (!shader->bo)
          return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      if (shader->data_size)
+         shader->data_addr = shader->bo->va->addr +
+                             ALIGN_POT((uint64_t)shader->code_size, HK_MIN_UBO_ALIGNMENT);
       hk_gpu_busy_shader(shader->bo, shader->code_ptr, shader->code_size,
                          shader->info.stage);
       if (shader->info.stage == MESA_SHADER_COMPUTE) {
@@ -4231,14 +4281,29 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
       }
       return VK_SUCCESS;
    }
-   if (shader->b.info.has_preamble || shader->b.info.rodata.size_16) {
+   if (shader->b.info.has_preamble || shader->b.info.rodata.size_16 ||
+       shader->data_size) {
       /* TODO: Do we wnat to compact? Revisit when we rework prolog/epilogs. */
-      size_t size = shader->b.info.binary_size;
+      uint64_t data_offset = ALIGN_POT((uint64_t)shader->b.info.binary_size,
+                                      HK_MIN_UBO_ALIGNMENT);
+      uint64_t size = data_offset + shader->data_size;
+      if (size > SIZE_MAX)
+         return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
       assert(size > 0);
 
       shader->bo = agx_bo_create(&dev->dev, size, 0,
                                  AGX_BO_EXEC | AGX_BO_LOW_VA, "Preamble");
-      memcpy(agx_bo_map(shader->bo), shader->b.binary, size);
+      if (!shader->bo)
+         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      void *map = agx_bo_map(shader->bo);
+      if (!map)
+         return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+      memset(map, 0, size);
+      memcpy(map, shader->b.binary, shader->b.info.binary_size);
+      if (shader->data_size) {
+         memcpy((char *)map + data_offset, shader->data_ptr, shader->data_size);
+         shader->data_addr = shader->bo->va->addr + data_offset;
+      }
       shader->preamble_addr =
          shader->bo->va->addr + shader->b.info.preamble_offset;
    }
@@ -4654,7 +4719,11 @@ hk_copy_shader_constant_data(struct hk_device *dev, struct hk_shader *shader,
                              const nir_shader *nir)
 {
    if (nir->constant_data_size > 0) {
-      uint32_t data_size = align(nir->constant_data_size, HK_MIN_UBO_ALIGNMENT);
+      uint64_t data_size = ALIGN_POT((uint64_t)nir->constant_data_size,
+                                     HK_MIN_UBO_ALIGNMENT);
+      /* The shader cache stores data lengths in 32 bits. */
+      if (data_size > UINT32_MAX)
+         return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
       void *data = malloc(data_size);
       if (data == NULL)
@@ -5257,6 +5326,7 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
       }
    }
 
+   hk_api_shader_init_constant_data(obj);
    *shader_out = obj;
    return VK_SUCCESS;
 }
@@ -6543,6 +6613,9 @@ done:
       if (result != VK_SUCCESS && out[i]) {
          hk_api_shader_destroy(&dev->vk, out[i], alloc);
          out[i] = NULL;
+      } else if (out[i]) {
+         hk_api_shader_init_constant_data(
+            container_of(out[i], struct hk_api_shader, vk));
       }
    }
    return result;
@@ -7329,6 +7402,7 @@ hk_deserialize_api_shader(struct vk_device *vk_dev, struct blob_reader *blob,
    if (blob->overrun)
       obj->pre_raster_reads = HK_READS_UNKNOWN;
 
+   hk_api_shader_init_constant_data(obj);
    *shader_out = &obj->vk;
    return VK_SUCCESS;
 }
