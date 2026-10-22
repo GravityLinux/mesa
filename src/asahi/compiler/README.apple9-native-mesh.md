@@ -666,3 +666,40 @@ reviewed candidate and host evidence.
 Status: implementation started; no milestone has passed review or device
 validation yet. The shape rejections will select a valid emulated pipeline;
 they are not converted into new pipeline-creation errors for valid shaders.
+
+### Milestone 1 — candidate ready for compiler review
+
+The base API shader now always owns the emulated realization. An optional
+native leaf owns a separate mesh/object pair or its matching fragment program;
+the raster/object variant alias never crosses these ownership boundaries.
+Creation-time native capability checking runs the actual mesh lowering on a
+clone, including for deferred libraries and shader objects. A negative result
+survives serialization and prevents later native compilation. Supported
+candidates can narrow further at link time (fragment interface, raster state,
+backend/launch restrictions). Only explicit native capability failures discard
+the optional realization; upload/allocation errors still propagate.
+
+Per-primitive fragment inputs retain their semantic form until the realization
+is selected for compilation. The emulated program reads mesh records, while a
+qualified native P1 program uses flat varyings. The cache container versions and
+owns both paths, and constant-data initialization checks both layouts before
+using the API stage's root pointer. The native gate is still default-off; public
+limits and draw restrictions are unchanged until milestone 2.
+
+Host validation (2026-10-22):
+
+- x86-64 and aarch64 Vulkan driver builds pass.
+- `hk-native-mesh-options` checks source-NIR immutability for accepted V3/P1 and
+  rejected inventory declarations, points/lines, payload, Layer and workgroup
+  classes, in addition to its existing interpolation/shared/output-array checks.
+- `hk-native-mesh-hybrid` compiles eager and deferred native/emulated pairs with
+  per-primitive fragment inputs, round-trips both kinds of cache object, checks
+  constant layouts, and injects failure at every BO upload allocation. All
+  objects and BO references are released; upload OOM remains a Vulkan error.
+- `hk-constant-data` passes. These three focused tests pass together.
+
+The hybrid test replaces BO allocation with host memory, not shader compilation
+or cache handling. It does not execute GPU commands. The complete set of 45
+historical deferred cases and the full rejection inventory remain qualification
+work for milestone 3, after routing and properties are ready. Compiler review
+is pending; no device qualification is claimed.

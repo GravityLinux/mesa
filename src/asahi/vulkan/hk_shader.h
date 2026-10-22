@@ -533,20 +533,26 @@ hk_only_variant(struct hk_api_shader *obj)
 
 /* Large constants are extracted before variants are cloned or generated.
  * Generated variants may not use them, but all original variants retain the
- * same data layout. Any uploaded copy can serve the API stage's root slot.
+ * same data layout, including the optional native realization. Any uploaded
+ * copy can serve the API stage's root slot without a draw-path rebind.
  */
 static inline void
 hk_api_shader_init_constant_data(struct hk_api_shader *shader)
 {
    const struct hk_shader *data = NULL;
-   for (unsigned v = 0; v < hk_num_variants(shader->vk.stage); ++v) {
-      const struct hk_shader *s = &shader->variants[v];
-      if (!s->data_size)
+   const struct hk_api_shader *paths[] = {shader, shader->apple9_native};
+   for (unsigned p = 0; p < ARRAY_SIZE(paths); ++p) {
+      if (!paths[p])
          continue;
-      assert(!data || (data->data_size == s->data_size &&
-                      !memcmp(data->data_ptr, s->data_ptr, s->data_size)));
-      if (!data)
-         data = s;
+      for (unsigned v = 0; v < hk_num_variants(shader->vk.stage); ++v) {
+         const struct hk_shader *s = &paths[p]->variants[v];
+         if (!s->data_size)
+            continue;
+         assert(!data || (data->data_size == s->data_size &&
+                         !memcmp(data->data_ptr, s->data_ptr, s->data_size)));
+         if (!data)
+            data = s;
+      }
    }
    shader->constant_data_addr = data ? data->data_addr : 0;
 }

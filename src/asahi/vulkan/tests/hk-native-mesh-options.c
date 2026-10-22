@@ -8,6 +8,7 @@
 #include "hk_shader.h"
 #include "asahi/compiler/agx_nir.h"
 #include "compiler/nir/nir_builder.h"
+#include "compiler/nir/nir_serialize.h"
 
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "%u: %s\n", __LINE__, #c); exit(1); } } while (0)
 #include "asahi/compiler/test/apple9-mesh-executor.h"
@@ -274,6 +275,70 @@ check_output_array(bool primitive, bool reverse)
    ralloc_free(mesh);
 }
 
+/* Classification must leave semantic NIR intact even when the native pass
+ * rejects after rewriting outputs or shared-memory accesses. Compare the
+ * serialized program, then let the normal compile tests consume the source. */
+static void
+check_capability(nir_shader *nir, bool expected)
+{
+   const struct hk_apple9_graphics_key key = {0};
+   struct blob before, after;
+   blob_init(&before);
+   blob_init(&after);
+   nir_serialize(&before, nir, false);
+   bool supported = !expected;
+   const char *reason = NULL;
+   CHECK(hk_apple9_native_mesh_check(nir, &key, &supported, &reason) == VK_SUCCESS);
+   CHECK(supported == expected);
+   CHECK(supported || reason);
+   nir_serialize(&after, nir, false);
+   CHECK(!before.out_of_memory && !after.out_of_memory);
+   CHECK(before.size == after.size);
+   CHECK(!memcmp(before.data, after.data, before.size));
+   blob_finish(&before);
+   blob_finish(&after);
+   ralloc_free(nir);
+}
+
+static void
+check_capabilities(void)
+{
+   check_capability(producer(true), true);
+   const unsigned declarations[][2] = {
+      {4, 2}, {96, 32}, {256, 256}, {6, 4}, {192, 64},
+      {24, 8}, {256, 254}, {3, 4},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(declarations); ++i) {
+      nir_shader *nir = producer(true);
+      nir->info.mesh.max_vertices_out = declarations[i][0];
+      nir->info.mesh.max_primitives_out = declarations[i][1];
+      check_capability(nir, false);
+   }
+   for (unsigned prim = MESA_PRIM_POINTS; prim <= MESA_PRIM_LINES; ++prim) {
+      nir_shader *nir = producer(true);
+      nir->info.mesh.primitive_type = prim;
+      check_capability(nir, false);
+   }
+   nir_shader *nir = producer(true);
+   nir->info.task_payload_size = 16;
+   check_capability(nir, false);
+   nir = producer(true);
+   nir->info.workgroup_size[0] = 129;
+   check_capability(nir, false);
+   nir = producer(true);
+   nir->info.workgroup_size[0] = 128;
+   check_capability(nir, true);
+   /* Layer is outside P1 broadcast, after shared/output lowering can run. */
+   nir = producer(true);
+   nir_builder b = nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(nir)));
+   nir_store_per_primitive_output(&b, nir_imm_int(&b, 1),
+      nir_imm_int(&b, 0), nir_imm_int(&b, 0), .write_mask = 1,
+      .src_type = nir_type_uint32,
+      .io_semantics = {.location = VARYING_SLOT_LAYER, .num_slots = 1});
+   nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+   check_capability(nir, false);
+}
+
 int main(void)
 {
    CHECK(hk_apple9_native_mesh_enabled());
@@ -284,6 +349,7 @@ int main(void)
       check_key(halfz, 2, 0);
    }
    check_primitive_key();
+   check_capabilities();
    for (unsigned primitive = 0; primitive < 2; ++primitive)
       for (unsigned reverse = 0; reverse < 2; ++reverse)
          check_output_array(primitive, reverse);
@@ -299,6 +365,6 @@ int main(void)
          check_workgroup_key(shapes[i], shared, i < 2 ? 16 : i < 12 ? 32 : 0);
    CHECK(!hk_apple9_native_mesh_threads(NULL));
    glsl_type_singleton_decref();
-   puts("hk native key: halfz/W, interpolation, output arrays, T128 shapes and shared allocation pass");
+   puts("hk native key: halfz/W, interpolation, output arrays, T128 shapes, shared allocation and immutable capability checks pass");
    return 0;
 }
