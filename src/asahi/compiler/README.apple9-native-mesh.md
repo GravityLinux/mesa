@@ -740,3 +740,55 @@ empty-stream reuse, native/emulated/ordinary/meta transitions, partial attachmen
 registers and continuation events. Its representative stream bytes are not a
 GPU rendering test; actual Vulkan recording and device parity remain milestone 3.
 Compiler review is pending for both candidates.
+
+### Milestone 3 — host qualification complete; review/device gates pending
+
+The frozen aarch64 candidate is driver commit `64598c0abb5`, SHA-256
+`331b16359c26a10504a0111f58d83d6099cb13539c3154f02be20e3df9fceee2`.
+The harness sources and reproduction instructions are in
+`src/asahi/vulkan/tests/native-mesh-hybrid/`. Compact evidence is in
+`research/native-hybrid-20261022/`; full local captures are in the sibling
+`../native-hybrid-20261022/` directory. No driver changes follow milestone 2.
+
+- The 625-case rejection inventory completes compilation and command recording
+  in both modes with **zero Vulkan API/debug errors**, including all **45**
+  previously deferred shape failures. Both modes have identical harness
+  outcomes: 622 expected missing-GPU image failures and 3 harness passes, with
+  626 suppressed queue submissions each. These counts are **not device CTS
+  results**. The comparison uses the same hybrid binary with native off/on;
+  it is not a comparison to a rebuilt parent or the full mesh_shader group.
+- Mesh properties/features are byte-identical across modes (200 bytes). The
+  device reports task, mesh, multiview and query support, 256 output vertices
+  and primitives, 128 components, 32768-byte output/shared limits, 16384-byte
+  task payload, 4194304 total workgroups, 8 layers and 16 multiview views.
+- A separate real Vulkan `NENVNMNN` probe records submissions without the
+  suppressing proxy: eligible mesh, emulated mesh, eligible mesh, ordinary VS,
+  eligible mesh, meta clear, and two eligible mesh draws. Native-on emits five
+  separate native renders and three ordinary renders. Each native stream has
+  one leading native packet, one direct draw and its terminator. Emulation's
+  compute work precedes its raster draw; all commands retain the recorded
+  previous-submit barriers. Continuations load the partial attachment program,
+  intermediate renders store partial attachments, and the last render uses
+  the final-store program. Native-off coalesces the eight draws into one
+  ordinary render between the emulation and readback compute commands.
+- The probe's independent CPU image oracle is ready for device execution.
+  Host pixels remain the untouched sentinel as expected. Depth/stencil pixel
+  preservation, query results and GPU synchronization remain device checks;
+  the focused unit test covers the CPU ZLS transition state only.
+
+The pinned host CTS binary has SHA-256
+`83acc28c211c515668ddaf108cbd5a38fdaaa1c46a3dd141ee1ed0e6683310aa`;
+its build differs from the original device inventory run. The earlier source
+equivalence audit applies to the inventoried shader cases. It does not replace
+the device runner's fixed device runner. All C harnesses build with warnings as errors;
+the final binaries are byte-identical to those used for the recorded evidence.
+
+Both compiler milestone reviews are still pending. Their concrete review
+requests are `reviews/review-request-native-hybrid-m1-20261022.md` and
+`reviews/review-request-native-hybrid-m2-20261022.md` at the workspace root.
+After review, the manager must schedule paired focused transition/state checks
+and the full mesh_shader comparison using knob revision 2 and debugfs mode.
+Compare against the fixed emulated baseline, retaining failures, skips,
+expected failures and flakes separately and checking the actual native route.
+Zero full-group regressions and device correctness are not yet established.
+Native remains default-off; no device was accessed, installed or reset here.
