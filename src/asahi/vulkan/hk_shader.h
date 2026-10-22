@@ -457,6 +457,16 @@ struct hk_api_shader {
     */
    struct hk_apple9_deferred *apple9_deferred;
 
+   /* Optional, independently owned native realization of this mesh/fragment
+    * stage. The ordinary variants always implement the emulated contract.
+    * Alternatives are leaves (no deferred source or further alternative).
+    * Paired compilation attaches matching mesh and fragment alternatives. */
+   struct hk_api_shader *apple9_native;
+
+   /* Shader capability, established before deferred state-dependent linking.
+    * Draw state can still require the emulated realization. */
+   bool apple9_native_candidate;
+
    /* Immutable after compilation/cache reload; avoids walking variants at
     * every shader bind, including shaders with no constant data. */
    uint64_t constant_data_addr;
@@ -681,6 +691,10 @@ struct hk_apple9_graphics_key {
 bool hk_apple9_compile_native_mesh_program(
    nir_shader *nir, const struct hk_apple9_graphics_key *key,
    struct agx_shader_part *out, struct agx_apple9_mesh_body_info *info,
+   const char **reason);
+
+VkResult hk_apple9_native_mesh_check(nir_shader *nir,
+   const struct hk_apple9_graphics_key *key, bool *supported,
    const char **reason);
 
 VkResult hk_apple9_compile_internal_gs(struct hk_device *dev, nir_shader *nir,

@@ -545,6 +545,11 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    struct hk_api_shader *tes = gfx->shaders[MESA_SHADER_TESS_EVAL];
    /* Mesh shaders have written their records as compute. */
    struct hk_api_shader *mesh = gfx->shaders[MESA_SHADER_MESH];
+   if (native_grid) {
+      if (!mesh || !mesh->apple9_native)
+         UNSUPPORTED();
+      mesh = mesh->apple9_native;
+   }
    /* Without an API fragment shader, the null program only applies the API
     * sample mask. A full mask needs no fragment work at all. */
    const bool null_fs = !gfx->shaders[MESA_SHADER_FRAGMENT] ||
@@ -555,6 +560,12 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       null_fs && dev->null_fs_trivial &&
       (dyn->ms.sample_mask & BITFIELD_MASK(null_samples)) ==
          BITFIELD_MASK(null_samples);
+   struct hk_api_shader *fragment_api = gfx->shaders[MESA_SHADER_FRAGMENT];
+   if (native_grid && !null_fs) {
+      if (!fragment_api->apple9_native)
+         UNSUPPORTED();
+      fragment_api = fragment_api->apple9_native;
+   }
    struct hk_shader *shaders[] = {
       mesh  ? &mesh->variants[native_grid ? HK_MESH_VARIANT_MAIN
                                          : HK_MESH_VARIANT_RAST]
@@ -562,7 +573,7 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       : tes ? &tes->variants[HK_VS_VARIANT_HW]
             : hk_any_variant(gfx->shaders[MESA_SHADER_VERTEX]),
       hk_any_variant(null_trivial ? dev->null_fs_trivial
-                     : gfx->shaders[MESA_SHADER_FRAGMENT] ?: dev->null_fs),
+                     : fragment_api ?: dev->null_fs),
    };
    if (native_grid &&
        (!mesh || gfx->shaders[MESA_SHADER_TASK] || gs || tes ||

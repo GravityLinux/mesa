@@ -5368,8 +5368,8 @@ hk_apple9_draw_mesh(struct hk_cmd_buffer *cmd, uint32_t draw_id,
 
    if (direct && (!direct[0] || !direct[1] || !direct[2]))
       return;
-   bool native = hk_apple9_native_mesh_enabled();
-   if (!hk_apple9_prepare_draw(cmd, native || !direct || count_addr))
+   if (!hk_apple9_prepare_draw(cmd, hk_apple9_native_mesh_enabled() ||
+                                   !direct || count_addr))
       return;
    if (!hk_apple9_resolve_shaders(cmd))
       return;
@@ -5379,7 +5379,9 @@ hk_apple9_draw_mesh(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    if (!mesh)
       return;
 
-   struct hk_shader *main = &mesh->variants[HK_MESH_VARIANT_MAIN];
+   bool native = hk_apple9_native_mesh_enabled() && mesh->apple9_native;
+   struct hk_shader *main = &(native ? mesh->apple9_native : mesh)
+                               ->variants[HK_MESH_VARIANT_MAIN];
    if (native) {
       /* Indirect/count draws and a false GPU predicate can export a zero
        * child grid. That object completion case remains unqualified. Direct
