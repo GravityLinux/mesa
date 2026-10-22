@@ -9,6 +9,65 @@
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "%u: %s\n", __LINE__, #c); abort(); } } while (0)
 
 static unsigned allocations, live_bos, fail_allocation;
+static unsigned native_compiles, emulated_compiles, fragment_compiles;
+static bool reject_native;
+
+bool __real_agx_compile_apple9_native_mesh(
+   nir_shader *, bool, const struct agx_apple9_native_mesh_options *,
+   struct agx_shader_part *, struct agx_apple9_mesh_body_info *, const char **);
+bool __wrap_agx_compile_apple9_native_mesh(
+   nir_shader *, bool, const struct agx_apple9_native_mesh_options *,
+   struct agx_shader_part *, struct agx_apple9_mesh_body_info *, const char **);
+bool
+__wrap_agx_compile_apple9_native_mesh(
+   nir_shader *nir, bool enable,
+   const struct agx_apple9_native_mesh_options *options,
+   struct agx_shader_part *out, struct agx_apple9_mesh_body_info *info,
+   const char **reason)
+{
+   ++native_compiles;
+   if (reject_native) {
+      *reason = "injected native backend capability rejection";
+      memset(out, 0, sizeof(*out));
+      return false;
+   }
+   return __real_agx_compile_apple9_native_mesh(nir, enable, options, out, info,
+                                                reason);
+}
+
+bool __real_agx_compile_apple9_tiny(nir_shader *, struct agx_shader_part *,
+                                    struct agx_apple9_compute_profile *,
+                                    const char **);
+bool __wrap_agx_compile_apple9_tiny(nir_shader *, struct agx_shader_part *,
+                                    struct agx_apple9_compute_profile *,
+                                    const char **);
+bool
+__wrap_agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
+                               struct agx_apple9_compute_profile *profile,
+                               const char **reason)
+{
+   ++emulated_compiles;
+   return __real_agx_compile_apple9_tiny(nir, out, profile, reason);
+}
+
+bool __real_agx_compile_apple9_fragment_mrt(
+   nir_shader *, const struct agx_apple9_varying_layout *,
+   const struct agx_apple9_blend *, unsigned, struct agx_shader_part *,
+   const char **);
+bool __wrap_agx_compile_apple9_fragment_mrt(
+   nir_shader *, const struct agx_apple9_varying_layout *,
+   const struct agx_apple9_blend *, unsigned, struct agx_shader_part *,
+   const char **);
+bool
+__wrap_agx_compile_apple9_fragment_mrt(
+   nir_shader *nir, const struct agx_apple9_varying_layout *varyings,
+   const struct agx_apple9_blend *blend, unsigned nr_targets,
+   struct agx_shader_part *out, const char **reason)
+{
+   ++fragment_compiles;
+   return __real_agx_compile_apple9_fragment_mrt(nir, varyings, blend,
+                                                 nr_targets, out, reason);
+}
 
 struct agx_bo *__wrap_agx_bo_create(struct agx_device *, size_t, unsigned,
                                     enum agx_bo_flags, const char *);
@@ -128,21 +187,42 @@ roundtrip(struct hk_device *dev, struct hk_api_shader *src)
    CHECK(hk_deserialize_api_shader(&dev->vk, &reader, 0, NULL, &result) == VK_SUCCESS);
    CHECK(!reader.overrun && reader.current == reader.end);
    blob_finish(&blob);
-   return container_of(result, struct hk_api_shader, vk);
+   struct hk_api_shader *copy = container_of(result, struct hk_api_shader, vk);
+   CHECK(copy->apple9_native_leaf == src->apple9_native_leaf);
+   CHECK(!memcmp(copy->apple9_native_pair_id, src->apple9_native_pair_id,
+                 sizeof(copy->apple9_native_pair_id)));
+   if (src->apple9_native) {
+      CHECK(copy->apple9_native && copy->apple9_native->apple9_native_leaf);
+      CHECK(!memcmp(copy->apple9_native->apple9_native_pair_id,
+                    src->apple9_native->apple9_native_pair_id,
+                    sizeof(copy->apple9_native_pair_id)));
+   }
+   return copy;
 }
 
 static void
 check_programs(struct hk_api_shader *mesh, struct hk_api_shader *fs, bool native)
 {
    CHECK(!mesh->apple9_deferred && !fs->apple9_deferred);
-   CHECK(mesh->variants[HK_MESH_VARIANT_MAIN].info.apple9_native_stage == HK_APPLE9_NATIVE_NONE);
-   CHECK(mesh->variants[HK_MESH_VARIANT_RAST].bo);
-   CHECK(!mesh->variants[HK_MESH_VARIANT_RAST].b.info.apple9_body_only);
-   CHECK(!!mesh->apple9_native == native && !!fs->apple9_native == native);
+   if (!mesh->apple9_native_leaf) {
+      CHECK(!fs->apple9_native_leaf);
+      CHECK(mesh->variants[HK_MESH_VARIANT_MAIN].info.apple9_native_stage ==
+            HK_APPLE9_NATIVE_NONE);
+      CHECK(mesh->variants[HK_MESH_VARIANT_RAST].bo);
+      CHECK(!mesh->variants[HK_MESH_VARIANT_RAST].b.info.apple9_body_only);
+   }
+   CHECK(!!hk_api_shader_native(mesh) == native &&
+         !!hk_api_shader_native(fs) == native);
    CHECK(mesh->constant_data_addr && fs->constant_data_addr);
    if (native) {
-      struct hk_api_shader *nm = mesh->apple9_native, *nf = fs->apple9_native;
+      struct hk_api_shader *nm = hk_api_shader_native(mesh),
+                           *nf = hk_api_shader_native(fs);
       CHECK(!nm->apple9_native && !nf->apple9_native);
+      CHECK(nm->apple9_native_leaf && nf->apple9_native_leaf);
+      const blake3_hash zero = {0};
+      CHECK(memcmp(nm->apple9_native_pair_id, zero, sizeof(zero)));
+      CHECK(!memcmp(nm->apple9_native_pair_id, nf->apple9_native_pair_id,
+                    sizeof(nm->apple9_native_pair_id)));
       CHECK(nm->variants[HK_MESH_VARIANT_MAIN].info.apple9_native_stage == HK_APPLE9_NATIVE_MESH);
       CHECK(nm->variants[HK_MESH_VARIANT_OBJECT].info.apple9_native_stage == HK_APPLE9_NATIVE_OBJECT);
       CHECK(nm->variants[HK_MESH_VARIANT_MAIN].b.info.apple9_varyings.mask[VARYING_SLOT_VAR0] == 15);
@@ -178,6 +258,7 @@ compile(struct hk_device *dev, bool deferred, bool native, unsigned failure)
    struct hk_apple9_graphics_key key;
    hk_apple9_graphics_key(&key, &state);
    allocations = 0;
+   native_compiles = emulated_compiles = fragment_compiles = 0;
    fail_allocation = failure;
    VkResult result = deferred
       ? hk_apple9_defer_graphics(dev, 2, infos, NULL, NULL, out)
@@ -197,6 +278,8 @@ compile(struct hk_device *dev, bool deferred, bool native, unsigned failure)
          CHECK(mesh->apple9_deferred && !mesh->apple9_native);
       } else {
          check_programs(mesh, fs, native);
+         CHECK(native_compiles == native && emulated_compiles == 1);
+         CHECK(fragment_compiles == 1 + native);
       }
       struct hk_api_shader *mcopy = roundtrip(dev, mesh), *fcopy = roundtrip(dev, fs);
       if (deferred) {
@@ -205,8 +288,27 @@ compile(struct hk_device *dev, bool deferred, bool native, unsigned failure)
          struct hk_api_shader *api[HK_APPLE9_GFX_STAGES] = {
             [MESA_SHADER_MESH] = mcopy, [MESA_SHADER_FRAGMENT] = fcopy,
          }, *resolved[HK_APPLE9_GFX_STAGES] = {0};
-         CHECK(hk_apple9_resolve_graphics(dev, api, &state, resolved) == VK_SUCCESS);
+         CHECK(hk_apple9_resolve_graphics(dev, api, &state, resolved, true) ==
+               VK_SUCCESS);
          check_programs(resolved[MESA_SHADER_MESH], resolved[MESA_SHADER_FRAGMENT], native);
+         CHECK(native_compiles == native && emulated_compiles == !native);
+         CHECK(fragment_compiles == 1);
+         struct hk_api_shader *first = resolved[MESA_SHADER_MESH];
+         unsigned before = allocations;
+         CHECK(hk_apple9_resolve_graphics(dev, api, &state, resolved, true) ==
+               VK_SUCCESS);
+         CHECK(resolved[MESA_SHADER_MESH] == first && allocations == before);
+         CHECK(fragment_compiles == 1);
+         CHECK(hk_apple9_resolve_graphics(dev, api, &state, resolved, false) ==
+               VK_SUCCESS);
+         check_programs(resolved[MESA_SHADER_MESH],
+                        resolved[MESA_SHADER_FRAGMENT], false);
+         CHECK(native_compiles == native && emulated_compiles == 1);
+         CHECK(fragment_compiles == 1 + native);
+         before = allocations;
+         CHECK(hk_apple9_resolve_graphics(dev, api, &state, resolved, true) ==
+               VK_SUCCESS);
+         CHECK(resolved[MESA_SHADER_MESH] == first && allocations == before);
       } else {
          check_programs(mcopy, fcopy, native);
       }
@@ -221,10 +323,97 @@ compile(struct hk_device *dev, bool deferred, bool native, unsigned failure)
    return allocations;
 }
 
+static unsigned
+compile_native_only(struct hk_device *dev, bool reject, unsigned failure)
+{
+   struct vk_shader_compile_info infos[] = {
+      {.stage = MESA_SHADER_MESH,
+       .nir = source(false, 3, 1),
+       .robustness = &vk_robustness_disabled},
+      {.stage = MESA_SHADER_FRAGMENT,
+       .nir = source(true, 0, 0),
+       .robustness = &vk_robustness_disabled},
+   };
+   struct hk_apple9_graphics_key key = {0};
+   struct vk_shader *out[2] = {0};
+   allocations = 0;
+   native_compiles = emulated_compiles = fragment_compiles = 0;
+   fail_allocation = failure;
+   reject_native = reject;
+   VkResult result = hk_apple9_compile_graphics_mode(dev, 2, infos, NULL, &key,
+                                                     NULL, NULL, out, true);
+   reject_native = false;
+   if (failure) {
+      CHECK(result == VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      CHECK(!out[0] && !out[1]);
+   } else {
+      CHECK(result == VK_SUCCESS);
+      CHECK(native_compiles == 1 && emulated_compiles == reject);
+      CHECK(fragment_compiles == 1);
+      struct hk_api_shader *mesh =
+         container_of(out[0], struct hk_api_shader, vk);
+      struct hk_api_shader *fs = container_of(out[1], struct hk_api_shader, vk);
+      check_programs(mesh, fs, !reject);
+      for (unsigned i = 0; i < 2; ++i)
+         hk_api_shader_destroy(&dev->vk, out[i], NULL);
+   }
+   hk_apple9_bodies_finish(dev);
+   CHECK(live_bos == 0);
+   return allocations;
+}
+
+static unsigned
+store_guard_depth(nir_shader *nir)
+{
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic ||
+                nir_instr_as_intrinsic(instr)->intrinsic !=
+                   nir_intrinsic_store_global)
+               continue;
+            unsigned depth = 0;
+            for (nir_cf_node *node = block->cf_node.parent; node;
+                 node = node->parent)
+               depth += node->type == nir_cf_node_if;
+            return depth;
+         }
+      }
+   }
+   CHECK(!"store must survive preprocessing");
+   return 0;
+}
+
+static void
+check_fragment_fixup(void)
+{
+   for (unsigned native = 0; native < 2; ++native) {
+      nir_shader *nir = source(true, 0, 0);
+      nir_builder b =
+         nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(nir)));
+      nir_def *address =
+         nir_load_ubo(&b, 1, 64, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
+                      .align_mul = 8, .range = 8);
+      nir_store_global(&b, nir_imm_int(&b, 0x57), address, .align_mul = 4,
+                       .write_mask = 1);
+      nir->info.writes_memory = true;
+      nir->info.fs.uses_sample_shading = true;
+      agx_preprocess_nir(nir);
+      unsigned before = store_guard_depth(nir);
+      CHECK(before == 1);
+      hk_apple9_lower_primitive_fs(nir, native);
+      CHECK(store_guard_depth(nir) == before);
+      nir_validate_shader(nir,
+                          "hybrid fragment fix-up preserves helper guards");
+      ralloc_free(nir);
+   }
+}
+
 int
 main(void)
 {
    glsl_type_singleton_init_or_ref();
+   check_fragment_fixup();
    struct hk_device *dev = calloc(1, sizeof(*dev));
    struct hk_physical_device *pdev = calloc(1, sizeof(*pdev));
    CHECK(dev && pdev);
@@ -241,12 +430,19 @@ main(void)
    compile(dev, true, false, 0);
    for (unsigned i = 1; i <= count; ++i)
       compile(dev, false, true, i);
+   count = compile_native_only(dev, false, 0);
+   for (unsigned i = 1; i <= count; ++i)
+      compile_native_only(dev, false, i);
+   count = compile_native_only(dev, true, 0);
+   for (unsigned i = 1; i <= count; ++i)
+      compile_native_only(dev, true, i);
    simple_mtx_destroy(&pdev->debug_compile_lock);
    simple_mtx_destroy(&dev->apple9_bodies.lock);
    simple_mtx_destroy(&dev->apple9_variants.lock);
    free(dev);
    free(pdev);
    glsl_type_singleton_decref();
-   puts("hybrid eager/deferred pairs, primitive FS, cache reload, constants, ownership and upload OOM pass");
+   puts(
+      "hybrid pairs, single-path deferred compiles/cache reuse, helper guards, constants and OOM pass");
    return 0;
 }

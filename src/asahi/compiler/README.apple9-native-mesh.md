@@ -668,8 +668,9 @@ changes do not. Commit locally as work progresses; no installation or push is
 part of these milestones. Device runs are requested only with a concrete,
 reviewed candidate and host evidence.
 
-Status: implementation started; no milestone has passed review or device
-validation yet. The shape rejections will select a valid emulated pipeline;
+Status: the compiler review approved M1 `91c5fddb86a` and M2
+`64598c0abb5` for the device comparison, which the device runner is running. Native
+remains default-off. The shape rejections select a valid emulated pipeline;
 they are not converted into new pipeline-creation errors for valid shaders.
 
 ### Milestone 1 — candidate ready for compiler review
@@ -792,3 +793,43 @@ Compare against the fixed emulated baseline, retaining failures, skips,
 expected failures and flakes separately and checking the actual native route.
 Zero full-group regressions and device correctness are not yet established.
 Native remains default-off; no device was accessed, installed or reset here.
+
+### Milestone 4 — review follow-ups in progress
+
+Manager 19:1x relayed GO verdicts for milestones 1 and 2, recorded in
+`reviews/native-hybrid-m1-review-20261022.md` and
+`reviews/native-hybrid-m2-review-20261022.md` at the workspace root.
+the device runner's full-group run uses the frozen milestone-2 driver; milestone 4 does
+not replace that artifact while it is running.
+
+The shared `agx_apple9_native_mesh_shape_eligible()` predicate now controls
+both early driver output-array lowering and the native compiler's V3/P1 gate.
+Late fragment primitive-input lowering runs only its targeted fix-up, DCE and
+IO gathering, preserving the helper-write guards from the original preprocessing.
+Native mesh/FS leaves carry a content-derived compile ID through independent
+cache round trips. Draw selection requires matching IDs before native packets
+can be emitted; a mismatch selects emulation.
+
+Deferred variants now key the requested realization as well as shaders and
+graphics state. Native requests compile only native mesh/object/FS programs;
+unsupported bodies fall back using untouched source NIR. Ineligible draw state
+requests emulation directly. Switching modes reuses or lazily compiles the other
+cache entry, rather than always compiling both paths on first native use. Eager
+pipelines retain their independently owned paired realizations. Binding a native
+leaf uses that leaf's constant-data root. Cache container revision 2 records the
+new metadata and rejects older layouts.
+
+Initial host checks: x86-64 ICD build and four focused tests pass. The hybrid
+test counts real backend calls: a deferred eligible native resolve performs
+one native mesh compile, one FS compile and zero emulated mesh compiles. It also
+checks path switching/cache reuse, pairing IDs through serialization, helper
+guard depth, explicit native capability fallback and every BO upload failure
+on paired/native-only/fallback compiles. The routing test rejects mismatched IDs
+for both eager alternatives and standalone deferred leaves. Broader focused
+checks, the aarch64 build and the constant-table/timestamp/merged-render probes
+are still in progress; M4 compiler/driver review is pending.
+
+**M2 acceptance condition:** if the device comparison finds any
+native-fail/emulated-pass case using native attributes or P1 primitive lowering,
+disable the corresponding opt-in default again. Neither default is qualified
+by host recording alone. Native itself remains default-off regardless.

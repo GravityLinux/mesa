@@ -342,6 +342,7 @@ struct hk_graphics_state {
     * inputs change. render_gen counts render pass instances. */
    struct {
       bool valid;
+      bool prefer_native;
       uint32_t render_gen;
       struct hk_api_shader *api[HK_APPLE9_GFX_STAGES];
       struct hk_api_shader *out[HK_APPLE9_GFX_STAGES];

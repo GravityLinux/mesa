@@ -208,12 +208,18 @@ hk_hash_apple9_native_mesh_abi(struct mesa_blake3 *ctx)
 {
    const struct agx_apple9_mesh_key k = AGX_APPLE9_MESH_KEY;
    const uint32_t abi[] = {
-      AGX_APPLE9_MESH_ABI_VERSION, k.reserved_uniform_words, k.output_root,
-      k.primitive_count_bits, k.payload_uniform, k.grid_root, k.grid_offset_B,
-      k.physical_threads, AGX_APPLE9_MESH_DRAW_UNIFORM,
+      AGX_APPLE9_MESH_ABI_VERSION,
+      k.reserved_uniform_words,
+      k.output_root,
+      k.primitive_count_bits,
+      k.payload_uniform,
+      k.grid_root,
+      k.grid_offset_B,
+      k.physical_threads,
+      AGX_APPLE9_MESH_DRAW_UNIFORM,
       AGX_APPLE9_MESH_ARGUMENT_WORDS,
       hk_apple9_native_mesh_attributes_enabled(),
-      1, /* Hybrid shader ownership and deferred IO representation. */
+      2, /* Explicit native pairing and on-demand deferred realizations. */
    };
    _mesa_blake3_update(ctx, abi, sizeof(abi));
 }
@@ -3961,12 +3967,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    /* Native mesh links a fixed component map. Resolve indirect output-array
     * slots while their declared bounds are still available as derefs. This
     * also covers arrays nested inside per-vertex/per-primitive blocks. */
-   if (dev->dev.chip == AGX_CHIP_G16G &&
-       nir->info.stage == MESA_SHADER_MESH && hk_apple9_native_mesh_enabled() &&
-       nir->info.mesh.max_vertices_out == 3 &&
-       nir->info.mesh.max_primitives_out == 1 &&
-       nir->info.mesh.primitive_type == MESA_PRIM_TRIANGLES &&
-       !nir->info.task_payload_size)
+   if (dev->dev.chip == AGX_CHIP_G16G && hk_apple9_native_mesh_enabled() &&
+       agx_apple9_native_mesh_shape_eligible(nir))
       lower_indirect_modes |= nir_var_shader_out;
 
    NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
@@ -6106,9 +6108,30 @@ hk_apple9_compile_task(struct hk_device *dev, nir_shader *nir,
    return hk_apple9_finish_shader(dev, shader, nir);
 }
 
+static void
+hk_apple9_lower_primitive_fs(nir_shader *nir, bool native_mesh)
+{
+   bool broadcast =
+      native_mesh && hk_apple9_native_mesh_primitive_lowering_enabled();
+   if (!nir_shader_intrinsics_pass(nir, hk_lower_per_primitive_input,
+                                   nir_metadata_control_flow, &broadcast))
+      return;
+
+   /* Layer reads introduced by primitive lowering use the same
+    * fixed-function layer source as ordinary fragment inputs. */
+   NIR_PASS(_, nir, nir_shader_intrinsics_pass,
+            hk_apple9_lower_layer_viewport_fs, nir_metadata_control_flow, NULL);
+
+   /* This NIR has already been preprocessed. The new input/record loads only
+    * need dead-code cleanup and refreshed IO metadata before linking; the
+    * backend performs ordinary algebraic/scalar cleanup later. Re-running
+    * agx_preprocess_nir would nest the non-idempotent helper-write guards. */
+   NIR_PASS(_, nir, nir_opt_dce);
+   nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+}
+
 /* fs_interp optionally gives the {flat, linear} input masks of the fragment
- * shader consuming a separately compiled last pre-rasterization stage.
- */
+ * shader consuming a separately compiled last pre-rasterization stage. */
 static VkResult
 hk_apple9_compile_graphics_path(struct hk_device *dev, uint32_t count,
                            struct vk_shader_compile_info *infos,
@@ -6147,19 +6170,7 @@ hk_apple9_compile_graphics_path(struct hk_device *dev, uint32_t count,
    for (unsigned i = 0; i < count; ++i) {
       if (infos[i].stage != MESA_SHADER_FRAGMENT)
          continue;
-      nir_shader *nir = infos[i].nir;
-      bool broadcast = native_mesh &&
-                       hk_apple9_native_mesh_primitive_lowering_enabled();
-      if (nir_shader_intrinsics_pass(nir, hk_lower_per_primitive_input,
-                                     nir_metadata_control_flow, &broadcast)) {
-         /* Layer reads introduced by primitive lowering use the same
-          * fixed-function layer source as ordinary fragment inputs. */
-         NIR_PASS(_, nir, nir_shader_intrinsics_pass,
-                  hk_apple9_lower_layer_viewport_fs,
-                  nir_metadata_control_flow, NULL);
-         agx_preprocess_nir(nir);
-         nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
-      }
+      hk_apple9_lower_primitive_fs(infos[i].nir, native_mesh);
    }
 
 
@@ -6718,18 +6729,62 @@ done:
    return result;
 }
 
-/* Compile both realizations from independent NIR. The ordinary objects own
- * the emulated mesh/raster programs and its fragment interface; each optional
- * native leaf owns its own programs and matching fragment interface. A failed
- * capability check never leaves a half-lowered emulated program behind. */
+/* Match the whole native compile, including both interfaces, code and constant
+ * tables. This identity survives independent per-stage cache round trips; a
+ * pointer or a process-local counter would not. Nothing owns another stage. */
+static void
+hk_apple9_identify_native_pair(uint32_t count, struct vk_shader **shaders,
+                               const struct hk_apple9_graphics_key *key)
+{
+   struct mesa_blake3 ctx;
+   _mesa_blake3_init(&ctx);
+   _mesa_blake3_update(&ctx, key, sizeof(*key));
+   for (unsigned i = 0; i < count; ++i) {
+      struct hk_api_shader *obj =
+         container_of(shaders[i], struct hk_api_shader, vk);
+      uint32_t stage = obj->vk.stage;
+      _mesa_blake3_update(&ctx, &stage, sizeof(stage));
+      hk_foreach_variant(obj, shader) {
+         _mesa_blake3_update(&ctx, &shader->b.info.apple9_varyings,
+                             sizeof(shader->b.info.apple9_varyings));
+         _mesa_blake3_update(&ctx, &shader->code_size,
+                             sizeof(shader->code_size));
+         _mesa_blake3_update(&ctx, shader->code_ptr, shader->code_size);
+         _mesa_blake3_update(&ctx, &shader->data_size,
+                             sizeof(shader->data_size));
+         if (shader->data_size)
+            _mesa_blake3_update(&ctx, shader->data_ptr, shader->data_size);
+      }
+   }
+   blake3_hash id;
+   _mesa_blake3_final(&ctx, id);
+   for (unsigned i = 0; i < count; ++i) {
+      struct hk_api_shader *obj =
+         container_of(shaders[i], struct hk_api_shader, vk);
+      obj->apple9_native_leaf = true;
+      memcpy(obj->apple9_native_pair_id, id, sizeof(id));
+      if (obj->vk.stage == MESA_SHADER_MESH) {
+         obj->apple9_native_candidate = true;
+         obj->apple9_native_cull_primitive =
+            obj->variants[HK_MESH_VARIANT_MAIN]
+               .info.apple9_native.primitive_broadcast &
+            VARYING_BIT_CULL_PRIMITIVE;
+      }
+   }
+}
+
+/* Eager pipelines own both realizations. Draw-time variants request one path:
+ * native compiles only its own programs, falling back to emulation if the
+ * native backend rejects the body. Independent NIR keeps either rejection
+ * from leaving a half-lowered fallback behind. */
 static VkResult
-hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
-                           struct vk_shader_compile_info *infos,
-                           const struct vk_graphics_pipeline_state *state,
-                           const struct hk_apple9_graphics_key *key_in,
-                           const uint64_t *fs_interp,
-                           const VkAllocationCallbacks *alloc,
-                           struct vk_shader **out)
+hk_apple9_compile_graphics_mode(struct hk_device *dev, uint32_t count,
+                                struct vk_shader_compile_info *infos,
+                                const struct vk_graphics_pipeline_state *state,
+                                const struct hk_apple9_graphics_key *key_in,
+                                const uint64_t *fs_interp,
+                                const VkAllocationCallbacks *alloc,
+                                struct vk_shader **out, bool native_only)
 {
    assert(count <= HK_APPLE9_GFX_STAGES);
    struct hk_apple9_graphics_key key;
@@ -6787,12 +6842,15 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
       return vk_error(dev, result);
    }
 
-   result = hk_apple9_compile_graphics_path(dev, count, infos, state, key_in,
-                                           fs_interp, alloc, out, false, NULL);
-   if (result != VK_SUCCESS || !native) {
-      for (unsigned i = 0; i < cloned; ++i)
-         ralloc_free(native_infos[i].nir);
-      return result;
+   memset(out, 0, count * sizeof(*out));
+   if (!native_only || !native) {
+      result = hk_apple9_compile_graphics_path(
+         dev, count, infos, state, key_in, fs_interp, alloc, out, false, NULL);
+      if (result != VK_SUCCESS || !native) {
+         for (unsigned i = 0; i < cloned; ++i)
+            ralloc_free(native_infos[i].nir);
+         return result;
+      }
    }
 
    struct vk_shader *native_out[HK_APPLE9_GFX_STAGES] = {0};
@@ -6803,26 +6861,53 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
                                            &native_unsupported);
    if (native_unsupported) {
       assert(result == VK_ERROR_FEATURE_NOT_PRESENT);
-      /* Native-only backend/launch limitations (for example scratch) are
-       * unsupported realizations. The required emulated realization already
-       * compiled. Allocation failures remain real Vulkan errors. */
-      return VK_SUCCESS;
+      /* Allocation failures remain real Vulkan errors. Only a native-only
+       * capability failure compiles/uses the emulated realization. */
+      return native_only ? hk_apple9_compile_graphics_path(
+                              dev, count, infos, state, key_in, fs_interp,
+                              alloc, out, false, NULL)
+                         : VK_SUCCESS;
+   }
+   if (native_only) {
+      for (unsigned i = 0; i < count; ++i)
+         ralloc_free(infos[i].nir);
    }
    if (result != VK_SUCCESS) {
       for (unsigned i = 0; i < count; ++i) {
-         hk_api_shader_destroy(&dev->vk, out[i], alloc);
+         if (out[i])
+            hk_api_shader_destroy(&dev->vk, out[i], alloc);
          out[i] = NULL;
       }
       return result;
    }
 
+   hk_apple9_identify_native_pair(count, native_out, &key);
+   if (native_only) {
+      memcpy(out, native_out, count * sizeof(*out));
+      return VK_SUCCESS;
+   }
    for (unsigned i = 0; i < count; ++i) {
       struct hk_api_shader *obj = container_of(out[i], struct hk_api_shader, vk);
       obj->apple9_native = container_of(native_out[i], struct hk_api_shader, vk);
       obj->apple9_native_candidate = infos[i].stage == MESA_SHADER_MESH;
+      obj->apple9_native_cull_primitive =
+         obj->apple9_native->apple9_native_cull_primitive;
       hk_api_shader_init_constant_data(obj);
    }
    return VK_SUCCESS;
+}
+
+static VkResult
+hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
+                           struct vk_shader_compile_info *infos,
+                           const struct vk_graphics_pipeline_state *state,
+                           const struct hk_apple9_graphics_key *key_in,
+                           const uint64_t *fs_interp,
+                           const VkAllocationCallbacks *alloc,
+                           struct vk_shader **out)
+{
+   return hk_apple9_compile_graphics_mode(dev, count, infos, state, key_in,
+                                          fs_interp, alloc, out, false);
 }
 
 /* Even without an API fragment shader, the pipeline sample mask controls
@@ -7065,7 +7150,8 @@ hk_apple9_eager_variant(struct hk_device *dev, uint32_t count,
 
    struct hk_api_shader *variant[HK_APPLE9_GFX_STAGES];
    hk_apple9_eager_compile = true;
-   if (hk_apple9_resolve_graphics(dev, api, &state, variant) != VK_SUCCESS)
+   if (hk_apple9_resolve_graphics(dev, api, &state, variant, true) !=
+       VK_SUCCESS)
       fprintf(stderr, "HK_APPLE9_EAGER_VARIANTS: variant compile failed\n");
    hk_apple9_eager_compile = false;
    if (stub)
@@ -7132,6 +7218,9 @@ hk_apple9_defer_graphics(struct hk_device *dev, uint32_t count,
       }
       obj->apple9_deferred = deferred;
       obj->apple9_native_candidate = native_candidate;
+      obj->apple9_native_cull_primitive =
+         infos[i].stage == MESA_SHADER_MESH &&
+         (infos[i].nir->info.outputs_written & VARYING_BIT_CULL_PRIMITIVE);
       obj->writes_memory = infos[i].nir->info.writes_memory;
       obj->pre_raster_reads = hk_nir_pre_raster_reads(infos[i].nir);
       out[i] = &obj->vk;
@@ -7161,6 +7250,7 @@ hk_apple9_deferred_sample_shading(const struct hk_api_shader *fs)
 struct hk_apple9_variant {
    struct hk_api_shader *api[HK_APPLE9_GFX_STAGES];
    struct hk_apple9_graphics_key key;
+   bool prefer_native;
    struct hk_api_shader *shaders[HK_APPLE9_GFX_STAGES];
 
    /* Signalled once the compile finished; result holds its outcome. The
@@ -7205,15 +7295,18 @@ hk_apple9_remove_generic_output(nir_builder *b, nir_intrinsic_instr *intr,
 }
 
 VkResult
-hk_apple9_resolve_graphics(struct hk_device *dev,
-                           struct hk_api_shader *const api[HK_APPLE9_GFX_STAGES],
-                           const struct vk_graphics_pipeline_state *state,
-                           struct hk_api_shader *out[HK_APPLE9_GFX_STAGES])
+hk_apple9_resolve_graphics(
+   struct hk_device *dev, struct hk_api_shader *const api[HK_APPLE9_GFX_STAGES],
+   const struct vk_graphics_pipeline_state *state,
+   struct hk_api_shader *out[HK_APPLE9_GFX_STAGES], bool prefer_native)
 {
    struct hk_apple9_variant search;
    memset(&search, 0, sizeof(search));
    memcpy(search.api, api, sizeof(search.api));
    hk_apple9_graphics_key(&search.key, state);
+   /* Collapse ineligible and non-mesh requests onto the emulated cache entry. */
+   search.prefer_native = prefer_native && api[MESA_SHADER_MESH] &&
+                          api[MESA_SHADER_MESH]->apple9_native_candidate;
    const struct hk_api_shader *fs = api[MESA_SHADER_FRAGMENT];
    if (fs && fs->apple9_deferred) {
       u_foreach_bit(rt, fs->apple9_deferred->undefined_colors)
@@ -7347,14 +7440,13 @@ compile:;
       agx_apple9_set_parallel_ra(!hk_apple9_eager_compile);
       /* Creation-time incompatibility is final. Dynamic state can narrow
        * a candidate further, but cannot make an incompatible shader native. */
-      if (api[MESA_SHADER_MESH] &&
-          !api[MESA_SHADER_MESH]->apple9_native_candidate) {
+      if (!search.prefer_native) {
          result = hk_apple9_compile_graphics_path(
             dev, count, infos, NULL, &search.key, NULL, NULL, compiled,
             false, NULL);
       } else {
-         result = hk_apple9_compile_graphics(dev, count, infos, NULL, &search.key,
-                                             NULL, NULL, compiled);
+         result = hk_apple9_compile_graphics_mode(
+            dev, count, infos, NULL, &search.key, NULL, NULL, compiled, true);
       }
       agx_apple9_set_parallel_ra(false);
       hk_cpu_timing_compile_end(&scope, true);
@@ -7563,7 +7655,7 @@ hk_deserialize_shader(struct hk_device *dev, struct blob_reader *blob,
 }
 
 /* Version the container independently of the hardware programs it owns. */
-#define HK_SHADER_CONTAINER_VERSION 0x484b0001u
+#define HK_SHADER_CONTAINER_VERSION 0x484b0002u
 
 static VkResult
 hk_deserialize_api_shader_inner(struct vk_device *vk_dev, struct blob_reader *blob,
@@ -7590,8 +7682,21 @@ hk_deserialize_api_shader_inner(struct vk_device *vk_dev, struct blob_reader *bl
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    obj->apple9_native_candidate = native_candidate;
+   obj->apple9_native_cull_primitive = blob_read_uint8(blob);
+   obj->apple9_native_leaf = blob_read_uint8(blob);
+   blob_copy_bytes(blob, obj->apple9_native_pair_id,
+                   sizeof(obj->apple9_native_pair_id));
+   if (blob->overrun || (obj->apple9_native_leaf && stage != MESA_SHADER_MESH &&
+                         stage != MESA_SHADER_FRAGMENT)) {
+      hk_api_shader_destroy(vk_dev, &obj->vk, pAllocator);
+      return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
+   }
 
    if (blob_read_uint8(blob)) {
+      if (obj->apple9_native_leaf) {
+         hk_api_shader_destroy(vk_dev, &obj->vk, pAllocator);
+         return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
+      }
       struct hk_apple9_deferred *d = calloc(1, sizeof(*d));
       if (!d) {
          vk_shader_free(&dev->vk, pAllocator, &obj->vk);
@@ -7631,7 +7736,8 @@ hk_deserialize_api_shader_inner(struct vk_device *vk_dev, struct blob_reader *bl
                         obj->variants[0].info.fs.writes_memory;
    obj->pre_raster_reads = blob_read_uint8(blob);
    bool has_native = blob_read_uint8(blob);
-   if (blob->overrun || (has_native && !allow_native)) {
+   if (blob->overrun ||
+       (has_native && (!allow_native || obj->apple9_native_leaf))) {
       hk_api_shader_destroy(vk_dev, &obj->vk, pAllocator);
       return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
    }
@@ -7644,7 +7750,8 @@ hk_deserialize_api_shader_inner(struct vk_device *vk_dev, struct blob_reader *bl
          return result;
       }
       obj->apple9_native = container_of(native, struct hk_api_shader, vk);
-      if (native->stage != stage || obj->apple9_native->apple9_deferred) {
+      if (native->stage != stage || obj->apple9_native->apple9_deferred ||
+          !obj->apple9_native->apple9_native_leaf) {
          hk_api_shader_destroy(vk_dev, &obj->vk, pAllocator);
          return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
       }
@@ -7688,6 +7795,10 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
    blob_write_uint32(blob, HK_SHADER_CONTAINER_VERSION);
    blob_write_uint8(blob, vk_shader->stage);
    blob_write_uint8(blob, obj->apple9_native_candidate);
+   blob_write_uint8(blob, obj->apple9_native_cull_primitive);
+   blob_write_uint8(blob, obj->apple9_native_leaf);
+   blob_write_bytes(blob, obj->apple9_native_pair_id,
+                    sizeof(obj->apple9_native_pair_id));
 
    const struct hk_apple9_deferred *d = obj->apple9_deferred;
    blob_write_uint8(blob, d != NULL);
@@ -7712,7 +7823,9 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
    blob_write_uint8(blob, obj->apple9_native != NULL);
    if (obj->apple9_native) {
       assert(!obj->apple9_native->apple9_native &&
-             !obj->apple9_native->apple9_deferred);
+             !obj->apple9_native->apple9_deferred &&
+             obj->apple9_native->apple9_native_leaf &&
+             !obj->apple9_native_leaf);
       hk_api_shader_serialize(vk_dev, &obj->apple9_native->vk, blob);
    }
 

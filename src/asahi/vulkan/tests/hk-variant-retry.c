@@ -38,7 +38,7 @@ resolve(void *data)
 {
    struct thread_data *t = data;
    struct hk_api_shader *out[HK_APPLE9_GFX_STAGES] = {0};
-   t->result = hk_apple9_resolve_graphics(t->dev, t->api, NULL, out);
+   t->result = hk_apple9_resolve_graphics(t->dev, t->api, NULL, out, false);
    return 0;
 }
 

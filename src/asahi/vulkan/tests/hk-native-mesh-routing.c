@@ -33,6 +33,10 @@ routes(struct hk_cmd_buffer *cmd)
                         *nf = shader(MESA_SHADER_FRAGMENT);
    mesh->apple9_native = nm;
    fs->apple9_native = nf;
+   nm->apple9_native_leaf = nf->apple9_native_leaf = true;
+   memset(nm->apple9_native_pair_id, 0x57, sizeof(nm->apple9_native_pair_id));
+   memcpy(nf->apple9_native_pair_id, nm->apple9_native_pair_id,
+          sizeof(nf->apple9_native_pair_id));
    nm->variants[HK_MESH_VARIANT_MAIN].info.apple9_native_stage =
       HK_APPLE9_NATIVE_MESH;
    gfx->shaders[MESA_SHADER_MESH] = mesh;
@@ -54,6 +58,17 @@ routes(struct hk_cmd_buffer *cmd)
    } while (0)
    FALLBACK(mesh->apple9_native, NULL);
    FALLBACK(fs->apple9_native, NULL);
+   FALLBACK(nf->apple9_native_pair_id[0], 0x35);
+   FALLBACK(nf->apple9_native_pair_id[31], 0x35);
+   FALLBACK(nf->apple9_native_leaf, false);
+   /* Deferred native variants are themselves leaves. Pairing is checked
+    * identically to the alternatives of an eagerly compiled pipeline. */
+   gfx->shaders[MESA_SHADER_MESH] = nm;
+   gfx->shaders[MESA_SHADER_FRAGMENT] = nf;
+   CHECK(hk_apple9_use_native_mesh(cmd, direct, 0));
+   FALLBACK(nf->apple9_native_pair_id[7], 0x35);
+   gfx->shaders[MESA_SHADER_MESH] = mesh;
+   gfx->shaders[MESA_SHADER_FRAGMENT] = fs;
    FALLBACK(gfx->shaders[MESA_SHADER_TASK], mesh);
    FALLBACK(gfx->shaders[MESA_SHADER_GEOMETRY], mesh);
    FALLBACK(gfx->shaders[MESA_SHADER_TESS_EVAL], mesh);
