@@ -457,6 +457,10 @@ struct hk_api_shader {
     */
    struct hk_apple9_deferred *apple9_deferred;
 
+   /* Immutable after compilation/cache reload; avoids walking variants at
+    * every shader bind, including shaders with no constant data. */
+   uint64_t constant_data_addr;
+
    struct hk_shader variants[];
 };
 
@@ -515,6 +519,32 @@ hk_only_variant(struct hk_api_shader *obj)
 
    assert(hk_num_variants(obj->vk.stage) == 1);
    return &obj->variants[0];
+}
+
+/* Large constants are extracted before variants are cloned or generated.
+ * Generated variants may not use them, but all original variants retain the
+ * same data layout. Any uploaded copy can serve the API stage's root slot.
+ */
+static inline void
+hk_api_shader_init_constant_data(struct hk_api_shader *shader)
+{
+   const struct hk_shader *data = NULL;
+   for (unsigned v = 0; v < hk_num_variants(shader->vk.stage); ++v) {
+      const struct hk_shader *s = &shader->variants[v];
+      if (!s->data_size)
+         continue;
+      assert(!data || (data->data_size == s->data_size &&
+                      !memcmp(data->data_ptr, s->data_ptr, s->data_size)));
+      if (!data)
+         data = s;
+   }
+   shader->constant_data_addr = data ? data->data_addr : 0;
+}
+
+static inline uint64_t
+hk_shader_constant_data(const struct hk_api_shader *shader)
+{
+   return shader ? shader->constant_data_addr : 0;
 }
 
 static struct hk_shader *
@@ -601,7 +631,8 @@ bool
 hk_nir_lower_descriptors(nir_shader *nir,
                          const struct vk_pipeline_robustness_state *rs,
                          uint32_t set_layout_count,
-                         struct vk_descriptor_set_layout *const *set_layouts);
+                         struct vk_descriptor_set_layout *const *set_layouts,
+                         bool root_uniform);
 
 VkResult hk_compile_shader(struct hk_device *dev,
                            struct vk_shader_compile_info *info,

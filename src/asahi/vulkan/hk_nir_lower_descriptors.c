@@ -25,6 +25,7 @@
 struct lower_descriptors_ctx {
    const struct hk_descriptor_set_layout *set_layouts[HK_MAX_SETS];
 
+   bool root_uniform;
    bool clamp_desc_array_bounds;
    nir_address_format ubo_addr_format;
    nir_address_format ssbo_addr_format;
@@ -66,21 +67,47 @@ lower_load_constant(nir_builder *b, nir_intrinsic_instr *load,
                     const struct lower_descriptors_ctx *ctx)
 {
    assert(load->intrinsic == nir_intrinsic_load_constant);
-   UNREACHABLE("todo: stick an address in the root descriptor or something");
-
-   uint32_t base = nir_intrinsic_base(load);
-   uint32_t range = nir_intrinsic_range(load);
-
    b->cursor = nir_before_instr(&load->instr);
 
-   nir_def *offset = nir_iadd_imm(b, load->src[0].ssa, base);
-   nir_def *data = nir_load_ubo(
-      b, load->def.num_components, load->def.bit_size, nir_imm_int(b, 0),
-      offset, .align_mul = nir_intrinsic_align_mul(load),
-      .align_offset = nir_intrinsic_align_offset(load), .range_base = base,
-      .range = range);
+   /* Extraction happens before stage emulation/cloning, so every variant
+    * addresses the same immutable data through its API stage's root slot.
+    */
+   unsigned slot = hk_root_descriptor_offset(constant_data) +
+                   b->shader->info.stage * sizeof(uint64_t);
+   /* G16 binds the root table as UBO 0, just as for descriptor-set roots.
+    * Read the pointer directly from that uniform binding instead of fetching
+    * the root address and then loading the pointer from global memory.
+    * The driver always uploads this root word, even when the shader does
+    * not enter the branch using its table, so fetching it can speculate.
+    */
+   nir_def *addr = ctx->root_uniform
+      ? nir_load_ubo(b, 1, 64, nir_imm_int(b, 0), nir_imm_int(b, slot),
+                     .align_mul = 8, .range_base = slot, .range = 8,
+                     .access = ACCESS_CAN_SPECULATE)
+      : load_root(b, 1, 64, nir_imm_int(b, slot), 8);
+   nir_def *offset = nir_iadd_imm(b, load->src[0].ssa,
+                                 nir_intrinsic_base(load));
 
-   nir_def_rewrite_uses(&load->def, data);
+   unsigned bytes = load->def.num_components * load->def.bit_size / 8;
+   assert(bytes <= b->shader->constant_data_size);
+   unsigned align = nir_intrinsic_align_mul(load);
+   unsigned align_offset = (nir_intrinsic_align_offset(load) +
+                            nir_intrinsic_base(load)) % align;
+   unsigned last = b->shader->constant_data_size - bytes;
+   assert(last >= align_offset);
+   last = align_offset + ((last - align_offset) & ~(align - 1));
+
+   /* An out-of-range constant array index is undefined, but must not fault
+    * or read outside the shader allocation. Preserve the load's alignment.
+    */
+   offset = nir_umin(b, offset, nir_imm_int(b, last));
+   nir_def *data = nir_load_global_constant(
+      b, load->def.num_components, load->def.bit_size,
+      nir_iadd(b, addr, nir_u2u64(b, offset)), .align_mul = align,
+      .align_offset = align_offset,
+      .access = ACCESS_CAN_SPECULATE | ACCESS_IN_BOUNDS);
+
+   nir_def_replace(&load->def, data);
 
    return true;
 }
@@ -1013,9 +1040,11 @@ bool
 hk_nir_lower_descriptors(nir_shader *nir,
                          const struct vk_pipeline_robustness_state *rs,
                          uint32_t set_layout_count,
-                         struct vk_descriptor_set_layout *const *set_layouts)
+                         struct vk_descriptor_set_layout *const *set_layouts,
+                         bool root_uniform)
 {
    struct lower_descriptors_ctx ctx = {
+      .root_uniform = root_uniform,
       .clamp_desc_array_bounds =
          rs->storage_buffers !=
             VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT ||

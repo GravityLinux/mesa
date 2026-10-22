@@ -140,14 +140,20 @@ struct hk_root_descriptor_table {
    /* Start index in dynamic_buffers where each set starts */
    uint8_t set_dynamic_buffer_start[HK_MAX_SETS];
 
-   /* Dynamic buffer bindings. Last, so that a root upload can stop after the
-    * slots in use, see hk_cmd_buffer_upload_root. */
+   /* Dynamic buffer bindings. Table-free roots stop after the slots in use. */
    struct hk_buffer_address dynamic_buffers[HK_MAX_DYNAMIC_BUFFERS];
+
+   /* Optional tail: read-only shader data, indexed by API stage (including
+    * emulated stages). Keeping it last preserves the existing layout and
+    * upload size of every program without constant tables, including those
+    * using dynamic descriptors.
+    */
+   uint64_t constant_data[MESA_SHADER_STAGES];
 };
 
 /* Bumped whenever hk_root_descriptor_table offsets change: compiled shaders
  * bake them, so pipeline and disk cache keys include it. */
-#define HK_ROOT_LAYOUT_VERSION 2
+#define HK_ROOT_LAYOUT_VERSION 4
 
 /* helper macro for computing root descriptor byte offsets */
 #define hk_root_descriptor_offset(member)                                      \
@@ -171,6 +177,8 @@ struct hk_descriptor_state {
    /* Dynamic buffer slots bound since the last reset: roots are uploaded up
     * to the end of these. */
    uint32_t root_dynamic_count;
+   /* Nonzero constant-data pointers, maintained on shader binds. */
+   uint32_t root_constant_stages;
 
    bool root_last_valid;
    uint32_t root_last_size;
@@ -190,6 +198,18 @@ struct hk_descriptor_state {
    struct hk_push_descriptor_set *push[HK_MAX_SETS];
    uint32_t push_dirty;
 };
+
+static inline size_t
+hk_descriptor_root_size(const struct hk_descriptor_state *desc)
+{
+   if (desc->root_constant_stages)
+      return hk_root_descriptor_offset(constant_data) +
+             util_last_bit(desc->root_constant_stages) * sizeof(uint64_t);
+
+   return hk_root_descriptor_offset(dynamic_buffers) +
+          desc->root_dynamic_count * sizeof(struct hk_buffer_address);
+}
+
 
 struct hk_attachment {
    VkFormat vk_format;
