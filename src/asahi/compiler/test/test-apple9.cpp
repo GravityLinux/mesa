@@ -9700,6 +9700,72 @@ TEST(Apple9Allocator, TexturePublicationsHaveIndependentStorageAndPendingLifetim
    }
 }
 
+/* A buffer's logical element count is not a 2D image's mip-level count.
+ * Lowering a buffer read through a physical 2D view must retain the former
+ * check, without introducing the latter. Normal image reads still need it. */
+TEST(Apple9Compiler, BufferFetchDoesNotReadImageLevelMetadata)
+{
+   for (bool buffer : {true, false}) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "buffer_fetch_bounds");
+      b.shader->info.num_ubos = 1;
+      nir_def *index = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0),
+         nir_imm_int(&b, 0), .align_mul = 4, .range = 4);
+      nir_tex_instr *tex = nir_tex_instr_create(b.shader, buffer ? 1 : 2);
+      tex->op = nir_texop_txf;
+      tex->sampler_dim = buffer ? GLSL_SAMPLER_DIM_BUF : GLSL_SAMPLER_DIM_2D;
+      tex->dest_type = nir_type_float32;
+      tex->coord_components = buffer ? 1 : 2;
+      tex->src[0].src_type = nir_tex_src_coord;
+      tex->src[0].src = nir_src_for_ssa(buffer ? index :
+         nir_vec2(&b, index, nir_imm_int(&b, 0)));
+      if (!buffer) {
+         tex->src[1].src_type = nir_tex_src_lod;
+         tex->src[1].src = nir_src_for_ssa(nir_imm_int(&b, 0));
+      }
+      nir_def_init(&tex->instr, &tex->def, 4, 32);
+      nir_builder_instr_insert(&b, &tex->instr);
+      nir_store_output(&b, &tex->def, nir_imm_int(&b, 0),
+         .write_mask = 15, .src_type = nir_type_float32,
+         .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+      b.shader->info.io_lowered = true;
+      agx_shader_part compiled = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason))
+         << (reason ?: "");
+
+      unsigned size_reads = 0, level_reads = 0;
+      nir_foreach_function_impl(impl, b.shader) {
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type != nir_instr_type_intrinsic)
+                  continue;
+               auto *intr = nir_instr_as_intrinsic(instr);
+               if (intr->intrinsic != nir_intrinsic_load_ubo ||
+                   !nir_src_is_const(intr->src[0]) ||
+                   nir_src_as_uint(intr->src[0]) != AGX_APPLE9_GRAPHICS_SYSVAL_BINDING ||
+                   !nir_src_is_const(intr->src[1]))
+                  continue;
+               unsigned start = nir_src_as_uint(intr->src[1]);
+               unsigned end = start + intr->def.num_components * 4;
+               unsigned size = AGX_APPLE9_TEXTURE_INFO_OFFSET;
+               unsigned levels = size + 3 * 4;
+               size_reads += start <= size && size < end;
+               level_reads += start <= levels && levels < end;
+            }
+         }
+      }
+      if (buffer) {
+         EXPECT_GT(size_reads, 0u);
+         EXPECT_EQ(level_reads, 0u);
+      } else {
+         EXPECT_GT(level_reads, 0u);
+      }
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
+}
+
 TEST(Apple9Compiler, TexelFetchUsesDynamicLodWithoutSamplerBinding)
 {
    for (unsigned kind = 0; kind < 3; ++kind)

@@ -9171,6 +9171,10 @@ apple9_fetch_buffer(nir_builder *b, const nir_tex_instr *orig, nir_def *index)
    tex->sampler_index = APPLE9_FETCH_SAMPLER;
    tex->dest_type = orig->dest_type;
    tex->coord_components = 2;
+   /* The caller bounds the logical buffer element before this physical 2D
+    * access. Buffer views have no image levels/layers/sample metadata; do not
+    * reinterpret that metadata when the ordinary image-fetch pass runs. */
+   tex->backend_flags |= AGX_APPLE9_TEXTURE_FETCH_BOUNDED;
    tex->src[0].src_type = nir_tex_src_coord;
    tex->src[0].src = nir_src_for_ssa(
       nir_vec2(b, nir_umod_imm(b, index, AGX_TEXTURE_BUFFER_WIDTH),
