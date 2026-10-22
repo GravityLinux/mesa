@@ -302,3 +302,334 @@ goes through normal selection and RA with physical T16 metadata and no spills.
 Disabled, invalid, variable and wider sizes reject. `--export <directory>`
 exports T1/T3/T16 plain and instrumented programs for hardware qualification;
 these test files do not add a driver asset-loading path.
+
+## native-coverage-plan
+
+**2026-10-22; project: `mesh-shaders-next-big-project`. Proposal only; awaiting
+the manager's go.** Start with emulation fallback and consistent API limits.
+Generalize the native implementation behind that fallback, one qualified
+capability at a time. Neither the current development limits nor the current
+native compiler justify default-on EXT mesh support.
+
+This section supersedes historical coverage/admission statements above only
+where explicitly stated. Its failure analysis pins installed Mesa
+`bcb0837f948a`, device runner report `a0b30cfd5b1`, and CTS
+`f6a29701220f34dd1407513bfe80d74ca7b392ce`. Source line numbers below refer to
+that Mesa revision, not the moving checkout. The
+[full-run report](../../../../../../results/mesh-cts-full-native/RESULTS.md),
+[case audit](research/native-coverage-20261022/CASE-AUDIT.tsv), and
+[reproducible summary](research/native-coverage-20261022/SUMMARY.json) are the
+evidence. The emulated comparison remains pending; no predicted pass gain below
+is a measured result.
+
+### Coverage and exact first rejections
+
+The native inventory contains 28,012 cases: **15 pass, 625 fail, 14,626 skip,
+2 aborted, 12,744 not run**. Only 15,266 completed. This is a partial full-list
+campaign, not a completed full suite. There were no designated expected
+failures, and repeat stability was not assessed. All 1,123 NV cases skipped.
+
+The audit joins every failed case by its full name to the original
+`CASE-RESULTS.json`. A host ARM/QEMU replay of the 545 feature-not-present
+cases uses the **exact unmodified installed ICD**, SHA256
+`907ced990a15920b38074b289c6fccafdc1cc2957529753e737564306c1aa5d5`, a no-op DRM
+shim, and a proxy that adds a debug messenger. This exposes the compiler's
+otherwise hidden rejection reason. It performs no GPU execution. The available
+host CTS binary differs from the device binary; all **109 distinct GLSL inputs
+and both assembly inputs** match original device shader-cache source keys.
+This corroborates the source-based diagnosis; it does not establish identical
+generated SPIR-V or new device outcomes. All 545 reproduce their Fail status.
+[Audit method and inputs](research/native-coverage-20261022/README.md).
+
+The following buckets are disjoint. Topology takes precedence within the
+combined shape gate; an actual count below a declared maximum does not bypass
+that gate.
+
+| First rejection | Cases | Exact source condition at the pinned revision |
+| --- | ---: | --- |
+| Larger triangle output declarations | **293** | `eligible()`, `agx_nir_apple9_mesh_native.c:18–24`: `max_vertices_out != 3 || max_primitives_out != 1`; returns `native mesh development class requires V3 P1 triangles without payload` |
+| Points | **29** | Same gate: `primitive_type != MESA_PRIM_TRIANGLES`; includes fifteen V1/P1 cases and fourteen larger declarations |
+| Lines | **6** | Same topology gate; two V2/P1 and four larger declarations |
+| Mesh payload declaration | **1** | Same gate: `nir->info.task_payload_size`; `misc.payload_not_accessed` is V3/P1 and has no API task stage |
+| Per-primitive user attributes | **27** | `varying_layout()`, same file:260–262: `layout->primitive_components || layout->culling`; message `native mesh primitive attributes/culling are not implemented`. These 27 are user-attribute cases, not measured culling failures |
+| Unsupported output builtins | **7** | `agx_nir_lower_apple9_mesh.c:229–233`: non-Position builtin below `VAR0`, except per-vertex PrimitiveID; message `Apple9 native output builtin is not implemented`. Layer: 4, authored PrimitiveID: 2, ViewportIndex: 1 |
+| Vertex attribute gate | **1** | `varying_layout():263–264`: more than four vertex components with attributes disabled; `misc.multiple_outputs_vertices` |
+| Indirect draws without count buffer | **61** | `hk_apple9_draw_mesh()`, `hk_cmd_draw.c:5388–5392`, `!direct`: 60 conditional-rendering cases plus `builtin.draw_index_in_mesh` |
+| Indirect draws with count buffer | **60** | Same compound rejection; `!direct` is already true, and `count_addr` also applies. All 60 are conditional-rendering cases |
+| Direct conditional draws | **60** | Same compound rejection, `hk_cond_render_applies(cmd)`; valid direct V3/P1 draws |
+| **FEATURE_NOT_PRESENT subtotal** | **545** | Compiler reasons are surfaced by `hk_shader.c:5993`; draw rejection by `hk_cmd_draw.c:5392` |
+| Output-component property assertion | **80** | `hk_physical_device.c:1877` advertises 4; CTS `vktMeshShaderInOutTestsEXT.cpp:628` fails `maxMeshOutputComponents too low`. No pipeline compiler rejection occurred |
+| **All failures** | **625** | Exactly the original inventory's failure count |
+
+The 293 triangle declarations are V96/P32:218, V4/P2:39, V256/P256:11,
+V6/P4:9, V192/P64:8, V24/P8:3, V256/P254:3, and V3/P4:2. Thus the large API
+draw group is already blocked at shader compilation: its 218 cases include
+48 indirect, 160 indirect-count and 10 direct variants. Those 208 indirect
+cases are **latent draw restrictions**, not additional first-rejection counts.
+Similarly, conditional rendering appears in 180 failures, but 120 first hit
+`!direct`. Fixing a first rejection alone does not guarantee a pass.
+
+The original API-error tally reconciles exactly:
+
+| Reported failure location | Compiler rejection | Draw rejection | Total |
+| --- | ---: | ---: | ---: |
+| `createGraphicsPipelines` | 265 shape + 27 primitive + 3 builtin + 1 attributes | 0 | **296** |
+| Pipeline construction (`retcode`) | 19 shape + 4 builtin | 0 | **23** |
+| `endCommandBuffer` | **45 shape**, compiled through deferred linking | **181** | **226** |
+
+In particular, all 226 end-command-buffer failures must not be attributed to
+draw support. The replay has 590 diagnostic messages because those 45 deferred
+compiler errors also produce a command-buffer error; the audit counts cases.
+
+Feature checks hide further coverage. Counts here use the **recorded first
+skip reason**, not guessed capability combinations:
+
+| Feature/category | FNP first rejections | Recorded skips | Exact current gate |
+| --- | ---: | ---: | --- |
+| API task shaders | 0; the separate mesh-payload failure above is 1 | **7,054** | `hk_physical_device.c:1749`, `taskShader = !native`; compiler additionally rejects any task stage at `hk_shader.c:6061–6067` |
+| Mesh queries | 0 | **6,168** | `meshShaderQueries = !native`, `hk_physical_device.c:1751`. The one failing `query.no_queries.lines...` case is in the line bucket and has no query |
+| Mesh multiview | 0 | **28** | `multiviewMeshShader = !native`, `hk_physical_device.c:1750`; `gfx->render.view_mask` also rejects at draw time |
+| Other requirements | — | **1,376** | 1,123 NV; 120 float64; 80 16-bit storage IO; 24 device-address commands; 15 fragment-shading-rate requirements; 14 output-count/workgroup property requirements |
+| **All skips** | — | **14,626** | Exact detailed reasons are retained in `SUMMARY.json` |
+
+No rejection category is inferred for the 12,744 unstarted cases. Many have
+multiple requirements; enabling task/query/multiview features can reveal new
+failures and skips. These skip counts are opportunity sizes, not pass forecasts.
+
+The two aborted property tests are separate from all these totals. The
+48-byte output limit and four-component limit underflow CTS's unsigned
+96-point output-size calculation: it logs 2,796,200 locations and
+4,294,966,272 output bytes, then exhausts host memory. The
+[OOM analysis](../../../../../../results/mesh-cts-full-native/OOM-ANALYSIS.json)
+pins the arithmetic and source. This is an API-limit defect; neither a native
+GPU fault nor an emulated pass was established.
+
+### Evaluate fallback first
+
+**Recommended first implementation: compile an emulated path for every valid
+mesh pipeline, optionally add a native path, and choose a compatible path
+before recording each draw.** Shader capability decides whether a native
+variant can exist; draw state decides whether it can be used. Keeping only a
+native variant for an eligible shader leaves the 181 draw failures unresolved.
+
+This reuses working mechanisms already in Honeykrisp. The emulated path in
+`hk_apple9_compile_mesh()` produces compute mesh plus rasterization programs;
+`hk_apple9_draw_mesh()` handles GPU draw arguments, count buffers, predicates,
+task work, per-view replay and query accounting. No new U encoding or native
+task/primitive-record contract is needed to retain those capabilities.
+
+Concrete work and constraints:
+
+1. Introduce a typed capability result for native compilation, with a reason
+   recorded in debug/performance diagnostics. Test the shader **and linked
+   fragment interface**, shared/output allocation, subgroup and scratch needs.
+   Use unmodified NIR or clones before path-specific preprocessing: native
+   lowering mutates NIR before several rejection sites. Unsupported native
+   capability selects emulation; invalid shaders, OOM and internal compiler
+   errors retain their real error semantics.
+2. Replace the variant-slot alias: `HK_MESH_VARIANT_OBJECT` currently aliases
+   `HK_MESH_VARIANT_RAST` (`hk_shader.h:370–381`). A hybrid object needs distinct
+   emulated main/raster and native mesh/object ownership, cleanup, serialization
+   and BO retention. Compile the emulated path eagerly; compile the optional
+   native path eagerly initially so late recording cannot discover a missing
+   fallback. Measure compilation/memory cost before adding lazy optimization.
+3. Make routing and fragment lowering follow the linked path, not environment
+   globals. `hk_lower_per_primitive_input()` and preprocessing at
+   `hk_shader.c:3991–3998` currently assume no emulated fallback under the native
+   gate. Native flat channels and emulated record loads need separate compatible
+   fragment/link variants. Include the path, interface and ABI in pipeline,
+   library, shader-object, deferred-link and disk-cache identities. Preserve an
+   unlowered source representation for separately linked stages.
+4. Select the route after resolving the required shader capabilities but before
+   path-specific preparation, heap work or command emission. Emulate API task
+   stages, indirect/count draws, applicable predicates, active mesh queries,
+   multiview, unsupported output/state, oversized grids and scratch needs.
+   Handle secondary-command inheritance and dynamic state at their actual
+   resolution point. Reading a GPU predicate or indirect buffer on the CPU is
+   not an acceptable substitute.
+5. Handle **stream transitions**, including ordinary VS draws and meta work.
+   `hk_cmd_apple9.c:717–725` rejects a second draw after a native stream and
+   native insertion after existing commands; native additionally requires one
+   sample and one layer. Reuse the existing partial-render store/reload and
+   `HK_CS_END_RENDER_SPLIT` machinery to isolate native work, with correct
+   attachment, synchronization and query semantics. A later emulated draw
+   cannot undo a native packet already recorded. Until splitting is qualified,
+   any context without a proven safe transition must stay entirely emulated;
+   shader-only fallback is not a default-on milestone.
+6. Keep the native opt-in and explicitly paired kernel requirement while the
+   hybrid route is validated. Kernel parsing/admission/retirement remain kernel
+   responsibilities. This proposal adds no kernel UAPI field or userspace
+   allocation replay. Emulation-only remains the control path.
+
+Estimated first milestone: **6–10 engineering days for routing, variant/cache
+ownership and stream integration, plus 2–4 days of focused device validation**.
+That estimate assumes the existing partial-render machinery can preserve all
+required transitions; a failing transition is a real dependency, not a reason
+to suppress a feature. No new ISA discovery is expected. Stream/query/render
+integration needs hardware validation. A compiler-only prototype is about
+2–3 days but does not meet the coverage goal and should not be shipped as such.
+
+The routing changes address the admission causes behind all 545 FNP failures;
+consistent properties address the 80 limit failures and the OOM trigger.
+They also allow task/query/multiview feature exposure to remain aligned with
+emulation. **This is a coverage target, not a claim of 625 recovered passes.**
+The pending baseline determines which tests already fail in emulation, and
+restored properties change the shaders some CTS property tests generate.
+
+### Advertised limits and features
+
+Keep the existing emulated properties as the public contract of the hybrid
+driver; native limits become internal routing predicates. Do not merely change
+48 to 32,768 while continuing to reject valid larger shaders. The key proposed
+values and required minima are:
+
+| Property suffix (`maxMesh...` unless noted) | Current native gate | Vulkan minimum | Proposed hybrid |
+| --- | ---: | ---: | ---: |
+| `WorkGroupTotalCount` | 1,048,575 | 4,194,304 | 4,194,304 |
+| `WorkGroupCount`, each dimension | 65,535 | 65,535 | 65,535 |
+| `WorkGroupInvocations` / `WorkGroupSize`, each dimension | 128 / 128 | 128 / 128 | 128 / 128 |
+| `SharedMemorySize` / `PayloadAndSharedMemorySize` | 28,672 / 28,672 | 28,672 / 28,672 | 32,768 / 32,768 |
+| `OutputMemorySize` | 48 | 32,768 | 32,768 |
+| `PayloadAndOutputMemorySize` | 48,128 | 48,128 | 48,128 |
+| `OutputComponents` | 4 | 128 | 128 |
+| `OutputVertices` / `OutputPrimitives` | 3 / 1 | 256 / 256 | 256 / 256 |
+| `OutputLayers` | 1 | 8 | 8 |
+| `MultiviewViewCount` | 1 | 1 | `min(core maxMultiviewViewCount, 16)` |
+| `maxTaskPayloadSize` (task enabled) | 0 | 16,384 | 16,384 |
+| Task shared / payload+shared (task enabled) | 32,768 / 32,768 | 32,768 / 32,768 | 32,768 / 32,768 |
+
+Minimum column: [Khronos Vulkan limits table](https://docs.vulkan.org/spec/latest/chapters/limits.html#limits-minmax).
+Current/proposed columns: `hk_physical_device.c:1816–1882` and
+`HK_APPLE9_NATIVE_MAX_GROUP_TOTAL`. Task grid/workgroup bounds retain the
+existing emulated values, equal to the mesh grid/workgroup minima above.
+Keep existing output granularities at one and recheck all related properties
+together. Independent maxima do not promise their unrestricted cross-product.
+
+Retain `taskShader`, `meshShaderQueries` and `multiviewMeshShader` at the
+emulation-supported values once every corresponding draw reliably routes to
+emulation. Do not enable unrelated float64, 16-bit IO, NV mesh or shading-rate
+features to reduce skip counts. Native output planes plus header/alignment and
+user shared memory must fit the real native allocation; spills/unsupported
+frames select emulation. A legal API output-memory size is not the same as
+native local-allocation bytes. Public limits must be backed by an executable
+path for every legal combination under those limits.
+
+Until fallback is implemented and validated, keep native as explicit research
+opt-in. It cannot satisfy the requested minima alone. There is no honest
+property-only fix that makes the current native class conformant.
+
+### Native generalization: hardware needs, research and effort
+
+Estimates below are **one experienced engineer's implementation days after the
+necessary hardware facts are known**, with a separate initial research budget.
+Research budgets are bounded first investigations, not promises that unknown
+contracts will be solved. Rows share work and should not be summed as a schedule.
+Every expansion needs focused paired device tests after authorization.
+
+The common invariant is the authored U model: U0 accepts count/control inputs;
+U1–U4 publish Position channels for the small class; U5 publishes the scalar
+vertex count with an explicit second word of zero. Larger interfaces require
+more channel submissions, so “U0–U5” is a reference class, not a six-instruction
+template. The [fixed producer model](README.apple9-u0-producer.md) keeps one U0
+outside loops, canonical completion selector 1 with alternative selector 2,
+and correct waits before consumers. Do not implement larger outputs by
+repeating U0; even fully waited repetition timed out.
+
+The completed [r8 report](../../../../../../results/mesh-u0-r8-v2/RESULTS.md)
+finds bit44/bit42 coupling: no bit44-off form qualifies both N1 and N32, and
+the canonical on form retains M00 failure and M01/M02 rescue. Keep the current
+on-form producer/wait contract. Bit44 is not proven to be a universal output
+enable, and token absence/multiplicity remains unresolved. Neither r8 nor the
+existing V3/P1 tests establish arbitrary output or task contracts.
+
+| Category / measured coverage | Required native work from existing evidence | More device research? | Implementation / initial research |
+| --- | --- | --- | --- |
+| **Triangle shapes: 293** | Generalize declaration eligibility, index/count layout, state and output allocation. Publish actual runtime counts; distribute channel work over all emitted vertices, including counts above T16/T32, without repeating U0. Verify primitive-index range, masks, empty counts and U5's second word at larger counts. | **Yes.** H1 capacity arms qualify V64/V128 and P32/P64 declarations but emit only V3/P1 through a research adapter. They do not qualify full-capacity native output. Start authored V4/P2, then shared vertices and boundary V/P counts, before V256/P256. | **5–8 d / 3–8 d** |
+| **Vertex attributes: 1 direct gate failure; prerequisite for many shape cases** | Reuse existing component-plane layout, ordinary interpolation grouping, U channels, fragment linker and PPP; make capability automatic rather than a separate global attribute gate. Check capacity, sparse components, interpolation, provoking vertex and register pressure. | **Qualification, mainly.** Existing attribute/per-primitive paired evidence covers a small class, not all 128-component/large-output combinations. Combined output/shared limits and spills still need coverage. | **2–4 d / 1–3 d** |
+| **Per-primitive data: 27; PrimitiveID: 2** | The qualified P1 lowering broadcasts primitive values through flat vertex channels. For arbitrary P, a shared vertex can belong to primitives with different values, so P1 broadcast cannot generalize unchanged. Establish primitive record stride/address publication and fragment coefficient link, or evaluate a semantic vertex-duplication lowering with explicit capacity fallback. | **Yes for general P.** DATA storage/stride and individual channel encodings are known, but the live local-linking-plane → coefficient → owned-record-address relation is not. Capture that relation for two strides and a nonzero primitive index. | **4–7 d / 4–10 d**; bounded P1 path audit **1–2 d** |
+| **Layer: 4; ViewportIndex: 1; other output builtins latent** | Model per-primitive control fields in the local/header layout and publication; connect layer/viewport selection and multi-layer state. Add proper clip/cull-distance transport where required. | **Yes.** Own-MSL body stores establish packed control inputs, not completion consumption. Need distinguishing layer/viewport captures and exact pixels. | **3–5 d / 2–5 d** |
+| **Points: 29** | Add point topology to local index/control layout and native state; qualify PointSize, clipping and one-index primitive publication. Current triangle lowering deliberately drops PointSize. | **Yes.** Triangle U0/U5 evidence and a generic body layout are insufficient to establish point submission. | **2–4 d / 2–4 d** |
+| **Lines: 6** | Add two-index primitives, line state, widths/raster modes, clipping and primitive attributes; qualify output-count/control interpretation. | **Yes.** Start isolated one-line and two-line authored outputs with CPU references. | **2–4 d / 2–4 d** |
+| **CullPrimitive: 0 first failures, latent under shape/feature gates** | Retain qualified P1 degenerate-index lowering only for filled, nonconservative triangles. General culling needs correct primitive compaction/index/count semantics, or established native mode-1 operand semantics; preserve user primitive data and query counts. | **Yes for general native cull.** Mode-1 encoding alone is not a semantic contract. The nine paired P1 arms, including untaken cull, passed; they do not qualify other topologies or general P. | **3–5 d / 3–6 d** |
+| **Indirect/count: 121 first failures, 208 latent API cases** | Let authored object code read GPU grid/count arguments, preserve draw ID, count clamping/stride and memory dependencies. A zero child grid needs a qualified object completion/retirement path; repeated indirect draws also need stream isolation. U completion per child remains unchanged. | **Yes.** Nonzero direct child grids are qualified; zero-grid object launch, false count and multi-draw behavior are not. No CPU readback fallback. | **3–5 d / 2–4 d** |
+| **Conditional: 60 first failures, 180 total affected cases** | Predicate GPU-side grid publication, including inverted/offset predicates and secondary inheritance. False predicate must skip task/mesh side effects and retire the object correctly. Share the zero-grid work above. | **Yes**, primarily the same zero-grid/retirement discriminator. | **1–2 d / 1–2 d**, incremental after indirect work |
+| **Multiview: 28 skips** | Begin with existing per-view replay: correct ViewIndex, masks/layers, view-dependent mesh/task execution and fragment linkage, one qualified native stream at a time. U output publication is still per generated view. | **Yes**, especially layered state, attachment preservation and query semantics. Single-view child grids do not cover it. | **2–4 d / 1–3 d**, after layer/stream work |
+| **Task/payload: 7,054 skips plus 1 payload rejection** | Replace generated taskless object with generalized task NIR; preserve API workgroup/shared/subgroup semantics, payload ownership and child visibility, launch counts/IDs and zero-child completion. Extend the collective-call ABI only with qualified liveness/clobber/frame behavior. | **Substantial.** Present object evidence is one T16 parent, limited callee and no API payload. Multiple parents, payload lifetimes, returned-atomic/scratch frames and calls with live values are unqualified. Use emulation until these are established. | **7–12 d / 5–15 d**, open-ended beyond first tranche |
+| **Queries: 6,168 skips** | Initially route query-active draws to emulation. For native, add semantic task/mesh invocation and generated-primitive accounting with correct reset/availability, conditional/indirect/multiview behavior and ordering. Shader counters may reuse normal atomics after verifying exact API semantics; opaque hardware counters are unnecessary if software accounting is exact. | **Yes**, for counts/visibility and integration, usually not new U encoding. Do not infer generated-primitive count from visible pixels or local snapshot counts. | **2–4 d / 1–3 d** |
+| **Limits: 80 failures, 2 aborted; grid/shared/state restrictions latent** | Hybrid routing supplies the public limits first. Native growth must separately validate allocation/header overhead, larger actual outputs, maximum legal grids, shared combinations, frame/scratch and attachment classes. The current native total-grid cap is also below minimum. | **Yes** for each expanded native resource class. Passing a declared-capacity arm is not a maximum-resource qualification. | **1–2 d property/routing audit** included in fallback; broader work in the rows above |
+
+Evidence boundaries: the
+[capacity result](../../../../H1-CAPACITY-HARDWARE-STATUS-20261019.md)
+is explicitly declared-capacity-only; the
+[per-primitive result](../../../../../../results/mesh-cts-second/RESULTS.md#per-primitive)
+has nine passing paired arms and a closing control; the
+[NumWorkGroups result](../../../../gate-lift-stack-20261022/device-results.md)
+has 32 focused CTS passes plus authored N32/XYZ checks with one object parent.
+These are different pinned payloads/campaigns. Their passes are not additions
+to the 15 passes of the full inventory.
+
+Additional native rejection sites have **zero observed first failures in this
+campaign**, not proof of support: fixed subgroup/workgroup constraints;
+nonconstant IO slots, non-32-bit outputs and unsupported output loads;
+native combined-memory/frame admission; builtin clipping state;
+non-fill/conservative cull state; multisampling/layer count; and mixed/multiple
+draw streams. `hk_apple9_prepare_native_mesh()`, the native metadata validators,
+`hk_cmd_apple9.c:567–575,717–725,1081`, and the lowerer's reason strings must all
+feed the routing predicate. Capacity/unsupported-state fallback must happen
+before native packets are emitted, rather than catching a poisoned command
+buffer afterward.
+
+### Recommended order and acceptance gates
+
+1. **Restore API coverage with hybrid fallback and consistent properties.**
+   Incorporate the pending emulated baseline; build the variant/link/cache and
+   draw/stream routing above. This attacks all observed admission failures and
+   the three large feature-skip groups without waiting on new native hardware
+   contracts. Validate property arithmetic on the host before rerunning the
+   formerly OOMing cases. Do not run another native full sweep with the current
+   48-byte/four-component properties.
+2. **Promote the already understood small native class.** Requalify it with
+   the accepted producer model, attributes and bounded P1 primitive lowering,
+   including native → emulated → native and ordinary graphics transitions.
+   Leave unsupported combinations on emulation. This is a small native
+   coverage gain but tests the hybrid architecture and reuses existing evidence.
+3. **General triangle outputs plus vertex attributes, then primitive data.**
+   V4/P2 reaches 39 currently blocked declarations; broader shapes reach the
+   218 V96/P32 API shaders and other meshlet-sized interfaces. Attributes and
+   per-primitive values are prerequisites, so a shape-only patch is not a
+   promised gain of 293 passes. This is the strongest likely game-relevant
+   native expansion; actual game benefit needs application measurements.
+4. **Indirect/count plus conditional execution and query accounting.**
+   Share zero-child and stream work. Emulation already supplies coverage after
+   step 1; native promotion reduces fallback for GPU-driven dispatch. Query
+   support is comparatively inexpensive if semantic counters suffice.
+5. **Layer/viewport and per-view replay, points and lines.** Promote by measured
+   workload demand. Points/lines cover 35 first failures and unblock property
+   stress; they matter for correctness but are a smaller observed native
+   coverage opportunity than larger triangle interfaces.
+6. **General API task shaders and payloads.** Their 7,054 skips make fallback
+   urgent, but not native task implementation the cheapest first project.
+   Start native task research after child output/retirement and stream rules
+   are stable. Prioritize it earlier only if application profiles show task
+   emulation dominating runtime.
+
+After go, use focused tests for each change: host property checks, capability
+classification and NIR/cache round trips; then paired device tests for each
+first-rejection bucket, direct/indirect/count/conditional routes, task payload,
+queries, multiview and stream transitions. Include larger legal declarations
+with small and maximum actual outputs, empty outputs, shared-memory pressure,
+and attachment preservation. Verify route diagnostics so a passing emulated
+draw is never reported as a native pass. Compare candidate and emulation using
+identical CTS, kernel, libraries, properties and compression defaults.
+
+The acceptance criterion is **no new failures against the measured emulated
+baseline**, stable behavior of the promoted native subset, and no unbacked
+advertised limits/features. Keep failures, skips, expected failures, mixed
+outcomes and not-run cases separate. A full CTS run waits for an explicitly
+authorized/overnight slot after focused coverage passes; game testing uses
+native applications or the separately authorized native FEX setup, not muvm.
+Default-on additionally requires ordinary production-kernel integration and
+qualification; a successful hybrid research opt-in is not that decision.
+
+This plan changed documentation and host analysis artifacts only. No fallback,
+limit, feature, compiler, kernel or device changes were made for this request.
