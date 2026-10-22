@@ -633,3 +633,36 @@ qualification; a successful hybrid research opt-in is not that decision.
 
 This plan changed documentation and host analysis artifacts only. No fallback,
 limit, feature, compiler, kernel or device changes were made for this request.
+
+## native-hybrid
+
+**2026-10-22, manager GO (18:0x).** Implementation branch
+`apple9/native-mesh-hybrid` starts at integration-next `bcb0837f948a`; the
+approved coverage plan is retained as `4327e79d9a7` (from `104134ce422`).
+The goals are no mesh-group CTS regressions against the measured emulated
+baseline and native execution whenever the shader and draw contract allow it.
+Native remains default-off through the full-group comparison.
+
+Milestones:
+
+1. **Pipeline capability and path ownership.** Classify native incompatibility
+   before deferred linking, keep fragment lowering paired with the mesh path,
+   and preserve independently owned native and emulated programs. The 45 known
+   deferred shape failures must be classified at pipeline creation and routed
+   to emulation, rather than become command-buffer errors.
+2. **Draw selection, stream transitions and public properties.** Select the
+   usable path before emitting work, preserve attachments and ordering across
+   native/ordinary streams, and retain emulation's limits and features.
+3. **Coverage qualification.** Host route/link/cache checks and the full pinned
+   rejection inventory precede device validation against the device runner's fixed
+   full-group runner and emulated baseline. The manager schedules device slots;
+   they use knob revision 2, selecting mode through debugfs.
+
+Each compiler/driver milestone goes to compiler review. Harness-only
+changes do not. Commit locally as work progresses; no installation or push is
+part of these milestones. Device runs are requested only with a concrete,
+reviewed candidate and host evidence.
+
+Status: implementation started; no milestone has passed review or device
+validation yet. The shape rejections will select a valid emulated pipeline;
+they are not converted into new pipeline-creation errors for valid shaders.
