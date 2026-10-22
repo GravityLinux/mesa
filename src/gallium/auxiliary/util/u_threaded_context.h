@@ -514,7 +514,9 @@ tc_renderpass_info_reset(struct tc_renderpass_info *info)
     * all remaining depth/stencil writes. A driver split must discard clear
     * and invalidate hints, but need not invent a depth/stencil write. Keep
     * the conservative fallback if recording was only signalled to unblock
-    * the driver and future calls are not known yet.
+    * the driver and future calls are not known yet. Drivers must execute
+    * recorded full clears before splitting and resetting this info: Zink
+    * consumes them as a CLEAR loadOp at begin or as an in-pass clear.
     */
    bool complete = info->ended;
    bool zsbuf_clear_partial = info->zsbuf_clear_partial;

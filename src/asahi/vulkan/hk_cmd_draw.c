@@ -547,7 +547,8 @@ hk_pack_zls_control(struct agx_zls_control_packed *packed,
    if (z) {
       zls.z_store = z->storeOp == VK_ATTACHMENT_STORE_OP_STORE ||
                     z->resolveMode != VK_RESOLVE_MODE_NONE || !last;
-      if (last && vk_image_layout_is_read_only(z->imageLayout,
+      if (last && z->loadOp != VK_ATTACHMENT_LOAD_OP_CLEAR &&
+          vk_image_layout_is_read_only(z->imageLayout,
                                                VK_IMAGE_ASPECT_DEPTH_BIT))
          zls.z_store = false;
 
@@ -558,7 +559,8 @@ hk_pack_zls_control(struct agx_zls_control_packed *packed,
    if (s) {
       zls.s_store = s->storeOp == VK_ATTACHMENT_STORE_OP_STORE ||
                     s->resolveMode != VK_RESOLVE_MODE_NONE || !last;
-      if (last && vk_image_layout_is_read_only(s->imageLayout,
+      if (last && s->loadOp != VK_ATTACHMENT_LOAD_OP_CLEAR &&
+          vk_image_layout_is_read_only(s->imageLayout,
                                                VK_IMAGE_ASPECT_STENCIL_BIT))
          zls.s_store = false;
 

@@ -1410,9 +1410,13 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
       .EXT_shader_subgroup_vote = true,
       .VALVE_mutable_descriptor_type = true,
       .KHR_shader_relaxed_extended_instruction = true,
-      /* GENERAL is as fast as any layout: hk keeps no layout-dependent
-       * state, and feedback comes from the feedback loop state (see
-       * hk_attachment_may_be_sampled). */
+      /* GENERAL remains correct and uses the same path as before. Explicit
+       * read-only depth/stencil layouts additionally allow store elision,
+       * render merging and barrier hoisting. GENERAL-layout clients such as
+       * DXVK/vkd3d with unified layouts do not get those read-only shortcuts.
+       * Feedback comes from the feedback loop state (see
+       * hk_attachment_may_be_sampled).
+       */
       .KHR_unified_image_layouts = true,
       .KHR_shader_subgroup_uniform_control_flow = true,
       .EXT_attachment_feedback_loop_layout = true,
