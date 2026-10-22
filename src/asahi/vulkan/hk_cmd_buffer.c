@@ -832,7 +832,7 @@ hk_render_merge_image_barrier(struct hk_cmd_buffer *cmd, VkPipelineStageFlags2 s
         VK_PIPELINE_STAGE_2_CONDITIONAL_RENDERING_BIT_EXT);
    if (hk_merge_expand_stages(src, true) & shaders)
       return false;
-   for (unsigned i = 0; i < cmd->merge_key.color_count; ++i) {
+   for (unsigned i = 0; i < HK_MAX_RTS + 2; ++i) {
       const struct vk_image *target = cmd->merge_key.image[i];
       if (!target)
          continue;
@@ -868,11 +868,17 @@ hk_cmd_sync_barrier(struct hk_cmd_buffer *cmd,
       const VkPipelineStageFlags2 xsrc = hk_merge_expand_stages(src, true);
       const VkPipelineStageFlags2 xdst = hk_merge_expand_stages(dst, false);
       bool image_barrier = false, unrelated = false;
-      if ((!cmd->in_meta &&
+      /* Depth/stencil input attachments are not read from the tilebuffer.
+       * They need the preceding render's stored image, not an in-tile order.
+       */
+      bool ds_input = (cmd->merge_key.image[HK_MAX_RTS] ||
+                       cmd->merge_key.image[HK_MAX_RTS + 1]) &&
+                      (dst_access & VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT);
+      if (!ds_input && ((!cmd->in_meta &&
            hk_render_merge_barrier(src, dst, src_access, dst_access)) ||
           (image_barrier = hk_render_merge_image_barrier(cmd, src)) ||
           (unrelated = hk_render_merge_move_enabled() && !cmd->in_meta &&
-                       !(xsrc & cmd->merge_reach))) {
+                       !(xsrc & cmd->merge_reach)))) {
          cmd->merge_cs->merge_hoisted |= image_barrier;
          if (image_barrier)
             perf_debug(cmd, "Hoisting an image barrier ahead of the open render");

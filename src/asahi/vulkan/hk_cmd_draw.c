@@ -560,7 +560,7 @@ hk_pack_zls_control(struct agx_zls_control_packed *packed,
                    incomplete_render_area;
    }
 
-   /* A continued suspend/resume chain loads as its first render pass did. */
+   /* A merged or suspend/resume chain loads as its first render pass did. */
    if (chain_load && !partial_render) {
       zls.z_load = z && chain_load[0];
       zls.s_load = s && chain_load[1];
@@ -574,8 +574,8 @@ hk_pack_zls_control(struct agx_zls_control_packed *packed,
  * separates them and both use the same colour attachments. The render covers
  * the whole attachment whatever the render area, and tiles keep their
  * contents between the passes, which satisfies the second pass's load.
- * Depth/stencil passes are not merged: their ZLS control mixes the first
- * pass's loads with the last pass's stores.
+ * Depth/stencil views and render areas must also match. As with suspend/resume,
+ * keep the first pass's ZLS loads and the final pass's stores.
  */
 /* Whether the render pass's draws may read this attachment other than as an
  * attachment (render->feedback). A written attachment may be read so only
@@ -611,18 +611,19 @@ hk_render_merge_enabled(struct hk_cmd_buffer *cmd)
           cmd->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY && !cmd->in_meta;
 }
 
-/* Key a render pass that may merge, from its colour views, or return false.
+/* Key a render pass that may merge, from its attachment views, or return false.
  * The caller checks load and store operations.
  */
-static bool
-hk_render_merge_key(struct hk_render_merge_key *key, VkRenderingFlags flags,
+bool
+hk_render_merge_key_init(struct hk_render_merge_key *key, VkRenderingFlags flags,
                     uint32_t layer_count, uint32_t view_mask,
                     uint32_t color_count, struct hk_image_view *const *views,
-                    bool depth_stencil)
+                    struct hk_image_view *depth, struct hk_image_view *stencil,
+                    VkRect2D area)
 {
    if ((flags & (VK_RENDERING_SUSPENDING_BIT | VK_RENDERING_RESUMING_BIT |
                  VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT)) ||
-       depth_stencil || !color_count || color_count > HK_MAX_RTS)
+       !color_count || color_count > HK_MAX_RTS)
       return false;
    /* Merged multiview renders fail multiview.readback_implicit_clear 8_1_1_8
     * (cause not understood yet); keep multiview renders separate. */
@@ -633,8 +634,11 @@ hk_render_merge_key(struct hk_render_merge_key *key, VkRenderingFlags flags,
    key->color_count = color_count;
    key->layer_count = layer_count;
    key->view_mask = view_mask;
-   for (unsigned i = 0; i < color_count; ++i) {
-      const struct hk_image_view *view = views[i];
+   if (depth || stencil)
+      key->ds_area = area;
+   for (unsigned i = 0; i < HK_MAX_RTS + 2; ++i) {
+      const struct hk_image_view *view = i == HK_MAX_RTS ? depth :
+         i == HK_MAX_RTS + 1 ? stencil : i < color_count ? views[i] : NULL;
       if (view) {
          key->image[i] = view->vk.image;
          key->level[i] = view->vk.base_mip_level;
@@ -650,10 +654,22 @@ hk_render_merge_begin(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
 {
    struct hk_image_view *views[HK_MAX_RTS] = {NULL};
    struct hk_render_merge_key key;
-   bool depth_stencil = (info->pDepthAttachment &&
-                         info->pDepthAttachment->imageView) ||
-                        (info->pStencilAttachment &&
-                         info->pStencilAttachment->imageView);
+   const VkRenderingAttachmentInfo *ds[2] = {
+      info->pDepthAttachment, info->pStencilAttachment};
+   struct hk_image_view *ds_views[2] = {NULL};
+   uint8_t ds_store_mask = 0;
+   for (unsigned i = 0; i < 2; ++i) {
+      if (!ds[i] || !ds[i]->imageView)
+         continue;
+      if (ds[i]->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ||
+          ds[i]->resolveMode != VK_RESOLVE_MODE_NONE)
+         return false;
+      ds_views[i] = hk_image_view_from_handle(ds[i]->imageView);
+      if (is_attachment_stored(ds[i]))
+         ds_store_mask |= BITFIELD_BIT(i);
+   }
+   if (cmd->merge_ds_store_mask & ~ds_store_mask)
+      return false;
 
    uint32_t store_mask = 0;
    for (unsigned i = 0; i < MIN2(info->colorAttachmentCount, HK_MAX_RTS); ++i) {
@@ -674,9 +690,9 @@ hk_render_merge_begin(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
    }
 
    return hk_render_merge_enabled(cmd) &&
-          hk_render_merge_key(&key, info->flags, info->layerCount,
+          hk_render_merge_key_init(&key, info->flags, info->layerCount,
                               info->viewMask, info->colorAttachmentCount, views,
-                              depth_stencil) &&
+                              ds_views[0], ds_views[1], info->renderArea) &&
           !memcmp(&key, &cmd->merge_key, sizeof(key));
 }
 
@@ -717,13 +733,17 @@ hk_render_merge_end(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
       views[i] = render->color_att[i].iview;
    }
 
+   if (render->depth_att.resolve_mode != VK_RESOLVE_MODE_NONE ||
+       render->stencil_att.resolve_mode != VK_RESOLVE_MODE_NONE)
+      return false;
+
    /* A render pass that resumed in its render ends it like any other. */
-   return hk_render_merge_key(
+   return hk_render_merge_key_init(
       &cmd->merge_key,
       render->flags & ~(render->resumed ? VK_RENDERING_RESUMING_BIT : 0),
       render->layer_count, render->view_mask,
       render->color_att_count, views,
-      render->depth_att.iview || render->stencil_att.iview);
+      render->depth_att.iview, render->stencil_att.iview, render->area);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -766,6 +786,12 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       if (pRenderingInfo->pColorAttachments[i].imageView &&
           is_attachment_stored(&pRenderingInfo->pColorAttachments[i]))
          render->store_mask |= BITFIELD_BIT(i);
+   }
+   const VkRenderingAttachmentInfo *ds[2] = {
+      pRenderingInfo->pDepthAttachment, pRenderingInfo->pStencilAttachment};
+   for (unsigned i = 0; i < 2; ++i) {
+      if (ds[i] && ds[i]->imageView && is_attachment_stored(ds[i]))
+         render->ds_store_mask |= BITFIELD_BIT(i);
    }
    const VkRenderingAttachmentInfo *feedback_att[HK_MAX_RTS + 2] = {
       pRenderingInfo->pDepthAttachment, pRenderingInfo->pStencilAttachment};
@@ -1005,7 +1031,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G &&
       !(render->flags & VK_RENDERING_SUSPENDING_BIT);
    /* The first render pass of a chain decides its loads. */
-   if (!resume) {
+   if (!resume && !merge) {
       render->chain_load[0] =
          attach_z && attach_z->imageView &&
          (attach_z->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD || incomplete_render_area);
@@ -1017,10 +1043,10 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    }
    hk_pack_zls_control(&render->zls_last, z_layout, s_layout, attach_z,
                        attach_s, incomplete_render_area, false, drop_stores,
-                       resume ? render->chain_load : NULL);
+                       (resume || merge) ? render->chain_load : NULL);
    hk_pack_zls_control(&render->zls_partial_last, z_layout, s_layout, attach_z,
                        attach_s, incomplete_render_area, true, drop_stores,
-                       resume ? render->chain_load : NULL);
+                       (resume || merge) ? render->chain_load : NULL);
 
    /* If multiview is disabled, always read 0. If multiview is enabled,
     * hk_set_view_index will dirty the root each draw.
@@ -1236,6 +1262,7 @@ hk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
       /* A continuing pass stores at least what the passes before it did, so
        * its mask covers the whole open render. */
       cmd->merge_store_mask = render->store_mask;
+      cmd->merge_ds_store_mask = render->ds_store_mask;
       cmd->merge_feedback = render->feedback;
       cmd->merge_reach = hk_merge_graphics_stages() | render->merge_reach;
       cmd->merge_cs = cs;

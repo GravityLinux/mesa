@@ -245,11 +245,13 @@ struct hk_rendering_state {
    VkPipelineStageFlags2 merge_reach;
    /* Colour attachments this render pass stores (bit per attachment). */
    uint32_t store_mask;
+   /* Depth/stencil aspects whose stores must survive a merged pass. */
+   uint8_t ds_store_mask;
    /* An attachment is in a layout that also allows shader access (GENERAL
     * or a feedback loop): passes may read it as a texture. */
    bool feedback;
 
-   /* Depth and stencil loads of a suspend/resume chain continued in one
+   /* Depth and stencil loads of a merged or suspend/resume chain in one
     * hardware render: those of its first render pass. */
    bool chain_load[2];
    /* This render pass resumed a suspended one in its render. */
@@ -681,10 +683,12 @@ enum hk_upload_last {
 
 /* Identity of a render pass's attachments, for HK_APPLE9_MERGE_RENDERS. */
 struct hk_render_merge_key {
-   const struct vk_image *image[HK_MAX_RTS];
-   uint32_t level[HK_MAX_RTS];
-   uint32_t layer[HK_MAX_RTS];
-   VkFormat format[HK_MAX_RTS];
+   const struct vk_image *image[HK_MAX_RTS + 2];
+   uint32_t level[HK_MAX_RTS + 2];
+   uint32_t layer[HK_MAX_RTS + 2];
+   VkFormat format[HK_MAX_RTS + 2];
+   /* Conservatively require identical depth/stencil render areas. */
+   VkRect2D ds_area;
    uint32_t color_count, layer_count, view_mask;
 };
 
@@ -771,6 +775,7 @@ struct hk_cmd_buffer {
    /* Colour attachments the open render's passes stored: a continuing pass
     * must store them too, or the merged render would drop those stores. */
    uint32_t merge_store_mask;
+   uint8_t merge_ds_store_mask;
    bool merge_feedback;
    /* The open render is a suspended render pass, which only its resuming
     * render pass may continue (HK_APPLE9_MERGE_RESUME). */
@@ -1028,6 +1033,12 @@ hk_merge_graphics_stages(void)
           VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT;
 }
 
+bool hk_render_merge_key_init(struct hk_render_merge_key *key,
+                              VkRenderingFlags flags, uint32_t layer_count,
+                              uint32_t view_mask, uint32_t color_count,
+                              struct hk_image_view *const *views,
+                              struct hk_image_view *depth,
+                              struct hk_image_view *stencil, VkRect2D area);
 void hk_cmd_render_merge_flush_why(struct hk_cmd_buffer *cmd, const char *why);
 struct hk_cs *hk_render_merge_pre_cs(struct hk_cmd_buffer *cmd, unsigned stages);
 void hk_render_merge_trace(const char *why, uint64_t a, uint64_t b);
