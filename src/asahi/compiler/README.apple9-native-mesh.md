@@ -833,3 +833,43 @@ are still in progress; M4 compiler/driver review is pending.
 native-fail/emulated-pass case using native attributes or P1 primitive lowering,
 disable the corresponding opt-in default again. Neither default is qualified
 by host recording alone. Native itself remains default-off regardless.
+
+## native-capability
+
+Manager reprioritization, 2026-10-22: the V3/P1 triangle class reflects what we
+have implemented and qualified, not an established hardware maximum. Native
+capability measurement now takes priority over hybrid milestone-4 polish.
+M4 driver work is saved at `ab4f31a9abb`; unfinished fixture additions are saved
+at `4a11a5160b4`. Nine focused host checks, the x86-64/aarch64 builds, and paired
+625-case recording runs passed before reprioritization. M4 review and its
+constant-table/timestamp/continuation device checks remain pending.
+
+### C1 — offline compiler study and existing state evidence
+
+[The capability study](research/native-capability-20261022/README.md) records
+71 independently authored MSL cases compiled on the M1 controller for G16.
+66 compile: counts through V256/P512; points/lines; broad vertex/primitive
+interfaces; four-byte primitive-stride increments; 16 KiB payloads; runtime
+counts; and exactly 32 KiB of application output. Five larger-interface cases
+receive explicit compiler-limit rejections. Those are compiler observations,
+not measured hardware limits. Source, compiler commands and archive hashes
+are retained; no compiler helper sequence is read or reproduced.
+
+The metadata field model matches all 66 successful cases. An unordered
+singleton census retains the existing control/submit encoding families and
+shows register operand variation, without establishing their runtime values.
+Existing T8132 own-MSL command-stream DATA was independently re-extracted:
+138 captures / 69 session-case pairs agree with the count, topology, stride
+and output-row state formulas. The exact 32-KiB application-output case needs
+32800 bytes in the inferred local layout, demonstrating that our combined
+32-KiB allocation gate is a separate software restriction to investigate.
+
+The revision-2 kernel parser is another software gate: its exact source accepts
+the baseline fixture but rejects all eight broader count/topology/primitive
+fixtures before GPU execution. The next milestone builds our own native
+programs and exact harness-v2 oracles, with a matching research admission
+extension arranged through the manager. Existing wide Metal state data and
+offline compiler acceptance do not establish correct execution of our wider
+native programs. Live wider launch allocations, primitive linking, full-count
+publication, and device results remain pending. No advertised limits change
+from this host evidence; native stays default-off.
