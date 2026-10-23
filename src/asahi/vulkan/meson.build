@@ -140,17 +140,24 @@ libvulkan_asahi = shared_library(
 )
 
 if with_tests
-  foreach t : ['hk-index-aperture', 'hk-index-memory', 'hk-variant-retry', 'hk-texture-upload-failure', 'hk-line-stipple-limit']
-    test(t, executable(t, 'tests/' + t + '.c',
+  foreach t : ['hk-index-aperture', 'hk-index-memory', 'hk-variant-retry', 'hk-variant-cache', 'hk-texture-upload-failure', 'hk-line-stipple-limit']
+    shader_test = executable(t, 'tests/' + t + '.c',
       include_directories : [inc_gallium, inc_gallium_aux, inc_include,
                              inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
       dependencies : [hk_deps], link_with : [libhk],
       link_args : {'hk-index-aperture': ['-Wl,--wrap=hk_dispatch_precomp'],
                    'hk-index-memory': ['-Wl,--wrap=agx_va_alloc', '-Wl,--wrap=agx_bo_bind', '-Wl,--wrap=agx_va_free'],
+                   'hk-variant-cache': ['-Wl,--wrap=agx_bo_create', '-Wl,--wrap=agx_bo_reference', '-Wl,--wrap=agx_bo_unreference', '-Wl,--wrap=nir_deserialize', '-Wl,--wrap=__vk_errorf'],
                    'hk-variant-retry': ['-Wl,--wrap=nir_deserialize', '-Wl,--wrap=__vk_errorf'],
                    'hk-texture-upload-failure': ['-Wl,--wrap=hk_pool_upload'],
-                   'hk-line-stipple-limit': []}[t]),
-      suite : ['asahi', 'honeykrisp'])
+                   'hk-line-stipple-limit': []}[t])
+    if t == 'hk-variant-cache'
+      test(t, prog_python,
+        args : [files('tests/hk-variant-cache.py'), shader_test],
+        suite : ['asahi', 'honeykrisp'])
+    else
+      test(t, shader_test, suite : ['asahi', 'honeykrisp'])
+    endif
   endforeach
   test(
     'hk-heap-oom',
