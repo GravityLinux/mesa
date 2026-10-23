@@ -410,6 +410,8 @@ struct hk_graphics_state {
    /* The runtime sysval block of the last draw and the per-draw inputs it
     * was built from, see hk_apple9_upload_textures. */
    uint64_t apple9_sysvals;
+   float apple9_sysvals_blend_constants[4];
+   uint32_t apple9_sysvals_color_write_enables;
    uint32_t apple9_sysvals_positions;
    bool apple9_sysvals_first_fan;
    uint32_t apple9_sysvals_line_stipple;
