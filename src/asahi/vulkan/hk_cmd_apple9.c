@@ -288,7 +288,10 @@ hk_apple9_draw_bindings(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    for (unsigned i = 0; i < ARRAY_SIZE(gfx->vb); ++i) {
       vertex_buffers[i][0] = gfx->vb[i].addr;
       vertex_buffers[i][1] = gfx->vb[i].range;
-      vertex_buffers[i][2] = dyn->vi_binding_strides[i];
+      /* A null or empty binding is the zero page with range 0. Unbounded
+       * fetches skip the range check, so give it stride 0: every vertex
+       * then reads the zero page at its attribute offset. */
+      vertex_buffers[i][2] = gfx->vb[i].range ? dyn->vi_binding_strides[i] : 0;
    }
    return (struct hk_apple9_prerast_bindings){
       .draw_params = draw_params,

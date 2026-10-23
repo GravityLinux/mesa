@@ -7751,7 +7751,7 @@ hk_deserialize_shader(struct hk_device *dev, struct blob_reader *blob,
 }
 
 /* Version the container independently of the hardware programs it owns. */
-#define HK_SHADER_CONTAINER_VERSION 0x484b0002u
+#define HK_SHADER_CONTAINER_VERSION 0x484b0003u
 
 static VkResult
 hk_deserialize_api_shader_inner(struct vk_device *vk_dev, struct blob_reader *blob,
