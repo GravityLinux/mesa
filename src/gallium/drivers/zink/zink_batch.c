@@ -1026,7 +1026,7 @@ ALWAYS_INLINE static void
 check_oom_flush(struct zink_context *ctx)
 {
    const VkDeviceSize resource_size = ctx->bs->resource_size;
-   if (resource_size >= zink_screen(ctx->base.screen)->clamp_video_mem) {
+   if (resource_size >= zink_screen(ctx->base.screen)->oom_flush_threshold) {
        ctx->oom_flush = true;
        ctx->oom_stall = true;
     }
