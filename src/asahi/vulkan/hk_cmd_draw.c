@@ -663,6 +663,10 @@ hk_render_merge_begin(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
 {
    struct hk_image_view *views[HK_MAX_RTS] = {NULL};
    struct hk_render_merge_key key;
+   bool empty = cmd->empty_barriers.size != 0;
+   if (empty && memcmp(&info->renderArea, &cmd->merge_empty_render->area,
+                       sizeof(info->renderArea)))
+      return false;
    const VkRenderingAttachmentInfo *ds[2] = {
       info->pDepthAttachment, info->pStencilAttachment};
    struct hk_image_view *ds_views[2] = {NULL};
@@ -672,6 +676,9 @@ hk_render_merge_begin(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
          continue;
       if (ds[i]->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ||
           ds[i]->resolveMode != VK_RESOLVE_MODE_NONE)
+         return false;
+      if (empty && (ds[i]->loadOp != VK_ATTACHMENT_LOAD_OP_LOAD ||
+                    hk_attachment_may_be_sampled(ds[i])))
          return false;
       ds_views[i] = hk_image_view_from_handle(ds[i]->imageView);
       if (vk_image_layout_is_read_only(ds[i]->imageLayout,
@@ -687,6 +694,10 @@ hk_render_merge_begin(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
    for (unsigned i = 0; i < MIN2(info->colorAttachmentCount, HK_MAX_RTS); ++i) {
       const VkRenderingAttachmentInfo *att = &info->pColorAttachments[i];
       views[i] = hk_image_view_from_handle(att->imageView);
+      if (empty && att->imageView &&
+          (att->loadOp != VK_ATTACHMENT_LOAD_OP_LOAD ||
+           hk_attachment_may_be_sampled(att)))
+         return false;
       /* Clears would need an in-pass clear over the render area. */
       if (att->imageView && att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
          return false;
@@ -702,7 +713,9 @@ hk_render_merge_begin(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
    }
 
    return hk_render_merge_enabled(cmd) &&
-          hk_render_merge_key_init(&key, info->flags, info->layerCount,
+          hk_render_merge_key_init(&key,
+                              info->flags & ~(empty ? VK_RENDERING_SUSPENDING_BIT : 0),
+                              info->layerCount,
                               info->viewMask, info->colorAttachmentCount, views,
                               ds_views[0], ds_views[1], ds_read_only, info->renderArea) &&
           !memcmp(&key, &cmd->merge_key, sizeof(key));
@@ -775,6 +788,8 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    }
    if (cmd->merge_cs && !resume) {
       merge = hk_render_merge_begin(cmd, pRenderingInfo);
+      if (merge)
+         hk_cmd_empty_barriers_flush(cmd, true);
       if (!merge) {
          hk_render_merge_trace(cmd->in_meta ? "begin: meta" : "begin: mismatch",
                                pRenderingInfo->colorAttachmentCount,

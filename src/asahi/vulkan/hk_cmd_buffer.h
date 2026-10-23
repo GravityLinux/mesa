@@ -724,6 +724,13 @@ struct hk_render_merge_key {
    uint32_t color_count, layer_count, view_mask;
 };
 
+/* Barriers postponed while an empty render may supply a later load clear. */
+struct hk_empty_barrier {
+   VkPipelineStageFlags2 src, dst;
+   VkAccessFlags2 src_access, dst_access;
+   uint32_t group;
+};
+
 /* CPU key storage is bounded independently of command-buffer GPU data. */
 #define HK_UPLOAD_CACHE_MAX_BYTES (1024 * 1024)
 #define HK_UPLOAD_CACHE_MAX_ENTRIES 4096
@@ -830,6 +837,7 @@ struct hk_cmd_buffer {
     * empty-render optimization needs if it ends without being continued. */
    struct hk_rendering_state *merge_empty_render;
    bool merge_empty;
+   struct util_dynarray empty_barriers;
    /* The image barrier being recorded by vkCmdPipelineBarrier2, if any, and
     * whether it transfers queue-family ownership. */
    struct hk_image *barrier_image;
@@ -1078,6 +1086,7 @@ bool hk_render_merge_key_init(struct hk_render_merge_key *key,
                               struct hk_image_view *depth,
                               struct hk_image_view *stencil, uint8_t ds_read_only,
                               VkRect2D area);
+void hk_cmd_empty_barriers_flush(struct hk_cmd_buffer *cmd, bool merge);
 void hk_cmd_render_merge_flush_why(struct hk_cmd_buffer *cmd, const char *why);
 struct hk_cs *hk_render_merge_pre_cs(struct hk_cmd_buffer *cmd, unsigned stages);
 void hk_render_merge_trace(const char *why, uint64_t a, uint64_t b);
@@ -1094,7 +1103,7 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
     * merging. A merged render pass takes the stream before drawing. */
    if (unlikely(cmd->merge_cs) && ptr != &cmd->merge_pre_cs) {
       if (compute && ptr == &cmd->current_cs.cs && cmd->merge_move_stage &&
-          !cmd->merge_suspended &&
+          !cmd->merge_suspended && !cmd->empty_barriers.size &&
           !(cmd->merge_move_stage & cmd->merge_reach) &&
           hk_render_merge_move_enabled())
          return hk_render_merge_pre_cs(cmd, stages);
