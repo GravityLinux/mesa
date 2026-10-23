@@ -220,12 +220,6 @@ agx_apple9_uniform_draw_reset(struct agx_apple9_uniform_draw *draw)
 
 void agx_apple9_initialize_entries(struct agx_device *dev);
 
-/* Immutable state caches compare the complete canonical contents. Launch keys
- * encode self-relative addresses at the shader aperture base; on a miss the
- * caller writes the actual address-dependent encoding before publishing it.
- * The cache and all allocations have the caller's command-buffer lifetime.
- */
-
 /* Per-sample tile allocation for a fragment-stage launch or render. As in
  * agx_build_tilebuffer_layout, multisampled renders keep a nonempty
  * allocation even without colour targets: a large G16 2x depth-only render
