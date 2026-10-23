@@ -4,6 +4,7 @@
  * Copyright 2022-2023 Collabora Ltd. and Red Hat Inc.
  * SPDX-License-Identifier: MIT
  */
+#include "asahi/debug.h"
 #include "hk_device_memory.h"
 
 #include "hk_device.h"
@@ -198,7 +199,7 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
       }
    }
 
-   if (debug_get_bool_option("HK_REPLAY_DEBUG", false)) {
+   if (agx_apple9_debug_enabled(AGX_A9_DBG_REPLAY)) {
       const VkMemoryAllocateFlagsInfo *flags_info =
          vk_find_struct_const(pAllocateInfo->pNext, MEMORY_ALLOCATE_FLAGS_INFO);
       const VkMemoryOpaqueCaptureAddressAllocateInfo *opaque_info =

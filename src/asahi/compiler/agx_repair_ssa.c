@@ -11,6 +11,7 @@
  * https://link.springer.com/content/pdf/10.1007/978-3-642-37051-9_6.pdf
  */
 
+#include "asahi/debug.h"
 #include "util/u_debug.h"
 #include "util/hash_table.h"
 #include "util/ralloc.h"
@@ -19,7 +20,6 @@
 #include "agx_compiler.h"
 #include "agx_opcodes.h"
 
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_ra_audit, "AGX_APPLE9_RA_AUDIT", NULL)
 /* Coalescing noninterfering spill homes is the default; AGX_SPILL_COALESCE=0
  * restores one home per spilled variable. */
 DEBUG_GET_ONCE_BOOL_OPTION(agx_spill_coalesce, "AGX_SPILL_COALESCE", true)
@@ -322,7 +322,7 @@ agx_repair_ssa(agx_context *ctx)
    }
 
    unsigned n = ctx->alloc;
-   const bool audit = debug_get_option_cached_agx_apple9_ra_audit() != NULL;
+   const bool audit = agx_apple9_debug_enabled(AGX_A9_DBG_RA_AUDIT);
    struct hash_table_u64 *homes = debug_get_option_agx_spill_coalesce()
       ? _mesa_hash_table_u64_create(blocks) : NULL;
 

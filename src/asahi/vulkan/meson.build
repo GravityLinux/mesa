@@ -196,6 +196,16 @@ if with_tests
     env : ['HK_APPLE9_NATIVE_MESH=1'],
     suite : ['asahi', 'honeykrisp'],
   )
+  compiler_env_test = executable(
+    'hk-compiler-env', 'tests/hk-compiler-env.c',
+    include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                           inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+    dependencies : [hk_deps], link_with : [libhk],
+  )
+  test('hk-compiler-env', prog_python,
+    args : [files('tests/check-hk-compiler-env.py'), compiler_env_test],
+    suite : ['asahi', 'honeykrisp'],
+  )
   test(
     'hk-native-mesh-hybrid',
     executable(

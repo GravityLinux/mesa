@@ -12,6 +12,7 @@
  * Copyright © 2015 Intel Corporation
  * SPDX-License-Identifier: MIT
  */
+#include "asahi/debug.h"
 #include "hk_gpu_busy.h"
 #include "util/u_wait_watchdog.h"
 #include "hk_queue.h"
@@ -953,11 +954,8 @@ enum hk_tiling_class {
 static void
 hk_tiling_stat(enum hk_tiling_class cls, bool meta)
 {
-   static int enabled = -1;
    static uint64_t counts[HK_TILING_CLASSES], total, meta_elided, meta_kept;
-   if (enabled < 0)
-      enabled = debug_get_bool_option("HK_TILING_ELISION_STATS", false);
-   if (!enabled)
+   if (!agx_apple9_debug_enabled(AGX_A9_DBG_TILING))
       return;
    counts[cls]++;
    if (meta) {

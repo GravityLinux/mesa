@@ -6,6 +6,7 @@
  * Copyright 2018 Intel Corporation
  * SPDX-License-Identifier: MIT
  */
+#include "asahi/debug.h"
 #include "hk_shader.h"
 #include "hk_gpu_busy.h"
 #include "util/u_queue.h"
@@ -76,20 +77,10 @@
 #include "util/u_debug.h"
 #include "vulkan/vulkan_core.h"
 
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_trace_nir, "AGX_APPLE9_TRACE_NIR", NULL)
 DEBUG_GET_ONCE_OPTION(cached_hk_apple9_dump_fragment_dir,
                       "HK_APPLE9_DUMP_FRAGMENT_DIR", NULL)
-DEBUG_GET_ONCE_OPTION(cached_hk_apple9_eager_trace,
-                      "HK_APPLE9_EAGER_TRACE", NULL)
 DEBUG_GET_ONCE_OPTION(cached_hk_apple9_eager_variants,
                       "HK_APPLE9_EAGER_VARIANTS", NULL)
-DEBUG_GET_ONCE_OPTION(cached_hk_apple9_pressure_stats,
-                      "HK_APPLE9_PRESSURE_STATS", NULL)
-DEBUG_GET_ONCE_OPTION(cached_hk_apple9_texel_classes,
-                      "HK_APPLE9_TEXEL_CLASSES", NULL)
-DEBUG_GET_ONCE_OPTION(cached_hk_apple9_trace_vectorize,
-                      "HK_APPLE9_TRACE_VECTORIZE", NULL)
-
 
 /* Set while a pipeline-time eager variant compiles on this thread. */
 static _Thread_local bool hk_apple9_eager_compile;
@@ -131,9 +122,10 @@ shared_var_info(const struct glsl_type *type, unsigned *size, unsigned *align)
    *size = comp_size * length, *align = comp_size;
 }
 
-/* AGX_* and HK_APPLE9_* environment knobs change generated code, so they key
- * the shader caches: a warm cache must not hand one setting's shaders to
- * another. Zero when none is set, which keeps existing caches valid.
+/* Code-generation environment controls key the shader caches: a warm cache
+ * must not hand one setting's shaders to another. Diagnostics and known
+ * runtime-only controls are excluded. Zero when none is set keeps existing
+ * default caches valid.
  */
 static uint64_t hk_compiler_env_hash_value;
 static once_flag hk_compiler_env_hash_once = ONCE_FLAG_INIT;
@@ -145,7 +137,7 @@ static once_flag hk_compiler_env_hash_once = ONCE_FLAG_INIT;
  * never split them while an unlisted knob still does, conservatively.
  */
 static const char *const hk_codegen_env[] = {
-   "AGX_MESA_DEBUG", "AGX_SPILL_COALESCE", "AGX_SPILL_NO_LOOP_HANDLING",
+   "AGX_MESA_DEBUG", "AGX_SPILL_COALESCE",
    "AGX_APPLE9_NO_COMPARE_LITERAL",
    "AGX_APPLE9_GATED",
    "AGX_APPLE9_HOIST_LOADS",
@@ -154,20 +146,23 @@ static const char *const hk_codegen_env[] = {
    "AGX_APPLE9_NO_DESCRIPTOR_HOIST",
    "AGX_APPLE9_NO_POINTER_LOAD", "AGX_APPLE9_NO_PROMOTE",
    "AGX_APPLE9_NO_SAMPLER_HOIST", "AGX_APPLE9_NO_UNIFORM_MOVE",
-   "AGX_APPLE9_RA_WEBS",
    "AGX_APPLE9_SAFE_HOIST_STAGES", "HK_APPLE9_DESCRIPTOR_BUFFER",
    "HK_APPLE9_MESH_SHADER", "HK_APPLE9_NATIVE_MESH",
    "HK_APPLE9_NATIVE_MESH_ATTRIBUTES",
    "HK_APPLE9_NATIVE_MESH_PRIMITIVE_LOWERING",
-   "HK_APPLE9_SPARSE_SCRATCH",
-   "HK_APPLE9_TESS_BATCH", "HK_APPLE9_TESS_SCAN_BLOCK",
-   "HK_APPLE9_TEXEL_CLASSES", "HK_APPLE9_UNIFORM_SAFE_CLASSES",
 };
 
-/* Knobs that never change generated code and must not split the caches at
- * all: the variant cache check compares against the normal entries. */
+/* These controls change diagnostics, memory backing, when a variant is
+ * compiled, or command recording/submission. They do not change shader code.
+ * Keep them available for runtime investigations without splitting caches. */
 static const char *const hk_ignored_env[] = {
    "HK_APPLE9_VARIANT_CACHE_VERIFY",
+   "HK_APPLE9_DUMP_FRAGMENT_DIR", "HK_APPLE9_EAGER_VARIANTS",
+   "HK_APPLE9_SPARSE_SCRATCH",
+   "HK_APPLE9_TESS_BATCH", "HK_APPLE9_TESS_SCAN_BLOCK",
+   "HK_APPLE9_MERGE_RENDERS", "HK_APPLE9_MERGE_RESUME",
+   "HK_APPLE9_MERGE_HOIST_BARRIERS", "HK_APPLE9_MERGE_MOVE_COMPUTE",
+   "HK_APPLE9_FRAGMENT_BARRIER", "HK_APPLE9_NO_TILING_ELISION",
 };
 
 static bool
@@ -188,7 +183,8 @@ hk_env_key_kind(const char *var)
 {
    if (strncmp(var, "AGX_", 4) && strncmp(var, "HK_APPLE9_", 10))
       return 0;
-   if (hk_env_named(var, hk_ignored_env, ARRAY_SIZE(hk_ignored_env)))
+   if (agx_apple9_is_debug_env(var) ||
+       hk_env_named(var, hk_ignored_env, ARRAY_SIZE(hk_ignored_env)))
       return 0;
    return hk_env_named(var, hk_codegen_env, ARRAY_SIZE(hk_codegen_env)) ? 2 : 1;
 }
@@ -1446,7 +1442,6 @@ static const enum mesa_vk_dynamic_graphics_state hk_apple9_keyed_dynamic[] = {
    MESA_VK_DYNAMIC_RS_POLYGON_MODE,
 };
 
-
 /* With unused attachments, a render's tile layout can differ from the one
  * pipeline formats imply: a null view occupies one word whatever the
  * pipeline format, and an attachment the pipeline leaves undefined occupies
@@ -1594,37 +1589,6 @@ hk_unencodable_scale(nir_scalar s)
    return true;
 }
 
-/* Classes of reads the preamble may take once per dispatch.
- * HK_APPLE9_UNIFORM_SAFE_CLASSES restricts them, e.g. to tell apart the
- * effect of hoisting uniform-buffer values, storage-buffer values and
- * descriptor metadata. Only descriptor metadata qualifies by default: in
- * Lethal Company it ran crash-free and helped the compute pass it changed. */
-enum hk_uniform_safe_class {
-   HK_UNIFORM_SAFE_UBO = BITFIELD_BIT(0),
-   HK_UNIFORM_SAFE_SSBO = BITFIELD_BIT(1),
-   HK_UNIFORM_SAFE_META = BITFIELD_BIT(2),
-};
-
-static const struct debug_named_value hk_uniform_safe_options[] = {
-   {"all", ~0u, "Every class"},
-   {"none", 0, "No class"},
-   {"ubo", HK_UNIFORM_SAFE_UBO, "Uniform-buffer values"},
-   {"ssbo", HK_UNIFORM_SAFE_SSBO, "Read-only storage-buffer values"},
-   {"meta", HK_UNIFORM_SAFE_META, "Descriptor metadata"},
-   DEBUG_NAMED_VALUE_END,
-};
-
-DEBUG_GET_ONCE_FLAGS_OPTION(hk_uniform_safe_classes,
-                            "HK_APPLE9_UNIFORM_SAFE_CLASSES",
-                            hk_uniform_safe_options, HK_UNIFORM_SAFE_META)
-
-static enum gl_access_qualifier
-hk_uniform_safe(enum hk_uniform_safe_class cls)
-{
-   return (debug_get_option_hk_uniform_safe_classes() & cls)
-             ? ACCESS_UNIFORM_SAFE_AGX : 0;
-}
-
 static nir_def *
 bound_offset(nir_builder *b, nir_def *valid, nir_scalar offset,
              bool shift_only_scale)
@@ -1708,15 +1672,6 @@ lower_load_global_bounded(nir_builder *b, nir_intrinsic_instr *intr,
    if (intr->intrinsic == nir_intrinsic_load_global_constant_bounded) {
       access |= ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER;
    }
-
-   /* The bounds check redirects out-of-range reads to the zero page, so a
-    * read-only access at a uniform address is safe once per dispatch: let
-    * the preamble take it. This is not general speculation; if-conversion
-    * and code motion must not run it on paths that skipped it. */
-   if (access & ACCESS_CAN_REORDER)
-      access |= hk_uniform_safe(
-         intr->intrinsic == nir_intrinsic_load_global_constant_bounded
-            ? HK_UNIFORM_SAFE_UBO : HK_UNIFORM_SAFE_SSBO);
 
    nir_def *val = nir_load_global(
       b, intr->def.num_components, intr->def.bit_size,
@@ -2344,7 +2299,7 @@ hk_apple9_lower_texel_buffer(nir_builder *b, nir_tex_instr *tex, UNUSED void *da
    ptr = nir_iadd_imm(b, ptr, offsetof(struct hk_apple9_texel_descriptor, metadata));
    nir_def *count = nir_load_global_constant(b, 1, 32,
       nir_iadd_imm(b, ptr, offsetof(struct hk_apple9_texel_metadata, elements)),
-      .align_mul = 4, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META));
+      .align_mul = 4, .access = ACCESS_UNIFORM_SAFE_AGX);
    if (tex->op == nir_texop_txs) {
       nir_def_replace(&tex->def, count);
       return true;
@@ -2356,10 +2311,10 @@ hk_apple9_lower_texel_buffer(nir_builder *b, nir_tex_instr *tex, UNUSED void *da
    nir_push_if(b, nir_ult(b, coord, count));
    nir_def *base = nir_load_global_constant(b, 1, 64,
       nir_iadd_imm(b, ptr, offsetof(struct hk_apple9_texel_metadata, base)),
-      .align_mul = 8, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META));
+      .align_mul = 8, .access = ACCESS_UNIFORM_SAFE_AGX);
    nir_def *size = nir_load_global_constant(b, 1, 32,
       nir_iadd_imm(b, ptr, offsetof(struct hk_apple9_texel_metadata, size_B)),
-      .align_mul = 4, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META));
+      .align_mul = 4, .access = ACCESS_UNIFORM_SAFE_AGX);
    nir_push_if(b, nir_ieq_imm(b, size, 12));
    nir_def *xyz = nir_load_global(b, 3, 32,
       nir_iadd(b, base, nir_u2u64(b, nir_imul_imm(b, coord, 12))), .align_mul = 4);
@@ -2401,7 +2356,7 @@ hk_apple9_lower_texel_buffer(nir_builder *b, nir_tex_instr *tex, UNUSED void *da
    if (tex->def.num_components == 4) {
       nir_def *alpha_kind = nir_ushr_imm(b, nir_load_global_constant(b, 1, 32,
          nir_iadd_imm(b, ptr, offsetof(struct hk_apple9_texel_metadata, component[3])),
-         .align_mul = 4, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META)), 18);
+         .align_mul = 4, .access = ACCESS_UNIFORM_SAFE_AGX), 18);
       nir_def *one = floating ? nir_imm_float(b, 1.0) : nir_imm_int(b, 1);
       zero = nir_vector_insert_imm(b, zero,
          nir_bcsel(b, nir_ieq_imm(b, alpha_kind, HK_TEXEL_ONE), one,
@@ -2566,16 +2521,6 @@ hk_apple9_decode_texel_classes(nir_builder *b, nir_def *words, nir_def *layout,
    return nir_if_phi(b, then_value, else_value);
 }
 
-/* HK_APPLE9_TEXEL_CLASSES limits the format classes with a dedicated
- * branch (0 keeps only the full select), trading executed work for code
- * size. */
-static unsigned
-hk_apple9_texel_class_limit(unsigned count)
-{
-   const char *env = debug_get_option_cached_hk_apple9_texel_classes();
-   return env ? MIN2((unsigned)atoi(env), count) : count;
-}
-
 static nir_def *
 hk_apple9_decode_texel(nir_builder *b, nir_def *words, nir_def *layout,
                        bool floating)
@@ -2587,9 +2532,9 @@ hk_apple9_decode_texel(nir_builder *b, nir_def *words, nir_def *layout,
    static const unsigned int_classes[] = {HK_TEXEL_UINT, HK_TEXEL_SINT};
    return floating
       ? hk_apple9_decode_texel_classes(b, words, layout, true, float_classes,
-            hk_apple9_texel_class_limit(ARRAY_SIZE(float_classes)))
+            ARRAY_SIZE(float_classes))
       : hk_apple9_decode_texel_classes(b, words, layout, false, int_classes,
-            hk_apple9_texel_class_limit(ARRAY_SIZE(int_classes)));
+            ARRAY_SIZE(int_classes));
 }
 
 /* Decode a texel from the per-component layout of its descriptor, as
@@ -2764,7 +2709,7 @@ hk_apple9_encode_texel(nir_builder *b, nir_def *value, nir_def *layout,
    };
    return floating
       ? hk_apple9_encode_texel_classes(b, value, layout, true, float_classes,
-            hk_apple9_texel_class_limit(ARRAY_SIZE(float_classes)))
+            ARRAY_SIZE(float_classes))
       : hk_apple9_encode_texel_kind(b, value, layout, false, -1);
 }
 
@@ -2827,7 +2772,7 @@ hk_apple9_buffer_texel_address(nir_builder *b, nir_def *meta, nir_def *coord,
 {
    nir_def *base = nir_load_global_constant(b, 1, 64,
       nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, base)),
-      .align_mul = 8, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META));
+      .align_mul = 8, .access = ACCESS_UNIFORM_SAFE_AGX);
    nir_def *offset = nir_imul(b, nir_channel(b, coord, 0), size_B);
    return nir_iadd(b, base, nir_u2u64(b, offset));
 }
@@ -3112,17 +3057,17 @@ hk_apple9_lower_formatless_storage(nir_builder *b, nir_intrinsic_instr *intr,
       offsetof(struct hk_apple9_storage_descriptor, metadata));
    nir_def *size_B = nir_load_global_constant(b, 1, 32,
       nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, size_B)),
-      .align_mul = 4, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META));
+      .align_mul = 4, .access = ACCESS_UNIFORM_SAFE_AGX);
    nir_def *layout = nir_load_global_constant(b, 4, 32,
       nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, component)),
-      .align_mul = 4, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META));
+      .align_mul = 4, .access = ACCESS_UNIFORM_SAFE_AGX);
    /* Storage image descriptors also name a canonical store encoding. */
    nir_def *encode = NULL;
    if (!load && dim != GLSL_SAMPLER_DIM_BUF) {
       encode = nir_load_global_constant(b, 1, 32,
          nir_iadd_imm(b, nir_load_from_texture_handle_agx(b, tex),
                       offsetof(struct hk_apple9_storage_descriptor, store_encode)),
-         .align_mul = 4, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META));
+         .align_mul = 4, .access = ACCESS_UNIFORM_SAFE_AGX);
    }
 
    /* Honeykrisp's storage cube descriptors are 2D arrays of faces. */
@@ -3268,14 +3213,14 @@ hk_apple9_buffer_residency_code(nir_builder *b, nir_def *meta, nir_def *x)
 {
    nir_def *table = nir_load_global_constant(b, 1, 64,
       nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, residency)),
-      .align_mul = 8, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META));
+      .align_mul = 8, .access = ACCESS_UNIFORM_SAFE_AGX);
    nir_def *code;
    nir_push_if(b, nir_ine_imm(b, table, 0));
    {
       nir_def *base = nir_load_global_constant(b, 1, 64, meta, .align_mul = 8);
       nir_def *fields = nir_load_global_constant(b, 2, 32,
          nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, elements)),
-         .align_mul = 8, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META));
+         .align_mul = 8, .access = ACCESS_UNIFORM_SAFE_AGX);
       nir_def *elements = nir_channel(b, fields, 0);
       nir_def *size_B = nir_channel(b, fields, 1);
       x = nir_umin(b, x, nir_iadd_imm(b, nir_umax_imm(b, elements, 1), -1));
@@ -3449,7 +3394,7 @@ hk_apple9_lower_sparse_intrinsic(nir_builder *b, nir_intrinsic_instr *intr,
       nir_def *table = nir_load_global_constant(b, 1, 64, meta, .align_mul = 8);
       nir_def *base = nir_load_global_constant(b, 1, 32,
          nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, elements)),
-         .align_mul = 4, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META));
+         .align_mul = 4, .access = ACCESS_UNIFORM_SAFE_AGX);
       nir_def *coord = nir_u2u32(b, intr->src[1].ssa);
       bool layered = nir_intrinsic_image_array(intr) || dim == GLSL_SAMPLER_DIM_CUBE;
       code = hk_apple9_residency_code(b, table, base, nir_imm_int(b, 0),
@@ -3835,7 +3780,6 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_push_const,
             nir_address_format_32bit_offset);
 
-
    /* Turn cache flushes into image coherency bits while we still have derefs */
    NIR_PASS(_, nir, nir_lower_memory_model);
 
@@ -3904,7 +3848,7 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       /* Explicit I/O builds each access's base and offset afresh. The
        * vectorizer only merges accesses sharing those definitions. */
       NIR_PASS(_, nir, nir_opt_cse);
-      if (debug_get_option_cached_hk_apple9_trace_vectorize() &&
+      if (agx_apple9_debug_enabled(AGX_A9_DBG_VECTORIZE) &&
           nir->info.stage == MESA_SHADER_FRAGMENT)
          nir_print_shader(nir, stderr);
       /* Below the pressure budget, merge without windows, unless that
@@ -3919,7 +3863,7 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
          peak_free = hk_apple9_vectorized_peak(nir, false);
          policy.windowed = peak_free > peak_windowed;
       }
-      if (debug_get_option_cached_hk_apple9_pressure_stats())
+      if (agx_apple9_debug_enabled(AGX_A9_DBG_PRESSURE))
          fprintf(stderr,
                  "HK_PRESSURE stage=%u peak=%u windowed=%u merged_peaks=%u/%u\n",
                  nir->info.stage, peak,
@@ -5129,7 +5073,6 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
                            const VkAllocationCallbacks *alloc,
                            struct vk_shader **out);
 
-
 VkResult
 hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
                   const struct vk_graphics_pipeline_state *state,
@@ -5629,7 +5572,7 @@ hk_apple9_compile_tes(struct hk_device *dev, nir_shader *nir,
    layout.ignore_point_size = !layout.rasterize_points;
    NIR_PASS(_, nir, poly_nir_lower_tes, true);
    hk_apple9_lower_prerast_sysvals(nir, MESA_SHADER_TESS_EVAL);
-   if (debug_get_option_cached_agx_apple9_trace_nir() != NULL)
+   if (agx_apple9_debug_enabled(AGX_A9_DBG_NIR))
       nir_print_shader(nir, stderr);
    bool cull_mask;
    if (!hk_apple9_compile_vertex_culls(nir, &layout, &hw->b, &cull_mask,
@@ -5901,7 +5844,7 @@ hk_apple9_compile_gs(struct hk_device *dev, nir_shader *nir,
       layout.rasterize_points = info.mode == MESA_PRIM_POINTS;
       layout.ignore_point_size = !layout.rasterize_points;
       hk_apple9_lower_prerast_sysvals(rast, MESA_SHADER_GEOMETRY);
-      if (debug_get_option_cached_agx_apple9_trace_nir() != NULL)
+      if (agx_apple9_debug_enabled(AGX_A9_DBG_NIR))
          nir_print_shader(rast, stderr);
       if (agx_compile_apple9_vertex_inputs(rast, &layout, &rast_shader->b,
                                            reason))
@@ -5970,7 +5913,7 @@ hk_apple9_compile_mesh(struct hk_device *dev, nir_shader *nir,
                   hk_apple9_lower_clip_z_coeff, nir_metadata_control_flow,
                   NULL);
       }
-      if (debug_get_option_cached_agx_apple9_trace_nir() != NULL)
+      if (agx_apple9_debug_enabled(AGX_A9_DBG_NIR))
          nir_print_shader(rast_nir, stderr);
       if (agx_compile_apple9_vertex_inputs(rast_nir, &layout, &rast->b, reason))
          result = hk_apple9_finish_shader(dev, rast, rast_nir);
@@ -6195,7 +6138,6 @@ hk_apple9_compile_graphics_path(struct hk_device *dev, uint32_t count,
          continue;
       hk_apple9_lower_primitive_fs(infos[i].nir, native_mesh);
    }
-
 
    /* Per-vertex inputs are read as flat copies, written by the passthrough
     * geometry shader of vertex-shader pipelines, or by the vertex shader
@@ -6471,7 +6413,7 @@ hk_apple9_compile_graphics_path(struct hk_device *dev, uint32_t count,
              !hk_per_vertex_copies_used(&per_vertex))
             hk_apple9_strip_unread_outputs(nir);
 
-         if (debug_get_option_cached_agx_apple9_trace_nir() != NULL)
+         if (agx_apple9_debug_enabled(AGX_A9_DBG_NIR))
             nir_print_shader(nir, stderr);
 
          if (stage == MESA_SHADER_VERTEX) {
@@ -7140,7 +7082,7 @@ hk_apple9_eager_variant(struct hk_device *dev, uint32_t count,
          api[MESA_SHADER_VERTEX] = stub;
       }
    }
-   if (debug_get_option_cached_hk_apple9_eager_trace())
+   if (agx_apple9_debug_enabled(AGX_A9_DBG_EAGER))
       fprintf(stderr, "HK_APPLE9_EAGER: %u stages vs=%d fs=%d flags=%#llx\n", count,
               !!api[MESA_SHADER_VERTEX], !!api[MESA_SHADER_FRAGMENT],
               pstate ? (unsigned long long)pstate->pipeline_flags : 0ull);
