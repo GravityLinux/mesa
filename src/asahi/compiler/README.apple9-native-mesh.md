@@ -882,3 +882,10 @@ Ordinary vertex draws must qualify the raster oracle before native submission.
 Kernel admission and device measurements are still required; production
 eligibility and advertised limits remain unchanged. See the study's C2 section
 for the current host-only evidence and remaining varying/payload tiers.
+
+C2 is now frozen as 47 normal-IR programs / 175 runtime arms, with 15 isolated
+high-index controls. Every arm passes host upload/identity checks; the exact
+buffer oracle and independently calculated raster multiplicities agree.
+`research/native-capability-20261022/C2-HOST.json` records this host-only result.
+The kit has 47 exact stream fixtures and takes the new kernel research mode
+and artifact pins separately. Device execution remains manager-scheduled.
