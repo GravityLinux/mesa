@@ -1566,6 +1566,7 @@ agx_apple9_bounded_render_signature(const nir_shader *nir, const char **reason)
              !(colors & ~((BITFIELD64_MASK(8) << FRAG_RESULT_DATA0) |
                           BITFIELD64_BIT(FRAG_RESULT_COLOR) |
                           BITFIELD64_BIT(FRAG_RESULT_DEPTH) |
+                          BITFIELD64_BIT(FRAG_RESULT_STENCIL) |
                           BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK)));
    }
 

@@ -2625,7 +2625,9 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
       caps->fbfetch = 0;
       caps->blend_equation_advanced = true;
       caps->max_dual_source_render_targets = 1;
-      caps->shader_stencil_export = false;
+      /* The fragment compiler exports stencil with the depth publication,
+       * as Honeykrisp's shaderStencilExport does. */
+      caps->shader_stencil_export = true;
       caps->framebuffer_no_attachment = false;
       caps->texture_mirror_clamp_to_edge = false;
       caps->texture_buffer_objects = true;
