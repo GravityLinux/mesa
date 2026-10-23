@@ -288,25 +288,25 @@ compile(struct hk_device *dev, bool deferred, bool native, unsigned failure)
          struct hk_api_shader *api[HK_APPLE9_GFX_STAGES] = {
             [MESA_SHADER_MESH] = mcopy, [MESA_SHADER_FRAGMENT] = fcopy,
          }, *resolved[HK_APPLE9_GFX_STAGES] = {0};
-         CHECK(hk_apple9_resolve_graphics(dev, api, &state, resolved, true) ==
+         CHECK(hk_apple9_resolve_graphics(dev, api, &state, resolved, true, false) ==
                VK_SUCCESS);
          check_programs(resolved[MESA_SHADER_MESH], resolved[MESA_SHADER_FRAGMENT], native);
          CHECK(native_compiles == native && emulated_compiles == !native);
          CHECK(fragment_compiles == 1);
          struct hk_api_shader *first = resolved[MESA_SHADER_MESH];
          unsigned before = allocations;
-         CHECK(hk_apple9_resolve_graphics(dev, api, &state, resolved, true) ==
+         CHECK(hk_apple9_resolve_graphics(dev, api, &state, resolved, true, false) ==
                VK_SUCCESS);
          CHECK(resolved[MESA_SHADER_MESH] == first && allocations == before);
          CHECK(fragment_compiles == 1);
-         CHECK(hk_apple9_resolve_graphics(dev, api, &state, resolved, false) ==
+         CHECK(hk_apple9_resolve_graphics(dev, api, &state, resolved, false, false) ==
                VK_SUCCESS);
          check_programs(resolved[MESA_SHADER_MESH],
                         resolved[MESA_SHADER_FRAGMENT], false);
          CHECK(native_compiles == native && emulated_compiles == 1);
          CHECK(fragment_compiles == 1 + native);
          before = allocations;
-         CHECK(hk_apple9_resolve_graphics(dev, api, &state, resolved, true) ==
+         CHECK(hk_apple9_resolve_graphics(dev, api, &state, resolved, true, false) ==
                VK_SUCCESS);
          CHECK(resolved[MESA_SHADER_MESH] == first && allocations == before);
       } else {
@@ -381,14 +381,14 @@ deferred_rejection(struct hk_device *dev)
    }, *resolved[HK_APPLE9_GFX_STAGES] = {0};
    CHECK(api[MESA_SHADER_MESH]->apple9_native_candidate);
    reject_native = true;
-   CHECK(hk_apple9_resolve_graphics(dev, api, NULL, resolved, true) == VK_SUCCESS);
+   CHECK(hk_apple9_resolve_graphics(dev, api, NULL, resolved, true, false) == VK_SUCCESS);
    reject_native = false;
    CHECK(!api[MESA_SHADER_MESH]->apple9_native_candidate);
    check_programs(resolved[MESA_SHADER_MESH], resolved[MESA_SHADER_FRAGMENT], false);
    struct hk_api_shader *first = resolved[MESA_SHADER_MESH];
    unsigned before = allocations;
    for (unsigned i = 0; i < 4; ++i) {
-      CHECK(hk_apple9_resolve_graphics(dev, api, NULL, resolved, i & 1) == VK_SUCCESS);
+      CHECK(hk_apple9_resolve_graphics(dev, api, NULL, resolved, i & 1, false) == VK_SUCCESS);
       CHECK(resolved[MESA_SHADER_MESH] == first && allocations == before);
       CHECK(native_compiles == 1 && emulated_compiles == 1 && fragment_compiles == 1);
    }
