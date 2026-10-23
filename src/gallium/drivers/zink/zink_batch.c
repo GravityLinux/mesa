@@ -1025,8 +1025,13 @@ batch_ptr_add_usage(struct zink_context *ctx, struct set *s, void *ptr)
 ALWAYS_INLINE static void
 check_oom_flush(struct zink_context *ctx)
 {
+   struct zink_screen *screen = zink_screen(ctx->base.screen);
    const VkDeviceSize resource_size = ctx->bs->resource_size;
-   if (resource_size >= zink_screen(ctx->base.screen)->clamp_video_mem) {
+   /* the batch references nearly the whole heap, or destroyed resources are
+    * piling up behind submitted batches
+    */
+   if (resource_size >= screen->clamp_video_mem ||
+       p_atomic_read(&screen->zombie_bytes) >= ctx->oom_zombie_floor + (int64_t)screen->zombie_bytes_limit) {
        ctx->oom_flush = true;
        ctx->oom_stall = true;
     }

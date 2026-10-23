@@ -4080,12 +4080,18 @@ flush_batch(struct zink_context *ctx, bool sync)
       zink_select_draw_mesh_tasks(ctx);
       zink_select_launch_grid(ctx);
 
+      /* destroyed resources piling up behind submitted batches (e.g. a
+       * stream of create/draw/delete with flushes in between)
+       */
+      if (p_atomic_read(&screen->zombie_bytes) >= ctx->oom_zombie_floor + (int64_t)screen->zombie_bytes_limit)
+         ctx->oom_stall = true;
       if (ctx->oom_stall) {
          stall(ctx);
          /* completed batch states keep their resources until they are
           * recycled: release them now, as this flush is for memory
           */
          zink_batch_reset_all(ctx);
+         ctx->oom_zombie_floor = p_atomic_read(&screen->zombie_bytes);
       }
       zink_reset_ds3_states(ctx);
 
@@ -6239,9 +6245,9 @@ zink_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    if (tc && (struct zink_context*)tc != ctx) {
       ctx->track_renderpasses = screen->driver_workarounds.track_renderpasses;
       threaded_context_init_bytes_mapped_limit(tc, 4);
-      /* with unified memory, also keep queued uploads below the batch memory limit */
-      if (screen->oom_flush_threshold < screen->clamp_video_mem)
-         tc->bytes_mapped_limit = MIN2(tc->bytes_mapped_limit, screen->oom_flush_threshold);
+      /* with unified memory, also keep queued uploads below the zombie memory limit */
+      if (screen->zombie_bytes_limit < screen->clamp_video_mem)
+         tc->bytes_mapped_limit = MIN2(tc->bytes_mapped_limit, screen->zombie_bytes_limit);
       ctx->base.set_context_param = zink_set_context_param;
    }
 
