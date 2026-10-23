@@ -1329,18 +1329,22 @@ apple9_completion_exempt(const struct agx_apple9_vir_instr *ins)
    return agx_apple9_encoding_info(ins->encoding)->prior_completion_exempt;
 }
 
-/* Acquire ordering: a plain device load still pending when a device fence
- * issued must complete before a later device read is performed, or that read
- * may observe memory older than the earlier one did (message passing through
- * the fence). The device-fence drain this replaces satisfied it; the
- * dependency belongs on the later read, which waits through its own input
- * mask. Native Metal also leaves returning atomics pending across the fence
- * before a later load (k23), so only plain loads are ordered here. */
+/* Acquire ordering: a device read (plain load or returning atomic) still
+ * pending when a device fence issued must complete before a later device read
+ * is performed, or that read may observe memory older than the earlier one
+ * did (message passing through the fence). The device-fence drain this
+ * replaces satisfied it; the dependency belongs on the later read, which
+ * waits through its own input mask. Native Metal leaves such reads pending
+ * across the fence, but places the later load on the same slot, so that is no
+ * evidence they are unordered across slots. Threadgroup memory is not
+ * covered: no workgroup-scope message-passing case failed without it. */
 static bool
 apple9_acquire_hazard(const struct agx_apple9_vir_instr *ins,
                       const struct agx_apple9_vir_instr *producer)
 {
-   return producer->op == AGX_APPLE9_VIR_DEVICE_LOAD &&
+   return (producer->op == AGX_APPLE9_VIR_DEVICE_LOAD ||
+           (producer->op == AGX_APPLE9_VIR_DEVICE_ATOMIC &&
+            !producer->atomic_discard)) &&
           (ins->op == AGX_APPLE9_VIR_DEVICE_LOAD ||
            ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC ||
            ins->op == AGX_APPLE9_VIR_TEXTURE_SAMPLE);
