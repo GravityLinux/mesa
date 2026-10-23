@@ -148,12 +148,12 @@ struct hk_root_descriptor_table {
     * upload size of every program without constant tables, including those
     * using dynamic descriptors.
     */
-   uint64_t constant_data[MESA_SHADER_STAGES];
+   uint64_t constant_data[MESA_SHADER_MESH_STAGES];
 };
 
 /* Bumped whenever hk_root_descriptor_table offsets change: compiled shaders
  * bake them, so pipeline and disk cache keys include it. */
-#define HK_ROOT_LAYOUT_VERSION 4
+#define HK_ROOT_LAYOUT_VERSION 5
 
 /* helper macro for computing root descriptor byte offsets */
 #define hk_root_descriptor_offset(member)                                      \
@@ -202,6 +202,8 @@ struct hk_descriptor_state {
 static inline size_t
 hk_descriptor_root_size(const struct hk_descriptor_state *desc)
 {
+   assert(!(desc->root_constant_stages &
+            ~BITFIELD_MASK(ARRAY_SIZE(desc->root.constant_data))));
    if (desc->root_constant_stages)
       return hk_root_descriptor_offset(constant_data) +
              util_last_bit(desc->root_constant_stages) * sizeof(uint64_t);
