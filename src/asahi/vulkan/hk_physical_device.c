@@ -1889,6 +1889,11 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
    props->maxVertexOutputComponents = outputs;
    props->maxTessellationEvaluationOutputComponents = outputs;
    props->maxGeometryOutputComponents = outputs;
+   /* Geometry inputs are the previous stage's outputs: advertise no more than
+    * a vertex or evaluation shader can export (the minimum is 64), so a
+    * geometry shader using the full input limit has a producer that links.
+    */
+   props->maxGeometryInputComponents = outputs;
    /* Input declarations need not all have produced values. The fragment
     * compiler removes unused and unwritten inputs before assigning compact
     * coefficients from the producer's tighter export-bank layout. Expose
