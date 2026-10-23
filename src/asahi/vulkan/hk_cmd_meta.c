@@ -295,6 +295,8 @@ hk_meta_decompress_color(struct hk_cmd_buffer *cmd,
    uint64_t mode = ail_tile_mode_uncompressed(layout->format);
    uint64_t address = hk_image_base_address(image, 0) + layout->metadata_offset_B +
                       layer * layout->compression_layer_stride_B + start;
+   assert(end >= start && (end - start) % 16 == 0);
+   assert(address % 16 == 0);
    libagx_fill_uint4(cmd, agx_1d((end - start) / 16), AGX_BARRIER_ALL,
                      address, 0, mode, mode >> 32, mode, mode >> 32);
    hk_cmd_buffer_end_compute(cmd);

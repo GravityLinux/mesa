@@ -458,6 +458,11 @@ VKAPI_ATTR VkResult VKAPI_CALL
 hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   /* Failed meta recording can leave a partial stream. Report the original
+    * recording error without trying to finish or merge that stream. */
+   if (vk_command_buffer_has_error(&cmd->vk))
+      return vk_command_buffer_end(&cmd->vk);
+
 
    hk_cmd_render_merge_flush(cmd);
    assert(cmd->current_cs.gfx == NULL && cmd->current_cs.pre_gfx == NULL &&

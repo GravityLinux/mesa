@@ -4,6 +4,7 @@
 #include "../hk_feedback.h"
 #include "../hk_image.h"
 #include "../hk_image_view.h"
+#include "asahi/lib/agx_tilebuffer.h"
 #define CHECK(x)                                                               \
    do {                                                                        \
       if (!(x)) {                                                              \
@@ -14,7 +15,10 @@
 int
 main(void)
 {
-   const VkFormat formats[] = {VK_FORMAT_R8G8B8A8_SRGB,
+   const VkFormat formats[] = {VK_FORMAT_R8_UINT, VK_FORMAT_R16_UINT,
+                               VK_FORMAT_R8G8_UINT, VK_FORMAT_R32_UINT,
+                               VK_FORMAT_R16G16_UINT, VK_FORMAT_R32G32_UINT,
+                               VK_FORMAT_R8G8B8A8_SRGB,
                                VK_FORMAT_R8G8B8A8_SNORM,
                                VK_FORMAT_A2B10G10R10_UNORM_PACK32,
                                VK_FORMAT_R16_SFLOAT,
@@ -29,6 +33,12 @@ main(void)
       CHECK(ail_pixel_format[hk_format_to_pipe_format(raw)].channels ==
             ail_pixel_format[hk_format_to_pipe_format(formats[i])].channels);
       CHECK(hk_feedback_can_compress(&dev, VK_IMAGE_TYPE_2D, formats[i], 1));
+      enum pipe_format pf = hk_format_to_pipe_format(raw);
+      struct agx_tilebuffer_layout tib = agx_build_tilebuffer_layout(&pf, 1, 1, true);
+      struct drm_asahi_cmd_render render = {0};
+      agx_tilebuffer_set_drm_cmd(&render, &tib);
+      CHECK(render.utile_width_px % 16 == 0);
+      CHECK(render.utile_height_px % 16 == 0);
       CHECK(!hk_feedback_can_compress(&dev, VK_IMAGE_TYPE_3D, formats[i], 1));
       CHECK(!hk_feedback_can_compress(&dev, VK_IMAGE_TYPE_2D, formats[i], 4));
    }

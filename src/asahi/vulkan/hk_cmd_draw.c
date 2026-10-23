@@ -873,6 +873,9 @@ hk_feedback_decompress(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
 static bool
 hk_feedback_prepare_draw(struct hk_cmd_buffer *cmd)
 {
+   if (vk_command_buffer_has_error(&cmd->vk))
+      return false;
+
    struct hk_rendering_state *render = &cmd->state.gfx.render;
    if (!cmd->rendering || cmd->in_meta ||
        !(cmd->vk.dynamic_graphics_state.feedback_loops & VK_IMAGE_ASPECT_COLOR_BIT))
@@ -943,6 +946,9 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
                      const VkRenderingInfo *pRenderingInfo)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   if (vk_command_buffer_has_error(&cmd->vk))
+      return;
+
    uint8_t raw_mask = hk_feedback_color_mask(cmd, pRenderingInfo);
    if (raw_mask) {
       hk_cmd_render_merge_flush(cmd);
@@ -1088,6 +1094,15 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
          agx_apple9_tile_sample_bytes(bytes, render->tilebuffer.nr_samples), 8);
       render->tilebuffer.tile_size = render->tilebuffer.nr_samples == 4
                                        ? 32 * 16 : 32 * 32;
+   }
+
+   if (cmd->feedback_decompress) {
+      /* A self-blit must retire each whole compression block before another
+       * tile reads it. The metadata covers 16x16 texels for every colour bpp. */
+      struct drm_asahi_cmd_render raw = {0};
+      agx_tilebuffer_set_drm_cmd(&raw, &render->tilebuffer);
+      assert(raw.utile_width_px % 16 == 0);
+      assert(raw.utile_height_px % 16 == 0);
    }
 
    const VkRenderingAttachmentLocationInfoKHR ral_info = {
@@ -1457,6 +1472,9 @@ hk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
                        const VkRenderingEndInfoKHR *pRenderingEndInfo)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   if (vk_command_buffer_has_error(&cmd->vk))
+      return;
+
    struct hk_rendering_state *render = &cmd->state.gfx.render;
 
    /* The last control stream of the render pass is special since it gets its
@@ -5671,6 +5689,11 @@ hk_apple9_draw_mesh(struct hk_cmd_buffer *cmd, uint32_t draw_id,
                     const uint32_t *direct, uint64_t grid_addr,
                     uint64_t count_addr)
 {
+   /* Includes the hybrid native path: static pipeline feedback may change
+    * after BeginRendering, and a failed decompression poisons recording. */
+   if (!hk_feedback_prepare_draw(cmd))
+      return;
+
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct hk_descriptor_state *desc = &gfx->descriptors;
 
