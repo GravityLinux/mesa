@@ -1866,6 +1866,30 @@ static unsigned
 apple9_first_consumer(const struct agx_apple9_vir_program *program,
                       unsigned producer_index);
 
+/* The first instruction that completes a texture result. A phi edge copy
+ * usually coalesces away in allocation, leaving the result pending into the
+ * successor, so follow phis to the first real use of the merged value. */
+static unsigned
+apple9_texture_handoff(const struct agx_apple9_vir_program *program,
+                       unsigned sample)
+{
+   unsigned handoff = apple9_first_consumer(program, sample);
+   for (unsigned depth = 0; depth < 4 && handoff != UINT_MAX; ++depth) {
+      const struct agx_apple9_vir_instr *edge = program->instructions[handoff];
+      if (edge->op != AGX_APPLE9_VIR_PHI_SRC)
+         return handoff;
+      unsigned next = UINT_MAX;
+      for (const struct agx_apple9_use *use = agx_apple9_uses(program, edge->target);
+           use; use = use->next) {
+         unsigned position = apple9_node(use->instruction)->position;
+         if (position > handoff)
+            next = MIN2(next, position);
+      }
+      handoff = next;
+   }
+   return handoff;
+}
+
 /* A texture bundle describes a pending operation. Its parameters remain live
  * through the first result consumer, which performs the scoreboard handoff.
  * Rewriting them between the bundle and that consumer changes the sample.
@@ -1893,7 +1917,7 @@ apple9_publication_end(const struct agx_apple9_vir_program *program,
          }
          if (sample->op != AGX_APPLE9_VIR_TEXTURE_SAMPLE)
             return program->instruction_count;
-         unsigned handoff = apple9_first_consumer(program, position);
+         unsigned handoff = apple9_texture_handoff(program, position);
          end = MAX2(end, handoff == UINT_MAX ? program->instruction_count : handoff);
       }
    }
@@ -2883,7 +2907,7 @@ retry:
          for (unsigned t = 0; t < i; ++t) {
             const struct agx_apple9_vir_instr *sample = program->instructions[t];
             if (sample->op != AGX_APPLE9_VIR_TEXTURE_SAMPLE ||
-                apple9_first_consumer(program, t) < i)
+                apple9_texture_handoff(program, t) < i)
                continue;
             bool borrows_publication = false;
             for (unsigned s = 0; s < sample->nr_srcs; ++s)
