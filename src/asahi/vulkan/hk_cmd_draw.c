@@ -670,6 +670,10 @@ hk_render_merge_begin(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
 {
    struct hk_image_view *views[HK_MAX_RTS] = {NULL};
    struct hk_render_merge_key key;
+   bool empty = cmd->empty_barriers.size != 0;
+   if (empty && memcmp(&info->renderArea, &cmd->merge_empty_render->area,
+                       sizeof(info->renderArea)))
+      return false;
    const VkRenderingAttachmentInfo *ds[2] = {
       info->pDepthAttachment, info->pStencilAttachment};
    struct hk_image_view *ds_views[2] = {NULL};
@@ -679,6 +683,13 @@ hk_render_merge_begin(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
          continue;
       if (ds[i]->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ||
           ds[i]->resolveMode != VK_RESOLVE_MODE_NONE)
+         return false;
+      if (empty && (ds[i]->loadOp != VK_ATTACHMENT_LOAD_OP_LOAD ||
+                    (ds[i]->imageLayout != VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL &&
+                     ds[i]->imageLayout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL &&
+                     ds[i]->imageLayout != (i ? VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL :
+                                               VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL)) ||
+                    hk_attachment_may_be_sampled(ds[i])))
          return false;
       ds_views[i] = hk_image_view_from_handle(ds[i]->imageView);
       if (vk_image_layout_is_read_only(ds[i]->imageLayout,
@@ -694,6 +705,12 @@ hk_render_merge_begin(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
    for (unsigned i = 0; i < MIN2(info->colorAttachmentCount, HK_MAX_RTS); ++i) {
       const VkRenderingAttachmentInfo *att = &info->pColorAttachments[i];
       views[i] = hk_image_view_from_handle(att->imageView);
+      if (empty && att->imageView &&
+          (att->loadOp != VK_ATTACHMENT_LOAD_OP_LOAD ||
+           (att->imageLayout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
+            att->imageLayout != VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL) ||
+           hk_attachment_may_be_sampled(att)))
+         return false;
       /* Clears would need an in-pass clear over the render area. */
       if (att->imageView && att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
          return false;
@@ -709,7 +726,9 @@ hk_render_merge_begin(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
    }
 
    return hk_render_merge_enabled(cmd) &&
-          hk_render_merge_key_init(&key, info->flags, info->layerCount,
+          hk_render_merge_key_init(&key,
+                              info->flags & ~(empty ? VK_RENDERING_SUSPENDING_BIT : 0),
+                              info->layerCount,
                               info->viewMask, info->colorAttachmentCount, views,
                               ds_views[0], ds_views[1], ds_read_only, info->renderArea) &&
           !memcmp(&key, &cmd->merge_key, sizeof(key));
@@ -766,6 +785,27 @@ hk_render_merge_end(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
       render->ds_read_only, render->area);
 }
 
+/* A merged empty chain can still end without any draws. Retain the first
+ * pass's clear values so empty-render conversion does not lose them when a
+ * later LOAD pass, including suspend/resume, supplies the final render state.
+ */
+static void
+hk_render_inherit_empty_clears(struct hk_cmd_buffer *cmd)
+{
+   if (!cmd->merge_empty)
+      return;
+   struct hk_rendering_state *render = &cmd->state.gfx.render;
+   const struct hk_rendering_state *first = cmd->merge_empty_render;
+   for (unsigned i = 0; i < HK_MAX_RTS + 2; ++i) {
+      struct hk_attachment *att = i == HK_MAX_RTS ? &render->depth_att :
+         i == HK_MAX_RTS + 1 ? &render->stencil_att : &render->color_att[i];
+      const struct hk_attachment *old = i == HK_MAX_RTS ? &first->depth_att :
+         i == HK_MAX_RTS + 1 ? &first->stencil_att : &first->color_att[i];
+      att->clear = old->clear;
+      memcpy(att->clear_colour, old->clear_colour, sizeof(att->clear_colour));
+   }
+}
+
 VKAPI_ATTR void VKAPI_CALL
 hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
                      const VkRenderingInfo *pRenderingInfo)
@@ -782,6 +822,8 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    }
    if (cmd->merge_cs && !resume) {
       merge = hk_render_merge_begin(cmd, pRenderingInfo);
+      if (merge)
+         hk_cmd_empty_barriers_flush(cmd, true);
       if (!merge) {
          hk_render_merge_trace(cmd->in_meta ? "begin: meta" : "begin: mismatch",
                                pRenderingInfo->colorAttachmentCount,
@@ -1086,6 +1128,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       render->first_cs = cmd->merge_first_cs ? cmd->merge_cs : NULL;
       render->feedback |= cmd->merge_feedback;
       render->resumed = true;
+      hk_render_inherit_empty_clears(cmd);
       cmd->merge_cs = NULL;
       cmd->merge_empty = false;
       cmd->merge_suspended = false;
@@ -1104,6 +1147,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       /* The render's earlier passes may have read their attachments too. */
       render->feedback |= cmd->merge_feedback;
       render->merge_reach = cmd->merge_reach;
+      hk_render_inherit_empty_clears(cmd);
       cmd->merge_cs = NULL;
       cmd->merge_empty = false;
       hk_cmd_buffer_dirty_all(cmd);

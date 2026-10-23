@@ -63,7 +63,7 @@ hk_trim_cmd_buffer(struct hk_cmd_buffer *cmd)
    struct util_dynarray *arrays[] = {
       &cmd->large_bos, &cmd->implicit_sync_res, &cmd->query_adds,
       &cmd->query_writes, &cmd->occlusion_accum, &cmd->sync_events,
-      &cmd->sync_remap, &cmd->sync_first_event,
+      &cmd->sync_remap, &cmd->sync_first_event, &cmd->empty_barriers,
    };
    for (unsigned i = 0; i < ARRAY_SIZE(arrays); ++i)
       util_dynarray_fini(arrays[i]);
@@ -124,6 +124,7 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd, bool release)
    util_dynarray_clear(&cmd->query_writes);
    util_dynarray_clear(&cmd->occlusion_accum);
    util_dynarray_clear(&cmd->sync_events);
+   util_dynarray_clear(&cmd->empty_barriers);
    util_dynarray_clear(&cmd->sync_remap);
    util_dynarray_clear(&cmd->sync_first_event);
    if (release)
@@ -171,6 +172,7 @@ hk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
    util_dynarray_fini(&cmd->query_writes);
    util_dynarray_fini(&cmd->occlusion_accum);
    util_dynarray_fini(&cmd->sync_events);
+   util_dynarray_fini(&cmd->empty_barriers);
    for (unsigned i = 0; i < HK_TESS_BATCH_LANES; ++i)
       util_dynarray_fini(&cmd->tess_batch.lane[i]);
    util_dynarray_fini(&cmd->sync_remap);
@@ -213,6 +215,7 @@ hk_create_cmd_buffer(struct vk_command_pool *vk_pool,
    cmd->query_writes = UTIL_DYNARRAY_INIT;
    cmd->occlusion_accum = UTIL_DYNARRAY_INIT;
    cmd->sync_events = UTIL_DYNARRAY_INIT;
+   cmd->empty_barriers = UTIL_DYNARRAY_INIT;
    cmd->sync_remap = UTIL_DYNARRAY_INIT;
    cmd->sync_first_event = UTIL_DYNARRAY_INIT;
    for (unsigned i = 0; i < HK_TESS_BATCH_LANES; ++i)
@@ -1116,6 +1119,95 @@ hk_cmd_sync_barrier(struct hk_cmd_buffer *cmd,
    util_dynarray_append(&cmd->sync_events, event);
 }
 
+/* Nothing between the empty pass and its successor has accessed memory. If
+ * the successor consumes its clears in tiles, place the retained barriers
+ * before that render to preserve dependencies from older work. Otherwise the
+ * empty-render conversion has emitted the clears and these barriers follow
+ * them, just as they would without deferral.
+ */
+void
+hk_cmd_empty_barriers_flush(struct hk_cmd_buffer *cmd, bool merge)
+{
+   if (!cmd->empty_barriers.size)
+      return;
+   struct util_dynarray pending = cmd->empty_barriers;
+   cmd->empty_barriers = UTIL_DYNARRAY_INIT;
+   struct hk_cs *saved = NULL;
+   if (merge) {
+      assert(cmd->merge_empty && cmd->merge_cs == cmd->current_cs.gfx);
+      saved = cmd->merge_cs;
+      cmd->merge_cs = cmd->current_cs.gfx = NULL;
+   }
+   util_dynarray_foreach(&pending, struct hk_empty_barrier, b) {
+      unsigned first = util_dynarray_num_elements(&cmd->sync_events,
+                                                  struct hk_sync_event);
+      hk_cmd_sync_barrier(cmd, b->src, b->dst, b->src_access, b->dst_access);
+      util_dynarray_top_ptr(&cmd->sync_events,
+                            struct hk_sync_event)->barrier_group = b->group;
+      if (merge)
+         hk_render_merge_place_events(cmd, first);
+   }
+   if (merge) {
+      cmd->merge_cs = cmd->current_cs.gfx = saved;
+      /* Future work cannot move ahead of the consumed clears across any of
+       * the deferred dependencies. */
+      cmd->merge_reach = ~(VkPipelineStageFlags2)0;
+   }
+   util_dynarray_fini(&pending);
+}
+
+static bool
+hk_defer_empty_barriers(struct hk_cmd_buffer *cmd, const VkDependencyInfo *info)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("HK_APPLE9_FOLD_EMPTY_CLEARS", true);
+   if (!enabled || !cmd->merge_cs || !cmd->merge_empty ||
+       cmd->merge_suspended || cmd->merge_feedback || cmd->merge_pre_cs ||
+       cmd->in_meta || cmd->sync_fallback ||
+       (info->dependencyFlags & ~VK_DEPENDENCY_BY_REGION_BIT))
+      return false;
+   /* The clear must not be visible through a distinct, consistently
+    * interpreted alias in the consuming pass. Optimal, private images
+    * without ALIAS cannot expose their cleared contents that way. */
+   for (unsigned i = 0; i < HK_MAX_RTS + 2; ++i) {
+      const struct vk_image *image = cmd->merge_key.image[i];
+      if (image && (image->tiling != VK_IMAGE_TILING_OPTIMAL ||
+                    image->external_handle_types ||
+                    (image->create_flags & (VK_IMAGE_CREATE_ALIAS_BIT |
+                                            VK_IMAGE_CREATE_SPARSE_BINDING_BIT))))
+         return false;
+   }
+   for (unsigned i = 0; i < info->bufferMemoryBarrierCount; ++i) {
+      const VkBufferMemoryBarrier2 *b = &info->pBufferMemoryBarriers[i];
+      if (b->srcQueueFamilyIndex != b->dstQueueFamilyIndex)
+         return false;
+   }
+   for (unsigned i = 0; i < info->imageMemoryBarrierCount; ++i) {
+      const VkImageMemoryBarrier2 *b = &info->pImageMemoryBarriers[i];
+      if (b->srcQueueFamilyIndex != b->dstQueueFamilyIndex)
+         return false;
+   }
+   uint32_t group = ++cmd->sync_next_group;
+   assert(group != 0);
+#define DEFER(b) do {                                                         \
+      struct hk_empty_barrier pending = {                                    \
+         .src = (b).srcStageMask, .dst = (b).dstStageMask,                      \
+         .src_access = (b).srcAccessMask, .dst_access = (b).dstAccessMask,       \
+         .group = group,                                                     \
+      };                                                                     \
+      util_dynarray_append(&cmd->empty_barriers, pending);                    \
+   } while (0)
+   for (unsigned i = 0; i < info->memoryBarrierCount; ++i)
+      DEFER(info->pMemoryBarriers[i]);
+   for (unsigned i = 0; i < info->bufferMemoryBarrierCount; ++i)
+      DEFER(info->pBufferMemoryBarriers[i]);
+   for (unsigned i = 0; i < info->imageMemoryBarrierCount; ++i)
+      DEFER(info->pImageMemoryBarriers[i]);
+#undef DEFER
+   return true;
+}
+
 VKAPI_ATTR void VKAPI_CALL
 hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
                        const VkDependencyInfo *pDependencyInfo)
@@ -1125,6 +1217,11 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
 
    if (HK_PERF(dev, NOBARRIER))
       return;
+
+   if (hk_defer_empty_barriers(cmd, pDependencyInfo))
+      return;
+   if (cmd->empty_barriers.size)
+      hk_cmd_render_merge_flush(cmd);
 
    perf_debug(cmd, "Pipeline barrier");
 
