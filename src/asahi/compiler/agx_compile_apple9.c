@@ -9183,6 +9183,10 @@ agx_nir_lower_apple9_sampler_state(
                *reason = "Apple9 custom border needs an additional sampler entry";
                return false;
             }
+            /* Aliases take slots no remaining sample binds. Runtime sampler
+             * records are indexed by API sampler, which stays bound for
+             * offset samples; an offset sample lowered to sampler-less
+             * fetches that still read its record would break this. */
             unsigned alias = ffs(~samplers) - 1;
             sampler_alias[s] = alias;
             samplers |= BITFIELD_BIT(alias);
