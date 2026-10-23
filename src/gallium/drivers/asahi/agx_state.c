@@ -2301,8 +2301,9 @@ agx_gather_shade_model_color(nir_builder *b, nir_intrinsic_instr *intr,
 
    nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
    nir_intrinsic_instr *bary = nir_src_as_intrinsic(intr->src[0]);
+   /* An indirect barycentric is treated as unqualified, i.e. flattened. */
    if (!(BITFIELD64_BIT(sem.location) & VARYING_BITS_COLOR) ||
-       nir_intrinsic_interp_mode(bary) != INTERP_MODE_NONE)
+       (bary && nir_intrinsic_interp_mode(bary) != INTERP_MODE_NONE))
       return false;
 
    *mask |= BITFIELD64_BIT(sem.location);
