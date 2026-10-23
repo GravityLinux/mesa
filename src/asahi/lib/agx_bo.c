@@ -129,6 +129,9 @@ struct agx_bo *
 agx_bo_cache_fetch(struct agx_device *dev, size_t size, size_t align,
                    uint32_t flags, const bool dontwait)
 {
+   if (unlikely(dev->bo_cache.forked))
+      return NULL;
+
    pthread_mutex_lock(&dev->bo_cache.lock);
    struct list_head *bucket = agx_bucket(dev, size);
    struct agx_bo *bo = NULL;

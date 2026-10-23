@@ -554,11 +554,10 @@ test_fork_during_close(void)
       pthread_mutex_unlock(&dev->bo_map_lock);
       CHECK(!pthread_mutex_trylock(&dev->bo_cache.lock));
       pthread_mutex_unlock(&dev->bo_cache.lock);
-      CHECK(agx_bo_cache_fetch(dev, 16384, 16384, 0, true) == cached);
-      agx_bo_free(dev, cached);
+      CHECK(!agx_bo_cache_fetch(dev, 16384, 16384, 0, true));
       agx_bo_unreference(dev, shared);
       agx_bo_unreference(dev, ordinary);
-      CHECK(!cached->size && !shared->size && !ordinary->size);
+      CHECK(!shared->size && !ordinary->size);
       agx_bo_cache_wait(dev);
       agx_bo_cache_finish(dev);
       agx_bo_cache_wait(&idle);
