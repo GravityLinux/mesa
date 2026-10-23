@@ -918,6 +918,9 @@ zink_init_screen_caps(struct zink_screen *screen)
       PIPE_VERTEX_INPUT_ALIGNMENT_NONE : PIPE_VERTEX_INPUT_ALIGNMENT_ELEMENT;
 
    caps->gl_clamp = false;
+   /* unorm D24 falls back to D32_SFLOAT */
+   caps->depth_unorm_emulated = !screen->have_X8_D24_UNORM_PACK32 ||
+                                !screen->have_D24_UNORM_S8_UINT;
 
    /* Most Vulkan compilers move immutable local arrays to shader constant
     * data. Honeykrisp does not implement that path yet, so large lookup

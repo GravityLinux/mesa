@@ -289,6 +289,11 @@ struct st_fp_variant_key
 
    /* bitmask of shadow samplers with depth textures in them for ARB programs; */
    GLbitfield depth_textures;
+
+   /* bitmask of shadow samplers with floating-point depth textures;
+    * pipe_caps.depth_unorm_emulated
+    */
+   uint32_t float_depth_shadow;
 };
 
 /**
@@ -349,6 +354,11 @@ struct st_common_variant_key
 
    /* bitmask of sampler units; pipe_caps.gl_clamp */
    uint32_t gl_clamp[3];
+
+   /* bitmask of shadow samplers with floating-point depth textures;
+    * pipe_caps.depth_unorm_emulated
+    */
+   uint32_t float_depth_shadow;
 };
 
 

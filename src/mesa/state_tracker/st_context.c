@@ -168,6 +168,28 @@ st_invalidate_state(struct gl_context *ctx)
             (!fp->shader_program && fp->ShadowSamplers))
             ST_SET_STATE(ctx->NewDriverState, ST_NEW_FS_STATE);
       }
+
+      /* shadow reference clamping depends on the depth texture format */
+      if (st->screen->caps.depth_unorm_emulated) {
+         static const struct {
+            mesa_shader_stage stage;
+            unsigned state;
+         } stages[] = {
+            { MESA_SHADER_TESS_CTRL, ST_NEW_TCS_STATE },
+            { MESA_SHADER_TESS_EVAL, ST_NEW_TES_STATE },
+            { MESA_SHADER_GEOMETRY, ST_NEW_GS_STATE },
+            { MESA_SHADER_COMPUTE, ST_NEW_CS_STATE },
+         };
+         if (ctx->VertexProgram._Current && ctx->VertexProgram._Current->ShadowSamplers)
+            ST_SET_STATE(ctx->NewDriverState, ST_NEW_VS_STATE);
+         if (ctx->FragmentProgram._Current && ctx->FragmentProgram._Current->ShadowSamplers)
+            ST_SET_STATE(ctx->NewDriverState, ST_NEW_FS_STATE);
+         for (unsigned i = 0; i < ARRAY_SIZE(stages); i++) {
+            struct gl_program *prog = ctx->_Shader->CurrentProgram[stages[i].stage];
+            if (prog && prog->ShadowSamplers)
+               ST_SET_STATE(ctx->NewDriverState, stages[i].state);
+         }
+      }
    }
 }
 
