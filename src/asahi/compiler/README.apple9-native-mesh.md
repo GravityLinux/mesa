@@ -873,3 +873,12 @@ offline compiler acceptance do not establish correct execution of our wider
 native programs. Live wider launch allocations, primitive linking, full-count
 publication, and device results remain pending. No advertised limits change
 from this host evidence; native stays default-off.
+
+The C2 native-capability pilot now has independently authored NIR programs and
+a harness-v2 source kit at `../vulkan/tests/native-capability-v2/`. It varies
+counts and thread widths independently, covers all three topologies through
+V256/P512, and uses full-buffer plus additive floating-point raster oracles.
+Ordinary vertex draws must qualify the raster oracle before native submission.
+Kernel admission and device measurements are still required; production
+eligibility and advertised limits remain unchanged. See the study's C2 section
+for the current host-only evidence and remaining varying/payload tiers.
