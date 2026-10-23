@@ -489,32 +489,32 @@ apple9_evict_entries(struct agx_device *dev)
    const unsigned target =
       AGX_APPLE9_ENTRY_ARENA_SIZE / AGX_APPLE9_ENTRY_BLOCK_SIZE / 4;
    unsigned freed = 0;
-   list_for_each_entry_safe(struct agx_bo, bo, &dev->apple9_entry_lru,
-                            apple9_entry_link) {
+   list_for_each_entry_safe(struct agx_shader_body, body,
+                            &dev->apple9_entry_lru, entry_link) {
       if (freed == target)
          break;
-      if (bo->apple9_entry_pins || bo->apple9_entry_fixed)
+      if (body->entry_pins || body->entry_fixed)
          continue;
       util_vma_heap_free(&dev->apple9_entry_heap,
-                         bo->apple9_entry_offset - AGX_APPLE9_ENTRY_CODE_OFFSET,
+                         body->entry_offset - AGX_APPLE9_ENTRY_CODE_OFFSET,
                          AGX_APPLE9_ENTRY_BLOCK_SIZE);
-      bo->apple9_entry_offset = 0;
-      list_del(&bo->apple9_entry_link);
+      body->entry_offset = 0;
+      list_del(&body->entry_link);
       ++freed;
    }
 }
 
 static uint32_t
 apple9_shader_entry(struct agx_device *dev, void *allocator,
-                    struct agx_bo *body, bool compute)
+                    struct agx_shader_body *body, bool compute)
 {
    simple_mtx_lock(&dev->apple9_entry_lock);
    if (!allocator || !dev->apple9_pin_entry ||
        !dev->apple9_pin_entry(allocator, body))
-      body->apple9_entry_fixed = true;
-   uint32_t entry = body->apple9_entry_offset;
+      body->entry_fixed = true;
+   uint32_t entry = body->entry_offset;
    if (entry) {
-      list_move_to(&body->apple9_entry_link, &dev->apple9_entry_lru);
+      list_move_to(&body->entry_link, &dev->apple9_entry_lru);
    } else {
       uint32_t block = util_vma_heap_alloc(&dev->apple9_entry_heap,
                                           AGX_APPLE9_ENTRY_BLOCK_SIZE,
@@ -536,11 +536,11 @@ apple9_shader_entry(struct agx_device *dev, void *allocator,
             memcpy(bytes + 0x40, apple9_compute_constant, 0x40);
          }
          if (apple9_build_body_entry(bytes + AGX_APPLE9_ENTRY_CODE_OFFSET,
-                                     dev->shader_base + entry, body->va->addr)) {
+                                     dev->shader_base + entry, body->addr)) {
             agx_bo_note_cpu_write(dev->apple9_entries, block,
                                   AGX_APPLE9_ENTRY_BLOCK_SIZE);
-            body->apple9_entry_offset = entry;
-            list_addtail(&body->apple9_entry_link, &dev->apple9_entry_lru);
+            body->entry_offset = entry;
+            list_addtail(&body->entry_link, &dev->apple9_entry_lru);
          } else {
             util_vma_heap_free(&dev->apple9_entry_heap, block,
                                AGX_APPLE9_ENTRY_BLOCK_SIZE);
@@ -555,7 +555,8 @@ apple9_shader_entry(struct agx_device *dev, void *allocator,
 bool
 agx_apple9_prepare_compute_dispatch_alloc(
    struct agx_device *dev, void *allocator,
-   struct agx_ptr (*alloc)(void *, size_t, size_t), struct agx_bo *body,
+   struct agx_ptr (*alloc)(void *, size_t, size_t),
+   struct agx_shader_body *body,
    const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
    unsigned resource_count, uint64_t textures, uint64_t samplers,
    const struct agx_apple9_compute_geometry *geometry,
@@ -570,7 +571,8 @@ agx_apple9_prepare_compute_dispatch_alloc(
 bool
 agx_apple9_prepare_compute_dispatch_alloc_tmpl(
    struct agx_device *dev, void *allocator,
-   struct agx_ptr (*alloc)(void *, size_t, size_t), struct agx_bo *body,
+   struct agx_ptr (*alloc)(void *, size_t, size_t),
+   struct agx_shader_body *body,
    const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
    unsigned resource_count, uint64_t textures, uint64_t samplers,
    const struct agx_apple9_compute_geometry *geometry,
@@ -661,7 +663,8 @@ agx_apple9_prepare_compute_dispatch(
    uint64_t preamble_address, uint64_t *launch_address)
 {
    return agx_apple9_prepare_compute_dispatch_alloc(
-      dev, usc_pool, apple9_pool_alloc, body, profile, resources, resource_count,
+      dev, usc_pool, apple9_pool_alloc, &body->apple9_body, profile, resources,
+      resource_count,
       textures, samplers, geometry, preamble_address, launch_address);
 }
 
@@ -1308,6 +1311,12 @@ agx_apple9_stage_launch_cache_finish(struct agx_apple9_stage_launch_cache *c)
    simple_mtx_destroy(&c->lock);
 }
 
+static struct agx_shader_body *
+apple9_stage_body(const struct agx_apple9_render_stage *stage)
+{
+   return stage->body ? stage->body : &stage->bo->apple9_body;
+}
+
 static void
 apple9_graphics_launch_params(struct agx_apple9_launch_parameters *params,
                               const struct agx_device *dev,
@@ -1317,7 +1326,7 @@ apple9_graphics_launch_params(struct agx_apple9_launch_parameters *params,
 {
    *params = (struct agx_apple9_launch_parameters){
       .preamble_address = shader->preamble_size
-         ? shader->bo->va->addr + shader->preamble_offset : 0,
+         ? apple9_stage_body(shader)->addr + shader->preamble_offset : 0,
       .shader_base = dev->shader_base,
       .publication_count = shader->publication_count,
       .frame_extent_a = MAX2(shader->scratch_size, shader->atomic_frame_size),
@@ -1388,7 +1397,7 @@ agx_apple9_prepare_graphics_stage(
 {
    if (!shader->bo || !shader->publication_count_valid)
       return false;
-   unsigned entry = apple9_shader_entry(dev, allocator, shader->bo, false);
+   unsigned entry = apple9_shader_entry(dev, allocator, apple9_stage_body(shader), false);
    if (!entry)
       return false;
    if (shader->preamble_size > AGX_APPLE9_MAX_GRAPHICS_PREAMBLE_BYTES ||
@@ -1554,7 +1563,7 @@ agx_apple9_prepare_draw_alloc(
          return false;
       }
       draw->program_id[stage] = shader->program_id;
-      draw->code[stage] = shader->bo->va->addr;
+      draw->code[stage] = apple9_stage_body(shader)->addr;
    }
    for (unsigned stage = 0; stage < 2; stage++) {
       const struct agx_apple9_render_stage *shader = stages[stage];
@@ -1750,7 +1759,7 @@ agx_apple9_update_draw_tables_alloc(
    uint32_t launch[] = {draw->launch[0], draw->launch[1]};
    for (unsigned stage = 0; stage < 2; ++stage) {
       assert(draw->program_id[stage] == stages[stage]->program_id);
-      assert(draw->code[stage] == stages[stage]->bo->va->addr);
+      assert(draw->code[stage] == apple9_stage_body(stages[stage])->addr);
       if (tables[stage] == old_tables[stage] ||
           (stage == 0 && stages[stage]->native_mesh))
          continue;

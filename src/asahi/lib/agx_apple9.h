@@ -38,6 +38,7 @@ bool agx_apple9_texture_format_supported(enum pipe_format format);
 
 struct agx_device;
 struct agx_bo;
+struct agx_shader_body;
 struct agx_pool;
 struct agx_apple9_graphics;
 
@@ -64,6 +65,8 @@ struct agx_apple9_render_stage {
    uint64_t program_id;
    /* Owned by the compiled shader; each using batch retains a BO reference. */
    struct agx_bo *bo;
+   /* Optional body identity; whole-BO callers leave this NULL. */
+   struct agx_shader_body *body;
    const uint8_t *binary;
    size_t binary_size;
    uint32_t preamble_offset, preamble_size;
@@ -391,7 +394,8 @@ bool agx_apple9_build_compute_geometry_fields(
 /* Build immutable resource and launch records in the batch's USC pool. */
 bool agx_apple9_prepare_compute_dispatch_alloc(
    struct agx_device *dev, void *allocator,
-   struct agx_ptr (*alloc)(void *, size_t, size_t), struct agx_bo *body,
+   struct agx_ptr (*alloc)(void *, size_t, size_t),
+   struct agx_shader_body *body,
    const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
    unsigned resource_count, uint64_t textures, uint64_t samplers,
    const struct agx_apple9_compute_geometry *geometry,
@@ -403,7 +407,8 @@ bool agx_apple9_prepare_compute_dispatch_alloc(
  * every templated program with a full build. */
 bool agx_apple9_prepare_compute_dispatch_alloc_tmpl(
    struct agx_device *dev, void *allocator,
-   struct agx_ptr (*alloc)(void *, size_t, size_t), struct agx_bo *body,
+   struct agx_ptr (*alloc)(void *, size_t, size_t),
+   struct agx_shader_body *body,
    const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
    unsigned resource_count, uint64_t textures, uint64_t samplers,
    const struct agx_apple9_compute_geometry *geometry,

@@ -4073,7 +4073,7 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
 struct hk_apple9_body {
    blake3_hash hash;
    uint64_t size;
-   struct agx_bo *bo;
+   struct agx_shader_body base;
    struct list_head link;
 };
 
@@ -4091,8 +4091,17 @@ hk_apple9_body_equal(const void *a, const void *b)
    return x->size == y->size && !memcmp(x->hash, y->hash, sizeof(x->hash));
 }
 
-static struct agx_bo *
-hk_apple9_body_bo(struct hk_device *dev, const struct hk_shader *shader)
+static void
+hk_apple9_body_destroy(struct agx_device *dev, struct agx_shader_body *base)
+{
+   struct hk_apple9_body *body =
+      container_of(base, struct hk_apple9_body, base);
+   agx_bo_unreference(dev, base->bo);
+   free(body);
+}
+
+static struct agx_shader_body *
+hk_apple9_body_upload(struct hk_device *dev, const struct hk_shader *shader)
 {
    uint64_t data_offset = ALIGN_POT((uint64_t)shader->code_size,
                                     HK_MIN_UBO_ALIGNMENT);
@@ -4119,20 +4128,27 @@ hk_apple9_body_bo(struct hk_device *dev, const struct hk_shader *shader)
    if (entry) {
       struct hk_apple9_body *body = entry->data;
       list_move_to(&body->link, &dev->apple9_bodies.lru);
-      agx_bo_reference(body->bo);
+      agx_shader_body_reference(&body->base);
       simple_mtx_unlock(&dev->apple9_bodies.lock);
-      return body->bo;
+      return &body->base;
    }
    simple_mtx_unlock(&dev->apple9_bodies.lock);
 
+   struct hk_apple9_body *body = malloc(sizeof(*body));
+   if (!body)
+      return NULL;
+   *body = key;
    struct agx_bo *bo = agx_bo_create(&dev->dev, size, 0,
                                      AGX_BO_EXEC | AGX_BO_LOW_VA,
                                      "Apple9 shader");
-   if (!bo)
+   if (!bo) {
+      free(body);
       return NULL;
+   }
    void *map = agx_bo_map(bo);
    if (!map) {
       agx_bo_unreference(&dev->dev, bo);
+      free(body);
       return NULL;
    }
    memset(map, 0, size);
@@ -4140,24 +4156,20 @@ hk_apple9_body_bo(struct hk_device *dev, const struct hk_shader *shader)
    if (shader->data_size)
       memcpy((char *)map + data_offset,
              shader->data_ptr, shader->data_size);
-
-   struct hk_apple9_body *body = malloc(sizeof(*body));
-   if (!body)
-      return bo;
-   *body = key;
-   body->bo = bo;
+   body->base = (struct agx_shader_body){
+      .bo = bo,
+      .addr = bo->va->addr,
+      .refcnt = 1,
+      .destroy = hk_apple9_body_destroy,
+   };
 
    struct list_head evicted;
    list_inithead(&evicted);
    simple_mtx_lock(&dev->apple9_bodies.lock);
-   if (!dev->apple9_bodies.ht || bo->size > HK_APPLE9_BODY_CACHE_BYTES ||
-       _mesa_hash_table_search(dev->apple9_bodies.ht, body) ||
-       !_mesa_hash_table_insert(dev->apple9_bodies.ht, body, body)) {
-      /* Oversized, uploaded concurrently or allocation failure: the caller
-       * still owns this BO, but the cache must not keep a reference. */
-      free(body);
-   } else {
-      agx_bo_reference(bo);
+   if (dev->apple9_bodies.ht && bo->size <= HK_APPLE9_BODY_CACHE_BYTES &&
+       !_mesa_hash_table_search(dev->apple9_bodies.ht, body) &&
+       _mesa_hash_table_insert(dev->apple9_bodies.ht, body, body)) {
+      agx_shader_body_reference(&body->base);
       list_add(&body->link, &dev->apple9_bodies.lru);
       dev->apple9_bodies.count++;
       dev->apple9_bodies.bytes += bo->size;
@@ -4168,16 +4180,18 @@ hk_apple9_body_bo(struct hk_device *dev, const struct hk_shader *shader)
          list_del(&old->link);
          _mesa_hash_table_remove_key(dev->apple9_bodies.ht, old);
          dev->apple9_bodies.count--;
-         dev->apple9_bodies.bytes -= old->bo->size;
+         dev->apple9_bodies.bytes -= old->base.bo->size;
          list_addtail(&old->link, &evicted);
       }
    }
    simple_mtx_unlock(&dev->apple9_bodies.lock);
    list_for_each_entry_safe(struct hk_apple9_body, old, &evicted, link) {
-      agx_bo_unreference(&dev->dev, old->bo);
-      free(old);
+      list_del(&old->link);
+      agx_shader_body_unreference(&dev->dev, &old->base);
    }
-   return bo;
+   /* A concurrent identical upload, oversized body or failed cache insertion
+    * leaves the caller owning a valid body without a cache reference. */
+   return &body->base;
 }
 
 void
@@ -4187,8 +4201,8 @@ hk_apple9_bodies_finish(struct hk_device *dev)
       return;
    list_for_each_entry_safe(struct hk_apple9_body, body,
                             &dev->apple9_bodies.lru, link) {
-      agx_bo_unreference(&dev->dev, body->bo);
-      free(body);
+      list_del(&body->link);
+      agx_shader_body_unreference(&dev->dev, &body->base);
    }
    _mesa_hash_table_destroy(dev->apple9_bodies.ht, NULL);
    dev->apple9_bodies.ht = NULL;
@@ -4205,6 +4219,7 @@ hk_apple9_init_render_stage(struct hk_shader *s)
    struct agx_apple9_render_stage stage = {
       .program_id = s->apple9_program_id,
       .bo = s->bo,
+      .body = s->apple9_body,
       .binary = s->code_ptr,
       .binary_size = i->binary_size,
       .preamble_offset = i->apple9_preamble_offset,
@@ -4271,20 +4286,21 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
           (shader->info.stage == MESA_SHADER_COMPUTE &&
            agx_is_shader_empty(&shader->b)))
          return VK_SUCCESS;
-      shader->bo = hk_apple9_body_bo(dev, shader);
-      if (!shader->bo)
+      shader->apple9_body = hk_apple9_body_upload(dev, shader);
+      if (!shader->apple9_body)
          return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      shader->bo = shader->apple9_body->bo;
       if (shader->data_size)
-         shader->data_addr = shader->bo->va->addr +
+         shader->data_addr = shader->apple9_body->addr +
                              ALIGN_POT((uint64_t)shader->code_size, HK_MIN_UBO_ALIGNMENT);
-      hk_gpu_busy_shader(shader->bo, shader->code_ptr, shader->code_size,
+      hk_gpu_busy_shader(shader->apple9_body->addr, shader->code_ptr, shader->code_size,
                          shader->info.stage);
       if (shader->info.stage == MESA_SHADER_COMPUTE) {
          const struct agx_apple9_compute_profile *p = &shader->info.apple9;
          struct agx_apple9_launch_template *t = malloc(sizeof(*t));
          if (t && agx_apple9_compute_launch_template(
                      t, p, dev->dev.shader_base,
-                     p->preamble_size ? shader->bo->va->addr + p->preamble_offset
+                     p->preamble_size ? shader->apple9_body->addr + p->preamble_offset
                                       : 0))
             shader->apple9_launch = t;
          else
@@ -5415,7 +5431,10 @@ hk_shader_destroy(struct hk_device *dev, struct hk_shader *s)
 {
    free((void *)s->code_ptr);
    free((void *)s->data_ptr);
-   agx_bo_unreference(&dev->dev, s->bo);
+   if (s->apple9_body)
+      agx_shader_body_unreference(&dev->dev, s->apple9_body);
+   else
+      agx_bo_unreference(&dev->dev, s->bo);
    if (s->apple9_coefficients.size) {
       simple_mtx_lock(&dev->usc_heap_lock);
       hk_usc_heap_free(&dev->usc_heap, &s->apple9_coefficients);

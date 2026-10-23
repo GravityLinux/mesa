@@ -61,8 +61,10 @@ main(void)
    simple_mtx_init(&dev->apple9_entry_lock, mtx_plain);
    list_inithead(&dev->apple9_entry_lru);
    struct agx_va va = {.addr = dev->shader_base + 0x10000};
-   struct agx_bo bo = {.va = &va, .apple9_entry_offset = 0x400};
-   list_add(&bo.apple9_entry_link, &dev->apple9_entry_lru);
+   struct agx_bo bo = {.va = &va};
+   agx_shader_body_init_bo(&bo);
+   bo.apple9_body.entry_offset = 0x400;
+   list_add(&bo.apple9_body.entry_link, &dev->apple9_entry_lru);
    uint8_t code[128] = {0};
    unsigned cases = 0, failures = 0;
    for (unsigned owned = 0; owned < 2; ++owned) {

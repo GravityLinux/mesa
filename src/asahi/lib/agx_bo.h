@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <time.h>
 #include "util/list.h"
+#include "agx_shader_body.h"
 
 struct agx_device;
 
@@ -112,15 +113,8 @@ struct agx_bo {
    /* Current writer, if any (queue in upper 32 bits, syncobj in lower 32 bits) */
    uint64_t writer;
 
-   /* Apple9 entry in the device's compact USC arena, or zero. It is fixed
-    * while any command buffer pins this BO. Unpinned entries may be evicted
-    * when the arena is full and recreated on the next use, see
-    * apple9_shader_entry. Protected by agx_device::apple9_entry_lock.
-    */
-   uint32_t apple9_entry_offset;
-   uint32_t apple9_entry_pins;
-   bool apple9_entry_fixed;
-   struct list_head apple9_entry_link;
+   /* Entry identity for callers that store one Apple9 body in this BO. */
+   struct agx_shader_body apple9_body;
 
    /* Update atomically */
    int32_t refcnt;

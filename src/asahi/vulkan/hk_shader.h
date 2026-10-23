@@ -308,8 +308,9 @@ struct hk_shader {
    const void *data_ptr;
    uint32_t data_size;
 
-   /* BO for any uploaded shader part */
+   /* BO for older GPUs; borrowed from apple9_body on G16. */
    struct agx_bo *bo;
+   struct agx_shader_body *apple9_body;
 
    /* G16 compute: launch program template, built once at upload from the
     * profile and preamble address and patched per dispatch. NULL falls back

@@ -2478,7 +2478,7 @@ hk_apple9_dispatch_prerast(struct hk_cmd_buffer *cmd, struct hk_shader *s,
       return;
 
    hk_reserve_scratch(cmd, cs, s);
-   hk_apple9_dispatch(cmd, cs, s->bo, &s->info.apple9, grid,
+   hk_apple9_dispatch(cmd, cs, s->apple9_body, &s->info.apple9, grid,
                       cmd->state.gfx.root, s, bindings);
 }
 

@@ -102,16 +102,7 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd, bool release)
       agx_bo_unreference(&dev->dev, *bo);
    }
 
-   if (cmd->apple9_pinned) {
-      simple_mtx_lock(&dev->dev.apple9_entry_lock);
-      set_foreach(cmd->apple9_pinned, entry)
-         ((struct agx_bo *)entry->key)->apple9_entry_pins--;
-      simple_mtx_unlock(&dev->dev.apple9_entry_lock);
-      set_foreach(cmd->apple9_pinned, entry)
-         agx_bo_unreference(&dev->dev, (struct agx_bo *)entry->key);
-      _mesa_set_clear(cmd->apple9_pinned, NULL);
-   }
-   cmd->apple9_last_pin[0] = cmd->apple9_last_pin[1] = NULL;
+   hk_apple9_unpin_entries(cmd);
 
    util_dynarray_clear(&cmd->large_bos);
    util_dynarray_clear(&cmd->implicit_sync_res);
@@ -126,13 +117,32 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd, bool release)
       hk_trim_cmd_buffer(cmd);
 }
 
+void
+hk_apple9_unpin_entries(struct hk_cmd_buffer *cmd)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (cmd->apple9_pinned) {
+      simple_mtx_lock(&dev->dev.apple9_entry_lock);
+      set_foreach(cmd->apple9_pinned, entry) {
+         struct agx_shader_body *body = (void *)entry->key;
+         assert(body->entry_pins > 0);
+         body->entry_pins--;
+      }
+      simple_mtx_unlock(&dev->dev.apple9_entry_lock);
+      set_foreach(cmd->apple9_pinned, entry)
+         agx_shader_body_unreference(&dev->dev, (void *)entry->key);
+      _mesa_set_clear(cmd->apple9_pinned, NULL);
+   }
+   cmd->apple9_last_pin[0] = cmd->apple9_last_pin[1] = NULL;
+}
+
 /* agx_device::apple9_pin_entry. Every Apple9 entry is requested while
  * recording a command buffer, which passes itself as the allocator. */
 bool
-hk_apple9_pin_entry(void *allocator, struct agx_bo *bo)
+hk_apple9_pin_entry(void *allocator, struct agx_shader_body *body)
 {
    struct hk_cmd_buffer *cmd = allocator;
-   if (cmd->apple9_last_pin[0] == bo || cmd->apple9_last_pin[1] == bo)
+   if (cmd->apple9_last_pin[0] == body || cmd->apple9_last_pin[1] == body)
       return true;
 
    if (!cmd->apple9_pinned) {
@@ -141,14 +151,14 @@ hk_apple9_pin_entry(void *allocator, struct agx_bo *bo)
          return false;
    }
    bool found;
-   if (!_mesa_set_search_or_add(cmd->apple9_pinned, bo, &found))
+   if (!_mesa_set_search_or_add(cmd->apple9_pinned, body, &found))
       return false;
    if (!found) {
-      agx_bo_reference(bo);
-      bo->apple9_entry_pins++;
+      agx_shader_body_reference(body);
+      body->entry_pins++;
    }
    cmd->apple9_last_pin[1] = cmd->apple9_last_pin[0];
-   cmd->apple9_last_pin[0] = bo;
+   cmd->apple9_last_pin[0] = body;
    return true;
 }
 
@@ -1685,7 +1695,7 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
 
    if (prog->apple9) {
       uint64_t args = hk_pool_upload(cmd, data, data_size, 8);
-      hk_apple9_dispatch(cmd, cs, prog->bo, &prog->apple9_profile, grid, args, NULL,
+      hk_apple9_dispatch(cmd, cs, &prog->bo->apple9_body, &prog->apple9_profile, grid, args, NULL,
                          NULL);
       return;
    }

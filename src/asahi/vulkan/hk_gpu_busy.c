@@ -383,17 +383,17 @@ hk_gpu_busy_set_pass(struct hk_queue *queue, uint64_t code,
 }
 
 void
-hk_gpu_busy_shader(struct agx_bo *bo, const void *code, uint32_t size,
+hk_gpu_busy_shader(uint64_t address, const void *code, uint32_t size,
                    unsigned stage)
 {
-   if (!bo || !busy_enabled())
+   if (!address || !busy_enabled())
       return;
    uint32_t hash = _mesa_hash_data(code, size);
    pthread_mutex_lock(&busy_lock);
    for (struct busy_device *d = devices; d; d = d->next) {
       busy_printf(d, "GPU_SHADER cpu_ns=%" PRIu64 " code=0x%" PRIx64
               " hash=0x%08x size=%u stage=%u\n", os_time_get_nano(),
-              bo->va->addr, hash, size, stage);
+              address, hash, size, stage);
       break;
    }
    pthread_mutex_unlock(&busy_lock);
