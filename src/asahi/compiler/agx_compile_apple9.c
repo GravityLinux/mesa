@@ -9029,6 +9029,28 @@ apple9_lower_texture_lod_query(nir_builder *b, nir_instr *instr, void *data)
    return true;
 }
 
+uint32_t
+agx_nir_apple9_offset_samplers(const nir_shader *nir)
+{
+   uint32_t mask = 0;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_tex)
+               continue;
+            nir_tex_instr *tex = nir_instr_as_tex(instr);
+            if (nir_tex_instr_src_index(tex, nir_tex_src_offset) < 0)
+               continue;
+            if (nir_tex_instr_src_index(tex, nir_tex_src_sampler_deref) >= 0 ||
+                tex->sampler_index >= 32)
+               return UINT32_MAX;
+            mask |= BITFIELD_BIT(tex->sampler_index);
+         }
+      }
+   }
+   return mask;
+}
+
 /* Sampler bias is per-draw state, independent of a shader's explicit bias.
  * Keep this in FP32, matching the rest of the Apple9 texture operands. */
 bool
@@ -9066,6 +9088,7 @@ agx_nir_lower_apple9_sampler_state(
    nir_lower_tex(nir, &options);
    nir_shader_instructions_pass(nir, apple9_lower_texture_lod_query,
                                 nir_metadata_control_flow, (void *)key);
+   mapping->runtime_samplers = agx_nir_apple9_offset_samplers(nir);
    if (!agx_nir_lower_apple9_texture_offsets(nir, key, reason))
       return false;
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
@@ -9163,6 +9186,10 @@ agx_nir_lower_apple9_sampler_state(
                *reason = "Apple9 custom border needs an additional sampler entry";
                return false;
             }
+            /* Aliases take slots no remaining sample binds. Runtime sampler
+             * records are indexed by API sampler, which stays bound for
+             * offset samples; an offset sample lowered to sampler-less
+             * fetches that still read its record would break this. */
             unsigned alias = ffs(~samplers) - 1;
             sampler_alias[s] = alias;
             samplers |= BITFIELD_BIT(alias);
@@ -9570,8 +9597,10 @@ apple9_lower_sampler_bias(nir_builder *b, nir_instr *instr, void *data)
       return false;
    if (tex->sampler_index >= AGX_APPLE9_SAMPLER_BIAS_COUNT)
       return false; /* Rejected by texture binding validation. */
-   /* Descriptor-addressed samplers have their bias applied upstream. */
-   if (nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle) >= 0)
+   /* Descriptor-addressed samplers have their bias applied upstream, and
+    * the offset lowering's levels already include it. */
+   if (nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle) >= 0 ||
+       (tex->backend_flags & AGX_APPLE9_TEXTURE_BIASED_LEVEL))
       return false;
 
    b->cursor = nir_before_instr(instr);
@@ -10871,6 +10900,12 @@ apple9_lower_textures(nir_shader *nir)
    nir_shader_instructions_pass(nir, apple9_flag_unencodable_offsets,
                                 nir_metadata_all, &fallback);
    if (fallback) {
+      /* The fallback's border taps take a custom border from sample_border(),
+       * which only the Gallium custom-border pass corrects, and that pass
+       * runs before this one. Today only the shadow 2D array lacks a native
+       * offset form, and shadow samples never take that border path. If a
+       * non-shadow form ever lands here, its custom border needs the same
+       * correction. */
       const char *offset_reason = NULL;
       agx_nir_lower_apple9_texture_offsets(nir, NULL, &offset_reason);
    }

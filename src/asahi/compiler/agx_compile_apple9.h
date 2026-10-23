@@ -436,7 +436,15 @@ struct agx_apple9_texture_mapping {
    uint8_t samplers[32];
    uint32_t white_samplers;
    uint32_t seamful_cubes;
+   /* Samplers used by texel-offset samples. Offsets the sample instruction
+    * cannot encode are lowered with runtime sampler state, so the driver
+    * must fill these runtime sampler records of the graphics sysval table. */
+   uint32_t runtime_samplers;
 };
+
+/* Mask of sampler indices sampled with texel offsets; all samplers when an
+ * offset sample has no sampler index yet. */
+uint32_t agx_nir_apple9_offset_samplers(const nir_shader *nir);
 
 /* Apple9 backend texture flags. They share nir_tex_instr::backend_flags with
  * the AGX_TEXTURE_FLAG_* bits in agx_nir_texture.h, so keep them disjoint. */
@@ -449,6 +457,10 @@ struct agx_apple9_texture_mapping {
 /* The sample's final form has no measured offset encoding: lower its texel
  * offset in NIR instead of encoding it. */
 #define AGX_APPLE9_TEXTURE_OFFSET_FALLBACK (1 << 12)
+/* Explicit-level sample from the offset lowering, whose level already
+ * includes the sampler's LOD bias: the per-draw sampler bias must not be
+ * applied again. */
+#define AGX_APPLE9_TEXTURE_BIASED_LEVEL (1 << 13)
 
 bool agx_nir_lower_apple9_sampler_state(
    nir_shader *nir, const struct agx_apple9_sampler_key key[32],
