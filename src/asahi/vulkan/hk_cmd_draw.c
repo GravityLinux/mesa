@@ -4980,10 +4980,10 @@ hk_ia_update(struct hk_cmd_buffer *cmd, struct agx_draw draw,
    if (agx_is_indirect(draw.b)) {
       draw_ptr = draw.b.ptr;
    } else {
-      /* The restart counter reads the first index from the third word, as
-       * in VkDrawIndexedIndirectCommand: scan the draw's own indices. */
-      uint32_t desc[] = {draw.b.count[0], draw.b.count[1],
-                         draw.indexed ? draw.start : 0};
+      /* Direct draws pass their own indices (agx_draw_index_buffer) with a
+       * range relative to the first index, so the descriptor's first index
+       * (VkDrawIndexedIndirectCommand word 2) is 0. */
+      uint32_t desc[] = {draw.b.count[0], draw.b.count[1], 0};
       draw_ptr = hk_pool_upload(cmd, &desc, sizeof(desc), 4);
    }
 
@@ -5001,7 +5001,7 @@ hk_ia_update(struct hk_cmd_buffer *cmd, struct agx_draw draw,
 
       libagx_increment_ia_restart(
          cmd, agx_1d(1024), AGX_BARRIER_ALL | AGX_PREGFX, ia_vertices, ia_prims,
-         vs_invocations, c_prims, c_inv, draw_ptr, draw.index_buffer,
+         vs_invocations, c_prims, c_inv, draw_ptr, agx_draw_index_buffer(draw),
          agx_draw_index_range_el(draw), cmd->state.gfx.index.restart,
          index_size_B, prim, patch_size);
    } else {
