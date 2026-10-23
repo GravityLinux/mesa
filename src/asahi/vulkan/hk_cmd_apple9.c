@@ -367,6 +367,24 @@ hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool reads_buffers,
          return false;
    }
 
+   /* A draw that selects a new occlusion segment in a stream without free
+    * segments ends that stream (hk_occlusion_prepare_draw). Do it here,
+    * before this function commits render state (depth bias representation,
+    * sample positions, write and read classes) to the stream, so that state
+    * lands on the stream the draw records into. Later splits here start
+    * streams with free segments.
+    */
+   const struct hk_graphics_state *ogfx = &cmd->state.gfx;
+   if (ogfx->occlusion.segment_dirty && ogfx->occlusion.active_count &&
+       cs->occlusion_segments == HK_OCCLUSION_SEGMENTS) {
+      perf_debug(cmd, "Splitting control stream for occlusion segments");
+      hk_cs_end_hint(cmd, HK_CS_END_QUERY);
+      hk_cmd_buffer_end_graphics(cmd);
+      cs = hk_cmd_buffer_get_cs(cmd, false);
+      if (!cs)
+         return false;
+   }
+
    /* Sample positions are render state (the per-render multisample control),
     * so the first application draw of a render commits them and a draw with
     * other positions starts a new render. That lets them vary within a
