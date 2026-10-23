@@ -964,8 +964,8 @@ fold_uniform_stores(struct agx_apple9_vir_program *p)
          ++i;
       }
    }
-   for (unsigned i = 0; i < nr_remove; ++i)
-      agx_apple9_vir_remove(p, remove[i]);
+   if (nr_remove)
+      agx_apple9_vir_remove_many(p, remove, nr_remove);
    free(remove);
    agx_apple9_invalidate_uses(p);
    return true;
@@ -1133,13 +1133,21 @@ fold_half_sources(struct agx_apple9_vir_program *p,
       }
       if (!all)
          continue;
-      for (const struct agx_apple9_use *u = uses; u; u = u->next) {
-         struct agx_apple9_vir_instr *R = u->instruction;
-         unsigned source = u->source;
+      /* Rewriting moves each use off this chain; walk a snapshot. */
+      unsigned count = 0;
+      for (const struct agx_apple9_use *u = uses; u; u = u->next)
+         ++count;
+      struct agx_apple9_use *readers = malloc(count * sizeof(*readers));
+      if (!readers)
+         return false;
+      count = 0;
+      for (const struct agx_apple9_use *u = uses; u; u = u->next)
+         readers[count++] = *u;
+      for (unsigned r = 0; r < count; ++r) {
+         struct agx_apple9_vir_instr *R = readers[r].instruction;
+         unsigned source = readers[r].source;
          if (fp16 && R->op == AGX_APPLE9_VIR_FMA && register_slot(R, source) == 0) {
-            uint32_t other = R->src[1];
-            R->src[1] = R->src[0];
-            R->src[0] = other;
+            agx_apple9_vir_set_source(p, R, 0, R->src[1]);
             R->src_abs_mask = (R->src_abs_mask & ~3u) |
                ((R->src_abs_mask & 1) << 1) | ((R->src_abs_mask & 2) >> 1);
             R->src_neg_mask = (R->src_neg_mask & ~3u) |
@@ -1147,16 +1155,13 @@ fold_half_sources(struct agx_apple9_vir_program *p,
             source = 1;
          }
          const unsigned bit = BITFIELD_BIT(register_slot(R, source));
-         R->src[source] = x;
+         agx_apple9_vir_set_source(p, R, source, x);
          R->src_half_mask |= bit;
          if (hi) R->src_hi_mask |= bit;
          if (sext) R->src_sext_mask |= bit;
       }
-      agx_apple9_invalidate_uses(p);
-      if (!agx_apple9_analyze_uses(p))
-         return false;
+      free(readers);
    }
-   agx_apple9_invalidate_uses(p);
    return true;
 }
 

@@ -316,17 +316,13 @@ apple9_after_logical_end(const struct agx_apple9_vir_instr *ins)
    }
 }
 
+/* The first physical block selected from a NIR block. */
 static struct agx_apple9_block *
-apple9_nir_block(struct apple9_shared_ra *ra, nir_block *nir)
+apple9_nir_block(struct hash_table *nir_blocks, nir_block *nir)
 {
-   if (!nir)
-      return NULL;
-   for (struct agx_apple9_block *block = ra->program->blocks; block;
-        block = block->next) {
-      if (block->nir == nir)
-         return block;
-   }
-   return NULL;
+   struct hash_entry *entry =
+      nir ? _mesa_hash_table_search(nir_blocks, nir) : NULL;
+   return entry ? entry->data : NULL;
 }
 
 static agx_block *
@@ -412,6 +408,16 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
       ra->blocks[block->index] = common;
    }
 
+   /* Map each NIR block once rather than searching the layout per edge. */
+   struct hash_table *nir_blocks = _mesa_pointer_hash_table_create(ctx);
+   if (!nir_blocks)
+      return false;
+   for (struct agx_apple9_block *block = p->blocks; block;
+        block = block->next) {
+      if (block->nir && !_mesa_hash_table_search(nir_blocks, block->nir))
+         _mesa_hash_table_insert(nir_blocks, block->nir, block);
+   }
+
    for (struct agx_apple9_block *block = p->blocks; block;
         block = block->next) {
       agx_block *common = apple9_shared_block(ra, block);
@@ -422,7 +428,7 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
          for (unsigned s = 0; s < 2; ++s) {
             nir_block *succ = exit->successors[s];
             agx_block *next =
-               apple9_shared_block(ra, apple9_nir_block(ra, succ));
+               apple9_shared_block(ra, apple9_nir_block(nir_blocks, succ));
             if (!next)
                continue;
             agx_block_add_successor(common, next);
@@ -1845,16 +1851,24 @@ apple9_needs_copy_register(agx_context *ctx)
  * followed by its pop has no effect; native one-armed ifs are a push and a
  * pop. Only once allocation is complete is an empty arm known to stay empty,
  * since allocation can place edge copies there. */
-static void
+static bool
 apple9_remove_empty_else(struct agx_apple9_vir_program *p)
 {
-   for (unsigned i = 0; i + 1 < p->instruction_count;) {
-      if (p->instructions[i]->op == AGX_APPLE9_VIR_EXEC_MASK_ELSE &&
-          p->instructions[i + 1]->op == AGX_APPLE9_VIR_EXEC_MASK_POP)
-         agx_apple9_vir_remove(p, p->instructions[i]);
-      else
-         ++i;
+   /* A removed else is followed by a pop, which stays: one sweep finds them all. */
+   struct agx_apple9_vir_instr **remove = NULL;
+   unsigned count = 0;
+   for (unsigned i = 0; i + 1 < p->instruction_count; ++i) {
+      if (p->instructions[i]->op != AGX_APPLE9_VIR_EXEC_MASK_ELSE ||
+          p->instructions[i + 1]->op != AGX_APPLE9_VIR_EXEC_MASK_POP)
+         continue;
+      if (!remove && !(remove = malloc(p->instruction_count * sizeof(*remove))))
+         return false;
+      remove[count++] = p->instructions[i];
    }
+   if (count)
+      agx_apple9_vir_remove_many(p, remove, count);
+   free(remove);
+   return true;
 }
 
 static bool
@@ -2171,7 +2185,10 @@ apple9_allocate_candidate(struct agx_apple9_vir_program *program,
       }
    }
    agx_apple9_vir_reindex(&out);
-   apple9_remove_empty_else(&out);
+   if (!apple9_remove_empty_else(&out)) {
+      *reason = "out of memory removing empty Apple9 else arms";
+      goto cleanup;
+   }
    if (!apple9_schedule_physical(&out, reason))
       goto cleanup;
    unsigned spill_bytes = ALIGN_POT(ra.ctx->scratch_size_B, 16);

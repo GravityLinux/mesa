@@ -5,6 +5,7 @@
 #include "agx_compile_apple9.h"
 #include "compiler/nir/nir_builder.h"
 #include <gtest/gtest.h>
+#include <vector>
 
 class Apple9Optimization : public ::testing::Test {
 protected:
@@ -79,6 +80,41 @@ TEST(Apple9Compiler, TextureChannelSelectionReachesPackedNativeResults)
       free(compiled.binary);
       ralloc_free(b.shader);
    }
+}
+
+/* Source rewrites keep a valid use analysis equal to a rebuild: chains stay
+ * in (position, source) order, including when a use moves between sources of
+ * one instruction. */
+TEST_F(Apple9Optimization, SetSourceMatchesRebuiltUses)
+{
+   auto a = imm(1), b = imm(2), c = imm(3);
+   auto x = add(a, b), y = add(b, a), z = add(a, a);
+   ASSERT_TRUE(agx_apple9_analyze_uses(&p));
+   auto ins = [&](uint32_t v) {
+      return const_cast<agx_apple9_vir_instr *>(agx_apple9_definition(&p, v));
+   };
+   auto X = ins(x), Y = ins(y), Z = ins(z);
+   auto chains = [&]() {
+      std::vector<std::vector<std::pair<const void *, unsigned>>> out;
+      for (uint32_t v = 0; v < p.value_count; ++v) {
+         out.emplace_back();
+         for (auto *u = agx_apple9_uses(&p, v); u; u = u->next)
+            out.back().emplace_back(u->instruction, u->source);
+      }
+      return out;
+   };
+   agx_apple9_vir_set_source(&p, Z, 1, c);
+   agx_apple9_vir_set_source(&p, X, 0, c);
+   /* A commutative swap, as fold_half_sources performs it. */
+   agx_apple9_vir_set_source(&p, Y, 0, Y->src[1]);
+   agx_apple9_vir_set_source(&p, Y, 1, b);
+   agx_apple9_vir_set_source(&p, X, 1, a);
+   auto incremental = chains();
+   agx_apple9_invalidate_uses(&p);
+   ASSERT_TRUE(agx_apple9_analyze_uses(&p));
+   EXPECT_EQ(incremental, chains());
+   EXPECT_EQ(Y->src[0], a);
+   EXPECT_EQ(Y->src[1], b);
 }
 
 TEST_F(Apple9Optimization, FoldsWrappingArithmeticAndArithmeticRightShift)

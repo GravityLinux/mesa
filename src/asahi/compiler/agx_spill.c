@@ -270,6 +270,10 @@ struct spill_ctx {
 
    /* Loop spans (see compute_loop_ends), or NULL without loop handling. */
    const unsigned *loop_end;
+
+   /* Zeroed per-variable scratch for compute_w_entry, which restores it. A
+    * fresh array per block would make each block cost O(n). */
+   unsigned *freq;
 };
 
 static inline struct spill_block *
@@ -1195,7 +1199,7 @@ compute_w_entry(struct spill_ctx *ctx)
    }
 
    /* Usual blocks follow */
-   unsigned *freq = calloc(ctx->n, sizeof(unsigned));
+   unsigned *freq = ctx->freq;
 
    /* Record what's written at the end of each predecessor */
    agx_foreach_predecessor(ctx->block, P) {
@@ -1207,8 +1211,8 @@ compute_w_entry(struct spill_ctx *ctx)
       }
    }
 
-   struct candidate *candidates = calloc(ctx->n, sizeof(struct candidate));
-   unsigned j = 0;
+   struct util_dynarray candidate_array;
+   util_dynarray_init(&candidate_array, NULL);
 
    /* Variables that are in all predecessors are assumed in W_entry. Phis and
     * variables in some predecessors are scored by next-use.
@@ -1217,8 +1221,16 @@ compute_w_entry(struct spill_ctx *ctx)
       if (freq[i] == agx_num_predecessors(ctx->block)) {
          insert_W(ctx, i);
       } else if (freq[i]) {
-         candidates[j++] = (struct candidate){.node = i, .dist = dist};
+         util_dynarray_append(&candidate_array,
+                              ((struct candidate){.node = i, .dist = dist}));
       }
+   }
+
+   agx_foreach_predecessor(ctx->block, P) {
+      struct spill_block *sp = spill_block(ctx, *P);
+
+      for (unsigned i = 0; i < sp->nW_exit; ++i)
+         freq[sp->W_exit[i]] = 0;
    }
 
    agx_foreach_phi_in_block(ctx->block, I) {
@@ -1253,11 +1265,16 @@ compute_w_entry(struct spill_ctx *ctx)
                                                               : all_found))
          continue;
 
-      candidates[j++] = (struct candidate){
-         .node = I->dest[0].value,
-         .dist = search_next_uses(&sb->next_use_in, I->dest[0].value),
-      };
+      util_dynarray_append(
+         &candidate_array,
+         ((struct candidate){
+            .node = I->dest[0].value,
+            .dist = search_next_uses(&sb->next_use_in, I->dest[0].value),
+         }));
    }
+
+   struct candidate *candidates = candidate_array.data;
+   unsigned j = util_dynarray_num_elements(&candidate_array, struct candidate);
 
    /* Sort by next-use distance */
    util_qsort_r(candidates, j, sizeof(struct candidate), cmp_dist, ctx);
@@ -1275,8 +1292,7 @@ compute_w_entry(struct spill_ctx *ctx)
 
    assert(ctx->nW <= ctx->k && "invariant");
 
-   free(freq);
-   free(candidates);
+   util_dynarray_fini(&candidate_array);
 }
 
 /*
@@ -1658,6 +1674,7 @@ agx_spill(agx_context *ctx, unsigned k, bool remat_only)
 
    BITSET_WORD *W = ralloc_array(memctx, BITSET_WORD, BITSET_WORDS(n));
    BITSET_WORD *S = ralloc_array(memctx, BITSET_WORD, BITSET_WORDS(n));
+   unsigned *freq = rzalloc_array(memctx, unsigned, n);
 
    agx_foreach_block(ctx, block) {
       memset(W, 0, BITSET_BYTES(n));
@@ -1679,6 +1696,7 @@ agx_spill(agx_context *ctx, unsigned k, bool remat_only)
          .spill_base = n,
          .remat_only = remat_only,
          .loop_end = loop_end,
+         .freq = freq,
       };
 
       compute_w_entry(&sctx);

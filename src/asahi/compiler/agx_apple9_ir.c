@@ -216,10 +216,21 @@ void
 agx_apple9_vir_remove(struct agx_apple9_vir_program *program,
                           struct agx_apple9_vir_instr *instr)
 {
-   struct apple9_instruction_node *node = apple9_node(instr);
-   list_del(&node->link);
-   free(node);
-   --program->instruction_count;
+   agx_apple9_vir_remove_many(program, &instr, 1);
+}
+
+/* Remove several instructions with a single reindex. */
+void
+agx_apple9_vir_remove_many(struct agx_apple9_vir_program *program,
+                           struct agx_apple9_vir_instr *const *instrs,
+                           unsigned count)
+{
+   for (unsigned i = 0; i < count; ++i) {
+      struct apple9_instruction_node *node = apple9_node(instrs[i]);
+      list_del(&node->link);
+      free(node);
+   }
+   program->instruction_count -= count;
    agx_apple9_vir_reindex(program);
 }
 
@@ -1466,6 +1477,8 @@ agx_apple9_vir_emit_device_atomic(
    return true;
 }
 
+/* The load setters below find a value's single definition, normally the
+ * instruction just selected, so they search from the end of the program. */
 bool
 agx_apple9_vir_set_device_load_contract(
    struct agx_apple9_vir_program *program, uint32_t value, uint8_t flags,
@@ -1475,7 +1488,7 @@ agx_apple9_vir_set_device_load_contract(
       if (flags & ~AGX_APPLE9_DEVICE_LOAD_HAS_NEXT)
          return false;
 
-      for (unsigned i = 0; i < program->instruction_count; ++i) {
+      for (unsigned i = program->instruction_count; i-- > 0;) {
          struct agx_apple9_vir_instr *instruction = program->instructions[i];
          if (instruction->dest != value)
             continue;
@@ -1510,7 +1523,7 @@ agx_apple9_vir_set_device_load_raw_contract(
        !apple9_scalar_load_slot_for_token(raw_token, &scoreboard_slot))
       return false;
 
-   for (unsigned i = 0; i < program->instruction_count; ++i) {
+   for (unsigned i = program->instruction_count; i-- > 0;) {
       struct agx_apple9_vir_instr *instruction = program->instructions[i];
       if (instruction->dest != value)
          continue;
@@ -1532,7 +1545,7 @@ agx_apple9_vir_set_load_address(struct agx_apple9_vir_program *program,
 {
    if (address >= program->value_count || address + 1 >= program->value_count)
       return false;
-   for (unsigned i = 0; i < program->instruction_count; ++i) {
+   for (unsigned i = program->instruction_count; i-- > 0;) {
       struct agx_apple9_vir_instr *load = program->instructions[i];
       if (load->dest != value || load->op != AGX_APPLE9_VIR_DEVICE_LOAD)
          continue;
@@ -1559,7 +1572,7 @@ agx_apple9_vir_set_device_load_index_kind(
        index_kind != AGX_APPLE9_DEVICE_LOAD_INDEX_LAST_USE_GPR)
       return false;
 
-   for (unsigned i = 0; i < program->instruction_count; ++i) {
+   for (unsigned i = program->instruction_count; i-- > 0;) {
       struct agx_apple9_vir_instr *instruction = program->instructions[i];
       if (instruction->dest != value)
          continue;
@@ -1765,6 +1778,56 @@ agx_apple9_uses(const struct agx_apple9_vir_program *program, uint32_t value)
        !agx_apple9_analyze_uses((struct agx_apple9_vir_program *)program))
       return NULL;
    return program->use_analysis->first[value];
+}
+
+/* Rewrite one register source. A valid use analysis stays valid: the use moves
+ * to the new value's chain at its layout position, so passes that edit
+ * operands between queries do not rebuild the whole analysis per edit. */
+void
+agx_apple9_vir_set_source(struct agx_apple9_vir_program *program,
+                          struct agx_apple9_vir_instr *instr, unsigned source,
+                          uint32_t value)
+{
+   struct agx_apple9_use_analysis *a = program->use_analysis;
+   const uint32_t old = instr->src[source];
+   program->dependencies_finalized = false;
+   instr->src[source] = value;
+   if (!a || !a->valid || old == value)
+      return;
+   if (old >= program->value_count || value >= program->value_count) {
+      a->valid = false;
+      return;
+   }
+
+   struct agx_apple9_use **link = &a->first[old], *previous = NULL;
+   while (*link && ((*link)->instruction != instr || (*link)->source != source)) {
+      previous = *link;
+      link = &(*link)->next;
+   }
+   struct agx_apple9_use *use = *link;
+   if (!use) {
+      a->valid = false;
+      return;
+   }
+   *link = use->next;
+   if (a->last[old] == use)
+      a->last[old] = previous;
+
+   /* Chains are ordered by (position, source), as the rebuild appends them. */
+   const unsigned position = apple9_node(instr)->position;
+   previous = NULL;
+   link = &a->first[value];
+   while (*link) {
+      const unsigned p = apple9_node((*link)->instruction)->position;
+      if (p > position || (p == position && (*link)->source > source))
+         break;
+      previous = *link;
+      link = &(*link)->next;
+   }
+   use->next = *link;
+   *link = use;
+   if (!use->next)
+      a->last[value] = use;
 }
 
 /* Final dependency decisions follow all operand/layout legalization and CFG
