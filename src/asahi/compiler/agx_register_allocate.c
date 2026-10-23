@@ -2436,6 +2436,13 @@ agx_ra(agx_context *ctx)
       assert(effective_demand <= max_possible_regs && "spiller post-condition");
    }
 
+   if (ctx->ra_target.within_spill_budget &&
+       !ctx->ra_target.within_spill_budget(ctx, ctx->ra_target.spill_budget_data)) {
+      ctx->ra_error = "Register allocation candidate exceeds spill budget";
+      pressure_audit_end(ctx);
+      return false;
+   }
+
    /* Constants shared by unrelated phis must not connect their affinity webs.
     * Give each incoming constant use a private affinity member. The actual SSA
     * source stays shared, so this does not increase pressure or emit extra

@@ -32,6 +32,7 @@ struct apple9_shared_ra {
    agx_index *vectors;
    agx_instr **phis;
    bool *publication;
+   uint64_t max_spill_cost;
 };
 
 static enum agx_schedule_class
@@ -1765,16 +1766,89 @@ apple9_seen_schedule(agx_context *ctx, struct util_dynarray *seen,
    return false;
 }
 
+/* After spilling and SSA repair, cross-file MOVs cannot coalesce away.
+ * Assignment and phi reconciliation can add moves, but retain these transfers
+ * and their order relative to loop masks. Count only this mandatory traffic,
+ * using the same loop weights as the completed-program cost.
+ */
+static bool
+apple9_within_spill_budget(const agx_context *ctx, void *data)
+{
+   const struct apple9_shared_ra *ra = data;
+   if (!ctx->has_spill_pcopy_reserved)
+      return true;
+
+   /* Large frames lower SAVE/FILL to private memory instructions, which the
+    * current candidate cost does not count as spills. Decline the bound unless
+    * every possible slot fits both compact encodings. Memory allocation uses
+    * first-fit aligned windows or an already assigned slot, without live-range
+    * splitting. An allocation of width w can grow the high-water mark by less
+    * than 2w; summing over all memory SSA definitions is a conservative bound.
+    */
+   uint64_t memory_halves = ctx->scratch_size_B / 2;
+   agx_foreach_instr_global(ctx, I) {
+      agx_foreach_ssa_dest(I, d) {
+         if (!I->dest[d].memory)
+            continue;
+         if (I->op != AGX_OPCODE_MOV && I->op != AGX_OPCODE_PHI)
+            return true;
+         memory_halves += 2 * util_next_power_of_two(agx_index_size_16(I->dest[d]));
+      }
+   }
+   if (memory_halves > 2 * MIN2(AGX_APPLE9_FILL_WORD_COUNT,
+                                AGX_APPLE9_SAVE_WORD_COUNT))
+      return true;
+
+   uint64_t spills = 0;
+   unsigned nesting = 0;
+   for (struct agx_apple9_block *block = ra->program->blocks; block;
+        block = block->next) {
+      agx_block *common = ra->blocks[block->index];
+      if (!common) {
+         /* Synthetic mask-restoration blocks are emitted directly from VIR. */
+         unsigned end = block->next ? block->next->start_index
+                                    : ra->program->instruction_count;
+         for (unsigned i = block->start_index; i < end; ++i) {
+            enum agx_apple9_vir_opcode op = ra->program->instructions[i]->op;
+            if (op == AGX_APPLE9_VIR_LOOP_MASK_POP && nesting)
+               --nesting;
+            if (op == AGX_APPLE9_VIR_LOOP_MASK_PUSH)
+               ++nesting;
+         }
+         continue;
+      }
+      agx_foreach_instr_in_block(common, I) {
+         bool selected = I->op == AGX_OPCODE_APPLE9 ||
+                         I->op == AGX_OPCODE_APPLE9_PURE ||
+                         I->op == AGX_OPCODE_APPLE9_CF;
+         if (selected && I->apple9->op == AGX_APPLE9_VIR_LOOP_MASK_POP && nesting)
+            --nesting;
+         if (I->op == AGX_OPCODE_MOV &&
+             I->src[0].type == AGX_INDEX_NORMAL &&
+             I->dest[0].memory != I->src[0].memory &&
+             I->src[0].size == AGX_SIZE_32 && I->dest[0].size == AGX_SIZE_32) {
+            spills += (1u << (3 * MIN2(nesting, 3))) * agx_channels(I->dest[0]);
+         }
+         if (selected && I->apple9->op == AGX_APPLE9_VIR_LOOP_MASK_PUSH)
+            ++nesting;
+      }
+   }
+   /* Equality must finish: the secondary cost fields may still win. */
+   return spills <= ra->max_spill_cost;
+}
+
 static bool
 apple9_allocate_candidate(struct agx_apple9_vir_program *program,
                           nir_shader *nir, bool cost_constraints, bool latency,
                           unsigned pressure_slack, bool copy_register, bool uniform_remat,
+                          uint64_t max_spill_cost,
                           struct agx_apple9_vir_program *result,
                           const char **reason, bool *remat_used,
                           unsigned *rejected_increase,
                           struct util_dynarray *seen)
 {
-   struct apple9_shared_ra ra = {.program = program};
+   struct apple9_shared_ra ra = {.program = program,
+                                 .max_spill_cost = max_spill_cost};
    ra.ctx = rzalloc(NULL, agx_context);
    struct agx_apple9_vir_program out;
    agx_apple9_vir_init(&out);
@@ -1783,6 +1857,10 @@ apple9_allocate_candidate(struct agx_apple9_vir_program *program,
       goto cleanup;
    ra.ctx->ra_target.cost_register_constraints = cost_constraints;
    ra.ctx->ra_target.disable_uniform_rematerialization = !uniform_remat;
+   if (max_spill_cost != UINT64_MAX) {
+      ra.ctx->ra_target.within_spill_budget = apple9_within_spill_budget;
+      ra.ctx->ra_target.spill_budget_data = &ra;
+   }
    /* A returning device atomic stores its old value in invocation-frame word
     * 0, which its result record then loads (agx_apple9_pack_device_atomic);
     * that store overwrote spill slot 0. Spills and private arrays start one
@@ -2063,6 +2141,7 @@ struct apple9_candidate_job {
    nir_shader *nir;
    bool cost_constraints, latency, copy_register, uniform_remat, retry_copy;
    unsigned slack;
+   uint64_t max_spill_cost;
    /* Results. */
    bool valid, ok, remat_used;
    unsigned increase;
@@ -2083,7 +2162,8 @@ apple9_candidate_job_run(void *data)
    job->remat_used = false;
    job->ok = apple9_allocate_candidate(
       job->program, job->nir, job->cost_constraints, job->latency, job->slack,
-      job->copy_register, job->uniform_remat, &job->result, &job->reason,
+      job->copy_register, job->uniform_remat, job->max_spill_cost,
+      &job->result, &job->reason,
       &job->remat_used, &job->increase, &job->seen);
    if (!job->ok && job->retry_copy && !job->copy_register &&
        job->reason == apple9_copy_register_reason) {
@@ -2091,7 +2171,8 @@ apple9_candidate_job_run(void *data)
       agx_apple9_vir_init(&job->result);
       job->ok = apple9_allocate_candidate(
          job->program, job->nir, job->cost_constraints, job->latency, job->slack,
-         true, job->uniform_remat, &job->result, &job->reason, NULL, NULL,
+         true, job->uniform_remat, job->max_spill_cost,
+         &job->result, &job->reason, NULL, NULL,
          &job->seen);
    }
    apple9_in_candidate_job = false;
@@ -2103,12 +2184,14 @@ apple9_candidate_job_init(struct apple9_candidate_job *job,
                           struct agx_apple9_vir_program *program, nir_shader *nir,
                           const struct util_dynarray *seen, bool cost_constraints,
                           bool latency, unsigned slack, bool copy_register,
-                          bool uniform_remat, bool retry_copy)
+                          bool uniform_remat, bool retry_copy,
+                          uint64_t max_spill_cost)
 {
    *job = (struct apple9_candidate_job){
       .program = program, .nir = nir, .cost_constraints = cost_constraints,
       .latency = latency, .slack = slack, .copy_register = copy_register,
       .uniform_remat = uniform_remat, .retry_copy = retry_copy, .valid = true,
+      .max_spill_cost = max_spill_cost,
    };
    util_dynarray_init(&job->seen, NULL);
    util_dynarray_append_array(&job->seen, uint8_t, seen->data, seen->size);
@@ -2158,6 +2241,7 @@ apple9_take_candidate(struct apple9_candidate_job *prefetched, unsigned count,
                       struct agx_apple9_vir_program *program, nir_shader *nir,
                       bool cost_constraints, bool latency, unsigned slack,
                       bool copy_register, bool uniform_remat,
+                      uint64_t max_spill_cost,
                       struct agx_apple9_vir_program *result, const char **reason,
                       bool *remat_used, unsigned *increase,
                       struct util_dynarray *seen)
@@ -2180,7 +2264,8 @@ apple9_take_candidate(struct apple9_candidate_job *prefetched, unsigned count,
       return job->ok;
    }
    return apple9_allocate_candidate(program, nir, cost_constraints, latency,
-                                    slack, copy_register, uniform_remat, result,
+                                    slack, copy_register, uniform_remat,
+                                    max_spill_cost, result,
                                     reason, remat_used, increase, seen);
 }
 
@@ -2212,7 +2297,8 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
     * (slack 0, current copy_register) actually rematerialized a uniform. If
     * not, the non-rematerializing allocation is the same computation. */
    bool remat_known[2][2] = {{false}}, remat_used[2][2] = {{false}};
-   if (!apple9_allocate_candidate(program, nir, false, false, 0, false, true, &best,
+   if (!apple9_allocate_candidate(program, nir, false, false, 0, false, true,
+                                  UINT64_MAX, &best,
                                   reason, &remat_used[0][0], NULL, &seen)) {
       if (*reason != apple9_copy_register_reason) {
          util_dynarray_fini(&seen);
@@ -2221,7 +2307,8 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
       agx_apple9_vir_finish(&best);
       agx_apple9_vir_init(&best);
       copy_register = true;
-      if (!apple9_allocate_candidate(program, nir, false, false, 0, true, true, &best,
+      if (!apple9_allocate_candidate(program, nir, false, false, 0, true, true,
+                                     UINT64_MAX, &best,
                                      reason, &remat_used[0][0], NULL, &seen)) {
          util_dynarray_fini(&seen);
          return false;
@@ -2257,9 +2344,9 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
    const bool parallel = apple9_parallel_ra_enabled();
    if (parallel && bank_candidates && long_dependencies > 1) {
       apple9_candidate_job_init(&prefetched[0], program, nir, &seen, true, false,
-                                0, copy_register, true, false);
+                                0, copy_register, true, false, cost.spills);
       apple9_candidate_job_init(&prefetched[1], program, nir, &seen, true, true,
-                                0, copy_register, true, false);
+                                0, copy_register, true, false, cost.spills);
       apple9_candidate_jobs_run(prefetched, &seen);
    }
    if (bank_candidates) {
@@ -2268,7 +2355,7 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
        * which caused them, including rematerialization and spill lowering. */
       const char *unused_reason = NULL;
       bool built = apple9_take_candidate(prefetched, 2, program, nir, true, false, 0,
-                                         copy_register, true, &alternative,
+                                         copy_register, true, cost.spills, &alternative,
                                          &unused_reason, &remat_used[0][1], NULL, &seen);
       remat_known[0][1] = built;
       if (built &&
@@ -2297,7 +2384,7 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
          bool used = false;
          unsigned increase = UINT_MAX;
          bool built = apple9_take_candidate(prefetched, 2, program, nir, banks, true, slack,
-                                        copy_register, true, &alternative,
+                                        copy_register, true, cost.spills, &alternative,
                                         &unused_reason, &used, &increase, &seen);
          rejected[banks] = built ? increase : UINT_MAX;
          if (!slack) {
@@ -2336,7 +2423,8 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
                continue;
             if (n < 2)
                apple9_candidate_job_init(&prefetched[n], program, nir, &seen, banks,
-                                         latency, 0, copy_register, false, true);
+                                         latency, 0, copy_register, false, true,
+                                         cost.spills);
             ++n;
          }
       }
@@ -2359,14 +2447,14 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
             agx_apple9_vir_init(&alternative);
             const char *unused_reason = NULL;
             bool ok = apple9_take_candidate(prefetched, 2,
-               program, nir, banks, latency, 0, copy_register, false,
+               program, nir, banks, latency, 0, copy_register, false, cost.spills,
                &alternative, &unused_reason, NULL, NULL, &seen);
             if (!ok && !copy_register &&
                 unused_reason == apple9_copy_register_reason) {
                agx_apple9_vir_finish(&alternative);
                agx_apple9_vir_init(&alternative);
                ok = apple9_allocate_candidate(
-                  program, nir, banks, latency, 0, true, false,
+                  program, nir, banks, latency, 0, true, false, cost.spills,
                   &alternative, &unused_reason, NULL, NULL, &seen);
             }
             if (ok && apple9_allocation_cheaper(

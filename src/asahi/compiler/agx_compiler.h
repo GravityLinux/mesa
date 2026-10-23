@@ -507,6 +507,8 @@ typedef struct agx_block {
 /* Target allocation limits, in the IR's 16-bit register units. Zero selects
  * the established Apple7/8 defaults. Instruction selection and spill lowering
  * remain target-specific; SSA spilling and register assignment are shared. */
+struct agx_context;
+
 struct agx_ra_target {
    unsigned max_registers;
    unsigned reserved_registers;
@@ -529,9 +531,14 @@ struct agx_ra_target {
    /* Number of half-registers directly addressable by MOV_IMM, or zero when
     * its destination range does not add a materialization cost. */
    uint16_t mov_imm_registers;
+   /* Optional candidate-search bound, after spilling/SSA repair and before
+    * register assignment. False rejects this candidate without allocating it.
+    * A caller must retain a completed allocation when using this callback. */
+   bool (*within_spill_budget)(const struct agx_context *ctx, void *data);
+   void *spill_budget_data;
 };
 
-typedef struct {
+typedef struct agx_context {
    struct agx_ra_target ra_target;
    /* Static diagnostic set when constrained register allocation fails. */
    const char *ra_error;
