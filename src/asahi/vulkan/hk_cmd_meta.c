@@ -104,6 +104,7 @@ static void
 hk_meta_begin(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
               VkPipelineBindPoint bind_point)
 {
+   hk_cmd_flush_empty_clears(cmd);
    struct hk_descriptor_state *desc = hk_get_descriptors_state(cmd, bind_point);
 
    if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) {
@@ -1520,6 +1521,7 @@ VKAPI_ATTR void VKAPI_CALL
 hk_CmdCopyBuffer2(VkCommandBuffer commandBuffer, const VkCopyBufferInfo2 *info)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   hk_cmd_flush_empty_clears(cmd);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    hk_cmd_use_implicit_sync(
       cmd, hk_buffer_from_handle(info->srcBuffer)->implicit_sync_res);
@@ -1644,6 +1646,7 @@ hk_CmdFillBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer,
                  VkDeviceSize dstOffset, VkDeviceSize dstRange, uint32_t data)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   hk_cmd_flush_empty_clears(cmd);
    VK_FROM_HANDLE(hk_buffer, buffer, dstBuffer);
    hk_cmd_use_implicit_sync(cmd, buffer->implicit_sync_res);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
@@ -1669,6 +1672,7 @@ hk_CmdUpdateBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer,
                    const void *pData)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   hk_cmd_flush_empty_clears(cmd);
    VK_FROM_HANDLE(hk_buffer, buffer, dstBuffer);
    hk_cmd_use_implicit_sync(cmd, buffer->implicit_sync_res);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);

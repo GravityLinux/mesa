@@ -1093,6 +1093,17 @@ void hk_render_merge_trace(const char *why, uint64_t a, uint64_t b);
 bool hk_render_merge_move_enabled(void);
 #define hk_cmd_render_merge_flush(cmd) hk_cmd_render_merge_flush_why(cmd, __func__)
 
+/* Do this before an outside-render operation uploads data or changes the meta
+ * state/scope: a pending clear must precede that operation in its original
+ * graphics scope, with the original allocation order on the fallback path. */
+static inline void
+hk_cmd_flush_empty_clears(struct hk_cmd_buffer *cmd)
+{
+   if (cmd->empty_barriers.size)
+      hk_cmd_render_merge_flush(cmd);
+}
+
+
 uint64_t hk_heap(struct hk_cmd_buffer *cmd);
 
 static inline struct hk_cs *

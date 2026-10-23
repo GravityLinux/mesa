@@ -694,6 +694,7 @@ hk_CmdDispatchBase(VkCommandBuffer commandBuffer, uint32_t baseGroupX,
                    uint32_t groupCountZ)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   hk_cmd_flush_empty_clears(cmd);
    struct hk_descriptor_state *desc = &cmd->state.cs.descriptors;
    if (desc->push_dirty)
       hk_cmd_buffer_flush_push_descriptors(cmd, desc);
@@ -728,6 +729,7 @@ hk_CmdDispatchIndirect(VkCommandBuffer commandBuffer, VkBuffer _buffer,
                        VkDeviceSize offset)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   hk_cmd_flush_empty_clears(cmd);
    VK_FROM_HANDLE(hk_buffer, buffer, _buffer);
    struct hk_descriptor_state *desc = &cmd->state.cs.descriptors;
    if (desc->push_dirty)
