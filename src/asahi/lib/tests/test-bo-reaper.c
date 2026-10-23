@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
 
 #define CHECK(x)                                                               \
    do {                                                                        \
@@ -31,12 +32,34 @@ static struct {
    unsigned next_handle, alloc_calls, fail_allocs, import_calls;
    int import_fd, other_fd;
    unsigned import_handle, other_handle;
+   unsigned wakes;
+   pid_t owner;
 } test;
 
 int __wrap_drmIoctl(int fd, unsigned long request, void *arg);
 int __wrap_drmPrimeFDToHandle(int fd, int prime, uint32_t *handle);
 int __wrap_u_thread_create(thrd_t *thread, int (*run)(void *), void *data);
 int __real_u_thread_create(thrd_t *thread, int (*run)(void *), void *data);
+int __wrap_pthread_cond_signal(pthread_cond_t *cond);
+int __real_pthread_cond_signal(pthread_cond_t *cond);
+void __wrap_agx_va_free(struct agx_device *dev, struct agx_va *va, bool unbind);
+void __real_agx_va_free(struct agx_device *dev, struct agx_va *va, bool unbind);
+
+int
+__wrap_pthread_cond_signal(pthread_cond_t *cond)
+{
+   if (cond == &test.dev.bo_cache.cond)
+      p_atomic_inc(&test.wakes);
+   return __real_pthread_cond_signal(cond);
+}
+
+void
+__wrap_agx_va_free(struct agx_device *dev, struct agx_va *va, bool unbind)
+{
+   if (getpid() != test.owner)
+      _exit(91);
+   __real_agx_va_free(dev, va, unbind);
+}
 
 int
 __wrap_u_thread_create(thrd_t *thread, int (*run)(void *), void *data)
@@ -67,6 +90,8 @@ wait_count(unsigned *value, unsigned count)
 int
 __wrap_drmIoctl(int fd, unsigned long request, void *arg)
 {
+   if (getpid() != test.owner)
+      _exit(92);
    CHECK(request == DRM_IOCTL_GEM_CLOSE);
    unsigned handle = ((struct drm_gem_close *)arg)->handle;
    CHECK(handle < ARRAY_SIZE(test.closed));
@@ -161,6 +186,7 @@ init(bool start)
    pthread_mutex_init(&test.lock, NULL);
    pthread_cond_init(&test.cond, NULL);
    test.main = thrd_current();
+   test.owner = getpid();
    test.synchronous = !start;
    test.next_handle = 100;
    test.import_fd = test.other_fd = -1;
@@ -464,6 +490,109 @@ test_invalid_import(void)
    finish();
 }
 
+static void
+test_transition_wakes(void)
+{
+   init(true);
+   struct agx_device *dev = &test.dev;
+   block_close(10);
+   agx_bo_unreference(dev, new_bo(10, 16384, AGX_BO_SHARED, 0, 0));
+   wait_count(&test.entered[10], 1);
+   unsigned wakes = p_atomic_read(&test.wakes);
+
+   agx_bo_unreference(dev, new_bo(11, 16384, 0, 0, 0));
+   CHECK(p_atomic_read(&test.wakes) == ++wakes);
+   agx_bo_unreference(dev, new_bo(12, 16384, 0, 0, 0));
+   CHECK(p_atomic_read(&test.wakes) == wakes);
+   agx_bo_unreference(dev, new_bo(13, 16384, AGX_BO_SHARED, 0, 0));
+   CHECK(p_atomic_read(&test.wakes) == ++wakes);
+   agx_bo_unreference(dev, new_bo(14, 16384, AGX_BO_SHARED, 0, 0));
+   CHECK(p_atomic_read(&test.wakes) == wakes);
+   agx_bo_cache_evict_all(dev);
+   agx_bo_cache_evict_all(dev);
+   CHECK(p_atomic_read(&test.wakes) == wakes);
+
+   release_close();
+   agx_bo_cache_wait(dev);
+   block_close(15);
+   agx_bo_unreference(dev, new_bo(15, 16384, AGX_BO_SHARED, 0, 0));
+   wait_count(&test.entered[15], 1);
+   agx_bo_unreference(dev, new_bo(16, 16384, 0, 0, 0));
+   wakes = p_atomic_read(&test.wakes);
+   agx_bo_cache_evict_all(dev);
+   CHECK(p_atomic_read(&test.wakes) == wakes + 1);
+   release_close();
+   finish();
+}
+
+static void
+test_fork_during_close(void)
+{
+   init(true);
+   struct agx_device *dev = &test.dev;
+   /* A second registered device also exercises an idle worker's inherited
+    * condvar and removal of more than one device from the atfork list. */
+   struct agx_device idle = {0};
+   pthread_mutex_init(&idle.bo_map_lock, NULL);
+   agx_bo_cache_init(&idle);
+   CHECK(agx_bo_cache_start(&idle));
+
+   block_close(10);
+   agx_bo_unreference(dev, new_bo(10, 16384, AGX_BO_SHARED, 0, 0));
+   wait_count(&test.entered[10], 1);
+   struct agx_bo *cached = new_bo(11, 16384, 0, 0, 0);
+   struct agx_bo *shared = new_bo(12, 16384, AGX_BO_SHARED, 0, 0);
+   struct agx_bo *ordinary = new_bo(13, 32768, 0, 0, 0);
+   uint64_t cached_addr = cached->va->addr, shared_addr = shared->va->addr;
+   agx_bo_unreference(dev, cached);
+
+   pid_t child = fork();
+   CHECK(child >= 0);
+   if (!child) {
+      alarm(3);
+      CHECK(!pthread_mutex_trylock(&dev->bo_map_lock));
+      pthread_mutex_unlock(&dev->bo_map_lock);
+      CHECK(!pthread_mutex_trylock(&dev->bo_cache.lock));
+      pthread_mutex_unlock(&dev->bo_cache.lock);
+      CHECK(agx_bo_cache_fetch(dev, 16384, 16384, 0, true) == cached);
+      agx_bo_free(dev, cached);
+      agx_bo_unreference(dev, shared);
+      agx_bo_unreference(dev, ordinary);
+      CHECK(!cached->size && !shared->size && !ordinary->size);
+      agx_bo_cache_wait(dev);
+      agx_bo_cache_finish(dev);
+      agx_bo_cache_wait(&idle);
+      agx_bo_cache_finish(&idle);
+      /* Any ioctl or VA free in this child exits with 91/92 above. */
+      _exit(0);
+   }
+
+   int status;
+   CHECK(waitpid(child, &status, 0) == child);
+   CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+   CHECK(!test.closed[10]);
+   CHECK(shared->refcnt == 1 && ordinary->refcnt == 1);
+   CHECK(!agx_va_alloc(dev, 16384, 16384, AGX_VA_FIXED, cached_addr));
+   CHECK(!agx_va_alloc(dev, 16384, 16384, AGX_VA_FIXED, shared_addr));
+   agx_bo_unreference(dev, shared);
+   agx_bo_unreference(dev, ordinary);
+   agx_bo_cache_evict_all(dev);
+   release_close();
+   agx_bo_cache_wait(dev);
+   for (unsigned i = 10; i <= 13; ++i)
+      CHECK(test.closed[i] == 1);
+   struct agx_va *va = agx_va_alloc(dev, 16384, 16384, AGX_VA_FIXED,
+                                   cached_addr);
+   CHECK(va);
+   agx_va_free(dev, va, false);
+   va = agx_va_alloc(dev, 16384, 16384, AGX_VA_FIXED, shared_addr);
+   CHECK(va);
+   agx_va_free(dev, va, false);
+   agx_bo_cache_finish(&idle);
+   pthread_mutex_destroy(&idle.bo_map_lock);
+   finish();
+}
+
 int
 main(void)
 {
@@ -477,6 +606,8 @@ main(void)
    test_cache_reuse_and_backlog();
    test_close_failure_and_bootstrap();
    test_invalid_import();
-   puts("BO reaper: 9 cases passed (including failed worker start)");
+   test_transition_wakes();
+   test_fork_during_close();
+   puts("BO reaper: 11 cases passed (including fork and failed worker start)");
    return 0;
 }

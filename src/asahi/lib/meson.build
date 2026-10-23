@@ -78,7 +78,8 @@ if with_tests
     dependencies : [idep_mesautil, idep_nir, idep_libagx],
     link_with : [libasahi_lib, libasahi_compiler],
     link_args : ['-Wl,--wrap=drmIoctl', '-Wl,--wrap=drmPrimeFDToHandle',
-                 '-Wl,--wrap=u_thread_create']),
+                 '-Wl,--wrap=u_thread_create', '-Wl,--wrap=pthread_cond_signal',
+                 '-Wl,--wrap=agx_va_free']),
     suite : ['asahi'], timeout : 40)
   test('apple9-coefficients', executable('apple9-coefficients',
     'tests/test-apple9-coefficients.c',

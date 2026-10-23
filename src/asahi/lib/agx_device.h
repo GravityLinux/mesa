@@ -188,7 +188,9 @@ struct agx_device {
       pthread_mutex_t lock;
       pthread_cond_t cond;
       thrd_t thread;
-      bool started, stop, busy;
+      bool started, stop, busy, forked;
+      /* Protected by the global reaper device-list lock. */
+      struct list_head device_link;
 
       /* Unreferenced BOs that cannot be reused, including explicit trims.
        * Uses bucket_link. Protected by lock, like the reuse cache below.

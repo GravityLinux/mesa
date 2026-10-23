@@ -19,6 +19,60 @@
 #include "decode.h"
 #include "layout.h"
 
+static pthread_mutex_t agx_reaper_devices_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct list_head agx_reaper_devices = {
+   &agx_reaper_devices, &agx_reaper_devices,
+};
+static pthread_once_t agx_reaper_atfork_once = PTHREAD_ONCE_INIT;
+static int agx_reaper_atfork_error;
+
+static void
+agx_reaper_fork_prepare(void)
+{
+   pthread_mutex_lock(&agx_reaper_devices_lock);
+   list_for_each_entry(struct agx_device, dev, &agx_reaper_devices,
+                       bo_cache.device_link) {
+      pthread_mutex_lock(&dev->bo_map_lock);
+      pthread_mutex_lock(&dev->bo_cache.lock);
+   }
+}
+
+static void
+agx_reaper_fork_parent(void)
+{
+   list_for_each_entry_rev(struct agx_device, dev, &agx_reaper_devices,
+                           bo_cache.device_link) {
+      pthread_mutex_unlock(&dev->bo_cache.lock);
+      pthread_mutex_unlock(&dev->bo_map_lock);
+   }
+   pthread_mutex_unlock(&agx_reaper_devices_lock);
+}
+
+static void
+agx_reaper_fork_child(void)
+{
+   list_for_each_entry(struct agx_device, dev, &agx_reaper_devices,
+                       bo_cache.device_link) {
+      /* GEM handles and GPU mappings still belong to the shared drm_file.
+       * The child must not close handles or recycle the parent's VA, even
+       * if a vanished worker had already removed a BO from the table.
+       */
+      dev->bo_cache.forked = true;
+      dev->bo_cache.started = false;
+      dev->bo_cache.busy = false;
+      dev->bo_closing_handle = 0;
+   }
+   agx_reaper_fork_parent();
+}
+
+static void
+agx_reaper_register_atfork(void)
+{
+   agx_reaper_atfork_error = pthread_atfork(agx_reaper_fork_prepare,
+                                           agx_reaper_fork_parent,
+                                           agx_reaper_fork_child);
+}
+
 /* Helper to calculate the bucket index of a BO */
 static unsigned
 agx_bucket_index(size_t size)
@@ -119,6 +173,7 @@ agx_bo_cache_put_locked(struct agx_device *dev, struct agx_bo *bo)
 {
    struct list_head *bucket = agx_bucket(dev, bo->size);
    struct timespec time;
+   bool was_empty = list_is_empty(&dev->bo_cache.lru);
 
    /* Add us to the bucket */
    list_addtail(&bo->bucket_link, bucket);
@@ -143,8 +198,9 @@ agx_bo_cache_put_locked(struct agx_device *dev, struct agx_bo *bo)
    /* Update label for debug */
    bo->label = "Unused (BO cache)";
 
-   /* Wake the reaper to arm its expiry timer, including when the app idles. */
-   pthread_cond_signal(&dev->bo_cache.cond);
+   /* An existing head already has an earlier expiry timer armed. */
+   if (was_empty)
+      pthread_cond_signal(&dev->bo_cache.cond);
 }
 
 /* Tries to add a BO to the cache. Returns if it was successful */
@@ -170,10 +226,17 @@ void
 agx_bo_free(struct agx_device *dev, struct agx_bo *bo)
 {
    assert(!bo->refcnt && !bo->retired);
+   if (unlikely(dev->bo_cache.forked)) {
+      memset(bo, 0, sizeof(*bo));
+      return;
+   }
+
    pthread_mutex_lock(&dev->bo_cache.lock);
+   bool was_empty = list_is_empty(&dev->bo_cache.retired);
    bo->retired = true;
    list_addtail(&bo->bucket_link, &dev->bo_cache.retired);
-   pthread_cond_signal(&dev->bo_cache.cond);
+   if (was_empty)
+      pthread_cond_signal(&dev->bo_cache.cond);
    pthread_mutex_unlock(&dev->bo_cache.lock);
 }
 
@@ -200,13 +263,19 @@ agx_bo_reclaim(struct agx_device *dev, struct agx_bo *bo)
 void
 agx_bo_cache_evict_all(struct agx_device *dev)
 {
+   if (unlikely(dev->bo_cache.forked))
+      return;
+
    pthread_mutex_lock(&dev->bo_cache.lock);
+   bool wake = list_is_empty(&dev->bo_cache.retired) &&
+               !list_is_empty(&dev->bo_cache.lru);
    list_for_each_entry_safe(struct agx_bo, bo, &dev->bo_cache.lru, lru_link) {
       agx_bo_cache_remove_locked(dev, bo);
       bo->retired = true;
       list_addtail(&bo->bucket_link, &dev->bo_cache.retired);
    }
-   pthread_cond_signal(&dev->bo_cache.cond);
+   if (wake)
+      pthread_cond_signal(&dev->bo_cache.cond);
    pthread_mutex_unlock(&dev->bo_cache.lock);
 }
 
@@ -342,6 +411,7 @@ agx_bo_cache_init(struct agx_device *dev)
    pthread_cond_init(&dev->bo_map_cond, NULL);
    list_inithead(&dev->bo_cache.lru);
    list_inithead(&dev->bo_cache.retired);
+   list_inithead(&dev->bo_cache.device_link);
    for (unsigned i = 0; i < ARRAY_SIZE(dev->bo_cache.buckets); ++i)
       list_inithead(&dev->bo_cache.buckets[i]);
 }
@@ -350,14 +420,25 @@ bool
 agx_bo_cache_start(struct agx_device *dev)
 {
    assert(!dev->bo_cache.started);
+   pthread_once(&agx_reaper_atfork_once, agx_reaper_register_atfork);
+   if (agx_reaper_atfork_error || dev->bo_cache.forked)
+      return false;
+
+   pthread_mutex_lock(&agx_reaper_devices_lock);
+   list_addtail(&dev->bo_cache.device_link, &agx_reaper_devices);
    dev->bo_cache.started = u_thread_create(&dev->bo_cache.thread, agx_bo_reaper,
                                            dev) == thrd_success;
+   pthread_mutex_unlock(&agx_reaper_devices_lock);
    return dev->bo_cache.started;
 }
 
 void
 agx_bo_cache_wait(struct agx_device *dev)
 {
+   /* Must not hold bo_map_lock: the worker needs it to complete a close. */
+   if (unlikely(dev->bo_cache.forked))
+      return;
+
    /* Device bootstrap can encounter an allocation failure before starting
     * the worker. No GPU work exists yet; reclaim synchronously in that case.
     */
@@ -376,17 +457,29 @@ agx_bo_cache_wait(struct agx_device *dev)
 void
 agx_bo_cache_finish(struct agx_device *dev)
 {
-   agx_bo_cache_evict_all(dev);
-   agx_bo_cache_wait(dev);
-   if (dev->bo_cache.started) {
-      pthread_mutex_lock(&dev->bo_cache.lock);
-      dev->bo_cache.stop = true;
-      pthread_cond_signal(&dev->bo_cache.cond);
-      pthread_mutex_unlock(&dev->bo_cache.lock);
-      thrd_join(dev->bo_cache.thread, NULL);
+   if (!dev->bo_cache.forked) {
+      agx_bo_cache_evict_all(dev);
+      agx_bo_cache_wait(dev);
+      if (dev->bo_cache.started) {
+         pthread_mutex_lock(&dev->bo_cache.lock);
+         dev->bo_cache.stop = true;
+         pthread_cond_signal(&dev->bo_cache.cond);
+         pthread_mutex_unlock(&dev->bo_cache.lock);
+         thrd_join(dev->bo_cache.thread, NULL);
+      }
    }
-   pthread_cond_destroy(&dev->bo_map_cond);
-   pthread_cond_destroy(&dev->bo_cache.cond);
+
+   pthread_mutex_lock(&agx_reaper_devices_lock);
+   list_delinit(&dev->bo_cache.device_link);
+   pthread_mutex_unlock(&agx_reaper_devices_lock);
+
+   /* In the child, inherited condvars may still record vanished waiters;
+    * even destroying those condvars could wait forever. No child uses them.
+    */
+   if (!dev->bo_cache.forked) {
+      pthread_cond_destroy(&dev->bo_map_cond);
+      pthread_cond_destroy(&dev->bo_cache.cond);
+   }
    pthread_mutex_destroy(&dev->bo_cache.lock);
 }
 
@@ -569,6 +662,12 @@ agx_bo_unreference(struct agx_device *dev, struct agx_bo *bo)
    pthread_mutex_lock(&dev->bo_map_lock);
 
    if (p_atomic_dec_zero(&bo->refcnt)) {
+      if (unlikely(dev->bo_cache.forked)) {
+         memset(bo, 0, sizeof(*bo));
+         pthread_mutex_unlock(&dev->bo_map_lock);
+         return;
+      }
+
       assert(!p_atomic_read_relaxed(&bo->writer));
 
       if (bo->apple9_entry_offset || bo->apple9_entry_fixed) {
