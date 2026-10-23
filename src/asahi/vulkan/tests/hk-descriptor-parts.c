@@ -73,6 +73,8 @@ check_writers(struct hk_device *dev, VkDescriptorType type,
       else
          hk_push_descriptor_set_update_template(&push, layout, templ, entry_data);
       const uint8_t *result = path < 2 ? data : push.data;
+      if (path >= 2)
+         CHECK(push.size == layout->non_variable_descriptor_buffer_size);
       CHECK(!memcmp(result + 16, expected, size));
       for (unsigned i = 0; i < 16; ++i)
          CHECK(result[i] == 0xa5 && result[size + 16 + i] == 0xa5);

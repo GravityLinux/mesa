@@ -3,6 +3,8 @@
 #include "../hk_cmd_buffer.h"
 #include "../hk_entrypoints.h"
 #include "../hk_shader.h"
+#include "../hk_descriptor_set.h"
+#include "../hk_descriptor_set_layout.h"
 #include "compiler/nir/nir_builder.h"
 #include "vk_common_entrypoints.h"
 #include "vk_alloc.h"
@@ -179,6 +181,43 @@ int main(void)
    uint64_t g = hk_cmd_buffer_upload_root(cmd, VK_PIPELINE_BIND_POINT_COMPUTE);
    CHECK(mapped(g)->push[0] == 0xa5 && mapped(g)->push[16] == 0x31);
    CHECK(cmd->state.cs.descriptors.root_last_size == hk_root_descriptor_offset(push) + 20);
+   /* Push descriptors retain only the current layout's extent. */
+   struct hk_push_descriptor_set *push = calloc(1, sizeof(*push));
+   CHECK(push);
+   desc->push[0] = push;
+   struct hk_descriptor_set_layout layout = {
+      .non_variable_descriptor_buffer_size = 80};
+   memset(push->data, 0x37, sizeof(push->data));
+   hk_push_descriptor_set_update(push, &layout, 0, NULL);
+   CHECK(push->size == 80);
+   desc->push_dirty = 1;
+   hk_cmd_buffer_flush_push_descriptors(cmd, desc);
+   uint64_t set_address = desc->root.sets[0];
+   CHECK(set_address && desc->set_sizes[0] == 80 && !desc->push_dirty);
+   CHECK(!memcmp(mapped(set_address), push->data, 80));
+   CHECK(((uint8_t *)mapped(set_address))[80] == 0xa5);
+   desc->root_dirty = false;
+   hk_cmd_buffer_flush_push_descriptors(cmd, desc);
+   CHECK(!desc->root_dirty && desc->root.sets[0] == set_address);
+   for (unsigned i = 0; i < HK_UPLOAD_CHUNKS; ++i)
+      cmd->uploader[HK_CMD_POOL_USC].chunks[i].offset = HK_CMD_BO_SIZE;
+   layout.non_variable_descriptor_buffer_size = sizeof(push->data);
+   hk_push_descriptor_set_update(push, &layout, 0, NULL);
+   desc->push_dirty = 1;
+   fail_alloc = true;
+   hk_cmd_buffer_flush_push_descriptors(cmd, desc);
+   CHECK(desc->push_dirty == 1 && desc->root.sets[0] == set_address &&
+         desc->set_sizes[0] == 80 && !desc->root_dirty);
+   fail_alloc = false;
+   hk_cmd_buffer_flush_push_descriptors(cmd, desc);
+   CHECK(!desc->push_dirty && desc->set_sizes[0] == sizeof(push->data));
+   CHECK(desc->root.sets[0] != set_address);
+   CHECK(!memcmp(mapped(desc->root.sets[0]), push->data, sizeof(push->data)));
+   layout.non_variable_descriptor_buffer_size = 0;
+   hk_push_descriptor_set_update(push, &layout, 0, NULL);
+   desc->push_dirty = 1;
+   hk_cmd_buffer_flush_push_descriptors(cmd, desc);
+   CHECK(!desc->push_dirty && !desc->set_sizes[0] && !desc->root.sets[0]);
    cmd->vk.state = MESA_VK_COMMAND_BUFFER_STATE_EXECUTABLE;
    CHECK(hk_ResetCommandBuffer(cb, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT) == VK_SUCCESS);
    CHECK(!desc->root_last_valid && !live_bos);

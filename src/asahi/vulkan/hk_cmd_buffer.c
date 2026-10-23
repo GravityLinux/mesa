@@ -1342,25 +1342,30 @@ hk_cmd_buffer_flush_push_descriptors(struct hk_cmd_buffer *cmd,
 {
    u_foreach_bit(set_idx, desc->push_dirty) {
       struct hk_push_descriptor_set *push_set = desc->push[set_idx];
+      const uint32_t size = push_set->size;
+      assert(size <= sizeof(push_set->data));
       /* G16 shaders address image descriptors within the USC aperture. */
-      uint64_t push_set_addr;
-      if (hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G) {
+      uint64_t push_set_addr = 0;
+      if (size && hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G) {
          struct agx_ptr t =
-            hk_pool_usc_alloc(cmd, sizeof(push_set->data), HK_MIN_UBO_ALIGNMENT);
+            hk_pool_usc_alloc(cmd, size, HK_MIN_UBO_ALIGNMENT);
          if (t.cpu)
-            memcpy(t.cpu, push_set->data, sizeof(push_set->data));
+            memcpy(t.cpu, push_set->data, size);
          push_set_addr = t.gpu;
-      } else {
+      } else if (size) {
          push_set_addr = hk_pool_upload(
-            cmd, push_set->data, sizeof(push_set->data), HK_MIN_UBO_ALIGNMENT);
+            cmd, push_set->data, size, HK_MIN_UBO_ALIGNMENT);
       }
+      if (size && !push_set_addr)
+         return;
 
+      if (desc->root.sets[set_idx] != push_set_addr ||
+          desc->set_sizes[set_idx] != size)
+         desc->root_dirty = true;
       desc->root.sets[set_idx] = push_set_addr;
-      desc->set_sizes[set_idx] = sizeof(push_set->data);
+      desc->set_sizes[set_idx] = size;
+      desc->push_dirty &= ~BITFIELD_BIT(set_idx);
    }
-
-   desc->root_dirty = true;
-   desc->push_dirty = 0;
 }
 
 VKAPI_ATTR void VKAPI_CALL
