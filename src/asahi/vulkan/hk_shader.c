@@ -7306,7 +7306,7 @@ hk_apple9_resolve_graphics(
    hk_apple9_graphics_key(&search.key, state);
    /* Collapse ineligible and non-mesh requests onto the emulated cache entry. */
    search.prefer_native = prefer_native && api[MESA_SHADER_MESH] &&
-                          api[MESA_SHADER_MESH]->apple9_native_candidate;
+                          p_atomic_read(&api[MESA_SHADER_MESH]->apple9_native_candidate);
    const struct hk_api_shader *fs = api[MESA_SHADER_FRAGMENT];
    if (fs && fs->apple9_deferred) {
       u_foreach_bit(rt, fs->apple9_deferred->undefined_colors)
@@ -7324,6 +7324,23 @@ retry:
       dev->apple9_variants.ht
          ? _mesa_hash_table_search(dev->apple9_variants.ht, &search)
          : NULL;
+   if (!entry && dev->apple9_variants.ht && !search.prefer_native) {
+      /* A rejected native request already owns emulated programs under its
+       * original key. Reuse that completed entry without moving/freeing it:
+       * waiters may still hold its fence, and another thread may already be
+       * compiling the emulated key. Do not wait on unrelated in-flight work. */
+      struct hk_apple9_variant alternate = search;
+      alternate.prefer_native = true;
+      struct hash_entry *fallback =
+         _mesa_hash_table_search(dev->apple9_variants.ht, &alternate);
+      if (fallback) {
+         struct hk_apple9_variant *f = fallback->data;
+         if (util_queue_fence_is_signalled(&f->ready) &&
+             f->result == VK_SUCCESS && f->shaders[MESA_SHADER_MESH] &&
+             !f->shaders[MESA_SHADER_MESH]->apple9_native_leaf)
+            entry = fallback;
+      }
+   }
    struct hk_apple9_variant *v;
    if (entry) {
       v = entry->data;
@@ -7470,6 +7487,9 @@ compile:;
       memcpy(out, v->shaders, sizeof(v->shaders));
    }
    simple_mtx_lock(&dev->apple9_variants.lock);
+   if (result == VK_SUCCESS && search.prefer_native &&
+       !v->shaders[MESA_SHADER_MESH]->apple9_native_leaf)
+      p_atomic_set(&api[MESA_SHADER_MESH]->apple9_native_candidate, false);
    v->result = result;
    util_queue_fence_signal(&v->ready);
    simple_mtx_unlock(&dev->apple9_variants.lock);
@@ -7794,7 +7814,7 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
 
    blob_write_uint32(blob, HK_SHADER_CONTAINER_VERSION);
    blob_write_uint8(blob, vk_shader->stage);
-   blob_write_uint8(blob, obj->apple9_native_candidate);
+   blob_write_uint8(blob, p_atomic_read(&obj->apple9_native_candidate));
    blob_write_uint8(blob, obj->apple9_native_cull_primitive);
    blob_write_uint8(blob, obj->apple9_native_leaf);
    blob_write_bytes(blob, obj->apple9_native_pair_id,

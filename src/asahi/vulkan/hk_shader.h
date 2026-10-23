@@ -470,7 +470,8 @@ struct hk_api_shader {
    blake3_hash apple9_native_pair_id;
 
    /* Shader capability, established before deferred state-dependent linking.
-    * Draw state can still require the emulated realization. */
+    * Draw state can still require the emulated realization. A deferred native
+    * rejection clears this atomically while recording threads may read it. */
    bool apple9_native_candidate;
    bool apple9_native_cull_primitive;
 

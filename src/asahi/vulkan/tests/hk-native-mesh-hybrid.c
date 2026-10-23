@@ -362,6 +362,46 @@ compile_native_only(struct hk_device *dev, bool reject, unsigned failure)
    return allocations;
 }
 
+static void
+deferred_rejection(struct hk_device *dev)
+{
+   struct vk_shader_compile_info infos[] = {
+      {.stage = MESA_SHADER_MESH, .nir = source(false, 3, 1),
+       .robustness = &vk_robustness_disabled},
+      {.stage = MESA_SHADER_FRAGMENT, .nir = source(true, 0, 0),
+       .robustness = &vk_robustness_disabled},
+   };
+   struct vk_shader *out[2] = {0};
+   fail_allocation = 0;
+   allocations = native_compiles = emulated_compiles = fragment_compiles = 0;
+   CHECK(hk_apple9_defer_graphics(dev, 2, infos, NULL, NULL, out) == VK_SUCCESS);
+   struct hk_api_shader *api[HK_APPLE9_GFX_STAGES] = {
+      [MESA_SHADER_MESH] = container_of(out[0], struct hk_api_shader, vk),
+      [MESA_SHADER_FRAGMENT] = container_of(out[1], struct hk_api_shader, vk),
+   }, *resolved[HK_APPLE9_GFX_STAGES] = {0};
+   CHECK(api[MESA_SHADER_MESH]->apple9_native_candidate);
+   reject_native = true;
+   CHECK(hk_apple9_resolve_graphics(dev, api, NULL, resolved, true) == VK_SUCCESS);
+   reject_native = false;
+   CHECK(!api[MESA_SHADER_MESH]->apple9_native_candidate);
+   check_programs(resolved[MESA_SHADER_MESH], resolved[MESA_SHADER_FRAGMENT], false);
+   struct hk_api_shader *first = resolved[MESA_SHADER_MESH];
+   unsigned before = allocations;
+   for (unsigned i = 0; i < 4; ++i) {
+      CHECK(hk_apple9_resolve_graphics(dev, api, NULL, resolved, i & 1) == VK_SUCCESS);
+      CHECK(resolved[MESA_SHADER_MESH] == first && allocations == before);
+      CHECK(native_compiles == 1 && emulated_compiles == 1 && fragment_compiles == 1);
+   }
+   struct hk_api_shader *copy = roundtrip(dev, api[MESA_SHADER_MESH]);
+   CHECK(!copy->apple9_native_candidate);
+   hk_api_shader_destroy(&dev->vk, &copy->vk, NULL);
+   hk_api_shader_destroy(&dev->vk, out[0], NULL);
+   hk_api_shader_destroy(&dev->vk, out[1], NULL);
+   hk_apple9_variants_finish(dev);
+   hk_apple9_bodies_finish(dev);
+   CHECK(live_bos == 0);
+}
+
 static unsigned
 store_guard_depth(nir_shader *nir)
 {
@@ -428,6 +468,7 @@ main(void)
    compile(dev, false, false, 0);
    compile(dev, true, true, 0);
    compile(dev, true, false, 0);
+   deferred_rejection(dev);
    for (unsigned i = 1; i <= count; ++i)
       compile(dev, false, true, i);
    count = compile_native_only(dev, false, 0);

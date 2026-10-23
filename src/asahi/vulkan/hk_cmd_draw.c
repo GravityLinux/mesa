@@ -5427,7 +5427,7 @@ hk_apple9_draw_mesh(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    const struct hk_api_shader *source =
       gfx->apple9_api[MESA_SHADER_MESH] ?: gfx->shaders[MESA_SHADER_MESH];
    bool prefer_native =
-      source && source->apple9_native_candidate &&
+      source && p_atomic_read(&source->apple9_native_candidate) &&
       hk_apple9_native_mesh_state_eligible(
          cmd, direct, count_addr, source->apple9_native_cull_primitive);
    if (vk_command_buffer_has_error(&cmd->vk) ||
