@@ -1579,7 +1579,11 @@ zink_bind_vertex_buffers_internal(struct zink_context *ctx, const struct pipe_ve
    for (unsigned i = 0; i < elems->hw_state.num_bindings; i++) {
       const struct pipe_vertex_buffer *vb = vbuffers + elems->hw_state.binding_map[i];
       assert(vb);
-      if (vb->buffer.resource) {
+      /* GL allows binding at or past the end of the buffer, where every fetch
+       * is out of bounds; Vulkan requires the offset to be inside the buffer.
+       * Bind no buffer instead (nullDescriptor): out-of-bounds reads are zero.
+       */
+      if (vb->buffer.resource && vb->buffer_offset < vb->buffer.resource->width0) {
          struct zink_resource *res = zink_resource(vb->buffer.resource);
          assert(res->obj->buffer);
          buffers[i] = res->obj->buffer;
