@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_image.h"
+#include "hk_feedback.h"
 #include "asahi/layout/layout.h"
 #include "asahi/lib/agx_apple9.h"
 #include "drm-uapi/drm_fourcc.h"
@@ -258,9 +259,10 @@ hk_can_compress(const struct agx_device *dev, VkFormat format, unsigned plane,
     * Compression is not supported in hardware for storage images or mutable
     * formats in general.
     *
-    * Feedback loops are problematic with compression. The GL driver bans them.
-    * Interestingly, the relevant CTS tests pass on G13G and G14C, but not on
-    * G13D. For now, conservatively ban compression with feedback loops.
+    * Feedback reads can race compressed block writeback even when the read
+    * and write texels are disjoint. Keep the allocation ban unless image init
+    * qualified the single-sample G16 colour format for raw feedback stores.
+    * Depth, MSAA, and formats without a bit-preserving view remain banned.
     */
    if (usage &
        (VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT | VK_IMAGE_USAGE_STORAGE_BIT |
@@ -794,9 +796,18 @@ static bool
 hk_can_compress_create_info(struct hk_device *dev, unsigned plane,
                             const VkImageCreateInfo *info)
 {
+   VkImageUsageFlags usage = info->usage;
+   if (hk_feedback_can_compress(&dev->dev, info->imageType, info->format,
+                                info->samples)) {
+      /* The render boundary path decompresses these colour subresources and
+       * keeps feedback stores raw. Depth, MSAA, 3D and formats without a
+       * bit-preserving integer compression alias retain 0ac160e1c41's ban.
+       */
+      usage &= ~VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
+   }
    return hk_can_compress(&dev->dev, info->format, plane, info->extent.width,
                           info->extent.height, info->samples, info->flags,
-                          info->usage, info->pNext);
+                          usage, info->pNext);
 }
 
 static enum ail_tiling

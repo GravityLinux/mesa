@@ -283,6 +283,8 @@ struct hk_rendering_state {
    /* A stored colour attachment is linear, so buffers aliasing its memory
     * can observe the render's writes (hk_queue's tiling-wait elision). */
    bool linear_store;
+   /* Feedback stores stay raw until the end of this render instance. */
+   uint8_t raw_color_mask;
 
    VkRenderingFlagBits flags;
 
@@ -824,6 +826,9 @@ struct hk_cmd_buffer {
    bool sync_render_continuation;
    bool sync_fallback;
    bool api_dispatch;
+   bool feedback_decompress;
+   bool rendering;
+   struct util_dynarray feedback_raw;
 
    /* HK_APPLE9_MERGE_RENDERS: the control stream of a render pass that has
     * ended but is kept open, so the next render pass on the same attachments

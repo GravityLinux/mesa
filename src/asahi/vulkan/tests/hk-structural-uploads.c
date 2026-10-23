@@ -144,7 +144,7 @@ check_view(struct hk_device *dev, VkFormat format, unsigned samples,
       CHECK(owned->texture_valid == valid);
       if (valid)
          CHECK(!memcmp(owned->texture, expected, sizeof(expected)));
-      valid = hk_apple9_image_view_eot(view, layered, expected);
+      valid = hk_apple9_image_view_eot(view, layered, false, expected);
       CHECK(owned->store_valid == valid);
       if (valid)
          CHECK(!memcmp(owned->store, expected, sizeof(expected)));

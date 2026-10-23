@@ -234,10 +234,19 @@ hk_apple9_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
    u_foreach_bit(rt, part_info->apple9_image_mask) {
       const struct hk_image_view *view =
          rt < key.count ? render->color_att[rt].iview : NULL;
+      uint8_t *store = (uint8_t *)textures.cpu + slot++ * AGX_APPLE9_TEXTURE_TABLE_STRIDE;
+      /* Feedback-raw attachments store uncompressed; the prepacked store is
+       * the compressed one. */
+      if (view && (render->raw_color_mask & BITFIELD_BIT(rt))) {
+         if (!hk_apple9_image_view_eot(view, key.layered, true, store)) {
+            fprintf(stderr, "Apple9 tile helper: unsupported store image %u\n", rt);
+            goto fail;
+         }
+         continue;
+      }
       if (!view || !view->apple9_render[key.layered].store_valid)
          goto fail;
-      memcpy((uint8_t *)textures.cpu + slot++ * AGX_APPLE9_TEXTURE_TABLE_STRIDE,
-             view->apple9_render[key.layered].store,
+      memcpy(store, view->apple9_render[key.layered].store,
              AGX_APPLE9_TEXTURE_TABLE_STRIDE);
    }
    uint64_t resources[AGX_APPLE9_MAX_GRAPHICS_BUFFERS] = {0};

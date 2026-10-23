@@ -65,7 +65,7 @@ uint64_t hk_apple9_view_residency(const struct hk_device *dev,
 
 /* Encode an uncompressed native tile-store view for render submission. */
 bool hk_apple9_image_view_eot(const struct hk_image_view *view, bool layered,
-                            void *out);
+                            bool raw, void *out);
 
 /* Image memory must be dense and uncompressed for native storage writes. */
 bool hk_apple9_native_store_image(const struct hk_image *image, unsigned plane);
