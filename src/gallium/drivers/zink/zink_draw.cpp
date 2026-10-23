@@ -672,6 +672,7 @@ zink_draw(struct pipe_context *pctx,
    }
 
    if ((mode_changed || prim_changed || rast_state_changed || ctx->gfx_pipeline_state.modules_changed)) {
+      zink_set_fs_poly_stipple_key(ctx);
       zink_set_primitive_emulation_keys(ctx);
    }
 
@@ -771,6 +772,11 @@ zink_draw(struct pipe_context *pctx,
       VKCTX(CmdPushConstants)(bs->cmdbuf, ctx->curr_program->base.layout, VK_SHADER_STAGE_ALL_GRAPHICS,
                         offsetof(struct zink_gfx_push_constant, default_inner_level), sizeof(float) * 6,
                         &ctx->tess_levels[0]);
+   }
+   if (zink_get_fs_base_key(ctx)->poly_stipple) {
+      VKCTX(CmdPushConstants)(bs->cmdbuf, ctx->curr_program->base.layout, VK_SHADER_STAGE_ALL_GRAPHICS,
+                        offsetof(struct zink_gfx_push_constant, poly_stipple), sizeof(ctx->poly_stipple),
+                        ctx->poly_stipple);
    }
 
    if (!screen->optimal_keys) {

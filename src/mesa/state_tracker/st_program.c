@@ -789,6 +789,27 @@ get_stream_output_info_from_nir(nir_shader *nir,
          xfb_compare_dst_offset);
 }
 
+/* pipe_caps.depth_unorm_emulated: clamp the shadow reference of every
+ * sampler except those with floating-point depth textures.
+ */
+static bool
+lower_shadow_ref_clamp(nir_shader *nir, struct gl_program *prog,
+                       uint32_t float_depth_shadow)
+{
+   uint32_t clamp_mask = prog->ShadowSamplers & ~float_depth_shadow;
+   if (!clamp_mask)
+      return false;
+
+   /* the clamp applies to the projected reference */
+   nir_lower_tex_options tex_opts = {
+      .lower_txp = ~0u,
+   };
+   bool progress = false;
+   NIR_PASS(progress, nir, nir_lower_tex, &tex_opts);
+   NIR_PASS(progress, nir, st_nir_lower_shadow_ref_clamp, clamp_mask);
+   return progress;
+}
+
 static struct st_common_variant *
 st_create_common_variant(struct st_context *st,
                          struct gl_program *prog,
@@ -849,6 +870,9 @@ st_create_common_variant(struct st_context *st,
       tex_opts.saturate_r = key->gl_clamp[2];
       NIR_PASS(finalize, state.ir.nir, nir_lower_tex, &tex_opts);
    }
+
+   if (st->screen->caps.depth_unorm_emulated && prog->ShadowSamplers)
+      finalize |= lower_shadow_ref_clamp(state.ir.nir, prog, key->float_depth_shadow);
 
    if (finalize || !st->screen->caps.call_finalize_nir_in_linker || key->is_draw_shader) {
       st_finalize_nir(st, prog, prog->shader_program, state.ir.nir, false,
@@ -1242,6 +1266,9 @@ st_create_fp_variant(struct st_context *st,
                  ~key->depth_textures & fp->ShadowSamplers);
       finalize = true;
    }
+
+   if (st->screen->caps.depth_unorm_emulated && fp->ShadowSamplers)
+      finalize |= lower_shadow_ref_clamp(state.ir.nir, fp, key->float_depth_shadow);
 
    assert(state.ir.nir->info.io_lowered);
 

@@ -132,6 +132,14 @@ zink_string_vkflags_unroll(char *buf, size_t bufsize, uint64_t flags, zink_vkfla
 VkSemaphore
 zink_create_semaphore(struct zink_screen *screen);
 
+static inline unsigned
+zink_gfx_push_constant_size(const struct zink_screen *screen)
+{
+   return screen->have_poly_stipple_emulation ?
+          sizeof(struct zink_gfx_push_constant) :
+          offsetof(struct zink_gfx_push_constant, poly_stipple);
+}
+
 static inline VkDriverId
 zink_driverid(const struct zink_screen *screen)
 {

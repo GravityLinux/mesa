@@ -87,8 +87,8 @@ is_clipcull_dist(int location)
 
 #define SIZEOF_FIELD(type, field) sizeof(((type *)0)->field)
 
-static void
-create_gfx_pushconst(nir_shader *nir)
+static const struct glsl_type *
+gfx_pushconst_type(nir_shader *nir, bool poly_stipple)
 {
 #define PUSHCONST_MEMBER(member_idx, field)                                                                     \
 fields[member_idx].type =                                                                                       \
@@ -96,7 +96,6 @@ fields[member_idx].type =                                                       
 fields[member_idx].name = ralloc_asprintf(nir, #field);                                                         \
 fields[member_idx].offset = offsetof(struct zink_gfx_push_constant, field);
 
-   nir_variable *pushconst;
    /* create compatible layout for the ntv push constant loader */
    struct glsl_struct_field *fields = rzalloc_array(nir, struct glsl_struct_field, ZINK_GFX_PUSHCONST_MAX);
    PUSHCONST_MEMBER(ZINK_GFX_PUSHCONST_DRAW_MODE_IS_INDEXED, draw_mode_is_indexed);
@@ -107,13 +106,25 @@ fields[member_idx].offset = offsetof(struct zink_gfx_push_constant, field);
    PUSHCONST_MEMBER(ZINK_GFX_PUSHCONST_LINE_STIPPLE_PATTERN, line_stipple_pattern);
    PUSHCONST_MEMBER(ZINK_GFX_PUSHCONST_VIEWPORT_SCALE, viewport_scale);
    PUSHCONST_MEMBER(ZINK_GFX_PUSHCONST_LINE_WIDTH, line_width);
+   PUSHCONST_MEMBER(ZINK_GFX_PUSHCONST_POLY_STIPPLE, poly_stipple);
 
-   pushconst = nir_variable_create(nir, nir_var_mem_push_const,
-                                   glsl_struct_type(fields, ZINK_GFX_PUSHCONST_MAX, "struct", false),
-                                   "gfx_pushconst");
-   pushconst->data.location = INT_MAX; //doesn't really matter
+   /* the stipple pattern is only declared by shaders that read it, since
+    * it is outside the push constant range on some devices
+    */
+   unsigned num_fields = poly_stipple ? ZINK_GFX_PUSHCONST_MAX : ZINK_GFX_PUSHCONST_POLY_STIPPLE;
+   return glsl_struct_type(fields, num_fields, "struct", false);
 
 #undef PUSHCONST_MEMBER
+}
+
+static void
+create_gfx_pushconst(nir_shader *nir)
+{
+   nir_variable *pushconst;
+   pushconst = nir_variable_create(nir, nir_var_mem_push_const,
+                                   gfx_pushconst_type(nir, false),
+                                   "gfx_pushconst");
+   pushconst->data.location = INT_MAX; //doesn't really matter
 }
 
 static bool
@@ -1003,6 +1014,49 @@ lower_line_smooth_gs(nir_shader *shader, unsigned driver_location)
 
    return nir_shader_instructions_pass(shader, lower_line_smooth_gs_instr,
                                        nir_metadata_control_flow, &state);
+}
+
+/* GL polygon stipple: kill fragments whose bit in the 32x32 pattern is clear.
+ * The pattern rows are in framebuffer order (row 0 at y = 0), with the most
+ * significant bit of each row at x % 32 == 0.
+ */
+static bool
+lower_poly_stipple_fs(nir_shader *shader)
+{
+   nir_function_impl *entry = nir_shader_get_entrypoint(shader);
+   nir_builder b = nir_builder_at(nir_before_impl(entry));
+
+   nir_foreach_variable_with_modes(var, shader, nir_var_mem_push_const)
+      var->type = gfx_pushconst_type(shader, true);
+
+   nir_variable *pos = nir_get_variable_with_location(shader, nir_var_shader_in,
+                                                      VARYING_SLOT_POS, glsl_vec4_type());
+   shader->info.inputs_read |= VARYING_BIT_POS;
+   nir_def *coord = nir_f2u32(&b, nir_trim_vector(&b, nir_load_var(&b, pos), 2));
+   nir_def *x = nir_iand_imm(&b, nir_channel(&b, coord, 0), 31);
+   nir_def *y = nir_iand_imm(&b, nir_channel(&b, coord, 1), 31);
+
+   /* push constant loads take constant offsets, so select the row with a
+    * bcsel tree on the bits of y
+    */
+   nir_def *rows[32];
+   for (unsigned i = 0; i < 32; i += 4) {
+      nir_def *vec = nir_load_push_constant_zink(&b, 4, 32,
+                                                 nir_imm_int(&b, ZINK_GFX_PUSHCONST_POLY_STIPPLE),
+                                                 .component = i);
+      for (unsigned c = 0; c < 4; c++)
+         rows[i + c] = nir_channel(&b, vec, c);
+   }
+   for (unsigned n = 32, bit = 0; n > 1; n /= 2, bit++) {
+      nir_def *odd = nir_test_mask(&b, y, 1u << bit);
+      for (unsigned i = 0; i < n / 2; i++)
+         rows[i] = nir_bcsel(&b, odd, rows[2 * i + 1], rows[2 * i]);
+   }
+
+   nir_def *mask = nir_ushr(&b, nir_imm_int(&b, 0x80000000), x);
+   nir_discard_if(&b, nir_ieq_imm(&b, nir_iand(&b, rows[0], mask), 0));
+   shader->info.fs.uses_discard = true;
+   return nir_progress(true, entry, nir_metadata_none);
 }
 
 static bool
@@ -3616,7 +3670,7 @@ zink_shader_spirv_compile(struct zink_screen *screen, struct zink_shader *zs, st
    VkPushConstantRange pcr;
    pcr.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
    pcr.offset = 0;
-   pcr.size = sizeof(struct zink_gfx_push_constant);
+   pcr.size = zink_gfx_push_constant_size(screen);
    sci.pushConstantRangeCount = 1;
    sci.pPushConstantRanges = &pcr;
 
@@ -4283,6 +4337,12 @@ zink_shader_compile(struct zink_screen *screen, bool can_shobj, struct zink_shad
          } else if (zink_fs_key(key)->lower_line_stipple)
                NIR_PASS(_, nir, lower_line_stipple_fs,
                         emulated_varying_location(screen, ZINK_EMULATED_VARYING_STIPPLE));
+
+         if (zink_fs_key_base(key)->poly_stipple) {
+            NIR_PASS(_, nir, lower_poly_stipple_fs);
+            NIR_PASS(_, nir, nir_lower_discard_if, nir_lower_demote_if_to_cf | nir_lower_terminate_if_to_cf);
+            need_optimize = true;
+         }
 
          if (zink_fs_key(key)->lower_point_smooth) {
             NIR_PASS(_, nir, nir_lower_point_smooth, false);

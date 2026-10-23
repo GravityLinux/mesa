@@ -1043,6 +1043,10 @@ struct pipe_caps {
    bool device_protected_surface;
    bool prefer_real_buffer_in_constbuf0;
    bool gl_clamp;
+   /* Fixed-point depth formats may be stored in floating-point formats, so
+    * shadow lookups don't clamp the reference: the state tracker must.
+    */
+   bool depth_unorm_emulated;
    bool texrect;
    bool sampler_reduction_minmax;
    bool sampler_reduction_minmax_arb;

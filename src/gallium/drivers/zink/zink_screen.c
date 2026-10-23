@@ -121,6 +121,7 @@ zink_debug_options[] = {
    { "rploads", ZINK_DEBUG_RPLOADS, "Zap renderpass loads for DONT_CARE" },
    { "nogeneral", ZINK_DEBUG_NOGENERAL, "Disable GENERAL layout usage for supported hardware" },
    { "rpstores", ZINK_DEBUG_RPSTORES, "Zap renderpass stores for DONT_CARE" },
+   { "nod24", ZINK_DEBUG_NOD24, "Treat D24 depth formats as unsupported (use the D32_SFLOAT fallback)" },
    DEBUG_NAMED_VALUE_END
 };
 
@@ -917,6 +918,9 @@ zink_init_screen_caps(struct zink_screen *screen)
       PIPE_VERTEX_INPUT_ALIGNMENT_NONE : PIPE_VERTEX_INPUT_ALIGNMENT_ELEMENT;
 
    caps->gl_clamp = false;
+   /* unorm D24 falls back to D32_SFLOAT */
+   caps->depth_unorm_emulated = !screen->have_X8_D24_UNORM_PACK32 ||
+                                !screen->have_D24_UNORM_S8_UINT;
 
    /* Most Vulkan compilers move immutable local arrays to shader constant
     * data. Honeykrisp does not implement that path yet, so large lookup
@@ -3568,9 +3572,11 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
 
    update_queue_props(screen);
 
-   screen->have_X8_D24_UNORM_PACK32 = zink_is_depth_format_supported(screen,
+   screen->have_X8_D24_UNORM_PACK32 = !(zink_debug & ZINK_DEBUG_NOD24) &&
+                                      zink_is_depth_format_supported(screen,
                                               VK_FORMAT_X8_D24_UNORM_PACK32);
-   screen->have_D24_UNORM_S8_UINT = zink_is_depth_format_supported(screen,
+   screen->have_D24_UNORM_S8_UINT = !(zink_debug & ZINK_DEBUG_NOD24) &&
+                                    zink_is_depth_format_supported(screen,
                                               VK_FORMAT_D24_UNORM_S8_UINT);
    screen->have_D32_SFLOAT_S8_UINT = zink_is_depth_format_supported(screen,
                                               VK_FORMAT_D32_SFLOAT_S8_UINT);
@@ -3904,6 +3910,12 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
    }
 
    simple_mtx_init(&screen->copy_context_lock, mtx_plain);
+
+   /* polygon stipple is emulated in the fragment shader with the pattern
+    * appended to the gfx push constants
+    */
+   screen->have_poly_stipple_emulation =
+      screen->info.props.limits.maxPushConstantsSize >= sizeof(struct zink_gfx_push_constant);
 
    init_optimal_keys(screen);
 

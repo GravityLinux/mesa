@@ -1015,6 +1015,16 @@ _mesa_get_fixed_func_fragment_program(struct gl_context *ctx)
       prog->nir = s;
 
       prog->SamplersUsed = s->info.samplers_used[0];
+      /* Only drivers that clamp shadow references in the state tracker need
+       * the shadow samplers of fixed-function programs.
+       */
+      if (ctx->screen->caps.depth_unorm_emulated) {
+         for (unsigned i = 0; i < ARRAY_SIZE(key.unit); i++) {
+            if (key.unit[i].enabled && key.unit[i].shadow)
+               prog->ShadowSamplers |= BITFIELD_BIT(i);
+         }
+         prog->ShadowSamplers &= prog->SamplersUsed;
+      }
 
       /* default mapping from samplers to texture units */
       for (unsigned i = 0; i < MAX_SAMPLERS; i++)

@@ -1348,6 +1348,9 @@ static void
 zink_set_polygon_stipple(struct pipe_context *pctx,
                          const struct pipe_poly_stipple *ps)
 {
+   struct zink_context *ctx = zink_context(pctx);
+   /* pushed with each draw that uses the poly_stipple fs key */
+   memcpy(ctx->poly_stipple, ps->stipple, sizeof(ctx->poly_stipple));
 }
 
 ALWAYS_INLINE static void
@@ -6004,6 +6007,10 @@ zink_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
             ctx->gfx_pipeline_state.shader_keys.key[pstage].key.vs_base.robust_access = true;
          ctx->gfx_pipeline_state.shader_keys.key[MESA_SHADER_FRAGMENT].key.fs.robust_access = true;
       }
+   } else {
+      /* generated GS programs use the full keys: these mirror the optimal key bits */
+      ctx->gfx_pipeline_state.shader_keys.key[MESA_SHADER_GEOMETRY].size = sizeof(struct zink_vs_key_base);
+      ctx->gfx_pipeline_state.shader_keys.key[MESA_SHADER_FRAGMENT].size = sizeof(struct zink_fs_key_base);
    }
    for (unsigned i = 0; i < ARRAY_SIZE(ctx->rendering_state_cache); i++)
       _mesa_set_init(&ctx->rendering_state_cache[i], ctx, hash_rendering_state, equals_rendering_state);

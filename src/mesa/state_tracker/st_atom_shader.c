@@ -108,6 +108,31 @@ update_gl_clamp(struct st_context *st, struct gl_program *prog, uint32_t *gl_cla
    }
 }
 
+/* Shadow samplers whose texture has a floating-point depth format. With
+ * pipe_caps.depth_unorm_emulated, shadow references are clamped in the shader
+ * by default; these samplers need a variant without the clamp.
+ */
+static uint32_t
+get_float_depth_shadow(struct st_context *st, struct gl_program *prog)
+{
+   if (!st->screen->caps.depth_unorm_emulated)
+      return 0;
+
+   uint32_t mask = 0;
+   u_foreach_bit(i, prog->ShadowSamplers) {
+      struct gl_texture_object *tex_obj =
+         _mesa_get_tex_unit(st->ctx, prog->SamplerUnits[i])->_Current;
+      if (!tex_obj || tex_obj->Target == GL_TEXTURE_BUFFER)
+         continue;
+      struct gl_texture_image *img = _mesa_base_tex_image(tex_obj);
+      if (img && (img->_BaseFormat == GL_DEPTH_COMPONENT ||
+                  img->_BaseFormat == GL_DEPTH_STENCIL) &&
+          _mesa_get_format_datatype(img->TexFormat) == GL_FLOAT)
+         mask |= BITFIELD_BIT(i);
+   }
+   return mask;
+}
+
 /**
  * Update fragment program state/atom.  This involves translating the
  * Mesa fragment program into a gallium fragment program and binding it.
@@ -122,11 +147,13 @@ st_update_fp( struct st_context *st )
    assert(fp->info.stage == MESA_SHADER_FRAGMENT);
 
    void *shader;
+   uint32_t float_depth_shadow = get_float_depth_shadow(st, fp);
 
    if (st->shader_has_one_variant[MESA_SHADER_FRAGMENT] &&
        !fp->ati_fs && /* ATI_fragment_shader always has multiple variants */
        !fp->ExternalSamplersUsed && /* external samplers need variants */
-       !(!fp->shader_program && fp->ShadowSamplers)) {
+       !(!fp->shader_program && fp->ShadowSamplers) &&
+       !float_depth_shadow) {
       shader = fp->variants->driver_shader;
    } else {
       struct st_fp_variant_key key;
@@ -188,6 +215,7 @@ st_update_fp( struct st_context *st )
 
       key.external = st_get_external_sampler_key(st, fp);
       update_gl_clamp(st, st->ctx->FragmentProgram._Current, key.gl_clamp);
+      key.float_depth_shadow = float_depth_shadow;
 
       simple_mtx_lock(&st->ctx->Shared->Mutex);
       shader = st_get_fp_variant(st, fp, &key, false, NULL)->base.driver_shader;
@@ -218,8 +246,11 @@ st_update_vp( struct st_context *st )
       return;
    }
 
+   uint32_t float_depth_shadow = get_float_depth_shadow(st, vp);
+
    if (st->shader_has_one_variant[MESA_SHADER_VERTEX] &&
-       !st->ctx->Array._PerVertexEdgeFlagsEnabled) {
+       !st->ctx->Array._PerVertexEdgeFlagsEnabled &&
+       !float_depth_shadow) {
       st->vp_variant = st_common_variant(vp->variants);
    } else {
       struct st_common_variant_key key;
@@ -255,6 +286,7 @@ st_update_vp( struct st_context *st )
       }
 
       update_gl_clamp(st, st->ctx->VertexProgram._Current, key.gl_clamp);
+      key.float_depth_shadow = float_depth_shadow;
 
       simple_mtx_lock(&st->ctx->Shared->Mutex);
       st->vp_variant = st_get_common_variant(st, vp, &key, false, NULL);
@@ -279,7 +311,9 @@ st_update_common_program(struct st_context *st, struct gl_program *prog,
 
    _mesa_reference_program(st->ctx, dst, prog);
 
-   if (st->shader_has_one_variant[prog->info.stage])
+   uint32_t float_depth_shadow = get_float_depth_shadow(st, prog);
+
+   if (st->shader_has_one_variant[prog->info.stage] && !float_depth_shadow)
       return prog->variants->driver_shader;
 
    struct st_common_variant_key key;
@@ -309,6 +343,7 @@ st_update_common_program(struct st_context *st, struct gl_program *prog,
    }
 
    update_gl_clamp(st, prog, key.gl_clamp);
+   key.float_depth_shadow = float_depth_shadow;
 
    simple_mtx_lock(&st->ctx->Shared->Mutex);
    void *result = st_get_common_variant(st, prog, &key, false, NULL)->base.driver_shader;
