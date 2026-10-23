@@ -12313,6 +12313,71 @@ TEST_F(Apple9Completion, MinMaxFoldsAndRetainsAPendingLoad)
    EXPECT_TRUE(folded);
 }
 
+/* Loads in the two arms of an if/else act on disjoint lanes and merge into
+ * one consumer after the pop: they share a slot that consumer retires once,
+ * and the else arm does not wait for the then arm's load. */
+TEST(Apple9CompletionArms, IfElseAlternativesShareASlot)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE,
+      &agx_nir_options, "if_else_alternatives");
+   nir_block logical[4] = {};
+   logical[0].successors[0] = &logical[1];
+   logical[0].successors[1] = &logical[2];
+   logical[1].successors[0] = &logical[3];
+   logical[2].successors[0] = &logical[3];
+   agx_apple9_vir_program p;
+   agx_apple9_vir_init(&p);
+   agx_apple9_block *blocks[4];
+   for (unsigned i = 0; i < 4; ++i) {
+      blocks[i] = agx_apple9_block_create(&p);
+      blocks[i]->nir = &logical[i];
+   }
+   agx_apple9_device_load_contract contract = {
+      .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
+      .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
+   };
+   agx_apple9_block_begin(&p, blocks[0]);
+   auto zero = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IMM,
+      AGX_APPLE9_ENC_MOV_IMM32, nullptr, 0, 0);
+   auto merged = agx_apple9_vir_emit_phi(&p, blocks[3]);
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_EXEC_MASK_PUSH,
+      AGX_APPLE9_ENC_EXEC_MASK_PUSH, nullptr, 0, AGX_APPLE9_EXEC_MASK_PREDICATE(0)));
+   agx_apple9_block_begin(&p, blocks[1]);
+   auto a = agx_apple9_vir_emit_device_load(&p, 0, zero, &contract);
+   ASSERT_TRUE(agx_apple9_vir_emit_phi_source(&p, merged, a));
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_EXEC_MASK_ELSE,
+      AGX_APPLE9_ENC_EXEC_MASK_ELSE, nullptr, 0, 0));
+   agx_apple9_block_begin(&p, blocks[2]);
+   auto c = agx_apple9_vir_emit_device_load(&p, 1, zero, &contract);
+   ASSERT_TRUE(agx_apple9_vir_emit_phi_source(&p, merged, c));
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_EXEC_MASK_POP,
+      AGX_APPLE9_ENC_EXEC_MASK_POP, nullptr, 0, 0));
+   agx_apple9_block_begin(&p, blocks[3]);
+   uint32_t sum[] = {merged, zero};
+   auto s = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IADD,
+      AGX_APPLE9_ENC_INT_ADD_EXTENDED, sum, 2, 0);
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_STORE_UNIFORM,
+      AGX_APPLE9_ENC_STORE_UNIFORM, &s, 1, 0));
+   agx_apple9_place_phis(&p);
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
+   unsigned slots[2] = {}, loads = 0, waits = 0, folded = 0;
+   for (unsigned i = 0; i < p.instruction_count; ++i) {
+      const auto *ins = p.instructions[i];
+      waits += ins->op == AGX_APPLE9_VIR_WAIT;
+      if (ins->op == AGX_APPLE9_VIR_DEVICE_LOAD && loads < 2)
+         slots[loads++] = ins->producer_scoreboard_slot;
+      if (loads == 2 && ins->scoreboard_slot == slots[0])
+         ++folded;
+   }
+   ASSERT_EQ(loads, 2u);
+   EXPECT_EQ(slots[0], slots[1]);
+   EXPECT_EQ(waits, 0u);
+   EXPECT_EQ(folded, 1u);
+   agx_apple9_vir_finish(&p);
+   ralloc_free(b.shader);
+}
+
 TEST_F(Apple9Completion, PointerTupleRetiresAtRetainedAddressUse)
 {
    auto zero = imm(0);
