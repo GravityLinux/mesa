@@ -760,6 +760,10 @@ _tc_sync(struct threaded_context *tc, UNUSED const char *info, UNUSED const char
       tc_batch_execute(next, NULL, 0);
       tc_begin_next_buffer_list(tc);
       synced = true;
+   } else if (next->unsync_upload_bytes) {
+      /* nothing is queued behind these uploads any more */
+      p_atomic_add(&tc->unsync_upload_bytes, -(int64_t)next->unsync_upload_bytes);
+      next->unsync_upload_bytes = 0;
    }
 
    if (synced) {
@@ -3344,10 +3348,11 @@ tc_texture_subdata(struct pipe_context *_pipe,
              * keeping every uploaded texture alive. Bound the bytes waiting
              * in queued batches by the mapped-bytes limit.
              */
-            tc->batch_slots[tc->next].unsync_upload_bytes += size;
-            if (tc->bytes_mapped_limit &&
-                p_atomic_add_return(&tc->unsync_upload_bytes, size) > tc->bytes_mapped_limit)
-               tc_sync_msg(tc, "  queued unsynchronized uploads over the mapped-bytes limit");
+            if (tc->bytes_mapped_limit) {
+               tc->batch_slots[tc->next].unsync_upload_bytes += size;
+               if (p_atomic_add_return(&tc->unsync_upload_bytes, size) > tc->bytes_mapped_limit)
+                  tc_sync_msg(tc, "  queued unsynchronized uploads over the mapped-bytes limit");
+            }
          } else {
             tc_sync(tc);
             tc_set_driver_thread(tc);
