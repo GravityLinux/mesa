@@ -4072,6 +4072,11 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
 
 #define HK_APPLE9_BODY_SLAB_SIZE (64 * 1024)
 #define HK_APPLE9_BODY_ALIGNMENT 64
+/* USC may prefetch beyond the last instruction. Keep the end of every slab
+ * mapped but unallocated so its last body cannot prefetch into the VA guard. */
+#define HK_APPLE9_BODY_TAIL 1024
+#define HK_APPLE9_BODY_SLAB_USABLE \
+   (HK_APPLE9_BODY_SLAB_SIZE - HK_APPLE9_BODY_TAIL)
 
 struct hk_apple9_body_slab {
    struct agx_bo *bo;
@@ -4143,7 +4148,7 @@ hk_apple9_body_alloc(struct hk_device *dev, struct hk_apple9_body *body)
    struct agx_bo *bo = NULL;
    struct agx_bo *failed_bo = NULL;
    body->alloc_size = ALIGN_POT(body->size, HK_APPLE9_BODY_ALIGNMENT);
-   if (body->alloc_size <= HK_APPLE9_BODY_SLAB_SIZE) {
+   if (body->alloc_size <= HK_APPLE9_BODY_SLAB_USABLE) {
       simple_mtx_lock(&dev->apple9_bodies.lock);
       list_for_each_entry(struct hk_apple9_body_slab, slab,
                           &dev->apple9_bodies.slabs, link) {
@@ -4163,7 +4168,7 @@ hk_apple9_body_alloc(struct hk_device *dev, struct hk_apple9_body *body)
             /* Map once before another uploader can reserve a slice. */
             if (slab->bo && agx_bo_map(slab->bo)) {
                util_vma_heap_init(&slab->heap, HK_APPLE9_BODY_ALIGNMENT,
-                                  slab->bo->size);
+                                  slab->bo->size - HK_APPLE9_BODY_TAIL);
                slab->heap.alloc_high = false;
                offset = util_vma_heap_alloc(&slab->heap, body->alloc_size,
                                             HK_APPLE9_BODY_ALIGNMENT);

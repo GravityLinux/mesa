@@ -255,7 +255,7 @@ check_fragmented_budget(struct hk_device *dev)
    const unsigned count =
       HK_APPLE9_BODY_CACHE_BYTES / HK_APPLE9_BODY_SLAB_SIZE + 1;
    struct agx_shader_body **held = calloc(count, sizeof(*held));
-   uint8_t code[HK_APPLE9_BODY_SLAB_SIZE - 64] = {0};
+   uint8_t code[HK_APPLE9_BODY_SLAB_USABLE - 64] = {0};
    CHECK(held);
    for (unsigned i = 0; i < count; ++i) {
       memcpy(code, &i, sizeof(i));
@@ -327,14 +327,30 @@ static void
 check_boundary(struct hk_device *dev)
 {
    uint8_t code[HK_APPLE9_BODY_SLAB_SIZE + 1] = {1};
-   for (unsigned size = sizeof(code) - 1; size <= sizeof(code); ++size) {
+   const unsigned sizes[] = {HK_APPLE9_BODY_SLAB_USABLE - 1,
+                             HK_APPLE9_BODY_SLAB_USABLE,
+                             HK_APPLE9_BODY_SLAB_USABLE + 1,
+                             HK_APPLE9_BODY_SLAB_SIZE,
+                             HK_APPLE9_BODY_SLAB_SIZE + 1};
+   for (unsigned i = 0; i < ARRAY_SIZE(sizes); ++i) {
+      unsigned size = sizes[i];
       struct hk_shader shader = {.code_ptr = code, .code_size = size};
       struct agx_shader_body *base = hk_apple9_body_upload(dev, &shader);
       CHECK(base);
       struct hk_apple9_body *body =
          container_of(base, struct hk_apple9_body, base);
-      CHECK(!!body->slab == (size == HK_APPLE9_BODY_SLAB_SIZE));
+      CHECK(!!body->slab == (size <= HK_APPLE9_BODY_SLAB_USABLE));
       CHECK(!memcmp(base->bo->_map, code, size));
+      if (body->slab) {
+         CHECK(body->alloc_size == HK_APPLE9_BODY_SLAB_USABLE);
+         CHECK(base->addr + body->alloc_size ==
+               base->bo->va->addr + base->bo->size - HK_APPLE9_BODY_TAIL);
+         CHECK(!util_vma_heap_alloc(&body->slab->heap, 64, 64));
+         struct hk_shader small = {.code_ptr = code, .code_size = 64};
+         struct agx_shader_body *next = hk_apple9_body_upload(dev, &small);
+         CHECK(next && next->bo != base->bo);
+         agx_shader_body_unreference(&dev->dev, next);
+      }
       agx_shader_body_unreference(&dev->dev, base);
       hk_apple9_bodies_finish(dev);
       CHECK(!live_bos && list_is_empty(&dev->apple9_bodies.slabs));
