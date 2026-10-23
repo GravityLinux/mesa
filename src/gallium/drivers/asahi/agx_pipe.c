@@ -2634,7 +2634,8 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
       caps->max_texture_array_layers = 2048;
       caps->max_texture_cube_levels = 15;
       caps->max_texture_3d_levels = 12;
-      caps->cube_map_array = false;
+      /* Cube arrays use the native cube-array descriptor and sample form. */
+      caps->cube_map_array = true;
       caps->seamless_cube_map = true;
       caps->seamless_cube_map_per_texture = false;
       caps->image_load_formatted = false;
@@ -2683,7 +2684,7 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
       if ((usage & PIPE_BIND_RENDER_TARGET) &&
           ((target != PIPE_TEXTURE_1D && target != PIPE_TEXTURE_1D_ARRAY &&
             target != PIPE_TEXTURE_RECT && target != PIPE_TEXTURE_2D &&
-            target != PIPE_TEXTURE_CUBE &&
+            target != PIPE_TEXTURE_CUBE && target != PIPE_TEXTURE_CUBE_ARRAY &&
             target != PIPE_TEXTURE_2D_ARRAY && target != PIPE_TEXTURE_3D) ||
            (!agx_apple9_color_is_wide(format) &&
             !agx_apple9_color_is_packed(format) &&
@@ -2709,6 +2710,7 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
           ((target != PIPE_BUFFER && target != PIPE_TEXTURE_2D && target != PIPE_TEXTURE_1D &&
             target != PIPE_TEXTURE_1D_ARRAY && target != PIPE_TEXTURE_RECT &&
             target != PIPE_TEXTURE_3D && target != PIPE_TEXTURE_CUBE &&
+            target != PIPE_TEXTURE_CUBE_ARRAY &&
             target != PIPE_TEXTURE_2D_ARRAY) ||
            !(agx_apple9_texture_format_supported(format) ||
              (target == PIPE_BUFFER && agx_apple9_texture_is_rgb32(format)))))

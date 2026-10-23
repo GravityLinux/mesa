@@ -6073,7 +6073,8 @@ agx_apple9_texture_view_supported(const struct agx_sampler_view *view)
            state->target == PIPE_TEXTURE_2D ||
            state->target == PIPE_TEXTURE_2D_ARRAY ||
            state->target == PIPE_TEXTURE_3D ||
-           state->target == PIPE_TEXTURE_CUBE) &&
+           state->target == PIPE_TEXTURE_CUBE ||
+           state->target == PIPE_TEXTURE_CUBE_ARRAY) &&
           agx_apple9_texture_format_supported(view->format) &&
           !state->u.tex.first_layer &&
           (resource->layout.tiling == AIL_TILING_GPU ||
@@ -6249,9 +6250,12 @@ agx_apple9_upload_graphics_sysvals(
       unsigned level = view->base.u.tex.first_level;
       info[0] = u_minify(texture->width0, level);
       info[1] = u_minify(texture->height0, level);
+      unsigned layers =
+         view->base.u.tex.last_layer - view->base.u.tex.first_layer + 1;
+      /* Cube arrays count cubes, as their layer queries and clamps do. */
       info[2] = view->base.target == PIPE_TEXTURE_3D
          ? u_minify(texture->depth0, level)
-         : view->base.u.tex.last_layer - view->base.u.tex.first_layer + 1;
+         : view->base.target == PIPE_TEXTURE_CUBE_ARRAY ? layers / 6 : layers;
       info[3] = view->base.u.tex.last_level - level + 1;
       info[4] = MAX2(texture->nr_samples, 1);
       agx_unpack(stderr, &view->desc, TEXTURE, descriptor);
