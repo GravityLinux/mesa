@@ -509,6 +509,7 @@ void hk_apple9_variants_finish(struct hk_device *dev);
 void hk_apple9_bodies_finish(struct hk_device *dev);
 
 bool hk_apple9_lower_sparse_residency(nir_shader *nir);
+bool hk_lower_bounded_global_loads(nir_shader *nir, bool soft_fault, bool apple9);
 
 bool hk_apple9_native_store_shader(const nir_shader *nir);
 

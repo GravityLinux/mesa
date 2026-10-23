@@ -1944,7 +1944,26 @@ lower_load_global_constant_offset_instr(nir_builder *b,
       nir_iadd(b, base_addr, nir_u2u64(b, offset)), .align_mul = align_mul,
       .align_offset = align_offset, .access = access);
 
-   if (intrin->intrinsic == nir_intrinsic_load_global_constant_bounded) {
+   if (intrin->intrinsic == nir_intrinsic_load_global_constant_bounded &&
+       opts->per_component && intrin->def.num_components > 1) {
+      /* A vector merged from separate robust fields (bounds_checked_modes)
+       * returns each in-bounds component, as in lower_load_global_bounded:
+       * checking only its last byte would zero the in-bounds fields too. A
+       * field split over two merged loads then reads (x, y, 0, 0) where
+       * robustness2 allows only (x, y, z, 0) or zero (uniform_buffer
+       * len_12/31/252).
+       */
+      nir_scalar offs = nir_scalar_resolved(offset, 0);
+      nir_def *comps[NIR_MAX_VEC_COMPONENTS];
+      for (unsigned c = 0; c < intrin->def.num_components; ++c) {
+         nir_def *end = nir_scalar_is_const(offs)
+            ? nir_imm_int(b, nir_scalar_as_uint(offs) + (c + 1) * byte_size)
+            : nir_iadd_imm(b, offset, (c + 1) * byte_size);
+         comps[c] = bounds_check(b, nir_channel(b, val, c), end, bound,
+                                 opts->apple9);
+      }
+      val = nir_vec(b, comps, intrin->def.num_components);
+   } else if (intrin->intrinsic == nir_intrinsic_load_global_constant_bounded) {
       nir_scalar offs = nir_scalar_resolved(offset, 0);
       if (nir_scalar_is_const(offs)) {
          /* Calculate last byte loaded */
@@ -1965,6 +1984,20 @@ lower_load_global_constant_offset_instr(nir_builder *b,
 
    nir_def_replace(&intrin->def, val);
    return true;
+}
+
+/* Lower bounded and offset global loads. Apple9 checks each component of a
+ * merged vector separately. */
+bool
+hk_lower_bounded_global_loads(nir_shader *nir, bool soft_fault, bool apple9)
+{
+   struct hk_bounded_lowering bounded = {
+      .soft_fault = soft_fault,
+      .apple9 = apple9,
+      .per_component = apple9,
+   };
+   return nir_shader_intrinsics_pass(nir, lower_load_global_constant_offset_instr,
+                                     nir_metadata_none, &bounded);
 }
 
 struct lower_ycbcr_state {
@@ -3887,14 +3920,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    NIR_PASS(progress, nir, nir_opt_sink, opts);
    NIR_PASS(progress, nir, nir_opt_move, opts);
 
-   struct hk_bounded_lowering bounded = {
-      .soft_fault = agx_has_soft_fault(&dev->dev),
-      .apple9 = dev->dev.chip == AGX_CHIP_G16G,
-      .per_component = dev->dev.chip == AGX_CHIP_G16G,
-   };
-   NIR_PASS(_, nir, nir_shader_intrinsics_pass,
-            lower_load_global_constant_offset_instr, nir_metadata_none,
-            &bounded);
+   NIR_PASS(_, nir, hk_lower_bounded_global_loads,
+            agx_has_soft_fault(&dev->dev), dev->dev.chip == AGX_CHIP_G16G);
 
    assert(nir->info.shared_size == 0);
 
