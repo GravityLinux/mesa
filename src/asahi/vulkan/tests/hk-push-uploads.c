@@ -95,8 +95,61 @@ readers(void)
    ralloc_free(b.shader);
 }
 
+#ifndef NDEBUG
+static void
+check_final_reader(void)
+{
+   const unsigned push = offsetof(struct hk_root_descriptor_table, push);
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_VERTEX, &agx_nir_options, "final root reader");
+   nir_def *root = nir_load_ubo(&b, 1, 64, nir_imm_int(&b, 0),
+      nir_imm_int(&b, offsetof(struct hk_root_descriptor_table, root_desc_addr)),
+      .align_mul = 8, .range = UINT32_MAX);
+   nir_load_global_constant(&b, 4, 32, nir_iadd_imm(&b, root, push + 12),
+                            .align_mul = 4);
+   CHECK(hk_nir_push_constant_mask(b.shader) == 0);
+   CHECK(hk_nir_final_push_constant_mask(b.shader) == BITFIELD64_RANGE(3, 4));
+   /* The check works on a clone, preserving the actual backend input. */
+   CHECK(hk_nir_push_constant_mask(b.shader) == 0);
+   nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0), nir_imm_int(&b, push + 252),
+                .align_mul = 4, .range = UINT32_MAX);
+   CHECK(hk_nir_final_push_constant_mask(b.shader) ==
+         (BITFIELD64_RANGE(3, 4) | BITFIELD64_BIT(63)));
+   nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0), nir_load_vertex_id(&b),
+                .align_mul = 4, .range = UINT32_MAX);
+   CHECK(hk_nir_final_push_constant_mask(b.shader) == UINT64_MAX);
+   ralloc_free(b.shader);
+
+   b = nir_builder_init_simple_shader(MESA_SHADER_VERTEX, &agx_nir_options,
+                                      "final loaded descriptor boundary");
+   nir_def *set = nir_load_ubo(&b, 1, 64, nir_imm_int(&b, 0),
+      nir_imm_int(&b, offsetof(struct hk_root_descriptor_table, sets)),
+      .align_mul = 8, .range = UINT32_MAX);
+   nir_load_global_constant(&b, 4, 32, nir_iadd_imm(&b, set, push), .align_mul = 4);
+   nir_load_ubo(&b, 4, 32, nir_imm_int(&b, 2), nir_imm_int(&b, push),
+                .align_mul = 4, .range = UINT32_MAX);
+   CHECK(hk_nir_final_push_constant_mask(b.shader) == 0);
+   nir_push_if(&b, nir_ine_imm(&b, nir_load_vertex_id(&b), 0));
+   nir_def *left = nir_imm_int64(&b, 0x10000);
+   nir_push_else(&b, NULL);
+   nir_def *right = nir_imm_int64(&b, 0x20000);
+   nir_pop_if(&b, NULL);
+   nir_def *address = nir_if_phi(&b, left, right);
+   nir_load_global_constant(&b, 1, 32, address, .align_mul = 4);
+   CHECK(hk_nir_push_constant_mask(b.shader) == UINT64_MAX);
+   CHECK(hk_nir_final_push_constant_mask(b.shader) == 0);
+   nir_load_ubo(&b, 1, 32, nir_load_vertex_id(&b), nir_imm_int(&b, push),
+                .align_mul = 4, .range = UINT32_MAX);
+   CHECK(hk_nir_final_push_constant_mask(b.shader) == UINT64_MAX);
+   ralloc_free(b.shader);
+}
+#endif
+
 int main(void)
 {
+#ifndef NDEBUG
+   check_final_reader();
+#endif
    readers();
    struct hk_device *dev = calloc(1, sizeof(*dev));
    CHECK(dev);

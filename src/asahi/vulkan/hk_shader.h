@@ -292,6 +292,10 @@ struct hk_fast_link_key_fs {
 };
 
 struct hk_shader {
+#ifndef NDEBUG
+   /* Final-NIR validation uses the owning API shader's upload mask. */
+   const struct hk_api_shader *debug_owner;
+#endif
    struct agx_shader_part b;
 
    struct hk_shader_info info;
@@ -440,6 +444,9 @@ enum hk_pre_raster_reads {
 uint8_t hk_nir_pre_raster_reads(const nir_shader *nir);
 bool hk_nir_reads_draw_id(const nir_shader *nir);
 uint64_t hk_nir_push_constant_mask(const nir_shader *nir);
+#ifndef NDEBUG
+uint64_t hk_nir_final_push_constant_mask(const nir_shader *nir);
+#endif
 
 struct hk_api_shader {
    struct vk_shader vk;

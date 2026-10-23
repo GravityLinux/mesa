@@ -4606,6 +4606,126 @@ hk_nir_push_constant_mask(const nir_shader *nir)
    return mask;
 }
 
+#ifndef NDEBUG
+/* hk_apple9_lower_roots replaces load_root_agx with a load of root_desc_addr
+ * from UBO 0. Recover that identity on a clone so the final-NIR check sees
+ * both indirect root loads and direct UBO 0 reads. Other loaded pointers
+ * still stop the address walk. The NIR passed to the backend is untouched.
+ */
+static bool
+hk_debug_restore_root(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_ubo)
+      return false;
+
+   bool *unknown = data;
+   if (!nir_src_is_const(intr->src[0])) {
+      *unknown = true;
+      return false;
+   }
+   if (nir_src_as_uint(intr->src[0]) != 0)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *root = nir_load_root_agx(b);
+   nir_def *value;
+   if (intr->num_components == 1 && intr->def.bit_size == 64 &&
+       nir_src_is_const(intr->src[1]) &&
+       nir_src_as_uint(intr->src[1]) ==
+          hk_root_descriptor_offset(root_desc_addr)) {
+      value = root;
+   } else {
+      nir_def *offset = nir_u2u64(b, intr->src[1].ssa);
+      value = nir_load_global_constant(
+         b, intr->num_components, intr->def.bit_size,
+         nir_iadd(b, root, offset),
+         .align_mul = nir_intrinsic_align_mul(intr),
+         .align_offset = nir_intrinsic_align_offset(intr));
+   }
+   nir_def_replace(&intr->def, value);
+   return true;
+}
+
+/* Geometry lowering introduces application-memory address phis and vector
+ * expressions which the early root walk conservatively calls unknown. They
+ * cannot refer to our root unless they depend on load_root_agx. Follow phis
+ * with a visited set, but stop at memory loads just like the early analysis.
+ */
+struct hk_debug_root_walk {
+   struct set *visited;
+   bool found;
+};
+
+static bool
+hk_debug_root_source(nir_src *src, void *data)
+{
+   struct hk_debug_root_walk *walk = data;
+   nir_instr *instr = nir_def_instr(src->ssa);
+   bool found;
+   _mesa_set_search_or_add(walk->visited, instr, &found);
+   if (found)
+      return true;
+   if (instr->type == nir_instr_type_intrinsic) {
+      walk->found |= nir_instr_as_intrinsic(instr)->intrinsic ==
+                     nir_intrinsic_load_root_agx;
+   } else {
+      nir_foreach_src(instr, hk_debug_root_source, walk);
+   }
+   return !walk->found;
+}
+
+static bool
+hk_debug_exclude_non_root_load(nir_builder *b, nir_intrinsic_instr *intr,
+                               void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_global &&
+       intr->intrinsic != nir_intrinsic_load_global_constant &&
+       intr->intrinsic != nir_intrinsic_load_global_constant_offset)
+      return false;
+   struct hk_debug_root_walk walk = {
+      .visited = _mesa_pointer_set_create(NULL),
+   };
+   assert(walk.visited);
+   hk_debug_root_source(&intr->src[0], &walk);
+   _mesa_set_destroy(walk.visited, NULL);
+   if (walk.found)
+      return false;
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_src_rewrite(&intr->src[0], nir_imm_int64(b, 0));
+   return true;
+}
+
+uint64_t
+hk_nir_final_push_constant_mask(const nir_shader *nir)
+{
+   nir_shader *copy = nir_shader_clone(NULL, nir);
+   assert(copy);
+   bool unknown = false;
+   NIR_PASS(_, copy, nir_shader_intrinsics_pass, hk_debug_restore_root,
+            nir_metadata_control_flow, &unknown);
+   /* Fold only the newly introduced integer conversions/adds, so direct
+    * constant UBO offsets remain recognizable to the conservative walk. */
+   NIR_PASS(_, copy, nir_opt_constant_folding);
+   NIR_PASS(_, copy, nir_shader_intrinsics_pass, hk_debug_exclude_non_root_load,
+            nir_metadata_control_flow, NULL);
+   uint64_t mask = unknown ? UINT64_MAX : hk_nir_push_constant_mask(copy);
+   ralloc_free(copy);
+   return mask;
+}
+
+static void
+hk_assert_final_push_mask(const nir_shader *nir, const struct hk_shader *shader)
+{
+   const struct hk_api_shader *obj = shader->debug_owner;
+   assert(obj);
+   uint64_t final = hk_nir_final_push_constant_mask(nir);
+   assert((final & ~obj->push_constant_mask) == 0 ||
+          obj->push_constant_mask == UINT64_MAX);
+}
+#else
+#define hk_assert_final_push_mask(nir, shader) ((void)0)
+#endif
+
 uint8_t
 hk_nir_pre_raster_reads(const nir_shader *nir)
 {
@@ -5060,6 +5180,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
 
    assert(nir->info.io_lowered);
    if (dev->dev.chip == AGX_CHIP_G16G) {
+      hk_assert_final_push_mask(nir, shader);
       /* A compute entrypoint without side effects has no GPU work, even
        * when loads and arithmetic remain, for example once optimization has
        * proved every store unreachable. Keep the common Asahi empty-shader
@@ -5451,6 +5572,10 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
    obj->pre_raster_reads = HK_READS_UNKNOWN;
    obj->reads_draw_id = hk_nir_reads_draw_id(nir);
    obj->push_constant_mask = hk_nir_push_constant_mask(nir);
+#ifndef NDEBUG
+   hk_foreach_variant(obj, variant)
+      variant->debug_owner = obj;
+#endif
 
    if (!nir->info.io_lowered) {
       hk_lower_nir(dev, nir, info->robustness, false, info->set_layout_count,
@@ -5763,6 +5888,7 @@ hk_apple9_compile_prerast(struct hk_device *dev, nir_shader *nir,
    NIR_PASS(_, nir, nir_opt_dead_cf);
    NIR_PASS(_, nir, nir_opt_dce);
 
+   hk_assert_final_push_mask(nir, shader);
    bool empty = true;
    nir_foreach_block(block, nir_shader_get_entrypoint(nir))
       empty &= exec_list_is_empty(&block->instr_list);
@@ -5909,6 +6035,7 @@ hk_apple9_compile_tes(struct hk_device *dev, nir_shader *nir,
    if (agx_apple9_debug_enabled(AGX_A9_DBG_NIR))
       nir_print_shader(nir, stderr);
    bool cull_mask;
+   hk_assert_final_push_mask(nir, hw);
    if (!hk_apple9_compile_vertex_culls(nir, &layout, &hw->b, &cull_mask,
                                        reason)) {
       ralloc_free(clone);
@@ -6180,6 +6307,7 @@ hk_apple9_compile_gs(struct hk_device *dev, nir_shader *nir,
       hk_apple9_lower_prerast_sysvals(rast, MESA_SHADER_GEOMETRY);
       if (agx_apple9_debug_enabled(AGX_A9_DBG_NIR))
          nir_print_shader(rast, stderr);
+      hk_assert_final_push_mask(rast, rast_shader);
       if (agx_compile_apple9_vertex_inputs(rast, &layout, &rast_shader->b,
                                            reason))
          result = hk_apple9_finish_shader(dev, rast_shader, rast);
@@ -6227,6 +6355,7 @@ hk_apple9_compile_mesh(struct hk_device *dev, nir_shader *nir,
    hk_apple9_lower_prerast_sysvals(nir, MESA_SHADER_COMPUTE);
    NIR_PASS(_, nir, nir_opt_dce);
    VkResult result = VK_SUCCESS;
+   hk_assert_final_push_mask(nir, main);
    if (!agx_compile_apple9_tiny(nir, &main->b, &main->info.apple9, reason))
       result = vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
    else
@@ -6249,6 +6378,7 @@ hk_apple9_compile_mesh(struct hk_device *dev, nir_shader *nir,
       }
       if (agx_apple9_debug_enabled(AGX_A9_DBG_NIR))
          nir_print_shader(rast_nir, stderr);
+      hk_assert_final_push_mask(rast_nir, rast);
       if (agx_compile_apple9_vertex_inputs(rast_nir, &layout, &rast->b, reason))
          result = hk_apple9_finish_shader(dev, rast, rast_nir);
       else
@@ -6340,6 +6470,7 @@ hk_apple9_compile_native_mesh(struct hk_device *dev, nir_shader *nir,
    struct hk_shader *object = &obj->variants[HK_MESH_VARIANT_OBJECT];
    hk_mesh_gather_info(nir, &mesh->info.mesh);
    mesh->info.apple9_native_stage = HK_APPLE9_NATIVE_MESH;
+   hk_assert_final_push_mask(nir, mesh);
    bool compiled = hk_apple9_compile_native_mesh_program(
       nir, key, &mesh->b, &mesh->info.apple9_native, reason);
    /* The backend may have allocated a binary before a final capability
@@ -6368,6 +6499,7 @@ hk_apple9_compile_native_mesh(struct hk_device *dev, nir_shader *nir,
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
    object->info.stage = MESA_SHADER_TASK;
    object->info.apple9_native_stage = HK_APPLE9_NATIVE_OBJECT;
+   hk_assert_final_push_mask(generated, object);
    compiled = agx_compile_apple9_native_object(
       generated, hk_apple9_native_mesh_enabled(), &k, &object->b,
       &object->info.apple9_native, reason);
@@ -6403,6 +6535,7 @@ hk_apple9_compile_task(struct hk_device *dev, nir_shader *nir,
    memset(&nir->info.cs, 0, sizeof(nir->info.cs));
    hk_apple9_lower_prerast_sysvals(nir, MESA_SHADER_COMPUTE);
    NIR_PASS(_, nir, nir_opt_dce);
+   hk_assert_final_push_mask(nir, shader);
    if (!agx_compile_apple9_tiny(nir, &shader->b, &shader->info.apple9, reason))
       return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
    return hk_apple9_finish_shader(dev, shader, nir);
@@ -6720,6 +6853,10 @@ hk_apple9_compile_graphics_path(struct hk_device *dev, uint32_t count,
          obj->pre_raster_reads = hk_nir_pre_raster_reads(nir);
          obj->reads_draw_id = hk_nir_reads_draw_id(nir);
          obj->push_constant_mask = hk_nir_push_constant_mask(nir);
+#ifndef NDEBUG
+         hk_foreach_variant(obj, variant)
+            variant->debug_owner = obj;
+#endif
          shader->info.set_count = infos[i].set_layout_count;
          shader->info.apple9_render_targets = key.targets;
          shader->info.apple9_line_stipple_first =
@@ -6810,6 +6947,7 @@ hk_apple9_compile_graphics_path(struct hk_device *dev, uint32_t count,
             if (!per_vertex.count && hk_per_vertex_copies_used(&per_vertex))
                hk_apple9_write_vertex_weights(nir, &per_vertex);
             bool cull_mask;
+            hk_assert_final_push_mask(nir, shader);
             if (!hk_apple9_compile_vertex_culls(nir, &key.vertex, &shader->b,
                                                 &cull_mask, &reason)) {
                ralloc_free(sw_nir);
@@ -6979,6 +7117,7 @@ hk_apple9_compile_graphics_path(struct hk_device *dev, uint32_t count,
             }
             struct blob dump_nir;
             const bool dump = hk_apple9_fragment_dump_begin(nir, &dump_nir);
+            hk_assert_final_push_mask(nir, shader);
             const bool compiled = agx_compile_apple9_fragment_mrt(
                nir, &varyings, key.blend, key.targets, &shader->b, &reason);
             if (dump)
