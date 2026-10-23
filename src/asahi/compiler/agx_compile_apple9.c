@@ -7568,26 +7568,32 @@ apple9_hoist_uniform_source(nir_src *src, void *data)
    return true;
 }
 
+/* Preamble-only reads are on for compute by default. In a large fragment
+ * shader they raised register pressure. AGX_APPLE9_SAFE_HOIST_STAGES
+ * selects =compute, =all or =none; hk chooses which reads qualify. */
 static bool
-apple9_hoist_uniform_reads(nir_shader *nir, struct hash_table *original_blocks,
-                            bool addresses, unsigned *address_hoists)
+apple9_safe_reads_enabled(const nir_shader *nir)
 {
-   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
-   nir_index_ssa_defs(impl);
-   /* Preamble-only reads are on for compute by default. In a large fragment
-    * shader they raised register pressure. AGX_APPLE9_SAFE_HOIST_STAGES
-    * selects =compute, =all or =none; hk chooses which reads qualify. */
    const char *env = debug_get_option_cached_agx_apple9_safe_hoist_stages();
    const char *stages = apple9_safe_reads_override > 0 ? "all"
                         : apple9_safe_reads_override == 0 ? NULL
                         : env ? env : "compute";
    bool compute = nir->info.stage == MESA_SHADER_COMPUTE ||
                   nir->info.stage == MESA_SHADER_KERNEL;
+   return stages && (!strcmp(stages, "all") ||
+                     (!strcmp(stages, "compute") && compute));
+}
+
+static bool
+apple9_hoist_uniform_reads(nir_shader *nir, struct hash_table *original_blocks,
+                            bool addresses, unsigned *address_hoists)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   nir_index_ssa_defs(impl);
    struct apple9_uniform_hoist s = {
       .entry = nir_start_block(impl),
       .original_blocks = original_blocks,
-      .safe_reads = stages && (!strcmp(stages, "all") ||
-                               (!strcmp(stages, "compute") && compute)),
+      .safe_reads = apple9_safe_reads_enabled(nir),
       /* Descriptor records read through handles (texture info, runtime
        * sampler state) are hoisted in every stage: unlike buffer reads,
        * leaving them in their branches did not save registers. */
@@ -7750,7 +7756,7 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
                    unsigned uniform_budget, bool promote_constants,
                    bool hoist_addresses, struct apple9_dag_cost *cost,
                    unsigned *preamble_bytes, unsigned *preamble_words,
-                   unsigned *address_hoists)
+                   bool *setup_spilled, unsigned *address_hoists)
 {
    nir_shader *main = apple9_prepare_preamble_main(nir);
    if (!main)
@@ -7855,6 +7861,7 @@ apple9_try_preamble(nir_shader *nir, struct agx_shader_part *out,
    }
    if (agx_apple9_trace_enabled() && candidate_reason)
       fprintf(stderr, "APPLE9_PREAMBLE_FALLBACK %s\n", candidate_reason);
+   *setup_spilled = setup.info.scratch_size != 0;
    *preamble_bytes = setup.info.main_size;
    *preamble_words = sizes[nir_preamble_class_general];
    free(setup.binary);
@@ -7887,23 +7894,38 @@ apple9_preamble_trial(nir_shader *nir, struct agx_shader_part *out,
    /* Constant stores must not discard an otherwise useful preamble when
     * they cross the code-size policy bound. Retry without them first.
     * If the extracted expressions alone exceed the bound, reduce their
-    * uniform budget using the measured setup size. Every attempt starts
-    * from the same prepared NIR and still checks the assembled code size.
-    * Bound retries so pathological setup code cannot multiply compile time.
+    * uniform budget using the measured setup size. Setup code has no
+    * scratch, so when it spills, first stop moving guarded reads out of their
+    * branches (the reads and address chains they bring are what fill the
+    * setup's registers), then halve the budget. Otherwise the shader would
+    * lose its whole preamble and run all of that uniform work per thread. Every
+    * attempt starts from the same prepared NIR and still checks the
+    * assembled code size. Bound retries so pathological setup code cannot
+    * multiply compile time.
     */
    const unsigned max_bytes =
       agx_apple9_max_preamble_bytes(nir->info.stage == MESA_SHADER_COMPUTE);
+   const int safe_reads_override = apple9_safe_reads_override;
    for (unsigned attempt = 0; attempt < 4 && budget; ++attempt) {
       unsigned bytes = 0, words = 0;
+      bool setup_spilled = false;
       if (apple9_try_preamble(nir, out, profile, varyings, resources, budget,
                              promote_constants, hoist_addresses, cost, &bytes, &words,
-                             address_hoists)) {
+                             &setup_spilled, address_hoists)) {
          ok = true;
          break;
       }
-      if (bytes <= max_bytes)
+      if (setup_spilled && apple9_safe_reads_enabled(nir)) {
+         if (agx_apple9_trace_enabled())
+            fprintf(stderr, "APPLE9_PREAMBLE_RETRY setup spilled: safe reads dropped\n");
+         apple9_safe_reads_override = 0;
+      } else if (setup_spilled) {
+         budget = MIN2(budget, words) / 2;
+         if (agx_apple9_trace_enabled())
+            fprintf(stderr, "APPLE9_PREAMBLE_RETRY setup spilled: budget %u\n", budget);
+      } else if (bytes <= max_bytes) {
          break;
-      if (promote_constants) {
+      } else if (promote_constants) {
          promote_constants = false;
       } else {
          budget = (uint64_t)MIN2(budget, words) *
@@ -7915,6 +7937,7 @@ apple9_preamble_trial(nir_shader *nir, struct agx_shader_part *out,
             budget = MIN2(budget, words / 2);
       }
    }
+   apple9_safe_reads_override = safe_reads_override;
    apple9_log_stream = previous;
    if (stream)
       fclose(stream);
