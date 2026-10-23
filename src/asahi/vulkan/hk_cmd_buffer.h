@@ -1556,6 +1556,7 @@ hk_apple9_draw_state_reusable(const struct hk_cmd_buffer *cmd,
           draw.start_instance == cmd->apple9_draw_state.base_instance;
 }
 
+bool hk_apple9_reads_draw_id(const struct hk_graphics_state *gfx);
 void hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
                     struct agx_draw draw);
 struct hk_apple9_prerast_bindings

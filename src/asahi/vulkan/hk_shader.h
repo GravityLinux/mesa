@@ -438,6 +438,7 @@ enum hk_pre_raster_reads {
 };
 
 uint8_t hk_nir_pre_raster_reads(const nir_shader *nir);
+bool hk_nir_reads_draw_id(const nir_shader *nir);
 
 struct hk_api_shader {
    struct vk_shader vk;
@@ -452,6 +453,12 @@ struct hk_api_shader {
     * images or buffers. Decides whether its render's tiling must wait for
     * earlier renders' writes (hk_queue). */
    uint8_t pre_raster_reads;
+
+   /* The program reads the draw index (gl_DrawID / DrawIndex), which hk
+    * passes in the root descriptor table. Draws whose bound stages do not
+    * read it leave the root unchanged, so consecutive draws of a multi-draw
+    * share one root upload. */
+   bool reads_draw_id;
 
    /* Apple9 graphics shaders whose key depends on state that is dynamic or
     * unknown at compile time keep their NIR and are compiled at draw time,

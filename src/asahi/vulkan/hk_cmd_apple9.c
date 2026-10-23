@@ -585,6 +585,19 @@ hk_apple9_account_draw(struct hk_cs *cs,
       cs->pass_code = fragment->bo ? fragment->bo->va->addr : 0;
 }
 
+/* Whether a bound stage reads the draw index from the root table. Other
+ * draws leave the root's draw_id unchanged: a multi-draw's identical draws
+ * then reuse one root upload instead of uploading it per draw. */
+bool
+hk_apple9_reads_draw_id(const struct hk_graphics_state *gfx)
+{
+   for (unsigned s = 0; s < ARRAY_SIZE(gfx->shaders); ++s) {
+      if (s != MESA_SHADER_COMPUTE && gfx->shaders[s] && gfx->shaders[s]->reads_draw_id)
+         return true;
+   }
+   return false;
+}
+
 /* Reuse preparation, not emission: every draw still records its scope and
  * emits its ordinary VDM command. Root updates preserve the normal upload
  * order and rebuild only the tables/launches that bind the changed root.
@@ -618,7 +631,7 @@ hk_apple9_try_cached_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    struct hk_cs *cs = hk_cmd_buffer_get_cs(cmd, false);
    assert(cs && cs == cmd->apple9_prev_cs);
 
-   if (desc->root.draw.draw_id != draw_id) {
+   if (hk_apple9_reads_draw_id(gfx) && desc->root.draw.draw_id != draw_id) {
       desc->root.draw.draw_id = draw_id;
       desc->root_dirty = true;
    }
@@ -1128,7 +1141,8 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
        dyn->ia.primitive_topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN &&
        dyn->rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT
           ? 4 : 0);
-   gfx->descriptors.root.draw.draw_id = draw_id;
+   if (hk_apple9_reads_draw_id(gfx))
+      gfx->descriptors.root.draw.draw_id = draw_id;
    gfx->descriptors.root_dirty = true;
    uint64_t t_sub = hk_cpu_sub_begin();
    hk_cmd_buffer_flush_push_descriptors(cmd, &gfx->descriptors);
