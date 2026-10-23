@@ -397,7 +397,7 @@ native_cache_tests(struct hk_device *dev)
       if (i == 4)
          api[i][MESA_SHADER_MESH]->apple9_native_candidate = false;
       CHECK(hk_apple9_resolve_graphics(dev, api[i], NULL, out,
-                                      native || i == 4) == VK_SUCCESS);
+                                      native || i == 4, false) == VK_SUCCESS);
       CHECK(nir_loads == before + ((i == 0 || i == 2) ? 2 : 0));
       CHECK(out[MESA_SHADER_MESH]->apple9_native_leaf == native);
       CHECK(out[MESA_SHADER_FRAGMENT]->apple9_native_leaf == native);
@@ -498,7 +498,7 @@ persistent_process(struct hk_device *dev, struct hk_api_shader **api,
    dev->vk.mem_cache = cache_create(dev, NULL, 0, true);
    bool hit = !strcmp(mode, "--warm-process");
    unsigned before = nir_loads;
-   CHECK(hk_apple9_resolve_graphics(dev, api, NULL, out, false) == VK_SUCCESS);
+   CHECK(hk_apple9_resolve_graphics(dev, api, NULL, out, false, false) == VK_SUCCESS);
    CHECK(nir_loads == before + (hit ? 0 : 2));
    api_destroy(dev, api);
    hk_apple9_variants_finish(dev);
@@ -566,7 +566,7 @@ main(int argc, char **argv)
    CHECK(pdev->vk.disk_cache);
    dev->vk.mem_cache = cache_create(dev, NULL, 0, true);
    unsigned before = nir_loads;
-   CHECK(hk_apple9_resolve_graphics(dev, api, NULL, out, false) == VK_SUCCESS);
+   CHECK(hk_apple9_resolve_graphics(dev, api, NULL, out, false, false) == VK_SUCCESS);
    CHECK(nir_loads == before + 2);
    blob_tests(dev, out, MESA_SHADER_VERTEX);
    /* These are the exact driver callbacks used by application VkPipelineCache
@@ -580,7 +580,7 @@ main(int argc, char **argv)
    }
    api_create(dev, again, false);
    before = nir_loads;
-   CHECK(hk_apple9_resolve_graphics(dev, again, NULL, out, false) == VK_SUCCESS);
+   CHECK(hk_apple9_resolve_graphics(dev, again, NULL, out, false, false) == VK_SUCCESS);
    CHECK(nir_loads ==
          before); /* A different API object, same persistent key. */
    CHECK(dev->vk.mem_cache->object_cache->entries == 1);
@@ -606,7 +606,7 @@ main(int argc, char **argv)
    free(data);
    api_create(dev, api, false);
    before = nir_loads;
-   CHECK(hk_apple9_resolve_graphics(dev, api, NULL, out, false) == VK_SUCCESS);
+   CHECK(hk_apple9_resolve_graphics(dev, api, NULL, out, false, false) == VK_SUCCESS);
    CHECK(nir_loads == before);
    api_destroy(dev, api);
    hk_apple9_variants_finish(dev);
@@ -617,13 +617,13 @@ main(int argc, char **argv)
    dev->vk.mem_cache = cache_create(dev, NULL, 0, true);
    api_create(dev, api, false);
    before = nir_loads;
-   CHECK(hk_apple9_resolve_graphics(dev, api, NULL, out, false) == VK_SUCCESS);
+   CHECK(hk_apple9_resolve_graphics(dev, api, NULL, out, false, false) == VK_SUCCESS);
    CHECK(nir_loads == before);
    /* Partial reload OOM falls back to compilation and keeps ownership sound. */
    api_create(dev, again, false);
    hk_apple9_bodies_finish(dev);
    fail_allocation = allocations + 2;
-   CHECK(hk_apple9_resolve_graphics(dev, again, NULL, out, false) == VK_SUCCESS);
+   CHECK(hk_apple9_resolve_graphics(dev, again, NULL, out, false, false) == VK_SUCCESS);
    CHECK(nir_loads == before + 2);
    fail_allocation = 0;
    api_destroy(dev, again);
@@ -646,18 +646,18 @@ main(int argc, char **argv)
       blob_finish(&api_blobs[i]);
    }
    before = nir_loads;
-   CHECK(hk_apple9_resolve_graphics(dev, api, NULL, out, false) == VK_SUCCESS);
+   CHECK(hk_apple9_resolve_graphics(dev, api, NULL, out, false, false) == VK_SUCCESS);
    CHECK(nir_loads == before);
    api_destroy(dev, api);
    CHECK(dev->vk.mem_cache->object_cache->entries == 0);
    /* A vertex-only cull-distance variant includes its generated fragment. */
    api_create(dev, api, true);
    before = nir_loads;
-   CHECK(hk_apple9_resolve_graphics(dev, api, NULL, out, false) == VK_SUCCESS);
+   CHECK(hk_apple9_resolve_graphics(dev, api, NULL, out, false, false) == VK_SUCCESS);
    CHECK(nir_loads == before + 1 && out[MESA_SHADER_FRAGMENT]);
    api_create(dev, again, true);
    before = nir_loads;
-   CHECK(hk_apple9_resolve_graphics(dev, again, NULL, out, false) == VK_SUCCESS);
+   CHECK(hk_apple9_resolve_graphics(dev, again, NULL, out, false, false) == VK_SUCCESS);
    CHECK(nir_loads == before && out[MESA_SHADER_FRAGMENT]);
    api_destroy(dev, again);
    api_destroy(dev, api);
