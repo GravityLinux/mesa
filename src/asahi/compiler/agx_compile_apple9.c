@@ -6172,6 +6172,60 @@ apple9_log(void)
    return apple9_log_stream ? apple9_log_stream : stderr;
 }
 
+void
+agx_apple9_dump_info(const struct agx_shader_info *info)
+{
+   if (!agx_apple9_debug_enabled(AGX_A9_DBG_ASM))
+      return;
+   FILE *f = apple9_log();
+   fprintf(f, "APPLE9_INFO stage=%u body_only=%u tri_merge_off=%u tag_write_off=%u "
+              "early_zs=%u depth_layout=%u writes_sample_mask=%u reads_tib=%u "
+              "reads_z=%u discard=%u interlock=%u layer_viewport=%u "
+              "nonzero_viewport=%u point_size=%u point_coord=%u primitive_id=%u "
+              "reads_tile=%u clip=%u bary=%#x draw_id=%u base_param=%u txf=%u "
+              "sampler_heap=%u textures=%u samplers=%u push=%u local=%u "
+              "imageblock=%u scratch=%u,%u gprs=%u,%u preamble=%u "
+              "publications=%u atomic_frame=%u ubo=%#x tex=%#x samp=%#x img=%#x "
+              "ssbo=%#x writes=%#x outputs=%#" PRIx64 " linear=%" PRIx64 ",%" PRIx64
+              " flat=%" PRIx64 ",%" PRIx64 " workgroup=%u,%u,%u varyings=%u,%u,",
+           info->stage, info->apple9_body_only, info->disable_tri_merging,
+           info->tag_write_disable, info->early_fragment_tests,
+           info->depth_layout, info->writes_sample_mask, info->reads_tib,
+           info->apple9_reads_z, info->apple9_uses_discard,
+           info->apple9_pixel_interlock, info->writes_layer_viewport,
+           info->nonzero_viewport, info->apple9_writes_point_size,
+           info->apple9_reads_point_coord, info->apple9_reads_primitive_id,
+           info->apple9_reads_tile, info->apple9_clip_distance_count,
+           info->apple9_barycentric_mask, info->uses_draw_id,
+           info->uses_base_param, info->uses_txf, info->uses_sampler_heap,
+           info->texture_state_count, info->sampler_state_count,
+           info->push_count, info->local_size, info->imageblock_stride,
+           info->scratch_size, info->preamble_scratch_size, info->nr_gprs,
+           info->nr_preamble_gprs, info->has_preamble,
+           info->apple9_publication_count, info->apple9_atomic_frame_size,
+           info->apple9_ubo_mask, info->apple9_texture_mask,
+           info->apple9_sampler_mask, info->apple9_image_mask,
+           info->apple9_resource_ssbo_mask, info->apple9_resource_write_mask,
+           info->outputs, info->apple9_linear_mask.lo,
+           info->apple9_linear_mask.hi, info->apple9_flat_mask.lo,
+           info->apple9_flat_mask.hi, info->workgroup_size[0],
+           info->workgroup_size[1], info->workgroup_size[2],
+           info->apple9_varyings.count,
+           info->apple9_varyings.cull_distance_mask);
+   for (unsigned i = 0; i < ARRAY_SIZE(info->apple9_varyings.mask); ++i)
+      fprintf(f, "%02x%02x", info->apple9_varyings.mask[i],
+              info->apple9_varyings.group[i]);
+   fprintf(f, " per_vertex=%u", info->apple9_per_vertex_count);
+   for (unsigned i = 0;
+        i < MIN2(info->apple9_per_vertex_count, AGX_APPLE9_MAX_PER_VERTEX); ++i)
+      fprintf(f, ",%u", info->apple9_per_vertex[i]);
+   fprintf(f, " resources=%u", info->apple9_resource_count);
+   for (unsigned i = 0;
+        i < MIN2(info->apple9_resource_count, AGX_APPLE9_MAX_GRAPHICS_BUFFERS); ++i)
+      fprintf(f, ",%u", info->apple9_resource_binding[i]);
+   fputc('\n', f);
+}
+
 struct apple9_dag_cost {
    uint64_t weighted_spills;
    unsigned spills, instructions, gprs;

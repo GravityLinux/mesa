@@ -485,6 +485,11 @@ bool agx_compile_apple9_fragment_inputs(
    nir_shader *nir, const struct agx_apple9_varying_layout *varyings,
    struct agx_shader_part *out, const char **reason);
 
+/* With AGX_APPLE9_ASM, print the shader's final hardware-state info as one
+ * APPLE9_INFO line, so identity checks see state the program bytes don't
+ * carry. Call it once the driver has made its last change to the info. */
+void agx_apple9_dump_info(const struct agx_shader_info *info);
+
 bool agx_apple9_vertex_format_supported(enum pipe_format format);
 
 /* Vertex pulling uses ordinary typed buffer loads in the API main. Buffer
