@@ -771,7 +771,7 @@ struct hk_cmd_buffer {
    struct {
       bool valid;
       uint32_t render_gen;
-      struct agx_draw draw;
+      uint32_t first_vertex, base_instance;
       struct agx_apple9_render_pipeline pipeline;
       struct hk_shader *fragment;
    } apple9_draw_state;
@@ -1503,21 +1503,17 @@ hk_apple9_draw_state_reusable(const struct hk_cmd_buffer *cmd,
                               struct agx_draw draw, uint64_t native_grid)
 {
    const struct hk_graphics_state *gfx = &cmd->state.gfx;
-   const struct agx_draw *prev = &cmd->apple9_draw_state.draw;
    return cmd->apple9_draw_state.valid &&
           cmd->current_cs.gfx && cmd->current_cs.gfx == cmd->apple9_prev_cs &&
           !cmd->merge_cs && cmd->apple9_draw_state.render_gen == gfx->render_gen &&
           !gfx->dirty && !gfx->shaders_dirty &&
           !vk_dynamic_graphics_state_any_dirty(&cmd->vk.dynamic_graphics_state) &&
           hk_apple9_draw_cache_supported(cmd, draw, native_grid) &&
-          draw.b.count[0] == prev->b.count[0] &&
-          draw.b.count[1] == prev->b.count[1] &&
-          draw.start == prev->start && draw.index_bias == prev->index_bias &&
-          draw.start_instance == prev->start_instance &&
-          draw.indexed == prev->indexed && draw.index_size == prev->index_size &&
-          draw.index_buffer == prev->index_buffer &&
-          draw.index_buffer_range_B == prev->index_buffer_range_B &&
-          draw.restart == prev->restart;
+          /* Prepared bindings read only first vertex/base vertex and base
+           * instance. Counts and index fetch state belong to the VDM draw. */
+          (draw.indexed ? draw.index_bias : draw.start) ==
+             cmd->apple9_draw_state.first_vertex &&
+          draw.start_instance == cmd->apple9_draw_state.base_instance;
 }
 
 void hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,

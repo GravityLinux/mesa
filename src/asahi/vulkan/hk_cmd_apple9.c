@@ -526,6 +526,22 @@ hk_apple9_prepare_native_mesh(struct hk_cmd_buffer *cmd,
    return agx_apple9_mesh_state_build(state, &params);
 }
 
+/* Index fetch is per-command state. It does not feed the prepared raster,
+ * shader bindings or launch records. Callers resolve null bindings and check
+ * the aperture before using this for either the full or cached draw path. */
+static void
+hk_apple9_set_index_fetch(struct agx_apple9_render_pipeline *pipeline,
+                          struct agx_draw draw, uint64_t buffer,
+                          uint64_t range, uint64_t offset)
+{
+   pipeline->index_size = agx_index_size_to_B(draw.index_size);
+   pipeline->index_buffer = buffer + offset;
+   pipeline->index_extent =
+      agx_is_indirect(draw.b)
+         ? range - offset
+         : MIN2(range - offset, (uint64_t)draw.b.count[0] * pipeline->index_size);
+}
+
 static void
 hk_apple9_emit_ordinary_draw(struct hk_cs *cs,
                              const struct agx_apple9_render_pipeline *pipeline,
@@ -574,9 +590,24 @@ hk_apple9_try_cached_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct hk_descriptor_state *desc = &gfx->descriptors;
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   struct agx_apple9_render_pipeline *pipeline = &cmd->apple9_draw_state.pipeline;
+   if (draw.indexed) {
+      uint64_t offset = (uint64_t)draw.start * agx_index_size_to_B(draw.index_size);
+      uint64_t address = draw.index_buffer + offset;
+      if (address < dev->dev.shader_base ||
+          address >= dev->dev.shader_base + (1ull << 32))
+         return false;
+      hk_apple9_set_index_fetch(pipeline, draw, draw.index_buffer,
+                                draw.index_buffer_range_B, offset);
+      pipeline->primitive_restart =
+         cmd->vk.dynamic_graphics_state.ia.primitive_restart_enable;
+      pipeline->restart_index = gfx->index.restart;
+   } else {
+      pipeline->index_size = 0;
+      pipeline->primitive_restart = false;
+   }
    struct hk_cs *cs = hk_cmd_buffer_get_cs(cmd, false);
    assert(cs && cs == cmd->apple9_prev_cs);
-   struct agx_apple9_render_pipeline *pipeline = &cmd->apple9_draw_state.pipeline;
 
    if (desc->root.draw.draw_id != draw_id) {
       desc->root.draw.draw_id = draw_id;
@@ -832,11 +863,7 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       if (pipeline.index_buffer < dev->dev.shader_base ||
           pipeline.index_buffer >= dev->dev.shader_base + (1ull << 32))
          UNSUPPORTED();
-      pipeline.index_extent =
-         agx_is_indirect(draw.b)
-            ? index_range - offset
-            : MIN2(index_range - offset,
-                   (uint64_t)draw.b.count[0] * pipeline.index_size);
+      hk_apple9_set_index_fetch(&pipeline, draw, index_buffer, index_range, offset);
       pipeline.primitive_restart =
          emulated ? draw.restart : dyn->ia.primitive_restart_enable;
       pipeline.restart_index =
@@ -1186,7 +1213,8 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    if (hk_apple9_draw_cache_supported(cmd, draw, native_grid)) {
       cmd->apple9_draw_state.valid = true;
       cmd->apple9_draw_state.render_gen = gfx->render_gen;
-      cmd->apple9_draw_state.draw = draw;
+      cmd->apple9_draw_state.first_vertex = draw.indexed ? draw.index_bias : draw.start;
+      cmd->apple9_draw_state.base_instance = draw.start_instance;
       cmd->apple9_draw_state.pipeline = pipeline;
       cmd->apple9_draw_state.fragment = shaders[1];
       vk_dynamic_graphics_state_clear_dirty(dyn);

@@ -10,10 +10,11 @@ main(void)
    struct hk_cmd_buffer *cmd = calloc(1, sizeof(*cmd));
    CHECK(dev && cmd);
    dev->dev.chip = AGX_CHIP_G16G;
+   dev->dev.shader_base = 1ull << 40;
    cmd->vk.base.device = &dev->vk;
    cmd->sync_events = UTIL_DYNARRAY_INIT;
    cmd->sync_remap = UTIL_DYNARRAY_INIT;
-   uint8_t emitted[4096] = {0}, expected[4096] = {0};
+   uint8_t emitted[16384] = {0}, expected[16384] = {0};
    struct hk_cs cs = {
       .cmd = cmd, .type = HK_CS_VDM, .sync_id = 0,
       .start = emitted, .current = emitted, .end = emitted + sizeof(emitted),
@@ -27,7 +28,6 @@ main(void)
    static const uint8_t binary[] = {0};
    struct agx_apple9_render_stage stage = {.binary = binary, .binary_size = 1};
    cmd->apple9_draw_state.valid = true;
-   cmd->apple9_draw_state.draw = draw;
    cmd->apple9_draw_state.fragment = &fragment;
    cmd->apple9_draw_state.pipeline = (struct agx_apple9_render_pipeline){
       .vertex = &stage, .fragment = &stage, .ppp = 0x100,
@@ -79,17 +79,41 @@ main(void)
    INVALIDATE(cmd->state.gfx.shaders[MESA_SHADER_MESH], (void *)1);
    INVALIDATE(cmd->state.gfx.apple9_fan_unrolled, true);
    INVALIDATE(cmd->in_meta, true);
-   INVALIDATE(draw.b.count[0], 6);
-   INVALIDATE(draw.b.count[1], 2);
    INVALIDATE(draw.start, 3);
-   INVALIDATE(draw.index_bias, 7);
    INVALIDATE(draw.start_instance, 1);
    INVALIDATE(draw.indexed, true);
-   INVALIDATE(draw.index_buffer, 0x1234);
-   INVALIDATE(draw.index_buffer_range_B, 16);
-   INVALIDATE(draw.restart, true);
    CHECK(!hk_apple9_draw_state_reusable(cmd, draw, 0x1000));
    CHECK(!hk_apple9_draw_state_reusable(cmd, agx_draw_indirect(0x2000), 0));
+
+   /* Index offsets, buffers, sizes, counts and indexed/non-indexed mode
+    * feed only command emission. Vary them through the actual cache hit path
+    * without any allocator, then compare the complete command stream. */
+   for (unsigned i = 0; i < 24; ++i) {
+      unsigned bytes = 1u << (i % 3);
+      draw = agx_draw_indexed(3 + i, 1 + i % 2, i % 4, 0, 0,
+         dev->dev.shader_base + 0x100 + (i % 2) * 32, 128,
+         i % 3 == 0 ? AGX_INDEX_SIZE_U8 :
+         i % 3 == 1 ? AGX_INDEX_SIZE_U16 : AGX_INDEX_SIZE_U32, false);
+      cmd->state.gfx.index.restart = BITFIELD_MASK(bytes * 8);
+      CHECK(hk_apple9_draw_state_reusable(cmd, draw, 0));
+      struct agx_apple9_render_pipeline pipeline = cmd->apple9_draw_state.pipeline;
+      pipeline.index_size = bytes;
+      pipeline.index_buffer = draw.index_buffer + draw.start * bytes;
+      pipeline.index_extent = MIN2(128 - draw.start * bytes, draw.b.count[0] * bytes);
+      pipeline.restart_index = cmd->state.gfx.index.restart;
+      end = agx_apple9_emit_direct_draw(end, &pipeline,
+         draw.b.count[0], draw.b.count[1], draw.index_bias) - 4;
+      hk_apple9_draw(cmd, 0, draw);
+   }
+   draw = (struct agx_draw){.b = agx_3d(6, 2, 1)};
+   CHECK(hk_apple9_draw_state_reusable(cmd, draw, 0));
+   struct agx_apple9_render_pipeline pipeline = cmd->apple9_draw_state.pipeline;
+   pipeline.index_size = 0;
+   end = agx_apple9_emit_direct_draw(end, &pipeline, 6, 2, 0) - 4;
+   hk_apple9_draw(cmd, 0, draw);
+   CHECK((uint8_t *)cs.current - emitted == end - expected);
+   CHECK(!memcmp(emitted, expected, end - expected));
+   CHECK(cs.stats.cmds == 27 && cs.pass_count == 27);
 
    /* Root/push changes update tables and launches in the reuse path; they
     * must not force rebuilding the unchanged raster state. */
@@ -99,13 +123,10 @@ main(void)
 
    /* A null index binding needs its existing fresh zero-range allocation. */
    draw = agx_draw_indexed(3, 1, 0, 0, 0, 0, 0, AGX_INDEX_SIZE_U16, false);
-   cmd->apple9_draw_state.draw = draw;
    CHECK(!hk_apple9_draw_state_reusable(cmd, draw, 0));
    draw.index_buffer_range_B = 16;
-   cmd->apple9_draw_state.draw = draw;
    CHECK(hk_apple9_draw_state_reusable(cmd, draw, 0));
    draw.start = 8;
-   cmd->apple9_draw_state.draw = draw;
    CHECK(!hk_apple9_draw_state_reusable(cmd, draw, 0));
 
    util_dynarray_fini(&cmd->sync_events);
