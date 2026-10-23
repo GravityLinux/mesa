@@ -274,6 +274,9 @@ struct spill_ctx {
    /* Zeroed per-variable scratch for compute_w_entry, which restores it. A
     * fresh array per block would make each block cost O(n). */
    unsigned *freq;
+
+   /* Per-variable scratch for listing a set's members. */
+   unsigned *members;
 };
 
 static inline struct spill_block *
@@ -554,6 +557,21 @@ remove_W_if_present(struct spill_ctx *ctx, unsigned v)
       remove_W(ctx, v);
 }
 
+/* The members of a set, in increasing order, as an exactly sized array. */
+static unsigned *
+bitset_members(struct spill_ctx *ctx, const BITSET_WORD *set, unsigned *count)
+{
+   unsigned n = 0;
+   int i;
+   BITSET_FOREACH_SET(i, set, ctx->n)
+      ctx->members[n++] = i;
+
+   unsigned *out = ralloc_array(ctx->memctx, unsigned, n);
+   memcpy(out, ctx->members, n * sizeof(*out));
+   *count = n;
+   return out;
+}
+
 struct candidate {
    unsigned node;
    dist_t dist;
@@ -656,9 +674,9 @@ insert_coupling_code(struct spill_ctx *ctx, agx_block *pred, agx_block *succ)
 
    /* These scratch sets are no longer needed by the per-block MIN pass.
     * Index the predecessor state once; repeated linear membership scans and
-    * phi scans otherwise become quadratic at large control-flow joins. */
-   memset(ctx->S, 0, BITSET_BYTES(ctx->n));
-   memset(ctx->W, 0, BITSET_BYTES(ctx->n));
+    * phi scans otherwise become quadratic at large control-flow joins. Both
+    * sets are empty here and are emptied again through the same lists on
+    * return, so an edge costs its sets' sizes rather than O(n). */
    for (unsigned i = 0; i < sp->nS_exit; ++i)
       BITSET_SET(ctx->S, sp->S_exit[i]);
    for (unsigned i = 0; i < sp->nW_exit; ++i)
@@ -736,7 +754,10 @@ insert_coupling_code(struct spill_ctx *ctx, agx_block *pred, agx_block *succ)
 
    /* Register phi destinations are also defined along the edge. Keep W as
     * the original predecessor set for the final phi-source reloads below. */
-   memset(ctx->S, 0, BITSET_BYTES(ctx->n));
+   for (unsigned i = 0; i < sp->nS_exit; ++i)
+      BITSET_CLEAR(ctx->S, sp->S_exit[i]);
+   agx_foreach_phi_in_block(succ, phi)
+      BITSET_CLEAR(ctx->S, chase_mem_index(phi->dest[0], ctx->spill_base));
    agx_foreach_phi_in_block(succ, phi) {
       if (phi->dest[0].value < ctx->n)
          BITSET_SET(ctx->S, phi->dest[0].value);
@@ -781,6 +802,13 @@ insert_coupling_code(struct spill_ctx *ctx, agx_block *pred, agx_block *succ)
       /* Leave as-is for the GPR version */
       assert(!I->src[s].memory);
    }
+
+   agx_foreach_phi_in_block(succ, phi) {
+      if (phi->dest[0].value < ctx->n)
+         BITSET_CLEAR(ctx->S, phi->dest[0].value);
+   }
+   for (unsigned i = 0; i < sp->nW_exit; ++i)
+      BITSET_CLEAR(ctx->W, sp->W_exit[i]);
 }
 
 /*
@@ -988,13 +1016,7 @@ min_algorithm(struct spill_ctx *ctx)
    BITSET_FOREACH_SET(i, ctx->W, ctx->n)
       sblock->W_exit[sblock->nW_exit++] = i;
 
-   unsigned nS = __bitset_count(ctx->S, BITSET_WORDS(ctx->n));
-   sblock->S_exit = ralloc_array(ctx->memctx, unsigned, nS);
-
-   BITSET_FOREACH_SET(i, ctx->S, ctx->n)
-      sblock->S_exit[sblock->nS_exit++] = i;
-
-   assert(nS == sblock->nS_exit);
+   sblock->S_exit = bitset_members(ctx, ctx->S, &sblock->nS_exit);
    util_dynarray_fini(&local_next_ip);
 }
 
@@ -1324,14 +1346,7 @@ compute_s_entry(struct spill_ctx *ctx)
 
    /* Copy ctx->S to S_entry for later look-ups with coupling code */
    struct spill_block *sb = spill_block(ctx, ctx->block);
-   unsigned nS = __bitset_count(ctx->S, BITSET_WORDS(ctx->n));
-   sb->S_entry = ralloc_array(ctx->memctx, unsigned, nS);
-
-   int i;
-   BITSET_FOREACH_SET(i, ctx->S, ctx->n)
-      sb->S_entry[sb->nS_entry++] = i;
-
-   assert(sb->nS_entry == nS);
+   sb->S_entry = bitset_members(ctx, ctx->S, &sb->nS_entry);
 }
 
 static int
@@ -1672,13 +1687,14 @@ agx_spill(agx_context *ctx, unsigned k, bool remat_only)
    unsigned n = ctx->alloc;
    ctx->alloc *= 2;
 
-   BITSET_WORD *W = ralloc_array(memctx, BITSET_WORD, BITSET_WORDS(n));
-   BITSET_WORD *S = ralloc_array(memctx, BITSET_WORD, BITSET_WORDS(n));
+   /* W and S start each block and each edge empty; their users empty them
+    * through the block's exit lists instead of clearing all n bits. */
+   BITSET_WORD *W = rzalloc_array(memctx, BITSET_WORD, BITSET_WORDS(n));
+   BITSET_WORD *S = rzalloc_array(memctx, BITSET_WORD, BITSET_WORDS(n));
    unsigned *freq = rzalloc_array(memctx, unsigned, n);
+   unsigned *members = ralloc_array(memctx, unsigned, n);
 
    agx_foreach_block(ctx, block) {
-      memset(W, 0, BITSET_BYTES(n));
-      memset(S, 0, BITSET_BYTES(n));
 
       struct spill_ctx sctx = {
          .memctx = memctx,
@@ -1697,11 +1713,19 @@ agx_spill(agx_context *ctx, unsigned k, bool remat_only)
          .remat_only = remat_only,
          .loop_end = loop_end,
          .freq = freq,
+         .members = members,
       };
 
       compute_w_entry(&sctx);
       compute_s_entry(&sctx);
       min_algorithm(&sctx);
+
+      /* W and S now hold exactly the exit sets. */
+      struct spill_block *sb = spill_block(&sctx, block);
+      for (unsigned i = 0; i < sb->nW_exit; ++i)
+         BITSET_CLEAR(W, sb->W_exit[i]);
+      for (unsigned i = 0; i < sb->nS_exit; ++i)
+         BITSET_CLEAR(S, sb->S_exit[i]);
    }
 
    /* Now that all blocks are processed separately, stitch it together */
