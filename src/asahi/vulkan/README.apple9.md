@@ -618,6 +618,18 @@ problems, measured on the native replay of a captured frame:
 The three-frame Heaven replay went from 17.9 to 36.7 frames per second. That
 matches disabling statistics queries entirely, which gave 36.4.
 
+The fragment invocation counter counts the invocations that run. Hidden-surface
+removal skips the fragments of opaque draws that later draws in the same pass
+cover, so such draws can count fewer invocations than they cover, or none. The
+Vulkan specification allows it. Under Fragment Shading (`fragops-shader`), "A
+fragment shader may not be executed if: An implementation determines that
+another fragment shader, invoked by a subsequent primitive in primitive order,
+overwrites all results computed by the shader (including writes to storage
+resources)." The counter's atomic is the driver's, not a storage write of the
+application, so it doesn't keep the shader running. Draws whose fragments stay
+visible count exactly: on T8132, disjoint draws inside one statistics query
+matched 48 of 48 counts for both complete and library pipelines.
+
 Ending an occlusion, statistics or primitives-generated query also queued its
 availability write into a compute dispatch after the render pass. DXVK ends
 such queries in every pass, so each render pass was followed by its own
