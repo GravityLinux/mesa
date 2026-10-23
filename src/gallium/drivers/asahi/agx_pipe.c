@@ -2629,7 +2629,8 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
        * as Honeykrisp's shaderStencilExport does. */
       caps->shader_stencil_export = true;
       caps->framebuffer_no_attachment = false;
-      caps->texture_mirror_clamp_to_edge = false;
+      /* Native sampler address mode 5 (agx_apple9_pack_sampler). */
+      caps->texture_mirror_clamp_to_edge = true;
       caps->texture_buffer_objects = true;
       /* RGB32 views consume three physical scalar texels per logical texel. */
       caps->max_texel_buffer_elements = AGX_TEXTURE_BUFFER_MAX_SIZE / 4;
