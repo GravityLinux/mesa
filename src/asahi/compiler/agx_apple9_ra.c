@@ -316,17 +316,13 @@ apple9_after_logical_end(const struct agx_apple9_vir_instr *ins)
    }
 }
 
+/* The first physical block selected from a NIR block. */
 static struct agx_apple9_block *
-apple9_nir_block(struct apple9_shared_ra *ra, nir_block *nir)
+apple9_nir_block(struct hash_table *nir_blocks, nir_block *nir)
 {
-   if (!nir)
-      return NULL;
-   for (struct agx_apple9_block *block = ra->program->blocks; block;
-        block = block->next) {
-      if (block->nir == nir)
-         return block;
-   }
-   return NULL;
+   struct hash_entry *entry =
+      nir ? _mesa_hash_table_search(nir_blocks, nir) : NULL;
+   return entry ? entry->data : NULL;
 }
 
 static agx_block *
@@ -412,6 +408,16 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
       ra->blocks[block->index] = common;
    }
 
+   /* Map each NIR block once rather than searching the layout per edge. */
+   struct hash_table *nir_blocks = _mesa_pointer_hash_table_create(ctx);
+   if (!nir_blocks)
+      return false;
+   for (struct agx_apple9_block *block = p->blocks; block;
+        block = block->next) {
+      if (block->nir && !_mesa_hash_table_search(nir_blocks, block->nir))
+         _mesa_hash_table_insert(nir_blocks, block->nir, block);
+   }
+
    for (struct agx_apple9_block *block = p->blocks; block;
         block = block->next) {
       agx_block *common = apple9_shared_block(ra, block);
@@ -422,7 +428,7 @@ apple9_shared_dataflow(struct apple9_shared_ra *ra, nir_shader *nir,
          for (unsigned s = 0; s < 2; ++s) {
             nir_block *succ = exit->successors[s];
             agx_block *next =
-               apple9_shared_block(ra, apple9_nir_block(ra, succ));
+               apple9_shared_block(ra, apple9_nir_block(nir_blocks, succ));
             if (!next)
                continue;
             agx_block_add_successor(common, next);
