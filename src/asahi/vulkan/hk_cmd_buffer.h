@@ -1308,8 +1308,8 @@ hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
    assert(cmd->current_cs.post_gfx == NULL);
    cmd->end_hint = HK_CS_END_UNKNOWN;
 
-   /* We just flushed out the heap use. If we want to use it again, we'll need
-    * to queue a free for it again.
+   /* The next render must acquire and reset the geometry heap again. Mesh
+    * heap releases remain in the post-graphics stream.
     */
    cmd->uses_heap = false;
    cmd->uses_mesh_heap = false;

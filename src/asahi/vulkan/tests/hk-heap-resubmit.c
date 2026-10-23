@@ -7,9 +7,35 @@
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "%s:%u: %s\n", \
                           __FILE__, __LINE__, #c); return 1; } } while (0)
 
+static struct libagx_write_u32_args reset;
+static unsigned reset_count;
+static bool reset_valid;
+
+void __wrap_hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
+                                enum agx_barrier barrier,
+                                enum libagx_program idx, void *data, size_t size);
+void
+__wrap_hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
+                           enum agx_barrier barrier,
+                           enum libagx_program idx, void *data, size_t size)
+{
+   reset_valid = idx == LIBAGX_WRITE_U32 && size == sizeof(reset) &&
+                 barrier == (AGX_BARRIER_ALL | AGX_PREGFX) &&
+                 grid.count[0] == 1 && grid.count[1] == 1 && grid.count[2] == 1;
+   if (!reset_valid)
+      return;
+
+   reset = *(struct libagx_write_u32_args *)data;
+   reset_count++;
+   reset_valid = hk_cmd_buffer_get_cs_general(
+      cmd, &cmd->current_cs.pre_gfx, true, HK_SYNC_ALL) != NULL;
+}
+
 static int
 record_and_replay(bool graphics)
 {
+   reset_count = 0;
+   reset_valid = false;
    struct hk_device *dev = calloc(1, sizeof(*dev));
    struct hk_cmd_buffer *cmd = calloc(1, sizeof(*cmd));
    uint8_t *pool = calloc(1, HK_CMD_BO_SIZE);
@@ -38,19 +64,20 @@ record_and_replay(bool graphics)
 
    uint64_t address = hk_heap(cmd);
    CHECK(address == (uintptr_t)&heap && hk_heap(cmd) == address);
-   struct hk_cs *post = cmd->current_cs.post_gfx;
-   CHECK(post && cmd->sync_fallback);
-   CHECK(util_dynarray_num_elements(&post->imm_writes, struct libagx_imm_write) == 1);
-   struct libagx_imm_write *reset = post->imm_writes.data;
-   CHECK(reset->address == address + offsetof(struct poly_heap, bottom));
-   CHECK(reset->value == 0);
+   struct hk_cs *pre = cmd->current_cs.pre_gfx;
+   CHECK(pre && cmd->sync_fallback && !cmd->current_cs.post_gfx);
+   CHECK(reset_valid && reset_count == 1);
+   CHECK(reset.address == address + offsetof(struct poly_heap, bottom));
+   CHECK(reset.value == 0);
+   if (graphics)
+      CHECK(pre->node.next == &gfx.node);
    /* Record once, then replay N times with tessellation and geometry-sized
     * allocations. Uploads and the reset dispatch are never re-recorded.
     * Without an execution-time reset these exceed 128 MiB by submission 6.
     * The Air Vulkan regression also runs actual tessellation allocations.
     */
    for (unsigned submit = 0; submit < 64; ++submit) {
-      *(uint32_t *)(uintptr_t)reset->address = reset->value;
+      *(uint32_t *)(uintptr_t)reset.address = reset.value;
       CHECK(heap.bottom == 0);
       heap.bottom += 8 * 1024 * 1024;
       CHECK(heap.bottom < heap.size);
@@ -59,8 +86,7 @@ record_and_replay(bool graphics)
    }
    CHECK(cmd->heap_renders == 1);
 
-   util_dynarray_fini(&post->imm_writes);
-   free(post);
+   free(pre);
    util_dynarray_fini(&cmd->sync_events);
    util_dynarray_fini(&cmd->sync_remap);
    free(pool);

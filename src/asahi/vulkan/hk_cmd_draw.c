@@ -1454,18 +1454,20 @@ hk_heap(struct hk_cmd_buffer *cmd)
       return 0;
    }
 
-   /* We need to free all allocations after each command buffer execution */
+   /* Acquire the heap before this render's first allocation. The pre-graphics
+    * stream waits for earlier work, including the previous heap consumer.
+    * Resetting here also covers command-buffer resubmission without a separate
+    * post-graphics Work just to release the allocation cursor.
+    */
    if (!cmd->uses_heap) {
-      perf_debug(cmd, "Freeing heap");
+      perf_debug(cmd, "Resetting heap");
       uint64_t addr = dev->rodata.heap;
 
       cmd->heap_renders++;
-
-      /* Zeroing the allocated index frees everything */
-      hk_queue_write(cmd, addr + offsetof(struct poly_heap, bottom), 0,
-                     true /* after gfx */);
-
       cmd->uses_heap = true;
+
+      libagx_write_u32(cmd, agx_1d(1), AGX_BARRIER_ALL | AGX_PREGFX,
+                       addr + offsetof(struct poly_heap, bottom), 0);
    }
 
    return dev->rodata.heap;

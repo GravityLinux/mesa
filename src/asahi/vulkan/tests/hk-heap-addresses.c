@@ -7,6 +7,8 @@
 #include "../hk_cmd_draw.c"
 
 static unsigned failures;
+static unsigned resets;
+static struct libagx_write_u32_args reset;
 
 #define CHECK(c)                                                               \
    do {                                                                        \
@@ -25,6 +27,12 @@ __wrap_hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
                            enum agx_barrier barrier, enum libagx_program idx,
                            void *data, size_t size)
 {
+   if (idx == LIBAGX_WRITE_U32) {
+      CHECK(size == sizeof(reset));
+      CHECK(barrier == (AGX_BARRIER_ALL | AGX_PREGFX));
+      reset = *(struct libagx_write_u32_args *)data;
+      resets++;
+   }
    struct hk_cs **target =
       barrier & AGX_PREGFX ? &cmd->current_cs.pre_gfx : &cmd->current_cs.cs;
    CHECK(hk_cmd_buffer_get_cs_general(cmd, target, true, HK_SYNC_ALL));
@@ -105,11 +113,9 @@ main(void)
       struct poly_heap *heap = (void *)(uintptr_t)descriptors[render];
       CHECK(heap->base == selected->va->addr && heap->size == selected->size);
       CHECK(hk_heap(cmd) == descriptors[render]);
-      struct hk_cs *post = cmd->current_cs.post_gfx;
-      CHECK(post && cmd->sync_fallback);
-      CHECK(util_dynarray_num_elements(&post->imm_writes, struct libagx_imm_write) == render + 1);
-      const struct libagx_imm_write *reset = util_dynarray_top_ptr(&post->imm_writes, struct libagx_imm_write);
-      CHECK(reset->address == descriptors[render] + offsetof(struct poly_heap, bottom) && reset->value == 0);
+      CHECK(cmd->current_cs.pre_gfx && !cmd->current_cs.post_gfx);
+      CHECK(cmd->sync_fallback && resets == render + 1);
+      CHECK(reset.address == descriptors[render] + offsetof(struct poly_heap, bottom) && reset.value == 0);
       for (unsigned i = 0; i < render; ++i)
          CHECK(descriptors[i] == descriptors[render]);
 
@@ -156,8 +162,6 @@ main(void)
       CHECK(heap->base == va.addr && heap->size == bo.size);
    }
    CHECK(cmd->heap_renders == 4);
-   util_dynarray_fini(&cmd->current_cs.post_gfx->imm_writes);
-   free(cmd->current_cs.post_gfx);
    util_dynarray_fini(&cmd->sync_events);
    util_dynarray_fini(&cmd->sync_remap);
    free(tcs);
