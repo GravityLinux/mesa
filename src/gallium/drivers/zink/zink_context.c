@@ -3637,6 +3637,8 @@ zink_batch_rp(struct zink_context *ctx)
       if (ctx->vertices_query || !list_is_empty(&ctx->primitives_generated_queries))
          zink_query_update_gs_states(ctx);
    }
+   if (!ctx->queries_disabled)
+      zink_suspend_cs_query_for_renderpass(ctx);
    unsigned clear_buffers = begin_rendering(ctx, true);
    assert(!ctx->rp_changed);
    if (ctx->unordered_blitting)
@@ -3654,8 +3656,10 @@ zink_batch_rp(struct zink_context *ctx)
       zink_clear_framebuffer(ctx, clear_buffers);
       zink_update_depth_state(ctx);
    }
-   /* unable to previously determine that queries didn't split renderpasses: ensure queries start inside renderpass */
-   if (!ctx->queries_disabled && maybe_has_query_ends && !list_is_empty(&ctx->suspended_queries)) {
+   /* unable to previously determine that queries didn't split renderpasses: ensure queries start inside renderpass.
+    * Graphics statistics queries only start inside one, so they may still be waiting.
+    */
+   if (!ctx->queries_disabled && !list_is_empty(&ctx->suspended_queries)) {
       zink_resume_queries(ctx);
       if (ctx->vertices_query || !list_is_empty(&ctx->primitives_generated_queries))
          zink_query_update_gs_states(ctx);
