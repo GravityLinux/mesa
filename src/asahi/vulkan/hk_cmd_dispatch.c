@@ -339,10 +339,10 @@ hk_apple9_upload_textures(struct hk_cmd_buffer *cmd,
       return true;
    }
 
-   /* The graphics block holds command buffer state only: rebuild it when
-    * the blend constants or write enables are set, or when the draw's
-    * sample positions, fan-ness, line stipple or viewports differ from the
-    * last build. */
+   /* The graphics block holds command buffer state only. Compare its
+    * inputs with the last upload: binding a pipeline or restoring meta
+    * state may dirty blend constants and write enables without changing
+    * either value. */
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
    uint32_t line_stipple = hk_apple9_line_stipple_word(dyn, lines);
@@ -353,14 +353,15 @@ hk_apple9_upload_textures(struct hk_cmd_buffer *cmd,
    if (gfx->apple9_sysvals &&
        !memcmp(&gfx->apple9_sysvals_polygon_points, &polygon_points,
                sizeof(polygon_points)) &&
-       !BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_CB_BLEND_CONSTANTS) &&
-       !BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES) &&
+       !memcmp(gfx->apple9_sysvals_blend_constants, dyn->cb.blend_constants,
+               sizeof(gfx->apple9_sysvals_blend_constants)) &&
+       gfx->apple9_sysvals_color_write_enables == dyn->cb.color_write_enables &&
        gfx->apple9_sysvals_positions == gfx->apple9_sample_positions &&
        gfx->apple9_sysvals_first_fan == first_fan &&
        gfx->apple9_sysvals_line_stipple == line_stipple &&
        !memcmp(gfx->apple9_sysvals_viewports, viewports, sizeof(viewports))) {
       *sysvals = gfx->apple9_sysvals;
-      return true;
+      goto clean;
    }
    _Alignas(64) uint8_t info[AGX_APPLE9_RUNTIME_SYSVAL_SIZE];
    hk_apple9_compute_sysvals(dev, info);
@@ -384,11 +385,15 @@ hk_apple9_upload_textures(struct hk_cmd_buffer *cmd,
 
    /* Publish the cache and consume its inputs only after the upload succeeds. */
    gfx->apple9_sysvals = *sysvals;
+   memcpy(gfx->apple9_sysvals_blend_constants, dyn->cb.blend_constants,
+          sizeof(gfx->apple9_sysvals_blend_constants));
+   gfx->apple9_sysvals_color_write_enables = dyn->cb.color_write_enables;
    gfx->apple9_sysvals_positions = gfx->apple9_sample_positions;
    gfx->apple9_sysvals_first_fan = first_fan;
    gfx->apple9_sysvals_line_stipple = line_stipple;
    memcpy(gfx->apple9_sysvals_viewports, viewports, sizeof(viewports));
    gfx->apple9_sysvals_polygon_points = polygon_points;
+clean:
    /* Draw-state reuse is invalidated before these bits are consumed. */
    BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_CB_BLEND_CONSTANTS);
    BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES);
