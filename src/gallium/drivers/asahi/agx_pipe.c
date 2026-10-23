@@ -2319,6 +2319,17 @@ agx_init_shader_caps(struct pipe_screen *pscreen)
          caps->max_texture_samplers = caps->max_sampler_views = 16;
       }
    }
+
+   /* Apple9 has no native launch path for the tessellation control stage or
+    * the libagx tessellator yet. Report no tessellation stages so
+    * ARB_tessellation_shader stays hidden instead of aborting at draw time.
+    */
+   if (agx_apple9_direct_render_enabled(agx_device(pscreen))) {
+      memset((void *)&pscreen->shader_caps[MESA_SHADER_TESS_CTRL], 0,
+             sizeof(pscreen->shader_caps[MESA_SHADER_TESS_CTRL]));
+      memset((void *)&pscreen->shader_caps[MESA_SHADER_TESS_EVAL], 0,
+             sizeof(pscreen->shader_caps[MESA_SHADER_TESS_EVAL]));
+   }
 }
 
 static void
