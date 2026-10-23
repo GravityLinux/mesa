@@ -3073,6 +3073,12 @@ prep_fb_attachment(struct zink_context *ctx, struct zink_resource *res, unsigned
          zink_update_fbfetch(ctx);
    }
    if (ctx->blitting && !(res->base.b.bind & ZINK_BIND_TRANSIENT)) {
+      /* The blit set this attachment's layout; keep zsbuf_readonly describing
+       * the attached image, not the previous depth buffer, or a deferred
+       * depth clear flushed in this render would leave the render pass.
+       */
+      if (!(res->aspect & VK_IMAGE_ASPECT_COLOR_BIT))
+         ctx->zsbuf_readonly = res->layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
       zink_batch_resource_usage_set(ctx->bs, res, true, false);
       return true;
    }
