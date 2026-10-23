@@ -14,6 +14,7 @@
 #include "util/timespec.h"
 #include "util/u_dynarray.h"
 #include "util/u_printf.h"
+#include "util/u_thread.h"
 #include "util/vma.h"
 #include "agx_bo.h"
 #include "agx_apple9_layout.h"
@@ -173,19 +174,36 @@ struct agx_device {
    struct renderonly *ro;
 
    pthread_mutex_t bo_map_lock;
+   pthread_cond_t bo_map_cond;
+   /* The reaper has removed this shared handle from bo_map and is closing it.
+    * An import that still gets the old handle must retry after the close.
+    * Ordinary allocation and imports of other handles do not wait for it.
+    * Protected by bo_map_lock. There is only one reaper per device.
+    */
+   uint32_t bo_closing_handle;
    struct util_sparse_array bo_map;
    uint32_t max_handle;
 
    struct {
-      simple_mtx_t lock;
+      pthread_mutex_t lock;
+      pthread_cond_t cond;
+      thrd_t thread;
+      bool started, stop, busy, forked;
+      /* Protected by the global reaper device-list lock. */
+      struct list_head device_link;
+
+      /* Unreferenced BOs that cannot be reused, including explicit trims.
+       * Uses bucket_link. Protected by lock, like the reuse cache below.
+       */
+      struct list_head retired;
 
       /* List containing all cached BOs sorted in LRU (Least Recently Used)
        * order so we can quickly evict BOs that are more than 1 second old.
        */
       struct list_head lru;
 
-      /* The BO cache is a set of buckets with power-of-two sizes.  Each bucket
-       * is a linked list of free panfrost_bo objects.
+      /* The BO cache is a set of buckets with power-of-two sizes. Each bucket
+       * is a linked list of free agx_bo objects.
        */
       struct list_head buckets[NR_BO_CACHE_BUCKETS];
 
@@ -194,10 +212,6 @@ struct agx_device {
 
       /* Number of hits/misses for the BO cache */
       uint64_t hits, misses;
-
-      /* CLOCK_MONOTONIC second at which agx_bo_cache_evict_stale next looks
-       * at the LRU. Read without the lock. */
-      int64_t next_evict_sec;
    } bo_cache;
 
    struct agxdecode_ctx *agxdecode;

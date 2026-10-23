@@ -125,6 +125,10 @@ struct agx_bo {
    /* Update atomically */
    int32_t refcnt;
 
+   /* Awaiting close on bo_cache.retired. An import can reclaim a shared BO
+    * until the reaper removes its handle from bo_map. */
+   bool retired;
+
    /* For debugging */
    const char *label;
 };
@@ -164,9 +168,15 @@ struct agx_bo *agx_bo_import(struct agx_device *dev, int fd);
 int agx_bo_export(struct agx_device *dev, struct agx_bo *bo);
 void agx_bo_make_shared(struct agx_device *dev, struct agx_bo *bo);
 
+/* Queue an unreferenced, uncached BO for close; does not wait for the kernel. */
 void agx_bo_free(struct agx_device *dev, struct agx_bo *bo);
+void agx_bo_cache_init(struct agx_device *dev);
+bool agx_bo_cache_start(struct agx_device *dev);
+void agx_bo_cache_finish(struct agx_device *dev);
+/* Allocation-failure recovery only. Device teardown also drains the reaper. */
+void agx_bo_cache_wait(struct agx_device *dev);
+void agx_bo_reclaim(struct agx_device *dev, struct agx_bo *bo);
 struct agx_bo *agx_bo_cache_fetch(struct agx_device *dev, size_t size,
                                   size_t align, uint32_t flags,
                                   const bool dontwait);
 void agx_bo_cache_evict_all(struct agx_device *dev);
-void agx_bo_cache_evict_stale(struct agx_device *dev);

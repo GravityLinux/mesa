@@ -46,6 +46,8 @@
 #include "nir_serialize.h"
 #include "vdrm.h"
 
+static void agx_finish_device(struct agx_device *dev);
+
 static inline int
 asahi_simple_ioctl(struct agx_device *dev, unsigned cmd, void *req)
 {
@@ -87,37 +89,6 @@ static const struct debug_named_value agx_debug_options[] = {
    DEBUG_NAMED_VALUE_END
 };
 /* clang-format on */
-
-void
-agx_bo_free(struct agx_device *dev, struct agx_bo *bo)
-{
-   const uint64_t handle = bo->handle;
-   struct agx_va *va = bo->va;
-
-   if (bo->_map)
-      munmap(bo->_map, bo->size);
-
-   if (bo->prime_fd != -1)
-      close(bo->prime_fd);
-
-   /* Reset the handle. This has to happen before the GEM close to avoid a race.
-    */
-   memset(bo, 0, sizeof(*bo));
-   __sync_synchronize();
-
-   struct drm_gem_close args = {.handle = handle};
-   if (drmIoctl(dev->fd, DRM_IOCTL_GEM_CLOSE, &args)) {
-      fprintf(stderr, "DRM_IOCTL_GEM_CLOSE failed: %m\n");
-      /* Keep the address reserved if the old mapping may still exist. */
-      free(va);
-      return;
-   }
-
-   /* GEM_CLOSE removes the kernel mappings. Only then allow another thread
-    * to reuse the address: BO allocation does not hold bo_map_lock while
-    * allocating and binding its VA. */
-   agx_va_free(dev, va, false);
-}
 
 static int
 agx_drm_bo_bind(struct agx_device *dev, struct drm_asahi_gem_bind_op *ops,
@@ -302,8 +273,18 @@ agx_bo_import(struct agx_device *dev, int fd)
    ASSERTED int ret;
    unsigned gem_handle;
 
+   /* Validate before importing a handle, so invalid sizes cannot leak a GEM
+    * reference (or leave a half-initialized entry for the reaper/importer). */
+   off_t size = lseek(fd, 0, SEEK_END);
+   if (size <= 0 || (size & (AIL_PAGESIZE - 1))) {
+      fprintf(stderr, "import failed: invalid BO size 0x%llx\n",
+              (long long)size);
+      return NULL;
+   }
+
    pthread_mutex_lock(&dev->bo_map_lock);
 
+retry:
    ret = drmPrimeFDToHandle(dev->fd, fd, &gem_handle);
    if (ret) {
       fprintf(stderr, "import failed: Could not map fd %d to handle\n", fd);
@@ -314,25 +295,20 @@ agx_bo_import(struct agx_device *dev, int fd)
    bo = agx_lookup_bo(dev, gem_handle);
    dev->max_handle = MAX2(dev->max_handle, gem_handle);
 
+   if (!bo->size && dev->bo_closing_handle == gem_handle) {
+      /* The kernel may still return the old handle before the reaper's
+       * close removes it. Wait without blocking allocation or other imports,
+       * then import again. If allocation has already reused the handle, its
+       * nonempty slot describes the new object and needs no such wait.
+       */
+      pthread_cond_wait(&dev->bo_map_cond, &dev->bo_map_lock);
+      goto retry;
+   }
+
    if (!bo->size) {
       bo->dev = dev;
-      bo->size = lseek(fd, 0, SEEK_END);
+      bo->size = size;
       bo->align = AIL_PAGESIZE;
-
-      /* Sometimes this can fail and return -1. size of -1 is not
-       * a nice thing for mmap to try mmap. Be more robust also
-       * for zero sized maps and fail nicely too
-       */
-      if ((bo->size == 0) || (bo->size == (size_t)-1)) {
-         goto error;
-      }
-      if (bo->size & (AIL_PAGESIZE - 1)) {
-         fprintf(
-            stderr,
-            "import failed: BO is not a multiple of the page size (0x%llx bytes)\n",
-            (long long)bo->size);
-         goto error;
-      }
 
       bo->flags = AGX_BO_SHARED | AGX_BO_SHAREABLE;
       bo->handle = gem_handle;
@@ -365,17 +341,19 @@ agx_bo_import(struct agx_device *dev, int fd)
          abort();
       }
    } else {
-      /* agx_bo_unreference drops the last reference under bo_map_lock, so a
-       * BO still in the map is live and its count is at least one.
-       */
-      agx_bo_reference(bo);
+      /* Final unreference, resurrection and reaper removal all serialize
+       * on bo_map_lock. A queued shared BO still owns its handle and VA. */
+      if (p_atomic_read(&bo->refcnt) == 0)
+         agx_bo_reclaim(dev, bo);
+      else
+         agx_bo_reference(bo);
 
       /* If this bo came back to us via import, it had better
        * been marked shared to begin with.
        */
       if (bo->shim_cpu_epoch)
-      *bo->shim_cpu_epoch = 0;
-   assert(bo->flags & AGX_BO_SHAREABLE);
+         *bo->shim_cpu_epoch = 0;
+      assert(bo->flags & AGX_BO_SHAREABLE);
       assert(bo->flags & AGX_BO_SHARED);
       assert(bo->prime_fd != -1);
    }
@@ -389,11 +367,6 @@ agx_bo_import(struct agx_device *dev, int fd)
    }
 
    return bo;
-
-error:
-   memset(bo, 0, sizeof(*bo));
-   pthread_mutex_unlock(&dev->bo_map_lock);
-   return NULL;
 }
 
 void
@@ -665,11 +638,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
    util_sparse_array_init(&dev->bo_map, sizeof(struct agx_bo), 512);
    pthread_mutex_init(&dev->bo_map_lock, NULL);
 
-   simple_mtx_init(&dev->bo_cache.lock, mtx_plain);
-   list_inithead(&dev->bo_cache.lru);
-
-   for (unsigned i = 0; i < ARRAY_SIZE(dev->bo_cache.buckets); ++i)
-      list_inithead(&dev->bo_cache.buckets[i]);
+   agx_bo_cache_init(dev);
 
    /* The generic ABI puts a generous kernel-private heap at the top of the
     * VM.  G16 render Work instead addresses that backend-owned state relative
@@ -871,23 +840,30 @@ agx_open_device(void *memctx, struct agx_device *dev)
    }
 
    u_printf_init(&dev->printf, bo, agx_bo_map(bo));
+   /* Start only after initialization succeeds: no worker may outlive a
+    * failed device open. All allocations made above are still idle. */
+   if (!agx_bo_cache_start(dev)) {
+      agx_finish_device(dev);
+      return false;
+   }
    return true;
 }
 
-void
-agx_close_device(struct agx_device *dev)
+static void
+agx_finish_device(struct agx_device *dev)
 {
    agx_bo_unreference(dev, dev->apple9_entries);
    agx_bo_unreference(dev, dev->printf.bo);
    agx_bo_unreference(dev, dev->zero_bo);
    agx_bo_unreference(dev, dev->scratch_bo);
    u_printf_destroy(&dev->printf);
-   agx_bo_cache_evict_all(dev);
+   agx_bo_cache_finish(dev);
    if (dev->chip == AGX_CHIP_G16G || dev->chip == AGX_CHIP_G17P) {
       util_vma_heap_finish(&dev->apple9_entry_heap);
       simple_mtx_destroy(&dev->apple9_entry_lock);
    }
    util_sparse_array_finish(&dev->bo_map);
+   pthread_mutex_destroy(&dev->bo_map_lock);
    agxdecode_destroy_context(dev->agxdecode);
 
    util_vma_heap_finish(&dev->main_heap);
@@ -896,8 +872,14 @@ agx_close_device(struct agx_device *dev)
    util_vma_heap_finish(&dev->replay_usc_heap);
    util_vma_heap_finish(&dev->context_heap);
    glsl_type_singleton_decref();
+}
 
+void
+agx_close_device(struct agx_device *dev)
+{
+   agx_finish_device(dev);
    close(dev->fd);
+   dev->fd = -1;
 }
 
 uint32_t
