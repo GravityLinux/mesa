@@ -536,6 +536,7 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    if (!agx_is_indirect(draw.b) && (!draw.b.count[0] || !draw.b.count[1]))
       return;
    unsigned failure_line = 0;
+   struct hk_shader *shaders[2] = {NULL, NULL};
 #define UNSUPPORTED()                                                          \
    do {                                                                        \
       failure_line = __LINE__;                                                 \
@@ -580,15 +581,14 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       if (!fragment_api)
          UNSUPPORTED();
    }
-   struct hk_shader *shaders[] = {
+   shaders[0] =
       mesh  ? &mesh->variants[native_grid ? HK_MESH_VARIANT_MAIN
                                          : HK_MESH_VARIANT_RAST]
       : gs  ? &gs->variants[HK_GS_VARIANT_RAST]
       : tes ? &tes->variants[HK_VS_VARIANT_HW]
-            : hk_any_variant(gfx->shaders[MESA_SHADER_VERTEX]),
-      hk_any_variant(null_trivial ? dev->null_fs_trivial
-                     : fragment_api ?: dev->null_fs),
-   };
+            : hk_any_variant(gfx->shaders[MESA_SHADER_VERTEX]);
+   shaders[1] = hk_any_variant(null_trivial ? dev->null_fs_trivial
+                                           : fragment_api ?: dev->null_fs);
    if (native_grid &&
        (!mesh || gfx->shaders[MESA_SHADER_TASK] || gs || tes ||
         shaders[0]->info.apple9_native_stage != HK_APPLE9_NATIVE_MESH ||
@@ -1095,8 +1095,8 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
 unsupported:
    fprintf(
       stderr,
-      "Apple9 draw unsupported at %u: shaders=%d/%d indirect=%d vp=%u sc=%u stencil=%d bias=%d topology=%u\n",
-      failure_line, !!shaders[0], !!shaders[1], agx_is_indirect(draw.b),
+      "Apple9 draw unsupported at %u: native=%d shaders=%d/%d indirect=%d vp=%u sc=%u stencil=%d bias=%d topology=%u\n",
+      failure_line, !!native_grid, !!shaders[0], !!shaders[1], agx_is_indirect(draw.b),
       dyn->vp.viewport_count, dyn->vp.scissor_count,
       dyn->ds.stencil.test_enable, dyn->rs.depth_bias.enable,
       dyn->ia.primitive_topology);
