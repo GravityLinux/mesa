@@ -301,6 +301,8 @@ blob_tests(struct hk_device *dev, struct hk_api_shader **resolved,
    for (unsigned i = 0; i < 2; ++i) {
       struct hk_api_shader *s = container_of(loaded[i], struct hk_api_shader, vk);
       CHECK(s->push_constant_mask == BITFIELD64_BIT(5 + i));
+      CHECK(s->writes_memory == resolved[stages[i]]->writes_memory);
+      CHECK(s->pre_raster_reads == resolved[stages[i]]->pre_raster_reads);
    }
    struct blob copy;
    blob_init(&copy);
@@ -343,6 +345,36 @@ blob_tests(struct hk_device *dev, struct hk_api_shader **resolved,
 
 /* The common deserializer must reject impossible payload sizes before
  * allocating host or GPU program storage, independently of the outer cache. */
+static void
+memory_effects_tests(struct hk_device *dev)
+{
+   nir_shader *fs = source(MESA_SHADER_FRAGMENT, false);
+   nir_builder b = nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(fs)));
+   nir_store_global(&b, nir_imm_int(&b, 0x57), nir_imm_int64(&b, 0x12340000),
+                     .align_mul = 4, .write_mask = 1);
+   nir_shader_gather_info(fs, nir_shader_get_entrypoint(fs));
+   CHECK(fs->info.writes_memory);
+   struct vk_shader_compile_info infos[] = {
+      {.stage = MESA_SHADER_VERTEX,
+       .nir = source(MESA_SHADER_VERTEX, false),
+       .robustness = &vk_robustness_disabled,
+       .next_stage_mask = VK_SHADER_STAGE_FRAGMENT_BIT},
+      {.stage = MESA_SHADER_FRAGMENT, .nir = fs,
+       .robustness = &vk_robustness_disabled},
+   };
+   struct vk_shader *out[2] = {0};
+   CHECK(hk_apple9_compile_graphics(dev, 2, infos, NULL, NULL, NULL, NULL, out) ==
+         VK_SUCCESS);
+   struct hk_api_shader *resolved[HK_APPLE9_GFX_STAGES] = {0};
+   resolved[MESA_SHADER_VERTEX] = container_of(out[0], struct hk_api_shader, vk);
+   resolved[MESA_SHADER_FRAGMENT] = container_of(out[1], struct hk_api_shader, vk);
+   CHECK(!resolved[MESA_SHADER_VERTEX]->writes_memory);
+   CHECK(resolved[MESA_SHADER_FRAGMENT]->writes_memory);
+   blob_tests(dev, resolved, MESA_SHADER_VERTEX);
+   for (unsigned i = 0; i < 2; ++i)
+      hk_api_shader_destroy(&dev->vk, out[i], NULL);
+}
+
 static void
 payload_bounds_tests(struct hk_device *dev)
 {
@@ -568,6 +600,7 @@ main(int argc, char **argv)
       persistent_process(dev, api, argv[1]);
       goto finish;
    }
+   memory_effects_tests(dev);
    payload_bounds_tests(dev);
    embedded_limit_tests(dev);
    key_tests(dev, api);

@@ -8419,7 +8419,7 @@ hk_deserialize_shader(struct hk_device *dev, struct blob_reader *blob,
 }
 
 /* Version the container independently of the hardware programs it owns. */
-#define HK_SHADER_CONTAINER_VERSION 0x484b0005u
+#define HK_SHADER_CONTAINER_VERSION 0x484b0006u
 
 static VkResult
 hk_deserialize_api_shader_inner(struct vk_device *vk_dev, struct blob_reader *blob,
@@ -8505,9 +8505,7 @@ hk_deserialize_api_shader_inner(struct vk_device *vk_dev, struct blob_reader *bl
          return result;
       }
    }
-   /* Fragment variants record memory writes; assume them elsewhere. */
-   obj->writes_memory = obj->vk.stage != MESA_SHADER_FRAGMENT ||
-                        obj->variants[0].info.fs.writes_memory;
+   obj->writes_memory = blob_read_uint8(blob);
    obj->pre_raster_reads = blob_read_uint8(blob);
    obj->reads_draw_id = blob_read_uint8(blob);
    blob_copy_bytes(blob, &obj->push_constant_mask,
@@ -8600,6 +8598,11 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
    hk_foreach_variant(obj, shader) {
       hk_shader_serialize(vk_dev, shader, blob);
    }
+   /* Preserve the API shader's memory effects on a cache hit. In particular,
+    * a read-only vertex shader must not turn its render into a memory writer
+    * and prevent later renders from overlapping tiling with fragment work.
+    */
+   blob_write_uint8(blob, obj->writes_memory);
    blob_write_uint8(blob, obj->pre_raster_reads);
    blob_write_uint8(blob, obj->reads_draw_id);
    blob_write_bytes(blob, &obj->push_constant_mask,
