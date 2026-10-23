@@ -4482,6 +4482,130 @@ hk_nir_reads_draw_id(const nir_shader *nir)
    return false;
 }
 
+/* Recognize the address expressions produced by descriptor lowering. Stop at
+ * memory loads: a descriptor pointer loaded from a root is not root memory.
+ * Unknown arithmetic/phis conservatively keep the full push region. */
+enum hk_root_address_kind {
+   HK_ROOT_ADDRESS_OTHER,
+   HK_ROOT_ADDRESS_CONSTANT,
+   HK_ROOT_ADDRESS_ROOT,
+   HK_ROOT_ADDRESS_UNKNOWN,
+};
+
+struct hk_root_address {
+   enum hk_root_address_kind kind;
+   uint64_t offset;
+};
+
+static struct hk_root_address
+hk_root_address(nir_def *def, unsigned depth)
+{
+   if (depth > 32)
+      return (struct hk_root_address){HK_ROOT_ADDRESS_UNKNOWN};
+
+   nir_instr *instr = nir_def_instr(def);
+   if (instr->type == nir_instr_type_load_const)
+      return (struct hk_root_address){
+         HK_ROOT_ADDRESS_CONSTANT, nir_src_as_uint(nir_src_for_ssa(def))};
+
+   if (instr->type == nir_instr_type_intrinsic) {
+      return (struct hk_root_address){
+         nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_root_agx
+            ? HK_ROOT_ADDRESS_ROOT : HK_ROOT_ADDRESS_OTHER};
+   }
+
+   if (instr->type != nir_instr_type_alu)
+      return (struct hk_root_address){HK_ROOT_ADDRESS_UNKNOWN};
+
+   nir_alu_instr *alu = nir_instr_as_alu(instr);
+   struct hk_root_address a = hk_root_address(alu->src[0].src.ssa, depth + 1);
+   if (alu->op == nir_op_mov || alu->op == nir_op_u2u64)
+      return a;
+
+   unsigned n = nir_op_infos[alu->op].num_inputs;
+   if (alu->op == nir_op_iadd) {
+      struct hk_root_address b = hk_root_address(alu->src[1].src.ssa, depth + 1);
+      if ((a.kind == HK_ROOT_ADDRESS_CONSTANT &&
+           b.kind == HK_ROOT_ADDRESS_CONSTANT) ||
+          (a.kind == HK_ROOT_ADDRESS_ROOT &&
+           b.kind == HK_ROOT_ADDRESS_CONSTANT) ||
+          (a.kind == HK_ROOT_ADDRESS_CONSTANT &&
+           b.kind == HK_ROOT_ADDRESS_ROOT)) {
+         uint64_t offset = (a.offset + b.offset) & BITFIELD64_MASK(def->bit_size);
+         return (struct hk_root_address){MAX2(a.kind, b.kind), offset};
+      }
+      return (struct hk_root_address){
+         a.kind >= HK_ROOT_ADDRESS_ROOT || b.kind >= HK_ROOT_ADDRESS_ROOT
+            ? HK_ROOT_ADDRESS_UNKNOWN : HK_ROOT_ADDRESS_OTHER};
+   }
+
+   bool root = a.kind >= HK_ROOT_ADDRESS_ROOT;
+   for (unsigned i = 1; i < n; ++i)
+      root |= hk_root_address(alu->src[i].src.ssa, depth + 1).kind >=
+              HK_ROOT_ADDRESS_ROOT;
+   return (struct hk_root_address){root ? HK_ROOT_ADDRESS_UNKNOWN
+                                       : HK_ROOT_ADDRESS_OTHER};
+}
+
+static uint64_t
+hk_push_range_mask(uint64_t start, uint64_t size)
+{
+   static_assert(HK_MAX_PUSH_SIZE == 64 * sizeof(uint32_t));
+   if (start >= HK_MAX_PUSH_SIZE || size > HK_MAX_PUSH_SIZE - start)
+      return UINT64_MAX;
+   unsigned first = start / 4;
+   unsigned end = DIV_ROUND_UP(start + size, 4);
+   return BITFIELD64_RANGE(first, end - first);
+}
+
+uint64_t
+hk_nir_push_constant_mask(const nir_shader *nir)
+{
+   uint64_t mask = 0;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *in = nir_instr_as_intrinsic(instr);
+            unsigned bytes = in->num_components * in->def.bit_size / 8;
+            if (in->intrinsic == nir_intrinsic_load_push_constant) {
+               if (!nir_src_is_const(in->src[0]))
+                  return UINT64_MAX;
+               mask |= hk_push_range_mask((uint64_t)nir_intrinsic_base(in) +
+                                             nir_src_as_uint(in->src[0]), bytes);
+            } else if (in->intrinsic == nir_intrinsic_load_deref &&
+                       nir_deref_mode_is(nir_src_as_deref(in->src[0]),
+                                         nir_var_mem_push_const)) {
+               return UINT64_MAX;
+            } else if (in->intrinsic == nir_intrinsic_load_global_constant ||
+                       in->intrinsic == nir_intrinsic_load_global ||
+                       in->intrinsic == nir_intrinsic_load_global_constant_offset) {
+               struct hk_root_address a = hk_root_address(in->src[0].ssa, 0);
+               if (in->intrinsic == nir_intrinsic_load_global_constant_offset &&
+                   a.kind >= HK_ROOT_ADDRESS_ROOT) {
+                  if (!nir_src_is_const(in->src[1]))
+                     return UINT64_MAX;
+                  a.offset += nir_src_as_uint(in->src[1]);
+               }
+               if (a.kind == HK_ROOT_ADDRESS_UNKNOWN)
+                  return UINT64_MAX;
+               if (a.kind != HK_ROOT_ADDRESS_ROOT)
+                  continue;
+               const uint64_t start = hk_root_descriptor_offset(push);
+               const uint64_t end = start + HK_MAX_PUSH_SIZE;
+               if (a.offset < end && bytes > start - MIN2(a.offset, start)) {
+                  uint64_t lo = MAX2(a.offset, start);
+                  uint64_t hi = MIN2(a.offset + bytes, end);
+                  mask |= hk_push_range_mask(lo - start, hi - lo);
+               }
+            }
+         }
+      }
+   }
+   return mask;
+}
+
 uint8_t
 hk_nir_pre_raster_reads(const nir_shader *nir)
 {
@@ -5326,6 +5450,7 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
    }
    obj->pre_raster_reads = HK_READS_UNKNOWN;
    obj->reads_draw_id = hk_nir_reads_draw_id(nir);
+   obj->push_constant_mask = hk_nir_push_constant_mask(nir);
 
    if (!nir->info.io_lowered) {
       hk_lower_nir(dev, nir, info->robustness, false, info->set_layout_count,
@@ -6594,6 +6719,7 @@ hk_apple9_compile_graphics_path(struct hk_device *dev, uint32_t count,
          obj->writes_memory = nir->info.writes_memory;
          obj->pre_raster_reads = hk_nir_pre_raster_reads(nir);
          obj->reads_draw_id = hk_nir_reads_draw_id(nir);
+         obj->push_constant_mask = hk_nir_push_constant_mask(nir);
          shader->info.set_count = infos[i].set_layout_count;
          shader->info.apple9_render_targets = key.targets;
          shader->info.apple9_line_stipple_first =
@@ -7443,6 +7569,7 @@ hk_apple9_defer_graphics(struct hk_device *dev, uint32_t count,
       obj->writes_memory = infos[i].nir->info.writes_memory;
       obj->pre_raster_reads = hk_nir_pre_raster_reads(infos[i].nir);
       obj->reads_draw_id = hk_nir_reads_draw_id(infos[i].nir);
+      obj->push_constant_mask = hk_nir_push_constant_mask(infos[i].nir);
       out[i] = &obj->vk;
    }
 
@@ -8153,7 +8280,7 @@ hk_deserialize_shader(struct hk_device *dev, struct blob_reader *blob,
 }
 
 /* Version the container independently of the hardware programs it owns. */
-#define HK_SHADER_CONTAINER_VERSION 0x484b0004u
+#define HK_SHADER_CONTAINER_VERSION 0x484b0005u
 
 static VkResult
 hk_deserialize_api_shader_inner(struct vk_device *vk_dev, struct blob_reader *blob,
@@ -8210,6 +8337,8 @@ hk_deserialize_api_shader_inner(struct vk_device *vk_dev, struct blob_reader *bl
       obj->writes_memory = blob_read_uint8(blob);
       obj->pre_raster_reads = blob_read_uint8(blob);
       obj->reads_draw_id = blob_read_uint8(blob);
+      blob_copy_bytes(blob, &obj->push_constant_mask,
+                      sizeof(obj->push_constant_mask));
       d->nir_size = blob_read_uint32(blob);
       const void *nir = blob_read_bytes(blob, d->nir_size);
       d->nir = blob->overrun ? NULL : malloc(MAX2(d->nir_size, 1));
@@ -8242,6 +8371,8 @@ hk_deserialize_api_shader_inner(struct vk_device *vk_dev, struct blob_reader *bl
                         obj->variants[0].info.fs.writes_memory;
    obj->pre_raster_reads = blob_read_uint8(blob);
    obj->reads_draw_id = blob_read_uint8(blob);
+   blob_copy_bytes(blob, &obj->push_constant_mask,
+                   sizeof(obj->push_constant_mask));
    bool has_native = blob_read_uint8(blob);
    if (blob->overrun ||
        (has_native && (!allow_native || obj->apple9_native_leaf))) {
@@ -8320,6 +8451,8 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
       blob_write_uint8(blob, obj->writes_memory);
       blob_write_uint8(blob, obj->pre_raster_reads);
       blob_write_uint8(blob, obj->reads_draw_id);
+      blob_write_bytes(blob, &obj->push_constant_mask,
+                       sizeof(obj->push_constant_mask));
       blob_write_uint32(blob, d->nir_size);
       blob_write_bytes(blob, d->nir, d->nir_size);
       return hk_apple9_serialize_variants(d, blob);
@@ -8330,6 +8463,8 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
    }
    blob_write_uint8(blob, obj->pre_raster_reads);
    blob_write_uint8(blob, obj->reads_draw_id);
+   blob_write_bytes(blob, &obj->push_constant_mask,
+                    sizeof(obj->push_constant_mask));
 
    blob_write_uint8(blob, obj->apple9_native != NULL);
    if (obj->apple9_native) {

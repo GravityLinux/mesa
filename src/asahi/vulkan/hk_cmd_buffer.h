@@ -183,6 +183,7 @@ struct hk_descriptor_state {
    bool root_last_valid;
    uint32_t root_last_size;
    uint64_t root_last_gpu;
+   uint64_t root_last_push_mask;
    struct hk_root_descriptor_table root_last;
 
    /* Last direct-dispatch group count upload, reused for identical counts so

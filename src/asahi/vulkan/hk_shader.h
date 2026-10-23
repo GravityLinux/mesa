@@ -439,6 +439,7 @@ enum hk_pre_raster_reads {
 
 uint8_t hk_nir_pre_raster_reads(const nir_shader *nir);
 bool hk_nir_reads_draw_id(const nir_shader *nir);
+uint64_t hk_nir_push_constant_mask(const nir_shader *nir);
 
 struct hk_api_shader {
    struct vk_shader vk;
@@ -459,6 +460,11 @@ struct hk_api_shader {
     * read it leave the root unchanged, so consecutive draws of a multi-draw
     * share one root upload. */
    bool reads_draw_id;
+
+   /* API push-constant dwords read by this stage. Collected before Apple9
+    * root lowering; an indirect or unrecognized root access keeps all words.
+    * This is upload metadata and does not change the compiled program. */
+   uint64_t push_constant_mask;
 
    /* Apple9 graphics shaders whose key depends on state that is dynamic or
     * unknown at compile time keep their NIR and are compiled at draw time,
