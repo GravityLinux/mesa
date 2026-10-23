@@ -1364,25 +1364,30 @@ hk_cmd_buffer_flush_push_descriptors(struct hk_cmd_buffer *cmd,
 {
    u_foreach_bit(set_idx, desc->push_dirty) {
       struct hk_push_descriptor_set *push_set = desc->push[set_idx];
+      const uint32_t size = push_set->size;
+      assert(size <= sizeof(push_set->data));
       /* G16 shaders address image descriptors within the USC aperture. */
-      uint64_t push_set_addr;
-      if (hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G) {
+      uint64_t push_set_addr = 0;
+      if (size && hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G) {
          struct agx_ptr t =
-            hk_pool_usc_alloc(cmd, sizeof(push_set->data), HK_MIN_UBO_ALIGNMENT);
+            hk_pool_usc_alloc(cmd, size, HK_MIN_UBO_ALIGNMENT);
          if (t.cpu)
-            memcpy(t.cpu, push_set->data, sizeof(push_set->data));
+            memcpy(t.cpu, push_set->data, size);
          push_set_addr = t.gpu;
-      } else {
+      } else if (size) {
          push_set_addr = hk_pool_upload(
-            cmd, push_set->data, sizeof(push_set->data), HK_MIN_UBO_ALIGNMENT);
+            cmd, push_set->data, size, HK_MIN_UBO_ALIGNMENT);
       }
+      if (size && !push_set_addr)
+         return;
 
+      if (desc->root.sets[set_idx] != push_set_addr ||
+          desc->set_sizes[set_idx] != size)
+         desc->root_dirty = true;
       desc->root.sets[set_idx] = push_set_addr;
-      desc->set_sizes[set_idx] = sizeof(push_set->data);
+      desc->set_sizes[set_idx] = size;
+      desc->push_dirty &= ~BITFIELD_BIT(set_idx);
    }
-
-   desc->root_dirty = true;
-   desc->push_dirty = 0;
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -1411,6 +1416,65 @@ hk_CmdPushDescriptorSetWithTemplate2KHR(
       pPushDescriptorSetWithTemplateInfo->pData);
 }
 
+/* Push constants occupy a fixed region so shader instructions keep their
+ * offsets. The root prefix and any descriptor/constant-data tail stay live;
+ * only the API push region is filtered by the bound stages' read masks. */
+static uint64_t
+hk_cmd_push_constant_mask(const struct hk_cmd_buffer *cmd,
+                          VkPipelineBindPoint bind_point)
+{
+   if (bind_point == VK_PIPELINE_BIND_POINT_COMPUTE) {
+      const struct hk_api_shader *shader = cmd->state.cs.shader;
+      return shader ? shader->push_constant_mask : UINT64_MAX;
+   }
+
+   uint64_t mask = 0;
+   for (unsigned i = 0; i < ARRAY_SIZE(cmd->state.gfx.shaders); ++i) {
+      const struct hk_api_shader *shader = cmd->state.gfx.shaders[i];
+      if (shader)
+         mask |= shader->push_constant_mask;
+   }
+   return mask;
+}
+
+static bool
+hk_root_equal(const struct hk_root_descriptor_table *a,
+               const struct hk_root_descriptor_table *b,
+               size_t size, uint64_t push_mask)
+{
+   const unsigned prefix = hk_root_descriptor_offset(push);
+   const unsigned tail = hk_root_descriptor_offset(set_dynamic_buffer_start);
+   if (memcmp(a, b, prefix) ||
+       (size > tail && memcmp((const char *)a + tail,
+                              (const char *)b + tail, size - tail)))
+      return false;
+
+   while (push_mask) {
+      int start, count;
+      u_bit_scan_consecutive_range64(&push_mask, &start, &count);
+      if (memcmp(a->push + start * 4, b->push + start * 4, count * 4))
+         return false;
+   }
+   return true;
+}
+
+static void
+hk_root_copy(struct hk_root_descriptor_table *dst,
+              const struct hk_root_descriptor_table *src,
+              size_t size, uint64_t push_mask)
+{
+   const unsigned prefix = hk_root_descriptor_offset(push);
+   const unsigned tail = hk_root_descriptor_offset(set_dynamic_buffer_start);
+   memcpy(dst, src, prefix);
+   if (size > tail)
+      memcpy((char *)dst + tail, (const char *)src + tail, size - tail);
+   while (push_mask) {
+      int start, count;
+      u_bit_scan_consecutive_range64(&push_mask, &start, &count);
+      memcpy(dst->push + start * 4, src->push + start * 4, count * 4);
+   }
+}
+
 uint64_t
 hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
                           VkPipelineBindPoint bind_point)
@@ -1418,26 +1482,30 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
    struct hk_descriptor_state *desc = hk_get_descriptors_state(cmd, bind_point);
    struct hk_root_descriptor_table *root = &desc->root;
 
-   bool is_new = true;
    struct agx_ptr root_ptr;
    size_t size = sizeof(*root);
+   uint64_t push_mask = UINT64_MAX;
    if (hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G) {
-      /* Normalize only the self-address and compare the root against the
-       * last upload for this bind point: identical roots reuse it, any
-       * difference uploads a fresh copy. No hashing on this per-draw path.
-       * Roots end after the dynamic buffer slots bound so far: the 64-entry
-       * table is most of the root, and layouts use a few. */
       root->root_desc_addr = 0;
+      push_mask = hk_cmd_push_constant_mask(cmd, bind_point);
       size = hk_descriptor_root_size(desc);
+      if (!desc->root_constant_stages && !desc->root_dynamic_count) {
+         size = hk_root_descriptor_offset(push) +
+                util_last_bit64(push_mask) * sizeof(uint32_t);
+      }
+      /* A shader bind may expose a previously unread range. Reuse requires
+       * that the old allocation actually contains every newly read word. */
       if (desc->root_last_valid && desc->root_last_size == size &&
-          !memcmp(root, &desc->root_last, size)) {
+          !(push_mask & ~desc->root_last_push_mask) &&
+          hk_root_equal(root, &desc->root_last, size, push_mask)) {
          root->root_desc_addr = desc->root_last_gpu;
          return desc->root_last_gpu;
       }
       root_ptr = hk_pool_alloc(cmd, size, 8);
       if (root_ptr.gpu) {
-         memcpy(&desc->root_last, root, size);
+         hk_root_copy(&desc->root_last, root, size, push_mask);
          desc->root_last_size = size;
+         desc->root_last_push_mask = push_mask;
          desc->root_last_gpu = root_ptr.gpu;
          desc->root_last_valid = true;
       }
@@ -1448,8 +1516,7 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
       return 0;
 
    root->root_desc_addr = root_ptr.gpu;
-   if (is_new)
-      memcpy(root_ptr.cpu, root, size);
+   hk_root_copy(root_ptr.cpu, root, size, push_mask);
    return root_ptr.gpu;
 }
 

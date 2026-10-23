@@ -15,6 +15,16 @@
 
 static struct agx_bo *bos[128];
 static unsigned allocations, live_bos, view_cases;
+static bool fail_alloc;
+VkResult __wrap___vk_errorf(const void *, VkResult, const char *, int,
+                            const char *, ...);
+VkResult
+__wrap___vk_errorf(const void *obj, VkResult error, const char *file, int line,
+                   const char *format, ...)
+{
+   CHECK(fail_alloc);
+   return error;
+}
 struct agx_bo *__wrap_agx_bo_create(struct agx_device *, size_t, unsigned,
                                     enum agx_bo_flags, const char *);
 void __wrap_agx_bo_unreference(struct agx_device *, struct agx_bo *);
@@ -23,6 +33,8 @@ struct agx_bo *
 __wrap_agx_bo_create(struct agx_device *dev, size_t size, unsigned alignment,
                      enum agx_bo_flags flags, const char *label)
 {
+   if (fail_alloc)
+      return NULL;
    CHECK(allocations + 1 < ARRAY_SIZE(bos));
    struct agx_bo *bo = calloc(1, sizeof(*bo));
    CHECK(bo);
@@ -223,20 +235,63 @@ main(void)
       CHECK(
          !memcmp(saved, cmd->uploader[HK_CMD_POOL_MAIN].chunks, sizeof(saved)));
    }
-   /* A new render owns new inputs; previous recording bytes stay immutable. */
+   /* A later render with identical inputs shares both immutable uploads. */
+   render->apple9_arguments = render->apple9_sysvals = 0;
+   CHECK(hk_apple9_render_inputs(cmd, &info));
+   CHECK(render->apple9_arguments == params && render->apple9_sysvals == sysvals);
+   CHECK(!memcmp(saved, cmd->uploader[HK_CMD_POOL_MAIN].chunks, sizeof(saved)));
+   /* A clear-value change only replaces the arguments. */
    render->apple9_arguments = render->apple9_sysvals = 0;
    att[0].clearValue.color.uint32[0] = 99;
    CHECK(hk_apple9_render_inputs(cmd, &info));
    CHECK(render->apple9_arguments != params &&
-         render->apple9_sysvals != sysvals);
+         render->apple9_sysvals == sysvals);
    CHECK(((uint32_t *)mapped(params))[16] == 1);
    CHECK(((uint32_t *)mapped(render->apple9_arguments))[16] == 99);
+   params = render->apple9_arguments;
+   render->apple9_arguments = render->apple9_sysvals = 0;
+   render->tilebuffer.nr_samples = 2;
+   CHECK(hk_apple9_render_inputs(cmd, &info));
+   CHECK(render->apple9_arguments == params && render->apple9_sysvals != sysvals);
+   CHECK(((uint32_t *)(metadata + AGX_APPLE9_TEXTURE_INFO_OFFSET))[4] == 4);
+   sysvals = render->apple9_sysvals;
+   render->apple9_arguments = render->apple9_sysvals = 0;
+   render->color_att[2].iview = NULL;
+   CHECK(hk_apple9_render_inputs(cmd, &info));
+   CHECK(render->apple9_sysvals != sysvals);
+   metadata = mapped(render->apple9_sysvals);
+   uint32_t zero[5] = {0};
+   CHECK(!memcmp(metadata + AGX_APPLE9_TEXTURE_INFO_OFFSET +
+                    2 * AGX_APPLE9_TEXTURE_INFO_STRIDE, zero, sizeof(zero)));
+   /* A failed metadata allocation leaves the old key/address intact. */
+   sysvals = cmd->state.gfx.apple9_render_sysvals;
+   uint32_t old_dimensions[HK_MAX_RTS][5];
+   memcpy(old_dimensions, cmd->state.gfx.apple9_render_dimensions,
+          sizeof(old_dimensions));
+   render->apple9_arguments = render->apple9_sysvals = 0;
+   render->tilebuffer.nr_samples = 1;
+   for (unsigned i = 0; i < HK_UPLOAD_CHUNKS; ++i)
+      cmd->uploader[HK_CMD_POOL_MAIN].chunks[i].offset = HK_CMD_BO_SIZE;
+   fail_alloc = true;
+   CHECK(!hk_apple9_render_inputs(cmd, &info));
+   CHECK(cmd->state.gfx.apple9_render_sysvals == sysvals);
+   CHECK(!memcmp(old_dimensions, cmd->state.gfx.apple9_render_dimensions,
+                 sizeof(old_dimensions)));
+   CHECK(!render->apple9_arguments && !render->apple9_sysvals);
+   fail_alloc = false;
+   CHECK(hk_apple9_render_inputs(cmd, &info));
+   CHECK(render->apple9_sysvals != sysvals);
+   /* Reset releases the pool and invalidates both command-lifetime caches. */
+   cmd->vk.state = MESA_VK_COMMAND_BUFFER_STATE_EXECUTABLE;
+   CHECK(hk_ResetCommandBuffer(cb, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT) == VK_SUCCESS);
+   CHECK(!cmd->state.gfx.apple9_render_sysvals);
+   CHECK(!cmd->upload_last[HK_UPLOAD_LAST_RENDER_PARAMS].gpu);
    hk_DestroyCommandPool(device, pool, NULL);
    hk_device_finish_usc_heap(dev);
    CHECK(live_bos == 0);
    free(pdev);
    free(dev);
    printf(
-      "PASS %u render view cases; per-render input reuse, new-render separation and lifetime\n",
+      "PASS %u render view cases; cross-render metadata/argument reuse, changed inputs and reset lifetime\n",
       view_cases);
 }

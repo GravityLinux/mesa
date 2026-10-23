@@ -276,6 +276,8 @@ hk_descriptor_set_addr(const struct hk_descriptor_set *set)
 
 struct hk_push_descriptor_set {
    uint8_t data[HK_PUSH_DESCRIPTOR_SET_SIZE];
+   /* Byte extent of the current layout, including padding between bindings. */
+   uint32_t size;
 };
 
 void hk_push_descriptor_set_update(struct hk_push_descriptor_set *push_set,

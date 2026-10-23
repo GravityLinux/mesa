@@ -287,6 +287,8 @@ blob_tests(struct hk_device *dev, struct hk_api_shader **resolved,
    unsigned stages[] = {first_stage, MESA_SHADER_FRAGMENT};
    struct vk_shader *shaders[] = {&resolved[stages[0]]->vk,
                                   &resolved[stages[1]]->vk};
+   for (unsigned i = 0; i < 2; ++i)
+      resolved[stages[i]]->push_constant_mask = BITFIELD64_BIT(5 + i);
    struct blob blob;
    blob_init(&blob);
    hk_apple9_variant_cache_store(dev, stages, 2, shaders, &blob);
@@ -296,6 +298,10 @@ blob_tests(struct hk_device *dev, struct hk_api_shader **resolved,
    struct vk_shader *loaded[HK_APPLE9_GFX_STAGES];
    CHECK(hk_apple9_variant_cache_load(dev, blob.data, blob.size, mask,
                                       loaded_stages, loaded) == 2);
+   for (unsigned i = 0; i < 2; ++i) {
+      struct hk_api_shader *s = container_of(loaded[i], struct hk_api_shader, vk);
+      CHECK(s->push_constant_mask == BITFIELD64_BIT(5 + i));
+   }
    struct blob copy;
    blob_init(&copy);
    hk_apple9_variant_cache_store(dev, loaded_stages, 2, loaded, &copy);
@@ -578,6 +584,7 @@ main(int argc, char **argv)
    struct blob api_blobs[2];
    const unsigned api_stages[] = {MESA_SHADER_VERTEX, MESA_SHADER_FRAGMENT};
    for (unsigned i = 0; i < 2; ++i) {
+      api[api_stages[i]]->push_constant_mask = BITFIELD64_BIT(i) | BITFIELD64_BIT(63);
       blob_init(&api_blobs[i]);
       CHECK(hk_api_shader_serialize(&dev->vk, &api[api_stages[i]]->vk,
                                     &api_blobs[i]));
@@ -648,6 +655,8 @@ main(int argc, char **argv)
                                       NULL, &shader) == VK_SUCCESS);
       CHECK(!reader.overrun && reader.current == reader.end);
       api[api_stages[i]] = container_of(shader, struct hk_api_shader, vk);
+      CHECK(api[api_stages[i]]->push_constant_mask ==
+            (BITFIELD64_BIT(i) | BITFIELD64_BIT(63)));
       blob_finish(&api_blobs[i]);
    }
    before = nir_loads;
