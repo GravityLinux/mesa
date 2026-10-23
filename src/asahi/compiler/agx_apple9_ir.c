@@ -1736,6 +1736,10 @@ agx_apple9_analyze_uses(struct agx_apple9_vir_program *program)
    for (unsigned i = 0; i < program->instruction_count; ++i) {
       struct agx_apple9_vir_instr *ins = program->instructions[i];
       for (unsigned c = 0; c < apple9_vir_dest_components(ins); ++c) {
+         /* Values have a single definition; the device-load setters rely on
+          * it when they search from the end of the program. */
+         assert(ins->dest + c >= program->value_count ||
+                !a->definitions[ins->dest + c]);
          if (ins->dest + c >= program->value_count || a->definitions[ins->dest + c])
             goto fail;
          a->definitions[ins->dest + c] = ins;
