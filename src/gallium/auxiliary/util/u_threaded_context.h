@@ -514,12 +514,13 @@ tc_renderpass_info_reset(struct tc_renderpass_info *info)
     * all remaining depth/stencil writes. A driver split must discard clear
     * and invalidate hints, but need not invent a depth/stencil write. Keep
     * the conservative fallback if recording was only signalled to unblock
-    * the driver and future calls are not known yet. Drivers must execute
-    * recorded full clears before splitting and resetting this info: Zink
-    * consumes them as a CLEAR loadOp at begin or as an in-pass clear.
+    * the driver and future calls are not known yet. A recorded full clear
+    * stays a write: the flag covers every full clear in the region, including
+    * ones recorded after the split point (clears between DSA blits with the
+    * framebuffer unchanged), which the next render must still execute.
     */
    bool complete = info->ended;
-   bool zsbuf_clear_partial = info->zsbuf_clear_partial;
+   bool zsbuf_clear_partial = info->zsbuf_clear_partial || info->zsbuf_clear;
    info->data32[0] = 0;
    info->cbuf_load = BITFIELD_MASK(8);
    info->zsbuf_clear_partial = !complete || zsbuf_clear_partial;

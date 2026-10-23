@@ -54,8 +54,9 @@ TEST(ThreadedRenderpass, PreserveWritesAndLaterClears)
    }
 }
 
-TEST(ThreadedRenderpass, ConsumedFullClearIsNotRepeated)
+TEST(ThreadedRenderpass, FullClearKeepsDepthWritable)
 {
+   /* The split consumes the CLEAR loadOp, but the region may clear again. */
    tc_renderpass_info info = {};
    info.ended = true;
    info.zsbuf_clear = true;
@@ -63,5 +64,6 @@ TEST(ThreadedRenderpass, ConsumedFullClearIsNotRepeated)
    tc_renderpass_info_reset(&info);
    EXPECT_FALSE(info.zsbuf_clear);
    EXPECT_EQ(info.cbuf_clear, 0);
-   EXPECT_FALSE(info.zsbuf_clear_partial);
+   EXPECT_TRUE(info.zsbuf_clear_partial);
+   EXPECT_TRUE(tc_renderpass_info_is_zsbuf_used(&info));
 }
