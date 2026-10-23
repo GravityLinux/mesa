@@ -1477,6 +1477,8 @@ agx_apple9_vir_emit_device_atomic(
    return true;
 }
 
+/* The load setters below find a value's single definition, normally the
+ * instruction just selected, so they search from the end of the program. */
 bool
 agx_apple9_vir_set_device_load_contract(
    struct agx_apple9_vir_program *program, uint32_t value, uint8_t flags,
@@ -1486,7 +1488,7 @@ agx_apple9_vir_set_device_load_contract(
       if (flags & ~AGX_APPLE9_DEVICE_LOAD_HAS_NEXT)
          return false;
 
-      for (unsigned i = 0; i < program->instruction_count; ++i) {
+      for (unsigned i = program->instruction_count; i-- > 0;) {
          struct agx_apple9_vir_instr *instruction = program->instructions[i];
          if (instruction->dest != value)
             continue;
@@ -1521,7 +1523,7 @@ agx_apple9_vir_set_device_load_raw_contract(
        !apple9_scalar_load_slot_for_token(raw_token, &scoreboard_slot))
       return false;
 
-   for (unsigned i = 0; i < program->instruction_count; ++i) {
+   for (unsigned i = program->instruction_count; i-- > 0;) {
       struct agx_apple9_vir_instr *instruction = program->instructions[i];
       if (instruction->dest != value)
          continue;
@@ -1543,7 +1545,7 @@ agx_apple9_vir_set_load_address(struct agx_apple9_vir_program *program,
 {
    if (address >= program->value_count || address + 1 >= program->value_count)
       return false;
-   for (unsigned i = 0; i < program->instruction_count; ++i) {
+   for (unsigned i = program->instruction_count; i-- > 0;) {
       struct agx_apple9_vir_instr *load = program->instructions[i];
       if (load->dest != value || load->op != AGX_APPLE9_VIR_DEVICE_LOAD)
          continue;
@@ -1570,7 +1572,7 @@ agx_apple9_vir_set_device_load_index_kind(
        index_kind != AGX_APPLE9_DEVICE_LOAD_INDEX_LAST_USE_GPR)
       return false;
 
-   for (unsigned i = 0; i < program->instruction_count; ++i) {
+   for (unsigned i = program->instruction_count; i-- > 0;) {
       struct agx_apple9_vir_instr *instruction = program->instructions[i];
       if (instruction->dest != value)
          continue;
