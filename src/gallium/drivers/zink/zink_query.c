@@ -839,6 +839,23 @@ get_buffer_offset(struct zink_query *q)
    return (get_num_starts(q) - 1) * get_num_results(q) * sizeof(uint64_t);
 }
 
+/* Replace a result buffer with a larger one holding its results so far. */
+static bool
+qbo_grow(struct zink_context *ctx, struct zink_query_buffer *qbo, unsigned i, unsigned size)
+{
+   struct pipe_resource *old = qbo->buffers[i];
+   struct pipe_resource *res = pipe_buffer_create(ctx->base.screen, PIPE_BIND_QUERY_BUFFER,
+                                                  PIPE_USAGE_STAGING, MAX2(size, old->width0 * 2));
+   if (!res) {
+      mesa_loge("ZINK: query buffer growth failed");
+      return false;
+   }
+   zink_copy_buffer(ctx, zink_resource(res), zink_resource(old), 0, 0, old->width0, false);
+   pipe_resource_reference(&qbo->buffers[i], NULL);
+   qbo->buffers[i] = res;
+   return true;
+}
+
 static void
 update_qbo(struct zink_context *ctx, struct zink_query *q)
 {
@@ -848,6 +865,16 @@ update_qbo(struct zink_context *ctx, struct zink_query *q)
    bool is_timestamp = q->type == PIPE_QUERY_TIMESTAMP;
    /* timestamp queries just write to offset 0 always */
    int num_queries = get_num_queries(q);
+   /* A query gains a start every time it resumes, e.g. in each render pass,
+    * which can be more starts than the buffer was created for.
+    */
+   if (!is_timestamp) {
+      unsigned size = num_starts * get_num_results(q) * sizeof(uint64_t);
+      for (unsigned i = 0; i < num_queries; i++) {
+         if (qbo->buffers[i]->width0 < size && !qbo_grow(ctx, qbo, i, size))
+            return;
+      }
+   }
    unsigned num_results = qbo->num_results;
    for (unsigned i = 0; i < num_queries; i++) {
       unsigned start_offset = q->start_offset;
