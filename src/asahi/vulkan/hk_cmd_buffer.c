@@ -82,6 +82,7 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd, bool release)
 
    ralloc_free(cmd->upload_cache);
    cmd->upload_cache = NULL;
+   cmd->upload_cache_bytes = 0;
    memset(cmd->upload_hits, 0, sizeof(cmd->upload_hits));
    memset(cmd->upload_misses, 0, sizeof(cmd->upload_misses));
    for (unsigned i = 0; i < HK_UPLOAD_LAST_COUNT; ++i)
@@ -436,6 +437,15 @@ hk_pool_alloc_cached(struct hk_cmd_buffer *cmd, enum hk_cmd_pool_kind kind,
    if (!ptr.cpu || !cmd->upload_cache)
       return ptr;
 
+   /* Retaining a second copy of every unique runtime table is counter-
+    * productive for long recordings. Keep hits available after the budget
+    * fills; new entries fall back to ordinary command-buffer storage. */
+   const size_t entry_size = sizeof(struct hk_upload_entry) + (size_t)size;
+   if (cmd->upload_cache->entries >= HK_UPLOAD_CACHE_MAX_ENTRIES ||
+       entry_size > HK_UPLOAD_CACHE_MAX_BYTES ||
+       cmd->upload_cache_bytes > HK_UPLOAD_CACHE_MAX_BYTES - entry_size)
+      return ptr;
+
    struct hk_upload_entry *entry =
       ralloc_size(cmd->upload_cache, sizeof(*entry) + size);
    if (entry) {
@@ -446,6 +456,8 @@ hk_pool_alloc_cached(struct hk_cmd_buffer *cmd, enum hk_cmd_pool_kind kind,
       if (!_mesa_hash_table_insert_pre_hashed(cmd->upload_cache, hash,
                                              &entry->key, entry))
          ralloc_free(entry);
+      else
+         cmd->upload_cache_bytes += entry_size;
    }
    return ptr;
 }
