@@ -52,6 +52,7 @@
 #include "vk_nir_convert_ycbcr.h"
 #include "vk_physical_device_features.h"
 #include "vk_pipeline.h"
+#include "vk_pipeline_cache.h"
 #include "vk_pipeline_layout.h"
 #include "vk_shader.h"
 #include "vk_shader_module.h"
@@ -83,6 +84,8 @@ DEBUG_GET_ONCE_OPTION(cached_hk_apple9_eager_trace,
                       "HK_APPLE9_EAGER_TRACE", NULL)
 DEBUG_GET_ONCE_OPTION(cached_hk_apple9_eager_variants,
                       "HK_APPLE9_EAGER_VARIANTS", NULL)
+DEBUG_GET_ONCE_BOOL_OPTION(apple9_variant_cache_verify,
+                           "HK_APPLE9_VARIANT_CACHE_VERIFY", false)
 DEBUG_GET_ONCE_OPTION(cached_hk_apple9_pressure_stats,
                       "HK_APPLE9_PRESSURE_STATS", NULL)
 DEBUG_GET_ONCE_OPTION(cached_hk_apple9_texel_classes,
@@ -4984,6 +4987,11 @@ hk_destroy_linked_shader(struct hk_device *dev, struct hk_linked_shader *linked)
    ralloc_free(linked);
 }
 
+struct hk_apple9_cached_variant {
+   struct hk_apple9_cached_variant *next;
+   struct vk_pipeline_cache_object *object;
+};
+
 struct hk_apple9_deferred {
    /* Serialized NIR after API lowering, before key-dependent compilation. */
    void *nir;
@@ -4998,7 +5006,89 @@ struct hk_apple9_deferred {
    /* Color attachments the pipeline leaves undefined; writes are discarded
     * even when the render binds an image there. */
    uint8_t undefined_colors;
+   /* A missing fragment stage needs a generated cull-distance consumer. */
+   bool cull_distance;
+   /* VkPipelineCache serializes these API shaders. Retain the variants seen
+    * with this source so application-managed caches include draw-time work.
+    * The list owns only serialized bytes, never other API shader objects. */
+   simple_mtx_t variant_lock;
+   struct hk_apple9_cached_variant *variants;
 };
+
+static void
+hk_apple9_remember_variant(struct hk_api_shader *api,
+                            struct vk_pipeline_cache_object *object)
+{
+   struct hk_apple9_deferred *d = api->apple9_deferred;
+   simple_mtx_lock(&d->variant_lock);
+   for (struct hk_apple9_cached_variant *v = d->variants; v; v = v->next) {
+      if (v->object == object) {
+         simple_mtx_unlock(&d->variant_lock);
+         return;
+      }
+   }
+   struct hk_apple9_cached_variant *v = malloc(sizeof(*v));
+   if (v) {
+      v->object = vk_pipeline_cache_object_ref(object);
+      v->next = d->variants;
+      d->variants = v;
+   }
+   simple_mtx_unlock(&d->variant_lock);
+}
+
+static bool
+hk_apple9_serialize_variants(struct hk_apple9_deferred *d, struct blob *blob)
+{
+   intptr_t count_at = blob_reserve_uint32(blob);
+   if (count_at < 0)
+      return false;
+   uint32_t count = 0;
+   simple_mtx_lock(&d->variant_lock);
+   for (struct hk_apple9_cached_variant *v = d->variants; v; v = v->next) {
+      struct vk_raw_data_cache_object *raw =
+         container_of(v->object, struct vk_raw_data_cache_object, base);
+      assert(v->object->key_size == BLAKE3_OUT_LEN);
+      if (raw->data_size > UINT32_MAX) {
+         blob->out_of_memory = true;
+         break;
+      }
+      blob_write_bytes(blob, v->object->key_data, BLAKE3_OUT_LEN);
+      blob_write_uint32(blob, raw->data_size);
+      blob_write_bytes(blob, raw->data, raw->data_size);
+      ++count;
+   }
+   simple_mtx_unlock(&d->variant_lock);
+   blob_overwrite_uint32(blob, count_at, count);
+   return !blob->out_of_memory;
+}
+
+static bool
+hk_apple9_deserialize_variants(struct hk_device *dev,
+                                struct hk_api_shader *api,
+                                struct blob_reader *blob)
+{
+   uint32_t count = blob_read_uint32(blob);
+   if (blob->overrun || count > (blob->end - blob->current) / (BLAKE3_OUT_LEN + 4))
+      return false;
+   for (unsigned i = 0; i < count; ++i) {
+      const void *key = blob_read_bytes(blob, BLAKE3_OUT_LEN);
+      uint32_t size = blob_read_uint32(blob);
+      const void *data = blob_read_bytes(blob, size);
+      if (blob->overrun || !size)
+         return false;
+      if (!dev->vk.mem_cache)
+         continue;
+      struct vk_pipeline_cache_object *object =
+         vk_pipeline_cache_create_and_insert_object(
+            dev->vk.mem_cache, key, BLAKE3_OUT_LEN, data, size,
+            &vk_raw_data_cache_object_ops);
+      if (object) {
+         hk_apple9_remember_variant(api, object);
+         vk_pipeline_cache_object_unref(&dev->vk, object);
+      }
+   }
+   return true;
+}
 
 static void hk_apple9_forget_deferred(struct hk_device *dev,
                                       struct hk_api_shader *obj);
@@ -5045,6 +5135,14 @@ hk_api_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
 
    if (obj->apple9_deferred) {
       hk_apple9_forget_deferred(dev, obj);
+      struct hk_apple9_cached_variant *v = obj->apple9_deferred->variants;
+      while (v) {
+         struct hk_apple9_cached_variant *next = v->next;
+         vk_pipeline_cache_object_unref(&dev->vk, v->object);
+         free(v);
+         v = next;
+      }
+      simple_mtx_destroy(&obj->apple9_deferred->variant_lock);
       free(obj->apple9_deferred->nir);
       free(obj->apple9_deferred);
       vk_shader_free(&dev->vk, pAllocator, &obj->vk);
@@ -7204,6 +7302,7 @@ hk_apple9_defer_graphics(struct hk_device *dev, uint32_t count,
       blob_finish_get_buffer(&blob, &deferred->nir, &deferred->nir_size);
       deferred->next_stage_mask = infos[i].next_stage_mask;
       deferred->set_layout_count = infos[i].set_layout_count;
+      deferred->cull_distance = infos[i].nir->info.cull_distance_array_size != 0;
       deferred->sample_shading =
          state && state->ms && state->ms->sample_shading_enable;
       deferred->zs_self_dep =
@@ -7221,6 +7320,7 @@ hk_apple9_defer_graphics(struct hk_device *dev, uint32_t count,
       obj->apple9_native_cull_primitive =
          infos[i].stage == MESA_SHADER_MESH &&
          (infos[i].nir->info.outputs_written & VARYING_BIT_CULL_PRIMITIVE);
+      simple_mtx_init(&deferred->variant_lock, mtx_plain);
       obj->writes_memory = infos[i].nir->info.writes_memory;
       obj->pre_raster_reads = hk_nir_pre_raster_reads(infos[i].nir);
       out[i] = &obj->vk;
@@ -7252,6 +7352,9 @@ struct hk_apple9_variant {
    struct hk_apple9_graphics_key key;
    bool prefer_native;
    struct hk_api_shader *shaders[HK_APPLE9_GFX_STAGES];
+   /* Keep the serialized object in the device's weak pipeline cache for the
+    * lifetime of the live variant. The disk cache outlives both. */
+   struct vk_pipeline_cache_object *cache_object;
 
    /* Signalled once the compile finished; result holds its outcome. The
     * variant is in the table from the start, so threads that need it wait
@@ -7280,6 +7383,8 @@ hk_apple9_variant_destroy(struct hk_device *dev, struct hk_apple9_variant *v)
          hk_api_shader_destroy(&dev->vk, &v->shaders[s]->vk, NULL);
    }
    util_queue_fence_destroy(&v->ready);
+   if (v->cache_object)
+      vk_pipeline_cache_object_unref(&dev->vk, v->cache_object);
    free(v);
 }
 
@@ -7309,8 +7414,15 @@ hk_apple9_variant_cache_key(struct hk_device *dev,
 {
    struct mesa_blake3 ctx;
    _mesa_blake3_init(&ctx);
-   static const char tag[] = "hk-apple9-variant-v1";
+   static const char tag[] = "hk-apple9-variant-v2";
    _mesa_blake3_update(&ctx, tag, sizeof(tag));
+   /* The UUID covers the driver build ID, root layout and compiler flags,
+    * including when these entries travel inside an application cache. */
+   const struct vk_properties *props = &dev->vk.physical->properties;
+   _mesa_blake3_update(&ctx, props->pipelineCacheUUID, VK_UUID_SIZE);
+   _mesa_blake3_update(&ctx, &props->shaderBinaryVersion,
+                       sizeof(props->shaderBinaryVersion));
+   _mesa_blake3_update(&ctx, &dev->dev.chip, sizeof(dev->dev.chip));
    const uint64_t flags =
       hk_physical_device_compiler_flags(hk_device_physical(dev));
    _mesa_blake3_update(&ctx, &flags, sizeof(flags));
@@ -7329,7 +7441,7 @@ hk_apple9_variant_cache_key(struct hk_device *dev,
       const uint64_t size = d->nir_size;
       const uint32_t fields[] = {d->next_stage_mask, d->set_layout_count,
                                  d->sample_shading, d->zs_self_dep,
-                                 d->undefined_colors};
+                                 d->undefined_colors, d->cull_distance};
       _mesa_blake3_update(&ctx, &size, sizeof(size));
       _mesa_blake3_update(&ctx, d->nir, d->nir_size);
       _mesa_blake3_update(&ctx, fields, sizeof(fields));
@@ -7339,11 +7451,15 @@ hk_apple9_variant_cache_key(struct hk_device *dev,
 }
 
 static void
-hk_apple9_variant_cache_store(struct hk_device *dev, const blake3_hash key,
+hk_apple9_variant_cache_store(struct hk_device *dev,
                               const unsigned *stages, unsigned count,
                               struct vk_shader *const *compiled,
                               struct blob *blob)
 {
+   blob_write_uint32(blob, 0x484b5602);
+   blob_write_bytes(blob, dev->vk.physical->properties.pipelineCacheUUID,
+                     VK_UUID_SIZE);
+   blob_write_uint32(blob, dev->vk.physical->properties.shaderBinaryVersion);
    blob_write_uint32(blob, count);
    for (unsigned i = 0; i < count; ++i) {
       blob_write_uint32(blob, stages[i]);
@@ -7354,40 +7470,81 @@ hk_apple9_variant_cache_store(struct hk_device *dev, const blake3_hash key,
          blob->out_of_memory = true;
          return;
       }
+      if (blob->size - start > UINT32_MAX) {
+         blob->out_of_memory = true;
+         return;
+      }
       blob_overwrite_uint32(blob, size_at, blob->size - start);
    }
+}
+
+/* Check sizes before the driver deserializer allocates code/data buffers. */
+static bool
+hk_apple9_variant_stage_valid(const void *data, size_t size, unsigned stage)
+{
+   struct blob_reader blob;
+   blob_reader_init(&blob, data, size);
+   if (blob_read_uint8(&blob) != stage || blob_read_uint8(&blob) != 0)
+      return false;
+   for (unsigned i = 0; i < hk_num_variants(stage); ++i) {
+      struct hk_shader_info info;
+      blob_copy_bytes(&blob, &info, sizeof(info));
+      blob_read_bytes(&blob, sizeof(struct agx_shader_info));
+      uint32_t code_size = blob_read_uint32(&blob);
+      uint32_t data_size = blob_read_uint32(&blob);
+      if (blob.overrun || (unsigned)info.stage >= MESA_SHADER_MESH_STAGES)
+         return false;
+      blob_read_bytes(&blob, code_size);
+      blob_read_bytes(&blob, data_size);
+      if (blob.overrun)
+         return false;
+   }
+   blob_read_uint8(&blob); /* pre_raster_reads */
+   return !blob.overrun && blob.current == blob.end;
 }
 
 /* Returns the number of stages loaded into out, or 0 on a miss. */
 static unsigned
 hk_apple9_variant_cache_load(struct hk_device *dev, const void *data,
-                             size_t size, unsigned *stages,
+                             size_t size, uint32_t expected_stages,
+                             unsigned *stages,
                              struct vk_shader **out)
 {
    for (unsigned i = 0; i < HK_APPLE9_GFX_STAGES; ++i)
       out[i] = NULL;
    struct blob_reader blob;
    blob_reader_init(&blob, data, size);
+   const uint32_t magic = blob_read_uint32(&blob);
+   uint8_t uuid[VK_UUID_SIZE];
+   blob_copy_bytes(&blob, uuid, sizeof(uuid));
+   const uint32_t version = blob_read_uint32(&blob);
    const unsigned count = blob_read_uint32(&blob);
-   if (blob.overrun || count == 0 || count > HK_APPLE9_GFX_STAGES)
+   if (blob.overrun || magic != 0x484b5602 ||
+       memcmp(uuid, dev->vk.physical->properties.pipelineCacheUUID, sizeof(uuid)) ||
+       version != dev->vk.physical->properties.shaderBinaryVersion ||
+       count == 0 || count != util_bitcount(expected_stages))
       return 0;
-   const uint32_t version =
-      dev->vk.physical->properties.shaderBinaryVersion;
+   uint32_t remaining = expected_stages;
    unsigned i;
    for (i = 0; i < count; ++i) {
       stages[i] = blob_read_uint32(&blob);
       const uint32_t len = blob_read_uint32(&blob);
-      const void *bytes = blob_read_bytes(&blob, len);
-      if (blob.overrun || stages[i] >= HK_APPLE9_GFX_STAGES)
+      const uint8_t *bytes = blob_read_bytes(&blob, len);
+      if (blob.overrun || stages[i] >= HK_APPLE9_GFX_STAGES ||
+          stages[i] == MESA_SHADER_COMPUTE ||
+          !(remaining & BITFIELD_BIT(stages[i])) || len < 2 ||
+          !hk_apple9_variant_stage_valid(bytes, len, stages[i]))
          break;
+      remaining &= ~BITFIELD_BIT(stages[i]);
       struct blob_reader stage;
       blob_reader_init(&stage, bytes, len);
       if (dev->vk.shader_ops->deserialize(&dev->vk, &stage, version, NULL,
                                           &out[i]) != VK_SUCCESS ||
-          stage.overrun)
+          !out[i] || out[i]->stage != stages[i] || stage.overrun ||
+          stage.current != stage.end)
          break;
    }
-   if (i == count)
+   if (i == count && !remaining && blob.current == blob.end)
       return count;
    for (unsigned j = 0; j <= i && j < count; ++j) {
       if (out[j])
@@ -7491,9 +7648,7 @@ retry:
 compile:;
    /* HK_APPLE9_VARIANT_CACHE_VERIFY=1 compiles on a cache hit as well and
     * reports any difference, to catch inputs missing from the key. */
-   static int verify = -1;
-   if (verify < 0)
-      verify = debug_get_bool_option("HK_APPLE9_VARIANT_CACHE_VERIFY", false);
+   const bool verify = debug_get_option_apple9_variant_cache_verify();
    blake3_hash cache_key;
    const bool cacheable =
       dev->vk.mem_cache &&
@@ -7501,16 +7656,31 @@ compile:;
    struct vk_shader *cached[HK_APPLE9_GFX_STAGES];
    unsigned cached_stages[HK_APPLE9_GFX_STAGES];
    unsigned cached_count = 0;
+   struct vk_pipeline_cache_object *cache_object = NULL;
    if (cacheable) {
-      struct vk_pipeline_cache_object *obj = vk_pipeline_cache_lookup_object(
+      uint32_t expected_stages = 0;
+      const struct hk_apple9_deferred *last = NULL;
+      for (unsigned s = 0; s < HK_APPLE9_GFX_STAGES; ++s) {
+         if (api[s]) {
+            expected_stages |= BITFIELD_BIT(s);
+            if (s != MESA_SHADER_FRAGMENT)
+               last = api[s]->apple9_deferred;
+         }
+      }
+      if (!api[MESA_SHADER_FRAGMENT] && last && last->cull_distance)
+         expected_stages |= BITFIELD_BIT(MESA_SHADER_FRAGMENT);
+      cache_object = vk_pipeline_cache_lookup_object(
          dev->vk.mem_cache, cache_key, sizeof(cache_key),
          &vk_raw_data_cache_object_ops, NULL);
-      if (obj) {
+      if (cache_object) {
          struct vk_raw_data_cache_object *raw =
-            container_of(obj, struct vk_raw_data_cache_object, base);
+            container_of(cache_object, struct vk_raw_data_cache_object, base);
          cached_count = hk_apple9_variant_cache_load(
-            dev, raw->data, raw->data_size, cached_stages, cached);
-         vk_pipeline_cache_object_unref(&dev->vk, obj);
+            dev, raw->data, raw->data_size, expected_stages, cached_stages, cached);
+         if (!cached_count) {
+            vk_pipeline_cache_object_unref(&dev->vk, cache_object);
+            cache_object = NULL;
+         }
       }
    }
    if (cached_count && !verify) {
@@ -7519,8 +7689,14 @@ compile:;
             container_of(cached[i], struct hk_api_shader, vk);
       }
       memcpy(out, v->shaders, sizeof(v->shaders));
+      v->cache_object = cache_object;
+      for (unsigned s = 0; s < HK_APPLE9_GFX_STAGES; ++s)
+         if (api[s])
+            hk_apple9_remember_variant(api[s], cache_object);
+      simple_mtx_lock(&dev->apple9_variants.lock);
       v->result = VK_SUCCESS;
       util_queue_fence_signal(&v->ready);
+      simple_mtx_unlock(&dev->apple9_variants.lock);
       return VK_SUCCESS;
    }
 
@@ -7621,12 +7797,12 @@ compile:;
       if (cacheable) {
          struct blob blob;
          blob_init(&blob);
-         hk_apple9_variant_cache_store(dev, cache_key, stages, count, compiled,
+         hk_apple9_variant_cache_store(dev, stages, count, compiled,
                                        &blob);
          if (cached_count) {
             struct blob check;
             blob_init(&check);
-            hk_apple9_variant_cache_store(dev, cache_key, cached_stages,
+            hk_apple9_variant_cache_store(dev, cached_stages,
                                           cached_count, cached, &check);
             if (blob.out_of_memory || check.out_of_memory ||
                 blob.size != check.size ||
@@ -7637,12 +7813,9 @@ compile:;
             }
             blob_finish(&check);
          } else if (!blob.out_of_memory) {
-            struct vk_pipeline_cache_object *obj =
-               vk_pipeline_cache_create_and_insert_object(
+            cache_object = vk_pipeline_cache_create_and_insert_object(
                   dev->vk.mem_cache, cache_key, sizeof(cache_key), blob.data,
                   blob.size, &vk_raw_data_cache_object_ops);
-            if (obj)
-               vk_pipeline_cache_object_unref(&dev->vk, obj);
          }
          blob_finish(&blob);
       }
@@ -7654,6 +7827,16 @@ compile:;
    }
    for (unsigned i = 0; i < cached_count; ++i)
       hk_api_shader_destroy(&dev->vk, cached[i], NULL);
+   if (result != VK_SUCCESS && cache_object) {
+      vk_pipeline_cache_object_unref(&dev->vk, cache_object);
+      cache_object = NULL;
+   }
+   v->cache_object = cache_object;
+   if (cache_object) {
+      for (unsigned s = 0; s < HK_APPLE9_GFX_STAGES; ++s)
+         if (api[s])
+            hk_apple9_remember_variant(api[s], cache_object);
+   }
    simple_mtx_lock(&dev->apple9_variants.lock);
    if (result == VK_SUCCESS && search.prefer_native &&
        !v->shaders[MESA_SHADER_MESH]->apple9_native_leaf)
@@ -7895,6 +8078,7 @@ hk_deserialize_api_shader_inner(struct vk_device *vk_dev, struct blob_reader *bl
       d->sample_shading = blob_read_uint8(blob);
       d->zs_self_dep = blob_read_uint8(blob);
       d->undefined_colors = blob_read_uint8(blob);
+      d->cull_distance = blob_read_uint8(blob);
       obj->writes_memory = blob_read_uint8(blob);
       obj->pre_raster_reads = blob_read_uint8(blob);
       d->nir_size = blob_read_uint32(blob);
@@ -7907,6 +8091,11 @@ hk_deserialize_api_shader_inner(struct vk_device *vk_dev, struct blob_reader *bl
       }
       memcpy(d->nir, nir, d->nir_size);
       obj->apple9_deferred = d;
+      simple_mtx_init(&d->variant_lock, mtx_plain);
+      if (!hk_apple9_deserialize_variants(dev, obj, blob)) {
+         hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
+         return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
+      }
       *shader_out = &obj->vk;
       return VK_SUCCESS;
    }
@@ -7988,7 +8177,7 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
    blob_write_bytes(blob, obj->apple9_native_pair_id,
                     sizeof(obj->apple9_native_pair_id));
 
-   const struct hk_apple9_deferred *d = obj->apple9_deferred;
+   struct hk_apple9_deferred *d = obj->apple9_deferred;
    blob_write_uint8(blob, d != NULL);
    if (d) {
       blob_write_uint32(blob, d->next_stage_mask);
@@ -7996,11 +8185,12 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
       blob_write_uint8(blob, d->sample_shading);
       blob_write_uint8(blob, d->zs_self_dep);
       blob_write_uint8(blob, d->undefined_colors);
+      blob_write_uint8(blob, d->cull_distance);
       blob_write_uint8(blob, obj->writes_memory);
       blob_write_uint8(blob, obj->pre_raster_reads);
       blob_write_uint32(blob, d->nir_size);
       blob_write_bytes(blob, d->nir, d->nir_size);
-      return !blob->out_of_memory;
+      return hk_apple9_serialize_variants(d, blob);
    }
 
    hk_foreach_variant(obj, shader) {
