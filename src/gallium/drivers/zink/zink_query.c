@@ -47,6 +47,7 @@ struct zink_query_start {
          bool have_gs;
          bool have_xfb;
          bool was_line_loop;
+         uint8_t stat_slot; /* result index of a shared statistics query */
       };
       uint32_t data;
    };
@@ -78,6 +79,7 @@ struct zink_query {
    struct list_head active_list;
 
    struct list_head stats_list; /* when active, statistics queries are added to ctx->primitives_generated_queries */
+   struct list_head shared_stats_list; /* when counting, in ctx->stats_queries */
    bool has_draws; /* have_gs and have_xfb are valid for idx=curr_query */
 
    struct zink_batch_usage *batch_uses; //batch that the query was started in
@@ -128,6 +130,34 @@ pipeline_statistic_convert(enum pipe_statistics_query_index idx)
    };
    assert(idx < ARRAY_SIZE(map));
    return map[idx];
+}
+
+/* Vulkan allows one active pipeline statistics query per command buffer, and GL
+ * any number. Graphics statistics queries therefore count into one shared
+ * query, ctx->curr_stats_query, which enables every statistic a begun query
+ * needs. Whenever a query begins or ends, the shared query ends and the queries
+ * still counting continue in a new one, so each interval belongs to exactly the
+ * queries active during it. Compute invocations are counted outside render
+ * passes and keep their own query, which waits outside render passes while
+ * graphics statistics are counted (zink_suspend_cs_query_for_renderpass).
+ */
+static bool
+is_shared_stats_query(const struct zink_query *q)
+{
+   return q->type == PIPE_QUERY_PIPELINE_STATISTICS_SINGLE &&
+          q->index != PIPE_STAT_QUERY_CS_INVOCATIONS &&
+          pipeline_statistic_convert(q->index);
+}
+
+static VkQueryPipelineStatisticFlags
+live_stats_mask(const struct zink_context *ctx)
+{
+   VkQueryPipelineStatisticFlags mask = 0;
+   for (unsigned i = 0; i < PIPE_STAT_QUERY_COUNT; i++) {
+      if (ctx->live_stats[i] && i != PIPE_STAT_QUERY_CS_INVOCATIONS)
+         mask |= pipeline_statistic_convert(i);
+   }
+   return mask;
 }
 
 static void
@@ -183,6 +213,8 @@ find_or_allocate_qp(struct zink_context *ctx, struct zink_query *q, unsigned idx
    if (q->type == PIPE_QUERY_PRIMITIVES_GENERATED && q->vkqtype != VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT)
       pipeline_stats = VK_QUERY_PIPELINE_STATISTIC_GEOMETRY_SHADER_PRIMITIVES_BIT |
                        VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT;
+   else if (is_shared_stats_query(q))
+      pipeline_stats = live_stats_mask(ctx);
    else if (q->type == PIPE_QUERY_PIPELINE_STATISTICS_SINGLE)
       pipeline_stats = pipeline_statistic_convert(q->index);
 
@@ -276,8 +308,10 @@ get_num_results(struct zink_query *q)
    case PIPE_QUERY_OCCLUSION_PREDICATE_CONSERVATIVE:
    case PIPE_QUERY_TIME_ELAPSED:
    case PIPE_QUERY_TIMESTAMP:
-   case PIPE_QUERY_PIPELINE_STATISTICS_SINGLE:
       return 1;
+   case PIPE_QUERY_PIPELINE_STATISTICS_SINGLE:
+      /* A shared query's results hold every statistic it enables. */
+      return is_shared_stats_query(q) ? PIPE_STAT_QUERY_COUNT : 1;
    case PIPE_QUERY_PRIMITIVES_GENERATED:
    case PIPE_QUERY_SO_OVERFLOW_ANY_PREDICATE:
    case PIPE_QUERY_SO_OVERFLOW_PREDICATE:
@@ -481,6 +515,10 @@ query_pool_get_range(struct zink_context *ctx, struct zink_query *q)
          vkq = ctx->curr_xfb_queries[xfb_idx];
          vkq->refcount++;
          vkq->pool->refcount++;
+      } else if (is_shared_stats_query(q) && ctx->curr_stats_query) {
+         vkq = ctx->curr_stats_query;
+         vkq->refcount++;
+         vkq->pool->refcount++;
       } else {
          struct zink_query_pool *pool = find_or_allocate_qp(ctx, q, pool_idx, &vkq_needs_reset);
          if (pool->last_range == pool->num_results) {
@@ -501,9 +539,16 @@ query_pool_get_range(struct zink_context *ctx, struct zink_query *q)
          vkq->pool = pool;
          vkq->started = false;
          vkq->query_id = pool->last_range++;
+         if (is_shared_stats_query(q))
+            ctx->curr_stats_query = vkq;
       }
       unref_vk_query(ctx, start->vkq[i]);
       start->vkq[i] = vkq;
+   }
+   if (is_shared_stats_query(q)) {
+      VkQueryPipelineStatisticFlags bit = pipeline_statistic_convert(q->index);
+      assert(start->vkq[0]->pool->pipeline_stats & bit);
+      start->stat_slot = util_bitcount(start->vkq[0]->pool->pipeline_stats & (bit - 1));
    }
 }
 
@@ -518,6 +563,7 @@ zink_create_query(struct pipe_context *pctx,
    if (!query)
       return NULL;
    list_inithead(&query->buffers);
+   list_inithead(&query->shared_stats_list);
 
    query->index = index;
    query->type = query_type;
@@ -647,11 +693,13 @@ check_query_results(struct zink_query *query, union pipe_query_result *result,
          break;
       case PIPE_QUERY_PIPELINE_STATISTICS_SINGLE:
          switch (query->index) {
-         case PIPE_STAT_QUERY_IA_VERTICES:
-            result->u64 += start->was_line_loop ? results[i] / 2 : results[i];
+         case PIPE_STAT_QUERY_IA_VERTICES: {
+            uint64_t vertices = results[i + start->stat_slot];
+            result->u64 += start->was_line_loop ? vertices / 2 : vertices;
             break;
+         }
          default:
-            result->u64 += results[i];
+            result->u64 += results[i + start->stat_slot];
             break;
          }
          break;
@@ -918,6 +966,58 @@ update_qbo(struct zink_context *ctx, struct zink_query *q)
    q->needs_update = false;
 }
 
+/* Compute invocation queries start only outside render passes. Graphics
+ * statistics queries start only inside them: draws are all there, and every
+ * interval of the shared query then stays inside one render pass.
+ */
+static bool
+query_waits(const struct zink_context *ctx, const struct zink_query *q)
+{
+   if (q->type == PIPE_QUERY_PIPELINE_STATISTICS_SINGLE && q->index == PIPE_STAT_QUERY_CS_INVOCATIONS)
+      return ctx->in_rp;
+   return is_shared_stats_query(q) && !ctx->in_rp;
+}
+
+static void
+begin_shared_stats_query(struct zink_context *ctx, struct zink_query *q)
+{
+   struct zink_vk_query *vkq =
+      util_dynarray_top_ptr(&q->starts, struct zink_query_start)->vkq[0];
+   if (!vkq->started) {
+      VKCTX(CmdBeginQuery)(ctx->bs->cmdbuf, vkq->pool->query_pool, vkq->query_id, 0);
+      vkq->started = true;
+      ctx->curr_stats_work_count = ctx->work_count;
+   }
+   /* not in the list while self-linked */
+   if (list_is_empty(&q->shared_stats_list))
+      list_addtail(&q->shared_stats_list, &ctx->stats_queries);
+}
+
+static void
+end_shared_stats_query(struct zink_context *ctx)
+{
+   struct zink_vk_query *vkq = ctx->curr_stats_query;
+   if (vkq && vkq->started) {
+      VKCTX(CmdEndQuery)(ctx->bs->cmdbuf, vkq->pool->query_pool, vkq->query_id);
+      vkq->started = false;
+   }
+   ctx->curr_stats_query = NULL;
+}
+
+/* End the shared query's interval; the queries still counting continue in a
+ * new one that enables every live statistic.
+ */
+static void
+restart_shared_stats_queries(struct zink_context *ctx)
+{
+   end_shared_stats_query(ctx);
+   list_for_each_entry(struct zink_query, q, &ctx->stats_queries, shared_stats_list) {
+      update_query_id(ctx, q);
+      reset_query_range(ctx, q);
+      begin_shared_stats_query(ctx, q);
+   }
+}
+
 static void
 begin_query(struct zink_context *ctx, struct zink_query *q)
 {
@@ -926,12 +1026,22 @@ begin_query(struct zink_context *ctx, struct zink_query *q)
    if (q->type == PIPE_QUERY_TIMESTAMP_DISJOINT || q->type >= PIPE_QUERY_DRIVER_SPECIFIC)
       return;
 
-   if (q->type == PIPE_QUERY_PIPELINE_STATISTICS_SINGLE && q->index == PIPE_STAT_QUERY_CS_INVOCATIONS && ctx->in_rp) {
-      /* refuse to start CS queries in renderpasses */
-      if (!list_is_linked(&q->active_list))
+   if (query_waits(ctx, q)) {
+      /* list_delinit leaves the entry self-linked */
+      if (!list_is_linked(&q->active_list) || list_is_empty(&q->active_list))
          list_addtail(&q->active_list, &ctx->suspended_queries);
       q->suspended = true;
       return;
+   }
+
+   if (is_shared_stats_query(q)) {
+      /* Join the shared query only if it has counted nothing yet and enables
+       * this statistic.
+       */
+      struct zink_vk_query *curr = ctx->curr_stats_query;
+      if (curr && (ctx->curr_stats_work_count != ctx->work_count ||
+                   !(curr->pool->pipeline_stats & pipeline_statistic_convert(q->index))))
+         restart_shared_stats_queries(ctx);
    }
 
    update_query_id(ctx, q);
@@ -982,7 +1092,9 @@ begin_query(struct zink_context *ctx, struct zink_query *q)
    } else if (q->vkqtype == VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT) {
       begin_vk_query_indexed(ctx, start->vkq[0], q->index, flags);
    }
-   if (q->vkqtype != VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT && q->vkqtype != VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT)
+   if (is_shared_stats_query(q))
+      begin_shared_stats_query(ctx, q);
+   else if (q->vkqtype != VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT && q->vkqtype != VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT)
       VKCTX(CmdBeginQuery)(ctx->bs->cmdbuf, start->vkq[0]->pool->query_pool, start->vkq[0]->query_id, flags);
    if (q->type == PIPE_QUERY_PIPELINE_STATISTICS_SINGLE && q->index == PIPE_STAT_QUERY_IA_VERTICES)  {
       assert(!ctx->vertices_query);
@@ -1013,6 +1125,8 @@ zink_begin_query(struct pipe_context *pctx,
       ctx->occlusion_query_active = true;
    if (query->type == PIPE_QUERY_PIPELINE_STATISTICS_SINGLE && query->index == PIPE_STAT_QUERY_PS_INVOCATIONS)
       ctx->fs_query_active = true;
+   if (is_shared_stats_query(query))
+      ctx->live_stats[query->index]++;
 
    query->predicate_dirty = true;
 
@@ -1069,8 +1183,13 @@ end_query(struct zink_context *ctx, struct zink_query *q)
    } else if (q->vkqtype == VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT) {
       end_vk_query_indexed(ctx, start->vkq[0], q->index);
    }
-   if (q->vkqtype != VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT &&
-       q->vkqtype != VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT && !is_time_query(q))
+   if (is_shared_stats_query(q)) {
+      list_delinit(&q->shared_stats_list);
+      /* The other queries counting into it end with it when suspending. */
+      if (start->vkq[0] == ctx->curr_stats_query)
+         end_shared_stats_query(ctx);
+   } else if (q->vkqtype != VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT &&
+              q->vkqtype != VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT && !is_time_query(q))
       VKCTX(CmdEndQuery)(ctx->bs->cmdbuf, start->vkq[0]->pool->query_pool, start->vkq[0]->query_id);
 
    if (q->type == PIPE_QUERY_PIPELINE_STATISTICS_SINGLE &&
@@ -1110,6 +1229,11 @@ zink_end_query(struct pipe_context *pctx,
    /* FIXME: this can be called from a thread, but it needs to write to the cmdbuf */
    threaded_context_unwrap_sync(pctx);
 
+   if (is_shared_stats_query(query)) {
+      assert(ctx->live_stats[query->index]);
+      ctx->live_stats[query->index]--;
+   }
+
    if (query->vkqtype == VK_QUERY_TYPE_OCCLUSION)
       ctx->occlusion_query_active = true;
    if (query->type == PIPE_QUERY_PIPELINE_STATISTICS_SINGLE && query->index == PIPE_STAT_QUERY_PS_INVOCATIONS)
@@ -1138,6 +1262,8 @@ zink_end_query(struct pipe_context *pctx,
       if (!query->started_in_rp)
          zink_batch_no_rp(ctx);
       end_query(ctx, query);
+      if (is_shared_stats_query(query) && !list_is_empty(&ctx->stats_queries))
+         restart_shared_stats_queries(ctx);
    }
 
    if (unset_null_fs)
@@ -1251,6 +1377,9 @@ zink_resume_queries(struct zink_context *ctx)
 {
    struct zink_query *query, *next;
    LIST_FOR_EACH_ENTRY_SAFE(query, next, &ctx->suspended_queries, active_list) {
+      /* begin_query would only requeue these */
+      if (query_waits(ctx, query))
+         continue;
       list_delinit(&query->active_list);
       query->suspended = false;
       if (query->type == PIPE_QUERY_PRIMITIVES_GENERATED)
@@ -1270,6 +1399,28 @@ zink_resume_cs_query(struct zink_context *ctx)
          list_delinit(&query->active_list);
          query->suspended = false;
          begin_query(ctx, query);
+      }
+   }
+}
+
+/* A compute invocations query active across a render pass would overlap the
+ * graphics statistics queries counting inside it, and only one statistics
+ * query may be active. Compute work is all outside render passes, so the
+ * query waits for the next dispatch instead.
+ */
+void
+zink_suspend_cs_query_for_renderpass(struct zink_context *ctx)
+{
+   if (!live_stats_mask(ctx))
+      return;
+   set_foreach(&ctx->bs->active_queries, entry) {
+      struct zink_query *query = (void*)entry->key;
+      if (query->active && !query->suspended &&
+          query->type == PIPE_QUERY_PIPELINE_STATISTICS_SINGLE &&
+          query->index == PIPE_STAT_QUERY_CS_INVOCATIONS) {
+         list_addtail(&query->active_list, &ctx->suspended_queries);
+         query->suspended = true;
+         suspend_query(ctx, query);
       }
    }
 }
@@ -1457,12 +1608,17 @@ zink_get_query_result_resource(struct pipe_context *pctx,
    unsigned num_queries = get_num_starts(query);
 
    /* it's possible that a query may have no data at all: write out zeroes to the buffer and return */
-   uint64_t u64[4] = {0};
-   unsigned src_offset = result_size * get_num_results(query);
+   uint64_t u64[PIPE_STAT_QUERY_COUNT + 1] = {0};
    if (!num_queries) {
-      tc_buffer_write(pctx, pres, offset, result_size, (unsigned char*)u64 + src_offset);
+      tc_buffer_write(pctx, pres, offset, result_size, u64);
       return;
    }
+   struct zink_query_start *start = util_dynarray_top_ptr(&query->starts, struct zink_query_start);
+   /* a shared statistics query writes the statistics it enables */
+   unsigned num_vk_results = is_shared_stats_query(query) ?
+                             util_bitcount(start->vkq[0]->pool->pipeline_stats) :
+                             get_num_results(query);
+   unsigned src_offset = result_size * num_vk_results;
 
    if (index == -1) {
       /* VK_QUERY_RESULT_WITH_AVAILABILITY_BIT will ALWAYS write some kind of result data
@@ -1475,7 +1631,6 @@ zink_get_query_result_resource(struct pipe_context *pctx,
 
       VkQueryResultFlags flag = is_time_query(query) ? 0 : VK_QUERY_RESULT_PARTIAL_BIT;
       if (zink_batch_usage_check_completion(ctx, query->batch_uses)) {
-         struct zink_query_start *start = util_dynarray_top_ptr(&query->starts, struct zink_query_start);
          unsigned query_id = start->vkq[0]->query_id;
          VkResult result = VKCTX(GetQueryPoolResults)(screen->dev, start->vkq[0]->pool->query_pool, query_id, 1,
                                    sizeof(u64), u64, 0, size_flags | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT | flag);
@@ -1486,9 +1641,10 @@ zink_get_query_result_resource(struct pipe_context *pctx,
             mesa_loge("ZINK: vkGetQueryPoolResults failed (%s)", vk_Result_to_str(result));
          }
       }
-      struct pipe_resource *staging = pipe_buffer_create(pctx->screen, 0, PIPE_USAGE_STAGING, src_offset + result_size);
+      struct pipe_resource *staging = pipe_buffer_create(pctx->screen, 0, PIPE_USAGE_STAGING,
+                                                         result_size * (get_num_results(query) + 1));
       copy_results_to_buffer(ctx, query, zink_resource(staging), 0, 1, size_flags | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT | flag);
-      zink_copy_buffer(ctx, res, zink_resource(staging), offset, result_size * get_num_results(query), result_size, false);
+      zink_copy_buffer(ctx, res, zink_resource(staging), offset, src_offset, result_size, false);
       pipe_resource_reference(&staging, NULL);
       return;
    }
@@ -1512,12 +1668,14 @@ zink_get_query_result_resource(struct pipe_context *pctx,
                update_qbo(ctx, query);
             /* internal qbo always writes 64bit value so we can just direct copy */
             zink_copy_buffer(ctx, res, zink_resource(query->curr_qbo->buffers[0]), offset,
-                             get_buffer_offset(query),
+                             get_buffer_offset(query) + start->stat_slot * sizeof(uint64_t),
                              result_size, false);
-         } else
+            return;
+         } else if (!is_shared_stats_query(query)) {
             /* have to do a new copy for 32bit */
             copy_results_to_buffer(ctx, query, res, offset, 1, size_flags);
-         return;
+            return;
+         }
       }
    }
 
@@ -1566,6 +1724,7 @@ zink_context_query_init(struct pipe_context *pctx)
    struct zink_context *ctx = zink_context(pctx);
    list_inithead(&ctx->suspended_queries);
    list_inithead(&ctx->primitives_generated_queries);
+   list_inithead(&ctx->stats_queries);
 
    pctx->create_query = zink_create_query;
    pctx->destroy_query = zink_destroy_query;

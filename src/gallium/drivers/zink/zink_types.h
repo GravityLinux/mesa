@@ -1887,6 +1887,13 @@ struct zink_context {
    struct list_head suspended_queries;
    struct list_head primitives_generated_queries;
    struct zink_query *vertices_query;
+   /* Graphics statistics queries share one Vulkan pipeline statistics query,
+    * since only one may be active at a time.
+    */
+   struct list_head stats_queries; /* the queries counting into it */
+   struct zink_vk_query *curr_stats_query;
+   unsigned curr_stats_work_count; /* ctx->work_count when it began */
+   unsigned live_stats[PIPE_STAT_QUERY_COUNT]; /* begun and not ended, per index */
    bool disable_fs;
    bool disable_color_writes;
    bool was_line_loop;
