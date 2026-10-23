@@ -1220,6 +1220,11 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       cmd->apple9_draw_state.base_instance = draw.start_instance;
       cmd->apple9_draw_state.pipeline = pipeline;
       cmd->apple9_draw_state.fragment = shaders[1];
+      /* Every dynamic, hk and shader dirty bit is consumed here, so the
+       * next clean draw can reuse this state. G16 has no other dirty-bit
+       * readers after this point (only shader resolution and the sysval
+       * upload, both above); a new one must read its bits before this or
+       * invalidate apple9_draw_state itself. */
       vk_dynamic_graphics_state_clear_dirty(dyn);
       gfx->shaders_dirty = 0;
       gfx->dirty = 0;
