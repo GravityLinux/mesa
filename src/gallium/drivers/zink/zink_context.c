@@ -4636,8 +4636,11 @@ zink_texture_barrier(struct pipe_context *pctx, unsigned flags)
                        VK_ACCESS_INPUT_ATTACHMENT_READ_BIT :
                        VK_ACCESS_SHADER_READ_BIT;
 
-   /* if this is a fb barrier, flush all pending clears */
-   if (ctx->rp_clears_enabled && dst == VK_ACCESS_INPUT_ATTACHMENT_READ_BIT)
+   /* A sampler barrier also makes earlier clears visible to feedback reads.
+    * Materialize them before the barrier, rather than folding them into the
+    * following rendering instance's loadOp where sampling can miss them.
+    */
+   if (ctx->clears_enabled)
       zink_flush_clears(ctx);
 
    /* this is not an in-renderpass barrier */
