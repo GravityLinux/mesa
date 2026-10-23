@@ -963,6 +963,8 @@ struct apple9_pending {
    unsigned first_need;
    bool unknown;
    struct agx_apple9_vir_instr producer[APPLE9_PENDING_MERGE];
+   /* Whether a device fence has issued since the producer did. */
+   bool fenced[APPLE9_PENDING_MERGE];
 };
 
 /* Pending instructions include fixed producers with no GPR result. Each is
@@ -1066,8 +1068,10 @@ apple9_complete(struct apple9_completion *state, unsigned mask)
       }
       unsigned count = 0;
       for (unsigned i = 0; i < p->count; ++i) {
-         if (!(apple9_producer_slots(&p->producer[i]) & mask))
+         if (!(apple9_producer_slots(&p->producer[i]) & mask)) {
+            p->fenced[count] = p->fenced[i];
             p->producer[count++] = p->producer[i];
+         }
       }
       p->count = count;
    }
@@ -1325,6 +1329,23 @@ apple9_completion_exempt(const struct agx_apple9_vir_instr *ins)
    return agx_apple9_encoding_info(ins->encoding)->prior_completion_exempt;
 }
 
+/* Acquire ordering: a plain device load still pending when a device fence
+ * issued must complete before a later device read is performed, or that read
+ * may observe memory older than the earlier one did (message passing through
+ * the fence). The device-fence drain this replaces satisfied it; the
+ * dependency belongs on the later read, which waits through its own input
+ * mask. Native Metal also leaves returning atomics pending across the fence
+ * before a later load (k23), so only plain loads are ordered here. */
+static bool
+apple9_acquire_hazard(const struct agx_apple9_vir_instr *ins,
+                      const struct agx_apple9_vir_instr *producer)
+{
+   return producer->op == AGX_APPLE9_VIR_DEVICE_LOAD &&
+          (ins->op == AGX_APPLE9_VIR_DEVICE_LOAD ||
+           ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC ||
+           ins->op == AGX_APPLE9_VIR_TEXTURE_SAMPLE);
+}
+
 static bool
 apple9_pending_hazard(const struct agx_apple9_vir_instr *ins,
                       const struct apple9_pending *p, bool barrier)
@@ -1337,7 +1358,8 @@ apple9_pending_hazard(const struct agx_apple9_vir_instr *ins,
    for (unsigned i = 0; i < p->count; ++i) {
       if (barrier && !(exempt & apple9_completion_class(&p->producer[i])))
          return true;
-      if (apple9_producer_hazard(ins, &p->producer[i]))
+      if (apple9_producer_hazard(ins, &p->producer[i]) ||
+          (p->fenced[i] && apple9_acquire_hazard(ins, &p->producer[i])))
          return true;
    }
    return false;
@@ -1374,14 +1396,20 @@ apple9_merge_pending(struct apple9_completion *to_state,
       t->first_need = UINT_MAX;
       for (unsigned i = 0; i < f->count; ++i) {
          bool present = false;
-         for (unsigned j = 0; j < t->count; ++j)
-            present |= apple9_same_producer(&t->producer[j], &f->producer[i]);
+         for (unsigned j = 0; j < t->count; ++j) {
+            if (apple9_same_producer(&t->producer[j], &f->producer[i])) {
+               t->fenced[j] |= f->fenced[i];
+               present = true;
+            }
+         }
          if (present)
             continue;
-         if (t->count == APPLE9_PENDING_MERGE)
+         if (t->count == APPLE9_PENDING_MERGE) {
             t->unknown = true;
-         else
+         } else {
+            t->fenced[t->count] = f->fenced[i];
             t->producer[t->count++] = f->producer[i];
+         }
       }
       if (t->unknown)
          t->count = 0;
@@ -1406,11 +1434,15 @@ apple9_first_need(const struct agx_apple9_vir_program *program, unsigned start,
                   bool drain)
 {
    const unsigned limit = MIN2(end, start + 512);
+   bool fenced = false;
    for (unsigned j = start; j < limit; ++j) {
       const struct agx_apple9_vir_instr *ins = program->instructions[j];
       if (ins->op == AGX_APPLE9_VIR_WAIT ||
           ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC_RESULT)
          continue;
+      if (fenced && apple9_acquire_hazard(ins, producer))
+         return j;
+      fenced |= ins->op == AGX_APPLE9_VIR_DEVICE_FENCE;
       if (apple9_completion_barrier(ins, drain) &&
           !(apple9_completion_exempt(ins) & apple9_completion_class(producer)))
          return j;
@@ -1733,6 +1765,7 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
             }
             if (joined) {
                struct apple9_pending *p = &pending[slot];
+               p->fenced[p->count] = false;
                p->producer[p->count++] = ins;
                p->latest_issue = out.instruction_count;
                p->first_need = MIN2(p->first_need, need);
@@ -1745,6 +1778,12 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
          apple9_select_compact_alu(&ins);
          if (!apple9_emit_physical(&out, &ins))
             goto cleanup;
+         if (ins.op == AGX_APPLE9_VIR_DEVICE_FENCE) {
+            for (unsigned slot = 1; slot <= 6; ++slot) {
+               for (unsigned k = 0; k < pending[slot].count; ++k)
+                  pending[slot].fenced[k] = true;
+            }
+         }
       }
       if (drain) {
          if (!apple9_retire(&out, &state, BITFIELD_MASK(6)))

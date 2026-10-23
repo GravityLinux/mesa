@@ -12199,6 +12199,42 @@ TEST_F(Apple9Completion, BarriersRetirePendingTextureReads)
    EXPECT_TRUE(waited);
 }
 
+/* Acquire through a device fence: a later device load waits, in its own
+ * input mask, for a plain load that was pending when the fence issued.
+ * Without the fence the loads stay independent. */
+TEST_F(Apple9Completion, LoadsAfterAFenceWaitForEarlierLoads)
+{
+   for (bool fenced : {false, true}) {
+      SCOPED_TRACE(fenced);
+      TearDown();
+      SetUp();
+      auto zero = imm(0);
+      auto guard = load(zero, 0);
+      if (fenced)
+         ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_DEVICE_FENCE,
+            AGX_APPLE9_ENC_DEVICE_FENCE, nullptr, 0, AGX_APPLE9_FENCE_DEVICE));
+      auto payload = load(zero, 1);
+      output(payload, 0);
+      output(guard, 1);
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
+      unsigned loads = 0, guard_slot = 0;
+      bool ordered = false;
+      for (unsigned i = 0; i < p.instruction_count; ++i) {
+         const auto *ins = p.instructions[i];
+         EXPECT_NE(ins->op, AGX_APPLE9_VIR_WAIT);
+         if (ins->op != AGX_APPLE9_VIR_DEVICE_LOAD)
+            continue;
+         if (loads++ == 0)
+            guard_slot = ins->producer_scoreboard_slot;
+         else
+            ordered = ins->scoreboard_slot == guard_slot;
+      }
+      ASSERT_EQ(loads, 2u);
+      EXPECT_EQ(ordered, fenced);
+   }
+}
+
 /* A barrier still waits for producers outside the memory class: here an
  * asynchronous system-value read. */
 TEST_F(Apple9Completion, BarriersRetireFixedProducers)
