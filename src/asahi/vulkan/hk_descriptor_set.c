@@ -250,7 +250,14 @@ hk_pack_storage_image(struct hk_device *dev, void *out,
          ext.metadata.base = hk_apple9_view_residency(dev, view, 0);
          ext.metadata.elements =
             view->vk.base_mip_level | (view->vk.base_array_layer << 16);
-         if (agx_apple9_translate_texture(ext.texture, &desc.tex))
+         /* A block-texel alias rebases to a single level. Its native 3D
+          * descriptor cannot express the original image's Z stride, but
+          * software storage reads use the explicit PBE stride correctly.
+          */
+         bool alias_3d = view->vk.view_type == VK_IMAGE_VIEW_TYPE_3D &&
+                         vk_format_is_compressed(view->vk.image->format) &&
+                         !vk_format_is_compressed(view->vk.format);
+         if (!alias_3d && agx_apple9_translate_texture(ext.texture, &desc.tex))
             ext.native_ok |= HK_APPLE9_STORAGE_READ_VALID;
          /* Native fetches need the original depth: it participates in the
           * inferred XY miptree stride when Z is the longest axis. Queries

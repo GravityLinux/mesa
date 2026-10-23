@@ -218,7 +218,10 @@ check_view(struct hk_device *dev, VkExtent3D extent, unsigned levels, unsigned l
       .image = hk_image_to_handle(&image), .viewType = VK_IMAGE_VIEW_TYPE_3D,
       .format = format, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level, 1, 0, 1},
    };
-   if (flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)
+   bool alias = vk_format_is_compressed(format);
+   if (alias)
+      vi.format = VK_FORMAT_R32G32B32A32_UINT;
+   else if (flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)
       vi.format = VK_FORMAT_R32_SFLOAT;
    if (flags & VK_IMAGE_CREATE_DESCRIPTOR_BUFFER_CAPTURE_REPLAY_BIT_EXT)
       vi.flags = VK_IMAGE_VIEW_CREATE_DESCRIPTOR_BUFFER_CAPTURE_REPLAY_BIT_EXT;
@@ -244,30 +247,37 @@ check_view(struct hk_device *dev, VkExtent3D extent, unsigned levels, unsigned l
    struct hk_apple9_storage_descriptor desc;
    get_descriptor(dev, sliced, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &desc);
    CHECK(sizeof(desc) == HK_APPLE9_DB_STORAGE_SIZE);
-   CHECK(desc.native_ok == HK_APPLE9_STORAGE_READ_VALID);
+   CHECK(desc.native_ok == (alias ? 0 : HK_APPLE9_STORAGE_READ_VALID));
    CHECK(!s->apple9_pbes.map);
    agx_unpack(NULL, &desc.common.tex, TEXTURE, query);
    agx_unpack(NULL, &desc.common.pbe, PBE, pbe);
    agx_unpack(NULL, &s->planes[0].ro_storage, TEXTURE, native);
    CHECK(native.depth == extent.depth);
-   CHECK(query.first_level == level && pbe.level == level);
+   CHECK(query.first_level == (alias ? 0 : level) && pbe.level == (alias ? 0 : level));
    CHECK(pbe.layer_stride_sw == layout->layer_stride_B);
-   CHECK(pbe.level_offset_sw == layout->level_offsets_B[level]);
-   CHECK(pbe.buffer == image.planes[0].addr + offset * (uint64_t)layout->layer_stride_B);
+   CHECK(pbe.level_offset_sw == (alias ? 0 : layout->level_offsets_B[level]));
+   CHECK(pbe.buffer == image.planes[0].addr + offset * (uint64_t)layout->layer_stride_B +
+         (alias ? layout->level_offsets_B[level] : 0));
    CHECK(native.address == pbe.buffer);
-   uint8_t native_expected[AGX_APPLE9_TEXTURE_TABLE_STRIDE];
-   CHECK(agx_apple9_translate_texture(native_expected, &s->planes[0].ro_storage));
+   uint8_t native_expected[AGX_APPLE9_TEXTURE_TABLE_STRIDE] = {0};
+   if (!alias)
+      CHECK(agx_apple9_translate_texture(native_expected, &s->planes[0].ro_storage));
    CHECK(!memcmp(desc.texture, native_expected, sizeof(native_expected)));
    /* Independently inspect the native depth bits: a Z-major image must retain
     * its full mip-tree depth even when only one slice is visible to storage.
     */
    uint64_t native_address;
    memcpy(&native_address, desc.texture + 8, 8);
-   CHECK(((native_address >> 46) & 0x7ff) + 1 == extent.depth);
-   CHECK((native_address & ((UINT64_C(1) << 40) - 1)) << 4 == pbe.buffer);
+   if (!alias) {
+      CHECK(((native_address >> 46) & 0x7ff) + 1 == extent.depth);
+      CHECK((native_address & ((UINT64_C(1) << 40) - 1)) << 4 == pbe.buffer);
+   }
    unsigned w = u_minify(extent.width, level), h = u_minify(extent.height, level);
+   w = util_format_get_nblocksx(layout->format, w);
+   h = util_format_get_nblocksy(layout->format, h);
    check_size(&desc.common.tex, w, h, slices);
-   check_size(&f->planes[0].sampled, w, h, depth);
+   if (!alias)
+      check_size(&f->planes[0].sampled, w, h, depth);
    enum pipe_format view_format = vk_format_to_pipe_format(vi.format);
    check_address(&desc.common.pbe, view_format, 0, 0, 0,
       image.planes[0].addr + ail_get_layer_level_B(layout, offset, level));
@@ -277,7 +287,9 @@ check_view(struct hk_device *dev, VkExtent3D extent, unsigned levels, unsigned l
    unsigned x = (w - 1) & ~(layout->tilesize_el[level].width_el - 1);
    unsigned y = (h - 1) & ~(layout->tilesize_el[level].height_el - 1);
    check_address(&desc.common.pbe, view_format, x, y, slices - 1,
-      image.planes[0].addr + ail_get_twiddled_block_B(layout, level, x, y, offset + slices - 1));
+      image.planes[0].addr + ail_get_twiddled_block_B(layout, level,
+         x * util_format_get_blockwidth(layout->format),
+         y * util_format_get_blockheight(layout->format), offset + slices - 1));
    check_updates(dev, sliced, &desc);
    hk_DestroyImageView(hk_device_to_handle(dev), sliced, NULL);
    hk_DestroyImageView(hk_device_to_handle(dev), full, NULL);
@@ -323,6 +335,11 @@ main(void)
               VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT);
    check_view(dev, (VkExtent3D){128, 64, 32}, 4, 2, 3, 2, VK_FORMAT_R32_UINT,
               VK_IMAGE_CREATE_DESCRIPTOR_BUFFER_CAPTURE_REPLAY_BIT_EXT);
+   for (unsigned level = 0; level < 5; ++level)
+      check_view(dev, (VkExtent3D){513, 257, 129}, 8, level, 1, 3,
+                 VK_FORMAT_BC3_UNORM_BLOCK, VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT |
+                 VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT |
+                 VK_IMAGE_CREATE_EXTENDED_USAGE_BIT);
    struct hk_apple9_storage_descriptor null;
    get_descriptor(dev, VK_NULL_HANDLE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &null);
    check_size(&null.common.tex, 0, 0, 0);
