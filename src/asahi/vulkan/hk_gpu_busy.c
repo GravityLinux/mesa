@@ -37,6 +37,7 @@ struct busy_pass_key {
    uint64_t code;
    uint32_t grid[3];
    uint32_t count;
+   uint32_t flags, reserved;
 };
 
 struct busy_slot {
@@ -89,9 +90,9 @@ pass_dump(struct busy_device *f, uint64_t now)
       struct busy_pass *p = &passes[i];
       if (!p->used)
          continue;
-      busy_printf(f, "GPU_PASS code=0x%" PRIx64 " grid=%u,%u,%u count=%u commands=%" PRIu64
+      busy_printf(f, "GPU_PASS code=0x%" PRIx64 " grid=%u,%u,%u count=%u flags=%u commands=%" PRIu64
               " vertex_ns=%" PRIu64 " fragment_ns=%" PRIu64 " compute_ns=%" PRIu64 "\n",
-              p->key.code, p->key.grid[0], p->key.grid[1], p->key.grid[2], p->key.count,
+              p->key.code, p->key.grid[0], p->key.grid[1], p->key.grid[2], p->key.count, p->key.flags,
               p->commands, p->ns[1], p->ns[2], p->ns[3]);
    }
    busy_printf(f, "GPU_PASS_END cpu_ns=%" PRIu64 "\n", now);
@@ -372,13 +373,13 @@ collect(struct busy_device *d, uint64_t now)
 
 void
 hk_gpu_busy_set_pass(struct hk_queue *queue, uint64_t code,
-                     const uint32_t grid[3], uint32_t count)
+                     const uint32_t grid[3], uint32_t count, uint32_t flags)
 {
    if (!queue->gpu_busy)
       return;
    pthread_mutex_lock(&busy_lock);
    pending_pass = (struct busy_pass_key){
-      .code = code, .grid = {grid[0], grid[1], grid[2]}, .count = count};
+      .code = code, .grid = {grid[0], grid[1], grid[2]}, .count = count, .flags = flags, .reserved = 0};
    pthread_mutex_unlock(&busy_lock);
 }
 

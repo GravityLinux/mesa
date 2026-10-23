@@ -275,6 +275,7 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    cmd->sync_render_continuation = false;
    cmd->api_dispatch = false;
    cmd->feedback_decompress = false;
+   memset(&cmd->feedback_stats, 0, sizeof(cmd->feedback_stats));
    cmd->rendering = false;
 
    memset(&cmd->state, 0, sizeof(cmd->state));
@@ -1741,6 +1742,7 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    uint8_t *map = cs->current;
 
    cs->tib = render->tilebuffer;
+   cs->feedback_color = render->feedback;
    /* Segment slots are per control stream; active queries continue in a new
     * segment here. */
    cs->occlusion_base = 0;

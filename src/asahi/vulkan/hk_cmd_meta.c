@@ -254,7 +254,20 @@ hk_meta_decompress_color(struct hk_cmd_buffer *cmd,
    struct hk_image *image = container_of(view->vk.image, struct hk_image, vk);
    struct ail_layout *layout = &image->planes[0].layout;
    unsigned level = view->vk.base_mip_level;
-   if (hk_feedback_is_raw(cmd, image, level, layer))
+   bool hit = hk_feedback_is_raw(cmd, image, level, layer);
+   if (unlikely(hk_cpu_level)) {
+      cmd->feedback_stats.calls++;
+      if (hit) {
+         cmd->feedback_stats.hits++;
+      } else {
+         cmd->feedback_stats.misses++;
+         cmd->feedback_stats.bytes +=
+            (uint64_t)u_minify(image->vk.extent.width, level) *
+            u_minify(image->vk.extent.height, level) *
+            vk_format_get_blocksize(image->vk.format);
+      }
+   }
+   if (hit)
       return true;
 
    VkFormat raw = hk_feedback_raw_format(image->vk.format);

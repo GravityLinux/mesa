@@ -129,6 +129,7 @@ static const char *hk_cpu_sub_name[HK_CPU_SUB_COUNT] = {
 };
 /* Heap-using renders per command buffer and per submit: 1, 2, 3, 4+. */
 static _Atomic uint64_t hk_cpu_heap_cmd[4], hk_cpu_heap_submit[4];
+static _Atomic uint64_t hk_cpu_feedback[4];
 static FILE *hk_cpu_out;
 
 static inline uint64_t
@@ -228,6 +229,11 @@ hk_cpu_report(bool force)
                     atomic_load(&hk_cpu_heap_cmd[i]), i + 1,
                     atomic_load(&hk_cpu_heap_submit[i]));
    }
+   fprintf(hk_cpu_out, "HK_FEEDBACK cpu_ns=%" PRIu64 " frames=%" PRIu64
+           " calls=%" PRIu64 " bytes=%" PRIu64 " hits=%" PRIu64
+           " misses=%" PRIu64 "\n", now, atomic_load(&hk_cpu_frames),
+           atomic_load(&hk_cpu_feedback[0]), atomic_load(&hk_cpu_feedback[1]),
+           atomic_load(&hk_cpu_feedback[2]), atomic_load(&hk_cpu_feedback[3]));
    fprintf(hk_cpu_out, "%s\n", line);
    fflush(hk_cpu_out);
 }
@@ -240,6 +246,15 @@ hk_cpu_timing_note_heap(unsigned renders, bool submit)
    atomic_fetch_add_explicit(
       &(submit ? hk_cpu_heap_submit : hk_cpu_heap_cmd)[MIN2(renders, 4) - 1], 1,
       memory_order_relaxed);
+}
+
+void
+hk_cpu_timing_note_feedback(const struct hk_feedback_stats *stats)
+{
+   atomic_fetch_add_explicit(&hk_cpu_feedback[0], stats->calls, memory_order_relaxed);
+   atomic_fetch_add_explicit(&hk_cpu_feedback[1], stats->bytes, memory_order_relaxed);
+   atomic_fetch_add_explicit(&hk_cpu_feedback[2], stats->hits, memory_order_relaxed);
+   atomic_fetch_add_explicit(&hk_cpu_feedback[3], stats->misses, memory_order_relaxed);
 }
 
 #define HK_WRAP_VOID(cat, name, PARAMS, ARGS)                                  \
