@@ -14,6 +14,9 @@ main(void)
    cmd->vk.base.device = &dev->vk;
    cmd->sync_events = UTIL_DYNARRAY_INIT;
    cmd->sync_remap = UTIL_DYNARRAY_INIT;
+   cmd->sync_first_event = UTIL_DYNARRAY_INIT;
+   util_dynarray_append(&cmd->sync_remap, (uint32_t)0);
+   util_dynarray_append(&cmd->sync_first_event, (uint32_t)HK_SYNC_NONE);
    uint8_t emitted[16384] = {0}, expected[16384] = {0};
    struct hk_cs cs = {
       .cmd = cmd, .type = HK_CS_VDM, .sync_id = 0,
@@ -51,6 +54,7 @@ main(void)
    CHECK(util_dynarray_num_elements(&cmd->sync_events, struct hk_sync_event) == 1);
    const struct hk_sync_event *event = cmd->sync_events.data;
    CHECK(event->stream == cs.sync_id);
+   CHECK(*util_dynarray_element(&cmd->sync_first_event, uint32_t, 0) == 0);
    CHECK(event->dst == (HK_SYNC_GRAPHICS | HK_SYNC_DRAW_INDIRECT));
 
 #define INVALIDATE(field, value) do { \
@@ -131,6 +135,7 @@ main(void)
 
    util_dynarray_fini(&cmd->sync_events);
    util_dynarray_fini(&cmd->sync_remap);
+   util_dynarray_fini(&cmd->sync_first_event);
    free(cmd);
    free(dev);
    return 0;
