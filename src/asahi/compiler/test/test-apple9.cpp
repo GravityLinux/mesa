@@ -12178,6 +12178,27 @@ TEST_F(Apple9Completion, FencesAndBarriersLeaveLoadsPending)
    }
 }
 
+/* Texture reads are not exempt: Metal waits for a pending read_write
+ * texture read before its texture barrier. */
+TEST_F(Apple9Completion, BarriersRetirePendingTextureReads)
+{
+   auto half = imm(0x3f000000);
+   uint32_t coords[] = {half, half};
+   auto texel = agx_apple9_vir_emit_texture_sample(&p, coords, half, 0, 0);
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_WORKGROUP_BARRIER,
+      AGX_APPLE9_ENC_WORKGROUP_BARRIER, nullptr, 0, 0));
+   output(texel, 0);
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
+   bool waited = false;
+   for (unsigned i = 0; i < p.instruction_count; ++i) {
+      waited |= p.instructions[i]->op == AGX_APPLE9_VIR_WAIT;
+      if (p.instructions[i]->op == AGX_APPLE9_VIR_WORKGROUP_BARRIER)
+         break;
+   }
+   EXPECT_TRUE(waited);
+}
+
 /* A barrier still waits for producers outside the memory class: here an
  * asynchronous system-value read. */
 TEST_F(Apple9Completion, BarriersRetireFixedProducers)

@@ -1294,15 +1294,17 @@ apple9_completion_class(const struct agx_apple9_vir_instr *producer)
 {
    if (apple9_scalar_publication(producer))
       return AGX_APPLE9_COMPLETION_PUBLICATION;
-   /* Threadgroup and private loads have fixed slots but are memory results:
-    * native Metal leaves threadgroup loads pending across barriers. */
+   /* Native T8132 Metal leaves device and threadgroup loads and returning
+    * atomics pending across fences and barriers. Threadgroup and private
+    * loads have fixed slots but are memory results too. Texture reads are
+    * not: before a texture barrier Metal waits for a pending read_write
+    * texture read, and our storage-image barriers have no such form. */
    switch (producer->op) {
    case AGX_APPLE9_VIR_DEVICE_LOAD:
    case AGX_APPLE9_VIR_DEVICE_ATOMIC:
    case AGX_APPLE9_VIR_PRIVATE_LOAD:
    case AGX_APPLE9_VIR_SHARED_LOAD:
    case AGX_APPLE9_VIR_SHARED_ATOMIC:
-   case AGX_APPLE9_VIR_TEXTURE_SAMPLE:
       return AGX_APPLE9_COMPLETION_MEMORY;
    default:
       return AGX_APPLE9_COMPLETION_OTHER;

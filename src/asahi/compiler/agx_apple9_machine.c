@@ -179,9 +179,9 @@ static const struct agx_apple9_encoding_info encodings[] = {
       .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
    },
    /* Native T8132 Metal issues both the fence and the barrier with device
-    * loads, returning atomics and threadgroup loads outstanding, including
-    * before another invocation's store to a loaded location, and waits at
-    * the results' consumers. The scheduler still drains the raster-order and
+    * and threadgroup loads and returning device and threadgroup atomics
+    * outstanding, including before another invocation's store to a loaded
+    * location, and waits at the results' consumers. The scheduler still drains the raster-order and
     * object-grid fence forms, which have no such evidence. */
    [AGX_APPLE9_ENC_DEVICE_FENCE] = {
       .name = "device_fence", .length = 6,

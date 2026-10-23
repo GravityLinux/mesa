@@ -270,10 +270,11 @@ enum agx_apple9_dependency_layout {
 
 /*
  * Pending producers grouped by what a completion barrier must order against.
- * Memory results are device, private and threadgroup loads, returning atomics
- * and texture reads. Publications are scalar exports, consumed only through
+ * Memory results are device, private and threadgroup loads and returning
+ * atomics. Publications are scalar exports, consumed only through
  * their readers' dependency fields. Everything else (fixed producers such as
- * system values and mesh control, scratch traffic, tile loads) is "other".
+ * system values and mesh control, texture reads, scratch traffic, tile
+ * loads) is "other".
  */
 enum agx_apple9_completion_class {
    AGX_APPLE9_COMPLETION_MEMORY = 1 << 0,
