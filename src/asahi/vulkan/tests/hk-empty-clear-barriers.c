@@ -12,7 +12,7 @@ int main(void)
    vk_object_base_init(&dev->vk, &cmd->vk.base, VK_OBJECT_TYPE_COMMAND_BUFFER);
    struct hk_cs older = {.cmd = cmd, .type = HK_CS_CDM, .sync_id = 0};
    struct hk_cs clear = {.cmd = cmd, .type = HK_CS_VDM, .sync_id = 1};
-   hk_cmd_sync_work(cmd, &older, HK_SYNC_COPY);
+   hk_cmd_sync_work(cmd, &older, HK_SYNC_TRANSFER);
    hk_cmd_sync_work(cmd, &clear, HK_SYNC_GRAPHICS);
    cmd->merge_cs = cmd->current_cs.gfx = &clear;
    cmd->merge_empty = true;
