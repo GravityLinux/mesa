@@ -12378,9 +12378,10 @@ TEST(Apple9CompletionArms, IfElseAlternativesShareASlot)
    ralloc_free(b.shader);
 }
 
-/* A device load pending from the then arm and an else-arm write to the same
- * (phi-coalesced) register act on disjoint lanes: the write does not wait. */
-TEST(Apple9CompletionArms, ElseWriteOverPendingThenLoadDoesNotWait)
+/* An ALU write in the else arm to the register a then-arm device load still
+ * has pending must wait: only two masked writebacks may cross arms (k19,
+ * k20), and allowing this one failed memory_model.message_passing on T8132. */
+TEST(Apple9CompletionArms, ElseAluWriteOverPendingThenLoadWaits)
 {
    nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE,
       &agx_nir_options, "else_write_over_then_load");
@@ -12424,7 +12425,7 @@ TEST(Apple9CompletionArms, ElseWriteOverPendingThenLoadDoesNotWait)
    const char *reason = nullptr;
    ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
    unsigned load_reg = ~0u, slot = 0;
-   bool in_else = false, wrote_same = false;
+   bool in_else = false, wrote_same = false, waited = false;
    for (unsigned i = 0; i < p.instruction_count; ++i) {
       const auto *ins = p.instructions[i];
       if (ins->op == AGX_APPLE9_VIR_DEVICE_LOAD) {
@@ -12435,10 +12436,14 @@ TEST(Apple9CompletionArms, ElseWriteOverPendingThenLoadDoesNotWait)
       if (ins->op == AGX_APPLE9_VIR_EXEC_MASK_POP)
          in_else = false;
       if (in_else) {
-         EXPECT_NE(ins->op, AGX_APPLE9_VIR_WAIT);
-         EXPECT_NE(ins->scoreboard_slot, slot);
-         wrote_same |= ins->dest != AGX_APPLE9_VREG_INVALID &&
+         bool writes = ins->dest != AGX_APPLE9_VREG_INVALID &&
                        p.phys[ins->dest] == load_reg;
+         if (writes)
+            EXPECT_TRUE(waited);
+         wrote_same |= writes;
+         waited |= (ins->op == AGX_APPLE9_VIR_WAIT &&
+                    (ins->immediate & BITFIELD_BIT(slot - 1))) ||
+                   ins->scoreboard_slot == slot;
       }
    }
    /* Otherwise the test does not exercise a register overlap. */

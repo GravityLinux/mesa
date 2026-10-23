@@ -1450,21 +1450,6 @@ apple9_arms_disjoint(const struct apple9_arms *arms, unsigned a, unsigned b)
    return false;
 }
 
-/* A read of a pending result by an instruction in a lane-disjoint arm does
- * not need it. */
-static bool
-apple9_pending_result_in(const struct apple9_pending *p, unsigned reg,
-                         const struct apple9_arms *arms, unsigned arm)
-{
-   for (unsigned i = 0; i < p->count; ++i) {
-      if (apple9_producer_result(&p->producer[i], reg) &&
-          !(apple9_masked_writeback(&p->producer[i]) &&
-            apple9_arms_disjoint(arms, p->arm[i], arm)))
-         return true;
-   }
-   return false;
-}
-
 static bool
 apple9_pending_hazard(const struct agx_apple9_vir_instr *ins,
                       const struct apple9_pending *p, bool barrier,
@@ -1480,7 +1465,14 @@ apple9_pending_hazard(const struct agx_apple9_vir_instr *ins,
          return true;
       if (apple9_resource_hazard(ins, &p->producer[i]))
          return true;
+      /* Two masked writebacks from opposite arms of a region may target
+       * the same register while the first is pending (k19, k20). Nothing
+       * else crosses arms: an ALU write over another arm's pending load
+       * has no such evidence (native Metal orders the arms so it never
+       * happens) and failed memory_model.message_passing intermittently on
+       * T8132 when allowed. */
       if (!(apple9_masked_writeback(&p->producer[i]) &&
+            apple9_masked_writeback(ins) &&
             apple9_arms_disjoint(arms, p->arm[i], arm)) &&
           apple9_lane_hazard(ins, &p->producer[i]))
          return true;
@@ -1806,7 +1798,7 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
             bool needed =
                apple9_pending_hazard(&ins, p, barrier, &arms, arms.of[i]);
             for (unsigned s = 0; s < ins.nr_srcs; ++s)
-               needed |= apple9_pending_result_in(p, ins.src[s], &arms, arms.of[i]);
+               needed |= apple9_pending_result(p, ins.src[s]);
             if (!needed)
                continue;
             if (!fold && apple9_can_fold_pending(&ins, p))
