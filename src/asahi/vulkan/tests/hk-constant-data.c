@@ -217,6 +217,18 @@ bind_upload(void)
    CHECK(!desc->root.constant_data[MESA_SHADER_MESH]);
    CHECK(!(desc->root_constant_stages & BITFIELD_BIT(MESA_SHADER_MESH)));
    CHECK(!memcmp(desc->descriptor_buffers, canary, sizeof(canary)));
+   /* Rebinding a native-only leaf updates its stage's constant root. */
+   struct hk_api_shader leaf = {.apple9_native_leaf = true,
+                                .constant_data_addr = 0x900000};
+   leaf.vk.stage = MESA_SHADER_MESH;
+   hk_cmd_bind_graphics_shader(cmd, MESA_SHADER_MESH, &leaf);
+   uint64_t address = hk_cmd_buffer_upload_root(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
+   struct hk_root_descriptor_table *uploaded = (void *)(pool + address - base);
+   CHECK(uploaded->constant_data[MESA_SHADER_MESH] == leaf.constant_data_addr);
+   CHECK(!memcmp(desc->descriptor_buffers, canary, sizeof(canary)));
+   hk_cmd_bind_graphics_shader(cmd, MESA_SHADER_MESH, NULL);
+   CHECK(!desc->root.constant_data[MESA_SHADER_MESH]);
+   CHECK(!(desc->root_constant_stages & BITFIELD_BIT(MESA_SHADER_MESH)));
    free(pool);
    free(cmd);
    free(dev);
