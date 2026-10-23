@@ -8014,6 +8014,42 @@ TEST(Apple9Compiler, BoundedVertexInputsUseBufferDescriptors)
    ralloc_free(b.shader);
 }
 
+TEST(Apple9Compiler, UnboundedVertexInputsSkipBoundsChecks)
+{
+   /* Without vertex input robustness, descriptor-table fetches keep their
+    * address and dynamic stride but drop the bounds check and the redirect
+    * to the zero sink. */
+   unsigned sizes[2];
+   for (unsigned unbounded = 0; unbounded < 2; ++unbounded) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_VERTEX, &agx_nir_options, "unbounded_vertex_input");
+      nir_def *position = nir_load_input(
+         &b, 4, 32, nir_imm_int(&b, 0), .dest_type = nir_type_float32,
+         .io_semantics = {.location = VERT_ATTRIB_GENERIC0, .num_slots = 1});
+      nir_store_output(&b, position, nir_imm_int(&b, 0), .write_mask = 15,
+         .src_type = nir_type_float32,
+         .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+      b.shader->info.io_lowered = true;
+      agx_apple9_vertex_layout layout = {};
+      layout.format[0] = PIPE_FORMAT_R32G32B32A32_FLOAT;
+      layout.offset[0] = 4;
+      layout.buffer[0] = 3;
+      layout.buffer_descriptor_ubo = 66;
+      layout.dynamic_stride = true;
+      layout.unbounded = unbounded;
+      agx_shader_part compiled = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_vertex_inputs(b.shader, &layout, &compiled, &reason))
+         << (reason ?: "");
+      EXPECT_EQ(compiled.info.apple9_resource_count, 1);
+      EXPECT_EQ(compiled.info.apple9_resource_binding[0], 66);
+      sizes[unbounded] = compiled.info.main_size;
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
+   EXPECT_LT(sizes[1], sizes[0]);
+}
+
 TEST(Apple9Compiler, PackedVertexInputsShareSparseBufferBinding)
 {
    nir_builder b = nir_builder_init_simple_shader(
