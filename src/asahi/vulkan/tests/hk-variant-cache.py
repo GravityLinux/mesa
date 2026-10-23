@@ -12,12 +12,16 @@ env = {k: v for k, v in os.environ.items()
 with tempfile.TemporaryDirectory(prefix="hk-variant-cache-") as directory:
     env["MESA_SHADER_CACHE_DIR"] = directory
     subprocess.run([binary], env=env, check=True)
+    subprocess.run([binary, "--native-cache"], env=env | {
+        "HK_APPLE9_NATIVE_MESH": "1", "HK_APPLE9_NATIVE_MESH_ATTRIBUTES": "1",
+        "HK_APPLE9_NATIVE_MESH_PRIMITIVE_LOWERING": "1"}, check=True)
     subprocess.run([binary, "--cold-process"], env=env, check=True)
     subprocess.run([binary, "--warm-process"], env=env, check=True)
     verify = subprocess.run([binary, "--verify-process"],
                             env=env | {"HK_APPLE9_VARIANT_CACHE_VERIFY": "1"},
                             capture_output=True, text=True, check=True)
     assert "cache mismatch" not in verify.stderr, verify.stderr
+    assert "variant cache verified" in verify.stderr, verify.stderr
     print("verification mode recompiled the warm entry without a mismatch")
 
     def key(**settings):

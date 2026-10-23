@@ -143,6 +143,51 @@ source(unsigned stage, bool cull)
    return b.shader;
 }
 
+static nir_shader *
+mesh_source(bool fragment, unsigned vertices, unsigned primitives)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      fragment ? MESA_SHADER_FRAGMENT : MESA_SHADER_MESH, &agx_nir_options,
+      "hybrid ownership");
+   b.shader->info.io_lowered = true;
+   if (fragment) {
+      nir_def *value = nir_load_per_primitive_input(&b, 4, 32,
+         nir_imm_int(&b, 0), .dest_type = nir_type_float32,
+         .io_semantics = {.location = VARYING_SLOT_VAR0, .num_slots = 1});
+      nir_store_output(&b, value, nir_imm_int(&b, 0), .write_mask = 15,
+         .src_type = nir_type_float32,
+         .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+   } else {
+      b.shader->info.workgroup_size[0] = b.shader->info.workgroup_size[1] =
+         b.shader->info.workgroup_size[2] = 1;
+      b.shader->info.mesh.max_vertices_out = vertices;
+      b.shader->info.mesh.max_primitives_out = primitives;
+      b.shader->info.mesh.primitive_type = MESA_PRIM_TRIANGLES;
+      nir_set_vertex_and_primitive_count(&b, nir_imm_int(&b, 3),
+                                         nir_imm_int(&b, 1), nir_imm_int(&b, 0));
+      for (unsigned v = 0; v < 3; ++v)
+         nir_store_per_vertex_output(&b,
+            nir_imm_vec4(&b, v == 0 ? -.5 : .5, v == 2 ? .5 : -.5, .5, 1),
+            nir_imm_int(&b, v), nir_imm_int(&b, 0), .write_mask = 15,
+            .src_type = nir_type_float32,
+            .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+      nir_store_per_primitive_output(&b, nir_imm_ivec3(&b, 0, 1, 2),
+         nir_imm_int(&b, 0), nir_imm_int(&b, 0), .write_mask = 7,
+         .src_type = nir_type_uint32,
+         .io_semantics = {.location = VARYING_SLOT_PRIMITIVE_INDICES, .num_slots = 1});
+      nir_store_per_primitive_output(&b, nir_imm_vec4(&b, .2, .4, .6, 1),
+         nir_imm_int(&b, 0), nir_imm_int(&b, 0), .write_mask = 15,
+         .src_type = nir_type_float32,
+         .io_semantics = {.location = VARYING_SLOT_VAR0, .num_slots = 1});
+   }
+   /* Both independently lowered realizations retain the original table. */
+   b.shader->constant_data_size = 64;
+   b.shader->constant_data = ralloc_size(b.shader, 64);
+   memset(b.shader->constant_data, fragment ? 0x35 : 0x57, 64);
+   nir_shader_gather_info(b.shader, nir_shader_get_entrypoint(b.shader));
+   return b.shader;
+}
+
 static void
 api_create(struct hk_device *dev, struct hk_api_shader **api, bool cull)
 {
@@ -178,15 +223,17 @@ key_tests(struct hk_device *dev, struct hk_api_shader **api)
 {
    struct hk_apple9_graphics_key key;
    hk_apple9_graphics_key(&key, NULL);
+   bool prefer_native = false;
    blake3_hash original, changed;
-   CHECK(hk_apple9_variant_cache_key(dev, api, &key, original));
+   CHECK(hk_apple9_variant_cache_key(dev, api, &key, prefer_native, original));
 #define DIFFERENT(change, restore)                                             \
    do {                                                                        \
       change;                                                                  \
-      CHECK(hk_apple9_variant_cache_key(dev, api, &key, changed));             \
+      CHECK(hk_apple9_variant_cache_key(dev, api, &key, prefer_native, changed));             \
       CHECK(memcmp(original, changed, sizeof(original)));                      \
       restore;                                                                 \
    } while (0)
+   DIFFERENT(prefer_native = true, prefer_native = false);
    DIFFERENT(dev->vk.physical->properties.pipelineCacheUUID[0] ^= 1,
              dev->vk.physical->properties.pipelineCacheUUID[0] ^= 1);
    DIFFERENT(dev->vk.physical->properties.shaderBinaryVersion++,
@@ -213,10 +260,10 @@ key_tests(struct hk_device *dev, struct hk_api_shader **api)
    DIFFERENT(api[MESA_SHADER_FRAGMENT] = NULL,
              api[MESA_SHADER_FRAGMENT] = saved_fs);
 #undef DIFFERENT
-   CHECK(hk_apple9_variant_cache_key(dev, api, &key, changed));
+   CHECK(hk_apple9_variant_cache_key(dev, api, &key, prefer_native, changed));
    CHECK(!memcmp(original, changed, sizeof(original)));
    api[MESA_SHADER_VERTEX]->apple9_deferred = NULL;
-   CHECK(!hk_apple9_variant_cache_key(dev, api, &key, changed));
+   CHECK(!hk_apple9_variant_cache_key(dev, api, &key, prefer_native, changed));
    api[MESA_SHADER_VERTEX]->apple9_deferred = d;
 }
 
@@ -233,9 +280,10 @@ expect_miss(struct hk_device *dev, const void *data, size_t size, unsigned mask)
 }
 
 static void
-blob_tests(struct hk_device *dev, struct hk_api_shader **resolved)
+blob_tests(struct hk_device *dev, struct hk_api_shader **resolved,
+           unsigned first_stage)
 {
-   unsigned stages[] = {MESA_SHADER_VERTEX, MESA_SHADER_FRAGMENT};
+   unsigned stages[] = {first_stage, MESA_SHADER_FRAGMENT};
    struct vk_shader *shaders[] = {&resolved[stages[0]]->vk,
                                   &resolved[stages[1]]->vk};
    struct blob blob;
@@ -265,7 +313,7 @@ blob_tests(struct hk_device *dev, struct hk_api_shader **resolved)
    expect_miss(dev, bad, blob.size + 1, mask);
    /* Header, UUID, binary version, count, stage, stage length, nested stage,
     * and deferred flag must all agree before a binary can be installed. */
-   const unsigned corrupt[] = {0, 4, 20, 24, 28, 32, 36, 37};
+   const unsigned corrupt[] = {0, 4, 20, 24, 28, 32, 36, 40};
    for (unsigned i = 0; i < ARRAY_SIZE(corrupt); ++i) {
       memcpy(bad, blob.data, blob.size);
       bad[corrupt[i]] ^= 0xff;
@@ -283,6 +331,104 @@ blob_tests(struct hk_device *dev, struct hk_api_shader **resolved)
    expect_miss(dev, bad, blob.size, mask);
    free(bad);
    blob_finish(&blob);
+}
+
+
+/* The common deserializer must reject impossible payload sizes before
+ * allocating host or GPU program storage, independently of the outer cache. */
+static void
+payload_bounds_tests(struct hk_device *dev)
+{
+   const uint32_t lengths[][3] = {
+      {UINT32_MAX, 0, 0}, {0, UINT32_MAX, 0},
+      {4, 0, 3}, {0, 4, 3}, {2, 2, 3},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(lengths); ++i) {
+      struct blob blob;
+      blob_init(&blob);
+      const struct hk_shader_info info = {.stage = MESA_SHADER_VERTEX};
+      const struct agx_shader_info backend = {0};
+      blob_write_bytes(&blob, &info, sizeof(info));
+      blob_write_bytes(&blob, &backend, sizeof(backend));
+      blob_write_uint32(&blob, lengths[i][0]);
+      blob_write_uint32(&blob, lengths[i][1]);
+      const uint32_t data = 0;
+      blob_write_bytes(&blob, &data, lengths[i][2]);
+      struct blob_reader reader;
+      blob_reader_init(&reader, blob.data, blob.size);
+      struct hk_shader shader = {0};
+      unsigned before = allocations;
+      CHECK(hk_deserialize_shader(dev, &reader, &shader) ==
+            VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
+      CHECK(!shader.code_ptr && !shader.data_ptr && !shader.linked.ht);
+      CHECK(allocations == before);
+      blob_finish(&blob);
+   }
+}
+
+static void
+mesh_api_create(struct hk_device *dev, struct hk_api_shader **api)
+{
+   struct vk_shader_compile_info infos[] = {
+      {.stage = MESA_SHADER_MESH, .nir = mesh_source(false, 3, 1),
+       .robustness = &vk_robustness_disabled},
+      {.stage = MESA_SHADER_FRAGMENT, .nir = mesh_source(true, 0, 0),
+       .robustness = &vk_robustness_disabled},
+   };
+   struct vk_shader *out[2] = {0};
+   CHECK(hk_apple9_defer_graphics(dev, 2, infos, NULL, NULL, out) == VK_SUCCESS);
+   memset(api, 0, HK_APPLE9_GFX_STAGES * sizeof(*api));
+   api[MESA_SHADER_MESH] = container_of(out[0], struct hk_api_shader, vk);
+   api[MESA_SHADER_FRAGMENT] = container_of(out[1], struct hk_api_shader, vk);
+   CHECK(api[MESA_SHADER_MESH]->apple9_native_candidate);
+}
+
+static void
+native_cache_tests(struct hk_device *dev)
+{
+   dev->vk.mem_cache = cache_create(dev, NULL, 0, false);
+   /* Hold sources so their raw variant objects survive this weak cache. */
+   struct hk_api_shader *api[5][HK_APPLE9_GFX_STAGES];
+   struct hk_api_shader *out[HK_APPLE9_GFX_STAGES];
+   for (unsigned i = 0; i < ARRAY_SIZE(api); ++i) {
+      mesh_api_create(dev, api[i]);
+      bool native = i < 2;
+      unsigned before = nir_loads;
+      if (i == 4)
+         api[i][MESA_SHADER_MESH]->apple9_native_candidate = false;
+      CHECK(hk_apple9_resolve_graphics(dev, api[i], NULL, out,
+                                      native || i == 4) == VK_SUCCESS);
+      CHECK(nir_loads == before + ((i == 0 || i == 2) ? 2 : 0));
+      CHECK(out[MESA_SHADER_MESH]->apple9_native_leaf == native);
+      CHECK(out[MESA_SHADER_FRAGMENT]->apple9_native_leaf == native);
+      CHECK(out[MESA_SHADER_MESH]->constant_data_addr);
+      CHECK(out[MESA_SHADER_FRAGMENT]->constant_data_addr);
+      if (native) {
+         CHECK(!memcmp(out[MESA_SHADER_MESH]->apple9_native_pair_id,
+                        out[MESA_SHADER_FRAGMENT]->apple9_native_pair_id,
+                        sizeof(blake3_hash)));
+      }
+      if (i == 0 || i == 2)
+         blob_tests(dev, out, MESA_SHADER_MESH);
+   }
+   CHECK(dev->vk.mem_cache->object_cache->entries == 2);
+   /* A valid deferred container is not a compiled draw variant. */
+   unsigned stages[] = {MESA_SHADER_MESH, MESA_SHADER_FRAGMENT};
+   struct vk_shader *shaders[] = {&api[0][stages[0]]->vk,
+                                  &api[0][stages[1]]->vk};
+   struct blob blob;
+   blob_init(&blob);
+   hk_apple9_variant_cache_store(dev, stages, 2, shaders, &blob);
+   expect_miss(dev, blob.data, blob.size,
+               BITFIELD_BIT(stages[0]) | BITFIELD_BIT(stages[1]));
+   blob_finish(&blob);
+   for (unsigned i = 0; i < ARRAY_SIZE(api); ++i)
+      api_destroy(dev, api[i]);
+   hk_apple9_variants_finish(dev);
+   hk_apple9_bodies_finish(dev);
+   CHECK(live_bos == 0 && dev->vk.mem_cache->object_cache->entries == 0);
+   vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
+   puts("native cache: separate native/emulated hits, collapsed candidate, pair IDs, constants and malformed hybrid containers pass");
 }
 
 static void
@@ -335,12 +481,17 @@ main(int argc, char **argv)
    struct hk_api_shader *api[HK_APPLE9_GFX_STAGES];
    struct hk_api_shader *again[HK_APPLE9_GFX_STAGES];
    struct hk_api_shader *out[HK_APPLE9_GFX_STAGES];
+   payload_bounds_tests(dev);
+   if (argc == 2 && !strcmp(argv[1], "--native-cache")) {
+      native_cache_tests(dev);
+      goto finish;
+   }
    api_create(dev, api, false);
    if (argc == 2 && !strcmp(argv[1], "--key")) {
       struct hk_apple9_graphics_key key;
       hk_apple9_graphics_key(&key, NULL);
       blake3_hash hash;
-      CHECK(hk_apple9_variant_cache_key(dev, api, &key, hash));
+      CHECK(hk_apple9_variant_cache_key(dev, api, &key, false, hash));
       for (unsigned i = 0; i < sizeof(hash); ++i)
          printf("%02x", hash[i]);
       puts("");
@@ -361,7 +512,7 @@ main(int argc, char **argv)
    unsigned before = nir_loads;
    CHECK(hk_apple9_resolve_graphics(dev, api, NULL, out, false) == VK_SUCCESS);
    CHECK(nir_loads == before + 2);
-   blob_tests(dev, out);
+   blob_tests(dev, out, MESA_SHADER_VERTEX);
    /* These are the exact driver callbacks used by application VkPipelineCache
     * objects and shader binaries. Export after the draw-time variant exists. */
    struct blob api_blobs[2];

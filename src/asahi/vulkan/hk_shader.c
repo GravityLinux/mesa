@@ -7410,11 +7410,11 @@ static bool
 hk_apple9_variant_cache_key(struct hk_device *dev,
                             struct hk_api_shader *const api[HK_APPLE9_GFX_STAGES],
                             const struct hk_apple9_graphics_key *key,
-                            blake3_hash out)
+                            bool prefer_native, blake3_hash out)
 {
    struct mesa_blake3 ctx;
    _mesa_blake3_init(&ctx);
-   static const char tag[] = "hk-apple9-variant-v2";
+   static const char tag[] = "hk-apple9-variant-v3";
    _mesa_blake3_update(&ctx, tag, sizeof(tag));
    /* The UUID covers the driver build ID, root layout and compiler flags,
     * including when these entries travel inside an application cache. */
@@ -7430,6 +7430,10 @@ hk_apple9_variant_cache_key(struct hk_device *dev,
       hk_make_feature_key(&dev->vk.enabled_features);
    _mesa_blake3_update(&ctx, &features, sizeof(features));
    _mesa_blake3_update(&ctx, key, sizeof(*key));
+   /* Use the effective request after candidate collapse. Native leaves cannot
+    * satisfy an emulated draw, even when every graphics-state field agrees. */
+   _mesa_blake3_update(&ctx, &prefer_native, sizeof(prefer_native));
+   hk_hash_apple9_native_mesh_abi(&ctx);
    for (unsigned s = 0; s < HK_APPLE9_GFX_STAGES; ++s) {
       const uint32_t present = api[s] != NULL;
       _mesa_blake3_update(&ctx, &present, sizeof(present));
@@ -7478,31 +7482,6 @@ hk_apple9_variant_cache_store(struct hk_device *dev,
    }
 }
 
-/* Check sizes before the driver deserializer allocates code/data buffers. */
-static bool
-hk_apple9_variant_stage_valid(const void *data, size_t size, unsigned stage)
-{
-   struct blob_reader blob;
-   blob_reader_init(&blob, data, size);
-   if (blob_read_uint8(&blob) != stage || blob_read_uint8(&blob) != 0)
-      return false;
-   for (unsigned i = 0; i < hk_num_variants(stage); ++i) {
-      struct hk_shader_info info;
-      blob_copy_bytes(&blob, &info, sizeof(info));
-      blob_read_bytes(&blob, sizeof(struct agx_shader_info));
-      uint32_t code_size = blob_read_uint32(&blob);
-      uint32_t data_size = blob_read_uint32(&blob);
-      if (blob.overrun || (unsigned)info.stage >= MESA_SHADER_MESH_STAGES)
-         return false;
-      blob_read_bytes(&blob, code_size);
-      blob_read_bytes(&blob, data_size);
-      if (blob.overrun)
-         return false;
-   }
-   blob_read_uint8(&blob); /* pre_raster_reads */
-   return !blob.overrun && blob.current == blob.end;
-}
-
 /* Returns the number of stages loaded into out, or 0 on a miss. */
 static unsigned
 hk_apple9_variant_cache_load(struct hk_device *dev, const void *data,
@@ -7532,8 +7511,7 @@ hk_apple9_variant_cache_load(struct hk_device *dev, const void *data,
       const uint8_t *bytes = blob_read_bytes(&blob, len);
       if (blob.overrun || stages[i] >= HK_APPLE9_GFX_STAGES ||
           stages[i] == MESA_SHADER_COMPUTE ||
-          !(remaining & BITFIELD_BIT(stages[i])) || len < 2 ||
-          !hk_apple9_variant_stage_valid(bytes, len, stages[i]))
+          !(remaining & BITFIELD_BIT(stages[i])) || !len)
          break;
       remaining &= ~BITFIELD_BIT(stages[i]);
       struct blob_reader stage;
@@ -7542,6 +7520,11 @@ hk_apple9_variant_cache_load(struct hk_device *dev, const void *data,
                                           &out[i]) != VK_SUCCESS ||
           !out[i] || out[i]->stage != stages[i] || stage.overrun ||
           stage.current != stage.end)
+         break;
+      /* Persistent draw variants contain compiled realizations only. Let the
+       * one driver deserializer own the container format, then check the kind. */
+      struct hk_api_shader *api = container_of(out[i], struct hk_api_shader, vk);
+      if (api->apple9_deferred)
          break;
    }
    if (i == count && !remaining && blob.current == blob.end)
@@ -7652,7 +7635,8 @@ compile:;
    blake3_hash cache_key;
    const bool cacheable =
       dev->vk.mem_cache &&
-      hk_apple9_variant_cache_key(dev, api, &search.key, cache_key);
+      hk_apple9_variant_cache_key(dev, api, &search.key, search.prefer_native,
+                                    cache_key);
    struct vk_shader *cached[HK_APPLE9_GFX_STAGES];
    unsigned cached_stages[HK_APPLE9_GFX_STAGES];
    unsigned cached_count = 0;
@@ -7694,6 +7678,9 @@ compile:;
          if (api[s])
             hk_apple9_remember_variant(api[s], cache_object);
       simple_mtx_lock(&dev->apple9_variants.lock);
+      if (search.prefer_native &&
+          !v->shaders[MESA_SHADER_MESH]->apple9_native_leaf)
+         p_atomic_set(&api[MESA_SHADER_MESH]->apple9_native_candidate, false);
       v->result = VK_SUCCESS;
       util_queue_fence_signal(&v->ready);
       simple_mtx_unlock(&dev->apple9_variants.lock);
@@ -7810,6 +7797,9 @@ compile:;
                mesa_loge("hk: draw-time variant cache mismatch (%zu vs %zu "
                          "bytes): an input is missing from the key",
                          blob.size, check.size);
+            } else {
+               mesa_logi("hk: draw-time variant cache verified (%zu bytes)",
+                         blob.size);
             }
             blob_finish(&check);
          } else if (!blob.out_of_memory) {
@@ -7993,7 +7983,12 @@ hk_deserialize_shader(struct hk_device *dev, struct blob_reader *blob,
 
    const uint32_t code_size = blob_read_uint32(blob);
    const uint32_t data_size = blob_read_uint32(blob);
-   if (blob->overrun)
+   /* Validate payload lengths before any code/data allocation, including
+    * nested native realizations and shader binaries outside the variant cache.
+    * Subtract successively so even a 32-bit host cannot overflow the sum. */
+   if (blob->overrun || (unsigned)info.stage >= MESA_SHADER_MESH_STAGES ||
+       code_size > blob->end - blob->current ||
+       data_size > (blob->end - blob->current) - code_size)
       return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
 
    VkResult result = hk_init_link_ht(shader, info.stage);
@@ -8012,7 +8007,7 @@ hk_deserialize_shader(struct hk_device *dev, struct blob_reader *blob,
    if (shader->code_ptr == NULL)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   shader->data_ptr = malloc(data_size);
+   shader->data_ptr = malloc(MAX2(data_size, 1));
    if (shader->data_ptr == NULL)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
