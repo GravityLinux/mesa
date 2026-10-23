@@ -615,10 +615,32 @@ update_gfx_program(struct zink_context *ctx, struct zink_gfx_program *prog)
       update_gfx_program_nonseamless(ctx, prog, false);
 }
 
+/* With optimal keys, the key setters only write shader_keys_optimal, but a
+ * bound generated GS still uses the full-key path: mirror the optimal fs and
+ * last-vertex-stage bits into the full keys before they are used.
+ */
+static void
+sync_optimal_keys(struct zink_context *ctx)
+{
+   const union zink_shader_key_optimal *opt = &ctx->gfx_pipeline_state.shader_keys_optimal.key;
+   struct zink_fs_key_base *fs = &ctx->gfx_pipeline_state.shader_keys.key[MESA_SHADER_FRAGMENT].key.fs.base;
+   struct zink_vs_key_base *vs = &ctx->gfx_pipeline_state.shader_keys.last_vertex.key.vs_base;
+   if (memcmp(fs, &opt->fs, sizeof(*fs))) {
+      memcpy(fs, &opt->fs, sizeof(*fs));
+      ctx->dirty_gfx_stages |= BITFIELD_BIT(MESA_SHADER_FRAGMENT);
+   }
+   if (memcmp(vs, &opt->vs_base, sizeof(*vs))) {
+      memcpy(vs, &opt->vs_base, sizeof(*vs));
+      ctx->last_vertex_stage_dirty = true;
+   }
+}
+
 void
 zink_gfx_program_update(struct zink_context *ctx)
 {
    assert(!ctx->gfx_stages[MESA_SHADER_TESS_CTRL] || !ctx->gfx_stages[MESA_SHADER_TESS_CTRL]->non_fs.is_generated);
+   if (zink_screen(ctx->base.screen)->optimal_keys)
+      sync_optimal_keys(ctx);
    if (ctx->last_vertex_stage_dirty) {
       mesa_shader_stage pstage = ctx->last_vertex_stage->info.stage;
       ctx->dirty_gfx_stages |= BITFIELD_BIT(pstage);
