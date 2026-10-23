@@ -13197,6 +13197,36 @@ TEST(Apple9Compiler, UnselectedUniformAddressesDoNotStayLiveAcrossBranches)
    ralloc_free(b.shader);
 }
 
+TEST(Apple9Compiler, SpillingPreambleSetupKeepsAPreamble)
+{
+   /* Uniform values that share operands half the shader apart: computing
+    * them all in the setup keeps more words live than fit, and it spills.
+    * Setup code has no scratch, so the compile must retry with fewer setup
+    * values rather than drop the preamble and run all of it in every
+    * thread. */
+   nir_builder b = apple9_compute_builder("spilling_preamble_setup");
+   nir_def *gid = apple9_global_id_x(&b);
+   nir_def *words[256];
+   for (unsigned i = 0; i < ARRAY_SIZE(words); ++i)
+      words[i] = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 4),
+         nir_imm_int(&b, 4 * i), .align_mul = 4, .range = 4 * ARRAY_SIZE(words));
+   nir_def *acc = gid;
+   for (unsigned i = 0; i < ARRAY_SIZE(words); ++i) {
+      nir_def *v = nir_imul(&b, words[i], nir_iadd_imm(&b,
+         words[(i + ARRAY_SIZE(words) / 2) % ARRAY_SIZE(words)], i));
+      acc = nir_ixor(&b, nir_imul(&b, acc, v), nir_iadd(&b, gid, v));
+   }
+   apple9_store_output(&b, gid, acc);
+   agx_shader_part compiled = {};
+   agx_apple9_compute_profile profile = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason))
+      << (reason ?: "");
+   EXPECT_GT(compiled.info.apple9_preamble_size, 0u);
+   free(compiled.binary);
+   ralloc_free(b.shader);
+}
+
 TEST(Apple9Compiler, PreambleShrinkingPreservesBufferByteAddresses)
 {
    nir_builder b = apple9_compute_builder("preamble_vector_start");
