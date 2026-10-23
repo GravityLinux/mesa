@@ -613,6 +613,16 @@ hk_cmd_render_merge_flush_why(struct hk_cmd_buffer *cmd, const char *why)
    assert(!cmd->merge_cs);
 }
 
+/* Whether a barrier's destination scope includes input attachment reads,
+ * which hk lowers to image reads: they never see tile contents.
+ */
+static bool
+hk_reads_input_attachments(VkPipelineStageFlags2 dst, VkAccessFlags2 dst_access)
+{
+   return vk_filter_dst_access_flags2(dst, dst_access) &
+          VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT;
+}
+
 /* Whether a barrier between two render passes only orders attachment access,
  * which a single hardware render already orders in each tile.
  */
@@ -825,7 +835,7 @@ hk_cmd_sync_barrier(struct hk_cmd_buffer *cmd,
        * to image reads. They need the preceding render's stored image, not
        * an in-tile order, for colour as well as depth/stencil.
        */
-      bool input_read = dst_access & VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT;
+      bool input_read = hk_reads_input_attachments(dst, dst_access);
       if (!input_read && ((!cmd->in_meta &&
            hk_render_merge_barrier(src, dst, src_access, dst_access)) ||
           (image_barrier = hk_render_merge_image_barrier(cmd, src, dst_access)) ||
@@ -975,6 +985,20 @@ hk_cmd_empty_barriers_flush(struct hk_cmd_buffer *cmd, bool merge)
 static bool
 hk_defer_empty_barriers(struct hk_cmd_buffer *cmd, const VkDependencyInfo *info)
 {
+   /* The successor would consume the clears in tiles, where an input
+    * attachment read (an image read) cannot see them. */
+#define READS_INPUT(b) hk_reads_input_attachments((b).dstStageMask, (b).dstAccessMask)
+   for (unsigned i = 0; i < info->memoryBarrierCount; ++i)
+      if (READS_INPUT(info->pMemoryBarriers[i]))
+         return false;
+   for (unsigned i = 0; i < info->bufferMemoryBarrierCount; ++i)
+      if (READS_INPUT(info->pBufferMemoryBarriers[i]))
+         return false;
+   for (unsigned i = 0; i < info->imageMemoryBarrierCount; ++i)
+      if (READS_INPUT(info->pImageMemoryBarriers[i]))
+         return false;
+#undef READS_INPUT
+
    static int enabled = -1;
    if (enabled < 0)
       enabled = debug_get_bool_option("HK_APPLE9_FOLD_EMPTY_CLEARS", true);
