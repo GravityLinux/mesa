@@ -419,6 +419,11 @@ struct hk_graphics_state {
    struct agx_apple9_polygon_point_params apple9_sysvals_polygon_points;
    float apple9_sysvals_viewports[HK_MAX_VIEWPORTS][4];
 
+   /* Attachment metadata is immutable command-pool data. Keep its compact
+    * input key outside render state so identical later renders can share it. */
+   uint64_t apple9_render_sysvals;
+   uint32_t apple9_render_dimensions[HK_MAX_RTS][5];
+
    struct hk_index_buffer_state index;
    enum agx_primitive topology;
    enum agx_object_type object_type;
@@ -719,6 +724,7 @@ enum hk_upload_last {
    HK_UPLOAD_LAST_VERTEX_BUFFERS,
    HK_UPLOAD_LAST_VERTEX_TABLE,
    HK_UPLOAD_LAST_FRAGMENT_TABLE,
+   HK_UPLOAD_LAST_RENDER_PARAMS,
    HK_UPLOAD_LAST_COUNT,
 };
 

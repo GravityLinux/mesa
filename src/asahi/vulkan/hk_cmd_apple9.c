@@ -113,9 +113,9 @@ hk_apple9_tile_helpers_finish(struct hk_device *dev)
    dev->apple9_tile_helpers.ht = NULL;
 }
 
-/* These inputs depend on the attachment set and clear values, not on which
- * helper loads/stores it. Upload once at render creation; pool storage keeps
- * the addresses alive across internal splits and command-buffer resubmission. */
+/* These inputs depend on attachment dimensions and clear values, not on which
+ * helper loads/stores them. Immutable pool storage can also be shared by later
+ * renders with identical inputs until the command buffer is reset. */
 static bool
 hk_apple9_render_inputs(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
 {
@@ -124,7 +124,7 @@ hk_apple9_render_inputs(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
       return true;
 
    uint32_t params[48] = {0};
-   uint8_t metadata[AGX_APPLE9_RUNTIME_SYSVAL_SIZE] = {0};
+   uint32_t dimensions[HK_MAX_RTS][5] = {0};
    uint32_t samples = MAX2(render->tilebuffer.nr_samples, 1);
    bool layered = render->cr.layers > 1;
    for (unsigned rt = 0; rt < render->color_att_count; ++rt) {
@@ -133,13 +133,27 @@ hk_apple9_render_inputs(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
          continue;
       memcpy(&params[16 + rt * 4],
              &info->pColorAttachments[rt].clearValue.color, 16);
-      uint8_t *dimensions = metadata + AGX_APPLE9_TEXTURE_INFO_OFFSET +
-                            rt * AGX_APPLE9_TEXTURE_INFO_STRIDE;
-      memcpy(dimensions, view->apple9_render[layered].dimensions, 16);
-      memcpy(dimensions + 16, &samples, sizeof(samples));
+      memcpy(dimensions[rt], view->apple9_render[layered].dimensions, 16);
+      dimensions[rt][4] = samples;
    }
-   uint64_t sysvals = hk_pool_upload(cmd, metadata, sizeof(metadata), 64);
-   uint64_t arguments = hk_pool_upload(cmd, params, sizeof(params), 16);
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+   uint64_t sysvals = gfx->apple9_render_sysvals;
+   if (!sysvals || memcmp(dimensions, gfx->apple9_render_dimensions,
+                          sizeof(dimensions))) {
+      uint8_t metadata[AGX_APPLE9_RUNTIME_SYSVAL_SIZE] = {0};
+      for (unsigned rt = 0; rt < HK_MAX_RTS; ++rt) {
+         memcpy(metadata + AGX_APPLE9_TEXTURE_INFO_OFFSET +
+                   rt * AGX_APPLE9_TEXTURE_INFO_STRIDE,
+                dimensions[rt], sizeof(dimensions[rt]));
+      }
+      sysvals = hk_pool_upload(cmd, metadata, sizeof(metadata), 64);
+      if (!sysvals)
+         return false;
+      gfx->apple9_render_sysvals = sysvals;
+      memcpy(gfx->apple9_render_dimensions, dimensions, sizeof(dimensions));
+   }
+   uint64_t arguments = hk_pool_upload_last(cmd, HK_UPLOAD_LAST_RENDER_PARAMS,
+                                            params, sizeof(params), 16);
    if (!sysvals || !arguments)
       return false;
    render->apple9_sysvals = sysvals;
