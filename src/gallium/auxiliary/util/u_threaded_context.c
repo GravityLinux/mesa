@@ -3338,6 +3338,16 @@ tc_texture_subdata(struct pipe_context *_pipe,
       } else {
          if (can_unsync) {
             usage |= unsync_usage;
+            /* This writes the texture now, while the calls that use it are
+             * still queued (a new texture is never busy), so streaming
+             * uploads could get arbitrarily far ahead of the driver thread,
+             * keeping every uploaded texture alive. Bound the bytes waiting
+             * in queued batches by the mapped-bytes limit.
+             */
+            tc->batch_slots[tc->next].unsync_upload_bytes += size;
+            if (tc->bytes_mapped_limit &&
+                p_atomic_add_return(&tc->unsync_upload_bytes, size) > tc->bytes_mapped_limit)
+               tc_sync_msg(tc, "  queued unsynchronized uploads over the mapped-bytes limit");
          } else {
             tc_sync(tc);
             tc_set_driver_thread(tc);
@@ -5424,6 +5434,11 @@ tc_batch_execute(void *job, UNUSED void *gdata, int thread_index)
     * an unflushed command buffer.
     */
    struct threaded_context *tc = batch->tc;
+
+   if (batch->unsync_upload_bytes) {
+      p_atomic_add(&tc->unsync_upload_bytes, -(int64_t)batch->unsync_upload_bytes);
+      batch->unsync_upload_bytes = 0;
+   }
    struct util_queue_fence *fence =
       &tc->buffer_lists[batch->buffer_list_index].driver_flushed_fence;
 

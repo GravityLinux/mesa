@@ -548,6 +548,8 @@ struct tc_batch {
    /* whether the first set_framebuffer_state call will increment the rp info in batch_execute */
    bool increment_rp_info_on_fb;
    int8_t batch_idx;
+   /* bytes written by unsynchronized texture_subdata while this batch was recorded */
+   uint64_t unsync_upload_bytes;
    struct tc_unflushed_batch_token *token;
    uint64_t slots[TC_SLOTS_PER_BATCH];
    struct util_dynarray renderpass_infos;
@@ -627,6 +629,11 @@ struct threaded_context {
     */
    uint64_t bytes_mapped_estimate;
    uint64_t bytes_mapped_limit;
+
+   /* Bytes of unsynchronized texture uploads in batches the driver thread
+    * hasn't executed yet (atomic).
+    */
+   int64_t unsync_upload_bytes;
 
    /* Estimation of how replacement buffer bytes are in
     * the current tc_batch.
