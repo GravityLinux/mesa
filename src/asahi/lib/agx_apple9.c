@@ -836,6 +836,24 @@ agx_apple9_texture_format_supported(enum pipe_format format)
    case PIPE_FORMAT_R16G16_UNORM:
    case PIPE_FORMAT_R16G16_SNORM:
    case PIPE_FORMAT_Z16_UNORM:
+   /* BC block formats sample natively, as in Honeykrisp. Without them Gallium
+    * decompresses S3TC/RGTC to RGBA8 on upload and cannot offer BPTC. */
+   case PIPE_FORMAT_DXT1_RGB:
+   case PIPE_FORMAT_DXT1_RGBA:
+   case PIPE_FORMAT_DXT1_SRGB:
+   case PIPE_FORMAT_DXT1_SRGBA:
+   case PIPE_FORMAT_DXT3_RGBA:
+   case PIPE_FORMAT_DXT3_SRGBA:
+   case PIPE_FORMAT_DXT5_RGBA:
+   case PIPE_FORMAT_DXT5_SRGBA:
+   case PIPE_FORMAT_RGTC1_UNORM:
+   case PIPE_FORMAT_RGTC1_SNORM:
+   case PIPE_FORMAT_RGTC2_UNORM:
+   case PIPE_FORMAT_RGTC2_SNORM:
+   case PIPE_FORMAT_BPTC_RGB_FLOAT:
+   case PIPE_FORMAT_BPTC_RGB_UFLOAT:
+   case PIPE_FORMAT_BPTC_RGBA_UNORM:
+   case PIPE_FORMAT_BPTC_SRGBA:
       return true;
    default:
       return false;
