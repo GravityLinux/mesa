@@ -6235,6 +6235,9 @@ zink_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    if (tc && (struct zink_context*)tc != ctx) {
       ctx->track_renderpasses = screen->driver_workarounds.track_renderpasses;
       threaded_context_init_bytes_mapped_limit(tc, 4);
+      /* with unified memory, also keep queued uploads below the batch memory limit */
+      if (screen->oom_flush_threshold < screen->clamp_video_mem)
+         tc->bytes_mapped_limit = MIN2(tc->bytes_mapped_limit, screen->oom_flush_threshold);
       ctx->base.set_context_param = zink_set_context_param;
    }
 
