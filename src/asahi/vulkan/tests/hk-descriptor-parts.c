@@ -17,10 +17,16 @@ check_writers(struct hk_device *dev, VkDescriptorType type,
               VkDescriptorImageInfo info, const void *expected, size_t size)
 {
    uint8_t data[HK_MAX_SAMPLED_DESCRIPTOR_SIZE + 32];
+   bool texel = type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER ||
+                type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+   VkBufferView null_buffer = VK_NULL_HANDLE;
+   const void *entry_data = texel ? (const void *)&null_buffer : &info;
    VkDescriptorGetInfoEXT get = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_GET_INFO_EXT,
       .type = type, .data.pCombinedImageSampler = &info};
    if (type == VK_DESCRIPTOR_TYPE_SAMPLER)
       get.data.pSampler = &info.sampler;
+   else if (texel)
+      get.data.pUniformTexelBuffer = NULL;
    memset(data, 0xa5, sizeof(data));
    hk_GetDescriptorEXT(hk_device_to_handle(dev), &get, size + 8, data + 8);
    CHECK(!memcmp(data + 8, expected, size));
@@ -44,11 +50,13 @@ check_writers(struct hk_device *dev, VkDescriptorType type,
       .layout = layout, .mapped_ptr = data, .size = sizeof(data)};
    VkWriteDescriptorSet write = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
       .dstSet = hk_descriptor_set_to_handle(&set), .descriptorCount = 1,
-      .descriptorType = type, .pImageInfo = &info};
+      .descriptorType = type, .pImageInfo = &info,
+      .pTexelBufferView = &null_buffer};
    templ->base.type = VK_OBJECT_TYPE_DESCRIPTOR_UPDATE_TEMPLATE;
    templ->entry_count = 1;
    templ->entries[0] = (struct vk_descriptor_template_entry){
-      .type = type, .array_count = 1, .stride = sizeof(info)};
+      .type = type, .array_count = 1,
+      .stride = texel ? sizeof(null_buffer) : sizeof(info)};
    struct hk_push_descriptor_set push;
    for (unsigned path = 0; path < 4; ++path) {
       memset(data, 0xa5, sizeof(data));
@@ -59,11 +67,11 @@ check_writers(struct hk_device *dev, VkDescriptorType type,
       else if (path == 1)
          hk_UpdateDescriptorSetWithTemplate(hk_device_to_handle(dev),
             hk_descriptor_set_to_handle(&set),
-            vk_descriptor_update_template_to_handle(templ), &info);
+            vk_descriptor_update_template_to_handle(templ), entry_data);
       else if (path == 2)
          hk_push_descriptor_set_update(&push, layout, 1, &write);
       else
-         hk_push_descriptor_set_update_template(&push, layout, templ, &info);
+         hk_push_descriptor_set_update_template(&push, layout, templ, entry_data);
       const uint8_t *result = path < 2 ? data : push.data;
       CHECK(!memcmp(result + 16, expected, size));
       for (unsigned i = 0; i < 16; ++i)
@@ -167,7 +175,30 @@ check(void)
    agx_apple9_translate_texture(null.texture, &tex);
    hk_apple9_texture_info(null.texture_info, &tex);
    CHECK(check_writers(dev, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, info, &null, sizeof(null)));
+   CHECK(check_writers(dev, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, info, &null, sizeof(null)));
    CHECK(null.texture_info[3] == 0 && null.min_lod_fp16 == 0);
+   uint8_t native[AGX_APPLE9_TEXTURE_TABLE_STRIDE + 2];
+   memset(native, 0xa5, sizeof(native));
+   agx_apple9_set_null_texture(native + 1);
+   CHECK(native[0] == 0xa5 && native[sizeof(native) - 1] == 0xa5);
+   CHECK(!memcmp(native + 1, null.texture, sizeof(null.texture)));
+   uint8_t combined[2 * (sizeof(null) + sizeof(sampler.planes[0].apple9))];
+   for (unsigned p = 0; p < 2; ++p) {
+      uint8_t *record = combined + p * (sizeof(null) + sizeof(sampler.planes[p].apple9));
+      memcpy(record, &null, sizeof(null));
+      memcpy(record + sizeof(null), &sampler.planes[p].apple9,
+             sizeof(sampler.planes[p].apple9));
+   }
+   CHECK(check_writers(dev, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, info,
+                       combined, sizeof(combined)));
+   struct hk_apple9_texel_descriptor texel = {.tex = tex};
+   memcpy(texel.texture, null.texture, sizeof(texel.texture));
+   CHECK(check_writers(dev, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, info,
+                       &texel, sizeof(texel)));
+   struct hk_apple9_storage_descriptor storage_texel = {.common.tex = tex};
+   agx_set_null_pbe(&storage_texel.common.pbe);
+   CHECK(check_writers(dev, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, info,
+                       &storage_texel, sizeof(storage_texel)));
    storage = (struct hk_apple9_storage_descriptor){.metadata.base = va[0].addr};
    agx_set_null_texture(&storage.common.tex);
    agx_set_null_pbe(&storage.common.pbe);

@@ -23,6 +23,7 @@
 #include "util/u_math.h"
 #include "agx_device.h"
 #include "agx_pack.h"
+#include "agx_helpers.h"
 #include "asahi/layout/layout.h"
 
 bool
@@ -914,6 +915,21 @@ agx_apple9_translate_texture(void *out, const struct agx_texture_packed *state)
 {
    agx_unpack(stderr, state, TEXTURE, tex);
    return agx_apple9_pack_texture(out, &tex);
+}
+
+void
+agx_apple9_set_null_texture(void *out)
+{
+   /* A null texture is a one-texel, zero-swizzled view of the zero page.
+    * Its format/dimension prefix is shared with Apple8, but the native
+    * address starts two bits earlier. Construct that native record directly
+    * instead of unpacking and translating a complete legacy descriptor. */
+   struct agx_texture_packed prefix;
+   agx_set_null_texture(&prefix);
+   memset(out, 0, AGX_APPLE9_TEXTURE_TABLE_STRIDE);
+   memcpy(out, &prefix, 8);
+   uint64_t address = AGX_ZERO_PAGE_ADDRESS >> 4;
+   memcpy((uint8_t *)out + 8, &address, sizeof(address));
 }
 
 bool
