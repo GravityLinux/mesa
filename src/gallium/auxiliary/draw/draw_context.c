@@ -45,6 +45,7 @@
 #include "draw_gs.h"
 #include "draw_tess.h"
 #include "draw_mesh.h"
+#include "tgsi/tgsi_exec.h"
 
 #if DRAW_LLVM_AVAILABLE
 #include "gallivm/lp_bld_init.h"
@@ -130,6 +131,130 @@ draw_create_no_llvm(struct pipe_context *pipe)
 }
 
 
+/*
+ * Without LLVM, vertex and geometry shaders run in the TGSI interpreter,
+ * which samples, and accesses images and buffers, through interfaces that
+ * only software drivers provide (draw_texture_sampler, draw_image,
+ * draw_buffer). Other users of the draw module, notably the state
+ * tracker's feedback/selection/raster-position path, must not crash on a
+ * shader that uses one: loads return zeros and stores are dropped until a
+ * driver provides the real interface.
+ */
+static void
+draw_null_get_samples(struct tgsi_sampler *sampler, const unsigned sview_index,
+                      const unsigned sampler_index,
+                      const float s[TGSI_QUAD_SIZE],
+                      const float t[TGSI_QUAD_SIZE],
+                      const float r[TGSI_QUAD_SIZE],
+                      const float c0[TGSI_QUAD_SIZE],
+                      const float c1[TGSI_QUAD_SIZE],
+                      float derivs[3][2][TGSI_QUAD_SIZE],
+                      const int8_t offset[3],
+                      enum tgsi_sampler_control control,
+                      float rgba[TGSI_NUM_CHANNELS][TGSI_QUAD_SIZE])
+{
+   memset(rgba, 0, sizeof(float) * TGSI_NUM_CHANNELS * TGSI_QUAD_SIZE);
+}
+
+static void
+draw_null_get_dims(struct tgsi_sampler *sampler, const unsigned sview_index,
+                   int level, int dims[4])
+{
+   memset(dims, 0, sizeof(int) * 4);
+}
+
+static void
+draw_null_get_texel(struct tgsi_sampler *sampler, const unsigned sview_index,
+                    const int i[TGSI_QUAD_SIZE], const int j[TGSI_QUAD_SIZE],
+                    const int k[TGSI_QUAD_SIZE], const int lod[TGSI_QUAD_SIZE],
+                    const int8_t offset[3],
+                    float rgba[TGSI_NUM_CHANNELS][TGSI_QUAD_SIZE])
+{
+   memset(rgba, 0, sizeof(float) * TGSI_NUM_CHANNELS * TGSI_QUAD_SIZE);
+}
+
+static void
+draw_null_query_lod(const struct tgsi_sampler *sampler,
+                    const unsigned sview_index, const unsigned sampler_index,
+                    const float s[TGSI_QUAD_SIZE],
+                    const float t[TGSI_QUAD_SIZE],
+                    const float p[TGSI_QUAD_SIZE],
+                    const float c0[TGSI_QUAD_SIZE],
+                    const enum tgsi_sampler_control control,
+                    float mipmap[TGSI_QUAD_SIZE], float lod[TGSI_QUAD_SIZE])
+{
+   memset(mipmap, 0, sizeof(float) * TGSI_QUAD_SIZE);
+   memset(lod, 0, sizeof(float) * TGSI_QUAD_SIZE);
+}
+
+static struct tgsi_sampler draw_null_sampler = {
+   .get_samples = draw_null_get_samples,
+   .get_dims = draw_null_get_dims,
+   .get_texel = draw_null_get_texel,
+   .query_lod = draw_null_query_lod,
+};
+
+static void
+draw_null_image_load(const struct tgsi_image *image,
+                     const struct tgsi_image_params *params,
+                     const int s[TGSI_QUAD_SIZE], const int t[TGSI_QUAD_SIZE],
+                     const int r[TGSI_QUAD_SIZE],
+                     const int sample[TGSI_QUAD_SIZE],
+                     float rgba[TGSI_NUM_CHANNELS][TGSI_QUAD_SIZE])
+{
+   memset(rgba, 0, sizeof(float) * TGSI_NUM_CHANNELS * TGSI_QUAD_SIZE);
+}
+
+static void
+draw_null_image_store(const struct tgsi_image *image,
+                      const struct tgsi_image_params *params,
+                      const int s[TGSI_QUAD_SIZE], const int t[TGSI_QUAD_SIZE],
+                      const int r[TGSI_QUAD_SIZE],
+                      const int sample[TGSI_QUAD_SIZE],
+                      float rgba[TGSI_NUM_CHANNELS][TGSI_QUAD_SIZE])
+{
+}
+
+static void
+draw_null_image_op(const struct tgsi_image *image,
+                   const struct tgsi_image_params *params,
+                   enum tgsi_opcode opcode,
+                   const int s[TGSI_QUAD_SIZE], const int t[TGSI_QUAD_SIZE],
+                   const int r[TGSI_QUAD_SIZE],
+                   const int sample[TGSI_QUAD_SIZE],
+                   float rgba[TGSI_NUM_CHANNELS][TGSI_QUAD_SIZE],
+                   float rgba2[TGSI_NUM_CHANNELS][TGSI_QUAD_SIZE])
+{
+   memset(rgba, 0, sizeof(float) * TGSI_NUM_CHANNELS * TGSI_QUAD_SIZE);
+}
+
+static void
+draw_null_image_get_dims(const struct tgsi_image *image,
+                         const struct tgsi_image_params *params, int dims[4])
+{
+   memset(dims, 0, sizeof(int) * 4);
+}
+
+static struct tgsi_image draw_null_image = {
+   .load = draw_null_image_load,
+   .store = draw_null_image_store,
+   .op = draw_null_image_op,
+   .get_dims = draw_null_image_get_dims,
+};
+
+/* A zero-sized buffer: the interpreter bounds-checks every access. */
+static void *
+draw_null_buffer_lookup(const struct tgsi_buffer *buffer, uint32_t unit,
+                        uint32_t *size)
+{
+   *size = 0;
+   return NULL;
+}
+
+static struct tgsi_buffer draw_null_buffer = {
+   .lookup = draw_null_buffer_lookup,
+};
+
 bool
 draw_init(struct draw_context *draw)
 {
@@ -150,6 +275,11 @@ draw_init(struct draw_context *draw)
 
    draw->pt.user.planes = (float (*) [DRAW_TOTAL_CLIP_PLANES][4]) &(draw->plane[0]);
    draw->pt.user.eltMax = ~0;
+
+   draw->vs.tgsi.sampler = &draw_null_sampler;
+   draw->gs.tgsi.sampler = &draw_null_sampler;
+   draw->vs.tgsi.image = draw->gs.tgsi.image = &draw_null_image;
+   draw->vs.tgsi.buffer = draw->gs.tgsi.buffer = &draw_null_buffer;
 
    if (!draw_pipeline_init(draw))
       return false;
