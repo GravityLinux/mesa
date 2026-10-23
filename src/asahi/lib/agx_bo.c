@@ -9,6 +9,8 @@
 #include <inttypes.h>
 #include <dlfcn.h>
 #include <stdlib.h>
+#include <sys/mman.h>
+#include <unistd.h>
 #include "util/u_debug.h"
 
 #include "util/hash_table.h"
@@ -40,7 +42,6 @@ agx_bucket(struct agx_device *dev, size_t size)
 static void
 agx_bo_cache_remove_locked(struct agx_device *dev, struct agx_bo *bo)
 {
-   simple_mtx_assert_locked(&dev->bo_cache.lock);
    list_del(&bo->bucket_link);
    list_del(&bo->lru_link);
    dev->bo_cache.size -= bo->size;
@@ -74,7 +75,7 @@ struct agx_bo *
 agx_bo_cache_fetch(struct agx_device *dev, size_t size, size_t align,
                    uint32_t flags, const bool dontwait)
 {
-   simple_mtx_lock(&dev->bo_cache.lock);
+   pthread_mutex_lock(&dev->bo_cache.lock);
    struct list_head *bucket = agx_bucket(dev, size);
    struct agx_bo *bo = NULL;
 
@@ -97,7 +98,7 @@ agx_bo_cache_fetch(struct agx_device *dev, size_t size, size_t align,
       bo = entry;
       break;
    }
-   simple_mtx_unlock(&dev->bo_cache.lock);
+   pthread_mutex_unlock(&dev->bo_cache.lock);
 
    if (bo) {
       /* A cached allocation has a new owner. The remote copy may contain
@@ -111,39 +112,6 @@ agx_bo_cache_fetch(struct agx_device *dev, size_t size, size_t align,
    }
 
    return bo;
-}
-
-/* Frees at most this many stale BOs per pass, so that a large spike is
- * returned over several submissions or allocations instead of in one stall. */
-#define AGX_BO_CACHE_EVICT_BATCH 32
-
-/* Returns whether stale BOs remain. */
-static bool
-agx_bo_cache_evict_stale_bos(struct agx_device *dev, unsigned tv_sec)
-{
-   struct timespec time;
-   unsigned freed = 0;
-
-   clock_gettime(CLOCK_MONOTONIC, &time);
-   list_for_each_entry_safe(struct agx_bo, entry, &dev->bo_cache.lru,
-                            lru_link) {
-      /* We want all entries that have been used more than 1 sec ago to be
-       * dropped, others can be kept.  Note the <= 2 check and not <= 1. It's
-       * here to account for the fact that we're only testing ->tv_sec, not
-       * ->tv_nsec.  That means we might keep entries that are between 1 and 2
-       * seconds old, but we don't really care, as long as unused BOs are
-       * dropped at some point.
-       */
-      if (time.tv_sec - entry->last_used <= 2)
-         return false;
-
-      if (freed++ == AGX_BO_CACHE_EVICT_BATCH)
-         return true;
-
-      agx_bo_cache_remove_locked(dev, entry);
-      agx_bo_free(dev, entry);
-   }
-   return false;
 }
 
 static void
@@ -175,8 +143,8 @@ agx_bo_cache_put_locked(struct agx_device *dev, struct agx_bo *bo)
    /* Update label for debug */
    bo->label = "Unused (BO cache)";
 
-   /* Let's do some cleanup in the BO cache while we hold the lock. */
-   agx_bo_cache_evict_stale_bos(dev, time.tv_sec);
+   /* Wake the reaper to arm its expiry timer, including when the app idles. */
+   pthread_cond_signal(&dev->bo_cache.cond);
 }
 
 /* Tries to add a BO to the cache. Returns if it was successful */
@@ -187,49 +155,239 @@ agx_bo_cache_put(struct agx_device *dev, struct agx_bo *bo)
        (bo->va && (bo->va->flags & (AGX_VA_REPLAY | AGX_VA_FIXED)))) {
       return false;
    } else {
-      simple_mtx_lock(&dev->bo_cache.lock);
+      pthread_mutex_lock(&dev->bo_cache.lock);
       agx_bo_cache_put_locked(dev, bo);
-      simple_mtx_unlock(&dev->bo_cache.lock);
+      pthread_mutex_unlock(&dev->bo_cache.lock);
 
       return true;
    }
 }
 
-/* Drop cached BOs that have been unused for a few seconds. Putting a BO into
- * the cache already does this, but a workload that stops freeing BOs (a spike
- * of command memory followed by steady frames, or an idle app) would otherwise
- * keep the cache at its peak, so allocation and queue submission call this
- * too. It reads a coarse clock and, unless a previous pass left stale BOs,
- * takes the lock at most once a second. */
+/* Queue an unreferenced BO for destruction. No allocation or ioctl is needed
+ * here: the BO itself is the queue entry until the reaper takes ownership.
+ */
 void
-agx_bo_cache_evict_stale(struct agx_device *dev)
+agx_bo_free(struct agx_device *dev, struct agx_bo *bo)
 {
-   struct timespec time;
-   clock_gettime(CLOCK_MONOTONIC_COARSE, &time);
-   if (time.tv_sec < p_atomic_read_relaxed(&dev->bo_cache.next_evict_sec))
-      return;
-
-   simple_mtx_lock(&dev->bo_cache.lock);
-   /* While stale BOs remain, look again on the next call. */
-   bool more = agx_bo_cache_evict_stale_bos(dev, time.tv_sec);
-   p_atomic_set(&dev->bo_cache.next_evict_sec,
-                (int64_t)time.tv_sec + (more ? 0 : 1));
-   simple_mtx_unlock(&dev->bo_cache.lock);
+   assert(!bo->refcnt && !bo->retired);
+   pthread_mutex_lock(&dev->bo_cache.lock);
+   bo->retired = true;
+   list_addtail(&bo->bucket_link, &dev->bo_cache.retired);
+   pthread_cond_signal(&dev->bo_cache.cond);
+   pthread_mutex_unlock(&dev->bo_cache.lock);
 }
 
+/* Called by import with bo_map_lock held. Until the reaper starts closing a
+ * shared BO, its original GEM handle and VA can be used again.
+ */
+void
+agx_bo_reclaim(struct agx_device *dev, struct agx_bo *bo)
+{
+   assert(bo->flags & AGX_BO_SHARED);
+   assert(!bo->refcnt && bo->retired);
+   pthread_mutex_lock(&dev->bo_cache.lock);
+   list_del(&bo->bucket_link);
+   bo->retired = false;
+   pthread_cond_broadcast(&dev->bo_cache.cond);
+   pthread_mutex_unlock(&dev->bo_cache.lock);
+   p_atomic_set(&bo->refcnt, 1);
+}
+
+/* Explicit trims queue all currently cached BOs. OOM recovery and teardown
+ * additionally wait for the reaper; ordinary pool trims do not block on the
+ * kernel. Entries returned to the cache later are not part of this trim.
+ */
 void
 agx_bo_cache_evict_all(struct agx_device *dev)
 {
-   simple_mtx_lock(&dev->bo_cache.lock);
-   for (unsigned i = 0; i < ARRAY_SIZE(dev->bo_cache.buckets); ++i) {
-      struct list_head *bucket = &dev->bo_cache.buckets[i];
-
-      list_for_each_entry_safe(struct agx_bo, entry, bucket, bucket_link) {
-         agx_bo_cache_remove_locked(dev, entry);
-         agx_bo_free(dev, entry);
-      }
+   pthread_mutex_lock(&dev->bo_cache.lock);
+   list_for_each_entry_safe(struct agx_bo, bo, &dev->bo_cache.lru, lru_link) {
+      agx_bo_cache_remove_locked(dev, bo);
+      bo->retired = true;
+      list_addtail(&bo->bucket_link, &dev->bo_cache.retired);
    }
-   simple_mtx_unlock(&dev->bo_cache.lock);
+   pthread_cond_signal(&dev->bo_cache.cond);
+   pthread_mutex_unlock(&dev->bo_cache.lock);
+}
+
+/* Return the oldest stale cache entry. Keep the others available for reuse
+ * while a close is blocked, instead of filling a separate eviction queue.
+ * The integer-second expiry matches the previous cache policy (> 2 s).
+ */
+static struct agx_bo *
+agx_bo_cache_stale_locked(struct agx_device *dev)
+{
+   if (list_is_empty(&dev->bo_cache.lru))
+      return NULL;
+
+   struct agx_bo *bo =
+      list_first_entry(&dev->bo_cache.lru, struct agx_bo, lru_link);
+   struct timespec now;
+   clock_gettime(CLOCK_MONOTONIC, &now);
+   return now.tv_sec - bo->last_used > 2 ? bo : NULL;
+}
+
+static void
+agx_bo_close(struct agx_device *dev, const struct agx_bo *bo)
+{
+   if (bo->_map)
+      munmap(bo->_map, bo->size);
+   if (bo->prime_fd != -1)
+      close(bo->prime_fd);
+
+   struct drm_gem_close args = {.handle = bo->handle};
+   if (drmIoctl(dev->fd, DRM_IOCTL_GEM_CLOSE, &args)) {
+      fprintf(stderr, "DRM_IOCTL_GEM_CLOSE failed: %m\n");
+      /* Keep the address reserved if the old mapping may still exist. */
+      free(bo->va);
+      return;
+   }
+
+   /* Do not recycle a VA until its old kernel mappings are gone. */
+   agx_va_free(dev, bo->va, false);
+}
+
+static bool
+agx_bo_reap_one(struct agx_device *dev)
+{
+   /* Same order as final unreference and import. Nothing takes bo_map_lock
+    * while holding the cache lock. Neither lock covers a blocking close.
+    */
+   pthread_mutex_lock(&dev->bo_map_lock);
+   pthread_mutex_lock(&dev->bo_cache.lock);
+   struct agx_bo *bo;
+   if (!list_is_empty(&dev->bo_cache.retired)) {
+      bo = list_first_entry(&dev->bo_cache.retired, struct agx_bo, bucket_link);
+      list_del(&bo->bucket_link);
+   } else {
+      bo = agx_bo_cache_stale_locked(dev);
+      if (bo)
+         agx_bo_cache_remove_locked(dev, bo);
+   }
+
+   if (!bo) {
+      pthread_mutex_unlock(&dev->bo_cache.lock);
+      pthread_mutex_unlock(&dev->bo_map_lock);
+      return false;
+   }
+
+   assert(!bo->refcnt && !bo->writer);
+   assert(!dev->bo_cache.busy && !dev->bo_closing_handle);
+   dev->bo_cache.busy = true;
+   if (bo->flags & AGX_BO_SHARED)
+      dev->bo_closing_handle = bo->handle;
+
+   /* The kernel can reuse a handle before GEM_CLOSE returns. Remove the old
+    * table entry first, then operate solely on this private snapshot. Never
+    * clear the slot after the ioctl: it may already belong to a new BO.
+    */
+   struct agx_bo dead = *bo;
+   memset(bo, 0, sizeof(*bo));
+   pthread_mutex_unlock(&dev->bo_cache.lock);
+   pthread_mutex_unlock(&dev->bo_map_lock);
+
+   agx_bo_close(dev, &dead);
+
+   pthread_mutex_lock(&dev->bo_map_lock);
+   dev->bo_closing_handle = 0;
+   pthread_cond_broadcast(&dev->bo_map_cond);
+   pthread_mutex_unlock(&dev->bo_map_lock);
+
+   pthread_mutex_lock(&dev->bo_cache.lock);
+   dev->bo_cache.busy = false;
+   pthread_cond_broadcast(&dev->bo_cache.cond);
+   pthread_mutex_unlock(&dev->bo_cache.lock);
+   return true;
+}
+
+static int
+agx_bo_reaper(void *data)
+{
+   struct agx_device *dev = data;
+   u_thread_setname("agx-bo-reaper");
+
+   for (;;) {
+      pthread_mutex_lock(&dev->bo_cache.lock);
+      while (list_is_empty(&dev->bo_cache.retired) &&
+             !agx_bo_cache_stale_locked(dev)) {
+         if (dev->bo_cache.stop) {
+            pthread_mutex_unlock(&dev->bo_cache.lock);
+            return 0;
+         }
+
+         if (list_is_empty(&dev->bo_cache.lru)) {
+            pthread_cond_wait(&dev->bo_cache.cond, &dev->bo_cache.lock);
+         } else {
+            struct agx_bo *bo =
+               list_first_entry(&dev->bo_cache.lru, struct agx_bo, lru_link);
+            struct timespec expiry = {.tv_sec = bo->last_used + 3};
+            pthread_cond_timedwait(&dev->bo_cache.cond, &dev->bo_cache.lock,
+                                   &expiry);
+         }
+      }
+      pthread_mutex_unlock(&dev->bo_cache.lock);
+      agx_bo_reap_one(dev);
+   }
+}
+
+void
+agx_bo_cache_init(struct agx_device *dev)
+{
+   pthread_mutex_init(&dev->bo_cache.lock, NULL);
+   pthread_condattr_t attr;
+   pthread_condattr_init(&attr);
+   pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+   pthread_cond_init(&dev->bo_cache.cond, &attr);
+   pthread_condattr_destroy(&attr);
+   pthread_cond_init(&dev->bo_map_cond, NULL);
+   list_inithead(&dev->bo_cache.lru);
+   list_inithead(&dev->bo_cache.retired);
+   for (unsigned i = 0; i < ARRAY_SIZE(dev->bo_cache.buckets); ++i)
+      list_inithead(&dev->bo_cache.buckets[i]);
+}
+
+bool
+agx_bo_cache_start(struct agx_device *dev)
+{
+   assert(!dev->bo_cache.started);
+   dev->bo_cache.started = u_thread_create(&dev->bo_cache.thread, agx_bo_reaper,
+                                           dev) == thrd_success;
+   return dev->bo_cache.started;
+}
+
+void
+agx_bo_cache_wait(struct agx_device *dev)
+{
+   /* Device bootstrap can encounter an allocation failure before starting
+    * the worker. No GPU work exists yet; reclaim synchronously in that case.
+    */
+   if (!dev->bo_cache.started) {
+      while (agx_bo_reap_one(dev))
+         ;
+      return;
+   }
+
+   pthread_mutex_lock(&dev->bo_cache.lock);
+   while (dev->bo_cache.busy || !list_is_empty(&dev->bo_cache.retired))
+      pthread_cond_wait(&dev->bo_cache.cond, &dev->bo_cache.lock);
+   pthread_mutex_unlock(&dev->bo_cache.lock);
+}
+
+void
+agx_bo_cache_finish(struct agx_device *dev)
+{
+   agx_bo_cache_evict_all(dev);
+   agx_bo_cache_wait(dev);
+   if (dev->bo_cache.started) {
+      pthread_mutex_lock(&dev->bo_cache.lock);
+      dev->bo_cache.stop = true;
+      pthread_cond_signal(&dev->bo_cache.cond);
+      pthread_mutex_unlock(&dev->bo_cache.lock);
+      thrd_join(dev->bo_cache.thread, NULL);
+   }
+   pthread_cond_destroy(&dev->bo_map_cond);
+   pthread_cond_destroy(&dev->bo_cache.cond);
+   pthread_mutex_destroy(&dev->bo_cache.lock);
 }
 
 void
@@ -397,10 +555,10 @@ agx_bo_unreference(struct agx_device *dev, struct agx_bo *bo)
 
    /* Drop references other than the last without the lock. The last one is
     * dropped under bo_map_lock, which agx_bo_import also holds, so an import
-    * never finds a BO whose count reached zero and is being freed. Checking
-    * the count again after taking the lock is not enough: an import and a
-    * release could both run in between, and two threads would then free the
-    * same BO (as iris does, see iris_bo_unreference).
+    * can safely resurrect a queued shared BO before the reaper removes it.
+    * Checking the count again after taking the lock is not enough: an import
+    * and a release could both run in between, and two threads would then free
+    * the same BO (as iris does, see iris_bo_unreference).
     */
    int c = p_atomic_read(&bo->refcnt), old;
    while (c != 1 && (old = p_atomic_cmpxchg(&bo->refcnt, c, c - 1)) != c)
@@ -452,8 +610,6 @@ agx_bo_create(struct agx_device *dev, size_t size, unsigned align,
    size = ALIGN_POT(size, AIL_PAGESIZE);
    align = MAX2(align, AIL_PAGESIZE);
 
-   agx_bo_cache_evict_stale(dev);
-
    /* See if we have a BO already in the cache */
    bo = agx_bo_cache_fetch(dev, size, align, flags, true);
 
@@ -473,6 +629,7 @@ agx_bo_create(struct agx_device *dev, size_t size, unsigned align,
       bo = agx_bo_cache_fetch(dev, size, align, flags, false);
    if (!bo) {
       agx_bo_cache_evict_all(dev);
+      agx_bo_cache_wait(dev);
       bo = dev->ops.bo_alloc(dev, size, align, flags, 0, 0);
    }
 
@@ -502,6 +659,13 @@ agx_bo_create_va(struct agx_device *dev, size_t size, unsigned align,
     */
    struct agx_bo *bo =
       dev->ops.bo_alloc(dev, size, align, flags, va_flags, fixed_va);
+   if (!bo) {
+      /* A recently released fixed/replay VA may still be closing. Only the
+       * allocation-failure path waits; never expose an address too early. */
+      agx_bo_cache_evict_all(dev);
+      agx_bo_cache_wait(dev);
+      bo = dev->ops.bo_alloc(dev, size, align, flags, va_flags, fixed_va);
+   }
    if (!bo)
       return NULL;
 
@@ -526,7 +690,11 @@ agx_bo_finish_create(struct agx_device *dev, struct agx_bo *bo,
       agxdecode_track_alloc(dev->agxdecode, bo);
    }
 
-   agx_bo_dump_all_periodic(dev);
+   if (unlikely(dev->debug & (AGX_DBG_BODUMP | AGX_DBG_BODUMPVERBOSE))) {
+      pthread_mutex_lock(&dev->bo_map_lock);
+      agx_bo_dump_all_periodic(dev);
+      pthread_mutex_unlock(&dev->bo_map_lock);
+   }
 }
 
 /* Native DRM mappings are coherent; the remote shim needs an explicit pull. */

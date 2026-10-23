@@ -1318,7 +1318,6 @@ hk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
 
    hk_gpu_busy_sample(queue);
    VkResult result = queue_submit(dev, queue, submit);
-   agx_bo_cache_evict_stale(&dev->dev);
    if (result != VK_SUCCESS)
       result = vk_queue_set_lost(&queue->vk, "Submit failed");
 
