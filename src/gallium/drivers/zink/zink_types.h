@@ -979,6 +979,10 @@ struct zink_gfx_push_constant {
    uint32_t line_stipple_pattern;
    float viewport_scale[2];
    float line_width;
+   /* only present when maxPushConstantsSize allows it, see
+    * zink_gfx_push_constant_size(); must stay last
+    */
+   uint32_t poly_stipple[32];
 };
 
 /* The order of the enums MUST match the order of the zink_gfx_push_constant
@@ -993,6 +997,7 @@ enum zink_gfx_push_constant_member {
    ZINK_GFX_PUSHCONST_LINE_STIPPLE_PATTERN,
    ZINK_GFX_PUSHCONST_VIEWPORT_SCALE,
    ZINK_GFX_PUSHCONST_LINE_WIDTH,
+   ZINK_GFX_PUSHCONST_POLY_STIPPLE,
    ZINK_GFX_PUSHCONST_MAX
 };
 
@@ -1470,6 +1475,7 @@ struct zink_screen {
 
    bool optimal_keys;
    bool have_full_ds3;
+   bool have_poly_stipple_emulation;
    bool have_X8_D24_UNORM_PACK32;
    bool have_D24_UNORM_S8_UINT;
    bool have_D32_SFLOAT_S8_UINT;
@@ -1870,6 +1876,7 @@ struct zink_context {
       };
       float tess_levels[6];
    };
+   uint32_t poly_stipple[32];
 
    struct zink_vk_query *curr_xfb_queries[PIPE_MAX_VERTEX_STREAMS];
    struct zink_shader *null_fs;

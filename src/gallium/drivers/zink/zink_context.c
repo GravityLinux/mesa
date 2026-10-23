@@ -1348,6 +1348,9 @@ static void
 zink_set_polygon_stipple(struct pipe_context *pctx,
                          const struct pipe_poly_stipple *ps)
 {
+   struct zink_context *ctx = zink_context(pctx);
+   /* pushed with each draw that uses the poly_stipple fs key */
+   memcpy(ctx->poly_stipple, ps->stipple, sizeof(ctx->poly_stipple));
 }
 
 ALWAYS_INLINE static void

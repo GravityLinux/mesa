@@ -366,6 +366,17 @@ zink_set_fs_point_coord_key(struct zink_context *ctx)
    }
 }
 
+/* GL polygon stipple only applies to filled polygons */
+static inline void
+zink_set_fs_poly_stipple_key(struct zink_context *ctx)
+{
+   bool poly_stipple = zink_screen(ctx->base.screen)->have_poly_stipple_emulation &&
+                       ctx->rast_state->base.poly_stipple_enable &&
+                       ctx->gfx_pipeline_state.rast_prim == MESA_PRIM_TRIANGLES;
+   if (zink_get_fs_base_key(ctx)->poly_stipple != poly_stipple)
+      zink_set_fs_base_key(ctx)->poly_stipple = poly_stipple;
+}
+
 void
 zink_set_primitive_emulation_keys(struct zink_context *ctx);
 

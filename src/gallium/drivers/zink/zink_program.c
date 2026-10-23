@@ -1130,7 +1130,7 @@ zink_pipeline_layout_create(struct zink_screen *screen, VkDescriptorSetLayout *d
    if (!is_compute) {
       pcr.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
       pcr.offset = 0;
-      pcr.size = sizeof(struct zink_gfx_push_constant);
+      pcr.size = zink_gfx_push_constant_size(screen);
       plci.pushConstantRangeCount = 1;
       plci.pPushConstantRanges = &pcr;
    }

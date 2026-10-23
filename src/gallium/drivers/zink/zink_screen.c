@@ -3905,6 +3905,12 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
 
    simple_mtx_init(&screen->copy_context_lock, mtx_plain);
 
+   /* polygon stipple is emulated in the fragment shader with the pattern
+    * appended to the gfx push constants
+    */
+   screen->have_poly_stipple_emulation =
+      screen->info.props.limits.maxPushConstantsSize >= sizeof(struct zink_gfx_push_constant);
+
    init_optimal_keys(screen);
 
    zink_init_shader_caps(screen);
