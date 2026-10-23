@@ -94,19 +94,11 @@ loops_exited(agx_context *ctx, const unsigned *loop_end, agx_block *pred,
 }
 
 DEBUG_GET_ONCE_BOOL_OPTION(spill_trace_loops, "AGX_SPILL_TRACE_LOOPS", false)
-DEBUG_GET_ONCE_BOOL_OPTION(spill_no_loop_handling,
-                           "AGX_SPILL_NO_LOOP_HANDLING", false)
 
 static bool
 spill_trace_loops(void)
 {
    return debug_get_option_spill_trace_loops();
-}
-
-static bool
-spill_loop_handling(void)
-{
-   return !debug_get_option_spill_no_loop_handling();
 }
 
 struct next_uses {
@@ -268,7 +260,7 @@ struct spill_ctx {
    /* If true, we cannot use scratch and must only rematerialize. */
    bool remat_only;
 
-   /* Loop spans (see compute_loop_ends), or NULL without loop handling. */
+   /* Loop spans (see compute_loop_ends). */
    const unsigned *loop_end;
 };
 
@@ -1106,7 +1098,7 @@ compute_w_entry_loop_header(struct spill_ctx *ctx)
     */
    unsigned through_budget = ctx->k;
    BITSET_WORD *used = NULL;
-   if (ctx->loop_end && ctx->loop_end[block->index]) {
+   if (ctx->loop_end[block->index]) {
       unsigned end = ctx->loop_end[block->index];
       BITSET_WORD *live = malloc(BITSET_BYTES(ctx->n));
       used = calloc(BITSET_WORDS(ctx->n), sizeof(BITSET_WORD));
@@ -1472,7 +1464,7 @@ global_next_use_distances(agx_context *ctx, void *memctx,
          }
 
          /* Uses reached only by leaving loops are far away inside them. */
-         unsigned exits = loop_end ? loops_exited(ctx, loop_end, *pred, blk) : 0;
+         unsigned exits = loops_exited(ctx, loop_end, *pred, blk);
          if (exits) {
             clear_next_uses(&far);
             foreach_next_use(&dists, node, dist) {
@@ -1534,7 +1526,7 @@ hoist_loop_invariant_spills(agx_context *ctx, unsigned n,
                             const struct spill_block *blocks,
                             const unsigned *loop_end)
 {
-   if (!loop_end || !ctx->ra_target.defer_spill_lowering)
+   if (!ctx->ra_target.defer_spill_lowering)
       return;
 
    agx_foreach_block(ctx, header) {
@@ -1647,8 +1639,7 @@ agx_spill(agx_context *ctx, unsigned k, bool remat_only)
       rzalloc_array(memctx, struct spill_block, ctx->num_blocks);
 
    /* Step 1. Compute global next-use distances */
-   unsigned *loop_end =
-      spill_loop_handling() ? compute_loop_ends(ctx, memctx) : NULL;
+   unsigned *loop_end = compute_loop_ends(ctx, memctx);
    global_next_use_distances(ctx, memctx, blocks, loop_end);
    validate_next_use_info(ctx, blocks);
 

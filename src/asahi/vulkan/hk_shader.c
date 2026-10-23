@@ -145,7 +145,7 @@ static once_flag hk_compiler_env_hash_once = ONCE_FLAG_INIT;
  * never split them while an unlisted knob still does, conservatively.
  */
 static const char *const hk_codegen_env[] = {
-   "AGX_MESA_DEBUG", "AGX_SPILL_COALESCE", "AGX_SPILL_NO_LOOP_HANDLING",
+   "AGX_MESA_DEBUG", "AGX_SPILL_COALESCE",
    "AGX_APPLE9_NO_COMPARE_LITERAL",
    "AGX_APPLE9_GATED",
    "AGX_APPLE9_HOIST_LOADS",
