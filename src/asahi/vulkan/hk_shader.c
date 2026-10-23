@@ -6,6 +6,8 @@
  * Copyright 2018 Intel Corporation
  * SPDX-License-Identifier: MIT
  */
+#include <unistd.h>
+
 #include "hk_shader.h"
 #include "hk_gpu_busy.h"
 #include "util/u_queue.h"
@@ -7825,12 +7827,12 @@ compile:;
             if (blob.out_of_memory || check.out_of_memory ||
                 blob.size != check.size ||
                 memcmp(blob.data, check.data, blob.size)) {
-               mesa_loge("hk: draw-time variant cache mismatch (%zu vs %zu "
+               mesa_loge("hk: draw-time variant cache mismatch pid=%u (%zu vs %zu "
                          "bytes): an input is missing from the key",
-                         blob.size, check.size);
+                         (unsigned)getpid(), blob.size, check.size);
             } else {
-               mesa_logi("hk: draw-time variant cache verified (%zu bytes)",
-                         blob.size);
+               mesa_logi("hk: draw-time variant cache verified pid=%u (%zu bytes)",
+                         (unsigned)getpid(), blob.size);
             }
             blob_finish(&check);
          } else if (!blob.out_of_memory) {
