@@ -73,6 +73,11 @@ libasahi_lib = static_library(
 )
 
 if with_tests
+  test('apple9-draw-tables', executable('apple9-draw-tables',
+    'tests/test-apple9-draw-tables.c',
+    include_directories : [inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+    dependencies : [idep_mesautil, idep_nir, idep_libagx],
+    link_with : [libasahi_lib, libasahi_compiler]), suite : ['asahi'])
   test('apple9-coefficients', executable('apple9-coefficients',
     'tests/test-apple9-coefficients.c',
     include_directories : [inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],

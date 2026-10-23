@@ -302,6 +302,17 @@ bool agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
                              struct agx_apple9_uniform_draw *draw,
                              const struct agx_apple9_uniform_draw *previous);
 
+/* Update only resource-table bindings of an already prepared draw. All shader,
+ * texture/sampler, interpolation and raster state must remain unchanged.
+ * GPU allocations remain immutable. Failure leaves the CPU draw unchanged.
+ */
+bool agx_apple9_update_draw_tables_alloc(
+   struct agx_device *dev, void *usc_allocator,
+   struct agx_ptr (*usc_alloc)(void *, size_t, size_t), void *context_allocator,
+   struct agx_ptr (*context_alloc)(void *, size_t, size_t),
+   const struct agx_apple9_render_pipeline *pipeline,
+   struct agx_apple9_uniform_draw *draw, const uint64_t tables[2]);
+
 #define AGX_APPLE9_COMPUTE_RESOURCE_STRIDE 0x20u
 #define AGX_APPLE9_COMPUTE_SUPERSET_RESOURCE_STRIDE 0x100u
 #define AGX_APPLE9_COMPUTE_GEOMETRY_GROUPS_OFFSET 0xc0u

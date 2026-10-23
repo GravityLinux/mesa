@@ -1737,6 +1737,57 @@ agx_apple9_prepare_draw_alloc(
 }
 
 bool
+agx_apple9_update_draw_tables_alloc(
+   struct agx_device *dev, void *usc_allocator,
+   struct agx_ptr (*usc_alloc)(void *, size_t, size_t), void *context_allocator,
+   struct agx_ptr (*context_alloc)(void *, size_t, size_t),
+   const struct agx_apple9_render_pipeline *pipeline,
+   struct agx_apple9_uniform_draw *draw, const uint64_t tables[2])
+{
+   const struct agx_apple9_render_stage *stages[] = {pipeline->vertex,
+                                                   pipeline->fragment};
+   const uint64_t old_tables[] = {draw->vertex_table, draw->fragment_table};
+   uint32_t launch[] = {draw->launch[0], draw->launch[1]};
+   for (unsigned stage = 0; stage < 2; ++stage) {
+      assert(draw->program_id[stage] == stages[stage]->program_id);
+      assert(draw->code[stage] == stages[stage]->bo->va->addr);
+      if (tables[stage] == old_tables[stage] ||
+          (stage == 0 && stages[stage]->native_mesh))
+         continue;
+      if (!agx_apple9_prepare_graphics_stage(
+             dev, usc_allocator, usc_alloc, stages[stage], stage != 0,
+             tables[stage], draw->texture_table[stage],
+             draw->sampler_table[stage],
+             agx_apple9_tile_sample_bytes(draw->tile_bytes, draw->samples),
+             draw->samples, &launch[stage]))
+         return false;
+   }
+
+   uint32_t ppp = draw->ppp;
+   if (launch[1] != draw->launch[1]) {
+      struct agx_ptr record =
+         context_alloc(context_allocator, draw->ppp_size, 64);
+      if (!record.cpu || record.gpu < AGX_APPLE9_RENDER_CONTEXT_BASE ||
+          record.gpu - AGX_APPLE9_RENDER_CONTEXT_BASE >
+             UINT32_MAX - draw->ppp_size + 1)
+         return false;
+      memcpy(record.cpu, draw->ppp_record, draw->ppp_size);
+      apple9_put_u32((uint8_t *)record.cpu + 0x54, launch[1] / 0x40);
+      ppp = record.gpu - AGX_APPLE9_RENDER_CONTEXT_BASE;
+   }
+
+   /* Commit only after all allocations succeeded. Previously emitted draws
+    * still refer to their immutable launch and raster allocations.
+    */
+   draw->vertex_table = tables[0];
+   draw->fragment_table = tables[1];
+   memcpy(draw->launch, launch, sizeof(launch));
+   apple9_put_u32(draw->ppp_record + 0x54, launch[1] / 0x40);
+   draw->ppp = ppp;
+   return true;
+}
+
+bool
 agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
                         struct agx_pool *context_pool,
                         const struct agx_apple9_render_pipeline *pipeline,
