@@ -436,13 +436,15 @@ struct agx_apple9_texture_mapping {
    uint8_t samplers[32];
    uint32_t white_samplers;
    uint32_t seamful_cubes;
-   /* The stage samples with texel offsets. Offsets the sample instruction
+   /* Samplers used by texel-offset samples. Offsets the sample instruction
     * cannot encode are lowered with runtime sampler state, so the driver
-    * must fill the runtime sampler records of the graphics sysval table. */
-   bool runtime_samplers;
+    * must fill these runtime sampler records of the graphics sysval table. */
+   uint32_t runtime_samplers;
 };
 
-bool agx_nir_apple9_samples_with_offsets(const nir_shader *nir);
+/* Mask of sampler indices sampled with texel offsets; all samplers when an
+ * offset sample has no sampler index yet. */
+uint32_t agx_nir_apple9_offset_samplers(const nir_shader *nir);
 
 /* Apple9 backend texture flags. They share nir_tex_instr::backend_flags with
  * the AGX_TEXTURE_FLAG_* bits in agx_nir_texture.h, so keep them disjoint. */

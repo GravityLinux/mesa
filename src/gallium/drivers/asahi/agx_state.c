@@ -1835,7 +1835,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       struct agx_compiled_shader *compiled = CALLOC_STRUCT(agx_compiled_shader);
       const char *reason = NULL;
       compiled->apple9_compute_textures.runtime_samplers =
-         agx_nir_apple9_samples_with_offsets(early);
+         agx_nir_apple9_offset_samplers(early);
 
       if (!agx_compile_apple9_tiny(
              early, &compiled->b, &compiled->apple9_compute_profile, &reason)) {
@@ -6233,7 +6233,8 @@ agx_apple9_upload_graphics_sysvals(
    size_t size = AGX_APPLE9_GRAPHICS_SYSVAL_SIZE;
    if (mapping->runtime_samplers)
       size = AGX_APPLE9_RUNTIME_SAMPLER_OFFSET +
-             32 * AGX_APPLE9_RUNTIME_SAMPLER_STRIDE;
+             util_last_bit(mapping->runtime_samplers) *
+                AGX_APPLE9_RUNTIME_SAMPLER_STRIDE;
    struct agx_ptr sysvals = agx_pool_alloc_aligned(&batch->pool, size, 16);
    memcpy(sysvals.cpu, ctx->blend_color.color, 16);
    uint32_t fan = first_fan;
@@ -6264,7 +6265,7 @@ agx_apple9_upload_graphics_sysvals(
       struct agx_sampler_state *sampler = stage->samplers[api];
       bias[i] = sampler ? CLAMP(sampler->base.lod_bias, -16.f, 16.f) : 0;
    }
-   for (unsigned i = 0; mapping->runtime_samplers && i < 32; ++i) {
+   u_foreach_bit(i, mapping->runtime_samplers) {
       uint32_t *record = (uint32_t *)((uint8_t *)sysvals.cpu +
          AGX_APPLE9_RUNTIME_SAMPLER_OFFSET + i * AGX_APPLE9_RUNTIME_SAMPLER_STRIDE);
       struct agx_sampler_state *sampler = stage->samplers[mapping->samplers[i]];
