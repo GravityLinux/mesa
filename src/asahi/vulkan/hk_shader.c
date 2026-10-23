@@ -6803,10 +6803,10 @@ hk_apple9_compile_graphics_path(struct hk_device *dev, uint32_t count,
                             "Apple9 fragment: %s", reason);
                goto done;
             }
-            /* hk's decision covers the backend's reasons and adds sample
-             * shading and off-centre interpolation, which the backend can't
-             * see. Without the statistics counter's memory writes, the
-             * backend would leave merging on for those. */
+            /* hk's decision covers the backend's reasons for the shader as
+             * written (before the statistics counter, which counts correctly
+             * in merged waves) and adds sample shading and off-centre
+             * interpolation, which the backend can't see. */
             shader->b.info.disable_tri_merging = !tri_merging;
          }
          shader->code_ptr = shader->b.binary;
