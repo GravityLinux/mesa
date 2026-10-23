@@ -9594,8 +9594,10 @@ apple9_lower_sampler_bias(nir_builder *b, nir_instr *instr, void *data)
       return false;
    if (tex->sampler_index >= AGX_APPLE9_SAMPLER_BIAS_COUNT)
       return false; /* Rejected by texture binding validation. */
-   /* Descriptor-addressed samplers have their bias applied upstream. */
-   if (nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle) >= 0)
+   /* Descriptor-addressed samplers have their bias applied upstream, and
+    * the offset lowering's levels already include it. */
+   if (nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle) >= 0 ||
+       (tex->backend_flags & AGX_APPLE9_TEXTURE_BIASED_LEVEL))
       return false;
 
    b->cursor = nir_before_instr(instr);

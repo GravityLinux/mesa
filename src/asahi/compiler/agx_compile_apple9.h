@@ -457,6 +457,10 @@ uint32_t agx_nir_apple9_offset_samplers(const nir_shader *nir);
 /* The sample's final form has no measured offset encoding: lower its texel
  * offset in NIR instead of encoding it. */
 #define AGX_APPLE9_TEXTURE_OFFSET_FALLBACK (1 << 12)
+/* Explicit-level sample from the offset lowering, whose level already
+ * includes the sampler's LOD bias: the per-draw sampler bias must not be
+ * applied again. */
+#define AGX_APPLE9_TEXTURE_BIASED_LEVEL (1 << 13)
 
 bool agx_nir_lower_apple9_sampler_state(
    nir_shader *nir, const struct agx_apple9_sampler_key key[32],

@@ -9963,6 +9963,51 @@ TEST(Apple9Compiler, StaticBorderWrapOffsetsUseRuntimeState)
    }
 }
 
+/* The runtime offset lowering selects levels with the sampler's LOD bias
+ * already applied. Its explicit-level samples must be marked so the per-draw
+ * sampler bias (Gallium's sysval bias) is not added a second time. */
+TEST(Apple9Compiler, RuntimeOffsetLevelsAreMarkedBiased)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "offset_bias");
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
+   tex->op = nir_texop_tex;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->is_array = true;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 3;
+   tex->texture_index = 1;
+   tex->sampler_index = 1;
+   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord,
+                                     nir_imm_vec3(&b, .375, .625, 1));
+   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_offset, nir_imm_ivec2(&b, 1, -2));
+   tex->backend_flags |= AGX_APPLE9_TEXTURE_OFFSET_FALLBACK;
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+   nir_store_output(&b, &tex->def, nir_imm_int(&b, 0), .write_mask = 15,
+      .src_type = nir_type_float32,
+      .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+   b.shader->info.io_lowered = true;
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_nir_lower_apple9_texture_offsets(b.shader, NULL, &reason))
+      << (reason ?: "");
+   unsigned levels = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_tex)
+            continue;
+         nir_tex_instr *t = nir_instr_as_tex(instr);
+         EXPECT_NE(t->op, nir_texop_tex);
+         if (t->op == nir_texop_txl) {
+            ++levels;
+            EXPECT_TRUE(t->backend_flags & AGX_APPLE9_TEXTURE_BIASED_LEVEL);
+         }
+      }
+   }
+   EXPECT_GT(levels, 0u);
+   ralloc_free(b.shader);
+}
+
 TEST(Apple9Compiler, TextureOffsetModesCoverOnlyMeasuredForms)
 {
    uint16_t mode = 0;

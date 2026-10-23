@@ -237,7 +237,7 @@ sample_border(nir_builder *b, nir_tex_instr *tex, nir_def *coord, unsigned dims)
    bt->dest_type = nir_alu_type_get_base_type(tex->dest_type) | 32;
    bt->texture_index = tex->texture_index;
    bt->sampler_index = tex->sampler_index;
-   bt->backend_flags = tex->backend_flags;
+   bt->backend_flags = tex->backend_flags | AGX_APPLE9_TEXTURE_BIASED_LEVEL;
    bt->can_speculate = tex->can_speculate;
    nir_def *comps[4];
    for (unsigned c = 0; c < coord->num_components; ++c)
@@ -529,7 +529,7 @@ native_offset_level(nir_builder *b, const struct offset_sample *s,
    nt->dest_type = tex->dest_type;
    nt->texture_index = tex->texture_index;
    nt->sampler_index = tex->sampler_index;
-   nt->backend_flags = tex->backend_flags;
+   nt->backend_flags = tex->backend_flags | AGX_APPLE9_TEXTURE_BIASED_LEVEL;
    nt->can_speculate = tex->can_speculate;
    unsigned n = 0;
    nt->src[n++] = (nir_tex_src){
