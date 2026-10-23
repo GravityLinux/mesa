@@ -55,6 +55,9 @@ struct shim_device {
    /* Lock for fd_map and mem_heap. */
    mtx_t lock;
 
+   /* Mapping from exported dma-buf inode to shim_bo, for PRIME import. */
+   struct hash_table_u64 *prime_map;
+
    /* Heap from which shim_bo are allocated */
    struct util_vma_heap mem_heap;
 
@@ -106,6 +109,9 @@ struct shim_bo {
    void *map;
    int refcount;
    uint32_t size;
+   /* memfd standing in for the BO's dma-buf, created on first PRIME export
+    * (0 until then). Its inode identifies the BO on PRIME import. */
+   int prime_fd;
 };
 
 /* Core support. */
