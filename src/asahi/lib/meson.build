@@ -73,6 +73,11 @@ libasahi_lib = static_library(
 )
 
 if with_tests
+  test('apple9-graphics-roots', executable('apple9-graphics-roots',
+    'tests/test-apple9-graphics-roots.c',
+    include_directories : [inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+    dependencies : [idep_mesautil, idep_nir, idep_libagx],
+    link_with : [libasahi_lib, libasahi_compiler]), suite : ['asahi'])
   test(
     'libasahi_tests',
     executable(

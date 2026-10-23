@@ -54,6 +54,27 @@ hk_descriptor_state_fini(struct hk_cmd_buffer *cmd,
    }
 }
 
+/* Called only after reset, or when trimming an already initial buffer. GPU
+ * storage has been released; discard CPU high-water marks on explicit trim. */
+void
+hk_trim_cmd_buffer(struct hk_cmd_buffer *cmd)
+{
+   assert(cmd->vk.state == MESA_VK_COMMAND_BUFFER_STATE_INITIAL);
+   struct util_dynarray *arrays[] = {
+      &cmd->large_bos, &cmd->implicit_sync_res, &cmd->query_adds,
+      &cmd->query_writes, &cmd->occlusion_accum, &cmd->sync_events,
+      &cmd->sync_remap,
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(arrays); ++i)
+      util_dynarray_fini(arrays[i]);
+   for (unsigned i = 0; i < HK_TESS_BATCH_LANES; ++i)
+      util_dynarray_fini(&cmd->tess_batch.lane[i]);
+   _mesa_set_destroy(cmd->apple9_pinned, NULL);
+   cmd->apple9_pinned = NULL;
+   free(cmd->merge_empty_render);
+   cmd->merge_empty_render = NULL;
+}
+
 static void
 hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd, bool release)
 {
@@ -62,6 +83,7 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd, bool release)
 
    ralloc_free(cmd->upload_cache);
    cmd->upload_cache = NULL;
+   cmd->upload_cache_bytes = 0;
    memset(cmd->upload_hits, 0, sizeof(cmd->upload_hits));
    memset(cmd->upload_misses, 0, sizeof(cmd->upload_misses));
    for (unsigned i = 0; i < HK_UPLOAD_LAST_COUNT; ++i)
@@ -102,6 +124,8 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd, bool release)
    util_dynarray_clear(&cmd->occlusion_accum);
    util_dynarray_clear(&cmd->sync_events);
    util_dynarray_clear(&cmd->sync_remap);
+   if (release)
+      hk_trim_cmd_buffer(cmd);
 }
 
 /* agx_device::apple9_pin_entry. Every Apple9 entry is requested while
@@ -247,6 +271,20 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    cmd->api_dispatch = false;
 
    memset(&cmd->state, 0, sizeof(cmd->state));
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+hk_ResetCommandBuffer(VkCommandBuffer commandBuffer,
+                       VkCommandBufferResetFlags flags)
+{
+   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+
+   if (cmd->vk.state != MESA_VK_COMMAND_BUFFER_STATE_INITIAL)
+      hk_reset_cmd_buffer(&cmd->vk, flags);
+   else if (flags & VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT)
+      hk_trim_cmd_buffer(cmd);
+
+   return VK_SUCCESS;
 }
 
 const struct vk_command_buffer_ops hk_cmd_buffer_ops = {
@@ -400,6 +438,15 @@ hk_pool_alloc_cached(struct hk_cmd_buffer *cmd, enum hk_cmd_pool_kind kind,
    if (!ptr.cpu || !cmd->upload_cache)
       return ptr;
 
+   /* Retaining a second copy of every unique runtime table is counter-
+    * productive for long recordings. Keep hits available after the budget
+    * fills; new entries fall back to ordinary command-buffer storage. */
+   const size_t entry_size = sizeof(struct hk_upload_entry) + (size_t)size;
+   if (cmd->upload_cache->entries >= HK_UPLOAD_CACHE_MAX_ENTRIES ||
+       entry_size > HK_UPLOAD_CACHE_MAX_BYTES ||
+       cmd->upload_cache_bytes > HK_UPLOAD_CACHE_MAX_BYTES - entry_size)
+      return ptr;
+
    struct hk_upload_entry *entry =
       ralloc_size(cmd->upload_cache, sizeof(*entry) + size);
    if (entry) {
@@ -410,6 +457,8 @@ hk_pool_alloc_cached(struct hk_cmd_buffer *cmd, enum hk_cmd_pool_kind kind,
       if (!_mesa_hash_table_insert_pre_hashed(cmd->upload_cache, hash,
                                              &entry->key, entry))
          ralloc_free(entry);
+      else
+         cmd->upload_cache_bytes += entry_size;
    }
    return ptr;
 }

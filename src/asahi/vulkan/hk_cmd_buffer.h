@@ -722,6 +722,10 @@ struct hk_render_merge_key {
    uint32_t color_count, layer_count, view_mask;
 };
 
+/* CPU key storage is bounded independently of command-buffer GPU data. */
+#define HK_UPLOAD_CACHE_MAX_BYTES (1024 * 1024)
+#define HK_UPLOAD_CACHE_MAX_ENTRIES 4096
+
 struct hk_cmd_buffer {
    struct vk_command_buffer vk;
 
@@ -743,6 +747,7 @@ struct hk_cmd_buffer {
 
    /* Full-content immutable upload cache, discarded on reset. */
    struct hash_table *upload_cache;
+   uint32_t upload_cache_bytes;
    /* HK_UPLOAD_STATS: content-cache lookups per record kind. */
    uint32_t upload_hits[AGX_APPLE9_STATE_COUNT + 3], upload_misses[AGX_APPLE9_STATE_COUNT + 3];
 
@@ -1472,3 +1477,6 @@ void hk_apple9_compute_sysvals(struct hk_device *dev, void *out);
 bool hk_apple9_upload_textures(struct hk_cmd_buffer *cmd,
    const struct hk_shader *shader, bool graphics, bool first_fan, bool lines,
    uint64_t *textures, uint64_t *samplers, uint64_t *sysvals);
+
+/* Discard retained CPU storage of an initial command buffer. */
+void hk_trim_cmd_buffer(struct hk_cmd_buffer *cmd);
