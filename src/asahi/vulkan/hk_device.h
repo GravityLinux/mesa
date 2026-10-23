@@ -125,6 +125,7 @@ struct hk_device {
       struct hash_table *ht;
       struct list_head lru;
       unsigned count;
+      uint64_t bytes;
    } apple9_bodies;
 
 

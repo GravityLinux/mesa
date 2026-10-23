@@ -4089,6 +4089,9 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
  * shader until evicted.
  */
 #define HK_APPLE9_BODY_CACHE_SIZE 4096
+/* Match the old count limit for minimum-size M4 BOs, but do not retain an
+ * unbounded number of bytes when shader bodies span several pages. */
+#define HK_APPLE9_BODY_CACHE_BYTES (64ull * 1024 * 1024)
 
 struct hk_apple9_body {
    blake3_hash hash;
@@ -4167,29 +4170,36 @@ hk_apple9_body_bo(struct hk_device *dev, const struct hk_shader *shader)
    *body = key;
    body->bo = bo;
 
-   struct agx_bo *evict = NULL;
+   struct list_head evicted;
+   list_inithead(&evicted);
    simple_mtx_lock(&dev->apple9_bodies.lock);
-   if (!dev->apple9_bodies.ht ||
-       _mesa_hash_table_search(dev->apple9_bodies.ht, body)) {
-      /* Uploaded concurrently, or no table: keep this copy unshared. */
+   if (!dev->apple9_bodies.ht || bo->size > HK_APPLE9_BODY_CACHE_BYTES ||
+       _mesa_hash_table_search(dev->apple9_bodies.ht, body) ||
+       !_mesa_hash_table_insert(dev->apple9_bodies.ht, body, body)) {
+      /* Oversized, uploaded concurrently or allocation failure: the caller
+       * still owns this BO, but the cache must not keep a reference. */
       free(body);
    } else {
       agx_bo_reference(bo);
-      _mesa_hash_table_insert(dev->apple9_bodies.ht, body, body);
       list_add(&body->link, &dev->apple9_bodies.lru);
-      if (++dev->apple9_bodies.count > HK_APPLE9_BODY_CACHE_SIZE) {
+      dev->apple9_bodies.count++;
+      dev->apple9_bodies.bytes += bo->size;
+      while (dev->apple9_bodies.count > HK_APPLE9_BODY_CACHE_SIZE ||
+             dev->apple9_bodies.bytes > HK_APPLE9_BODY_CACHE_BYTES) {
          struct hk_apple9_body *old = list_last_entry(
             &dev->apple9_bodies.lru, struct hk_apple9_body, link);
          list_del(&old->link);
          _mesa_hash_table_remove_key(dev->apple9_bodies.ht, old);
          dev->apple9_bodies.count--;
-         evict = old->bo;
-         free(old);
+         dev->apple9_bodies.bytes -= old->bo->size;
+         list_addtail(&old->link, &evicted);
       }
    }
    simple_mtx_unlock(&dev->apple9_bodies.lock);
-   if (evict)
-      agx_bo_unreference(&dev->dev, evict);
+   list_for_each_entry_safe(struct hk_apple9_body, old, &evicted, link) {
+      agx_bo_unreference(&dev->dev, old->bo);
+      free(old);
+   }
    return bo;
 }
 
@@ -4205,6 +4215,8 @@ hk_apple9_bodies_finish(struct hk_device *dev)
    }
    _mesa_hash_table_destroy(dev->apple9_bodies.ht, NULL);
    dev->apple9_bodies.ht = NULL;
+   dev->apple9_bodies.count = 0;
+   dev->apple9_bodies.bytes = 0;
 }
 
 /* The native description of an uploaded G16 graphics stage. */
