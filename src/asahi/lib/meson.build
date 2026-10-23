@@ -84,8 +84,13 @@ if with_tests
     link_with : [libasahi_lib, libasahi_compiler],
     link_args : ['-Wl,--wrap=drmIoctl', '-Wl,--wrap=drmPrimeFDToHandle',
                  '-Wl,--wrap=u_thread_create', '-Wl,--wrap=pthread_cond_signal',
-                 '-Wl,--wrap=agx_va_free']),
+                 '-Wl,--wrap=agx_va_free', '-Wl,--wrap=agx_va_retire']),
     suite : ['asahi'], timeout : 40)
+  test('va-quarantine', executable('va-quarantine', 'tests/test-va-quarantine.c',
+    include_directories : [inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+    dependencies : [idep_mesautil, idep_nir, idep_libagx],
+    link_with : [libasahi_lib, libasahi_compiler]),
+    suite : ['asahi'])
   test('apple9-coefficients', executable('apple9-coefficients',
     'tests/test-apple9-coefficients.c',
     include_directories : [inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],

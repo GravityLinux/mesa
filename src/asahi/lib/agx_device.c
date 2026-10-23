@@ -728,6 +728,9 @@ agx_open_device(void *memctx, struct agx_device *dev)
    util_vma_heap_init(&dev->context_heap, context_start,
                       fixed_apple9_usc_base ? context_end - context_start : 0);
    dev->context_heap.alloc_high = false;
+   agx_va_quarantine_init(dev, user_size - replay_size,
+                          shader_size - replay_usc_size,
+                          fixed_apple9_usc_base ? context_end - context_start : 0);
 
    /* The compact Apple9 entry arena must start at the USC base. Allocate
     * it first from the bottom of the heap; shader bodies and batch state can
@@ -858,6 +861,7 @@ agx_finish_device(struct agx_device *dev)
    agx_bo_unreference(dev, dev->scratch_bo);
    u_printf_destroy(&dev->printf);
    agx_bo_cache_finish(dev);
+   agx_va_quarantine_finish(dev);
    if (dev->chip == AGX_CHIP_G16G || dev->chip == AGX_CHIP_G17P) {
       util_vma_heap_finish(&dev->apple9_entry_heap);
       simple_mtx_destroy(&dev->apple9_entry_lock);
