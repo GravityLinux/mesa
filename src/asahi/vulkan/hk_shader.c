@@ -85,8 +85,6 @@ DEBUG_GET_ONCE_OPTION(cached_hk_apple9_eager_variants,
                       "HK_APPLE9_EAGER_VARIANTS", NULL)
 DEBUG_GET_ONCE_OPTION(cached_hk_apple9_pressure_stats,
                       "HK_APPLE9_PRESSURE_STATS", NULL)
-DEBUG_GET_ONCE_OPTION(cached_hk_apple9_texel_classes,
-                      "HK_APPLE9_TEXEL_CLASSES", NULL)
 DEBUG_GET_ONCE_OPTION(cached_hk_apple9_trace_vectorize,
                       "HK_APPLE9_TRACE_VECTORIZE", NULL)
 
@@ -161,7 +159,7 @@ static const char *const hk_codegen_env[] = {
    "HK_APPLE9_NATIVE_MESH_PRIMITIVE_LOWERING",
    "HK_APPLE9_SPARSE_SCRATCH",
    "HK_APPLE9_TESS_BATCH", "HK_APPLE9_TESS_SCAN_BLOCK",
-   "HK_APPLE9_TEXEL_CLASSES", "HK_APPLE9_UNIFORM_SAFE_CLASSES",
+   "HK_APPLE9_UNIFORM_SAFE_CLASSES",
 };
 
 /* Knobs that never change generated code and must not split the caches at
@@ -2543,16 +2541,6 @@ hk_apple9_decode_texel_classes(nir_builder *b, nir_def *words, nir_def *layout,
    return nir_if_phi(b, then_value, else_value);
 }
 
-/* HK_APPLE9_TEXEL_CLASSES limits the format classes with a dedicated
- * branch (0 keeps only the full select), trading executed work for code
- * size. */
-static unsigned
-hk_apple9_texel_class_limit(unsigned count)
-{
-   const char *env = debug_get_option_cached_hk_apple9_texel_classes();
-   return env ? MIN2((unsigned)atoi(env), count) : count;
-}
-
 static nir_def *
 hk_apple9_decode_texel(nir_builder *b, nir_def *words, nir_def *layout,
                        bool floating)
@@ -2564,9 +2552,9 @@ hk_apple9_decode_texel(nir_builder *b, nir_def *words, nir_def *layout,
    static const unsigned int_classes[] = {HK_TEXEL_UINT, HK_TEXEL_SINT};
    return floating
       ? hk_apple9_decode_texel_classes(b, words, layout, true, float_classes,
-            hk_apple9_texel_class_limit(ARRAY_SIZE(float_classes)))
+            ARRAY_SIZE(float_classes))
       : hk_apple9_decode_texel_classes(b, words, layout, false, int_classes,
-            hk_apple9_texel_class_limit(ARRAY_SIZE(int_classes)));
+            ARRAY_SIZE(int_classes));
 }
 
 /* Decode a texel from the per-component layout of its descriptor, as
@@ -2741,7 +2729,7 @@ hk_apple9_encode_texel(nir_builder *b, nir_def *value, nir_def *layout,
    };
    return floating
       ? hk_apple9_encode_texel_classes(b, value, layout, true, float_classes,
-            hk_apple9_texel_class_limit(ARRAY_SIZE(float_classes)))
+            ARRAY_SIZE(float_classes))
       : hk_apple9_encode_texel_kind(b, value, layout, false, -1);
 }
 
