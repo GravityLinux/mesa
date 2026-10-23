@@ -310,14 +310,19 @@ fetch_state(struct gl_context *ctx, const gl_state_index16 state[],
       return;
    case STATE_FOG_PARAMS: {
       float scale = 1.0f / (ctx->Fog.End - ctx->Fog.Start);
-      /* Pass +-FLT_MAX/2 to the shader instead of +-Inf because Infs have
+      /* Pass +-2^64 to the shader instead of +-Inf because Infs have
        * undefined behavior without GLSL 4.10 or GL_ARB_shader_precision
        * enabled. Infs also have undefined behavior with Shader Model 3.
        *
-       * The division by 2 makes it less likely that ALU ops will generate
-       * Inf.
+       * The bound stays far below FLT_MAX because varying optimizations can
+       * move "fogcoord * scale" into the previous stage, so the product is
+       * interpolated, and varying setup can overflow far below FLT_MAX.
+       * Apple G16 (T8132) fails between 1e35 and 1e36 on a 16x16 target and
+       * between 1e30 and 1e33 on 1024x1024, falling with the target size.
+       * 2^64 still saturates the fog factor for any distance from the fog end
+       * above 2^-64.
        */
-      scale = CLAMP(scale, -FLT_MAX / 2, FLT_MAX / 2);
+      scale = CLAMP(scale, -0x1p64f, 0x1p64f);
       value[0] = ctx->Fog.Density;
       value[1] = ctx->Fog.Start;
       value[2] = ctx->Fog.End;
