@@ -156,6 +156,12 @@ agx_apple9_instr_block(const struct agx_apple9_vir_instr *instr)
    return apple9_node(instr)->block;
 }
 
+unsigned
+agx_apple9_instr_position(const struct agx_apple9_vir_instr *instr)
+{
+   return apple9_node(instr)->position;
+}
+
 struct agx_apple9_block *
 agx_apple9_block_create(struct agx_apple9_vir_program *program)
 {
