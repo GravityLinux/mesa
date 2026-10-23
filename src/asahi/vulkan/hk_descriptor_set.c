@@ -88,7 +88,7 @@ hk_apple9_pack_sampled_image(struct hk_device *dev, void *out,
             *part = (struct hk_apple9_image_part){0};
             struct agx_texture_packed null;
             agx_set_null_texture(&null);
-            agx_apple9_translate_texture(part->texture, &null);
+            agx_apple9_set_null_texture(part->texture);
             hk_apple9_texture_info(part->texture_info, &null);
             if (view) {
                part->base_level = view->vk.base_mip_level;
@@ -341,7 +341,7 @@ hk_pack_texel_buffer_desc(struct hk_device *dev, void *out,
          memcpy(desc.texture, apple9_texture, sizeof(desc.texture));
       } else {
          agx_set_null_texture(&desc.tex);
-         agx_apple9_translate_texture(desc.texture, &desc.tex);
+         agx_apple9_set_null_texture(desc.texture);
       }
       memcpy(out, &desc, sizeof(desc));
       return sizeof(desc);
