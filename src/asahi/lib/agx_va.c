@@ -82,9 +82,8 @@ agx_va_quarantine_init(struct agx_device *dev, uint64_t main_B,
                        uint64_t usc_B, uint64_t context_B)
 {
    const uint64_t max_B = 8ull << 30;
+   memset(&dev->va_quarantine, 0, sizeof(dev->va_quarantine));
    list_inithead(&dev->va_quarantine.list);
-   memset(&dev->va_quarantine.bytes, 0, sizeof(dev->va_quarantine.bytes));
-   memset(&dev->va_quarantine.cap, 0, sizeof(dev->va_quarantine.cap));
    dev->va_quarantine.cap[0] = MIN2(main_B / 8, max_B);
    dev->va_quarantine.cap[1] = MIN2(usc_B / 8, max_B);
    dev->va_quarantine.cap[2] = MIN2(context_B / 8, max_B);
@@ -134,7 +133,9 @@ agx_va_retire(struct agx_device *dev, struct agx_va *va)
          break;
       if (agx_va_heap_index(old->flags) == heap) {
          agx_va_release_locked(dev, old);
-         dev->va_quarantine.released_cap++;
+         /* A zero cap (replay heaps) is no quarantine: not a cap release. */
+         if (dev->va_quarantine.cap[heap])
+            dev->va_quarantine.released_cap++;
       }
    }
    simple_mtx_unlock(&dev->vma_lock);
