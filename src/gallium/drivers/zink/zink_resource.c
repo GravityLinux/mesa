@@ -239,6 +239,8 @@ zink_destroy_resource_object(struct zink_screen *screen, struct zink_resource_ob
 #endif
    }
 
+   if (obj->zombie)
+      p_atomic_add(&screen->zombie_bytes, -(int64_t)obj->size);
    if (obj->dt) {
       FREE(obj->bo); //this is a dummy struct
    } else
@@ -268,6 +270,11 @@ zink_resource_destroy(struct pipe_screen *pscreen,
    free(res->modifiers);
    struct pipe_resource *pres_transient = res->transient ? &res->transient->base.b : NULL;
    pipe_resource_reference(&pres_transient, NULL);
+   /* still referenced by batches: its memory now lives only for them */
+   if (!res->obj->zombie && p_atomic_read(&res->obj->reference.count) > 1) {
+      res->obj->zombie = true;
+      p_atomic_add(&screen->zombie_bytes, (int64_t)res->obj->size);
+   }
    zink_resource_object_reference(screen, &res->obj, NULL);
    threaded_resource_deinit(pres);
    FREE_CL(res);

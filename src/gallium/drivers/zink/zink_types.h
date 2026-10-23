@@ -1237,6 +1237,8 @@ struct zink_resource_object {
    bool transfer_dst;
    bool render_target;
    bool is_buffer;
+   /* the resource was destroyed while batches still referenced this */
+   bool zombie;
    bool exportable;
    bool exportable_dmabuf;
 
@@ -1456,7 +1458,11 @@ struct zink_screen {
 
    uint64_t total_video_mem;
    uint64_t clamp_video_mem;
-   uint64_t oom_flush_threshold;
+   uint64_t zombie_bytes_limit;
+   /* bytes of objects whose resource was destroyed while batches still
+    * referenced them (atomic)
+    */
+   int64_t zombie_bytes;
    uint64_t total_mem;
    uint64_t mapped_vram;
 
@@ -1764,6 +1770,11 @@ struct zink_context {
    struct zink_batch_state *last_free_batch_state; //for appending
    bool oom_flush;
    bool oom_stall;
+   /* zombie_bytes after the last out-of-memory stall: only growth from here
+    * triggers the next one, so zombies of other contexts can't cause a stall
+    * on every flush
+    */
+   int64_t oom_zombie_floor;
    bool track_renderpasses;
    bool no_reorder;
    struct zink_batch_state *bs;

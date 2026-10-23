@@ -3764,7 +3764,16 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
 
    screen->total_video_mem = get_video_mem(screen);
    screen->clamp_video_mem = screen->total_video_mem * 0.8;
-   screen->oom_flush_threshold = screen->clamp_video_mem;
+   /* A batch keeps every resource it references alive, including deleted
+    * ones, until it completes. With unified memory the heap is system memory
+    * shared with everything else, so bound the memory kept alive only by
+    * batches (zombie_bytes) long before the heap is nearly full.
+    */
+   if (screen->info.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ||
+       screen->info.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU)
+      screen->zombie_bytes_limit = screen->total_video_mem / 4;
+   else
+      screen->zombie_bytes_limit = screen->clamp_video_mem;
    if (!os_get_total_physical_memory(&screen->total_mem)) {
       if (!screen->driver_name_is_inferred)
          mesa_loge("ZINK: failed to get total physical memory");
