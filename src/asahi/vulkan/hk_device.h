@@ -22,8 +22,8 @@
 #include "hk_private.h"
 
 #include "hk_descriptor_table.h"
-#include "hk_apple9_pbe_table.h"
 #include "hk_queue.h"
+#include "hk_usc_heap.h"
 #include "vk_device.h"
 #include "vk_meta.h"
 #include "vk_queue.h"
@@ -73,12 +73,14 @@ struct hk_device {
 
    struct hk_sampler_heap samplers;
 
-   simple_mtx_t apple9_pbe_lock;
-   struct hk_apple9_pbe_table apple9_pbes;
+   simple_mtx_t usc_heap_lock;
+   struct hk_usc_heap usc_heap;
 
    /* G16 private texel-fetch sampler, addressable as a native table entry
     * relative to the USC aperture. */
    struct agx_bo *apple9_fetch_sampler;
+   /* Reload sampler shares the immutable sampler BO, at a 64-byte boundary. */
+   uint64_t apple9_reload_sampler;
    /* Last G16 graphics program id handed out, see hk_shader::apple9_program_id. */
    uint64_t apple9_last_program_id;
    /* USC space charged to shared index aliases, including allocator guards. */
@@ -303,3 +305,6 @@ hk_cpu_sub_count(enum hk_cpu_sub sub)
    if (unlikely(hk_cpu_level))
       hk_cpu_sub_count_slow(sub);
 }
+
+void hk_device_init_usc_heap(struct hk_device *dev);
+void hk_device_finish_usc_heap(struct hk_device *dev);

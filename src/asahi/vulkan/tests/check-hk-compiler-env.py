@@ -26,7 +26,7 @@ presence = {
 }
 boolean = {
     'spill_loops': 'AGX_SPILL_TRACE_LOOPS', 'merge': 'HK_APPLE9_MERGE_TRACE',
-    'upload': 'HK_UPLOAD_STATS', 'tiling': 'HK_TILING_ELISION_STATS',
+    'tiling': 'HK_TILING_ELISION_STATS',
     'launch_check': 'HK_APPLE9_LAUNCH_CHECK', 'bo_labels': 'AGX_BO_TRACE_LABELS',
     'replay': 'HK_REPLAY_DEBUG',
 }

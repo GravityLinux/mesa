@@ -55,31 +55,22 @@ int main(void)
    };
    CHECK(vk_common_AllocateCommandBuffers(device, &ai, &cb) == VK_SUCCESS);
    struct hk_cmd_buffer *cmd = hk_cmd_buffer_from_handle(cb);
-   uint64_t first = 0, last = 0;
+   uint64_t last = 0;
    uint32_t words[128] = {0};
    for (unsigned i = 0; i < 6000; ++i) {
       words[0] = i;
-      last = hk_pool_upload_cached(cmd, words, sizeof(words), 64, HK_UPLOAD_RUNTIME);
+      last = hk_pool_upload(cmd, words, sizeof(words), 64);
       CHECK(last);
-      if (!i) first = last;
    }
-   CHECK(cmd->upload_cache_bytes <= HK_UPLOAD_CACHE_MAX_BYTES);
-   CHECK(cmd->upload_cache->entries <= HK_UPLOAD_CACHE_MAX_ENTRIES);
-   CHECK(cmd->upload_cache->entries > 0 && cmd->upload_cache->entries < 6000);
-   words[0] = 0;
-   CHECK(hk_pool_upload_cached(cmd, words, sizeof(words), 64, HK_UPLOAD_RUNTIME) == first);
-   words[0] = 5999;
-   CHECK(hk_pool_upload_cached(cmd, words, sizeof(words), 64, HK_UPLOAD_RUNTIME) != last);
    /* All data, including uncached uploads, stays alive until reset. */
    unsigned before = live_bos;
    cmd->vk.state = MESA_VK_COMMAND_BUFFER_STATE_EXECUTABLE;
    hk_TrimCommandPool(device, handle, 0);
-   CHECK(live_bos == before && cmd->upload_cache_bytes);
+   CHECK(live_bos == before);
    CHECK(util_dynarray_resize_bytes(&cmd->sync_events, 1, 1024 * 1024));
    cmd->sync_events.size = 0;
    CHECK(hk_ResetCommandPool(device, handle, 0) == VK_SUCCESS);
-   CHECK(cmd->sync_events.capacity >= 1024 * 1024 && !cmd->upload_cache);
-   CHECK(!cmd->upload_cache_bytes);
+   CHECK(cmd->sync_events.capacity >= 1024 * 1024);
    hk_TrimCommandPool(device, handle, 0);
    CHECK(!cmd->sync_events.capacity && !live_bos && trims == 2);
    /* A releasing reset frees CPU high-water marks on allocated buffers. */
@@ -97,5 +88,6 @@ int main(void)
    hk_DestroyCommandPool(device, handle, NULL);
    CHECK(!live_bos);
    free(dev);
-   puts("PASS bounded upload reuse; recording lifetime; reset, trim and recycled-buffer release");
+   puts(
+      "PASS direct uploads; recording lifetime; reset, trim and recycled-buffer release");
 }

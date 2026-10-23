@@ -1,27 +1,25 @@
 /* Copyright 2026 Asahi Linux Contributors
  * SPDX-License-Identifier: MIT
  */
-#include "hk_apple9_pbe_table.h"
+#include "hk_usc_heap.h"
 #include <assert.h>
 #include <stdlib.h>
-#include "asahi/lib/agx_apple9_layout.h"
 #include "util/macros.h"
 #include "util/u_math.h"
 
 void
-hk_apple9_pbe_table_init(struct hk_apple9_pbe_table *table,
-                         const struct hk_descriptor_memory_ops *ops, void *data)
+hk_usc_heap_init(struct hk_usc_heap *table,
+                 const struct hk_descriptor_memory_ops *ops, void *data)
 {
-   *table = (struct hk_apple9_pbe_table){.ops = ops, .data = data};
+   *table = (struct hk_usc_heap){.ops = ops, .data = data};
    list_inithead(&table->slabs);
 }
 
 static bool
 alloc_from_slab(struct hk_descriptor_chunk *slab, uint64_t size,
-                struct hk_descriptor_allocation *out)
+                unsigned alignment, struct hk_descriptor_allocation *out)
 {
-   uint64_t addr =
-      util_vma_heap_alloc(&slab->heap, size, AGX_APPLE9_TEXTURE_TABLE_STRIDE);
+   uint64_t addr = util_vma_heap_alloc(&slab->heap, size, alignment);
    if (!addr)
       return false;
    *out = (struct hk_descriptor_allocation){
@@ -33,20 +31,20 @@ alloc_from_slab(struct hk_descriptor_chunk *slab, uint64_t size,
 }
 
 bool
-hk_apple9_pbe_table_alloc(struct hk_apple9_pbe_table *table, unsigned count,
-                          struct hk_descriptor_allocation *out)
+hk_usc_heap_alloc(struct hk_usc_heap *table, uint64_t size, unsigned alignment,
+                  struct hk_descriptor_allocation *out)
 {
-   if (!count)
+   if (!size)
       return false;
-   uint64_t size = (uint64_t)count * AGX_APPLE9_TEXTURE_TABLE_STRIDE;
+   assert(util_is_power_of_two_nonzero(alignment));
    list_for_each_entry(struct hk_descriptor_chunk, slab, &table->slabs, link) {
-      if (alloc_from_slab(slab, size, out))
+      if (alloc_from_slab(slab, size, alignment, out))
          return true;
    }
    struct hk_descriptor_chunk *slab = calloc(1, sizeof(*slab));
    if (!slab)
       return false;
-   if (!table->ops->create(table->data, MAX2(size, HK_APPLE9_PBE_SLAB_SIZE), 0,
+   if (!table->ops->create(table->data, MAX2(size, HK_USC_HEAP_SLAB_SIZE), 0,
                            &slab->backing)) {
       free(slab);
       return false;
@@ -54,14 +52,14 @@ hk_apple9_pbe_table_alloc(struct hk_apple9_pbe_table *table, unsigned count,
    assert(slab->backing.addr && slab->backing.size >= size);
    util_vma_heap_init(&slab->heap, slab->backing.addr, slab->backing.size);
    list_addtail(&slab->link, &table->slabs);
-   ASSERTED bool ok = alloc_from_slab(slab, size, out);
+   ASSERTED bool ok = alloc_from_slab(slab, size, alignment, out);
    assert(ok);
    return true;
 }
 
 void
-hk_apple9_pbe_table_free(struct hk_apple9_pbe_table *table,
-                         struct hk_descriptor_allocation *alloc)
+hk_usc_heap_free(struct hk_usc_heap *table,
+                 struct hk_descriptor_allocation *alloc)
 {
    if (!alloc->size)
       return;
@@ -75,11 +73,11 @@ hk_apple9_pbe_table_free(struct hk_apple9_pbe_table *table,
          return;
       }
    }
-   UNREACHABLE("PBE allocation must belong to its device's table");
+   UNREACHABLE("USC allocation must belong to its device's heap");
 }
 
 void
-hk_apple9_pbe_table_finish(struct hk_apple9_pbe_table *table)
+hk_usc_heap_finish(struct hk_usc_heap *table)
 {
    list_for_each_entry_safe(struct hk_descriptor_chunk, slab, &table->slabs,
                             link) {

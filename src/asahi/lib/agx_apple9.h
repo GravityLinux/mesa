@@ -108,6 +108,9 @@ struct agx_apple9_render_stage {
    uint8_t render_targets;
    /* Optional per-shader launch templates; NULL builds every launch. */
    struct agx_apple9_stage_launch_cache *launch_cache;
+   /* Fragment-owned interpolation tables for each provoking vertex. */
+   uint32_t coefficients[3];
+   uint16_t coefficient_count;
 };
 
 struct agx_apple9_render_pipeline {
@@ -217,22 +220,6 @@ agx_apple9_uniform_draw_reset(struct agx_apple9_uniform_draw *draw)
 
 void agx_apple9_initialize_entries(struct agx_device *dev);
 
-/* Immutable state caches compare the complete canonical contents. Launch keys
- * encode self-relative addresses at the shader aperture base; on a miss the
- * caller writes the actual address-dependent encoding before publishing it.
- * The cache and all allocations have the caller's command-buffer lifetime.
- */
-enum agx_apple9_state_type {
-   AGX_APPLE9_STATE_LAUNCH,
-   AGX_APPLE9_STATE_COEFFICIENTS,
-   AGX_APPLE9_STATE_PPP,
-   AGX_APPLE9_STATE_COUNT,
-};
-
-typedef struct agx_ptr (*agx_apple9_cached_alloc)(
-   void *allocator, enum agx_apple9_state_type type, const void *contents,
-   size_t size, size_t alignment, bool *is_new);
-
 /* Per-sample tile allocation for a fragment-stage launch or render. As in
  * agx_build_tilebuffer_layout, multisampled renders keep a nonempty
  * allocation even without colour targets: a large G16 2x depth-only render
@@ -250,10 +237,9 @@ agx_apple9_tile_sample_bytes(unsigned color_bytes, unsigned samples)
 bool agx_apple9_prepare_graphics_stage(
    struct agx_device *dev, void *allocator,
    struct agx_ptr (*alloc)(void *, size_t, size_t),
-   const struct agx_apple9_render_stage *shader, bool fragment,
-   uint64_t table, uint64_t textures, uint64_t samplers,
-   unsigned tile_bytes, unsigned samples, uint32_t *launch,
-   agx_apple9_cached_alloc cached_alloc);
+   const struct agx_apple9_render_stage *shader, bool fragment, uint64_t table,
+   uint64_t textures, uint64_t samplers, unsigned tile_bytes, unsigned samples,
+   uint32_t *launch);
 
 /* Whether a draw can take the previous draw's launch for stage (0 vertex, 1
  * fragment) or its coefficient table. Both need nonzero, equal program ids:
@@ -289,6 +275,15 @@ agx_apple9_draw_reuses_coefficients(const struct agx_apple9_uniform_draw *previo
  * within the render-context aperture; USC allocations use the shader aperture.
  * A false return leaves the draw unpublished, including on allocation failure.
  */
+#define AGX_APPLE9_CF_BINDINGS_SIZE   0x2a0
+#define AGX_APPLE9_CF_BINDINGS_STRIDE 0x2c0
+#define AGX_APPLE9_CF_ALLOCATION_SIZE (3 * AGX_APPLE9_CF_BINDINGS_STRIDE)
+unsigned
+agx_apple9_coefficients_size(const struct agx_apple9_render_stage *fragment);
+void agx_apple9_init_coefficients(struct agx_device *dev,
+                                  struct agx_apple9_render_stage *fragment,
+                                  struct agx_ptr allocation);
+
 #define AGX_APPLE9_PPP_STATIC_SIZE 0xc0
 void agx_apple9_build_ppp_static(const struct agx_apple9_render_pipeline *pipeline,
                                  uint8_t out[AGX_APPLE9_PPP_STATIC_SIZE]);
@@ -299,8 +294,7 @@ bool agx_apple9_prepare_draw_alloc(
    struct agx_ptr (*context_alloc)(void *, size_t, size_t),
    const struct agx_apple9_render_pipeline *pipeline,
    struct agx_apple9_uniform_draw *draw,
-   const struct agx_apple9_uniform_draw *previous,
-   agx_apple9_cached_alloc cached_alloc);
+   const struct agx_apple9_uniform_draw *previous);
 
 bool agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
                              struct agx_pool *context_pool,

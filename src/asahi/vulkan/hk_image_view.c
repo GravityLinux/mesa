@@ -656,6 +656,33 @@ hk_apple9_init_view_descriptors(struct hk_image_view *view)
    }
 }
 
+static void
+hk_apple9_init_render_view(struct hk_image_view *view)
+{
+   for (unsigned layered = 0; layered < 2; ++layered) {
+      struct hk_apple9_render_view *out = &view->apple9_render[layered];
+      const struct agx_texture_packed *texture =
+         layered ? &view->planes[0].layered_background
+                 : &view->planes[0].background;
+      agx_unpack(stderr, texture, TEXTURE, image);
+      out->array =
+         image.dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY ||
+         image.dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY_MULTISAMPLED;
+      out->dimensions[0] = u_minify(image.width, image.first_level);
+      out->dimensions[1] = u_minify(image.height, image.first_level);
+      out->dimensions[2] = image.depth;
+      out->dimensions[3] = image.last_level - image.first_level + 1;
+      /* Tile words retain encoded sRGB. Hardware reloads must not decode it. */
+      image.srgb = image.srgb_2_channel = false;
+      struct agx_texture_packed packed;
+      agx_pack(&packed, TEXTURE, cfg) {
+         cfg = image;
+      }
+      out->texture_valid = agx_apple9_translate_texture(out->texture, &packed);
+      out->store_valid = hk_apple9_image_view_eot(view, layered, out->store);
+   }
+}
+
 static VkResult
 hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
                    const VkImageViewCreateInfo *pCreateInfo)
@@ -707,6 +734,9 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
 
    if (dev->dev.chip == AGX_CHIP_G16G)
       hk_apple9_init_view_descriptors(view);
+   if (dev->dev.chip == AGX_CHIP_G16G &&
+       (view->vk.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT))
+      hk_apple9_init_render_view(view);
 
    return VK_SUCCESS;
 }
@@ -721,9 +751,9 @@ hk_DestroyImageView(VkDevice _device, VkImageView imageView,
    if (!view)
       return;
 
-   simple_mtx_lock(&dev->apple9_pbe_lock);
-   hk_apple9_pbe_table_free(&dev->apple9_pbes, &view->apple9_pbes);
-   simple_mtx_unlock(&dev->apple9_pbe_lock);
+   simple_mtx_lock(&dev->usc_heap_lock);
+   hk_usc_heap_free(&dev->usc_heap, &view->apple9_pbes);
+   simple_mtx_unlock(&dev->usc_heap_lock);
    vk_image_view_finish(&view->vk);
    vk_free2(&dev->vk.alloc, pAllocator, view);
 }
@@ -783,17 +813,19 @@ hk_apple9_init_storage_pbe(struct hk_device *dev, struct hk_image_view *view)
    if (!hk_apple9_native_store_image(image, plane))
       return;
    unsigned count = array ? view->vk.layer_count : 1;
-   simple_mtx_lock(&dev->apple9_pbe_lock);
-   bool allocated = hk_apple9_pbe_table_alloc(&dev->apple9_pbes, count, &view->apple9_pbes);
-   simple_mtx_unlock(&dev->apple9_pbe_lock);
+   simple_mtx_lock(&dev->usc_heap_lock);
+   bool allocated = hk_usc_heap_alloc(
+      &dev->usc_heap, (uint64_t)count * AGX_APPLE9_TEXTURE_TABLE_STRIDE,
+      AGX_APPLE9_TEXTURE_TABLE_STRIDE, &view->apple9_pbes);
+   simple_mtx_unlock(&dev->usc_heap_lock);
    if (!allocated)
       return;
    uint64_t index = (view->apple9_pbes.addr - dev->dev.shader_base) /
                      AGX_APPLE9_TEXTURE_TABLE_STRIDE;
    if (index + count - 1 > HK_APPLE9_STORAGE_PBE_MASK) {
-      simple_mtx_lock(&dev->apple9_pbe_lock);
-      hk_apple9_pbe_table_free(&dev->apple9_pbes, &view->apple9_pbes);
-      simple_mtx_unlock(&dev->apple9_pbe_lock);
+      simple_mtx_lock(&dev->usc_heap_lock);
+      hk_usc_heap_free(&dev->usc_heap, &view->apple9_pbes);
+      simple_mtx_unlock(&dev->usc_heap_lock);
       return;
    }
    uint8_t *entries = view->apple9_pbes.map;
@@ -803,9 +835,9 @@ hk_apple9_init_storage_pbe(struct hk_device *dev, struct hk_image_view *view)
       if (!hk_apple9_translate_storage_pbe(entries + i * AGX_APPLE9_TEXTURE_TABLE_STRIDE,
              &view->planes[0].storage, format_for_plane(view, 0), layout, base,
              view->vk.base_mip_level)) {
-         simple_mtx_lock(&dev->apple9_pbe_lock);
-         hk_apple9_pbe_table_free(&dev->apple9_pbes, &view->apple9_pbes);
-         simple_mtx_unlock(&dev->apple9_pbe_lock);
+         simple_mtx_lock(&dev->usc_heap_lock);
+         hk_usc_heap_free(&dev->usc_heap, &view->apple9_pbes);
+         simple_mtx_unlock(&dev->usc_heap_lock);
          return;
       }
    }

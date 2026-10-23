@@ -13,6 +13,7 @@
          abort();                                                              \
       }                                                                        \
    } while (0)
+#include "hk-test-usc.h"
 static unsigned allocations, live_bos, fail_allocation, nir_loads;
 
 nir_shader *__real_nir_deserialize(void *, const nir_shader_compiler_options *,
@@ -426,6 +427,7 @@ native_cache_tests(struct hk_device *dev)
       api_destroy(dev, api[i]);
    hk_apple9_variants_finish(dev);
    hk_apple9_bodies_finish(dev);
+   test_reset_usc_heap(dev);
    CHECK(live_bos == 0 && dev->vk.mem_cache->object_cache->entries == 0);
    vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
    puts("native cache: separate native/emulated hits, collapsed candidate, pair IDs, constants and malformed hybrid containers pass");
@@ -505,6 +507,7 @@ persistent_process(struct hk_device *dev, struct hk_api_shader **api,
    hk_apple9_bodies_finish(dev);
    vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
    disk_cache_destroy(pdev->vk.disk_cache);
+   test_reset_usc_heap(dev);
    CHECK(live_bos == 0);
    printf("separate process: %s\n", mode);
 }
@@ -530,6 +533,7 @@ main(int argc, char **argv)
    dev->vk.shader_ops = &hk_device_shader_ops;
    pdev->vk.dispatch_table.GetPhysicalDeviceProperties = properties;
    memset(pdev->vk.properties.pipelineCacheUUID, 0x57, VK_UUID_SIZE);
+   hk_device_init_usc_heap(dev);
    simple_mtx_init(&dev->apple9_variants.lock, mtx_plain);
    simple_mtx_init(&pdev->debug_compile_lock, mtx_plain);
    simple_mtx_init(&dev->apple9_bodies.lock, mtx_plain);
@@ -598,6 +602,7 @@ main(int argc, char **argv)
    api_destroy(dev, again);
    api_destroy(dev, api);
    hk_apple9_bodies_finish(dev);
+   test_reset_usc_heap(dev);
    CHECK(live_bos == 0 && dev->vk.mem_cache->object_cache->entries == 0);
    hk_apple9_variants_finish(dev);
    vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
@@ -665,6 +670,7 @@ main(int argc, char **argv)
    vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
    disk_cache_destroy(pdev->vk.disk_cache);
    hk_apple9_bodies_finish(dev);
+   test_reset_usc_heap(dev);
    CHECK(live_bos == 0);
    puts(
       "variant cache: binary/constant round trip, pipeline export/import, deferred API binary persistence, disk reopen, malformed blobs, OOM, keys and generated fragment pass");
@@ -673,6 +679,8 @@ finish:
    simple_mtx_destroy(&pdev->debug_compile_lock);
    simple_mtx_destroy(&dev->apple9_variants.lock);
    free(pdev);
+   test_reset_usc_heap(dev);
+   hk_device_finish_usc_heap(dev);
    free(dev);
    glsl_type_singleton_decref();
    return 0;

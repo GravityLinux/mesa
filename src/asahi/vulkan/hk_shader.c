@@ -4297,6 +4297,20 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
          if (shader->apple9_stage_launch)
             agx_apple9_stage_launch_cache_init(shader->apple9_stage_launch);
          hk_apple9_init_render_stage(shader);
+         if (shader->info.stage == MESA_SHADER_FRAGMENT) {
+            simple_mtx_lock(&dev->usc_heap_lock);
+            bool allocated = hk_usc_heap_alloc(
+               &dev->usc_heap,
+               agx_apple9_coefficients_size(&shader->apple9_stage), 64,
+               &shader->apple9_coefficients);
+            simple_mtx_unlock(&dev->usc_heap_lock);
+            if (!allocated)
+               return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+            agx_apple9_init_coefficients(
+               &dev->dev, &shader->apple9_stage,
+               (struct agx_ptr){.cpu = shader->apple9_coefficients.map,
+                                .gpu = shader->apple9_coefficients.addr});
+         }
       }
       return VK_SUCCESS;
    }
@@ -5142,6 +5156,11 @@ hk_shader_destroy(struct hk_device *dev, struct hk_shader *s)
    free((void *)s->code_ptr);
    free((void *)s->data_ptr);
    agx_bo_unreference(&dev->dev, s->bo);
+   if (s->apple9_coefficients.size) {
+      simple_mtx_lock(&dev->usc_heap_lock);
+      hk_usc_heap_free(&dev->usc_heap, &s->apple9_coefficients);
+      simple_mtx_unlock(&dev->usc_heap_lock);
+   }
    free(s->apple9_launch);
    s->apple9_launch = NULL;
    if (s->apple9_stage_launch) {

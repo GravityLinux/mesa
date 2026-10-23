@@ -1087,7 +1087,7 @@ agx_apple9_pack_nearest_sampler(void *out)
  * own slots on the following pages so mixed interpolation can use one
  * descriptor per scalar without overwriting the next draw's roots. */
 #define APPLE9_CF_BINDINGS 0x203d00u
-#define APPLE9_CF_BINDINGS_SIZE 0x2a0u
+#define APPLE9_CF_BINDINGS_SIZE AGX_APPLE9_CF_BINDINGS_SIZE
 /* One binding per user scalar in the worst case, then 1/W, primitive ID,
  * Z, point coordinates, two barycentric pairs and the per-vertex inputs. */
 static_assert(4 + 4 * (AGX_APPLE9_MAX_VARYING_COMPONENTS + 1 + 1 + 1 + 1 + 2 +
@@ -1185,6 +1185,35 @@ apple9_build_cf_bindings(uint8_t *table, unsigned components,
    }
    assert(4 + 4 * binding <= APPLE9_CF_BINDINGS_SIZE);
    return binding;
+}
+
+unsigned
+agx_apple9_coefficients_size(const struct agx_apple9_render_stage *fragment)
+{
+   bool flat = fragment->apple9_flat_mask.lo || fragment->apple9_flat_mask.hi;
+   return (flat ? 3 : 1) * AGX_APPLE9_CF_BINDINGS_STRIDE;
+}
+
+void
+agx_apple9_init_coefficients(struct agx_device *dev,
+                             struct agx_apple9_render_stage *fragment,
+                             struct agx_ptr allocation)
+{
+   unsigned count =
+      agx_apple9_coefficients_size(fragment) / AGX_APPLE9_CF_BINDINGS_STRIDE;
+   memset(allocation.cpu, 0, count * AGX_APPLE9_CF_BINDINGS_STRIDE);
+   for (unsigned pv = 0; pv < count; ++pv) {
+      unsigned offset = pv * AGX_APPLE9_CF_BINDINGS_STRIDE;
+      fragment->coefficient_count = apple9_build_cf_bindings(
+         (uint8_t *)allocation.cpu + offset, fragment->varying_components,
+         fragment->apple9_linear_mask, fragment->apple9_flat_mask, pv,
+         fragment->apple9_reads_z, fragment->reads_point_coord,
+         fragment->reads_primitive_id, fragment);
+      fragment->coefficients[pv] = agx_usc_addr(dev, allocation.gpu + offset);
+   }
+   if (count == 1)
+      fragment->coefficients[1] = fragment->coefficients[2] =
+         fragment->coefficients[0];
 }
 
 static void
@@ -1337,10 +1366,9 @@ bool
 agx_apple9_prepare_graphics_stage(
    struct agx_device *dev, void *allocator,
    struct agx_ptr (*alloc)(void *, size_t, size_t),
-   const struct agx_apple9_render_stage *shader, bool fragment,
-   uint64_t table, uint64_t textures, uint64_t samplers,
-   unsigned tile_bytes, unsigned samples, uint32_t *launch,
-   agx_apple9_cached_alloc cached_alloc)
+   const struct agx_apple9_render_stage *shader, bool fragment, uint64_t table,
+   uint64_t textures, uint64_t samplers, unsigned tile_bytes, unsigned samples,
+   uint32_t *launch)
 {
    if (!shader->bo || !shader->publication_count_valid)
       return false;
@@ -1407,27 +1435,9 @@ agx_apple9_prepare_graphics_stage(
    apple9_put_u64(roots, textures);
    apple9_put_u64(roots + 8, samplers);
    apple9_put_u64(roots + 0x10, table);
-   params.launch_address = dev->shader_base + roots_size;
-   params.resource_table = dev->shader_base;
-   bool is_new = true;
-   struct agx_ptr state;
-   if (cached_alloc) {
-      if (!agx_apple9_launch_build(
-             canonical + roots_size, launch_size,
-             fragment ? AGX_APPLE9_LAUNCH_FRAGMENT : AGX_APPLE9_LAUNCH_VERTEX,
-             &params))
-         return false;
-      state = cached_alloc(allocator, AGX_APPLE9_STATE_LAUNCH, canonical,
-                           sizeof(canonical), 64, &is_new);
-   } else {
-      state = alloc(allocator, sizeof(canonical), 64);
-   }
+   struct agx_ptr state = alloc(allocator, sizeof(canonical), 64);
    if (!state.cpu)
       return false;
-   if (!is_new) {
-      *launch = agx_usc_addr(dev, state.gpu + roots_size);
-      return true;
-   }
    roots = state.cpu;
    memcpy(roots, canonical, roots_size);
    params.launch_address = state.gpu + roots_size;
@@ -1501,10 +1511,9 @@ agx_apple9_prepare_draw_alloc(
    struct agx_device *dev, void *usc_allocator,
    struct agx_ptr (*usc_alloc)(void *, size_t, size_t), void *context_allocator,
    struct agx_ptr (*context_alloc)(void *, size_t, size_t),
-                        const struct agx_apple9_render_pipeline *pipeline,
-                        struct agx_apple9_uniform_draw *draw,
-                        const struct agx_apple9_uniform_draw *previous,
-   agx_apple9_cached_alloc cached_alloc)
+   const struct agx_apple9_render_pipeline *pipeline,
+   struct agx_apple9_uniform_draw *draw,
+   const struct agx_apple9_uniform_draw *previous)
 {
    const struct agx_apple9_render_stage *stages[] = {pipeline->vertex,
                                                      pipeline->fragment};
@@ -1546,14 +1555,18 @@ agx_apple9_prepare_draw_alloc(
              dev, usc_allocator, usc_alloc, shader, stage != 0, table,
              draw->texture_table[stage], draw->sampler_table[stage],
              agx_apple9_tile_sample_bytes(tile_bytes, samples), samples,
-             &draw->launch[stage], cached_alloc))
+             &draw->launch[stage]))
          return false;
    }
    draw->provoking_vertex = apple9_provoking_vertex(pipeline->primitive,
                                                    draw->flatshade_first);
    bool reuse_coefficients = agx_apple9_draw_reuses_coefficients(previous, draw);
    unsigned cf_count;
-   if (reuse_coefficients) {
+   if (pipeline->fragment->coefficients[draw->provoking_vertex]) {
+      draw->coefficients =
+         pipeline->fragment->coefficients[draw->provoking_vertex];
+      cf_count = pipeline->fragment->coefficient_count;
+   } else if (reuse_coefficients) {
       draw->coefficients = previous->coefficients;
       cf_count = previous->cf_count;
    } else {
@@ -1565,15 +1578,10 @@ agx_apple9_prepare_draw_alloc(
          pipeline->fragment->apple9_reads_z,
          pipeline->fragment->reads_point_coord, pipeline->fragment->reads_primitive_id,
          pipeline->fragment);
-      bool is_new = true;
-      struct agx_ptr cf = cached_alloc
-         ? cached_alloc(usc_allocator, AGX_APPLE9_STATE_COEFFICIENTS,
-                        contents, sizeof(contents), 64, &is_new)
-         : usc_alloc(usc_allocator, sizeof(contents), 64);
+      struct agx_ptr cf = usc_alloc(usc_allocator, sizeof(contents), 64);
       if (!cf.cpu)
          return false;
-      if (is_new)
-         memcpy(cf.cpu, contents, sizeof(contents));
+      memcpy(cf.cpu, contents, sizeof(contents));
       draw->coefficients = agx_usc_addr(dev, cf.gpu);
    }
    draw->cf_count = cf_count;
@@ -1700,17 +1708,13 @@ agx_apple9_prepare_draw_alloc(
        !memcmp(previous->ppp_record, ppp, draw->ppp_size)) {
       draw->ppp = previous->ppp;
    } else {
-      bool is_new = true;
-      struct agx_ptr record = cached_alloc
-         ? cached_alloc(context_allocator, AGX_APPLE9_STATE_PPP,
-                        ppp, draw->ppp_size, 64, &is_new)
-         : context_alloc(context_allocator, draw->ppp_size, 64);
+      struct agx_ptr record =
+         context_alloc(context_allocator, draw->ppp_size, 64);
       if (!record.cpu || record.gpu < AGX_APPLE9_RENDER_CONTEXT_BASE ||
           record.gpu - AGX_APPLE9_RENDER_CONTEXT_BASE >
              UINT32_MAX - draw->ppp_size + 1)
          return false;
-      if (is_new)
-         memcpy(record.cpu, ppp, draw->ppp_size);
+      memcpy(record.cpu, ppp, draw->ppp_size);
       draw->ppp = record.gpu - AGX_APPLE9_RENDER_CONTEXT_BASE;
    }
    return true;
@@ -1723,9 +1727,9 @@ agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
                         struct agx_apple9_uniform_draw *draw,
                         const struct agx_apple9_uniform_draw *previous)
 {
-   return agx_apple9_prepare_draw_alloc(
-      dev, usc_pool, apple9_pool_alloc, context_pool, apple9_pool_alloc,
-      pipeline, draw, previous, NULL);
+   return agx_apple9_prepare_draw_alloc(dev, usc_pool, apple9_pool_alloc,
+                                        context_pool, apple9_pool_alloc,
+                                        pipeline, draw, previous);
 }
 
 struct agx_apple9_ppp_update {

@@ -22,7 +22,7 @@ hk_files = files(
   'hk_cmd_pool.h',
   'hk_descriptor_set.h',
   'hk_descriptor_memory.c',
-  'hk_apple9_pbe_table.c',
+  'hk_usc_heap.c',
   'hk_descriptor_set.c',
   'hk_descriptor_set_layout.c',
   'hk_descriptor_set_layout.h',
@@ -219,6 +219,12 @@ if with_tests
     dependencies : [hk_deps], link_with : [libhk],
     link_args : ['-Wl,--wrap=agx_bo_create', '-Wl,--wrap=agx_bo_reference',
                  '-Wl,--wrap=agx_bo_unreference']), suite : ['asahi', 'honeykrisp'])
+  test('hk-structural-uploads', executable('hk-structural-uploads', 'tests/hk-structural-uploads.c',
+    include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                           inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+    dependencies : [hk_deps], link_with : [libhk],
+    link_args : ['-Wl,--wrap=agx_bo_create', '-Wl,--wrap=agx_bo_unreference',
+                 '-Wl,--wrap=agx_bo_cache_evict_all']), suite : ['asahi', 'honeykrisp'])
   test('hk-memory', executable('hk-memory', 'tests/hk-memory.c',
     include_directories : [inc_gallium, inc_gallium_aux, inc_include,
                            inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
@@ -373,7 +379,7 @@ if with_tests
     'hk_descriptor_memory',
     executable(
       'hk_descriptor_memory_test',
-      ['hk_descriptor_memory.c', 'hk_apple9_pbe_table.c', 'tests/hk-descriptor-memory.cpp'],
+      ['hk_descriptor_memory.c', 'hk_usc_heap.c', 'tests/hk-descriptor-memory.cpp'],
       include_directories : [inc_src, inc_include, inc_asahi],
       dependencies : [idep_gtest, idep_mesautil],
     ),
