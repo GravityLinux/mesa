@@ -365,20 +365,10 @@ agx_bo_import(struct agx_device *dev, int fd)
          abort();
       }
    } else {
-      /* bo->refcnt == 0 can happen if the BO
-       * was being released but agx_bo_import() acquired the
-       * lock before agx_bo_unreference(). In that case, refcnt
-       * is 0 and we can't use agx_bo_reference() directly, we
-       * have to re-initialize the refcnt().
-       * Note that agx_bo_unreference() checks
-       * refcnt value just after acquiring the lock to
-       * make sure the object is not freed if agx_bo_import()
-       * acquired it in the meantime.
+      /* agx_bo_unreference drops the last reference under bo_map_lock, so a
+       * BO still in the map is live and its count is at least one.
        */
-      if (p_atomic_read(&bo->refcnt) == 0)
-         p_atomic_set(&bo->refcnt, 1);
-      else
-         agx_bo_reference(bo);
+      agx_bo_reference(bo);
 
       /* If this bo came back to us via import, it had better
        * been marked shared to begin with.

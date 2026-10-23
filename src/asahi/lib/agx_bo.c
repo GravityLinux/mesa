@@ -393,19 +393,24 @@ agx_bo_unreference(struct agx_device *dev, struct agx_bo *bo)
    if (!bo)
       return;
 
-   int refcnt = p_atomic_dec_return(&bo->refcnt);
-   assert(refcnt >= 0);
+   assert(p_atomic_read(&bo->refcnt) > 0);
 
-   /* Don't return to cache if there are still references */
-   if (refcnt)
+   /* Drop references other than the last without the lock. The last one is
+    * dropped under bo_map_lock, which agx_bo_import also holds, so an import
+    * never finds a BO whose count reached zero and is being freed. Checking
+    * the count again after taking the lock is not enough: an import and a
+    * release could both run in between, and two threads would then free the
+    * same BO (as iris does, see iris_bo_unreference).
+    */
+   int c = p_atomic_read(&bo->refcnt), old;
+   while (c != 1 && (old = p_atomic_cmpxchg(&bo->refcnt, c, c - 1)) != c)
+      c = old;
+   if (c != 1)
       return;
 
    pthread_mutex_lock(&dev->bo_map_lock);
 
-   /* Someone might have imported this BO while we were waiting for the
-    * lock, let's make sure it's still not referenced before freeing it.
-    */
-   if (p_atomic_read(&bo->refcnt) == 0) {
+   if (p_atomic_dec_zero(&bo->refcnt)) {
       assert(!p_atomic_read_relaxed(&bo->writer));
 
       if (bo->apple9_entry_offset || bo->apple9_entry_fixed) {
