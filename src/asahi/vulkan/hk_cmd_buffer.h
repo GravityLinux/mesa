@@ -531,6 +531,10 @@ struct hk_cs {
    /* Render merging: a draw of this stream writes memory, and an image
     * barrier was hoisted ahead of this stream (hk_cmd_sync_barrier). */
    bool merge_writes, merge_hoisted;
+   /* An attachment barrier was moved ahead of this render to keep it open.
+    * Its fragment dependency must also follow the render when it closes.
+    */
+   bool merge_attachment_barrier;
 
    /* enum hk_pre_raster_reads of the stream's draws: what their
     * pre-rasterization stages read (hk_queue's tiling-wait elision). */
@@ -1262,6 +1266,7 @@ hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
    /* An empty render kept open for merging ends after its render pass: the
     * empty-render optimization needs that pass's render state back. */
    const bool restore = cs && cs == cmd->merge_cs && cmd->merge_empty;
+   const bool attachment_barrier = cs && cs->merge_attachment_barrier;
    cmd->merge_cs = NULL;
    cmd->merge_empty = false;
    cmd->merge_suspended = false;
@@ -1296,6 +1301,21 @@ hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
 
       /* TODO: maybe free scissor/depth_bias now? */
       cs->current = agx_vdm_terminate(cs->current);
+   }
+
+   /* Within one hardware render, tile order satisfies attachment barriers.
+    * Once it ends, later fragment work still needs those dependencies, even
+    * if a later pass could not merge. The copy ahead of the render only
+    * orders work that preceded it; it cannot order the render's own writes.
+    */
+   if (attachment_barrier) {
+      struct hk_sync_event event = {
+         .stream = HK_SYNC_NONE,
+         .src = hk_sync_stage_mask(VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                   true),
+         .dst = HK_SYNC_FRAGMENT,
+      };
+      util_dynarray_append(&cmd->sync_events, event);
    }
 
    cmd->current_cs.gfx = NULL;

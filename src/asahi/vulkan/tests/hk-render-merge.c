@@ -49,6 +49,19 @@ check_depth_barriers(void)
        * a depth attachment -> depth attachment barrier stays in-tile. */
       CHECK((cmd->merge_cs == &render) == (kind == 2 || kind == 3 || kind == 5));
       CHECK((cmd->current_cs.gfx == &render) == (kind == 2 || kind == 3 || kind == 5));
+      CHECK(render.merge_attachment_barrier == (kind == 2));
+      if (kind == 2) {
+         /* If the next pass changes its key, closing the kept-open render
+          * must retain the attachment dependency after its own work event.
+          */
+         hk_cmd_buffer_end_graphics(cmd);
+         const struct hk_sync_event *last =
+            util_dynarray_top_ptr(&cmd->sync_events, struct hk_sync_event);
+         CHECK(last->stream == HK_SYNC_NONE);
+         CHECK(last->src == hk_sync_stage_mask(
+                  VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, true));
+         CHECK(last->dst == HK_SYNC_FRAGMENT);
+      }
       cmd->merge_cs = cmd->current_cs.gfx = NULL;
    }
    util_dynarray_fini(&cmd->sync_events);

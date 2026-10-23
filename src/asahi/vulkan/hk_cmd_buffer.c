@@ -952,6 +952,12 @@ hk_cmd_sync_barrier(struct hk_cmd_buffer *cmd,
           (unrelated = hk_render_merge_move_enabled() && !cmd->in_meta &&
                        !(xsrc & cmd->merge_reach)))) {
          cmd->merge_cs->merge_hoisted |= image_barrier;
+         if (!image_barrier && !unrelated) {
+            assert(hk_sync_stage_mask(src, true) ==
+                   hk_sync_stage_mask(VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, true));
+            assert(hk_sync_stage_mask(dst, false) == HK_SYNC_FRAGMENT);
+            cmd->merge_cs->merge_attachment_barrier = true;
+         }
          if (image_barrier)
             perf_debug(cmd, "Hoisting an image barrier ahead of the open render");
          /* The execution scope of a barrier with colour-output or test
