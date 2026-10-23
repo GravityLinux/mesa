@@ -12264,7 +12264,7 @@ TEST_F(Apple9Completion, IndexCompletionDoesNotPreventLaterOrdinaryUse)
    EXPECT_EQ(loads, 2u);
 }
 
-TEST_F(Apple9Completion, AsyncSystemReadsRetireSlotConflictsAndFoldRealUses)
+TEST_F(Apple9Completion, AsyncSystemReadsAvoidSlotConflictsAndFoldRealUses)
 {
    auto zero = imm(0);
    auto a = load(zero, 0);
@@ -12297,14 +12297,13 @@ TEST_F(Apple9Completion, AsyncSystemReadsRetireSlotConflictsAndFoldRealUses)
          unassigned.producer_scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_NONE;
          EXPECT_FALSE(agx_apple9_pack_vir_instruction(
             &unassigned, p.phys, &packed, &reason));
-         if (reads++ == 0) {
-            ASSERT_GT(i, 0u);
-            const auto *prev = p.instructions[i - 1];
-            EXPECT_TRUE(prev->op == AGX_APPLE9_VIR_WAIT
-                           ? (prev->immediate & BITFIELD_BIT(0)) != 0
-                           : prev->scoreboard_slot == AGX_APPLE9_SCOREBOARD_SLOT_1);
-         }
+         ++reads;
       }
+      /* The loads leave slot 1 to the fixed system-value reads that follow
+       * them, so neither read has to retire a load first. */
+      if (ins->op == AGX_APPLE9_VIR_DEVICE_LOAD)
+         EXPECT_NE(ins->producer_scoreboard_slot, AGX_APPLE9_SCOREBOARD_SLOT_1);
+      EXPECT_NE(ins->op, AGX_APPLE9_VIR_WAIT);
       if (ins->op == AGX_APPLE9_VIR_IXOR) {
          EXPECT_EQ(ins->scoreboard_slot, AGX_APPLE9_SCOREBOARD_SLOT_1);
          ++consumers;

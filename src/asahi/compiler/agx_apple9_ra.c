@@ -1345,8 +1345,8 @@ apple9_completion_class(const struct agx_apple9_vir_instr *producer)
 {
    if (apple9_scalar_publication(producer))
       return AGX_APPLE9_COMPLETION_PUBLICATION;
-   if (apple9_fixed_producer_slot(producer))
-      return AGX_APPLE9_COMPLETION_OTHER;
+   /* Threadgroup and private loads have fixed slots but are memory results:
+    * native Metal leaves threadgroup loads pending across barriers. */
    switch (producer->op) {
    case AGX_APPLE9_VIR_DEVICE_LOAD:
    case AGX_APPLE9_VIR_DEVICE_ATOMIC:
@@ -1471,6 +1471,25 @@ apple9_first_need(const struct agx_apple9_vir_program *program, unsigned start,
       }
    }
    return UINT_MAX;
+}
+
+/* Slots that fixed-slot producers issued in [start, end) will claim. A free
+ * slot chosen for an ordinary producer should not be one of them, or the
+ * fixed producer must retire it first. */
+static unsigned
+apple9_fixed_slots_ahead(const struct agx_apple9_vir_program *program,
+                         unsigned start, unsigned end)
+{
+   unsigned slots = 0;
+   for (unsigned j = start; j < MIN2(end, start + 512); ++j) {
+      const struct agx_apple9_vir_instr *ins = program->instructions[j];
+      unsigned slot = apple9_fixed_producer_slot(ins);
+      if (slot) {
+         slots |= BITFIELD_BIT(slot - 1) |
+                  agx_apple9_encoding_info(ins->encoding)->fixed_producer_alternates;
+      }
+   }
+   return slots;
 }
 
 /* Whether a sharing producer can be added to the slot without retiring it. */
@@ -1712,10 +1731,15 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
                 * Keep independent operations pending until a real hazard,
                 * consumer, or tag exhaustion requires their result handoff. */
                unsigned first = ins.op == AGX_APPLE9_VIR_TEXTURE_SAMPLE ? 1 : 6;
-               for (unsigned p = 0; p < 6; ++p) {
-                  unsigned candidate = (first - 1 + p) % 6 + 1;
-                  if (!apple9_conflicting_slots(
-                         &state, BITFIELD_BIT(candidate - 1))) {
+               const unsigned avoid = apple9_fixed_slots_ahead(
+                  program, i + 1, need == UINT_MAX ? end : need);
+               for (unsigned pass = 0; !slot && pass < 2; ++pass) {
+                  for (unsigned p = 0; p < 6; ++p) {
+                     unsigned candidate = (first - 1 + p) % 6 + 1;
+                     if ((!pass && (avoid & BITFIELD_BIT(candidate - 1))) ||
+                         apple9_conflicting_slots(
+                            &state, BITFIELD_BIT(candidate - 1)))
+                        continue;
                      slot = candidate;
                      break;
                   }
