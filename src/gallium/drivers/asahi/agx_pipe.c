@@ -2640,7 +2640,9 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
       /* Cube arrays use the native cube-array descriptor and sample form. */
       caps->cube_map_array = true;
       caps->seamless_cube_map = true;
-      caps->seamless_cube_map_per_texture = false;
+      /* Seamless filtering is per sampler in the native descriptor and the
+       * compiler key, so it can come from texture state too. */
+      caps->seamless_cube_map_per_texture = true;
       caps->image_load_formatted = false;
       caps->image_store_formatted = false;
       /* Gathers use the native gather sample, including constant offsets. */
