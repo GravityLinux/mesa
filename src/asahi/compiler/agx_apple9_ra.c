@@ -13,6 +13,8 @@
 #include "agx_compiler.h"
 #include "agx_debug.h"
 #include "util/hash_table.h"
+#include "util/u_atomic.h"
+#include "util/u_cpu_detect.h"
 #include "util/u_debug.h"
 #define XXH_INLINE_ALL
 #include "util/xxhash.h"
@@ -2685,41 +2687,88 @@ apple9_candidate_job_init(struct apple9_candidate_job *job,
    job->seen_start = seen->size;
 }
 
-/* Run two jobs, the second on a helper thread when possible, and merge their
- * new schedule fingerprints into seen in serial order. */
-static void
-apple9_candidate_jobs_run(struct apple9_candidate_job jobs[2],
-                          struct util_dynarray *seen)
+/* Helper threads in use by candidate jobs across the process. Compiles that
+ * already run on every core (for example DXVK's or vkd3d's workers) find the
+ * budget taken and run their jobs inline instead of oversubscribing. */
+static unsigned apple9_helpers_busy;
+
+static bool
+apple9_acquire_helper(void)
 {
-   thrd_t thread;
-   bool threaded = thrd_create(&thread, apple9_candidate_job_run, &jobs[1]) ==
-                   thrd_success;
+   static unsigned limit;
+   if (!limit) {
+      p_atomic_set(&limit, MAX2(util_get_cpu_caps()->nr_cpus / 4, 1));
+   }
+   if (p_atomic_inc_return(&apple9_helpers_busy) <= limit)
+      return true;
+   p_atomic_dec(&apple9_helpers_busy);
+   return false;
+}
+
+/* Run jobs, all but the first on helper threads when the budget allows. Their
+ * schedule fingerprints stay private until apple9_take_candidate consumes
+ * them in serial order. */
+static void
+apple9_candidate_jobs_run(struct apple9_candidate_job *jobs, unsigned count)
+{
+   thrd_t threads[4];
+   bool threaded[4] = {false};
+   assert(count <= ARRAY_SIZE(threads));
+   for (unsigned i = 1; i < count; ++i) {
+      if (!apple9_acquire_helper())
+         continue;
+      threaded[i] = thrd_create(&threads[i], apple9_candidate_job_run, &jobs[i]) ==
+                    thrd_success;
+      if (!threaded[i])
+         p_atomic_dec(&apple9_helpers_busy);
+   }
    apple9_candidate_job_run(&jobs[0]);
-   if (threaded)
-      thrd_join(thread, NULL);
-   else
-      apple9_candidate_job_run(&jobs[1]);
-   const uint8_t *first = (const uint8_t *)jobs[0].seen.data + jobs[0].seen_start;
-   const unsigned first_size = jobs[0].seen.size - jobs[0].seen_start;
-   const uint8_t *second = (const uint8_t *)jobs[1].seen.data + jobs[1].seen_start;
-   const unsigned second_size = jobs[1].seen.size - jobs[1].seen_start;
-   /* The second candidate repeats the first's schedule: in serial order it
-    * would have been rejected as a duplicate. */
-   for (unsigned a = 0; jobs[1].ok && a < second_size; a += sizeof(XXH128_hash_t)) {
-      for (unsigned b = 0; b < first_size; b += sizeof(XXH128_hash_t)) {
-         if (!memcmp(second + a, first + b, sizeof(XXH128_hash_t))) {
-            agx_apple9_vir_finish(&jobs[1].result);
-            agx_apple9_vir_init(&jobs[1].result);
-            jobs[1].ok = false;
-            jobs[1].reason = apple9_duplicate_candidate_reason;
-            break;
-         }
+   for (unsigned i = 1; i < count; ++i) {
+      if (threaded[i]) {
+         thrd_join(threads[i], NULL);
+         p_atomic_dec(&apple9_helpers_busy);
+      } else {
+         apple9_candidate_job_run(&jobs[i]);
       }
    }
-   util_dynarray_append_array(seen, uint8_t, first, first_size);
-   util_dynarray_append_array(seen, uint8_t, second, second_size);
-   util_dynarray_fini(&jobs[0].seen);
-   util_dynarray_fini(&jobs[1].seen);
+}
+
+static void
+apple9_candidate_job_discard(struct apple9_candidate_job *job)
+{
+   if (!job->valid)
+      return;
+   agx_apple9_vir_finish(&job->result);
+   util_dynarray_fini(&job->seen);
+   job->valid = false;
+}
+
+/* Consume a job's schedule fingerprints as the serial search would have
+ * produced them at this point. A fingerprint recorded since the job's
+ * snapshot means the serial candidate would have stopped there as a
+ * duplicate: before allocating, so without its own fingerprint. */
+static void
+apple9_candidate_job_merge(struct apple9_candidate_job *job,
+                           struct util_dynarray *seen)
+{
+   const unsigned stride = sizeof(XXH128_hash_t);
+   const uint8_t *added = (const uint8_t *)job->seen.data + job->seen_start;
+   const unsigned added_size = job->seen.size - job->seen_start;
+   const uint8_t *since = (const uint8_t *)seen->data + job->seen_start;
+   const unsigned since_size = seen->size - job->seen_start;
+   for (unsigned a = 0; a < added_size; a += stride) {
+      for (unsigned b = 0; b < since_size; b += stride) {
+         if (memcmp(added + a, since + b, stride))
+            continue;
+         agx_apple9_vir_finish(&job->result);
+         agx_apple9_vir_init(&job->result);
+         job->ok = false;
+         job->reason = apple9_duplicate_candidate_reason;
+         util_dynarray_append_array(seen, uint8_t, added, a);
+         return;
+      }
+   }
+   util_dynarray_append_array(seen, uint8_t, added, added_size);
 }
 
 /* Take a prefetched candidate matching these parameters, or allocate it. */
@@ -2741,6 +2790,8 @@ apple9_take_candidate(struct apple9_candidate_job *prefetched, unsigned count,
           job->uniform_remat != uniform_remat)
          continue;
       job->valid = false;
+      apple9_candidate_job_merge(job, seen);
+      util_dynarray_fini(&job->seen);
       agx_apple9_vir_finish(result);
       *result = job->result;
       *reason = job->reason;
@@ -2920,7 +2971,7 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
                                 0, copy_register, true, false, cost.spills);
       apple9_candidate_job_init(&prefetched[1], program, nir, &seen, true, true,
                                 0, copy_register, true, false, cost.spills);
-      apple9_candidate_jobs_run(prefetched, &seen);
+      apple9_candidate_jobs_run(prefetched, 2);
    }
    if (bank_candidates) {
       /* Bank hints can conflict with later tuples and phi reconciliation.
@@ -2937,6 +2988,19 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
    }
    agx_apple9_vir_finish(&alternative);
    cost = apple9_allocation_cost(&best);
+   /* Without spills, both latency candidates run under the same zero spill
+    * budget the serial search gives them, so allocating them together
+    * reproduces it exactly: the larger slack is kept only if the serial rule
+    * below would have run it. Like the other pairs this is for draw-time
+    * compiles only: with ELDEN RING's shaders compiled by 8 or 32 concurrent
+    * processes it cost more per-shader latency than it saved. */
+   if (!bank_candidates && long_dependencies > 1 && parallel) {
+      apple9_candidate_job_init(&prefetched[0], program, nir, &seen, false, true,
+                                0, copy_register, true, false, cost.spills);
+      apple9_candidate_job_init(&prefetched[1], program, nir, &seen, false, true,
+                                16, copy_register, true, false, cost.spills);
+      apple9_candidate_jobs_run(prefetched, 2);
+   }
    if (long_dependencies > 1) {
       /* Overlapping independent long-latency operations needs registers;
        * also offer schedules that may raise a block's peak pressure by eight
@@ -2978,9 +3042,7 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
     * Keep invariant-store placement in both policies. */
    /* Unconsumed prefetches (a candidate the serial rules then skipped). */
    for (unsigned i = 0; i < 2; ++i) {
-      if (prefetched[i].valid)
-         agx_apple9_vir_finish(&prefetched[i].result);
-      prefetched[i].valid = false;
+      apple9_candidate_job_discard(&prefetched[i]);
    }
    /* Uniform-rematerialization-off retries: the latency-scheduled one has
     * never beaten the others (0 of 216 spilling allocations over ER, its
@@ -3002,12 +3064,10 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
          }
       }
       if (n == 2)
-         apple9_candidate_jobs_run(prefetched, &seen);
+         apple9_candidate_jobs_run(prefetched, 2);
       else
          for (unsigned i = 0; i < 2; ++i) {
-            if (prefetched[i].valid)
-               util_dynarray_fini(&prefetched[i].seen);
-            prefetched[i].valid = false;
+            apple9_candidate_job_discard(&prefetched[i]);
          }
    }
    if (cost.spills) {
@@ -3039,10 +3099,8 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
          }
       }
    }
-   for (unsigned i = 0; i < 2; ++i) {
-      if (prefetched[i].valid)
-         agx_apple9_vir_finish(&prefetched[i].result);
-   }
+   for (unsigned i = 0; i < 2; ++i)
+      apple9_candidate_job_discard(&prefetched[i]);
    util_dynarray_fini(&seen);
    agx_apple9_vir_finish(program);
    *program = best;
