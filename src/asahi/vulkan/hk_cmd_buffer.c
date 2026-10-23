@@ -101,6 +101,7 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd, bool release)
    util_dynarray_clear(&cmd->occlusion_accum);
    util_dynarray_clear(&cmd->sync_events);
    util_dynarray_clear(&cmd->sync_remap);
+   util_dynarray_clear(&cmd->sync_first_event);
 }
 
 /* agx_device::apple9_pin_entry. Every Apple9 entry is requested while
@@ -147,6 +148,7 @@ hk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
    for (unsigned i = 0; i < HK_TESS_BATCH_LANES; ++i)
       util_dynarray_fini(&cmd->tess_batch.lane[i]);
    util_dynarray_fini(&cmd->sync_remap);
+   util_dynarray_fini(&cmd->sync_first_event);
    free(cmd->merge_empty_render);
    vk_command_buffer_finish(&cmd->vk);
    vk_free(&pool->vk.alloc, cmd);
@@ -186,6 +188,7 @@ hk_create_cmd_buffer(struct vk_command_pool *vk_pool,
    cmd->occlusion_accum = UTIL_DYNARRAY_INIT;
    cmd->sync_events = UTIL_DYNARRAY_INIT;
    cmd->sync_remap = UTIL_DYNARRAY_INIT;
+   cmd->sync_first_event = UTIL_DYNARRAY_INIT;
    for (unsigned i = 0; i < HK_TESS_BATCH_LANES; ++i)
       cmd->tess_batch.lane[i] = UTIL_DYNARRAY_INIT;
 
@@ -535,6 +538,8 @@ merge_control_streams(struct hk_cmd_buffer *cmd)
          last->sync_stages |= cs->sync_stages;
          *util_dynarray_element(&cmd->sync_remap, uint32_t, cs->sync_id) =
             last->sync_id;
+         hk_sync_remap_first_event(cmd->sync_first_event.data, cs->sync_id,
+                                   last->sync_id);
          list_del(&cs->node);
          hk_cs_destroy(cs);
       } else {
@@ -639,6 +644,9 @@ hk_cmd_sync_work(struct hk_cmd_buffer *cmd, struct hk_cs *cs, unsigned stages)
    }
 
    struct hk_sync_event event = {.stream = cs->sync_id, .dst = stages};
+   hk_sync_index_event(cmd->sync_first_event.data, cs->sync_id,
+                       util_dynarray_num_elements(&cmd->sync_events,
+                                                   struct hk_sync_event));
    util_dynarray_append(&cmd->sync_events, event);
 }
 
@@ -731,6 +739,8 @@ hk_render_merge_place_events(struct hk_cmd_buffer *cmd, unsigned first)
    memmove(&events[cmd->merge_event + n], &events[cmd->merge_event],
            (first - cmd->merge_event) * sizeof(*events));
    memcpy(&events[cmd->merge_event], moved, n * sizeof(*events));
+   hk_sync_reindex_events(cmd->sync_first_event.data, events, cmd->merge_event,
+                          count);
 done:
    cmd->merge_event += n;
 }
@@ -936,7 +946,10 @@ hk_cmd_sync_barrier(struct hk_cmd_buffer *cmd,
          struct hk_sync_event *events = cmd->sync_events.data;
          memmove(&events[cmd->merge_event + 1], &events[cmd->merge_event],
                  (count - cmd->merge_event) * sizeof(*events));
-         events[cmd->merge_event++] = event;
+         events[cmd->merge_event] = event;
+         hk_sync_reindex_events(cmd->sync_first_event.data, events,
+                                cmd->merge_event, count + 1);
+         cmd->merge_event++;
          hk_render_merge_trace("barrier kept", src, dst);
          return;
       }
@@ -1802,5 +1815,7 @@ hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd)
     */
    list_del(&cs->node);
    *util_dynarray_element(&cmd->sync_remap, uint32_t, cs->sync_id) = HK_SYNC_NONE;
+   hk_sync_remap_first_event(cmd->sync_first_event.data, cs->sync_id,
+                             HK_SYNC_NONE);
    hk_cs_destroy(cs);
 }

@@ -16,6 +16,7 @@ check_depth_barriers(void)
    cmd->vk.base.device = &dev->vk;
    cmd->sync_events = UTIL_DYNARRAY_INIT;
    cmd->sync_remap = UTIL_DYNARRAY_INIT;
+   cmd->sync_first_event = UTIL_DYNARRAY_INIT;
    uint8_t pool[4096] = {0}, bytes[4096] = {0};
    cmd->uploader[HK_CMD_POOL_MAIN].chunks[0].map = pool;
 
@@ -27,6 +28,8 @@ check_depth_barriers(void)
       };
       cmd->sync_render_continuation = false;
       util_dynarray_clear(&cmd->sync_events);
+      util_dynarray_clear(&cmd->sync_first_event);
+      util_dynarray_append(&cmd->sync_first_event, (uint32_t)HK_SYNC_NONE);
       hk_cmd_sync_work(cmd, &render, HK_SYNC_GRAPHICS);
       cmd->current_cs.gfx = cmd->merge_cs = &render;
       cmd->merge_event = 0;
@@ -53,6 +56,7 @@ check_depth_barriers(void)
    }
    util_dynarray_fini(&cmd->sync_events);
    util_dynarray_fini(&cmd->sync_remap);
+   util_dynarray_fini(&cmd->sync_first_event);
    free(image);
    free(cmd);
    free(dev);

@@ -17,6 +17,7 @@ main(void)
    cmd->vk.base.device = &dev->vk;
    cmd->sync_events = UTIL_DYNARRAY_INIT;
    cmd->sync_remap = UTIL_DYNARRAY_INIT;
+   cmd->sync_first_event = UTIL_DYNARRAY_INIT;
    cmd->uploader[HK_CMD_POOL_MAIN].chunks[0].map = pool;
    list_inithead(&cmd->control_streams);
 
@@ -25,12 +26,13 @@ main(void)
    cmd->current_cs.gfx = &gfx;
    list_addtail(&gfx.node, &cmd->control_streams);
    util_dynarray_append(&cmd->sync_remap, gfx.sync_id);
+   util_dynarray_append(&cmd->sync_first_event, (uint32_t)HK_SYNC_NONE);
    hk_cmd_sync_work(cmd, &gfx, HK_SYNC_GRAPHICS | HK_SYNC_DRAW_INDIRECT);
    cmd->merge_cs = &gfx;
    cmd->merge_event = 0;
 
    /* Ending that pass keeps it open for merging. A kept attachment barrier
-    * inserts an event before it, invalidating any cached absolute index.
+    * inserts an event before it, advancing the first-event index.
     */
    hk_cmd_sync_barrier(cmd, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
@@ -39,6 +41,7 @@ main(void)
    CHECK(cmd->merge_cs == &gfx && cmd->merge_event == 1);
    struct hk_sync_event *ev = cmd->sync_events.data;
    CHECK(ev[0].stream == HK_SYNC_NONE && ev[1].stream == gfx.sync_id);
+   CHECK(*util_dynarray_element(&cmd->sync_first_event, uint32_t, gfx.sync_id) == 1);
 
    /* BeginRendering continues the same stream and consumes merge_cs. The
     * continued pass's first tess/GS draw creates its pre-gfx helper through
@@ -53,6 +56,8 @@ main(void)
    CHECK(ev[0].stream == HK_SYNC_NONE);
    CHECK(ev[1].stream == gfx.sync_id);
    CHECK(ev[2].stream == pre->sync_id);
+   CHECK(*util_dynarray_element(&cmd->sync_first_event, uint32_t, gfx.sync_id) == 1);
+   CHECK(*util_dynarray_element(&cmd->sync_first_event, uint32_t, pre->sync_id) == 2);
    CHECK(cmd->merge_event == 1);
    CHECK(cmd->control_streams.next == &pre->node && pre->node.next == &gfx.node);
 
@@ -80,6 +85,7 @@ main(void)
    free(pre);
    util_dynarray_fini(&cmd->sync_events);
    util_dynarray_fini(&cmd->sync_remap);
+   util_dynarray_fini(&cmd->sync_first_event);
    free(pool);
    free(cmd);
    free(dev);

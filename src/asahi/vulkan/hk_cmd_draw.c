@@ -1301,13 +1301,10 @@ hk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
          }
       }
       /* Barriers before the next pass go ahead of the stream's first event. */
-      unsigned i = 0, n = util_dynarray_num_elements(&cmd->sync_events,
-                                                    struct hk_sync_event);
-      const struct hk_sync_event *events = cmd->sync_events.data;
-      while (i < n && events[i].stream != cs->sync_id)
-         ++i;
-      assert(i < n && "a stream with draws has a sync event");
-      cmd->merge_event = i;
+      cmd->merge_event = *util_dynarray_element(&cmd->sync_first_event, uint32_t,
+                                                cs->sync_id);
+      assert(cmd->merge_event != HK_SYNC_NONE &&
+             "a stream with draws has a sync event");
    } else {
       if (cs) {
          /* Why this render is not kept open (diagnostic). */

@@ -24,6 +24,7 @@ record_and_replay(bool graphics)
    cmd->vk.base.device = &dev->vk;
    cmd->sync_events = UTIL_DYNARRAY_INIT;
    cmd->sync_remap = UTIL_DYNARRAY_INIT;
+   cmd->sync_first_event = UTIL_DYNARRAY_INIT;
    cmd->uploader[HK_CMD_POOL_MAIN].chunks[0].map = pool;
    cmd->uploader[HK_CMD_POOL_MAIN].chunks[0].base = (uintptr_t)pool;
    list_inithead(&cmd->control_streams);
@@ -33,6 +34,7 @@ record_and_replay(bool graphics)
       cmd->current_cs.gfx = &gfx;
       list_addtail(&gfx.node, &cmd->control_streams);
       util_dynarray_append(&cmd->sync_remap, gfx.sync_id);
+      util_dynarray_append(&cmd->sync_first_event, (uint32_t)HK_SYNC_NONE);
       hk_cmd_sync_work(cmd, &gfx, HK_SYNC_GRAPHICS);
    }
 
@@ -63,6 +65,7 @@ record_and_replay(bool graphics)
    free(post);
    util_dynarray_fini(&cmd->sync_events);
    util_dynarray_fini(&cmd->sync_remap);
+   util_dynarray_fini(&cmd->sync_first_event);
    free(pool);
    free(cmd);
    free(dev);

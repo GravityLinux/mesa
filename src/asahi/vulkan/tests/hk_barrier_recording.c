@@ -17,6 +17,7 @@ main(void)
    cmd->vk.base.device = &dev->vk;
    cmd->sync_events = UTIL_DYNARRAY_INIT;
    cmd->sync_remap = UTIL_DYNARRAY_INIT;
+   cmd->sync_first_event = UTIL_DYNARRAY_INIT;
    uint8_t pool[4096] = {0};
    cmd->uploader[HK_CMD_POOL_MAIN].chunks[0].map = pool;
 
@@ -88,6 +89,8 @@ main(void)
 
    /* A state-induced render split has an implicit store -> load dependency. */
    struct hk_cs resumed = {.cmd = cmd, .type = HK_CS_VDM, .sync_id = 7};
+   for (unsigned i = 0; i <= resumed.sync_id; ++i)
+      util_dynarray_append(&cmd->sync_first_event, (uint32_t)HK_SYNC_NONE);
    size_t before = util_dynarray_num_elements(&cmd->sync_events, struct hk_sync_event);
    hk_cmd_sync_work(cmd, &resumed, HK_SYNC_GRAPHICS);
    CHECK(util_dynarray_num_elements(&cmd->sync_events, struct hk_sync_event) == before + 2);
@@ -100,6 +103,7 @@ main(void)
 
    util_dynarray_fini(&cmd->sync_events);
    util_dynarray_fini(&cmd->sync_remap);
+   util_dynarray_fini(&cmd->sync_first_event);
    free(cmd);
    free(dev);
    return 0;

@@ -64,6 +64,7 @@ main(void)
    cmd->vk.base.device = &dev->vk;
    cmd->sync_events = UTIL_DYNARRAY_INIT;
    cmd->sync_remap = UTIL_DYNARRAY_INIT;
+   cmd->sync_first_event = UTIL_DYNARRAY_INIT;
    cmd->uploader[HK_CMD_POOL_MAIN].chunks[0].map = pool;
    cmd->uploader[HK_CMD_POOL_MAIN].chunks[0].base = (uintptr_t)pool;
    list_inithead(&cmd->control_streams);
@@ -99,6 +100,7 @@ main(void)
       cmd->current_cs.gfx = &gfx[render];
       list_addtail(&gfx[render].node, &cmd->control_streams);
       util_dynarray_append(&cmd->sync_remap, gfx[render].sync_id);
+      util_dynarray_append(&cmd->sync_first_event, (uint32_t)HK_SYNC_NONE);
       hk_cmd_sync_work(cmd, &gfx[render], HK_SYNC_GRAPHICS);
       const struct agx_bo *selected = &bo;
       descriptors[render] = hk_heap(cmd);
@@ -160,6 +162,7 @@ main(void)
    free(cmd->current_cs.post_gfx);
    util_dynarray_fini(&cmd->sync_events);
    util_dynarray_fini(&cmd->sync_remap);
+   util_dynarray_fini(&cmd->sync_first_event);
    free(tcs);
    free(gs);
    free(pool);
