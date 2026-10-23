@@ -122,9 +122,10 @@ shared_var_info(const struct glsl_type *type, unsigned *size, unsigned *align)
    *size = comp_size * length, *align = comp_size;
 }
 
-/* AGX_* and HK_APPLE9_* environment knobs change generated code, so they key
- * the shader caches: a warm cache must not hand one setting's shaders to
- * another. Zero when none is set, which keeps existing caches valid.
+/* Code-generation environment controls key the shader caches: a warm cache
+ * must not hand one setting's shaders to another. Diagnostics and known
+ * runtime-only controls are excluded. Zero when none is set keeps existing
+ * default caches valid.
  */
 static uint64_t hk_compiler_env_hash_value;
 static once_flag hk_compiler_env_hash_once = ONCE_FLAG_INIT;
@@ -149,14 +150,19 @@ static const char *const hk_codegen_env[] = {
    "HK_APPLE9_MESH_SHADER", "HK_APPLE9_NATIVE_MESH",
    "HK_APPLE9_NATIVE_MESH_ATTRIBUTES",
    "HK_APPLE9_NATIVE_MESH_PRIMITIVE_LOWERING",
-   "HK_APPLE9_SPARSE_SCRATCH",
-   "HK_APPLE9_TESS_BATCH", "HK_APPLE9_TESS_SCAN_BLOCK",
 };
 
-/* Knobs that never change generated code and must not split the caches at
- * all: the variant cache check compares against the normal entries. */
+/* These controls change diagnostics, memory backing, when a variant is
+ * compiled, or command recording/submission. They do not change shader code.
+ * Keep them available for runtime investigations without splitting caches. */
 static const char *const hk_ignored_env[] = {
    "HK_APPLE9_VARIANT_CACHE_VERIFY",
+   "HK_APPLE9_DUMP_FRAGMENT_DIR", "HK_APPLE9_EAGER_VARIANTS",
+   "HK_APPLE9_SPARSE_SCRATCH",
+   "HK_APPLE9_TESS_BATCH", "HK_APPLE9_TESS_SCAN_BLOCK",
+   "HK_APPLE9_MERGE_RENDERS", "HK_APPLE9_MERGE_RESUME",
+   "HK_APPLE9_MERGE_HOIST_BARRIERS", "HK_APPLE9_MERGE_MOVE_COMPUTE",
+   "HK_APPLE9_FRAGMENT_BARRIER", "HK_APPLE9_NO_TILING_ELISION",
 };
 
 static bool

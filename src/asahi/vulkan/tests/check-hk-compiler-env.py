@@ -49,6 +49,15 @@ assert read(AGX_APPLE9_DEBUG='') == (base, 0)
 a = read(AGX_APPLE9_DEBUG='asm')[1]
 b = read(AGX_APPLE9_STATS='1')[1]
 assert read(AGX_APPLE9_DEBUG='asm', AGX_APPLE9_STATS='0') == (base, a | b)
+# Runtime-only controls and dump paths share the same compiler key.
+for name in ('HK_APPLE9_VARIANT_CACHE_VERIFY', 'HK_APPLE9_DUMP_FRAGMENT_DIR',
+             'HK_APPLE9_EAGER_VARIANTS', 'HK_APPLE9_SPARSE_SCRATCH',
+             'HK_APPLE9_TESS_BATCH', 'HK_APPLE9_TESS_SCAN_BLOCK',
+             'HK_APPLE9_MERGE_RENDERS', 'HK_APPLE9_MERGE_RESUME',
+             'HK_APPLE9_MERGE_HOIST_BARRIERS', 'HK_APPLE9_MERGE_MOVE_COMPUTE',
+             'HK_APPLE9_FRAGMENT_BARRIER', 'HK_APPLE9_NO_TILING_ELISION'):
+    for value in ('0', '1', '/tmp/trace-a', '/tmp/trace-b'):
+        assert read(**{name: value}) == (base, 0), (name, value)
 # Code-generation controls continue to separate cache entries.
 for name in ('AGX_SPILL_COALESCE', 'AGX_APPLE9_HOIST_LOADS',
              'AGX_APPLE9_SAFE_HOIST_STAGES', 'HK_APPLE9_NATIVE_MESH'):
@@ -57,4 +66,4 @@ for name in ('AGX_SPILL_COALESCE', 'AGX_APPLE9_HOIST_LOADS',
     assert len({base, zero, one}) == 3, name
 # A longer, unknown name must not be mistaken for a diagnostic alias.
 assert read(AGX_APPLE9_ASM_SUFFIX='1')[0] != base
-print('19 diagnostic aliases preserve parsing and cache keys; codegen keys remain distinct')
+print('19 diagnostic aliases preserve parsing; diagnostics and runtime controls preserve cache keys; codegen keys remain distinct')
