@@ -973,6 +973,8 @@ struct apple9_pending {
    struct agx_apple9_vir_instr producer[APPLE9_PENDING_MERGE];
    /* Whether a device fence has issued since the producer did. */
    bool fenced[APPLE9_PENDING_MERGE];
+   /* The if/else arm (apple9_arms node) that issued each producer. */
+   unsigned arm[APPLE9_PENDING_MERGE];
 };
 
 /* Pending instructions include fixed producers with no GPR result. Each is
@@ -1078,6 +1080,7 @@ apple9_complete(struct apple9_completion *state, unsigned mask)
       for (unsigned i = 0; i < p->count; ++i) {
          if (!(apple9_producer_slots(&p->producer[i]) & mask)) {
             p->fenced[count] = p->fenced[i];
+            p->arm[count] = p->arm[i];
             p->producer[count++] = p->producer[i];
          }
       }
@@ -1242,8 +1245,10 @@ apple9_reads_sources_at_issue(const struct agx_apple9_vir_instr *ins)
    }
 }
 
+/* Hazards on shared execution resources rather than on a lane's registers or
+ * memory: they hold however the producer's and consumer's lanes relate. */
 static bool
-apple9_producer_hazard(const struct agx_apple9_vir_instr *ins,
+apple9_resource_hazard(const struct agx_apple9_vir_instr *ins,
                        const struct agx_apple9_vir_instr *producer)
 {
    /* T8132 r6 isolates the first channel submit as U0's publication consumer.
@@ -1252,6 +1257,17 @@ apple9_producer_hazard(const struct agx_apple9_vir_instr *ins,
    if (producer->op == AGX_APPLE9_VIR_MESH_CONTROL &&
        ins->op == AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL)
       return true;
+   /* This compound encoding contains a fixed slot-1 publication and wait. */
+   return (ins->encoding == AGX_APPLE9_ENC_BLOCK_IMAGE_STORE ||
+           ins->encoding == AGX_APPLE9_ENC_IMAGE_WRITE) &&
+          producer->producer_scoreboard_slot == AGX_APPLE9_SCOREBOARD_SLOT_1;
+}
+
+/* Hazards on a lane's own registers and memory. */
+static bool
+apple9_lane_hazard(const struct agx_apple9_vir_instr *ins,
+                   const struct agx_apple9_vir_instr *producer)
+{
    /* SAVE destroys its source just as a destination write would. In
     * particular, wait for earlier asynchronous borrowers before consuming it. */
    bool save = ins->op == AGX_APPLE9_VIR_SPILL_STORE;
@@ -1292,13 +1308,16 @@ apple9_producer_hazard(const struct agx_apple9_vir_instr *ins,
        (producer->op == AGX_APPLE9_VIR_SHARED_LOAD ||
         producer->op == AGX_APPLE9_VIR_SHARED_ATOMIC))
       return true;
-   if (ins->op == AGX_APPLE9_VIR_SHARED_LOAD &&
-       producer->op == AGX_APPLE9_VIR_SHARED_ATOMIC)
-      return true;
-   /* This compound encoding contains a fixed slot-1 publication and wait. */
-   return (ins->encoding == AGX_APPLE9_ENC_BLOCK_IMAGE_STORE ||
-           ins->encoding == AGX_APPLE9_ENC_IMAGE_WRITE) &&
-          producer->producer_scoreboard_slot == AGX_APPLE9_SCOREBOARD_SLOT_1;
+   return ins->op == AGX_APPLE9_VIR_SHARED_LOAD &&
+          producer->op == AGX_APPLE9_VIR_SHARED_ATOMIC;
+}
+
+static bool
+apple9_producer_hazard(const struct agx_apple9_vir_instr *ins,
+                       const struct agx_apple9_vir_instr *producer)
+{
+   return apple9_resource_hazard(ins, producer) ||
+          apple9_lane_hazard(ins, producer);
 }
 
 static enum agx_apple9_completion_class
@@ -1358,9 +1377,90 @@ apple9_acquire_hazard(const struct agx_apple9_vir_instr *ins,
            ins->op == AGX_APPLE9_VIR_TEXTURE_SAMPLE);
 }
 
+/* The if/else arms of the linear program. Node 0 is outside every region;
+ * each other node is one arm (0 = then, 1 = else) of a push/else/pop region,
+ * nested in its parent node. An asynchronous result writes only the lanes
+ * active when it issued, so a producer in one arm of a region and an
+ * instruction in the other arm act on disjoint lanes: native Metal issues a
+ * sample into the same register in both arms with the first still pending. */
+struct apple9_arm {
+   unsigned parent, region;
+   uint8_t arm;
+};
+
+struct apple9_arms {
+   struct apple9_arm *node;
+   unsigned *of; /* node of each input instruction */
+};
+
+static bool
+apple9_build_arms(const struct agx_apple9_vir_program *program,
+                  struct apple9_arms *arms)
+{
+   arms->node = calloc(program->instruction_count + 1, sizeof(*arms->node));
+   arms->of = calloc(MAX2(program->instruction_count, 1), sizeof(*arms->of));
+   if (!arms->node || !arms->of)
+      return false;
+   unsigned nodes = 1, regions = 0, current = 0;
+   for (unsigned i = 0; i < program->instruction_count; ++i) {
+      const struct agx_apple9_vir_instr *ins = program->instructions[i];
+      arms->of[i] = current;
+      switch (ins->op) {
+      case AGX_APPLE9_VIR_EXEC_MASK_PUSH:
+         arms->node[nodes] = (struct apple9_arm){current, ++regions, 0};
+         current = nodes++;
+         break;
+      case AGX_APPLE9_VIR_EXEC_MASK_ELSE:
+         /* Without a then arm to pair with, give up on disjointness. */
+         if (!current || arms->node[current].arm)
+            goto unstructured;
+         arms->node[nodes] = (struct apple9_arm){
+            arms->node[current].parent, arms->node[current].region, 1};
+         current = nodes++;
+         break;
+      case AGX_APPLE9_VIR_EXEC_MASK_POP:
+         if (!current)
+            goto unstructured;
+         current = arms->node[current].parent;
+         break;
+      default:
+         break;
+      }
+   }
+   return true;
+unstructured:
+   memset(arms->of, 0, program->instruction_count * sizeof(*arms->of));
+   return true;
+}
+
+/* Results shown to be written only to the lanes active at issue: native Metal
+ * issues a texture sample (k19) or device load (k20) into the same register
+ * in both arms with the first still pending. Other asynchronous results have
+ * no such evidence yet and keep their cross-arm hazards. */
+static bool
+apple9_masked_writeback(const struct agx_apple9_vir_instr *producer)
+{
+   return !apple9_fixed_producer_slot(producer) &&
+          (producer->op == AGX_APPLE9_VIR_TEXTURE_SAMPLE ||
+           producer->op == AGX_APPLE9_VIR_DEVICE_LOAD);
+}
+
+static bool
+apple9_arms_disjoint(const struct apple9_arms *arms, unsigned a, unsigned b)
+{
+   for (unsigned x = a; x; x = arms->node[x].parent) {
+      for (unsigned y = b; y; y = arms->node[y].parent) {
+         if (arms->node[x].region == arms->node[y].region)
+            return arms->node[x].arm != arms->node[y].arm;
+      }
+   }
+   return false;
+}
+
 static bool
 apple9_pending_hazard(const struct agx_apple9_vir_instr *ins,
-                      const struct apple9_pending *p, bool barrier)
+                      const struct apple9_pending *p, bool barrier,
+                      const struct apple9_arms *arms, unsigned arm)
 {
    if (!apple9_pending_active(p))
       return false;
@@ -1370,8 +1470,20 @@ apple9_pending_hazard(const struct agx_apple9_vir_instr *ins,
    for (unsigned i = 0; i < p->count; ++i) {
       if (barrier && !(exempt & apple9_completion_class(&p->producer[i])))
          return true;
-      if (apple9_producer_hazard(ins, &p->producer[i]) ||
-          (p->fenced[i] && apple9_acquire_hazard(ins, &p->producer[i])))
+      if (apple9_resource_hazard(ins, &p->producer[i]))
+         return true;
+      /* Two masked writebacks from opposite arms of a region may target
+       * the same register while the first is pending (k19, k20). Nothing
+       * else crosses arms: an ALU write over another arm's pending load
+       * has no such evidence (native Metal orders the arms so it never
+       * happens) and failed memory_model.message_passing intermittently on
+       * T8132 when allowed. */
+      if (!(apple9_masked_writeback(&p->producer[i]) &&
+            apple9_masked_writeback(ins) &&
+            apple9_arms_disjoint(arms, p->arm[i], arm)) &&
+          apple9_lane_hazard(ins, &p->producer[i]))
+         return true;
+      if (p->fenced[i] && apple9_acquire_hazard(ins, &p->producer[i]))
          return true;
    }
    return false;
@@ -1420,6 +1532,7 @@ apple9_merge_pending(struct apple9_completion *to_state,
             t->unknown = true;
          } else {
             t->fenced[t->count] = f->fenced[i];
+            t->arm[t->count] = f->arm[i];
             t->producer[t->count++] = f->producer[i];
          }
       }
@@ -1503,22 +1616,31 @@ apple9_slot_joinable(const struct apple9_completion *state, unsigned slot)
 }
 
 /* Choose a slot to join for a sharing producer first needed at need. With
- * free slots, only a slot whose first need is the same instruction: that
- * consumer waits once for both, and nothing waits earlier than it would.
+ * free slots, only a slot whose first need is the same instruction, or whose
+ * producers all issued in the other arm of an enclosing if/else: those are
+ * alternatives on disjoint lanes that merge after it, so the consumer of the
+ * merged value waits once for both (native Metal tags both arms' samples
+ * alike).
  * When every slot is occupied, joining still beats retiring a slot now:
  * prefer the slot needed soonest at or after need (older producers are
  * waited for slightly early), else the one needed latest. */
 static unsigned
 apple9_join_slot(const struct apple9_completion *state, unsigned need,
-                 bool exhausted)
+                 bool exhausted, const struct apple9_arms *arms, unsigned arm)
 {
    unsigned best = 0;
    for (unsigned slot = 1; slot <= 6; ++slot) {
       if (!apple9_slot_joinable(state, slot))
          continue;
-      unsigned other = state->pending[slot].first_need;
+      const struct apple9_pending *p = &state->pending[slot];
+      unsigned other = p->first_need;
       if (!exhausted) {
          if (need != UINT_MAX && other == need)
+            return slot;
+         bool alternatives = true;
+         for (unsigned i = 0; i < p->count; ++i)
+            alternatives &= apple9_arms_disjoint(arms, p->arm[i], arm);
+         if (alternatives)
             return slot;
          continue;
       }
@@ -1583,8 +1705,10 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
    bool *header = calloc(count, sizeof(*header));
    struct apple9_completion *entry = calloc(count, sizeof(*entry));
    struct hash_table *nir_blocks = _mesa_pointer_hash_table_create(NULL);
+   struct apple9_arms arms = {0};
    bool success = false;
-   if (!blocks || !successors || !position || !header || !entry || !nir_blocks)
+   if (!blocks || !successors || !position || !header || !entry || !nir_blocks ||
+       !apple9_build_arms(program, &arms))
       goto cleanup;
    /* Several physical blocks may come from one NIR block. As with the old
     * layout scan, logical successors name its last physical block. Build the
@@ -1678,7 +1802,8 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
             const struct apple9_pending *p = &pending[slot];
             if (!apple9_pending_active(p))
                continue;
-            bool needed = apple9_pending_hazard(&ins, p, barrier);
+            bool needed =
+               apple9_pending_hazard(&ins, p, barrier, &arms, arms.of[i]);
             for (unsigned s = 0; s < ins.nr_srcs; ++s)
                needed |= apple9_pending_result(p, ins.src[s]);
             if (!needed)
@@ -1718,7 +1843,7 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
                      : UINT_MAX;
             bool joined = false;
             if (share) {
-               slot = apple9_join_slot(&state, need, false);
+               slot = apple9_join_slot(&state, need, false, &arms, arms.of[i]);
                joined = slot != 0;
             }
             if (!slot) {
@@ -1740,7 +1865,7 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
                   }
                }
                if (!slot && share) {
-                  slot = apple9_join_slot(&state, need, true);
+                  slot = apple9_join_slot(&state, need, true, &arms, arms.of[i]);
                   joined = slot != 0;
                }
                if (!slot) {
@@ -1778,13 +1903,14 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
             if (joined) {
                struct apple9_pending *p = &pending[slot];
                p->fenced[p->count] = false;
+               p->arm[p->count] = arms.of[i];
                p->producer[p->count++] = ins;
                p->latest_issue = out.instruction_count;
                p->first_need = MIN2(p->first_need, need);
             } else {
                pending[slot] = (struct apple9_pending){
                   .count = 1, .latest_issue = out.instruction_count,
-                  .first_need = need, .producer = {ins}};
+                  .first_need = need, .producer = {ins}, .arm = {arms.of[i]}};
             }
          }
          apple9_select_compact_alu(&ins);
@@ -1826,6 +1952,8 @@ cleanup:
    free(position);
    free(header);
    free(entry);
+   free(arms.node);
+   free(arms.of);
    _mesa_hash_table_destroy(nir_blocks, NULL);
    agx_apple9_vir_finish(&out);
    return success;
