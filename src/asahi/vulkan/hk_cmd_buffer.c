@@ -635,8 +635,7 @@ hk_render_merge_barrier(VkPipelineStageFlags2 src, VkPipelineStageFlags2 dst,
       return false;
 
    return !(src_access & ~attachment_access) &&
-          !(dst_access &
-            ~(attachment_access | VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT));
+          !(dst_access & ~attachment_access);
 }
 
 /* Place the sync events recorded from index first onwards ahead of the open
@@ -822,13 +821,12 @@ hk_cmd_sync_barrier(struct hk_cmd_buffer *cmd,
       const VkPipelineStageFlags2 xsrc = hk_merge_expand_stages(src, true);
       const VkPipelineStageFlags2 xdst = hk_merge_expand_stages(dst, false);
       bool image_barrier = false, unrelated = false;
-      /* Depth/stencil input attachments are not read from the tilebuffer.
-       * They need the preceding render's stored image, not an in-tile order.
+      /* Input attachments are not read from the tilebuffer: hk lowers them
+       * to image reads. They need the preceding render's stored image, not
+       * an in-tile order, for colour as well as depth/stencil.
        */
-      bool ds_input = (cmd->merge_key.image[HK_MAX_RTS] ||
-                       cmd->merge_key.image[HK_MAX_RTS + 1]) &&
-                      (dst_access & VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT);
-      if (!ds_input && ((!cmd->in_meta &&
+      bool input_read = dst_access & VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT;
+      if (!input_read && ((!cmd->in_meta &&
            hk_render_merge_barrier(src, dst, src_access, dst_access)) ||
           (image_barrier = hk_render_merge_image_barrier(cmd, src, dst_access)) ||
           (unrelated = hk_render_merge_move_enabled() && !cmd->in_meta &&
