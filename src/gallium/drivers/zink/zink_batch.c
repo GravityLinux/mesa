@@ -1030,8 +1030,11 @@ check_oom_flush(struct zink_context *ctx)
    /* the batch references nearly the whole heap, or destroyed resources are
     * piling up behind submitted batches
     */
+   const int64_t zombie_bytes = p_atomic_read(&screen->zombie_bytes);
+   /* other contexts' zombies freed since the last stall lower the floor */
+   ctx->oom_zombie_floor = MIN2(ctx->oom_zombie_floor, zombie_bytes);
    if (resource_size >= screen->clamp_video_mem ||
-       p_atomic_read(&screen->zombie_bytes) >= ctx->oom_zombie_floor + (int64_t)screen->zombie_bytes_limit) {
+       zombie_bytes >= ctx->oom_zombie_floor + (int64_t)screen->zombie_bytes_limit) {
        ctx->oom_flush = true;
        ctx->oom_stall = true;
     }

@@ -4083,7 +4083,9 @@ flush_batch(struct zink_context *ctx, bool sync)
       /* destroyed resources piling up behind submitted batches (e.g. a
        * stream of create/draw/delete with flushes in between)
        */
-      if (p_atomic_read(&screen->zombie_bytes) >= ctx->oom_zombie_floor + (int64_t)screen->zombie_bytes_limit)
+      const int64_t zombie_bytes = p_atomic_read(&screen->zombie_bytes);
+      ctx->oom_zombie_floor = MIN2(ctx->oom_zombie_floor, zombie_bytes);
+      if (zombie_bytes >= ctx->oom_zombie_floor + (int64_t)screen->zombie_bytes_limit)
          ctx->oom_stall = true;
       if (ctx->oom_stall) {
          stall(ctx);
