@@ -39,3 +39,13 @@ Strict shader comparison, CPU timings and native kit provenance are recorded sep
 Strict baseline/candidate comparison is complete: 7,008 matching shader entries, 11 matching state-only pipeline-library entries, six matching baseline failures (three CTS, three Willems; keys, exits and assertion expressions match). Strict pre-raster adapters are separate diagnostic builds and are not included as device drivers. Fifteen generated files match between the candidate host release build and baseline AArch64 release build; assertion-build helpers contain extra assert/printf code and are kept separate.
 
 The focused CPU comparison completed 84 successful runs (14 cases, three 3-second repetitions per arm, alternating order, CPU 12, max-of-three statistic). Render-boundary throughput improved 1.169–2.274×; resolve improved 1.405×; plain draw and descriptor/control cases ranged 0.986–1.014×. All processes mapped the selected frozen driver and noop shim. SMT sibling activity stayed below 0.45%. Full rates, ranges and raw measurements are in `results/structural-uploads-20261023/BENCHMARKS.md` and its `benchmarks/` directory. These measure host command recording, not GPU or game performance.
+
+## Integration status (2026-10-23)
+
+Merged into apple9/integration-next as d62f572b66e, together with the empty-clear fold (9420b471d47). Build fix 11e176c815d adapted two callers from other series to the removed upload-cache API.
+
+- **Acceptance gate:** the strict relocation-normalized comparison above was accepted. Every submitted command and initialized live payload matches in all 12 cases. The remaining differences are unwritten descriptor tails, copy counts and retired storage, and these were judged benign.
+- **Post-merge device check:** 11e176c815d against 0e255a68e54, on the mini (results/postmerge-structural-20261023/RESULTS.md).
+  - **Correctness passes:** 50/50 pixel probes, and 1,808 CTS cases per arm (1,156 pass, 652 NotSupported) with no status changes and no GPU faults.
+  - **CPU and memory are neutral.** hk command CPU moved +3.6 ms in one run and −13.8 ms in the other, on a harness-inflated baseline. Paired median GEM peak +1.9 MB within a ±120 MB alternation, last-submit GEM +4.8 MB.
+  - **No memory saving is demonstrated post-merge.** The earlier −60 MB GEM peak, measured on the series' own base (20263f73679), did not reproduce once the series sat with the later merges.
