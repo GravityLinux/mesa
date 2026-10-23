@@ -52,6 +52,19 @@ check_depth_barriers(void)
        * a depth attachment -> depth attachment barrier stays in-tile. */
       CHECK((cmd->merge_cs == &render) == (kind == 2 || kind == 3 || kind == 5));
       CHECK((cmd->current_cs.gfx == &render) == (kind == 2 || kind == 3 || kind == 5));
+      CHECK(render.merge_attachment_barrier == (kind == 2));
+      if (kind == 2) {
+         /* If the next pass changes its key, closing the kept-open render
+          * must retain the attachment dependency after its own work event.
+          */
+         hk_cmd_buffer_end_graphics(cmd);
+         const struct hk_sync_event *last =
+            util_dynarray_top_ptr(&cmd->sync_events, struct hk_sync_event);
+         CHECK(last->stream == HK_SYNC_NONE);
+         CHECK(last->src == hk_sync_stage_mask(
+                  VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, true));
+         CHECK(last->dst == HK_SYNC_FRAGMENT);
+      }
       cmd->merge_cs = cmd->current_cs.gfx = NULL;
    }
    util_dynarray_fini(&cmd->sync_events);
@@ -105,8 +118,38 @@ main(void)
                                     1, 0, 1, colors, &depth, &depth, 0, area));
    CHECK(!hk_render_merge_key_init(&next, 0, 1, 1, 1, colors,
                                     &depth, &depth, 0, area));
-   CHECK(!hk_render_merge_key_init(&next, 0, 1, 0, 0, colors,
-                                    &depth, &depth, 0, area));
+   /* Depth/stencil-only passes have a complete framebuffer identity, too.
+    * Keep the same subresource, read-only and area restrictions as mixed
+    * colour/depth rendering. No view array is needed when color_count is 0.
+    */
+   for (unsigned aspects = 1; aspects < 4; ++aspects) {
+      struct hk_image_view *z = (aspects & 1) ? &depth : NULL;
+      struct hk_image_view *s = (aspects & 2) ? &depth : NULL;
+      CHECK(hk_render_merge_key_init(&first, 0, 1, 0, 0, NULL,
+                                       z, s, 0, area));
+      CHECK(hk_render_merge_key_init(&next, 0, 1, 0, 0, NULL,
+                                       z, s, 0, area));
+      CHECK(!memcmp(&first, &next, sizeof(first)));
+      VkRect2D other_area = area;
+      other_area.offset.x++;
+      CHECK(hk_render_merge_key_init(&next, 0, 1, 0, 0, NULL,
+                                       z, s, 0, other_area));
+      CHECK(memcmp(&first, &next, sizeof(first)));
+      CHECK(hk_render_merge_key_init(&next, 0, 1, 0, 0, NULL,
+                                       z, s, aspects, area));
+      CHECK(memcmp(&first, &next, sizeof(first)));
+      CHECK(!hk_render_merge_key_init(&next,
+               VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT,
+               1, 0, 0, NULL, z, s, 0, area));
+      CHECK(!hk_render_merge_key_init(&next, VK_RENDERING_SUSPENDING_BIT,
+               1, 0, 0, NULL, z, s, 0, area));
+      CHECK(!hk_render_merge_key_init(&next, VK_RENDERING_RESUMING_BIT,
+               1, 0, 0, NULL, z, s, 0, area));
+      CHECK(!hk_render_merge_key_init(&next, 0, 1, 1, 0, NULL,
+                                       z, s, 0, area));
+   }
+   CHECK(!hk_render_merge_key_init(&next, 0, 1, 0, 0, NULL,
+                                    NULL, NULL, 0, area));
 
    /* Preserve the existing colour-only render-area freedom. */
    CHECK(hk_render_merge_key_init(&first, 0, 1, 0, 1, colors, NULL, NULL, 0, area));
