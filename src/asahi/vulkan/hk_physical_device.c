@@ -1746,9 +1746,9 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
    if (debug_get_bool_option("HK_APPLE9_MESH_SHADER", true)) {
       ext->EXT_mesh_shader = true;
       feat->meshShader = true;
-      feat->taskShader = !hk_apple9_native_mesh_enabled();
-      feat->multiviewMeshShader = !hk_apple9_native_mesh_enabled();
-      feat->meshShaderQueries = !hk_apple9_native_mesh_enabled();
+      feat->taskShader = true;
+      feat->multiviewMeshShader = true;
+      feat->meshShaderQueries = true;
    }
 
    /* Fragment shader interlock: the compiler acquires the pixel in raster
@@ -1847,41 +1847,9 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
    props->prefersLocalInvocationPrimitiveOutput = false;
    props->prefersCompactVertexOutput = true;
 
-   /* This opt-in development class is deliberately below extension minima.
-    * These limits describe what native pipeline/draw validation accepts. */
-   if (hk_apple9_native_mesh_enabled()) {
-      props->maxMeshWorkGroupTotalCount = HK_APPLE9_NATIVE_MAX_GROUP_TOTAL;
-      props->maxMeshWorkGroupInvocations = AGX_APPLE9_NATIVE_MAX_INVOCATIONS;
-      for (unsigned i = 0; i < 3; ++i) {
-         props->maxMeshWorkGroupCount[i] = HK_APPLE9_NATIVE_MAX_GROUP_COUNT;
-         props->maxMeshWorkGroupSize[i] = AGX_APPLE9_NATIVE_MAX_INVOCATIONS;
-      }
-      props->maxTaskPayloadSize = 0;
-      props->maxMeshSharedMemorySize = HK_APPLE9_NATIVE_SHARED_BYTES;
-      /* No task payload is admitted; both fields bound the same user region. */
-      props->maxMeshPayloadAndSharedMemorySize = HK_APPLE9_NATIVE_SHARED_BYTES;
-      /* The API component limit includes Position. User locations use the
-       * channels left after XYZW, while both occupy native output planes. */
-      unsigned user_components = hk_apple9_native_mesh_attributes_enabled()
-                                    ? AGX_APPLE9_MAX_VARYING_COMPONENTS : 0;
-      unsigned components = 4 + user_components;
-      /* Vulkan counts the declared output interface. Compiler count words
-       * and padding to four local vertices are not API output memory.
-       * V3/P1 and granularity one bound this at three copies of the interface;
-       * per-primitive outputs consume no more than the all-vertex case. */
-      props->maxMeshOutputMemorySize = 3 * components * sizeof(uint32_t);
-      /* This combined bound is nonbinding with taskShader=false and no
-       * payload: the separate output limit still bounds every legal shader.
-       * It does not imply a contiguous local allocation of this size. */
-      props->maxMeshPayloadAndOutputMemorySize = 48128;
-      props->maxMeshOutputComponents = components;
-      props->maxMeshOutputVertices = 3;
-      props->maxMeshOutputPrimitives = 1;
-      props->maxMeshOutputLayers = 1;
-      props->maxMeshMultiviewViewCount = 1;
-      props->maxPreferredMeshWorkGroupInvocations = AGX_APPLE9_NATIVE_SERIAL_THREADS;
-   }
-
+   /* Native is an optional per-draw realization. Emulation backs the full
+    * advertised mesh/task limits, including grids and outputs larger than
+    * the current native class. */
 
    /* VK_KHR_compute_shader_derivatives: task and mesh workgroups run as
     * compute kernels with the API's linear invocation order, so linear

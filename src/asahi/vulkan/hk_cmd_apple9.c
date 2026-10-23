@@ -332,7 +332,8 @@ hk_apple9_draw_sample_positions(const struct vk_dynamic_graphics_state *dyn,
 }
 
 bool
-hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool reads_buffers)
+hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool reads_buffers,
+                         bool native_mesh)
 {
    if (vk_command_buffer_has_error(&cmd->vk))
       return false;
@@ -343,6 +344,19 @@ hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool reads_buffers)
 
    const struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
    const struct hk_rendering_state *render = &cmd->state.gfx.render;
+
+   /* The paired kernel accepts one leading native mesh draw per render.
+    * End a native stream before any next draw (including meta/ordinary VS),
+    * and end an ordinary stream before its first native draw. Existing
+    * partial-render stores/reloads and continuation dependencies preserve
+    * attachments and order; no emitted work is rerouted retroactively. */
+   if (cs->apple9_native_mesh || (native_mesh && cs->current != cs->start)) {
+      hk_cs_end_hint(cmd, HK_CS_END_RENDER_SPLIT);
+      hk_cmd_buffer_end_graphics(cmd);
+      cs = hk_cmd_buffer_get_cs(cmd, false);
+      if (!cs)
+         return false;
+   }
 
    /* Sample positions are render state (the per-render multisample control),
     * so the first application draw of a render commits them and a draw with
@@ -522,6 +536,7 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    if (!agx_is_indirect(draw.b) && (!draw.b.count[0] || !draw.b.count[1]))
       return;
    unsigned failure_line = 0;
+   struct hk_shader *shaders[2] = {NULL, NULL};
 #define UNSUPPORTED()                                                          \
    do {                                                                        \
       failure_line = __LINE__;                                                 \
@@ -545,6 +560,11 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    struct hk_api_shader *tes = gfx->shaders[MESA_SHADER_TESS_EVAL];
    /* Mesh shaders have written their records as compute. */
    struct hk_api_shader *mesh = gfx->shaders[MESA_SHADER_MESH];
+   if (native_grid) {
+      mesh = hk_api_shader_native(mesh);
+      if (!mesh)
+         UNSUPPORTED();
+   }
    /* Without an API fragment shader, the null program only applies the API
     * sample mask. A full mask needs no fragment work at all. */
    const bool null_fs = !gfx->shaders[MESA_SHADER_FRAGMENT] ||
@@ -555,15 +575,20 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       null_fs && dev->null_fs_trivial &&
       (dyn->ms.sample_mask & BITFIELD_MASK(null_samples)) ==
          BITFIELD_MASK(null_samples);
-   struct hk_shader *shaders[] = {
+   struct hk_api_shader *fragment_api = gfx->shaders[MESA_SHADER_FRAGMENT];
+   if (native_grid && !null_fs) {
+      fragment_api = hk_api_shader_native(fragment_api);
+      if (!fragment_api)
+         UNSUPPORTED();
+   }
+   shaders[0] =
       mesh  ? &mesh->variants[native_grid ? HK_MESH_VARIANT_MAIN
                                          : HK_MESH_VARIANT_RAST]
       : gs  ? &gs->variants[HK_GS_VARIANT_RAST]
       : tes ? &tes->variants[HK_VS_VARIANT_HW]
-            : hk_any_variant(gfx->shaders[MESA_SHADER_VERTEX]),
-      hk_any_variant(null_trivial ? dev->null_fs_trivial
-                     : gfx->shaders[MESA_SHADER_FRAGMENT] ?: dev->null_fs),
-   };
+            : hk_any_variant(gfx->shaders[MESA_SHADER_VERTEX]);
+   shaders[1] = hk_any_variant(null_trivial ? dev->null_fs_trivial
+                                           : fragment_api ?: dev->null_fs);
    if (native_grid &&
        (!mesh || gfx->shaders[MESA_SHADER_TASK] || gs || tes ||
         shaders[0]->info.apple9_native_stage != HK_APPLE9_NATIVE_MESH ||
@@ -714,10 +739,8 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    cs = hk_occlusion_prepare_draw(cmd, cs);
    if (!cs)
       return;
-   /* The paired kernel parses a leading native state and one direct draw.
-    * Reject mixed/multiple draws and unqualified render resource classes
-    * before publishing a stream that the kernel could mistake for ordinary
-    * rendering. The empty root has ample space without a stream link. */
+   /* Selection and preparation guarantee a leading native state and one
+    * direct draw. Keep this backstop before publishing a malformed stream. */
    if (cs->apple9_native_mesh ||
        (native_grid && (cs->current != cs->start || pipeline.samples != 1 ||
                         gfx->render.layer_count != 1)))
@@ -1072,8 +1095,8 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
 unsupported:
    fprintf(
       stderr,
-      "Apple9 draw unsupported at %u: shaders=%d/%d indirect=%d vp=%u sc=%u stencil=%d bias=%d topology=%u\n",
-      failure_line, !!shaders[0], !!shaders[1], agx_is_indirect(draw.b),
+      "Apple9 draw unsupported at %u: native=%d shaders=%d/%d indirect=%d vp=%u sc=%u stencil=%d bias=%d topology=%u\n",
+      failure_line, !!native_grid, !!shaders[0], !!shaders[1], agx_is_indirect(draw.b),
       dyn->vp.viewport_count, dyn->vp.scissor_count,
       dyn->ds.stencil.test_enable, dyn->rs.depth_bias.enable,
       dyn->ia.primitive_topology);

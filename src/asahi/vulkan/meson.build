@@ -186,6 +186,34 @@ if with_tests
     endif
   endforeach
   test(
+    'hk-native-mesh-routing',
+    executable(
+      'hk-native-mesh-routing', 'tests/hk-native-mesh-routing.c',
+      include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                             inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+      dependencies : [hk_deps], link_with : [libhk],
+    ),
+    env : ['HK_APPLE9_NATIVE_MESH=1'],
+    suite : ['asahi', 'honeykrisp'],
+  )
+  test(
+    'hk-native-mesh-hybrid',
+    executable(
+      'hk-native-mesh-hybrid', 'tests/hk-native-mesh-hybrid.c',
+      include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                             inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+      dependencies : [hk_deps], link_with : [libhk],
+      link_args : ['-Wl,--wrap=agx_bo_create', '-Wl,--wrap=agx_bo_reference',
+                   '-Wl,--wrap=agx_bo_unreference', '-Wl,--wrap=__vk_errorf',
+                   '-Wl,--wrap=agx_compile_apple9_native_mesh',
+                   '-Wl,--wrap=agx_compile_apple9_tiny',
+                   '-Wl,--wrap=agx_compile_apple9_fragment_mrt'],
+    ),
+    env : ['HK_APPLE9_NATIVE_MESH=1', 'HK_APPLE9_NATIVE_MESH_ATTRIBUTES=1',
+           'HK_APPLE9_NATIVE_MESH_PRIMITIVE_LOWERING=1'],
+    suite : ['asahi', 'honeykrisp'],
+  )
+  test(
     'hk-native-mesh-options',
     executable(
       'hk-native-mesh-options', 'tests/hk-native-mesh-options.c',

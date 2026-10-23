@@ -55,6 +55,10 @@ struct agx_apple9_mesh_key {
 bool agx_apple9_native_workgroup_supported(const nir_shader *nir,
                                           const char **reason);
 
+/* Output declaration class shared by early driver IO lowering and the native
+ * compiler. Other eligibility checks still depend on the body and shader key. */
+bool agx_apple9_native_mesh_shape_eligible(const nir_shader *nir);
+
 /* 32-bit component maps shared with the future launch and fragment linkers.
  * Local vertex outputs are component-major; primitive attributes are device
  * records. Indices and culling have distinct byte-addressed local regions. */

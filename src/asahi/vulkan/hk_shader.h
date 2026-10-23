@@ -457,6 +457,24 @@ struct hk_api_shader {
     */
    struct hk_apple9_deferred *apple9_deferred;
 
+   /* Eager pipelines own an emulated realization and this optional native
+    * leaf. Deferred variants compile only the requested path: a native
+    * result is itself a leaf, with no emulated realization attached. */
+   struct hk_api_shader *apple9_native;
+
+   /* Native mesh/FS realizations have the same content-derived compile ID.
+    * Store the ID in cache blobs so independently reloaded stages can still
+    * prove that their producer/consumer interfaces were compiled together.
+    * Leaves have no deferred source or further alternative. */
+   bool apple9_native_leaf;
+   blake3_hash apple9_native_pair_id;
+
+   /* Shader capability, established before deferred state-dependent linking.
+    * Draw state can still require the emulated realization. A deferred native
+    * rejection clears this atomically while recording threads may read it. */
+   bool apple9_native_candidate;
+   bool apple9_native_cull_primitive;
+
    /* Immutable after compilation/cache reload; avoids walking variants at
     * every shader bind, including shaders with no constant data. */
    uint64_t constant_data_addr;
@@ -464,12 +482,21 @@ struct hk_api_shader {
    struct hk_shader variants[];
 };
 
+static inline struct hk_api_shader *
+hk_api_shader_native(const struct hk_api_shader *shader)
+{
+   if (!shader)
+      return NULL;
+   return shader->apple9_native_leaf ? (struct hk_api_shader *)shader
+                                     : shader->apple9_native;
+}
+
 struct vk_graphics_pipeline_state;
 
 VkResult hk_apple9_resolve_graphics(
    struct hk_device *dev, struct hk_api_shader *const api[HK_APPLE9_GFX_STAGES],
    const struct vk_graphics_pipeline_state *state,
-   struct hk_api_shader *out[HK_APPLE9_GFX_STAGES]);
+   struct hk_api_shader *out[HK_APPLE9_GFX_STAGES], bool prefer_native);
 
 bool hk_apple9_deferred_sample_shading(const struct hk_api_shader *fs);
 
@@ -523,20 +550,26 @@ hk_only_variant(struct hk_api_shader *obj)
 
 /* Large constants are extracted before variants are cloned or generated.
  * Generated variants may not use them, but all original variants retain the
- * same data layout. Any uploaded copy can serve the API stage's root slot.
+ * same data layout, including the optional native realization. Any uploaded
+ * copy can serve the API stage's root slot without a draw-path rebind.
  */
 static inline void
 hk_api_shader_init_constant_data(struct hk_api_shader *shader)
 {
    const struct hk_shader *data = NULL;
-   for (unsigned v = 0; v < hk_num_variants(shader->vk.stage); ++v) {
-      const struct hk_shader *s = &shader->variants[v];
-      if (!s->data_size)
+   const struct hk_api_shader *paths[] = {shader, shader->apple9_native};
+   for (unsigned p = 0; p < ARRAY_SIZE(paths); ++p) {
+      if (!paths[p])
          continue;
-      assert(!data || (data->data_size == s->data_size &&
-                      !memcmp(data->data_ptr, s->data_ptr, s->data_size)));
-      if (!data)
-         data = s;
+      for (unsigned v = 0; v < hk_num_variants(shader->vk.stage); ++v) {
+         const struct hk_shader *s = &paths[p]->variants[v];
+         if (!s->data_size)
+            continue;
+         assert(!data || (data->data_size == s->data_size &&
+                         !memcmp(data->data_ptr, s->data_ptr, s->data_size)));
+         if (!data)
+            data = s;
+      }
    }
    shader->constant_data_addr = data ? data->data_addr : 0;
 }
@@ -681,6 +714,10 @@ struct hk_apple9_graphics_key {
 bool hk_apple9_compile_native_mesh_program(
    nir_shader *nir, const struct hk_apple9_graphics_key *key,
    struct agx_shader_part *out, struct agx_apple9_mesh_body_info *info,
+   const char **reason);
+
+VkResult hk_apple9_native_mesh_check(nir_shader *nir,
+   const struct hk_apple9_graphics_key *key, bool *supported,
    const char **reason);
 
 VkResult hk_apple9_compile_internal_gs(struct hk_device *dev, nir_shader *nir,

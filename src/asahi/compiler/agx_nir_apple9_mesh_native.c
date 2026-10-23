@@ -12,14 +12,19 @@ fail(const char **reason, const char *message)
    return false;
 }
 
+bool
+agx_apple9_native_mesh_shape_eligible(const nir_shader *nir)
+{
+   return nir->info.stage == MESA_SHADER_MESH && !nir->info.task_payload_size &&
+          nir->info.mesh.max_vertices_out == 3 &&
+          nir->info.mesh.max_primitives_out == 1 &&
+          nir->info.mesh.primitive_type == MESA_PRIM_TRIANGLES;
+}
+
 static bool
 eligible(nir_shader *nir, unsigned physical_threads, const char **reason)
 {
-   if (nir->info.stage != MESA_SHADER_MESH ||
-       nir->info.task_payload_size ||
-       nir->info.mesh.max_vertices_out != 3 ||
-       nir->info.mesh.max_primitives_out != 1 ||
-       nir->info.mesh.primitive_type != MESA_PRIM_TRIANGLES)
+   if (!agx_apple9_native_mesh_shape_eligible(nir))
       return fail(reason,
                   "native mesh development class requires V3 P1 triangles without payload");
    if (physical_threads == AGX_APPLE9_NATIVE_THREADS) {

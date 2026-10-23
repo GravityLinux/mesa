@@ -342,6 +342,7 @@ struct hk_graphics_state {
     * inputs change. render_gen counts render pass instances. */
    struct {
       bool valid;
+      bool prefer_native;
       uint32_t render_gen;
       struct hk_api_shader *api[HK_APPLE9_GFX_STAGES];
       struct hk_api_shader *out[HK_APPLE9_GFX_STAGES];
@@ -1452,7 +1453,10 @@ struct hk_bg_eot hk_apple9_build_bg_eot(
 bool hk_apple9_pin_entry(void *allocator, struct agx_bo *bo);
 /* reads_buffers: the draw's tiling reads buffer memory itself (indices or
  * indirect arguments). */
-bool hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool reads_buffers);
+bool hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool reads_buffers,
+                             bool native_mesh);
+bool hk_apple9_use_native_mesh(struct hk_cmd_buffer *cmd, const uint32_t *direct,
+                                uint64_t count_addr);
 void hk_apple9_draw_native_mesh(struct hk_cmd_buffer *cmd, uint32_t draw_id,
                                 uint64_t grid);
 void hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
