@@ -91,11 +91,50 @@ int main(void)
    streams[1] = (struct hk_sync_stream){.engine = HK_SYNC_RENDER, .index = 1};
    CHECK(hk_sync_resolve(&state, ev, 3, remap, streams, 2, false));
    CHECK(streams[0].wait.engine[HK_SYNC_RENDER] == 1);
+
+   /* Input attachments are image reads, which cannot see clears the next
+    * render would consume in tiles: a barrier to them, named directly or
+    * as a fragment-stage memory read, is not deferred and ends the
+    * clear-only render. */
+   const VkMemoryBarrier2 input_barriers[] = {
+      {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+       .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+       .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+       .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+       .dstAccessMask = VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT},
+      {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+       .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+       .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+       .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+       .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT},
+   };
+   /* Ending the render writes its terminating commands and uploads. */
+   static uint8_t pool[4096], bytes[4096];
+   cmd->uploader[HK_CMD_POOL_MAIN].chunks[0].map = pool;
+   for (unsigned i = 0; i < ARRAY_SIZE(input_barriers); ++i) {
+      struct hk_cs kept = {.cmd = cmd, .type = HK_CS_VDM, .sync_id = 1,
+                           .current = bytes, .end = bytes + sizeof(bytes),
+                           .sync_stages = HK_SYNC_GRAPHICS, .stats.cmds = 1};
+      util_dynarray_clear(&cmd->sync_events);
+      for (unsigned j = 0; j < 2; ++j)
+         *util_dynarray_element(&cmd->sync_first_event, uint32_t, j) = HK_SYNC_NONE;
+      hk_cmd_sync_work(cmd, &kept, HK_SYNC_GRAPHICS);
+      cmd->merge_cs = cmd->current_cs.gfx = &kept;
+      cmd->merge_empty = true;
+      cmd->merge_event = 0;
+      hk_CmdPipelineBarrier2(hk_cmd_buffer_to_handle(cmd), &(VkDependencyInfo){
+         .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+         .memoryBarrierCount = 1, .pMemoryBarriers = &input_barriers[i]});
+      CHECK(!cmd->empty_barriers.size);
+      CHECK(cmd->merge_cs == NULL);
+      cmd->merge_cs = cmd->current_cs.gfx = NULL;
+      cmd->merge_empty = false;
+   }
    util_dynarray_fini(&cmd->sync_events);
    util_dynarray_fini(&cmd->sync_first_event);
    util_dynarray_fini(&cmd->empty_barriers);
    vk_object_base_finish(&cmd->vk.base);
    free(cmd); free(dev);
-   puts("PASS deferred clear barriers: predecessor ordering, grouping, fallback WAR");
+   puts("PASS deferred clear barriers: predecessor ordering, grouping, fallback WAR, input attachments");
    return 0;
 }

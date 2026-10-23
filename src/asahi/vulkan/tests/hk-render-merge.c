@@ -67,6 +67,33 @@ check_depth_barriers(void)
       }
       cmd->merge_cs = cmd->current_cs.gfx = NULL;
    }
+
+   /* Colour input attachments are image reads too: a colour attachment ->
+    * input attachment barrier ends a colour-only render. */
+   {
+      struct hk_cs render = {
+         .cmd = cmd, .type = HK_CS_VDM, .sync_id = 0,
+         .current = bytes, .end = bytes + sizeof(bytes),
+         .sync_stages = HK_SYNC_GRAPHICS, .stats.cmds = 1,
+      };
+      util_dynarray_clear(&cmd->sync_events);
+      util_dynarray_clear(&cmd->sync_first_event);
+      util_dynarray_append(&cmd->sync_first_event, (uint32_t)HK_SYNC_NONE);
+      hk_cmd_sync_work(cmd, &render, HK_SYNC_GRAPHICS);
+      cmd->current_cs.gfx = cmd->merge_cs = &render;
+      cmd->merge_event = 0;
+      cmd->merge_reach = hk_merge_graphics_stages();
+      memset(&cmd->merge_key, 0, sizeof(cmd->merge_key));
+      cmd->barrier_image = NULL;
+      cmd->merge_feedback = false;
+      hk_cmd_sync_barrier(cmd, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                          VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                          VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                          VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT);
+      CHECK(cmd->merge_cs == NULL && cmd->current_cs.gfx == NULL);
+      CHECK(!render.merge_attachment_barrier);
+      cmd->merge_cs = cmd->current_cs.gfx = NULL;
+   }
    util_dynarray_fini(&cmd->sync_events);
    util_dynarray_fini(&cmd->sync_remap);
    util_dynarray_fini(&cmd->sync_first_event);

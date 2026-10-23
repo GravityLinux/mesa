@@ -35,9 +35,9 @@ main(void)
     * inserts an event before it, advancing the first-event index.
     */
    hk_cmd_sync_barrier(cmd, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                       VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                       VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-                       VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT);
+                       VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT);
    CHECK(cmd->merge_cs == &gfx && cmd->merge_event == 1);
    struct hk_sync_event *ev = cmd->sync_events.data;
    CHECK(ev[0].stream == HK_SYNC_NONE && ev[1].stream == gfx.sync_id);
