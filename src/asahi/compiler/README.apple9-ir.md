@@ -426,6 +426,21 @@ readback; no captured instruction sequence or fixed publication assignment is
 required. Export lifetime shortening and Metal's full 31-vector interface remain
 separate work. Compiler tests cover publication exhaustion and all canonical IDs.
 
+### Varying range
+
+Interpolating huge but finite varyings overflows far below FLT_MAX. A vertex
+shader writing `v = x * U` (x = ±1 at the edges of a full-screen quad, no
+fragment arithmetic) keeps the interpolated sign correct on T8132 up to
+U = 1e35 and fails at 1e36 on a 16x16 target; on 1024x1024 it passes at 1e30
+and fails at 1e33 (coarse sampled brackets). Native GL and Zink on Honeykrisp
+behave identically, so this is a property of the hardware varying setup, not
+of either driver. As a rule of thumb, finite values overflow above roughly
+FLT_MAX / extent², where extent is the render-target dimension in pixels.
+Optimizations that move a multiply by a large uniform across interpolation
+(nir_opt_varyings) can hit this; gl_Fog.scale is clamped to 2^64 for that
+reason. Evidence: results/interp-range/RESULTS.md and device-out/interp.txt
+(interp-range test, results/interp-range.c).
+
 ## Native cube coordinates and integer texture reads
 
 T8132 authored-Metal tests establish three cube-coordinate operations. `CUBE`
