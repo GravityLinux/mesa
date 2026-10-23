@@ -7,6 +7,7 @@
 #include "../hk_shader.c"
 
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "%u: %s\n", __LINE__, #c); abort(); } } while (0)
+#include "hk-test-usc.h"
 
 static unsigned allocations, live_bos, fail_allocation;
 static unsigned native_compiles, emulated_compiles, fragment_compiles;
@@ -319,6 +320,7 @@ compile(struct hk_device *dev, bool deferred, bool native, unsigned failure)
    }
    hk_apple9_variants_finish(dev);
    hk_apple9_bodies_finish(dev);
+   test_reset_usc_heap(dev);
    CHECK(live_bos == 0);
    return allocations;
 }
@@ -358,6 +360,7 @@ compile_native_only(struct hk_device *dev, bool reject, unsigned failure)
          hk_api_shader_destroy(&dev->vk, out[i], NULL);
    }
    hk_apple9_bodies_finish(dev);
+   test_reset_usc_heap(dev);
    CHECK(live_bos == 0);
    return allocations;
 }
@@ -399,6 +402,7 @@ deferred_rejection(struct hk_device *dev)
    hk_api_shader_destroy(&dev->vk, out[1], NULL);
    hk_apple9_variants_finish(dev);
    hk_apple9_bodies_finish(dev);
+   test_reset_usc_heap(dev);
    CHECK(live_bos == 0);
 }
 
@@ -461,6 +465,7 @@ main(void)
    dev->dev.shader_base = 0x1200000000ull;
    dev->vk.alloc = *vk_default_allocator();
    dev->vk.physical = &pdev->vk;
+   hk_device_init_usc_heap(dev);
    simple_mtx_init(&dev->apple9_variants.lock, mtx_plain);
    simple_mtx_init(&dev->apple9_bodies.lock, mtx_plain);
    simple_mtx_init(&pdev->debug_compile_lock, mtx_plain);
@@ -480,6 +485,8 @@ main(void)
    simple_mtx_destroy(&pdev->debug_compile_lock);
    simple_mtx_destroy(&dev->apple9_bodies.lock);
    simple_mtx_destroy(&dev->apple9_variants.lock);
+   test_reset_usc_heap(dev);
+   hk_device_finish_usc_heap(dev);
    free(dev);
    free(pdev);
    glsl_type_singleton_decref();

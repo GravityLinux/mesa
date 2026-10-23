@@ -11,6 +11,7 @@
 #include "../hk_shader.c"
 
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "%u: %s\n", __LINE__, #c); abort(); } } while (0)
+#include "hk-test-usc.h"
 
 struct agx_bo *__wrap_agx_bo_create(struct agx_device *, size_t, unsigned,
                                     enum agx_bo_flags, const char *);
@@ -164,6 +165,7 @@ main(void)
    dev->dev.shader_base = 0x1200000000ull;
    dev->vk.alloc = *vk_default_allocator();
    dev->vk.physical = &pdev->vk;
+   hk_device_init_usc_heap(dev);
    simple_mtx_init(&dev->apple9_variants.lock, mtx_plain);
    simple_mtx_init(&dev->apple9_bodies.lock, mtx_plain);
    simple_mtx_init(&pdev->debug_compile_lock, mtx_plain);
@@ -178,6 +180,8 @@ main(void)
    simple_mtx_destroy(&pdev->debug_compile_lock);
    simple_mtx_destroy(&dev->apple9_bodies.lock);
    simple_mtx_destroy(&dev->apple9_variants.lock);
+   test_reset_usc_heap(dev);
+   hk_device_finish_usc_heap(dev);
    free(dev);
    free(pdev);
    glsl_type_singleton_decref();

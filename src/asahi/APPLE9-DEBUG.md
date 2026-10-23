@@ -21,7 +21,6 @@ shader cache explicitly when a cached shader would otherwise suppress output.
 | `vectorize` | `HK_APPLE9_TRACE_VECTORIZE` | Presence |
 | `eager` | `HK_APPLE9_EAGER_TRACE` | Presence |
 | `merge` | `HK_APPLE9_MERGE_TRACE` | Boolean |
-| `upload` | `HK_UPLOAD_STATS` | Boolean |
 | `tiling` | `HK_TILING_ELISION_STATS` | Boolean |
 | `launch_check` | `HK_APPLE9_LAUNCH_CHECK` | Boolean |
 | `bo_labels` | `AGX_BO_TRACE_LABELS` | Boolean |

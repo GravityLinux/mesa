@@ -294,6 +294,9 @@ struct hk_rendering_state {
    struct hk_attachment depth_att;
    struct hk_attachment stencil_att;
 
+   /* Immutable inputs shared by this render's background/store helpers. */
+   uint64_t apple9_arguments, apple9_sysvals;
+
    struct agx_tilebuffer_layout tilebuffer;
    struct hk_render_registers cr;
 

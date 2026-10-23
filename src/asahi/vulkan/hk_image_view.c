@@ -570,6 +570,32 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
    };
 }
 
+static void
+hk_apple9_init_render_view(struct hk_image_view *view)
+{
+   for (unsigned layered = 0; layered < 2; ++layered) {
+      struct hk_apple9_render_view *out = &view->apple9_render[layered];
+      const struct agx_texture_packed *texture =
+         layered ? &view->planes[0].layered_background
+                 : &view->planes[0].background;
+      agx_unpack(stderr, texture, TEXTURE, image);
+      out->array = image.dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY ||
+                   image.dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY_MULTISAMPLED;
+      out->dimensions[0] = u_minify(image.width, image.first_level);
+      out->dimensions[1] = u_minify(image.height, image.first_level);
+      out->dimensions[2] = image.depth;
+      out->dimensions[3] = image.last_level - image.first_level + 1;
+      /* Tile words retain encoded sRGB. Hardware reloads must not decode it. */
+      image.srgb = image.srgb_2_channel = false;
+      struct agx_texture_packed packed;
+      agx_pack(&packed, TEXTURE, cfg) {
+         cfg = image;
+      }
+      out->texture_valid = agx_apple9_translate_texture(out->texture, &packed);
+      out->store_valid = hk_apple9_image_view_eot(view, layered, out->store);
+   }
+}
+
 static VkResult
 hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
                    const VkImageViewCreateInfo *pCreateInfo)
@@ -618,6 +644,10 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
       pack_pbe(dev, view, p, HK_DESC_USAGE_LAYERED_BG_EOT,
                &view->planes[p].layered_eot);
    }
+
+   if (dev->dev.chip == AGX_CHIP_G16G &&
+       (view->vk.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT))
+      hk_apple9_init_render_view(view);
 
    return VK_SUCCESS;
 }

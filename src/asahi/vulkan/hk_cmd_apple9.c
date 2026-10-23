@@ -27,6 +27,7 @@ struct hk_apple9_tile_helper {
    struct agx_apple9_tilebuffer_key key;
    struct agx_bo *bo;
    struct agx_shader_info info;
+   struct agx_apple9_stage_launch_cache launch;
 };
 
 static uint32_t
@@ -41,12 +42,12 @@ hk_apple9_tile_helper_equal(const void *a, const void *b)
    return !memcmp(a, b, sizeof(struct agx_apple9_tilebuffer_key));
 }
 
-static const struct hk_apple9_tile_helper *
+static struct hk_apple9_tile_helper *
 hk_apple9_tile_helper(struct hk_device *dev,
                       const struct agx_apple9_tilebuffer_key *key,
                       const struct agx_apple9_blend *blend)
 {
-   const struct hk_apple9_tile_helper *helper = NULL;
+   struct hk_apple9_tile_helper *helper = NULL;
    struct hk_apple9_tile_helper *created = NULL;
    struct agx_shader_part part = {0};
    nir_shader *nir = NULL;
@@ -86,6 +87,7 @@ hk_apple9_tile_helper(struct hk_device *dev,
    }
    memcpy(agx_bo_map(created->bo), part.binary, part.info.binary_size);
    agx_bo_note_cpu_write(created->bo, 0, part.info.binary_size);
+   agx_apple9_stage_launch_cache_init(&created->launch);
    _mesa_hash_table_insert(ht, &created->key, created);
    helper = created;
 
@@ -103,11 +105,45 @@ hk_apple9_tile_helpers_finish(struct hk_device *dev)
       return;
    hash_table_foreach(dev->apple9_tile_helpers.ht, entry) {
       struct hk_apple9_tile_helper *helper = entry->data;
+      agx_apple9_stage_launch_cache_finish(&helper->launch);
       agx_bo_unreference(&dev->dev, helper->bo);
       free(helper);
    }
    _mesa_hash_table_destroy(dev->apple9_tile_helpers.ht, NULL);
    dev->apple9_tile_helpers.ht = NULL;
+}
+
+/* These inputs depend on the attachment set and clear values, not on which
+ * helper loads/stores it. Upload once at render creation; pool storage keeps
+ * the addresses alive across internal splits and command-buffer resubmission. */
+static bool
+hk_apple9_render_inputs(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
+{
+   struct hk_rendering_state *render = &cmd->state.gfx.render;
+   if (render->apple9_arguments)
+      return true;
+
+   uint32_t params[48] = {0};
+   uint8_t metadata[AGX_APPLE9_RUNTIME_SYSVAL_SIZE] = {0};
+   uint32_t samples = MAX2(render->tilebuffer.nr_samples, 1);
+   bool layered = render->cr.layers > 1;
+   for (unsigned rt = 0; rt < render->color_att_count; ++rt) {
+      const struct hk_image_view *view = render->color_att[rt].iview;
+      if (!view)
+         continue;
+      memcpy(&params[16 + rt * 4], &info->pColorAttachments[rt].clearValue.color, 16);
+      uint8_t *dimensions = metadata + AGX_APPLE9_TEXTURE_INFO_OFFSET +
+                            rt * AGX_APPLE9_TEXTURE_INFO_STRIDE;
+      memcpy(dimensions, view->apple9_render[layered].dimensions, 16);
+      memcpy(dimensions + 16, &samples, sizeof(samples));
+   }
+   uint64_t sysvals = hk_pool_upload(cmd, metadata, sizeof(metadata), 64);
+   uint64_t arguments = hk_pool_upload(cmd, params, sizeof(params), 16);
+   if (!sysvals || !arguments)
+      return false;
+   render->apple9_sysvals = sysvals;
+   render->apple9_arguments = arguments;
+   return true;
 }
 
 struct hk_bg_eot
@@ -124,9 +160,6 @@ hk_apple9_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
    key.store = store;
    key.layered = render->cr.layers > 1;
    struct agx_apple9_blend blend[8] = {0};
-   struct agx_texture_packed legacy[8] = {0};
-   uint32_t params[48] = {0};
-   uint8_t metadata[AGX_APPLE9_RUNTIME_SYSVAL_SIZE] = {0};
    unsigned tile_bytes = 0;
    VkResult error = VK_ERROR_FEATURE_NOT_PRESENT;
    if (key.count > 8)
@@ -151,29 +184,8 @@ hk_apple9_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
          key.mask |= BITFIELD_BIT(rt);
       if (clear)
          key.clear_mask |= BITFIELD_BIT(rt);
-      memcpy(&params[16 + rt * 4], &att->clearValue.color, 16);
-      const struct agx_texture_packed *texture =
-         key.layered ? &view->planes[0].layered_background
-                     : &view->planes[0].background;
-      agx_unpack(stderr, texture, TEXTURE, image);
-      /* Tile words retain encoded sRGB. Hardware reloads must not decode it. */
-      image.srgb = image.srgb_2_channel = false;
-      agx_pack(&legacy[rt], TEXTURE, cfg) {
-         cfg = image;
-      }
-      if (image.dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY ||
-          image.dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY_MULTISAMPLED)
+      if (view->apple9_render[key.layered].array)
          key.array_mask |= BITFIELD_BIT(rt);
-      uint32_t dimensions[] = {
-         u_minify(image.width, image.first_level),
-         u_minify(image.height, image.first_level),
-         image.depth,
-         image.last_level - image.first_level + 1,
-         key.samples,
-      };
-      memcpy(metadata + AGX_APPLE9_TEXTURE_INFO_OFFSET +
-                rt * AGX_APPLE9_TEXTURE_INFO_STRIDE,
-             dimensions, sizeof(dimensions));
    }
    blend[0].samples = key.samples;
    if (tile_bytes > 128) {
@@ -181,52 +193,43 @@ hk_apple9_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
               tile_bytes, key.samples);
       goto fail;
    }
-   const struct hk_apple9_tile_helper *helper =
+   struct hk_apple9_tile_helper *helper =
       hk_apple9_tile_helper(dev, &key, blend);
    if (!helper)
       goto fail;
    const struct agx_shader_info *part_info = &helper->info;
    error = VK_ERROR_OUT_OF_DEVICE_MEMORY;
-   uint64_t arguments = hk_pool_upload(cmd, params, sizeof(params), 16);
-   uint64_t sysvals = hk_pool_upload_cached(cmd, metadata, sizeof(metadata), 64,
-                                            HK_UPLOAD_RUNTIME);
+   if (!hk_apple9_render_inputs(cmd, info))
+      goto fail;
    struct agx_ptr textures =
       hk_pool_alloc(cmd, 8 * AGX_APPLE9_TEXTURE_TABLE_STRIDE, 64);
-   struct agx_ptr sampler =
-      hk_pool_alloc(cmd, AGX_APPLE9_SAMPLER_TABLE_STRIDE, 64);
-   if (!arguments || !sysvals || !textures.cpu || !sampler.cpu)
+   if (!textures.cpu)
       goto fail;
-   memset(sampler.cpu, 0, AGX_APPLE9_SAMPLER_TABLE_STRIDE);
-   agx_apple9_pack_sampler(sampler.cpu, false, false, 1, 0, 14,
-                           PIPE_TEX_WRAP_CLAMP_TO_EDGE,
-                           PIPE_TEX_WRAP_CLAMP_TO_EDGE, 1);
    unsigned slot = 0;
    error = VK_ERROR_FEATURE_NOT_PRESENT;
    u_foreach_bit(rt, part_info->apple9_texture_mask) {
-      if (rt >= key.count ||
-          !agx_apple9_translate_texture(
-             (uint8_t *)textures.cpu + slot++ * AGX_APPLE9_TEXTURE_TABLE_STRIDE,
-             &legacy[rt])) {
-         fprintf(stderr, "Apple9 tile helper: unsupported reload texture %u (%s)\n", rt, util_format_short_name(key.formats[rt]));
+      const struct hk_image_view *view =
+         rt < key.count ? render->color_att[rt].iview : NULL;
+      if (!view || !view->apple9_render[key.layered].texture_valid)
          goto fail;
-      }
+      memcpy((uint8_t *)textures.cpu + slot++ * AGX_APPLE9_TEXTURE_TABLE_STRIDE,
+             view->apple9_render[key.layered].texture, AGX_APPLE9_TEXTURE_TABLE_STRIDE);
    }
    u_foreach_bit(rt, part_info->apple9_image_mask) {
-      if (rt >= key.count || !hk_apple9_image_view_eot(
-                                render->color_att[rt].iview, key.layered,
-                                (uint8_t *)textures.cpu +
-                                   slot++ * AGX_APPLE9_TEXTURE_TABLE_STRIDE)) {
-         fprintf(stderr, "Apple9 tile helper: unsupported store image %u\n", rt);
+      const struct hk_image_view *view =
+         rt < key.count ? render->color_att[rt].iview : NULL;
+      if (!view || !view->apple9_render[key.layered].store_valid)
          goto fail;
-      }
+      memcpy((uint8_t *)textures.cpu + slot++ * AGX_APPLE9_TEXTURE_TABLE_STRIDE,
+             view->apple9_render[key.layered].store, AGX_APPLE9_TEXTURE_TABLE_STRIDE);
    }
    uint64_t resources[AGX_APPLE9_MAX_GRAPHICS_BUFFERS] = {0};
    for (unsigned i = 0; i < part_info->apple9_resource_count; ++i) {
       unsigned binding = part_info->apple9_resource_binding[i];
       if (binding == 0)
-         resources[i] = arguments;
+         resources[i] = render->apple9_arguments;
       else if (binding == AGX_APPLE9_GRAPHICS_SYSVAL_BINDING)
-         resources[i] = sysvals;
+         resources[i] = render->apple9_sysvals;
       else
          goto fail;
    }
@@ -234,6 +237,7 @@ hk_apple9_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
       cmd, resources, part_info->apple9_resource_count * sizeof(uint64_t), 64);
    struct agx_apple9_render_stage shader = {
       .bo = helper->bo,
+      .launch_cache = &helper->launch,
       .binary_size = part_info->binary_size,
       .preamble_offset = part_info->apple9_preamble_offset,
       .preamble_size = part_info->apple9_preamble_size,
@@ -244,7 +248,7 @@ hk_apple9_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
    uint32_t launch;
    if (!agx_apple9_prepare_graphics_stage(
           &dev->dev, cmd, hk_apple9_usc_alloc, &shader, true, table,
-          textures.gpu, sampler.gpu,
+          textures.gpu, dev->apple9_reload_sampler,
           agx_apple9_tile_sample_bytes(tile_bytes, key.samples), key.samples,
           &launch))
       goto fail;
@@ -645,7 +649,7 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
          /* This derived stage has the producer's interface, so its tables
           * belong to this command buffer rather than the device's null FS. */
          struct agx_ptr cf = hk_pool_usc_alloc(
-            cmd, AGX_APPLE9_CF_ALLOCATION_SIZE, 64);
+            cmd, agx_apple9_coefficients_size(&cmd->apple9_null_fs), 64);
          if (!cf.cpu)
             UNSUPPORTED();
          agx_apple9_init_coefficients(&dev->dev, &cmd->apple9_null_fs, cf);

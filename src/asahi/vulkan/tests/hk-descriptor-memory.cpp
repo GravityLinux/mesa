@@ -206,19 +206,19 @@ TEST(HkUscHeap, StableSharedSlabsAndReuse)
    EXPECT_EQ(dev.creates, 0u);
    std::vector<hk_descriptor_allocation> views(2048);
    for (auto &view : views)
-      ASSERT_TRUE(hk_usc_heap_alloc(&table, 1 * 128, 128, &view));
+      ASSERT_TRUE(hk_usc_heap_alloc(&table, 1 * 32, 32, &view));
    EXPECT_EQ(dev.creates, 1u); /* 2048 views share one 64 KiB BO. */
    uint64_t first = views[0].addr;
    views[0].map[0] = 0x5a;
    hk_descriptor_allocation array;
-   ASSERT_TRUE(hk_usc_heap_alloc(&table, 2048 * 128, 128, &array));
+   ASSERT_TRUE(hk_usc_heap_alloc(&table, 2048 * 32, 32, &array));
    EXPECT_EQ(dev.creates, 2u);
    EXPECT_EQ(views[0].addr, first); /* Growth never relocates live entries. */
    EXPECT_EQ(views[0].map[0], 0x5a);
    for (auto &view : views)
       hk_usc_heap_free(&table, &view);
    hk_descriptor_allocation reused;
-   ASSERT_TRUE(hk_usc_heap_alloc(&table, 2048 * 128, 128, &reused));
+   ASSERT_TRUE(hk_usc_heap_alloc(&table, 2048 * 32, 32, &reused));
    EXPECT_EQ(dev.creates, 2u); /* Freed view slots coalesce and are reused. */
    EXPECT_EQ(reused.addr + reused.size, first + 32);
    hk_usc_heap_free(&table, &array);
@@ -233,17 +233,46 @@ TEST(HkUscHeap, AllocationFailureKeepsExistingEntries)
    hk_usc_heap table;
    hk_usc_heap_init(&table, &fake_ops, &dev);
    hk_descriptor_allocation a{}, failed{};
-   EXPECT_FALSE(hk_usc_heap_alloc(&table, 0 * 128, 128, &failed));
-   ASSERT_TRUE(hk_usc_heap_alloc(&table, 2048 * 128, 128, &a));
+   EXPECT_FALSE(hk_usc_heap_alloc(&table, 0 * 32, 32, &failed));
+   ASSERT_TRUE(hk_usc_heap_alloc(&table, 2048 * 32, 32, &a));
    a.map[0] = 0x6b;
    dev.fail = true;
-   EXPECT_FALSE(hk_usc_heap_alloc(&table, 1 * 128, 128, &failed));
+   EXPECT_FALSE(hk_usc_heap_alloc(&table, 1 * 32, 32, &failed));
    EXPECT_EQ(failed.size, 0u);
    EXPECT_EQ(a.map[0], 0x6b);
    hk_usc_heap_free(&table, &a);
-   ASSERT_TRUE(hk_usc_heap_alloc(&table, 12 * 128, 128, &failed));
+   ASSERT_TRUE(hk_usc_heap_alloc(&table, 12 * 32, 32, &failed));
    EXPECT_EQ(dev.creates, 1u); /* Reuse needs no new BO even under OOM. */
    hk_usc_heap_free(&table, &failed);
    hk_usc_heap_finish(&table);
+   EXPECT_TRUE(dev.live.empty());
+}
+
+TEST(HkUscHeap, MixedObjectSizesAlignmentAndLifetime)
+{
+   FakeDevice dev;
+   hk_usc_heap heap;
+   hk_usc_heap_init(&heap, &fake_ops, &dev);
+   hk_descriptor_allocation view{}, smooth{}, flat{};
+   ASSERT_TRUE(hk_usc_heap_alloc(&heap, 32, 32, &view));
+   ASSERT_TRUE(hk_usc_heap_alloc(&heap, 704, 64, &smooth));
+   ASSERT_TRUE(hk_usc_heap_alloc(&heap, 3 * 704, 64, &flat));
+   EXPECT_EQ(dev.creates, 1u);
+   EXPECT_EQ(smooth.addr % 64, 0u);
+   EXPECT_EQ(flat.addr % 64, 0u);
+   memset(view.map, 0x11, view.size);
+   memset(smooth.map, 0x22, smooth.size);
+   memset(flat.map, 0x33, flat.size);
+   uint64_t address = smooth.addr;
+   hk_usc_heap_free(&heap, &smooth);
+   ASSERT_TRUE(hk_usc_heap_alloc(&heap, 704, 64, &smooth));
+   EXPECT_EQ(smooth.addr, address);
+   memset(smooth.map, 0x44, smooth.size);
+   for (unsigned i = 0; i < view.size; ++i) EXPECT_EQ(view.map[i], 0x11);
+   for (unsigned i = 0; i < flat.size; ++i) EXPECT_EQ(flat.map[i], 0x33);
+   hk_usc_heap_free(&heap, &flat);
+   hk_usc_heap_free(&heap, &view);
+   hk_usc_heap_free(&heap, &smooth);
+   hk_usc_heap_finish(&heap);
    EXPECT_TRUE(dev.live.empty());
 }

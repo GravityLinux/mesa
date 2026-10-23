@@ -79,6 +79,8 @@ struct hk_device {
    /* G16 private texel-fetch sampler, addressable as a native table entry
     * relative to the USC aperture. */
    struct agx_bo *apple9_fetch_sampler;
+   /* Reload sampler shares the immutable sampler BO, at a 64-byte boundary. */
+   uint64_t apple9_reload_sampler;
    /* Last G16 graphics program id handed out, see hk_shader::apple9_program_id. */
    uint64_t apple9_last_program_id;
    /* USC space charged to shared index aliases, including allocator guards. */
@@ -303,3 +305,6 @@ hk_cpu_sub_count(enum hk_cpu_sub sub)
    if (unlikely(hk_cpu_level))
       hk_cpu_sub_count_slow(sub);
 }
+
+void hk_device_init_usc_heap(struct hk_device *dev);
+void hk_device_finish_usc_heap(struct hk_device *dev);

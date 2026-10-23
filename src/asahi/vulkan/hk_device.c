@@ -7,6 +7,7 @@
 #include "hk_device.h"
 #include "agx_timeline.h"
 #include "vk_util.h"
+#include "pipe/p_defines.h"
 #include "wsi_common_entrypoints.h"
 
 #include "agx_bg_eot.h"
@@ -182,6 +183,20 @@ hk_usc_slab_destroy(void *data, struct hk_descriptor_backing *backing)
 static const struct hk_descriptor_memory_ops hk_usc_ops = {
    .create = hk_usc_slab_create, .destroy = hk_usc_slab_destroy,
 };
+
+void
+hk_device_init_usc_heap(struct hk_device *dev)
+{
+   simple_mtx_init(&dev->usc_heap_lock, mtx_plain);
+   hk_usc_heap_init(&dev->usc_heap, &hk_usc_ops, dev);
+}
+
+void
+hk_device_finish_usc_heap(struct hk_device *dev)
+{
+   hk_usc_heap_finish(&dev->usc_heap);
+   simple_mtx_destroy(&dev->usc_heap_lock);
+}
 
 DERIVE_HASH_TABLE(agx_sampler_packed);
 
@@ -464,8 +479,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       goto fail_fd;
    }
 
-   simple_mtx_init(&dev->usc_heap_lock, mtx_plain);
-   hk_usc_heap_init(&dev->usc_heap, &hk_usc_ops, dev);
+   hk_device_init_usc_heap(dev);
 
    if (dev->dev.chip == AGX_CHIP_G16G)
       agx_apple9_initialize_entries(&dev->dev);
@@ -489,15 +503,19 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    if (dev->dev.chip == AGX_CHIP_G16G) {
       dev->apple9_fetch_sampler =
-         agx_bo_create(&dev->dev, AGX_APPLE9_SAMPLER_TABLE_STRIDE, 0,
-                       AGX_BO_LOW_VA, "Apple9 fetch sampler");
+         agx_bo_create(&dev->dev, 64 + AGX_APPLE9_SAMPLER_TABLE_STRIDE, 0,
+                       AGX_BO_LOW_VA, "Apple9 immutable samplers");
       if (!dev->apple9_fetch_sampler) {
          result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
          goto fail_samplers;
       }
-      memset(agx_bo_map(dev->apple9_fetch_sampler), 0,
-             AGX_APPLE9_SAMPLER_TABLE_STRIDE);
-      agx_apple9_pack_fetch_sampler(agx_bo_map(dev->apple9_fetch_sampler));
+      uint8_t *samplers = agx_bo_map(dev->apple9_fetch_sampler);
+      memset(samplers, 0, 64 + AGX_APPLE9_SAMPLER_TABLE_STRIDE);
+      agx_apple9_pack_fetch_sampler(samplers);
+      agx_apple9_pack_sampler(samplers + 64, false, false, 1, 0, 14,
+                             PIPE_TEX_WRAP_CLAMP_TO_EDGE,
+                             PIPE_TEX_WRAP_CLAMP_TO_EDGE, 1);
+      dev->apple9_reload_sampler = dev->apple9_fetch_sampler->va->addr + 64;
 
       dev->apple9_compute_sysvals =
          agx_bo_create(&dev->dev, AGX_APPLE9_RUNTIME_SYSVAL_SIZE, 0, 0,
@@ -635,8 +653,7 @@ fail_samplers:
       agx_bo_unreference(&dev->dev, dev->apple9_resident);
    hk_destroy_sampler_heap(dev, &dev->samplers);
 fail_dev:
-   hk_usc_heap_finish(&dev->usc_heap);
-   simple_mtx_destroy(&dev->usc_heap_lock);
+   hk_device_finish_usc_heap(dev);
    agx_close_device(&dev->dev);
 fail_fd:
    close(dev->dev.fd);
@@ -699,8 +716,7 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    agx_bo_unreference(&dev->dev, dev->heap);
    agx_bo_unreference(&dev->dev, dev->mesh_heap);
    agx_bg_eot_cleanup(&dev->bg_eot);
-   hk_usc_heap_finish(&dev->usc_heap);
-   simple_mtx_destroy(&dev->usc_heap_lock);
+   hk_device_finish_usc_heap(dev);
    agx_close_device(&dev->dev);
    vk_free(&dev->vk.alloc, dev);
 }

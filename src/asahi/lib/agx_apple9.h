@@ -285,7 +285,8 @@ agx_apple9_draw_reuses_coefficients(const struct agx_apple9_uniform_draw *previo
 #define AGX_APPLE9_CF_BINDINGS_SIZE 0x2a0
 #define AGX_APPLE9_CF_BINDINGS_STRIDE 0x2c0
 #define AGX_APPLE9_CF_ALLOCATION_SIZE (3 * AGX_APPLE9_CF_BINDINGS_STRIDE)
-void agx_apple9_init_coefficients(const struct agx_device *dev,
+unsigned agx_apple9_coefficients_size(const struct agx_apple9_render_stage *fragment);
+void agx_apple9_init_coefficients(struct agx_device *dev,
                                  struct agx_apple9_render_stage *fragment,
                                  struct agx_ptr allocation);
 

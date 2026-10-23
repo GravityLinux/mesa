@@ -8,6 +8,7 @@
 #pragma once
 
 #include "agx_pack.h"
+#include "agx_apple9_layout.h"
 #include "hk_private.h"
 #include "hk_descriptor_memory.h"
 #include "vk_image.h"
@@ -24,6 +25,13 @@ struct hk_image_view {
    /* A suballocation in the device's immutable native PBE table. */
    uint32_t apple9_store_flags, apple9_pbe_index;
    struct hk_descriptor_allocation apple9_pbes;
+
+   struct hk_apple9_render_view {
+      uint8_t texture[AGX_APPLE9_TEXTURE_TABLE_STRIDE];
+      uint8_t store[AGX_APPLE9_TEXTURE_TABLE_STRIDE];
+      uint32_t dimensions[4];
+      bool array, texture_valid, store_valid;
+   } apple9_render[2]; /* single layer, layered */
 
    uint8_t plane_count;
    struct {

@@ -219,6 +219,12 @@ if with_tests
     dependencies : [hk_deps], link_with : [libhk],
     link_args : ['-Wl,--wrap=agx_bo_create', '-Wl,--wrap=agx_bo_reference',
                  '-Wl,--wrap=agx_bo_unreference']), suite : ['asahi', 'honeykrisp'])
+  test('hk-structural-uploads', executable('hk-structural-uploads', 'tests/hk-structural-uploads.c',
+    include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                           inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+    dependencies : [hk_deps], link_with : [libhk],
+    link_args : ['-Wl,--wrap=agx_bo_create', '-Wl,--wrap=agx_bo_unreference',
+                 '-Wl,--wrap=agx_bo_cache_evict_all']), suite : ['asahi', 'honeykrisp'])
   test('hk-memory', executable('hk-memory', 'tests/hk-memory.c',
     include_directories : [inc_gallium, inc_gallium_aux, inc_include,
                            inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],

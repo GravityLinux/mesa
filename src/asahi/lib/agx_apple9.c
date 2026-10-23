@@ -1187,13 +1187,21 @@ apple9_build_cf_bindings(uint8_t *table, unsigned components,
    return binding;
 }
 
+unsigned
+agx_apple9_coefficients_size(const struct agx_apple9_render_stage *fragment)
+{
+   bool flat = fragment->apple9_flat_mask.lo || fragment->apple9_flat_mask.hi;
+   return (flat ? 3 : 1) * AGX_APPLE9_CF_BINDINGS_STRIDE;
+}
+
 void
-agx_apple9_init_coefficients(const struct agx_device *dev,
+agx_apple9_init_coefficients(struct agx_device *dev,
                              struct agx_apple9_render_stage *fragment,
                              struct agx_ptr allocation)
 {
-   memset(allocation.cpu, 0, AGX_APPLE9_CF_ALLOCATION_SIZE);
-   for (unsigned pv = 0; pv < 3; ++pv) {
+   unsigned count = agx_apple9_coefficients_size(fragment) / AGX_APPLE9_CF_BINDINGS_STRIDE;
+   memset(allocation.cpu, 0, count * AGX_APPLE9_CF_BINDINGS_STRIDE);
+   for (unsigned pv = 0; pv < count; ++pv) {
       unsigned offset = pv * AGX_APPLE9_CF_BINDINGS_STRIDE;
       fragment->coefficient_count = apple9_build_cf_bindings(
          (uint8_t *)allocation.cpu + offset, fragment->varying_components,
@@ -1202,6 +1210,8 @@ agx_apple9_init_coefficients(const struct agx_device *dev,
          fragment->reads_primitive_id, fragment);
       fragment->coefficients[pv] = agx_usc_addr(dev, allocation.gpu + offset);
    }
+   if (count == 1)
+      fragment->coefficients[1] = fragment->coefficients[2] = fragment->coefficients[0];
 }
 
 static void
