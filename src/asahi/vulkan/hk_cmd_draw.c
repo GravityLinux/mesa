@@ -4986,6 +4986,10 @@ static bool
 hk_apple9_resolve_shaders(struct hk_cmd_buffer *cmd, bool prefer_native)
 {
    struct hk_graphics_state *gfx = &cmd->state.gfx;
+   /* Shader resolution consumes some dirty bits which also affect native
+    * draw state. Invalidate that cache before resolution clears them. */
+   if (vk_dynamic_graphics_state_any_dirty(&cmd->vk.dynamic_graphics_state))
+      cmd->apple9_draw_state.valid = false;
    bool deferred = false;
    for (unsigned s = 0; s < HK_APPLE9_GFX_STAGES; ++s) {
       deferred |= gfx->apple9_api[s] && gfx->apple9_api[s]->apple9_deferred;
@@ -4997,8 +5001,8 @@ hk_apple9_resolve_shaders(struct hk_cmd_buffer *cmd, bool prefer_native)
    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
    const struct hk_rendering_state *render = &gfx->render;
 
-   /* Dynamic state read by the graphics key. The G16 draw path consumes no
-    * other dirty bits for these states, so the resolution clears them. */
+   /* Dynamic state read by the graphics key. Draw-state reuse was already
+    * invalidated above, so resolution can consume these bits. */
    static const enum mesa_vk_dynamic_graphics_state inputs[] = {
       MESA_VK_DYNAMIC_VI,
       MESA_VK_DYNAMIC_VI_BINDINGS_VALID,
@@ -5167,8 +5171,10 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
       if (cmd->state.gfx.apple9_fan_unrolled)
          draw_ = hk_apple9_unroll_fan(cmd, draw_);
       /* Software stages read the draw ID from the root table they upload. */
-      cmd->state.gfx.descriptors.root.draw.draw_id = draw_id;
-      cmd->state.gfx.descriptors.root_dirty = true;
+      if (cmd->state.gfx.descriptors.root.draw.draw_id != draw_id) {
+         cmd->state.gfx.descriptors.root.draw.draw_id = draw_id;
+         cmd->state.gfx.descriptors.root_dirty = true;
+      }
       bool adjacency =
          !cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY] &&
          !cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL] &&
