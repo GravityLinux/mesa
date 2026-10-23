@@ -291,6 +291,11 @@ struct agx_apple9_encoding_info {
    enum agx_apple9_evidence evidence;
    enum agx_apple9_dependency_layout dependency_layout;
 
+   /* A consumer that waits through its dependency field may keep the
+    * completed operands live: each register source has its own release
+    * flag. Without it, a folded wait must also be the operand's last use. */
+   bool dependency_retains_sources;
+
    /* Implicit producer slot, 1..6, or zero for no fixed assignment. This is
     * scheduler metadata, not an encoded output-tag field. Existing producers
     * with a programmable output tag continue to allocate their slot normally. */

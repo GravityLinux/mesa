@@ -1113,58 +1113,6 @@ apple9_retire(struct agx_apple9_vir_program *out,
 }
 
 static bool
-apple9_float_consumer(enum agx_apple9_encoding encoding)
-{
-   switch (encoding) {
-   case AGX_APPLE9_ENC_FLOAT2_COMPACT:
-   case AGX_APPLE9_ENC_FLOAT2_MODIFIER_EXTENDED:
-   case AGX_APPLE9_ENC_FLOAT2_ABS_EXTENDED:
-   case AGX_APPLE9_ENC_FLOAT2_MUL_ABS_EXTENDED:
-   case AGX_APPLE9_ENC_FLOAT2_IMMEDIATE_COMPACT:
-   case AGX_APPLE9_ENC_FLOAT2_IMMEDIATE_EXTENDED:
-   case AGX_APPLE9_ENC_FLOAT3_EXTENDED:
-   case AGX_APPLE9_ENC_FLOAT3_MODIFIER_EXTENDED:
-   case AGX_APPLE9_ENC_FLOAT3_SATURATE_EXTENDED:
-      return true;
-   default:
-      return false;
-   }
-}
-
-/* Encodings that carry an explicit release flag for each register source, so
- * a consumer can take a pending result and keep it live. */
-static bool
-apple9_retaining_consumer(enum agx_apple9_encoding encoding)
-{
-   if (apple9_float_consumer(encoding))
-      return true;
-   switch (encoding) {
-   case AGX_APPLE9_ENC_FLOAT_SPECIAL:
-   case AGX_APPLE9_ENC_FLOAT_SPECIAL_UNIFORM:
-   case AGX_APPLE9_ENC_FLOAT2_EXPORT:
-   case AGX_APPLE9_ENC_LOGIC_EXTENDED:
-   case AGX_APPLE9_ENC_LOGIC_EXPORT:
-   case AGX_APPLE9_ENC_DEVICE_LOAD:
-   case AGX_APPLE9_ENC_DEVICE_LOAD_INDIRECT:
-   case AGX_APPLE9_ENC_DEVICE_LOAD_POINTER:
-   case AGX_APPLE9_ENC_INT_ADD_EXTENDED:
-   case AGX_APPLE9_ENC_INT_MAD_EXTENDED:
-   case AGX_APPLE9_ENC_INT_MUL_WIDE:
-   case AGX_APPLE9_ENC_SHIFT_LOGICAL_IMMEDIATE:
-   case AGX_APPLE9_ENC_SHIFT_LOGICAL_REGISTER:
-   case AGX_APPLE9_ENC_SHIFT_EXTENDED:
-   case AGX_APPLE9_ENC_SHIFT_ARITH_REGISTER:
-   case AGX_APPLE9_ENC_SELECT_GPR_WIDE:
-   case AGX_APPLE9_ENC_STORE_UNIFORM:
-   case AGX_APPLE9_ENC_PREDICATE_COMPARE_SHORT:
-   case AGX_APPLE9_ENC_PREDICATE_COMPARE_EXTENDED:
-      return true;
-   default:
-      return false;
-   }
-}
-
-static bool
 apple9_can_fold_wait(const struct agx_apple9_vir_instr *ins,
                      const struct agx_apple9_vir_instr *producer)
 {
@@ -1207,7 +1155,8 @@ apple9_can_fold_wait(const struct agx_apple9_vir_instr *ins,
     * interpolation results, including texture results in integer consumers.
     * Scratch fills keep their materialized form. */
    bool tuple = producer->op != AGX_APPLE9_VIR_SPILL_LOAD;
-   bool can_retain = tuple && apple9_retaining_consumer(ins->encoding);
+   bool can_retain =
+      tuple && agx_apple9_encoding_info(ins->encoding)->dependency_retains_sources;
    unsigned consumed = 0;
    for (unsigned s = 0; s < ins->nr_srcs; ++s) {
       if (!apple9_producer_result(producer, ins->src[s]))

@@ -12198,6 +12198,45 @@ TEST_F(Apple9Completion, BarriersRetireFixedProducers)
    EXPECT_TRUE(waited);
 }
 
+TEST(Apple9Encoding, RetainingConsumersHaveDependencyFields)
+{
+   for (unsigned e = 0; e < AGX_APPLE9_ENC_COUNT; ++e) {
+      const auto *info = agx_apple9_encoding_info(agx_apple9_encoding(e));
+      if (info->dependency_retains_sources)
+         EXPECT_NE(info->dependency_layout, AGX_APPLE9_DEPENDENCY_NONE) << e;
+   }
+}
+
+/* Min/max takes a pending load's completion in its own field and keeps the
+ * operand for a later read, as native T8132 Metal does. */
+TEST_F(Apple9Completion, MinMaxFoldsAndRetainsAPendingLoad)
+{
+   auto zero = imm(0), bound = imm(100);
+   auto x = load(zero, 0);
+   uint32_t src[] = {x, bound};
+   auto m = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_UMAX,
+      AGX_APPLE9_ENC_MINMAX_COMPACT, src, 2, 0);
+   uint32_t sum[] = {m, x};
+   auto y = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IADD,
+      AGX_APPLE9_ENC_INT_ADD_EXTENDED, sum, 2, 0);
+   output(y, 0);
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
+   unsigned slot = 0;
+   bool folded = false;
+   for (unsigned i = 0; i < p.instruction_count; ++i) {
+      const auto *ins = p.instructions[i];
+      EXPECT_NE(ins->op, AGX_APPLE9_VIR_WAIT);
+      if (ins->op == AGX_APPLE9_VIR_DEVICE_LOAD)
+         slot = ins->producer_scoreboard_slot;
+      if (ins->op == AGX_APPLE9_VIR_UMAX) {
+         folded = ins->scoreboard_slot == slot;
+         EXPECT_TRUE(ins->live_after_mask & 1);
+      }
+   }
+   EXPECT_TRUE(folded);
+}
+
 TEST_F(Apple9Completion, PointerTupleRetiresAtRetainedAddressUse)
 {
    auto zero = imm(0);
