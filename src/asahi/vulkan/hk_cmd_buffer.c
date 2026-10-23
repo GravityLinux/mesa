@@ -1142,6 +1142,17 @@ hk_defer_empty_barriers(struct hk_cmd_buffer *cmd, const VkDependencyInfo *info)
        cmd->in_meta || cmd->sync_fallback ||
        (info->dependencyFlags & ~VK_DEPENDENCY_BY_REGION_BIT))
       return false;
+   /* The clear must not be visible through a distinct, consistently
+    * interpreted alias in the consuming pass. Optimal, private images
+    * without ALIAS cannot expose their cleared contents that way. */
+   for (unsigned i = 0; i < HK_MAX_RTS + 2; ++i) {
+      const struct vk_image *image = cmd->merge_key.image[i];
+      if (image && (image->tiling != VK_IMAGE_TILING_OPTIMAL ||
+                    image->external_handle_types ||
+                    (image->create_flags & (VK_IMAGE_CREATE_ALIAS_BIT |
+                                            VK_IMAGE_CREATE_SPARSE_BINDING_BIT))))
+         return false;
+   }
    for (unsigned i = 0; i < info->bufferMemoryBarrierCount; ++i) {
       const VkBufferMemoryBarrier2 *b = &info->pBufferMemoryBarriers[i];
       if (b->srcQueueFamilyIndex != b->dstQueueFamilyIndex)

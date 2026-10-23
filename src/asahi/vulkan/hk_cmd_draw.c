@@ -678,6 +678,10 @@ hk_render_merge_begin(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
           ds[i]->resolveMode != VK_RESOLVE_MODE_NONE)
          return false;
       if (empty && (ds[i]->loadOp != VK_ATTACHMENT_LOAD_OP_LOAD ||
+                    (ds[i]->imageLayout != VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL &&
+                     ds[i]->imageLayout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL &&
+                     ds[i]->imageLayout != (i ? VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL :
+                                               VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL)) ||
                     hk_attachment_may_be_sampled(ds[i])))
          return false;
       ds_views[i] = hk_image_view_from_handle(ds[i]->imageView);
@@ -696,6 +700,8 @@ hk_render_merge_begin(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
       views[i] = hk_image_view_from_handle(att->imageView);
       if (empty && att->imageView &&
           (att->loadOp != VK_ATTACHMENT_LOAD_OP_LOAD ||
+           (att->imageLayout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
+            att->imageLayout != VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL) ||
            hk_attachment_may_be_sampled(att)))
          return false;
       /* Clears would need an in-pass clear over the render area. */
