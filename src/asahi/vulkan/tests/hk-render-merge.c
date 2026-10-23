@@ -114,8 +114,38 @@ main(void)
                                     1, 0, 1, colors, &depth, &depth, 0, area));
    CHECK(!hk_render_merge_key_init(&next, 0, 1, 1, 1, colors,
                                     &depth, &depth, 0, area));
-   CHECK(!hk_render_merge_key_init(&next, 0, 1, 0, 0, colors,
-                                    &depth, &depth, 0, area));
+   /* Depth/stencil-only passes have a complete framebuffer identity, too.
+    * Keep the same subresource, read-only and area restrictions as mixed
+    * colour/depth rendering. No view array is needed when color_count is 0.
+    */
+   for (unsigned aspects = 1; aspects < 4; ++aspects) {
+      struct hk_image_view *z = (aspects & 1) ? &depth : NULL;
+      struct hk_image_view *s = (aspects & 2) ? &depth : NULL;
+      CHECK(hk_render_merge_key_init(&first, 0, 1, 0, 0, NULL,
+                                       z, s, 0, area));
+      CHECK(hk_render_merge_key_init(&next, 0, 1, 0, 0, NULL,
+                                       z, s, 0, area));
+      CHECK(!memcmp(&first, &next, sizeof(first)));
+      VkRect2D other_area = area;
+      other_area.offset.x++;
+      CHECK(hk_render_merge_key_init(&next, 0, 1, 0, 0, NULL,
+                                       z, s, 0, other_area));
+      CHECK(memcmp(&first, &next, sizeof(first)));
+      CHECK(hk_render_merge_key_init(&next, 0, 1, 0, 0, NULL,
+                                       z, s, aspects, area));
+      CHECK(memcmp(&first, &next, sizeof(first)));
+      CHECK(!hk_render_merge_key_init(&next,
+               VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT,
+               1, 0, 0, NULL, z, s, 0, area));
+      CHECK(!hk_render_merge_key_init(&next, VK_RENDERING_SUSPENDING_BIT,
+               1, 0, 0, NULL, z, s, 0, area));
+      CHECK(!hk_render_merge_key_init(&next, VK_RENDERING_RESUMING_BIT,
+               1, 0, 0, NULL, z, s, 0, area));
+      CHECK(!hk_render_merge_key_init(&next, 0, 1, 1, 0, NULL,
+                                       z, s, 0, area));
+   }
+   CHECK(!hk_render_merge_key_init(&next, 0, 1, 0, 0, NULL,
+                                    NULL, NULL, 0, area));
 
    /* Preserve the existing colour-only render-area freedom. */
    CHECK(hk_render_merge_key_init(&first, 0, 1, 0, 1, colors, NULL, NULL, 0, area));

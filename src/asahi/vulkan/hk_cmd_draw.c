@@ -631,7 +631,14 @@ hk_render_merge_key_init(struct hk_render_merge_key *key, VkRenderingFlags flags
 {
    if ((flags & (VK_RENDERING_SUSPENDING_BIT | VK_RENDERING_RESUMING_BIT |
                  VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT)) ||
-       !color_count || color_count > HK_MAX_RTS)
+       color_count > HK_MAX_RTS)
+      return false;
+   /* A depth/stencil-only pass has the same fixed framebuffer and ZLS state
+    * as one with colour attachments. The depth/stencil key, loads, stores
+    * and barriers below already constrain its continuation. Attachmentless
+    * passes still have no sample count until draw time, so keep them out.
+    */
+   if (!color_count && !depth && !stencil)
       return false;
    /* Merged multiview renders fail multiview.readback_implicit_clear 8_1_1_8
     * (cause not understood yet); keep multiview renders separate. */
