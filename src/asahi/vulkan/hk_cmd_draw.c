@@ -1316,7 +1316,10 @@ hk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
     */
    struct hk_cs *cs = cmd->current_cs.gfx;
    if (cs) {
-      cs->cr.eot.main = render->cr.eot.main;
+      cs->cr.eot.main = (render->flags & VK_RENDERING_SUSPENDING_BIT)
+                           ? render->cr.eot.partial : render->cr.eot.main;
+      /* zls_last already preserves suspended stores. Its first-stream
+       * loads must retain CLEAR; the partial control would force a load. */
       cs->cr.zls_control = cs == render->first_cs ? render->zls_last
                                                   : render->zls_partial_last;
    }
