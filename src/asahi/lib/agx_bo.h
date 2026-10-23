@@ -63,6 +63,9 @@ struct agx_va {
    enum agx_va_flags flags;
    uint64_t addr;
    uint64_t size_B;
+
+   /* Entry in agx_device::va_quarantine while retired (see agx_va_retire). */
+   struct list_head link;
 };
 
 struct agx_ptr {

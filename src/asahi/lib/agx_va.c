@@ -6,15 +6,112 @@
 #include "agx_bo.h"
 #include "agx_device.h"
 
-static struct util_vma_heap *
-agx_vma_heap(struct agx_device *dev, enum agx_va_flags flags)
+/* Main, USC, context, replay, replay USC: indexes agx_device::va_quarantine. */
+static unsigned
+agx_va_heap_index(enum agx_va_flags flags)
 {
    assert(!(flags & AGX_VA_USC) || !(flags & AGX_VA_CONTEXT));
    if (flags & AGX_VA_CONTEXT)
-      return &dev->context_heap;
+      return 2;
    if (flags & AGX_VA_REPLAY)
-      return (flags & AGX_VA_USC) ? &dev->replay_usc_heap : &dev->replay_heap;
-   return (flags & AGX_VA_USC) ? &dev->usc_heap : &dev->main_heap;
+      return (flags & AGX_VA_USC) ? 4 : 3;
+   return (flags & AGX_VA_USC) ? 1 : 0;
+}
+
+static struct util_vma_heap *
+agx_vma_heap(struct agx_device *dev, enum agx_va_flags flags)
+{
+   struct util_vma_heap *heaps[] = {&dev->main_heap, &dev->usc_heap,
+                                    &dev->context_heap, &dev->replay_heap,
+                                    &dev->replay_usc_heap};
+   return heaps[agx_va_heap_index(flags)];
+}
+
+/*
+ * A GEM close while the VM has work queued only marks the old mappings
+ * closing: the kernel removes them once the work queued at the close has
+ * completed, since it cannot tell which of that work used the object. A bind
+ * over a closing range waits for all of it, so recycling a just-closed VA
+ * (the heaps allocate top-down, so it is the next one handed out) stalls an
+ * ordinary allocation for the whole backlog. Retired VAs therefore wait in a
+ * FIFO and return to their heap once a per-heap byte cap is exceeded, or when
+ * an allocation would otherwise fail.
+ */
+static void
+agx_va_release_locked(struct agx_device *dev, struct agx_va *va)
+{
+   list_del(&va->link);
+   dev->va_quarantine.bytes[agx_va_heap_index(va->flags)] -= va->size_B;
+   util_vma_heap_free(agx_vma_heap(dev, va->flags), va->addr, va->size_B);
+   free(va);
+}
+
+/* Return quarantined VAs so an allocation can be retried: for a fixed
+ * address, those overlapping it (in whichever heap: the ranges are
+ * disjoint); otherwise all of the heap's. Returns whether any was released.
+ */
+static bool
+agx_va_unquarantine_locked(struct agx_device *dev, enum agx_va_flags flags,
+                           uint64_t fixed_va, uint64_t size_B)
+{
+   unsigned heap = agx_va_heap_index(flags);
+   bool released = false;
+   list_for_each_entry_safe(struct agx_va, va, &dev->va_quarantine.list, link) {
+      if (flags & AGX_VA_FIXED) {
+         if (va->addr >= fixed_va + size_B || fixed_va >= va->addr + va->size_B)
+            continue;
+      } else if (agx_va_heap_index(va->flags) != heap) {
+         continue;
+      }
+      agx_va_release_locked(dev, va);
+      released = true;
+   }
+   return released;
+}
+
+void
+agx_va_quarantine_init(struct agx_device *dev, uint64_t main_B,
+                       uint64_t usc_B, uint64_t context_B)
+{
+   const uint64_t max_B = 8ull << 30;
+   list_inithead(&dev->va_quarantine.list);
+   memset(&dev->va_quarantine.bytes, 0, sizeof(dev->va_quarantine.bytes));
+   memset(&dev->va_quarantine.cap, 0, sizeof(dev->va_quarantine.cap));
+   dev->va_quarantine.cap[0] = MIN2(main_B / 8, max_B);
+   dev->va_quarantine.cap[1] = MIN2(usc_B / 8, max_B);
+   dev->va_quarantine.cap[2] = MIN2(context_B / 8, max_B);
+   /* Replay heaps keep cap 0: replay needs its exact addresses back. */
+}
+
+void
+agx_va_quarantine_finish(struct agx_device *dev)
+{
+   simple_mtx_lock(&dev->vma_lock);
+   list_for_each_entry_safe(struct agx_va, va, &dev->va_quarantine.list, link)
+      agx_va_release_locked(dev, va);
+   simple_mtx_unlock(&dev->vma_lock);
+}
+
+/* Free the VA of a GEM object that has just been closed (no unbind: the close
+ * removes the mappings, possibly later). See the comment above.
+ */
+void
+agx_va_retire(struct agx_device *dev, struct agx_va *va)
+{
+   if (!va)
+      return;
+
+   unsigned heap = agx_va_heap_index(va->flags);
+   simple_mtx_lock(&dev->vma_lock);
+   list_addtail(&va->link, &dev->va_quarantine.list);
+   dev->va_quarantine.bytes[heap] += va->size_B;
+   list_for_each_entry_safe(struct agx_va, old, &dev->va_quarantine.list, link) {
+      if (dev->va_quarantine.bytes[heap] <= dev->va_quarantine.cap[heap])
+         break;
+      if (agx_va_heap_index(old->flags) == heap)
+         agx_va_release_locked(dev, old);
+   }
+   simple_mtx_unlock(&dev->vma_lock);
 }
 
 struct agx_va *
@@ -34,20 +131,34 @@ agx_va_alloc(struct agx_device *dev, uint64_t size_B, uint64_t align_B,
    uint64_t addr = 0;
 
    simple_mtx_lock(&dev->vma_lock);
-   if (flags & AGX_VA_FIXED) {
-      if (util_vma_heap_alloc_addr(heap, fixed_va, size_B)) {
-         addr = fixed_va;
-      } else if (flags & AGX_VA_REPLAY) {
-         /* Captures made before the replay ranges existed hold addresses in
-          * the ordinary heaps. Same address, other heap; never another one.
-          */
-         flags &= ~AGX_VA_REPLAY;
-         heap = agx_vma_heap(dev, flags);
-         if (util_vma_heap_alloc_addr(heap, fixed_va, size_B))
+   const enum agx_va_flags requested = flags;
+   for (unsigned attempt = 0; attempt < 2 && !addr; ++attempt) {
+      /* Out of space, or a fixed address still quarantined: return the
+       * quarantine (only what overlaps a fixed address) and retry once.
+       * Never in a forked child: it must not touch the VA heaps.
+       */
+      if (attempt &&
+          (dev->bo_cache.forked ||
+           !agx_va_unquarantine_locked(dev, requested, fixed_va, size_B)))
+         break;
+
+      flags = requested;
+      heap = agx_vma_heap(dev, flags);
+      if (flags & AGX_VA_FIXED) {
+         if (util_vma_heap_alloc_addr(heap, fixed_va, size_B)) {
             addr = fixed_va;
+         } else if (flags & AGX_VA_REPLAY) {
+            /* Captures made before the replay ranges existed hold addresses
+             * in the ordinary heaps. Same address, other heap; never another.
+             */
+            flags &= ~AGX_VA_REPLAY;
+            heap = agx_vma_heap(dev, flags);
+            if (util_vma_heap_alloc_addr(heap, fixed_va, size_B))
+               addr = fixed_va;
+         }
+      } else {
+         addr = util_vma_heap_alloc(heap, size_B, align_B);
       }
-   } else {
-      addr = util_vma_heap_alloc(heap, size_B, align_B);
    }
    simple_mtx_unlock(&dev->vma_lock);
 

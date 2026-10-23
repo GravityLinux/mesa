@@ -44,6 +44,8 @@ int __wrap_pthread_cond_signal(pthread_cond_t *cond);
 int __real_pthread_cond_signal(pthread_cond_t *cond);
 void __wrap_agx_va_free(struct agx_device *dev, struct agx_va *va, bool unbind);
 void __real_agx_va_free(struct agx_device *dev, struct agx_va *va, bool unbind);
+void __wrap_agx_va_retire(struct agx_device *dev, struct agx_va *va);
+void __real_agx_va_retire(struct agx_device *dev, struct agx_va *va);
 
 int
 __wrap_pthread_cond_signal(pthread_cond_t *cond)
@@ -59,6 +61,14 @@ __wrap_agx_va_free(struct agx_device *dev, struct agx_va *va, bool unbind)
    if (getpid() != test.owner)
       _exit(91);
    __real_agx_va_free(dev, va, unbind);
+}
+
+void
+__wrap_agx_va_retire(struct agx_device *dev, struct agx_va *va)
+{
+   if (getpid() != test.owner)
+      _exit(91);
+   __real_agx_va_retire(dev, va);
 }
 
 int
@@ -196,6 +206,7 @@ init(bool start)
    simple_mtx_init(&dev->vma_lock, mtx_plain);
    util_vma_heap_init(&dev->main_heap, 0x1000000000ull, 1ull << 28);
    util_vma_heap_init(&dev->usc_heap, 0x2000000000ull, 1ull << 28);
+   agx_va_quarantine_init(dev, 1ull << 28, 1ull << 28, 0);
    dev->guard_size = 16384;
    dev->ops.bo_alloc = alloc_bo;
    dev->ops.bo_bind = bind_bo;
@@ -212,6 +223,7 @@ finish(void)
    for (unsigned i = 0; i <= test.dev.max_handle; ++i)
       CHECK(!agx_lookup_bo(&test.dev, i)->size);
    util_sparse_array_finish(&test.dev.bo_map);
+   agx_va_quarantine_finish(&test.dev);
    util_vma_heap_finish(&test.dev.main_heap);
    util_vma_heap_finish(&test.dev.usc_heap);
    simple_mtx_destroy(&test.dev.vma_lock);
