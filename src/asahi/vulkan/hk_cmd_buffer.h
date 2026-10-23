@@ -722,10 +722,6 @@ struct hk_render_merge_key {
    uint32_t color_count, layer_count, view_mask;
 };
 
-/* CPU key storage is bounded independently of command-buffer GPU data. */
-#define HK_UPLOAD_CACHE_MAX_BYTES (1024 * 1024)
-#define HK_UPLOAD_CACHE_MAX_ENTRIES 4096
-
 struct hk_cmd_buffer {
    struct vk_command_buffer vk;
 
@@ -744,12 +740,6 @@ struct hk_cmd_buffer {
    } state;
 
    struct hk_uploader uploader[HK_CMD_POOL_COUNT];
-
-   /* Full-content immutable upload cache, discarded on reset. */
-   struct hash_table *upload_cache;
-   uint32_t upload_cache_bytes;
-   /* HK_UPLOAD_STATS: content-cache lookups per record kind. */
-   uint32_t upload_hits[AGX_APPLE9_STATE_COUNT + 3], upload_misses[AGX_APPLE9_STATE_COUNT + 3];
 
    /* Per-draw tables whose contents usually change from one draw to the next
     * (they carry the root address): the last upload of each kind, reused only
@@ -973,25 +963,9 @@ struct agx_ptr hk_pool_alloc_internal(struct hk_cmd_buffer *cmd, uint32_t size,
 uint64_t hk_pool_upload(struct hk_cmd_buffer *cmd, const void *data,
                         uint32_t size, uint32_t alignment);
 
-enum hk_upload_type {
-   HK_UPLOAD_RUNTIME = AGX_APPLE9_STATE_COUNT,
-   HK_UPLOAD_ROOT,
-   HK_UPLOAD_TABLE,
-};
-
-uint64_t hk_pool_upload_cached(struct hk_cmd_buffer *cmd, const void *data,
-                               uint32_t size, uint32_t alignment,
-                               enum hk_upload_type type);
 uint64_t hk_pool_upload_last(struct hk_cmd_buffer *cmd, enum hk_upload_last slot,
                              const void *data, uint32_t size,
                              uint32_t alignment);
-struct agx_ptr hk_apple9_state_cache_alloc(
-   void *allocator, enum agx_apple9_state_type type, const void *contents,
-   size_t size, size_t alignment, bool *is_new);
-struct agx_ptr hk_apple9_state_uncached_alloc(
-   void *allocator, enum agx_apple9_state_type type, const void *contents,
-   size_t size, size_t alignment, bool *is_new);
-
 static inline struct agx_ptr
 hk_pool_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment)
 {

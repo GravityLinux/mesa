@@ -196,54 +196,54 @@ TEST(HkDescriptorMemory, ChurnDoesNotFragmentOrLeak)
    EXPECT_TRUE(dev.live.empty());
 }
 
-#include "hk_apple9_pbe_table.h"
+#include "hk_usc_heap.h"
 
-TEST(HkPbeTable, StableSharedSlabsAndReuse)
+TEST(HkUscHeap, StableSharedSlabsAndReuse)
 {
    FakeDevice dev;
-   hk_apple9_pbe_table table;
-   hk_apple9_pbe_table_init(&table, &fake_ops, &dev);
+   hk_usc_heap table;
+   hk_usc_heap_init(&table, &fake_ops, &dev);
    EXPECT_EQ(dev.creates, 0u);
    std::vector<hk_descriptor_allocation> views(2048);
    for (auto &view : views)
-      ASSERT_TRUE(hk_apple9_pbe_table_alloc(&table, 1, &view));
+      ASSERT_TRUE(hk_usc_heap_alloc(&table, 1 * 128, 128, &view));
    EXPECT_EQ(dev.creates, 1u); /* 2048 views share one 64 KiB BO. */
    uint64_t first = views[0].addr;
    views[0].map[0] = 0x5a;
    hk_descriptor_allocation array;
-   ASSERT_TRUE(hk_apple9_pbe_table_alloc(&table, 2048, &array));
+   ASSERT_TRUE(hk_usc_heap_alloc(&table, 2048 * 128, 128, &array));
    EXPECT_EQ(dev.creates, 2u);
    EXPECT_EQ(views[0].addr, first); /* Growth never relocates live entries. */
    EXPECT_EQ(views[0].map[0], 0x5a);
    for (auto &view : views)
-      hk_apple9_pbe_table_free(&table, &view);
+      hk_usc_heap_free(&table, &view);
    hk_descriptor_allocation reused;
-   ASSERT_TRUE(hk_apple9_pbe_table_alloc(&table, 2048, &reused));
+   ASSERT_TRUE(hk_usc_heap_alloc(&table, 2048 * 128, 128, &reused));
    EXPECT_EQ(dev.creates, 2u); /* Freed view slots coalesce and are reused. */
    EXPECT_EQ(reused.addr + reused.size, first + 32);
-   hk_apple9_pbe_table_free(&table, &array);
-   hk_apple9_pbe_table_free(&table, &reused);
-   hk_apple9_pbe_table_finish(&table);
+   hk_usc_heap_free(&table, &array);
+   hk_usc_heap_free(&table, &reused);
+   hk_usc_heap_finish(&table);
    EXPECT_TRUE(dev.live.empty());
 }
 
-TEST(HkPbeTable, AllocationFailureKeepsExistingEntries)
+TEST(HkUscHeap, AllocationFailureKeepsExistingEntries)
 {
    FakeDevice dev;
-   hk_apple9_pbe_table table;
-   hk_apple9_pbe_table_init(&table, &fake_ops, &dev);
+   hk_usc_heap table;
+   hk_usc_heap_init(&table, &fake_ops, &dev);
    hk_descriptor_allocation a{}, failed{};
-   EXPECT_FALSE(hk_apple9_pbe_table_alloc(&table, 0, &failed));
-   ASSERT_TRUE(hk_apple9_pbe_table_alloc(&table, 2048, &a));
+   EXPECT_FALSE(hk_usc_heap_alloc(&table, 0 * 128, 128, &failed));
+   ASSERT_TRUE(hk_usc_heap_alloc(&table, 2048 * 128, 128, &a));
    a.map[0] = 0x6b;
    dev.fail = true;
-   EXPECT_FALSE(hk_apple9_pbe_table_alloc(&table, 1, &failed));
+   EXPECT_FALSE(hk_usc_heap_alloc(&table, 1 * 128, 128, &failed));
    EXPECT_EQ(failed.size, 0u);
    EXPECT_EQ(a.map[0], 0x6b);
-   hk_apple9_pbe_table_free(&table, &a);
-   ASSERT_TRUE(hk_apple9_pbe_table_alloc(&table, 12, &failed));
+   hk_usc_heap_free(&table, &a);
+   ASSERT_TRUE(hk_usc_heap_alloc(&table, 12 * 128, 128, &failed));
    EXPECT_EQ(dev.creates, 1u); /* Reuse needs no new BO even under OOM. */
-   hk_apple9_pbe_table_free(&table, &failed);
-   hk_apple9_pbe_table_finish(&table);
+   hk_usc_heap_free(&table, &failed);
+   hk_usc_heap_finish(&table);
    EXPECT_TRUE(dev.live.empty());
 }

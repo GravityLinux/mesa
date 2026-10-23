@@ -81,11 +81,6 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd, bool release)
    struct hk_cmd_pool *pool = hk_cmd_buffer_pool(cmd);
    struct hk_device *dev = hk_cmd_pool_device(pool);
 
-   ralloc_free(cmd->upload_cache);
-   cmd->upload_cache = NULL;
-   cmd->upload_cache_bytes = 0;
-   memset(cmd->upload_hits, 0, sizeof(cmd->upload_hits));
-   memset(cmd->upload_misses, 0, sizeof(cmd->upload_misses));
    for (unsigned i = 0; i < HK_UPLOAD_LAST_COUNT; ++i)
       cmd->upload_last[i].gpu = 0;
    cmd->apple9_prev_cs = NULL;
@@ -366,118 +361,6 @@ hk_pool_alloc_internal(struct hk_cmd_buffer *cmd, uint32_t size,
    };
 }
 
-/* The key owns an ordinary CPU copy, avoiding reads from uncached uploads.
- * Type and pool are part of the key: canonical roots and launches have address
- * fixups, whereas raw uploads preserve the key bytes verbatim.
- */
-struct hk_upload_key {
-   uint32_t size, alignment, kind, type;
-   const void *data;
-};
-
-struct hk_upload_entry {
-   struct hk_upload_key key;
-   struct agx_ptr ptr;
-};
-
-/* HK_STATE_CACHE=0 disables reuse. Comma-separated names enable individual
- * kinds for correctness diagnosis; all kinds are enabled by default.
- */
-static const struct debug_named_value hk_state_cache_options[] = {
-   {"all", ~0u, "All immutable state kinds"},
-   {"launch", BITFIELD_BIT(AGX_APPLE9_STATE_LAUNCH), "Graphics launch state"},
-   {"cf", BITFIELD_BIT(AGX_APPLE9_STATE_COEFFICIENTS), "Coefficient bindings"},
-   {"ppp", BITFIELD_BIT(AGX_APPLE9_STATE_PPP), "PPP context state"},
-   {"uploads", BITFIELD_BIT(HK_UPLOAD_RUNTIME), "Runtime, texture and sampler tables"},
-   {"root", BITFIELD_BIT(HK_UPLOAD_ROOT), "Root descriptor tables"},
-   {"tables", BITFIELD_BIT(HK_UPLOAD_TABLE), "Draw, vertex and resource tables"},
-   DEBUG_NAMED_VALUE_END
-};
-DEBUG_GET_ONCE_FLAGS_OPTION(hk_state_cache, "HK_STATE_CACHE",
-                           hk_state_cache_options, ~0u)
-
-static bool
-hk_upload_equal(const void *a_, const void *b_)
-{
-   const struct hk_upload_key *a = a_, *b = b_;
-   return a->size == b->size && a->alignment == b->alignment &&
-          a->kind == b->kind && a->type == b->type &&
-          !memcmp(a->data, b->data, a->size);
-}
-
-static struct agx_ptr
-hk_pool_alloc_cached(struct hk_cmd_buffer *cmd, enum hk_cmd_pool_kind kind,
-                      uint32_t type, const void *contents, uint32_t size,
-                      uint32_t alignment, bool *is_new)
-{
-   *is_new = true;
-   if (!size)
-      return (struct agx_ptr){0};
-
-   if (!(debug_get_option_hk_state_cache() & BITFIELD_BIT(type)))
-      return hk_pool_alloc_internal(cmd, size, alignment, kind);
-
-   const struct hk_upload_key key = {size, alignment, kind, type, contents};
-   uint32_t meta[] = {size, alignment, kind, type};
-   uint32_t hash = _mesa_hash_data_with_seed(
-      contents, size, _mesa_hash_data(meta, sizeof(meta)));
-   if (!cmd->upload_cache)
-      cmd->upload_cache = _mesa_hash_table_create(NULL, NULL, hk_upload_equal);
-   if (cmd->upload_cache) {
-      struct hash_entry *entry =
-         _mesa_hash_table_search_pre_hashed(cmd->upload_cache, hash, &key);
-      if (entry) {
-         *is_new = false;
-         cmd->upload_hits[MIN2(type, HK_UPLOAD_TABLE)]++;
-         return ((struct hk_upload_entry *)entry->data)->ptr;
-      }
-   }
-   cmd->upload_misses[MIN2(type, HK_UPLOAD_TABLE)]++;
-
-   struct agx_ptr ptr = hk_pool_alloc_internal(cmd, size, alignment, kind);
-   if (!ptr.cpu || !cmd->upload_cache)
-      return ptr;
-
-   /* Retaining a second copy of every unique runtime table is counter-
-    * productive for long recordings. Keep hits available after the budget
-    * fills; new entries fall back to ordinary command-buffer storage. */
-   const size_t entry_size = sizeof(struct hk_upload_entry) + (size_t)size;
-   if (cmd->upload_cache->entries >= HK_UPLOAD_CACHE_MAX_ENTRIES ||
-       entry_size > HK_UPLOAD_CACHE_MAX_BYTES ||
-       cmd->upload_cache_bytes > HK_UPLOAD_CACHE_MAX_BYTES - entry_size)
-      return ptr;
-
-   struct hk_upload_entry *entry =
-      ralloc_size(cmd->upload_cache, sizeof(*entry) + size);
-   if (entry) {
-      entry->key = key;
-      entry->key.data = entry + 1;
-      memcpy(entry + 1, contents, size);
-      entry->ptr = ptr;
-      if (!_mesa_hash_table_insert_pre_hashed(cmd->upload_cache, hash,
-                                             &entry->key, entry))
-         ralloc_free(entry);
-      else
-         cmd->upload_cache_bytes += entry_size;
-   }
-   return ptr;
-}
-
-uint64_t
-hk_pool_upload_cached(struct hk_cmd_buffer *cmd, const void *data,
-                       uint32_t size, uint32_t alignment,
-                       enum hk_upload_type type)
-{
-   bool is_new;
-   struct agx_ptr ptr = hk_pool_alloc_cached(
-      cmd, HK_CMD_POOL_MAIN, type, data, size, alignment, &is_new);
-   if (!ptr.cpu)
-      return 0;
-   if (is_new)
-      memcpy(ptr.cpu, data, size);
-   return ptr.gpu;
-}
-
 /* Upload a per-draw table, reusing the previous upload of the same kind when
  * the contents are unchanged. Unlike the content cache this keeps one entry
  * per kind: these tables carry the root address, so they rarely repeat
@@ -500,40 +383,6 @@ hk_pool_upload_last(struct hk_cmd_buffer *cmd, enum hk_upload_last slot,
    last->size = size;
    last->gpu = ptr.gpu;
    return ptr.gpu;
-}
-
-struct agx_ptr
-hk_apple9_state_cache_alloc(void *allocator, enum agx_apple9_state_type type,
-                             const void *contents, size_t size,
-                             size_t alignment, bool *is_new)
-{
-   enum hk_cmd_pool_kind kind = type == AGX_APPLE9_STATE_PPP
-                                  ? HK_CMD_POOL_CONTEXT : HK_CMD_POOL_USC;
-   /* A PPP record embeds its draw's launch addresses. Launches are emitted
-    * fresh unless the previous draw's is reused, so a PPP record can only
-    * repeat consecutively, which the previous-draw comparison already reuses:
-    * a content lookup would always miss and grow the cache by one entry per
-    * draw. */
-   if (type == AGX_APPLE9_STATE_PPP) {
-      *is_new = true;
-      return hk_pool_alloc_internal(allocator, size, alignment, kind);
-   }
-   return hk_pool_alloc_cached(allocator, kind, type, contents, size,
-                               alignment, is_new);
-}
-
-/* Records that embed this pass's own uploads (background/EOT stages) can never
- * match an earlier entry, so they skip the content lookup and its hashing. */
-struct agx_ptr
-hk_apple9_state_uncached_alloc(void *allocator, enum agx_apple9_state_type type,
-                                const void *contents, size_t size,
-                                size_t alignment, bool *is_new)
-{
-   *is_new = true;
-   return hk_pool_alloc_internal(allocator, size, alignment,
-                                 type == AGX_APPLE9_STATE_PPP
-                                    ? HK_CMD_POOL_CONTEXT
-                                    : HK_CMD_POOL_USC);
 }
 
 uint64_t
@@ -621,37 +470,6 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
          cs->current = agx_cdm_terminate(cs->current);
       }
    }
-
-   /* Lookup keys are only needed while recording. Keep the immutable GPU
-    * uploads until reset, but do not retain duplicate CPU copies in executable
-    * command buffers.
-    */
-   if (cmd->upload_cache && agx_apple9_debug_enabled(AGX_A9_DBG_UPLOAD)) {
-      size_t bytes = 0;
-      unsigned per_type[HK_UPLOAD_TABLE + 1] = {0};
-      hash_table_foreach(cmd->upload_cache, entry) {
-         const struct hk_upload_key *key = entry->key;
-         bytes += key->size;
-         if (key->type <= HK_UPLOAD_TABLE)
-            per_type[key->type]++;
-      }
-      fprintf(stderr, "HK_UPLOAD_STATS cache entries=%u bytes=%zu "
-              "launch=%u coefficients=%u ppp=%u runtime=%u root=%u table=%u\n",
-              cmd->upload_cache->entries, bytes,
-              per_type[AGX_APPLE9_STATE_LAUNCH],
-              per_type[AGX_APPLE9_STATE_COEFFICIENTS],
-              per_type[AGX_APPLE9_STATE_PPP], per_type[HK_UPLOAD_RUNTIME],
-              per_type[HK_UPLOAD_ROOT], per_type[HK_UPLOAD_TABLE]);
-      static const char *names[] = {"launch", "coefficients", "ppp",
-                                    "runtime", "root", "table"};
-      for (unsigned t = 0; t <= HK_UPLOAD_TABLE; ++t) {
-         if (cmd->upload_hits[t] + cmd->upload_misses[t])
-            fprintf(stderr, "HK_UPLOAD_STATS %s hits=%u misses=%u\n", names[t],
-                    cmd->upload_hits[t], cmd->upload_misses[t]);
-      }
-   }
-   ralloc_free(cmd->upload_cache);
-   cmd->upload_cache = NULL;
 
    return vk_command_buffer_get_record_result(&cmd->vk);
 }

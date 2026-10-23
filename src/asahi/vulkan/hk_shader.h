@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include "hk_descriptor_memory.h"
 #include "asahi/compiler/agx_compile.h"
 #include "poly/nir/poly_nir.h"
 #include "util/macros.h"
@@ -320,6 +321,7 @@ struct hk_shader {
    /* G16 graphics: the native stage description, built once at upload and
     * linked by pointer at draw time. */
    struct agx_apple9_render_stage apple9_stage;
+   struct hk_descriptor_allocation apple9_coefficients;
 
    /* Cache of fast linked variants */
    struct {

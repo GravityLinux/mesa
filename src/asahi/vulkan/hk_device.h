@@ -22,7 +22,7 @@
 #include "hk_private.h"
 
 #include "hk_descriptor_table.h"
-#include "hk_apple9_pbe_table.h"
+#include "hk_usc_heap.h"
 #include "hk_queue.h"
 #include "vk_device.h"
 #include "vk_meta.h"
@@ -73,8 +73,8 @@ struct hk_device {
 
    struct hk_sampler_heap samplers;
 
-   simple_mtx_t apple9_pbe_lock;
-   struct hk_apple9_pbe_table apple9_pbes;
+   simple_mtx_t usc_heap_lock;
+   struct hk_usc_heap usc_heap;
 
    /* G16 private texel-fetch sampler, addressable as a native table entry
     * relative to the USC aperture. */

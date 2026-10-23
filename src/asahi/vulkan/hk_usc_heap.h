@@ -4,10 +4,11 @@
 #pragma once
 #include "hk_descriptor_memory.h"
 
-/* Stable USC addresses: slabs are retained until device destruction. Entries
- * return to their slab when their view is destroyed. Caller serializes access. */
-#define HK_APPLE9_PBE_SLAB_SIZE (64 * 1024)
-struct hk_apple9_pbe_table {
+/* Immutable shader and image-view state at stable USC addresses. Slabs remain
+ * until device destruction; allocations return when their owner is destroyed.
+ * Caller serializes access. */
+#define HK_USC_HEAP_SLAB_SIZE (64 * 1024)
+struct hk_usc_heap {
    struct list_head slabs;
    const struct hk_descriptor_memory_ops *ops;
    void *data;
@@ -17,15 +18,15 @@ struct hk_apple9_pbe_table {
 extern "C" {
 #endif
 
-void hk_apple9_pbe_table_init(struct hk_apple9_pbe_table *table,
+void hk_usc_heap_init(struct hk_usc_heap *table,
                               const struct hk_descriptor_memory_ops *ops,
                               void *data);
-bool hk_apple9_pbe_table_alloc(struct hk_apple9_pbe_table *table,
-                               unsigned count,
+bool hk_usc_heap_alloc(struct hk_usc_heap *table,
+                               uint64_t size, unsigned alignment,
                                struct hk_descriptor_allocation *out);
-void hk_apple9_pbe_table_free(struct hk_apple9_pbe_table *table,
+void hk_usc_heap_free(struct hk_usc_heap *table,
                               struct hk_descriptor_allocation *alloc);
-void hk_apple9_pbe_table_finish(struct hk_apple9_pbe_table *table);
+void hk_usc_heap_finish(struct hk_usc_heap *table);
 
 #ifdef __cplusplus
 }

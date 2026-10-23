@@ -246,8 +246,7 @@ hk_apple9_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
           &dev->dev, cmd, hk_apple9_usc_alloc, &shader, true, table,
           textures.gpu, sampler.gpu,
           agx_apple9_tile_sample_bytes(tile_bytes, key.samples), key.samples,
-          &launch,
-          hk_apple9_state_uncached_alloc))
+          &launch))
       goto fail;
    return (struct hk_bg_eot){.usc = launch};
 
@@ -643,6 +642,13 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
          cmd->apple9_null_fs = *fragment;
          cmd->apple9_null_fs.varyings = vertex->varyings;
          cmd->apple9_null_fs.varying_components = vertex->varying_components;
+         /* This derived stage has the producer's interface, so its tables
+          * belong to this command buffer rather than the device's null FS. */
+         struct agx_ptr cf = hk_pool_usc_alloc(
+            cmd, AGX_APPLE9_CF_ALLOCATION_SIZE, 64);
+         if (!cf.cpu)
+            UNSUPPORTED();
+         agx_apple9_init_coefficients(&dev->dev, &cmd->apple9_null_fs, cf);
          cmd->apple9_null_fs_vertex_id = vertex->program_id;
       }
       fragment = &cmd->apple9_null_fs;
@@ -1043,7 +1049,7 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    t_sub = hk_cpu_sub_begin();
    bool prepared = agx_apple9_prepare_draw_alloc(
       &dev->dev, cmd, hk_apple9_usc_alloc, cmd, hk_apple9_context_alloc,
-      &pipeline, record, previous, hk_apple9_state_cache_alloc);
+      &pipeline, record, previous);
    hk_cpu_sub_end(t_sub, HK_CPU_SUB_PREPARE_ALLOC);
    if (!prepared)
       UNSUPPORTED();
