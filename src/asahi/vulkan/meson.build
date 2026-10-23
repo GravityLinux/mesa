@@ -226,6 +226,18 @@ if with_tests
     link_args : ['-Wl,--wrap=agx_bo_create', '-Wl,--wrap=agx_bo_unreference',
                  '-Wl,--wrap=agx_bo_cache_evict_all']), suite : ['asahi', 'honeykrisp'])
   test(
+    'hk-fragment-tri-merging',
+    executable(
+      'hk-fragment-tri-merging', 'tests/hk-fragment-tri-merging.c',
+      include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                             inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+      dependencies : [hk_deps], link_with : [libhk],
+      link_args : ['-Wl,--wrap=agx_bo_create', '-Wl,--wrap=agx_bo_reference',
+                   '-Wl,--wrap=agx_bo_unreference'],
+    ),
+    suite : ['asahi', 'honeykrisp'],
+  )
+  test(
     'hk-native-mesh-hybrid',
     executable(
       'hk-native-mesh-hybrid', 'tests/hk-native-mesh-hybrid.c',
