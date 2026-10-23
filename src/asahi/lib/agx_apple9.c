@@ -678,8 +678,9 @@ bool
 agx_apple9_compute_enabled(const struct agx_device *dev)
 {
    /* These generated launch and resource encodings have been exercised on
-    * T8132. Shared Apple9 ISA support alone does not validate G17P launch ABI. */
-   return dev->chip == AGX_CHIP_G16G;
+    * T8132 and the source-built G16C submission tests. Live Honeykrisp on
+    * G16C is qualified separately. Shared ISA alone does not validate G17P. */
+   return agx_is_g16(dev);
 }
 
 void

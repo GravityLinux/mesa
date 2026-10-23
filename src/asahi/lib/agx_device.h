@@ -268,6 +268,15 @@ struct agx_device {
    struct u_printf_ctx printf;
 };
 
+/* G16 native launch and descriptor encoding, independent of cluster count.
+ * Keep G17P separate until its userspace launch path is qualified.
+ */
+static inline bool
+agx_is_g16(const struct agx_device *dev)
+{
+   return dev->chip == AGX_CHIP_G16G || dev->chip == AGX_CHIP_G16C;
+}
+
 static inline bool
 agx_apple9_direct_render_enabled(const struct agx_device *dev)
 {

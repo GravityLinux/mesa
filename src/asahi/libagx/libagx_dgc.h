@@ -220,6 +220,8 @@ enum agx_chip {
    AGX_CHIP_G14X,
    AGX_CHIP_G16G,
    AGX_CHIP_G17P,
+   /* Append to retain existing chip values in precompiled inputs. */
+   AGX_CHIP_G16C,
 };
 
 static inline GLOBAL uint32_t *

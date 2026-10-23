@@ -253,7 +253,7 @@ hk_device_alloc_scratch(struct hk_device *dev, mesa_shader_stage stage,
 static inline bool
 hk_sparse_unbound_unmapped(const struct agx_device *dev)
 {
-   return dev->chip == AGX_CHIP_G16G && agx_has_soft_fault((struct agx_device *)dev) &&
+   return agx_is_g16(dev) && agx_has_soft_fault((struct agx_device *)dev) &&
           !debug_get_option_cached_hk_apple9_sparse_scratch();
 }
 /* Debug only: HK_CPU_TIMING, see hk_cpu_timing.c */

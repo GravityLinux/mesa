@@ -106,7 +106,7 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
       features |= VK_FORMAT_FEATURE_2_STORAGE_IMAGE_ATOMIC_BIT;
    }
 
-   if (pdev->dev.chip == AGX_CHIP_G16G) {
+   if (agx_is_g16(&pdev->dev)) {
       /* Image atomics address device memory, which has FP32 addition. */
       if (p_format == PIPE_FORMAT_R32_FLOAT && tiling == VK_IMAGE_TILING_OPTIMAL)
          features |= VK_FORMAT_FEATURE_2_STORAGE_IMAGE_ATOMIC_BIT;
@@ -283,7 +283,7 @@ hk_can_compress(const struct agx_device *dev, VkFormat format, unsigned plane,
 
    /* Shared-exponent encodings do not round-trip through texture reads.
     * Apple9's raw transfer path preserves their bits without compression. */
-   if (dev->chip == AGX_CHIP_G16G && p_format == PIPE_FORMAT_R9G9B9E5_FLOAT)
+   if (agx_is_g16(dev) && p_format == PIPE_FORMAT_R9G9B9E5_FLOAT)
       return false;
 
    /* Check for format compatibility if mutability is enabled. */
@@ -506,7 +506,7 @@ hk_GetPhysicalDeviceImageFormatProperties2(
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
    }
 
-   const uint32_t max_dim = pdev->dev.chip == AGX_CHIP_G16G &&
+   const uint32_t max_dim = agx_is_g16(&pdev->dev) &&
                                    pImageFormatInfo->type == VK_IMAGE_TYPE_3D
                               ? AGX_APPLE9_MAX_3D_TEXTURE_DIMENSION
                               : 16384;
@@ -1119,7 +1119,7 @@ hk_image_plane_alloc_vma(struct hk_device *dev, struct hk_image_plane *plane,
       hk_bind_scratch(dev, plane->va, 0, size);
    }
 
-   if (sparse_resident && dev->dev.chip == AGX_CHIP_G16G) {
+   if (sparse_resident && agx_is_g16(&dev->dev)) {
       /* Unbound pages read the scratch page. Every page starts unbound. */
       const struct ail_layout *layout = &plane->layout;
       size_t size_B = sizeof(struct hk_apple9_residency) +

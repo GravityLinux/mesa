@@ -69,7 +69,7 @@ bool
 hk_feedback_can_compress(const struct agx_device *dev, VkImageType type,
                          VkFormat format, unsigned samples)
 {
-   return dev->chip == AGX_CHIP_G16G && type == VK_IMAGE_TYPE_2D &&
+   return agx_is_g16(dev) && type == VK_IMAGE_TYPE_2D &&
           samples == 1 &&
           (hk_feedback_is_zs_format(format) ||
            hk_feedback_raw_format(format) != VK_FORMAT_UNDEFINED);

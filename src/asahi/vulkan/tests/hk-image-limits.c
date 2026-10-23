@@ -9,7 +9,7 @@ int main(void)
 {
    struct hk_physical_device pdev = {0};
    vk_object_base_init(NULL, &pdev.vk.base, VK_OBJECT_TYPE_PHYSICAL_DEVICE);
-   const enum agx_chip chips[] = {AGX_CHIP_G13G, AGX_CHIP_G16G};
+   const enum agx_chip chips[] = {AGX_CHIP_G13G, AGX_CHIP_G16G, AGX_CHIP_G16C};
    const VkImageType types[] = {VK_IMAGE_TYPE_1D, VK_IMAGE_TYPE_2D, VK_IMAGE_TYPE_3D};
    for (unsigned c = 0; c < ARRAY_SIZE(chips); ++c) {
       pdev.dev.chip = chips[c];
@@ -27,7 +27,7 @@ int main(void)
          CHECK(hk_GetPhysicalDeviceImageFormatProperties2(
             hk_physical_device_to_handle(&pdev), &info, &props) == VK_SUCCESS);
          const VkImageFormatProperties *p = &props.imageFormatProperties;
-         unsigned max = chips[c] == AGX_CHIP_G16G && types[t] == VK_IMAGE_TYPE_3D ? 2048 : 16384;
+         unsigned max = chips[c] != AGX_CHIP_G13G && types[t] == VK_IMAGE_TYPE_3D ? 2048 : 16384;
          CHECK(p->maxExtent.width == max);
          CHECK(p->maxExtent.height == (types[t] == VK_IMAGE_TYPE_1D ? 1 : max));
          CHECK(p->maxExtent.depth == (types[t] == VK_IMAGE_TYPE_3D ? max : 1));

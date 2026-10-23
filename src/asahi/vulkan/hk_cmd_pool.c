@@ -22,9 +22,9 @@ hk_cmd_pool_bo_flags(const struct hk_device *dev, enum hk_cmd_pool_kind kind)
       return 0;
    case HK_CMD_POOL_USC:
       return AGX_BO_LOW_VA |
-             (dev->dev.chip == AGX_CHIP_G16G ? AGX_BO_WRITEBACK : 0);
+             (agx_is_g16(&dev->dev) ? AGX_BO_WRITEBACK : 0);
    case HK_CMD_POOL_CONTEXT:
-      assert(dev->dev.chip == AGX_CHIP_G16G);
+      assert(agx_is_g16(&dev->dev));
       return AGX_BO_CONTEXT | AGX_BO_WRITEBACK;
    default:
       UNREACHABLE("Invalid command pool kind");

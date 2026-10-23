@@ -674,7 +674,7 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
     * image sampler, including one stored in a mutable binding) read the
     * plane's sampler part. Separate texture and sampler variables read
     * separate records, even when they alias one mutable binding. */
-   const bool g16 = dev->dev.chip == AGX_CHIP_G16G;
+   const bool g16 = agx_is_g16(&dev->dev);
    if (g16 && tex->sampler_dim != GLSL_SAMPLER_DIM_BUF &&
        (tex->op == nir_texop_txs || tex->op == nir_texop_query_levels ||
         tex->op == nir_texop_texture_samples))
@@ -798,7 +798,7 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
          VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT |
          VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
          VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;
-      if (dev->dev.chip == AGX_CHIP_G16G &&
+      if (agx_is_g16(&dev->dev) &&
           (get_binding_layout(set, binding, ctx)->flags & late))
          tex->backend_flags |= HK_APPLE9_TEX_DESCRIPTOR_HANDLE;
    }

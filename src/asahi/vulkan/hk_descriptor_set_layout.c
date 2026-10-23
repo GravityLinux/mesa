@@ -38,7 +38,7 @@ hk_descriptor_stride_align_for_type(
    /* Descriptor-buffer layouts use the advertised descriptor sizes: the
     * internal records zero-padded to a power of two, see
     * hk_descriptor_buffer.h. */
-   if (descriptor_buffer && pdev->dev.chip == AGX_CHIP_G16G &&
+   if (descriptor_buffer && agx_is_g16(&pdev->dev) &&
        type != VK_DESCRIPTOR_TYPE_MUTABLE_EXT &&
        type != VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK) {
       *alignment = HK_APPLE9_DB_ALIGNMENT;
@@ -77,7 +77,7 @@ hk_descriptor_stride_align_for_type(
       /* TODO: How do samplers work? */
    case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
    case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
-      if (pdev->dev.chip == AGX_CHIP_G16G) {
+      if (agx_is_g16(&pdev->dev)) {
          /* Image part, sampler part, or both for a combined image sampler. */
          *stride = type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
                       ? HK_APPLE9_COMBINED_DESCRIPTOR_SIZE
@@ -91,7 +91,7 @@ hk_descriptor_stride_align_for_type(
       break;
 
    case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
-      if (pdev->dev.chip == AGX_CHIP_G16G) {
+      if (agx_is_g16(&pdev->dev)) {
          *stride = sizeof(struct hk_apple9_texel_descriptor);
          *alignment = AGX_APPLE9_TEXTURE_TABLE_STRIDE;
          break;
@@ -99,7 +99,7 @@ hk_descriptor_stride_align_for_type(
       FALLTHROUGH;
    case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
    case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
-      if (pdev->dev.chip == AGX_CHIP_G16G &&
+      if (agx_is_g16(&pdev->dev) &&
           type != VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER) {
          *stride = sizeof(struct hk_apple9_storage_descriptor);
          *alignment = AGX_APPLE9_TEXTURE_TABLE_STRIDE;
@@ -374,7 +374,7 @@ hk_CreateDescriptorSetLayout(VkDevice device,
       /* Shaders address it like any descriptor buffer: in the USC aperture. */
       layout->embedded_samplers = agx_bo_create(
          &dev->dev, MAX2(buffer_size, HK_APPLE9_DB_ALIGNMENT), 0,
-         dev->dev.chip == AGX_CHIP_G16G ? AGX_BO_LOW_VA | AGX_BO_WRITEBACK : 0,
+         agx_is_g16(&dev->dev) ? AGX_BO_LOW_VA | AGX_BO_WRITEBACK : 0,
          "Embedded samplers");
       if (!layout->embedded_samplers) {
          vk_descriptor_set_layout_unref(&dev->vk, &layout->vk);

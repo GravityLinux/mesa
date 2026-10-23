@@ -282,7 +282,7 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
    memcpy(&c->partial_eot.rsrc_spec, &cs->cr.eot.partial.counts,
           sizeof(struct agx_counts_packed));
 
-   if (dev->dev.chip == AGX_CHIP_G16G) {
+   if (agx_is_g16(&dev->dev)) {
       c->bg.usc = cs->cr.bg.main.usc;
       c->eot.usc = cs->cr.eot.main.usc;
       c->partial_bg.usc = cs->cr.bg.partial.usc;

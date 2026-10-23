@@ -732,9 +732,9 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
                &view->planes[p].layered_eot);
    }
 
-   if (dev->dev.chip == AGX_CHIP_G16G)
+   if (agx_is_g16(&dev->dev))
       hk_apple9_init_view_descriptors(view);
-   if (dev->dev.chip == AGX_CHIP_G16G &&
+   if (agx_is_g16(&dev->dev) &&
        (view->vk.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT))
       hk_apple9_init_render_view(view);
 
@@ -805,7 +805,7 @@ hk_apple9_init_storage_pbe(struct hk_device *dev, struct hk_image_view *view)
    view->apple9_store_flags = 0;
    view->apple9_pbes = (struct hk_descriptor_allocation){0};
    view->apple9_pbe_index = 0;
-   if (dev->dev.chip != AGX_CHIP_G16G || view->plane_count != 1 ||
+   if (!agx_is_g16(&dev->dev) || view->plane_count != 1 ||
        !(view->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT) ||
        !hk_apple9_native_store_format(format_for_plane(view, 0)) ||
        view->vk.image->samples != 1)

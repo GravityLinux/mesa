@@ -118,7 +118,7 @@ hk_pack_sampled_image(struct hk_device *dev, void *out,
                       const VkDescriptorImageInfo *const info,
                       struct hk_sampler *sampler)
 {
-   if (dev->dev.chip == AGX_CHIP_G16G)
+   if (agx_is_g16(&dev->dev))
       return hk_apple9_pack_sampled_image(dev, out, descriptor_type, info, sampler);
 
    struct hk_sampled_image_descriptor desc[3] = {};
@@ -249,7 +249,7 @@ hk_pack_storage_image(struct hk_device *dev, void *out,
    if (view)
       assert(view->plane_count == 1);
 
-   if (dev->dev.chip == AGX_CHIP_G16G) {
+   if (agx_is_g16(&dev->dev)) {
       struct hk_apple9_storage_descriptor *ext = out;
       if (view) {
          *ext = view->apple9_storage;
@@ -341,7 +341,7 @@ hk_pack_texel_buffer_desc(struct hk_device *dev, void *out,
                           const uint8_t *apple9_texture)
 {
    /* G16 uniform texel buffers carry load metadata, also in mutable bindings. */
-   if (dev->dev.chip == AGX_CHIP_G16G &&
+   if (agx_is_g16(&dev->dev) &&
        type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER) {
       struct hk_apple9_texel_descriptor desc = {};
       if (tex) {
@@ -354,7 +354,7 @@ hk_pack_texel_buffer_desc(struct hk_device *dev, void *out,
       }
       memcpy(out, &desc, sizeof(desc));
       return sizeof(desc);
-   } else if (dev->dev.chip == AGX_CHIP_G16G) {
+   } else if (agx_is_g16(&dev->dev)) {
       struct hk_apple9_storage_descriptor desc = {};
       if (tex) {
          desc.common.tex = *tex;
@@ -648,7 +648,7 @@ hk_descriptor_bo_create(void *data, uint64_t size, uint64_t reserve,
                         struct hk_descriptor_backing *out)
 {
    struct hk_device *dev = data;
-   const bool low_va = dev->dev.chip == AGX_CHIP_G16G;
+   const bool low_va = agx_is_g16(&dev->dev);
    struct agx_bo *bo = agx_bo_create(&dev->dev, size, 0,
                                      low_va ? AGX_BO_LOW_VA | AGX_BO_WRITEBACK
                                             : 0,
@@ -1113,7 +1113,7 @@ hk_get_texel_buffer_descriptor(struct hk_device *dev, VkDescriptorType type,
       enum pipe_format format = hk_format_to_pipe_format(info->format);
       uint32_t elements = info->range / util_format_get_blocksize(format);
       hk_pack_texel_buffer(dev, format, info->address, info->address, elements,
-                           dev->dev.chip == AGX_CHIP_G16G
+                           agx_is_g16(&dev->dev)
                               ? dev->apple9_resident->va->addr : 0,
                            &tex, &pbe, &m, texture);
       size = hk_pack_texel_buffer_desc(dev, out, type, &tex, &pbe, &m, texture);

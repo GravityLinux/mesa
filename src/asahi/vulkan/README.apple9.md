@@ -5,6 +5,31 @@ This is the experimental native Vulkan port for the T8132 M4 Mac mini
 requires `HK_EXPERIMENTAL_APPLE9=1`, and the conformance version is zero.
 Older chips retain their existing behavior.
 
+## G16C native integration candidate
+
+Production integration uses Honeykrisp for Vulkan, Zink for OpenGL, and
+Rusticl over Zink for OpenCL. The native kernel driver is shared by G16C
+and G17P; userspace launch support is qualified separately for each device.
+
+This candidate adds explicit `AGX_CHIP_G16C` selection and uses the shared
+G16 launch, descriptor, graphics and capability paths for G16G and G16C.
+The kernel-private window remains inside the compact render-context aperture.
+G16G behavior and existing chip enum values are preserved. G17P selection
+is unchanged. Native Max qualification on 2026-10-22 passed the authored live Vulkan
+compute and offscreen draw tests through the shared Rust DRM driver. Compute
+checks 257 output words and 63 guards on each of three submissions, including
+indirect dispatch with changing inputs. Drawing checks all 703 pixels of each
+37x19 image plus readback guards on three submissions. Both tests pass with
+default driver settings, as well as the initial `nocluster,nocompress` control.
+Shaders compile at runtime; submissions do not use exported fixtures or a DRM
+shim. Native memory regression (6303 checks) and clean unbind also pass.
+
+The ARM64 Honeykrisp and Zink libraries build using matching host compiler
+tools from this branch. Zink execution, Rusticl, browser integration and
+presentation are not yet qualified here. These small tests establish a live
+integration baseline; they do not establish Vulkan conformance or broad Max
+application correctness.
+
 ## Status
 
 The device reports Vulkan 1.4 on one graphics/compute/transfer queue with

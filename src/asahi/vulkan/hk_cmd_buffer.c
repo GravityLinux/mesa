@@ -948,7 +948,7 @@ hk_cmd_sync_barrier(struct hk_cmd_buffer *cmd,
        */
       struct hk_device *dev = hk_cmd_buffer_device(cmd);
       hk_ensure_cs_has_space(cmd, cs, AGX_CDM_BARRIER_LENGTH);
-      if (dev->dev.chip == AGX_CHIP_G16G &&
+      if (agx_is_g16(&dev->dev) &&
           !(dst_stages & HK_SYNC_DISPATCH_INDIRECT))
          hk_cdm_compute_barrier(dev, cs);
       else
@@ -1408,7 +1408,7 @@ hk_cmd_buffer_flush_push_descriptors(struct hk_cmd_buffer *cmd,
       assert(size <= sizeof(push_set->data));
       /* G16 shaders address image descriptors within the USC aperture. */
       uint64_t push_set_addr = 0;
-      if (size && hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G) {
+      if (size && agx_is_g16(&hk_cmd_buffer_device(cmd)->dev)) {
          struct agx_ptr t =
             hk_pool_usc_alloc(cmd, size, HK_MIN_UBO_ALIGNMENT);
          if (t.cpu)
@@ -1525,7 +1525,7 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
    struct agx_ptr root_ptr;
    size_t size = sizeof(*root);
    uint64_t push_mask = UINT64_MAX;
-   if (hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G) {
+   if (agx_is_g16(&hk_cmd_buffer_device(cmd)->dev)) {
       root->root_desc_addr = 0;
       push_mask = hk_cmd_push_constant_mask(cmd, bind_point);
       size = hk_descriptor_root_size(desc);
@@ -1605,7 +1605,7 @@ hk_reserve_scratch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    /* Apple9 private memory is described by the native launch frame extents.
     * It does not use the older helper shader and scratch-buffer protocol. */
-   if (max_scratch_size == 0 || dev->dev.chip == AGX_CHIP_G16G)
+   if (max_scratch_size == 0 || agx_is_g16(&dev->dev))
       return;
 
    unsigned preamble_size = (s->b.info.preamble_scratch_size > 0) ? 1 : 0;
@@ -1811,7 +1811,7 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    cs->cr.eot.main = render->cr.eot.partial;
    cs->cr.zls_control = render->cr.zls_control_partial;
 
-   if (hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G) {
+   if (agx_is_g16(&hk_cmd_buffer_device(cmd)->dev)) {
       cs->scissor = UTIL_DYNARRAY_INIT;
       cs->depth_bias = UTIL_DYNARRAY_INIT;
       cs->ppp_multisamplectl = hk_default_sample_positions(cs->tib.nr_samples);
@@ -1892,7 +1892,7 @@ hk_ensure_cs_has_space(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    /* Native VDM continuation pointers are relative to the render context. */
    uint64_t target = T.gpu;
-   if (vdm && hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G) {
+   if (vdm && agx_is_g16(&hk_cmd_buffer_device(cmd)->dev)) {
       assert(target >= AGX_APPLE9_RENDER_CONTEXT_BASE &&
              target - AGX_APPLE9_RENDER_CONTEXT_BASE <= UINT32_MAX);
       target -= AGX_APPLE9_RENDER_CONTEXT_BASE;

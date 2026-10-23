@@ -25,7 +25,7 @@ hk_get_buffer_alignment(const struct hk_physical_device *pdev,
 
    /* Native VDM index pointers are relative to the USC aperture. Mapping a
     * buffer there requires page-aligned memory bindings, not a CPU copy. */
-   if (pdev->dev.chip == AGX_CHIP_G16G &&
+   if (agx_is_g16(&pdev->dev) &&
        (usage_flags & VK_BUFFER_USAGE_2_INDEX_BUFFER_BIT))
       alignment = 16384;
 
@@ -176,7 +176,7 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
     */
    const bool sparse =
       buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT;
-   buffer->apple9_index_va = dev->dev.chip == AGX_CHIP_G16G && !sparse &&
+   buffer->apple9_index_va = agx_is_g16(&dev->dev) && !sparse &&
       (buffer->vk.usage & VK_BUFFER_USAGE_2_INDEX_BUFFER_BIT);
    if (buffer->vk.size > 0 &&
        (buffer->vk.create_flags &
@@ -201,7 +201,7 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
 
       enum agx_va_flags flags = buffer->apple9_index_va ? AGX_VA_USC : 0;
       /* Shaders address descriptor records in the USC aperture. */
-      if (dev->dev.chip == AGX_CHIP_G16G &&
+      if (agx_is_g16(&dev->dev) &&
           (buffer->vk.usage &
            (VK_BUFFER_USAGE_2_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT |
             VK_BUFFER_USAGE_2_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT |
@@ -256,7 +256,7 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
       /* Apple9 texel fetches report no residency, so shaders read it from
        * a table of the buffer's pages, all unbound initially.
        */
-      if (dev->dev.chip == AGX_CHIP_G16G &&
+      if (agx_is_g16(&dev->dev) &&
           (buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT)) {
          size_t pages = DIV_ROUND_UP(vma_size_B, AIL_PAGESIZE);
          buffer->apple9_residency =

@@ -210,7 +210,7 @@ hk_CreateSampler(VkDevice device,
    /* G16 samples custom border colours natively, with the border format the
     * application provides (customBorderColorWithoutFormat is not exposed).
     * Its opaque black needs no RGBA4 workaround through that path. */
-   const bool g16 = pdev->dev.chip == AGX_CHIP_G16G;
+   const bool g16 = agx_is_g16(&pdev->dev);
    bool workaround_rgba4 = !g16 && dev->vk.enabled_features.customBorderColors;
    bool custom_border =
       uses_border(info) &&
