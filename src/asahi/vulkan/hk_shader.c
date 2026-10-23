@@ -159,7 +159,6 @@ static const char *const hk_codegen_env[] = {
    "HK_APPLE9_NATIVE_MESH_PRIMITIVE_LOWERING",
    "HK_APPLE9_SPARSE_SCRATCH",
    "HK_APPLE9_TESS_BATCH", "HK_APPLE9_TESS_SCAN_BLOCK",
-   "HK_APPLE9_UNIFORM_SAFE_CLASSES",
 };
 
 /* Knobs that never change generated code and must not split the caches at
@@ -1569,37 +1568,6 @@ hk_unencodable_scale(nir_scalar s)
    return true;
 }
 
-/* Classes of reads the preamble may take once per dispatch.
- * HK_APPLE9_UNIFORM_SAFE_CLASSES restricts them, e.g. to tell apart the
- * effect of hoisting uniform-buffer values, storage-buffer values and
- * descriptor metadata. Only descriptor metadata qualifies by default: in
- * Lethal Company it ran crash-free and helped the compute pass it changed. */
-enum hk_uniform_safe_class {
-   HK_UNIFORM_SAFE_UBO = BITFIELD_BIT(0),
-   HK_UNIFORM_SAFE_SSBO = BITFIELD_BIT(1),
-   HK_UNIFORM_SAFE_META = BITFIELD_BIT(2),
-};
-
-static const struct debug_named_value hk_uniform_safe_options[] = {
-   {"all", ~0u, "Every class"},
-   {"none", 0, "No class"},
-   {"ubo", HK_UNIFORM_SAFE_UBO, "Uniform-buffer values"},
-   {"ssbo", HK_UNIFORM_SAFE_SSBO, "Read-only storage-buffer values"},
-   {"meta", HK_UNIFORM_SAFE_META, "Descriptor metadata"},
-   DEBUG_NAMED_VALUE_END,
-};
-
-DEBUG_GET_ONCE_FLAGS_OPTION(hk_uniform_safe_classes,
-                            "HK_APPLE9_UNIFORM_SAFE_CLASSES",
-                            hk_uniform_safe_options, HK_UNIFORM_SAFE_META)
-
-static enum gl_access_qualifier
-hk_uniform_safe(enum hk_uniform_safe_class cls)
-{
-   return (debug_get_option_hk_uniform_safe_classes() & cls)
-             ? ACCESS_UNIFORM_SAFE_AGX : 0;
-}
-
 static nir_def *
 bound_offset(nir_builder *b, nir_def *valid, nir_scalar offset,
              bool shift_only_scale)
@@ -1683,15 +1651,6 @@ lower_load_global_bounded(nir_builder *b, nir_intrinsic_instr *intr,
    if (intr->intrinsic == nir_intrinsic_load_global_constant_bounded) {
       access |= ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER;
    }
-
-   /* The bounds check redirects out-of-range reads to the zero page, so a
-    * read-only access at a uniform address is safe once per dispatch: let
-    * the preamble take it. This is not general speculation; if-conversion
-    * and code motion must not run it on paths that skipped it. */
-   if (access & ACCESS_CAN_REORDER)
-      access |= hk_uniform_safe(
-         intr->intrinsic == nir_intrinsic_load_global_constant_bounded
-            ? HK_UNIFORM_SAFE_UBO : HK_UNIFORM_SAFE_SSBO);
 
    nir_def *val = nir_load_global(
       b, intr->def.num_components, intr->def.bit_size,
@@ -2319,7 +2278,7 @@ hk_apple9_lower_texel_buffer(nir_builder *b, nir_tex_instr *tex, UNUSED void *da
    ptr = nir_iadd_imm(b, ptr, offsetof(struct hk_apple9_texel_descriptor, metadata));
    nir_def *count = nir_load_global_constant(b, 1, 32,
       nir_iadd_imm(b, ptr, offsetof(struct hk_apple9_texel_metadata, elements)),
-      .align_mul = 4, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META));
+      .align_mul = 4, .access = ACCESS_UNIFORM_SAFE_AGX);
    if (tex->op == nir_texop_txs) {
       nir_def_replace(&tex->def, count);
       return true;
@@ -2331,10 +2290,10 @@ hk_apple9_lower_texel_buffer(nir_builder *b, nir_tex_instr *tex, UNUSED void *da
    nir_push_if(b, nir_ult(b, coord, count));
    nir_def *base = nir_load_global_constant(b, 1, 64,
       nir_iadd_imm(b, ptr, offsetof(struct hk_apple9_texel_metadata, base)),
-      .align_mul = 8, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META));
+      .align_mul = 8, .access = ACCESS_UNIFORM_SAFE_AGX);
    nir_def *size = nir_load_global_constant(b, 1, 32,
       nir_iadd_imm(b, ptr, offsetof(struct hk_apple9_texel_metadata, size_B)),
-      .align_mul = 4, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META));
+      .align_mul = 4, .access = ACCESS_UNIFORM_SAFE_AGX);
    nir_push_if(b, nir_ieq_imm(b, size, 12));
    nir_def *xyz = nir_load_global(b, 3, 32,
       nir_iadd(b, base, nir_u2u64(b, nir_imul_imm(b, coord, 12))), .align_mul = 4);
@@ -2376,7 +2335,7 @@ hk_apple9_lower_texel_buffer(nir_builder *b, nir_tex_instr *tex, UNUSED void *da
    if (tex->def.num_components == 4) {
       nir_def *alpha_kind = nir_ushr_imm(b, nir_load_global_constant(b, 1, 32,
          nir_iadd_imm(b, ptr, offsetof(struct hk_apple9_texel_metadata, component[3])),
-         .align_mul = 4, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META)), 18);
+         .align_mul = 4, .access = ACCESS_UNIFORM_SAFE_AGX), 18);
       nir_def *one = floating ? nir_imm_float(b, 1.0) : nir_imm_int(b, 1);
       zero = nir_vector_insert_imm(b, zero,
          nir_bcsel(b, nir_ieq_imm(b, alpha_kind, HK_TEXEL_ONE), one,
@@ -2792,7 +2751,7 @@ hk_apple9_buffer_texel_address(nir_builder *b, nir_def *meta, nir_def *coord,
 {
    nir_def *base = nir_load_global_constant(b, 1, 64,
       nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, base)),
-      .align_mul = 8, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META));
+      .align_mul = 8, .access = ACCESS_UNIFORM_SAFE_AGX);
    nir_def *offset = nir_imul(b, nir_channel(b, coord, 0), size_B);
    return nir_iadd(b, base, nir_u2u64(b, offset));
 }
@@ -3077,17 +3036,17 @@ hk_apple9_lower_formatless_storage(nir_builder *b, nir_intrinsic_instr *intr,
       offsetof(struct hk_apple9_storage_descriptor, metadata));
    nir_def *size_B = nir_load_global_constant(b, 1, 32,
       nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, size_B)),
-      .align_mul = 4, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META));
+      .align_mul = 4, .access = ACCESS_UNIFORM_SAFE_AGX);
    nir_def *layout = nir_load_global_constant(b, 4, 32,
       nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, component)),
-      .align_mul = 4, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META));
+      .align_mul = 4, .access = ACCESS_UNIFORM_SAFE_AGX);
    /* Storage image descriptors also name a canonical store encoding. */
    nir_def *encode = NULL;
    if (!load && dim != GLSL_SAMPLER_DIM_BUF) {
       encode = nir_load_global_constant(b, 1, 32,
          nir_iadd_imm(b, nir_load_from_texture_handle_agx(b, tex),
                       offsetof(struct hk_apple9_storage_descriptor, store_encode)),
-         .align_mul = 4, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META));
+         .align_mul = 4, .access = ACCESS_UNIFORM_SAFE_AGX);
    }
 
    /* Honeykrisp's storage cube descriptors are 2D arrays of faces. */
@@ -3233,14 +3192,14 @@ hk_apple9_buffer_residency_code(nir_builder *b, nir_def *meta, nir_def *x)
 {
    nir_def *table = nir_load_global_constant(b, 1, 64,
       nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, residency)),
-      .align_mul = 8, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META));
+      .align_mul = 8, .access = ACCESS_UNIFORM_SAFE_AGX);
    nir_def *code;
    nir_push_if(b, nir_ine_imm(b, table, 0));
    {
       nir_def *base = nir_load_global_constant(b, 1, 64, meta, .align_mul = 8);
       nir_def *fields = nir_load_global_constant(b, 2, 32,
          nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, elements)),
-         .align_mul = 8, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META));
+         .align_mul = 8, .access = ACCESS_UNIFORM_SAFE_AGX);
       nir_def *elements = nir_channel(b, fields, 0);
       nir_def *size_B = nir_channel(b, fields, 1);
       x = nir_umin(b, x, nir_iadd_imm(b, nir_umax_imm(b, elements, 1), -1));
@@ -3414,7 +3373,7 @@ hk_apple9_lower_sparse_intrinsic(nir_builder *b, nir_intrinsic_instr *intr,
       nir_def *table = nir_load_global_constant(b, 1, 64, meta, .align_mul = 8);
       nir_def *base = nir_load_global_constant(b, 1, 32,
          nir_iadd_imm(b, meta, offsetof(struct hk_apple9_texel_metadata, elements)),
-         .align_mul = 4, .access = hk_uniform_safe(HK_UNIFORM_SAFE_META));
+         .align_mul = 4, .access = ACCESS_UNIFORM_SAFE_AGX);
       nir_def *coord = nir_u2u32(b, intr->src[1].ssa);
       bool layered = nir_intrinsic_image_array(intr) || dim == GLSL_SAMPLER_DIM_CUBE;
       code = hk_apple9_residency_code(b, table, base, nir_imm_int(b, 0),
