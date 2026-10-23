@@ -7876,7 +7876,8 @@ apple9_preamble_trial(nir_shader *nir, struct agx_shader_part *out,
                      const struct agx_apple9_varying_layout *varyings,
                      const struct apple9_buffer_map *resources,
                      bool hoist_addresses, struct apple9_dag_cost *cost,
-                     char **log, size_t *log_size, unsigned *address_hoists)
+                     char **log, size_t *log_size, unsigned *address_hoists,
+                     bool *setup_retried)
 {
    FILE *stream = open_memstream(log, log_size);
    FILE *previous = apple9_log_stream;
@@ -7912,6 +7913,8 @@ apple9_preamble_trial(nir_shader *nir, struct agx_shader_part *out,
          ok = true;
          break;
       }
+      if (setup_spilled && setup_retried)
+         *setup_retried = true;
       if (setup_spilled && apple9_safe_reads_enabled(nir)) {
          if (agx_apple9_trace_enabled())
             fprintf(stderr, "APPLE9_PREAMBLE_RETRY setup spilled: safe reads dropped\n");
@@ -8125,7 +8128,7 @@ apple9_compile_dag_tail(nir_shader *nir, struct agx_shader_part *out,
       agx_apple9_ra_set_probe(true);
       bool probe_ok = apple9_preamble_trial(nir, &probe, NULL, varyings, &resources,
                                             true, &probe_cost, &probe_log,
-                                            &probe_size, &probe_hoists);
+                                            &probe_size, &probe_hoists, NULL);
       agx_apple9_ra_set_probe(false);
       free(probe.binary);
       free(probe_log);
@@ -8133,7 +8136,8 @@ apple9_compile_dag_tail(nir_shader *nir, struct agx_shader_part *out,
          have_original = true;
          original_ok = apple9_preamble_trial(
             nir, &original, profile ? &original_profile : NULL, varyings,
-            &resources, false, &original_cost, &original_log, &original_size, NULL);
+            &resources, false, &original_cost, &original_log, &original_size, NULL,
+            NULL);
          if (original_ok &&
              (!original_cost.spills ||
               original_cost.weighted_spills * 10 <= probe_cost.weighted_spills * 9)) {
@@ -8143,15 +8147,18 @@ apple9_compile_dag_tail(nir_shader *nir, struct agx_shader_part *out,
       }
    }
    if (!address_done) {
+      /* A setup that spilled is retried with less in the preamble, which can
+       * leave main worse than the original placement's preamble would. */
+      bool address_retried = false;
       ok = apple9_preamble_trial(nir, out, profile, varyings, &resources,
                                  true, &address_cost, &address_log, &address_size,
-                                 &address_hoists);
-      if (!ok || (address_cost.spills && address_hoists)) {
+                                 &address_hoists, &address_retried);
+      if (!ok || (address_cost.spills && address_hoists) || address_retried) {
          if (!have_original) {
             original_ok = apple9_preamble_trial(
                nir, &original, profile ? &original_profile : NULL, varyings,
                &resources, false, &original_cost, &original_log, &original_size,
-               NULL);
+               NULL, NULL);
          }
          use_original = original_ok &&
                         (!ok || address_cost.spills > original_cost.spills ||
