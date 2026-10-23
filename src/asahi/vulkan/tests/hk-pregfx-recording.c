@@ -50,38 +50,62 @@ main(void)
    cmd->merge_cs = NULL;
    struct hk_cs *pre = hk_cmd_buffer_get_cs_general(
       cmd, &cmd->current_cs.pre_gfx, true, HK_SYNC_PRE_RASTER);
-   CHECK(pre && cmd->sync_fallback);
+   CHECK(pre && pre->sync_before_gfx && !cmd->sync_fallback);
    CHECK(util_dynarray_num_elements(&cmd->sync_events, struct hk_sync_event) == 3);
    ev = cmd->sync_events.data;
    CHECK(ev[0].stream == HK_SYNC_NONE);
-   CHECK(ev[1].stream == gfx.sync_id);
-   CHECK(ev[2].stream == pre->sync_id);
-   CHECK(*util_dynarray_element(&cmd->sync_first_event, uint32_t, gfx.sync_id) == 1);
-   CHECK(*util_dynarray_element(&cmd->sync_first_event, uint32_t, pre->sync_id) == 2);
-   CHECK(cmd->merge_event == 1);
+   CHECK(ev[1].stream == pre->sync_id && ev[1].dst == HK_SYNC_ALL);
+   CHECK(ev[2].stream == gfx.sync_id);
+   CHECK(*util_dynarray_element(&cmd->sync_first_event, uint32_t, gfx.sync_id) == 2);
+   CHECK(*util_dynarray_element(&cmd->sync_first_event, uint32_t, pre->sync_id) == 1);
+   CHECK(cmd->merge_event == 2);
    CHECK(cmd->control_streams.next == &pre->node && pre->node.next == &gfx.node);
 
    struct hk_sync_state state;
    hk_sync_init(&state);
+   /* An earlier render may still consume the shared geometry heap. */
+   hk_sync_work(&state, HK_SYNC_GRAPHICS, HK_SYNC_RENDER, 5);
    struct hk_sync_stream streams[2] = {
-      {.engine = HK_SYNC_RENDER, .index = 1, .before = {0, 1}},
-      {.engine = HK_SYNC_CDM, .index = 1, .before = {0, 0}},
+      {.engine = HK_SYNC_RENDER, .index = 6, .before = {5, 1}},
+      {.engine = HK_SYNC_CDM, .index = 1, .before = {5, 0}},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(streams); ++i)
       streams[i].wait = streams[i].wait_tiling = hk_sync_empty();
-   /* Helpers reordered around rendering request the normal full-ordering
-    * fallback at recording time. Resolve their physical submission order. */
-   CHECK(!hk_sync_resolve(&state, ev, 3, cmd->sync_remap.data, streams, 2,
-                          cmd->sync_fallback));
+   /* Previous heap consumer -> reset/helper -> graphics consumer. The
+    * logical events now match the physical submission order without fallback.
+    */
+   CHECK(hk_sync_resolve(&state, ev, 3, cmd->sync_remap.data, streams, 2,
+                         cmd->sync_fallback));
    CHECK(streams[0].wait_tiling.engine[HK_SYNC_CDM] == 1);
-   CHECK(streams[1].wait.engine[HK_SYNC_RENDER] == 0);
+   CHECK(streams[1].wait.engine[HK_SYNC_RENDER] == 5);
 
-   /* A later request still records the additional scope on the same helper. */
+   /* Later helper requests use the same fully ordered event, never an event
+    * after their graphics consumer. */
    CHECK(hk_cmd_buffer_get_cs_general(cmd, &cmd->current_cs.pre_gfx, true,
                                      HK_SYNC_DRAW_INDIRECT) == pre);
    CHECK(pre->sync_stages & HK_SYNC_DRAW_INDIRECT);
-   CHECK(cmd->sync_fallback && cmd->merge_event == 1);
+   CHECK(!cmd->sync_fallback && cmd->merge_event == 2);
+   CHECK(util_dynarray_num_elements(&cmd->sync_events, struct hk_sync_event) == 3);
 
+   /* Resolving another execution uses new queue-relative indices without
+    * mutating the immutable recorded event identities. */
+   streams[0].index = 7;
+   streams[0].before[0] = streams[1].before[0] = 6;
+   streams[0].before[1] = 2;
+   streams[1].index = 2;
+   streams[1].before[1] = 1;
+   for (unsigned i = 0; i < ARRAY_SIZE(streams); ++i)
+      streams[i].wait = streams[i].wait_tiling = hk_sync_empty();
+   CHECK(hk_sync_resolve(&state, ev, 3, cmd->sync_remap.data, streams, 2, false));
+   CHECK(streams[0].wait_tiling.engine[HK_SYNC_CDM] == 2);
+   CHECK(streams[1].wait.engine[HK_SYNC_RENDER] == 6);
+
+   /* An unclassified post-graphics helper still requests fallback. */
+   struct hk_cs *post = hk_cmd_buffer_get_cs_general(
+      cmd, &cmd->current_cs.post_gfx, true, HK_SYNC_ALL);
+   CHECK(post && !post->sync_before_gfx && cmd->sync_fallback);
+
+   free(post);
    free(pre);
    util_dynarray_fini(&cmd->sync_events);
    util_dynarray_fini(&cmd->sync_remap);

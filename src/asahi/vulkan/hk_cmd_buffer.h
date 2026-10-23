@@ -557,6 +557,8 @@ struct hk_cs {
 
    uint32_t sync_id;
    unsigned sync_stages;
+   /* The whole pre-graphics stream is ordered at its render's first event. */
+   bool sync_before_gfx;
    bool cdm_dirty;
 
    /* The last dispatch ended with the compute-only barrier: later compute
@@ -1040,6 +1042,7 @@ hk_pool_cs_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment,
 void hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
 void hk_cmd_sync_work(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                       unsigned stages);
+bool hk_cmd_sync_before_gfx(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
 void hk_cmd_sync_barrier(struct hk_cmd_buffer *cmd,
                          VkPipelineStageFlags2 src, VkPipelineStageFlags2 dst,
                          VkAccessFlags2 src_access, VkAccessFlags2 dst_access);
@@ -1150,9 +1153,9 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
       list_inithead(&cs->node);
 
       bool before_gfx = (ptr == &cmd->current_cs.pre_gfx);
-      /* These helpers are physically reordered around rendering. Until their
-       * logical operations are split out, preserve full ordering. */
-      cmd->sync_fallback |= before_gfx || ptr == &cmd->current_cs.post_gfx;
+      /* Post-graphics operations may still have events interleaved with their
+       * render. Keep the fallback until those operations are classified. */
+      cmd->sync_fallback |= ptr == &cmd->current_cs.post_gfx;
 
       /* Insert into the command buffer. We usually append to the end of the
        * command buffer, except for pre-graphics streams which go right before
@@ -1170,10 +1173,14 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
 
       if (!compute)
          hk_cs_init_graphics(cmd, cs);
+
+      if (before_gfx && !hk_cmd_sync_before_gfx(cmd, cs))
+         cmd->sync_fallback = true;
    }
 
    assert(*ptr != NULL);
-   hk_cmd_sync_work(cmd, *ptr, stages);
+   if (!(*ptr)->sync_before_gfx)
+      hk_cmd_sync_work(cmd, *ptr, stages);
    return *ptr;
 }
 
@@ -1343,8 +1350,8 @@ hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
    assert(cmd->current_cs.post_gfx == NULL);
    cmd->end_hint = HK_CS_END_UNKNOWN;
 
-   /* We just flushed out the heap use. If we want to use it again, we'll need
-    * to queue a free for it again.
+   /* The next render must acquire and reset the geometry heap again. Mesh
+    * heap releases remain in the post-graphics stream.
     */
    cmd->uses_heap = false;
    cmd->uses_mesh_heap = false;
