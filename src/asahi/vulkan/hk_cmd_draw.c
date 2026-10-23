@@ -5220,8 +5220,10 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
          !cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL];
       if (cmd->state.gfx.apple9_fan_unrolled)
          draw_ = hk_apple9_unroll_fan(cmd, draw_);
-      /* Software stages read the draw ID from the root table they upload. */
-      if (cmd->state.gfx.descriptors.root.draw.draw_id != draw_id) {
+      /* Software stages read the draw ID from the root table they upload,
+       * when one of the bound stages they run reads it. */
+      if (hk_apple9_reads_draw_id(&cmd->state.gfx) &&
+          cmd->state.gfx.descriptors.root.draw.draw_id != draw_id) {
          cmd->state.gfx.descriptors.root.draw.draw_id = draw_id;
          cmd->state.gfx.descriptors.root_dirty = true;
       }

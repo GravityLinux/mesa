@@ -4467,6 +4467,21 @@ hk_apple9_fragment_dump_end(struct blob *nir_blob, bool compiled,
  * operations read images; loads from any buffer, global or descriptor
  * memory and vertex attributes read buffers. Queries and stores do not
  * read. Unknown memory loads count as buffers. */
+bool
+hk_nir_reads_draw_id(const nir_shader *nir)
+{
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_intrinsic &&
+                nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_draw_id)
+               return true;
+         }
+      }
+   }
+   return false;
+}
+
 uint8_t
 hk_nir_pre_raster_reads(const nir_shader *nir)
 {
@@ -5310,6 +5325,7 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
    }
    obj->pre_raster_reads = HK_READS_UNKNOWN;
+   obj->reads_draw_id = hk_nir_reads_draw_id(nir);
 
    if (!nir->info.io_lowered) {
       hk_lower_nir(dev, nir, info->robustness, false, info->set_layout_count,
@@ -6577,6 +6593,7 @@ hk_apple9_compile_graphics_path(struct hk_device *dev, uint32_t count,
          nir_shader *nir = infos[i].nir;
          obj->writes_memory = nir->info.writes_memory;
          obj->pre_raster_reads = hk_nir_pre_raster_reads(nir);
+         obj->reads_draw_id = hk_nir_reads_draw_id(nir);
          shader->info.set_count = infos[i].set_layout_count;
          shader->info.apple9_render_targets = key.targets;
          shader->info.apple9_line_stipple_first =
@@ -7425,6 +7442,7 @@ hk_apple9_defer_graphics(struct hk_device *dev, uint32_t count,
       simple_mtx_init(&deferred->variant_lock, mtx_plain);
       obj->writes_memory = infos[i].nir->info.writes_memory;
       obj->pre_raster_reads = hk_nir_pre_raster_reads(infos[i].nir);
+      obj->reads_draw_id = hk_nir_reads_draw_id(infos[i].nir);
       out[i] = &obj->vk;
    }
 
@@ -8191,6 +8209,7 @@ hk_deserialize_api_shader_inner(struct vk_device *vk_dev, struct blob_reader *bl
       d->cull_distance = blob_read_uint8(blob);
       obj->writes_memory = blob_read_uint8(blob);
       obj->pre_raster_reads = blob_read_uint8(blob);
+      obj->reads_draw_id = blob_read_uint8(blob);
       d->nir_size = blob_read_uint32(blob);
       const void *nir = blob_read_bytes(blob, d->nir_size);
       d->nir = blob->overrun ? NULL : malloc(MAX2(d->nir_size, 1));
@@ -8222,6 +8241,7 @@ hk_deserialize_api_shader_inner(struct vk_device *vk_dev, struct blob_reader *bl
    obj->writes_memory = obj->vk.stage != MESA_SHADER_FRAGMENT ||
                         obj->variants[0].info.fs.writes_memory;
    obj->pre_raster_reads = blob_read_uint8(blob);
+   obj->reads_draw_id = blob_read_uint8(blob);
    bool has_native = blob_read_uint8(blob);
    if (blob->overrun ||
        (has_native && (!allow_native || obj->apple9_native_leaf))) {
@@ -8299,6 +8319,7 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
       blob_write_uint8(blob, d->cull_distance);
       blob_write_uint8(blob, obj->writes_memory);
       blob_write_uint8(blob, obj->pre_raster_reads);
+      blob_write_uint8(blob, obj->reads_draw_id);
       blob_write_uint32(blob, d->nir_size);
       blob_write_bytes(blob, d->nir, d->nir_size);
       return hk_apple9_serialize_variants(d, blob);
@@ -8308,6 +8329,7 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
       hk_shader_serialize(vk_dev, shader, blob);
    }
    blob_write_uint8(blob, obj->pre_raster_reads);
+   blob_write_uint8(blob, obj->reads_draw_id);
 
    blob_write_uint8(blob, obj->apple9_native != NULL);
    if (obj->apple9_native) {
