@@ -1767,6 +1767,56 @@ agx_apple9_uses(const struct agx_apple9_vir_program *program, uint32_t value)
    return program->use_analysis->first[value];
 }
 
+/* Rewrite one register source. A valid use analysis stays valid: the use moves
+ * to the new value's chain at its layout position, so passes that edit
+ * operands between queries do not rebuild the whole analysis per edit. */
+void
+agx_apple9_vir_set_source(struct agx_apple9_vir_program *program,
+                          struct agx_apple9_vir_instr *instr, unsigned source,
+                          uint32_t value)
+{
+   struct agx_apple9_use_analysis *a = program->use_analysis;
+   const uint32_t old = instr->src[source];
+   program->dependencies_finalized = false;
+   instr->src[source] = value;
+   if (!a || !a->valid || old == value)
+      return;
+   if (old >= program->value_count || value >= program->value_count) {
+      a->valid = false;
+      return;
+   }
+
+   struct agx_apple9_use **link = &a->first[old], *previous = NULL;
+   while (*link && ((*link)->instruction != instr || (*link)->source != source)) {
+      previous = *link;
+      link = &(*link)->next;
+   }
+   struct agx_apple9_use *use = *link;
+   if (!use) {
+      a->valid = false;
+      return;
+   }
+   *link = use->next;
+   if (a->last[old] == use)
+      a->last[old] = previous;
+
+   /* Chains are ordered by (position, source), as the rebuild appends them. */
+   const unsigned position = apple9_node(instr)->position;
+   previous = NULL;
+   link = &a->first[value];
+   while (*link) {
+      const unsigned p = apple9_node((*link)->instruction)->position;
+      if (p > position || (p == position && (*link)->source > source))
+         break;
+      previous = *link;
+      link = &(*link)->next;
+   }
+   use->next = *link;
+   *link = use;
+   if (!use->next)
+      a->last[value] = use;
+}
+
 /* Final dependency decisions follow all operand/layout legalization and CFG
  * liveness. Only physical expansion and byte packing may follow this point. */
 static bool

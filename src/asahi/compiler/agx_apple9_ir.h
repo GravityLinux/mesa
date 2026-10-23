@@ -535,8 +535,9 @@ struct agx_apple9_block {
    unsigned offset;
 };
 
-/* Uses are ordered by machine layout. Rebuild after operand edits; pointers
- * remain valid only until the next analysis rebuild. */
+/* Uses are ordered by machine layout. agx_apple9_vir_set_source keeps them
+ * current; other operand edits must invalidate. Pointers remain valid only
+ * until the next analysis rebuild. */
 struct agx_apple9_use {
    struct agx_apple9_vir_instr *instruction;
    unsigned source;
@@ -591,6 +592,9 @@ const struct agx_apple9_vir_instr *agx_apple9_definition(
    const struct agx_apple9_vir_program *program, uint32_t value);
 const struct agx_apple9_use *agx_apple9_uses(
    const struct agx_apple9_vir_program *program, uint32_t value);
+void agx_apple9_vir_set_source(struct agx_apple9_vir_program *program,
+                               struct agx_apple9_vir_instr *instr,
+                               unsigned source, uint32_t value);
 
 void agx_apple9_vir_init(struct agx_apple9_vir_program *program);
 void agx_apple9_vir_finish(struct agx_apple9_vir_program *program);
