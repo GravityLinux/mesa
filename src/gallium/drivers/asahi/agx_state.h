@@ -299,6 +299,9 @@ struct agx_uncompiled_shader {
       uint64_t outputs_written;
       uint64_t inputs_flat_shaded;
       uint64_t inputs_linear_shaded;
+      /* Colors read without an interpolation qualifier, which follow the
+       * shade model. Includes the matching back colors. */
+      uint64_t inputs_shade_model_colors;
       uint8_t cull_distance_size;
       bool has_edgeflags;
       bool uses_draw_id;

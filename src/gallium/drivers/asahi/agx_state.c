@@ -2291,6 +2291,28 @@ should_lower_robustness(const nir_intrinsic_instr *intr, const void *data)
    }
 }
 
+static bool
+agx_gather_shade_model_color(nir_builder *b, nir_intrinsic_instr *intr,
+                             void *data)
+{
+   uint64_t *mask = data;
+   if (intr->intrinsic != nir_intrinsic_load_interpolated_input)
+      return false;
+
+   nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+   nir_intrinsic_instr *bary = nir_src_as_intrinsic(intr->src[0]);
+   if (!(BITFIELD64_BIT(sem.location) & VARYING_BITS_COLOR) ||
+       nir_intrinsic_interp_mode(bary) != INTERP_MODE_NONE)
+      return false;
+
+   *mask |= BITFIELD64_BIT(sem.location);
+   if (sem.location == VARYING_SLOT_COL0)
+      *mask |= VARYING_BIT_BFC0;
+   else if (sem.location == VARYING_SLOT_COL1)
+      *mask |= VARYING_BIT_BFC1;
+   return false;
+}
+
 static void
 agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
                       nir_shader *nir, bool support_lod_bias, bool robust)
@@ -2350,6 +2372,9 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
       so->info.inputs_flat_shaded = nir->info.inputs_read &
                                     ~nir->info.linear_varyings &
                                     ~nir->info.perspective_varyings;
+      nir_shader_intrinsics_pass(nir, agx_gather_shade_model_color,
+                                 nir_metadata_all,
+                                 &so->info.inputs_shade_model_colors);
 
       /* Interpolate varyings at fp16 and write to the tilebuffer at fp16. As an
        * exception, interpolate flat shaded at fp32. This works around a
@@ -2807,8 +2832,13 @@ agx_apple9_varying_key(struct agx_context *ctx,
       layout->outputs_flat = fs->info.inputs_flat_shaded;
       layout->outputs_linear = fs->info.inputs_linear_shaded;
    }
-   if (ctx->rast->base.flatshade)
-      layout->outputs_flat |= VARYING_BITS_COLOR;
+   /* Flat shading applies only to colors without an interpolation
+    * qualifier, as nir_lower_flatshade does in the fragment shader. Explicitly
+    * smooth or noperspective colors must stay interpolated, including on
+    * vertices the clipper creates.
+    */
+   if (ctx->rast->base.flatshade && fs)
+      layout->outputs_flat |= fs->info.inputs_shade_model_colors;
 }
 
 static bool
