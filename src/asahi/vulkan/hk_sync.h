@@ -63,6 +63,44 @@ struct hk_sync_event {
    uint32_t barrier_group;
 };
 
+/* Index raw stream IDs while recording. Barriers carry no stream ID. */
+static inline void
+hk_sync_index_event(uint32_t *first_event, uint32_t stream, uint32_t index)
+{
+   if (stream != HK_SYNC_NONE && index < first_event[stream])
+      first_event[stream] = index;
+}
+
+/* Repair the index after inserting/reordering events in [first, end). An
+ * earlier event is unaffected. Walking backwards leaves each affected stream
+ * pointing at its earliest occurrence, including streams with repeated work.
+ * This touches only the range the caller already moved, never older history.
+ */
+static inline void
+hk_sync_reindex_events(uint32_t *first_event, const struct hk_sync_event *events,
+                       unsigned first, unsigned end)
+{
+   while (end > first) {
+      uint32_t stream = events[--end].stream;
+      if (stream != HK_SYNC_NONE && first_event[stream] != HK_SYNC_NONE &&
+          first_event[stream] >= first)
+         first_event[stream] = end;
+   }
+}
+
+/* Removed streams no longer have an indexed event. At final CDM merging,
+ * fold their first event into the surviving stream. No reordering follows
+ * that merge; the event log retains its stable IDs for sync resolution.
+ */
+static inline void
+hk_sync_remap_first_event(uint32_t *first_event, uint32_t from, uint32_t to)
+{
+   assert(from != to);
+   if (to != HK_SYNC_NONE)
+      hk_sync_index_event(first_event, to, first_event[from]);
+   first_event[from] = HK_SYNC_NONE;
+}
+
 struct hk_sync_stream {
    struct hk_sync_dep wait;
    /* The subset of wait needed before a render command's tiling stage. The

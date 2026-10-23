@@ -789,6 +789,9 @@ struct hk_cmd_buffer {
    /* Immutable after recording; resolved afresh for every queue submission. */
    struct util_dynarray sync_events;
    struct util_dynarray sync_remap;
+   /* First event for each stable stream ID, or HK_SYNC_NONE until work is
+    * recorded. Reordering updates only the affected event range. */
+   struct util_dynarray sync_first_event;
    uint32_t sync_next_group;
    unsigned sync_scope;
    unsigned sync_render_stages;
@@ -1127,6 +1130,7 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
       };
 
       util_dynarray_append(&cmd->sync_remap, cs->sync_id);
+      util_dynarray_append(&cmd->sync_first_event, (uint32_t)HK_SYNC_NONE);
 
       list_inithead(&cs->node);
 

@@ -119,6 +119,7 @@ transitions(struct hk_cmd_buffer *cmd)
    cmd->uploader[HK_CMD_POOL_CONTEXT].chunks[0].base = 0x1500000000ull;
    cmd->sync_events = UTIL_DYNARRAY_INIT;
    cmd->sync_remap = UTIL_DYNARRAY_INIT;
+   cmd->sync_first_event = UTIL_DYNARRAY_INIT;
    list_inithead(&cmd->control_streams);
    struct hk_rendering_state *r = &cmd->state.gfx.render;
    r->cr.bg.partial.usc = 0x1000;
@@ -165,6 +166,7 @@ transitions(struct hk_cmd_buffer *cmd)
    }
    util_dynarray_fini(&cmd->sync_events);
    util_dynarray_fini(&cmd->sync_remap);
+   util_dynarray_fini(&cmd->sync_first_event);
    free(pool);
 }
 

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "../hk_sync.h"
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <vector>
 
 class Sync : public testing::Test {
@@ -406,4 +407,60 @@ TEST(SyncScopes, ExecutionOnlyAndOneSidedMemoryScopes)
                                    VK_ACCESS_2_SHADER_WRITE_BIT, 0), HK_SYNC_COMPUTE);
    EXPECT_EQ(hk_sync_ordered_stages(0, HK_SYNC_COMPUTE, 0,
                                    VK_ACCESS_2_SHADER_READ_BIT), HK_SYNC_COMPUTE);
+}
+
+/* Compare the recording index with an independent linear oracle after every
+ * insertion/move, including repeated work declarations and barriers. */
+TEST(SyncIndex, ReorderedRecording)
+{
+   std::vector<hk_sync_event> events;
+   std::vector<uint32_t> first(16, HK_SYNC_NONE);
+   uint32_t random = 0x8132;
+   auto next = [&]() { return random = random * 1664525u + 1013904223u; };
+
+   for (unsigned step = 0; step < 2000; ++step) {
+      unsigned old_end = events.size();
+      unsigned count = 1 + next() % 4;
+      for (unsigned j = 0; j < count; ++j) {
+         uint32_t stream = (next() % 5 == 0) ? HK_SYNC_NONE : next() % 16;
+         hk_sync_index_event(first.data(), stream, events.size());
+         events.push_back({stream, 0, HK_SYNC_COMPUTE});
+      }
+
+      /* Hoist the newly recorded tail to an arbitrary earlier boundary,
+       * matching both barrier insertion and merge-pre stream placement. */
+      unsigned at = next() % (old_end + 1);
+      std::rotate(events.begin() + at, events.begin() + old_end, events.end());
+      hk_sync_reindex_events(first.data(), events.data(), at, events.size());
+
+      std::vector<uint32_t> expected(first.size(), HK_SYNC_NONE);
+      for (unsigned i = 0; i < events.size(); ++i) {
+         uint32_t stream = events[i].stream;
+         if (stream != HK_SYNC_NONE && expected[stream] == HK_SYNC_NONE)
+            expected[stream] = i;
+      }
+      ASSERT_EQ(first, expected) << "after recording step " << step;
+   }
+}
+
+TEST(SyncIndex, MergeAndRemove)
+{
+   uint32_t first[] = {10, 2, 7, HK_SYNC_NONE};
+   /* Physical CDM ordering can differ from event order. */
+   hk_sync_remap_first_event(first, 1, 0);
+   EXPECT_EQ(first[0], 2u);
+   EXPECT_EQ(first[1], HK_SYNC_NONE);
+   hk_sync_remap_first_event(first, 2, 0);
+   EXPECT_EQ(first[0], 2u);
+   EXPECT_EQ(first[2], HK_SYNC_NONE);
+   hk_sync_remap_first_event(first, 3, 0);
+   EXPECT_EQ(first[0], 2u);
+   hk_sync_remap_first_event(first, 0, HK_SYNC_NONE);
+   EXPECT_EQ(first[0], HK_SYNC_NONE);
+
+   /* Removing an empty render leaves its event in the log; a later move
+    * must not make the removed stream live again. */
+   struct hk_sync_event events[] = {{HK_SYNC_NONE, 0, 0}, {0, 0, 0}};
+   hk_sync_reindex_events(first, events, 0, 2);
+   EXPECT_EQ(first[0], HK_SYNC_NONE);
 }
