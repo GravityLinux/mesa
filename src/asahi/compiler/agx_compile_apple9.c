@@ -8176,6 +8176,7 @@ apple9_compile_dag_tail(nir_shader *nir, struct agx_shader_part *out,
    }
    apple9_prepared_main = NULL;
    ralloc_free(prepared);
+   agx_apple9_ra_release_probe_results();
    *chosen_cost = use_original ? original_cost : address_cost;
    const char *log = use_original ? original_log : address_log;
    size_t size = use_original ? original_size : address_size;
