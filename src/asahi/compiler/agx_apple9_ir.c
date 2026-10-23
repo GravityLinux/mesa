@@ -1874,10 +1874,13 @@ apple9_texture_handoff(const struct agx_apple9_vir_program *program,
                        unsigned sample)
 {
    unsigned handoff = apple9_first_consumer(program, sample);
-   for (unsigned depth = 0; depth < 4 && handoff != UINT_MAX; ++depth) {
+   for (unsigned depth = 0; handoff != UINT_MAX; ++depth) {
       const struct agx_apple9_vir_instr *edge = program->instructions[handoff];
       if (edge->op != AGX_APPLE9_VIR_PHI_SRC)
          return handoff;
+      /* Too deep a chain: treat the borrow as lasting to the end. */
+      if (depth == 4)
+         return UINT_MAX;
       unsigned next = UINT_MAX;
       for (const struct agx_apple9_use *use = agx_apple9_uses(program, edge->target);
            use; use = use->next) {

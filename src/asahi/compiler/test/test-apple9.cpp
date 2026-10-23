@@ -12378,6 +12378,75 @@ TEST(Apple9CompletionArms, IfElseAlternativesShareASlot)
    ralloc_free(b.shader);
 }
 
+/* A device load pending from the then arm and an else-arm write to the same
+ * (phi-coalesced) register act on disjoint lanes: the write does not wait. */
+TEST(Apple9CompletionArms, ElseWriteOverPendingThenLoadDoesNotWait)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE,
+      &agx_nir_options, "else_write_over_then_load");
+   nir_block logical[4] = {};
+   logical[0].successors[0] = &logical[1];
+   logical[0].successors[1] = &logical[2];
+   logical[1].successors[0] = &logical[3];
+   logical[2].successors[0] = &logical[3];
+   agx_apple9_vir_program p;
+   agx_apple9_vir_init(&p);
+   agx_apple9_block *blocks[4];
+   for (unsigned i = 0; i < 4; ++i) {
+      blocks[i] = agx_apple9_block_create(&p);
+      blocks[i]->nir = &logical[i];
+   }
+   agx_apple9_device_load_contract contract = {
+      .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
+      .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
+   };
+   agx_apple9_block_begin(&p, blocks[0]);
+   auto zero = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IMM,
+      AGX_APPLE9_ENC_MOV_IMM32, nullptr, 0, 0);
+   auto merged = agx_apple9_vir_emit_phi(&p, blocks[3]);
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_EXEC_MASK_PUSH,
+      AGX_APPLE9_ENC_EXEC_MASK_PUSH, nullptr, 0, AGX_APPLE9_EXEC_MASK_PREDICATE(0)));
+   agx_apple9_block_begin(&p, blocks[1]);
+   auto a = agx_apple9_vir_emit_device_load(&p, 0, zero, &contract);
+   ASSERT_TRUE(agx_apple9_vir_emit_phi_source(&p, merged, a));
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_EXEC_MASK_ELSE,
+      AGX_APPLE9_ENC_EXEC_MASK_ELSE, nullptr, 0, 0));
+   agx_apple9_block_begin(&p, blocks[2]);
+   auto c = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IMM,
+      AGX_APPLE9_ENC_MOV_IMM32, nullptr, 0, 0x1234);
+   ASSERT_TRUE(agx_apple9_vir_emit_phi_source(&p, merged, c));
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_EXEC_MASK_POP,
+      AGX_APPLE9_ENC_EXEC_MASK_POP, nullptr, 0, 0));
+   agx_apple9_block_begin(&p, blocks[3]);
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_STORE_UNIFORM,
+      AGX_APPLE9_ENC_STORE_UNIFORM, &merged, 1, 0));
+   agx_apple9_place_phis(&p);
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
+   unsigned load_reg = ~0u, slot = 0;
+   bool in_else = false, wrote_same = false;
+   for (unsigned i = 0; i < p.instruction_count; ++i) {
+      const auto *ins = p.instructions[i];
+      if (ins->op == AGX_APPLE9_VIR_DEVICE_LOAD) {
+         load_reg = p.phys[ins->dest];
+         slot = ins->producer_scoreboard_slot;
+      }
+      in_else |= ins->op == AGX_APPLE9_VIR_EXEC_MASK_ELSE;
+      if (ins->op == AGX_APPLE9_VIR_EXEC_MASK_POP)
+         in_else = false;
+      if (in_else) {
+         EXPECT_NE(ins->op, AGX_APPLE9_VIR_WAIT);
+         EXPECT_NE(ins->scoreboard_slot, slot);
+         wrote_same |= ins->dest != AGX_APPLE9_VREG_INVALID &&
+                       p.phys[ins->dest] == load_reg;
+      }
+   }
+   /* Otherwise the test does not exercise a register overlap. */
+   EXPECT_TRUE(wrote_same);
+   agx_apple9_vir_finish(&p);
+   ralloc_free(b.shader);
+}
+
 TEST_F(Apple9Completion, PointerTupleRetiresAtRetainedAddressUse)
 {
    auto zero = imm(0);

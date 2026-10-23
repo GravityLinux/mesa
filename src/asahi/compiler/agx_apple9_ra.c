@@ -1238,8 +1238,10 @@ apple9_reads_sources_at_issue(const struct agx_apple9_vir_instr *ins)
    }
 }
 
+/* Hazards on shared execution resources rather than on a lane's registers or
+ * memory: they hold however the producer's and consumer's lanes relate. */
 static bool
-apple9_producer_hazard(const struct agx_apple9_vir_instr *ins,
+apple9_resource_hazard(const struct agx_apple9_vir_instr *ins,
                        const struct agx_apple9_vir_instr *producer)
 {
    /* T8132 r6 isolates the first channel submit as U0's publication consumer.
@@ -1248,6 +1250,17 @@ apple9_producer_hazard(const struct agx_apple9_vir_instr *ins,
    if (producer->op == AGX_APPLE9_VIR_MESH_CONTROL &&
        ins->op == AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL)
       return true;
+   /* This compound encoding contains a fixed slot-1 publication and wait. */
+   return (ins->encoding == AGX_APPLE9_ENC_BLOCK_IMAGE_STORE ||
+           ins->encoding == AGX_APPLE9_ENC_IMAGE_WRITE) &&
+          producer->producer_scoreboard_slot == AGX_APPLE9_SCOREBOARD_SLOT_1;
+}
+
+/* Hazards on a lane's own registers and memory. */
+static bool
+apple9_lane_hazard(const struct agx_apple9_vir_instr *ins,
+                   const struct agx_apple9_vir_instr *producer)
+{
    /* SAVE destroys its source just as a destination write would. In
     * particular, wait for earlier asynchronous borrowers before consuming it. */
    bool save = ins->op == AGX_APPLE9_VIR_SPILL_STORE;
@@ -1288,13 +1301,16 @@ apple9_producer_hazard(const struct agx_apple9_vir_instr *ins,
        (producer->op == AGX_APPLE9_VIR_SHARED_LOAD ||
         producer->op == AGX_APPLE9_VIR_SHARED_ATOMIC))
       return true;
-   if (ins->op == AGX_APPLE9_VIR_SHARED_LOAD &&
-       producer->op == AGX_APPLE9_VIR_SHARED_ATOMIC)
-      return true;
-   /* This compound encoding contains a fixed slot-1 publication and wait. */
-   return (ins->encoding == AGX_APPLE9_ENC_BLOCK_IMAGE_STORE ||
-           ins->encoding == AGX_APPLE9_ENC_IMAGE_WRITE) &&
-          producer->producer_scoreboard_slot == AGX_APPLE9_SCOREBOARD_SLOT_1;
+   return ins->op == AGX_APPLE9_VIR_SHARED_LOAD &&
+          producer->op == AGX_APPLE9_VIR_SHARED_ATOMIC;
+}
+
+static bool
+apple9_producer_hazard(const struct agx_apple9_vir_instr *ins,
+                       const struct agx_apple9_vir_instr *producer)
+{
+   return apple9_resource_hazard(ins, producer) ||
+          apple9_lane_hazard(ins, producer);
 }
 
 static enum agx_apple9_completion_class
@@ -1410,6 +1426,18 @@ unstructured:
    return true;
 }
 
+/* Results shown to be written only to the lanes active at issue: native Metal
+ * issues a texture sample (k19) or device load (k20) into the same register
+ * in both arms with the first still pending. Other asynchronous results have
+ * no such evidence yet and keep their cross-arm hazards. */
+static bool
+apple9_masked_writeback(const struct agx_apple9_vir_instr *producer)
+{
+   return !apple9_fixed_producer_slot(producer) &&
+          (producer->op == AGX_APPLE9_VIR_TEXTURE_SAMPLE ||
+           producer->op == AGX_APPLE9_VIR_DEVICE_LOAD);
+}
+
 static bool
 apple9_arms_disjoint(const struct apple9_arms *arms, unsigned a, unsigned b)
 {
@@ -1430,7 +1458,8 @@ apple9_pending_result_in(const struct apple9_pending *p, unsigned reg,
 {
    for (unsigned i = 0; i < p->count; ++i) {
       if (apple9_producer_result(&p->producer[i], reg) &&
-          !apple9_arms_disjoint(arms, p->arm[i], arm))
+          !(apple9_masked_writeback(&p->producer[i]) &&
+            apple9_arms_disjoint(arms, p->arm[i], arm)))
          return true;
    }
    return false;
@@ -1449,8 +1478,11 @@ apple9_pending_hazard(const struct agx_apple9_vir_instr *ins,
    for (unsigned i = 0; i < p->count; ++i) {
       if (barrier && !(exempt & apple9_completion_class(&p->producer[i])))
          return true;
-      if (!apple9_arms_disjoint(arms, p->arm[i], arm) &&
-          apple9_producer_hazard(ins, &p->producer[i]))
+      if (apple9_resource_hazard(ins, &p->producer[i]))
+         return true;
+      if (!(apple9_masked_writeback(&p->producer[i]) &&
+            apple9_arms_disjoint(arms, p->arm[i], arm)) &&
+          apple9_lane_hazard(ins, &p->producer[i]))
          return true;
       if (p->fenced[i] && apple9_acquire_hazard(ins, &p->producer[i]))
          return true;
