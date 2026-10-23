@@ -7568,16 +7568,19 @@ apple9_hoist_uniform_source(nir_src *src, void *data)
    return true;
 }
 
-/* Preamble-only reads are on for compute by default. In a large fragment
- * shader they raised register pressure. AGX_APPLE9_SAFE_HOIST_STAGES
- * selects =compute, =all or =none; hk chooses which reads qualify. */
+/* Preamble-only reads leave their branches in every stage. A fragment or
+ * vertex preamble runs once per draw, so moving a guarded uniform read there
+ * costs the draw a few instructions and saves each thread its load, address
+ * and the registers holding them. A setup that spills retries without them
+ * (apple9_preamble_trial). AGX_APPLE9_SAFE_HOIST_STAGES selects =all,
+ * =compute or =none; hk chooses which reads qualify. */
 static bool
 apple9_safe_reads_enabled(const nir_shader *nir)
 {
    const char *env = debug_get_option_cached_agx_apple9_safe_hoist_stages();
    const char *stages = apple9_safe_reads_override > 0 ? "all"
                         : apple9_safe_reads_override == 0 ? NULL
-                        : env ? env : "compute";
+                        : env ? env : "all";
    bool compute = nir->info.stage == MESA_SHADER_COMPUTE ||
                   nir->info.stage == MESA_SHADER_KERNEL;
    return stages && (!strcmp(stages, "all") ||
