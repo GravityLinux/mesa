@@ -794,13 +794,13 @@ expected failures and flakes separately and checking the actual native route.
 Zero full-group regressions and device correctness are not yet established.
 Native remains default-off; no device was accessed, installed or reset here.
 
-### Milestone 4 — review follow-ups in progress
+### Milestone 4 — review follow-ups ready for review
 
 Manager 19:1x relayed GO verdicts for milestones 1 and 2, recorded in
 `reviews/native-hybrid-m1-review-20261022.md` and
 `reviews/native-hybrid-m2-review-20261022.md` at the workspace root.
-the device runner's full-group run uses the frozen milestone-2 driver; milestone 4 does
-not replace that artifact while it is running.
+the device runner's completed full-group comparison uses the frozen milestone-2 driver;
+milestone 4 has separate host evidence and still needs review/device validation.
 
 The shared `agx_apple9_native_mesh_shape_eligible()` predicate now controls
 both early driver output-array lowering and the native compiler's V3/P1 gate.
@@ -819,30 +819,66 @@ pipelines retain their independently owned paired realizations. Binding a native
 leaf uses that leaf's constant-data root. Cache container revision 2 records the
 new metadata and rejects older layouts.
 
-Initial host checks: x86-64 ICD build and four focused tests pass. The hybrid
+Host checks: x86-64/aarch64 ICD builds and nine focused tests pass. The hybrid
 test counts real backend calls: a deferred eligible native resolve performs
 one native mesh compile, one FS compile and zero emulated mesh compiles. It also
 checks path switching/cache reuse, pairing IDs through serialization, helper
 guard depth, explicit native capability fallback and every BO upload failure
 on paired/native-only/fallback compiles. The routing test rejects mismatched IDs
-for both eager alternatives and standalone deferred leaves. Broader focused
-checks, the aarch64 build and the constant-table/timestamp/merged-render probes
-are still in progress; M4 compiler/driver review is pending.
+for both eager alternatives and standalone deferred leaves.
+
+The constant-table fixture exposed a real descriptor-layout bug: the root
+allocated six GL-stage constant slots, while task and mesh use slots 6 and 7.
+Those binds overwrote the adjacent descriptor-buffer array and root caching
+copied beyond its struct. `cf3fb9a207c` extends the tail to all eight graphics/
+compute/task/mesh slots and bumps the root cache layout to version 5. The
+regression test now exercises real binding/upload/reuse, checks descriptor
+buffer canaries, and checks rebinding a native-only leaf's constant root.
+
+Eight new host recordings (native off/on for four fixtures) pass: the original
+transition sequence with a dynamic immutable table, deferred native leaves with
+that table, a timestamp following a native draw, and a merged API render
+continuation. Capture checks follow the actual pointer chain to all 1024 table
+bytes, verify single-draw native streams, fragment-end timestamp placement,
+attachment programs and render/compute dependency edges. The merged fixture
+proves entry into the existing merge path before its next draw splits the
+native stream. Instructions are in
+`src/asahi/vulkan/tests/native-mesh-hybrid/README.md`.
+
+Final host evidence is
+`research/native-hybrid-20261022/M4-HOST.json`; raw captures and build logs are
+in `../native-hybrid-m4-20261022/`. The earlier paired 625-case recording
+inventory used `ab4f31a9abb`; it had zero API/debug errors and is retained under
+that exact identity. M4's final ICD is `08f0715c6df`, which also initializes
+the rejection diagnostic's shader pointers before early exits and identifies
+native draws in that message. No M4 hardware execution
+or pixel/timestamp qualification is claimed. Compiler/driver review is pending.
 
 **M2 acceptance condition:** if the device comparison finds any
 native-fail/emulated-pass case using native attributes or P1 primitive lowering,
-disable the corresponding opt-in default again. Neither default is qualified
-by host recording alone. Native itself remains default-off regardless.
+disable the corresponding opt-in default again. the device runner's completed paired
+M2 comparison reports zero such cases across 27,999 included tests: each arm
+has 26,349 passes, one shared `misc.max_lines` failure, 1,649 skips, zero XFail
+and zero observed flakes, with 13 exclusions separate. There are 54 passing
+cases with native-path entry; case-level entry is not proof every draw ran
+native. Attribute/P1 therefore remain enabled inside the opt-in. Native itself
+remains default-off. The report leaves native V3/P1 last-provoking/P1, depth
+bias, discriminating 1x sample-mask/A2C and explicit discard coverage gaps.
+Source evidence and hashes are in `M4-HOST.json`; full device evidence is at
+workspace `results/mesh-cts-full-native/DEFAULT-ON-BLOCKERS-hybrid.json`
+and `hybrid-retry/{FINAL-VERIFICATION,STATE-COVERAGE}.json`.
 
 ## native-capability
 
 Manager reprioritization, 2026-10-22: the V3/P1 triangle class reflects what we
 have implemented and qualified, not an established hardware maximum. Native
-capability measurement now takes priority over hybrid milestone-4 polish.
+capability measurement took priority over hybrid milestone-4 polish.
 M4 driver work is saved at `ab4f31a9abb`; unfinished fixture additions are saved
 at `4a11a5160b4`. Nine focused host checks, the x86-64/aarch64 builds, and paired
-625-case recording runs passed before reprioritization. M4 review and its
-constant-table/timestamp/continuation device checks remain pending.
+625-case recording runs passed before reprioritization. After the C2 kit freeze,
+the manager resumed M4 host polish, now documented above. M4 review and its
+constant-table/timestamp/continuation device checks remain pending. Capability
+conclusions still do not change advertised limits without device evidence.
 
 ### C1 — offline compiler study and existing state evidence
 
