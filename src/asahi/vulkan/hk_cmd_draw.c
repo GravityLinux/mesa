@@ -5000,8 +5000,13 @@ hk_apple9_resolve_shaders(struct hk_cmd_buffer *cmd, bool prefer_native)
       MESA_VK_DYNAMIC_RS_LINE_STIPPLE_ENABLE,
       MESA_VK_DYNAMIC_RS_POLYGON_MODE,
    };
+   /* Fragment shaders count invocations only while such a query is active;
+    * other draws use variants without the counter. */
+   const bool fs_statistics = gfx->descriptors.root.draw.pipeline_stats_flags &
+      VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT;
    bool changed = !gfx->apple9_resolved.valid ||
                   gfx->apple9_resolved.prefer_native != prefer_native ||
+                  gfx->apple9_resolved.fs_statistics != fs_statistics ||
                   gfx->apple9_resolved.render_gen != gfx->render_gen ||
                   memcmp(gfx->apple9_resolved.api, gfx->apple9_api,
                          sizeof(gfx->apple9_api));
@@ -5057,7 +5062,8 @@ hk_apple9_resolve_shaders(struct hk_cmd_buffer *cmd, bool prefer_native)
    struct hk_api_shader *out[HK_APPLE9_GFX_STAGES];
    uint64_t t_slow = hk_cpu_sub_begin();
    VkResult result = hk_apple9_resolve_graphics(dev, gfx->apple9_api, &state,
-                                                out, prefer_native);
+                                                out, prefer_native,
+                                                fs_statistics);
    hk_cpu_sub_end(t_slow, HK_CPU_SUB_RESOLVE_SLOW);
    if (result != VK_SUCCESS) {
       vk_command_buffer_set_error(&cmd->vk, result);
@@ -5071,6 +5077,7 @@ hk_apple9_resolve_shaders(struct hk_cmd_buffer *cmd, bool prefer_native)
    }
    gfx->apple9_resolved.valid = true;
    gfx->apple9_resolved.prefer_native = prefer_native;
+   gfx->apple9_resolved.fs_statistics = fs_statistics;
    gfx->apple9_resolved.render_gen = gfx->render_gen;
    memcpy(gfx->apple9_resolved.api, gfx->apple9_api, sizeof(gfx->apple9_api));
    memcpy(gfx->apple9_resolved.out, out, sizeof(out));

@@ -6628,7 +6628,8 @@ hk_apple9_compile_graphics_path(struct hk_device *dev, uint32_t count,
                              !nir->info.writes_memory &&
                              !key.sample_shading &&
                              !hk_apple9_interpolates_off_center(nir);
-               hk_apple9_lower_fs_statistics(nir);
+               if (!key.no_fs_statistics)
+                  hk_apple9_lower_fs_statistics(nir);
                NIR_PASS(_, nir, nir_shader_intrinsics_pass,
                         hk_apple9_clamp_depth_export,
                         nir_metadata_control_flow, NULL);
@@ -7150,7 +7151,8 @@ hk_apple9_eager_variant(struct hk_device *dev, uint32_t count,
 
    struct hk_api_shader *variant[HK_APPLE9_GFX_STAGES];
    hk_apple9_eager_compile = true;
-   if (hk_apple9_resolve_graphics(dev, api, &state, variant, true) !=
+   /* Warm the variant draws use outside statistics queries. */
+   if (hk_apple9_resolve_graphics(dev, api, &state, variant, true, false) !=
        VK_SUCCESS)
       fprintf(stderr, "HK_APPLE9_EAGER_VARIANTS: variant compile failed\n");
    hk_apple9_eager_compile = false;
@@ -7298,12 +7300,14 @@ VkResult
 hk_apple9_resolve_graphics(
    struct hk_device *dev, struct hk_api_shader *const api[HK_APPLE9_GFX_STAGES],
    const struct vk_graphics_pipeline_state *state,
-   struct hk_api_shader *out[HK_APPLE9_GFX_STAGES], bool prefer_native)
+   struct hk_api_shader *out[HK_APPLE9_GFX_STAGES], bool prefer_native,
+   bool fs_statistics)
 {
    struct hk_apple9_variant search;
    memset(&search, 0, sizeof(search));
    memcpy(search.api, api, sizeof(search.api));
    hk_apple9_graphics_key(&search.key, state);
+   search.key.no_fs_statistics = !fs_statistics;
    /* Collapse ineligible and non-mesh requests onto the emulated cache entry. */
    search.prefer_native = prefer_native && api[MESA_SHADER_MESH] &&
                           p_atomic_read(&api[MESA_SHADER_MESH]->apple9_native_candidate);

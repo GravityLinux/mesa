@@ -496,7 +496,8 @@ struct vk_graphics_pipeline_state;
 VkResult hk_apple9_resolve_graphics(
    struct hk_device *dev, struct hk_api_shader *const api[HK_APPLE9_GFX_STAGES],
    const struct vk_graphics_pipeline_state *state,
-   struct hk_api_shader *out[HK_APPLE9_GFX_STAGES], bool prefer_native);
+   struct hk_api_shader *out[HK_APPLE9_GFX_STAGES], bool prefer_native,
+   bool fs_statistics);
 
 bool hk_apple9_deferred_sample_shading(const struct hk_api_shader *fs);
 
@@ -699,6 +700,10 @@ struct hk_apple9_graphics_key {
    bool sample_shading;
    /* The depth/stencil attachment is also read as an input attachment. */
    bool zs_self_dep;
+   /* No fragment-invocation statistics query is active: omit the counter
+    * (hk_apple9_lower_fs_statistics). Draw-time variants only; pipelines
+    * compiled with their state keep it. */
+   bool no_fs_statistics;
    /* stippledLineEnable: lines measure a stipple counter in the fragment
     * shader, see hk_apple9_lower_line_stipple_fs. */
    bool line_stipple;
