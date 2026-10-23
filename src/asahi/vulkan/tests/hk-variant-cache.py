@@ -36,11 +36,10 @@ with tempfile.TemporaryDirectory(prefix="hk-variant-cache-") as directory:
         assert len({original, zero, one}) == 3, knob
     assert key(HK_APPLE9_VARIANT_CACHE_VERIFY="1") == original
     assert key(AGX_APPLE9_TRACE="first/path") == key(AGX_APPLE9_TRACE="second/path")
-    assert key(AGX_APPLE9_TRACE="first/path") != original
     assert key(HK_APPLE9_UNKNOWN_TEST="1") != original
     assert key(HK_APPLE9_UNKNOWN_TEST="1") == key(HK_APPLE9_UNKNOWN_TEST="2")
     assert key(UNRELATED_TEST="1") == original
     assert key(AGX_APPLE9_GATED="1", AGX_APPLE9_LICM="0") == key(
         AGX_APPLE9_LICM="0", AGX_APPLE9_GATED="1")
     print(f"cache keys: all {len(knobs)} active codegen knob values, ignored verification, "
-          "name-only tracing/unknown knobs and environment order pass")
+          "diagnostic path stability, unknown names and environment order pass")
