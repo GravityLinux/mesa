@@ -1,3 +1,4 @@
+#include "asahi/debug.h"
 #include "c11/threads.h"
 #include "agx_compile_apple9.h"
 /*
@@ -17,8 +18,6 @@
 
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_parallel_ra,
                       "AGX_APPLE9_PARALLEL_RA", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_trace_shared_ra,
-                      "AGX_APPLE9_TRACE_SHARED_RA", NULL)
 
 /* Apple9 selection keeps its machine operands and encoding contracts. The
  * shared IR carries their SSA dataflow, including genuine CFG phis, through
@@ -2062,7 +2061,7 @@ apple9_allocate_candidate(struct agx_apple9_vir_program *program,
       *reason = apple9_duplicate_candidate_reason;
       goto cleanup;
    }
-   if (debug_get_option_cached_agx_apple9_trace_shared_ra() != NULL)
+   if (agx_apple9_debug_enabled(AGX_A9_DBG_SHARED_RA))
       agx_print_shader(ra.ctx, stderr);
    if (!agx_ra(ra.ctx)) {
       *reason = ra.ctx->ra_error;

@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "asahi/debug.h"
 #include "util/bitset.h"
 #include "util/hash_table.h"
 #include "util/ralloc.h"
@@ -93,12 +94,11 @@ loops_exited(agx_context *ctx, const unsigned *loop_end, agx_block *pred,
    return exits;
 }
 
-DEBUG_GET_ONCE_BOOL_OPTION(spill_trace_loops, "AGX_SPILL_TRACE_LOOPS", false)
 
 static bool
 spill_trace_loops(void)
 {
-   return debug_get_option_spill_trace_loops();
+   return agx_apple9_debug_enabled(AGX_A9_DBG_SPILL_LOOPS);
 }
 
 struct next_uses {

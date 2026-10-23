@@ -4,6 +4,7 @@
  * Copyright 2022-2023 Collabora Ltd. and Red Hat Inc.
  * SPDX-License-Identifier: MIT
  */
+#include "asahi/debug.h"
 #include "util/u_debug.h"
 #include <inttypes.h>
 #include "hk_buffer.h"
@@ -212,7 +213,7 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
       buffer->va =
          agx_va_alloc(&dev->dev, vma_size_B, alignment, flags, bda_fixed_addr);
 
-      if (bda_capture_replay && debug_get_bool_option("HK_REPLAY_DEBUG", false))
+      if (bda_capture_replay && agx_apple9_debug_enabled(AGX_A9_DBG_REPLAY))
          fprintf(stderr,
                  "hk-replay: buffer size=0x%" PRIx64 " usage=0x%" PRIx64
                  " flags=0x%x requested=0x%" PRIx64 " got=0x%" PRIx64 "\n",

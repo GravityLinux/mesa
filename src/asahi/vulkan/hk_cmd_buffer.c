@@ -4,6 +4,7 @@
  * Copyright 2022-2023 Collabora Ltd. and Red Hat Inc.
  * SPDX-License-Identifier: MIT
  */
+#include "asahi/debug.h"
 #include "hk_cmd_buffer.h"
 #include <inttypes.h>
 #include "util/simple_mtx.h"
@@ -428,8 +429,6 @@ hk_pool_upload_cached(struct hk_cmd_buffer *cmd, const void *data,
    return ptr.gpu;
 }
 
-DEBUG_GET_ONCE_BOOL_OPTION(hk_upload_stats, "HK_UPLOAD_STATS", false)
-
 /* Upload a per-draw table, reusing the previous upload of the same kind when
  * the contents are unchanged. Unlike the content cache this keeps one entry
  * per kind: these tables carry the root address, so they rarely repeat
@@ -578,7 +577,7 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
     * uploads until reset, but do not retain duplicate CPU copies in executable
     * command buffers.
     */
-   if (cmd->upload_cache && debug_get_option_hk_upload_stats()) {
+   if (cmd->upload_cache && agx_apple9_debug_enabled(AGX_A9_DBG_UPLOAD)) {
       size_t bytes = 0;
       unsigned per_type[HK_UPLOAD_TABLE + 1] = {0};
       hash_table_foreach(cmd->upload_cache, entry) {
@@ -647,10 +646,7 @@ hk_cmd_sync_work(struct hk_cmd_buffer *cmd, struct hk_cs *cs, unsigned stages)
 void
 hk_render_merge_trace(const char *why, uint64_t a, uint64_t b)
 {
-   static int enabled = -1;
-   if (enabled < 0)
-      enabled = debug_get_bool_option("HK_APPLE9_MERGE_TRACE", false);
-   if (!enabled)
+   if (!agx_apple9_debug_enabled(AGX_A9_DBG_MERGE))
       return;
    static simple_mtx_t lock = SIMPLE_MTX_INITIALIZER;
    static struct { const char *why; uint64_t a, b, n; } table[64];

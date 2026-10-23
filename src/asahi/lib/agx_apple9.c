@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "asahi/debug.h"
 #include "agx_apple9.h"
 #include "asahi/compiler/agx_apple9_ir.h"
 #include "asahi/lib/pool.h"
@@ -564,7 +565,6 @@ agx_apple9_prepare_compute_dispatch_alloc(
       samplers, geometry, preamble_address, NULL, launch_address);
 }
 
-DEBUG_GET_ONCE_BOOL_OPTION(apple9_launch_check, "HK_APPLE9_LAUNCH_CHECK", false)
 
 bool
 agx_apple9_prepare_compute_dispatch_alloc_tmpl(
@@ -625,7 +625,7 @@ agx_apple9_prepare_compute_dispatch_alloc_tmpl(
           !agx_apple9_launch_template_emit(launch.cpu, tmpl, record.gpu, entry,
                                            launch.gpu))
          return false;
-      if (debug_get_option_apple9_launch_check()) {
+      if (agx_apple9_debug_enabled(AGX_A9_DBG_LAUNCH_CHECK)) {
          uint8_t ref[AGX_APPLE9_COMPUTE_LAUNCH_SIZE];
          size_t size = agx_apple9_compute_launch_size(profile);
          if (!apple9_build_compute_launch(ref, dev->shader_base, launch.gpu,
@@ -1363,7 +1363,7 @@ agx_apple9_prepare_graphics_stage(
       if (!agx_apple9_launch_template_emit(roots + 0x100, tmpl, state.gpu,
                                            entry, state.gpu + 0x100))
          return false;
-      if (debug_get_option_apple9_launch_check()) {
+      if (agx_apple9_debug_enabled(AGX_A9_DBG_LAUNCH_CHECK)) {
          uint8_t ref[AGX_APPLE9_GRAPHICS_LAUNCH_SIZE];
          params.resource_table = state.gpu;
          params.launch_address = state.gpu + 0x100;

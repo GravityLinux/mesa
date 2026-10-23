@@ -4,13 +4,13 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "asahi/debug.h"
 #include "agx_bo.h"
 #include <inttypes.h>
 #include <dlfcn.h>
 #include <stdlib.h>
 #include "util/u_debug.h"
 
-DEBUG_GET_ONCE_BOOL_OPTION(agx_bo_trace_labels, "AGX_BO_TRACE_LABELS", false)
 #include "util/hash_table.h"
 #include "util/ralloc.h"
 #include "agx_device.h"
@@ -511,7 +511,7 @@ agx_bo_finish_create(struct agx_device *dev, struct agx_bo *bo,
    if (bo->shim_cpu_epoch)
       *bo->shim_cpu_epoch = 0; /* Cache reuse must opt in again. */
    bo->label = label;
-   if (debug_get_option_agx_bo_trace_labels())
+   if (agx_apple9_debug_enabled(AGX_A9_DBG_BO_LABELS))
       fprintf(stderr, "AGX_BO_LABEL fd=%d handle=%u flags=%u size=%zu label=%s\n",
               dev->fd, bo->uapi_handle, bo->flags, bo->size, label);
    p_atomic_set(&bo->refcnt, 1);

@@ -6,6 +6,7 @@
  * Copyright 2018 Intel Corporation
  * SPDX-License-Identifier: MIT
  */
+#include "asahi/debug.h"
 #include "hk_shader.h"
 #include "hk_gpu_busy.h"
 #include "util/u_queue.h"
@@ -76,18 +77,10 @@
 #include "util/u_debug.h"
 #include "vulkan/vulkan_core.h"
 
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_trace_nir, "AGX_APPLE9_TRACE_NIR", NULL)
 DEBUG_GET_ONCE_OPTION(cached_hk_apple9_dump_fragment_dir,
                       "HK_APPLE9_DUMP_FRAGMENT_DIR", NULL)
-DEBUG_GET_ONCE_OPTION(cached_hk_apple9_eager_trace,
-                      "HK_APPLE9_EAGER_TRACE", NULL)
 DEBUG_GET_ONCE_OPTION(cached_hk_apple9_eager_variants,
                       "HK_APPLE9_EAGER_VARIANTS", NULL)
-DEBUG_GET_ONCE_OPTION(cached_hk_apple9_pressure_stats,
-                      "HK_APPLE9_PRESSURE_STATS", NULL)
-DEBUG_GET_ONCE_OPTION(cached_hk_apple9_trace_vectorize,
-                      "HK_APPLE9_TRACE_VECTORIZE", NULL)
-
 
 /* Set while a pipeline-time eager variant compiles on this thread. */
 static _Thread_local bool hk_apple9_eager_compile;
@@ -152,7 +145,6 @@ static const char *const hk_codegen_env[] = {
    "AGX_APPLE9_NO_DESCRIPTOR_HOIST",
    "AGX_APPLE9_NO_POINTER_LOAD", "AGX_APPLE9_NO_PROMOTE",
    "AGX_APPLE9_NO_SAMPLER_HOIST", "AGX_APPLE9_NO_UNIFORM_MOVE",
-   "AGX_APPLE9_RA_WEBS",
    "AGX_APPLE9_SAFE_HOIST_STAGES", "HK_APPLE9_DESCRIPTOR_BUFFER",
    "HK_APPLE9_MESH_SHADER", "HK_APPLE9_NATIVE_MESH",
    "HK_APPLE9_NATIVE_MESH_ATTRIBUTES",
@@ -185,7 +177,8 @@ hk_env_key_kind(const char *var)
 {
    if (strncmp(var, "AGX_", 4) && strncmp(var, "HK_APPLE9_", 10))
       return 0;
-   if (hk_env_named(var, hk_ignored_env, ARRAY_SIZE(hk_ignored_env)))
+   if (agx_apple9_is_debug_env(var) ||
+       hk_env_named(var, hk_ignored_env, ARRAY_SIZE(hk_ignored_env)))
       return 0;
    return hk_env_named(var, hk_codegen_env, ARRAY_SIZE(hk_codegen_env)) ? 2 : 1;
 }
@@ -1419,7 +1412,6 @@ static const enum mesa_vk_dynamic_graphics_state hk_apple9_keyed_dynamic[] = {
    MESA_VK_DYNAMIC_RS_LINE_STIPPLE_ENABLE,
    MESA_VK_DYNAMIC_RS_POLYGON_MODE,
 };
-
 
 /* With unused attachments, a render's tile layout can differ from the one
  * pipeline formats imply: a null view occupies one word whatever the
@@ -3759,7 +3751,6 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_push_const,
             nir_address_format_32bit_offset);
 
-
    /* Turn cache flushes into image coherency bits while we still have derefs */
    NIR_PASS(_, nir, nir_lower_memory_model);
 
@@ -3828,7 +3819,7 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       /* Explicit I/O builds each access's base and offset afresh. The
        * vectorizer only merges accesses sharing those definitions. */
       NIR_PASS(_, nir, nir_opt_cse);
-      if (debug_get_option_cached_hk_apple9_trace_vectorize() &&
+      if (agx_apple9_debug_enabled(AGX_A9_DBG_VECTORIZE) &&
           nir->info.stage == MESA_SHADER_FRAGMENT)
          nir_print_shader(nir, stderr);
       /* Below the pressure budget, merge without windows, unless that
@@ -3843,7 +3834,7 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
          peak_free = hk_apple9_vectorized_peak(nir, false);
          policy.windowed = peak_free > peak_windowed;
       }
-      if (debug_get_option_cached_hk_apple9_pressure_stats())
+      if (agx_apple9_debug_enabled(AGX_A9_DBG_PRESSURE))
          fprintf(stderr,
                  "HK_PRESSURE stage=%u peak=%u windowed=%u merged_peaks=%u/%u\n",
                  nir->info.stage, peak,
@@ -5053,7 +5044,6 @@ hk_apple9_compile_graphics(struct hk_device *dev, uint32_t count,
                            const VkAllocationCallbacks *alloc,
                            struct vk_shader **out);
 
-
 VkResult
 hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
                   const struct vk_graphics_pipeline_state *state,
@@ -5553,7 +5543,7 @@ hk_apple9_compile_tes(struct hk_device *dev, nir_shader *nir,
    layout.ignore_point_size = !layout.rasterize_points;
    NIR_PASS(_, nir, poly_nir_lower_tes, true);
    hk_apple9_lower_prerast_sysvals(nir, MESA_SHADER_TESS_EVAL);
-   if (debug_get_option_cached_agx_apple9_trace_nir() != NULL)
+   if (agx_apple9_debug_enabled(AGX_A9_DBG_NIR))
       nir_print_shader(nir, stderr);
    bool cull_mask;
    if (!hk_apple9_compile_vertex_culls(nir, &layout, &hw->b, &cull_mask,
@@ -5825,7 +5815,7 @@ hk_apple9_compile_gs(struct hk_device *dev, nir_shader *nir,
       layout.rasterize_points = info.mode == MESA_PRIM_POINTS;
       layout.ignore_point_size = !layout.rasterize_points;
       hk_apple9_lower_prerast_sysvals(rast, MESA_SHADER_GEOMETRY);
-      if (debug_get_option_cached_agx_apple9_trace_nir() != NULL)
+      if (agx_apple9_debug_enabled(AGX_A9_DBG_NIR))
          nir_print_shader(rast, stderr);
       if (agx_compile_apple9_vertex_inputs(rast, &layout, &rast_shader->b,
                                            reason))
@@ -5894,7 +5884,7 @@ hk_apple9_compile_mesh(struct hk_device *dev, nir_shader *nir,
                   hk_apple9_lower_clip_z_coeff, nir_metadata_control_flow,
                   NULL);
       }
-      if (debug_get_option_cached_agx_apple9_trace_nir() != NULL)
+      if (agx_apple9_debug_enabled(AGX_A9_DBG_NIR))
          nir_print_shader(rast_nir, stderr);
       if (agx_compile_apple9_vertex_inputs(rast_nir, &layout, &rast->b, reason))
          result = hk_apple9_finish_shader(dev, rast, rast_nir);
@@ -6119,7 +6109,6 @@ hk_apple9_compile_graphics_path(struct hk_device *dev, uint32_t count,
          continue;
       hk_apple9_lower_primitive_fs(infos[i].nir, native_mesh);
    }
-
 
    /* Per-vertex inputs are read as flat copies, written by the passthrough
     * geometry shader of vertex-shader pipelines, or by the vertex shader
@@ -6395,7 +6384,7 @@ hk_apple9_compile_graphics_path(struct hk_device *dev, uint32_t count,
              !hk_per_vertex_copies_used(&per_vertex))
             hk_apple9_strip_unread_outputs(nir);
 
-         if (debug_get_option_cached_agx_apple9_trace_nir() != NULL)
+         if (agx_apple9_debug_enabled(AGX_A9_DBG_NIR))
             nir_print_shader(nir, stderr);
 
          if (stage == MESA_SHADER_VERTEX) {
@@ -7046,7 +7035,7 @@ hk_apple9_eager_variant(struct hk_device *dev, uint32_t count,
          api[MESA_SHADER_VERTEX] = stub;
       }
    }
-   if (debug_get_option_cached_hk_apple9_eager_trace())
+   if (agx_apple9_debug_enabled(AGX_A9_DBG_EAGER))
       fprintf(stderr, "HK_APPLE9_EAGER: %u stages vs=%d fs=%d flags=%#llx\n", count,
               !!api[MESA_SHADER_VERTEX], !!api[MESA_SHADER_FRAGMENT],
               pstate ? (unsigned long long)pstate->pipeline_flags : 0ull);

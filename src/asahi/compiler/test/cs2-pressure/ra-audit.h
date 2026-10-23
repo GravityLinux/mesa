@@ -1,10 +1,9 @@
 /* SPDX-License-Identifier: MIT
  * Local, opt-in allocation diagnostics. No placement or lowering changes.
  */
+#include "asahi/debug.h"
 #include "util/u_debug.h"
 #include "util/hash_table.h"
-
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_ra_audit, "AGX_APPLE9_RA_AUDIT", NULL)
 
 struct pressure_phi_tag {
    unsigned id;
@@ -31,7 +30,7 @@ pressure_tag_phi(agx_context *ctx, agx_instr *phi, const char *origin)
 static void
 pressure_audit_begin(agx_context *ctx)
 {
-   if (!debug_get_option_cached_agx_apple9_ra_audit() || ctx->stage != MESA_SHADER_FRAGMENT)
+   if (!agx_apple9_debug_enabled(AGX_A9_DBG_RA_AUDIT) || ctx->stage != MESA_SHADER_FRAGMENT)
       return;
    assert(!pressure_audit.ctx);
    pressure_audit.ctx = ctx;

@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "asahi/debug.h"
 #include "util/u_debug.h"
 #include "agx_compile_apple9.h"
 #include "agx_apple9_ir.h"
@@ -27,9 +28,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_asm, "AGX_APPLE9_ASM", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_dump_binary,
-                      "AGX_APPLE9_DUMP_BINARY", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_gated, "AGX_APPLE9_GATED", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_hoist_samples,
                       "AGX_APPLE9_HOIST_SAMPLES", NULL)
@@ -46,10 +44,6 @@ DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_uniform_move,
                       "AGX_APPLE9_NO_UNIFORM_MOVE", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_safe_hoist_stages,
                       "AGX_APPLE9_SAFE_HOIST_STAGES", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_stats, "AGX_APPLE9_STATS", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_trace_final_nir,
-                      "AGX_APPLE9_TRACE_FINAL_NIR", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_trace_nir, "AGX_APPLE9_TRACE_NIR", NULL)
 
 DEBUG_GET_ONCE_NUM_OPTION(apple9_hoist_loads, "AGX_APPLE9_HOIST_LOADS", 0)
 
@@ -3560,7 +3554,7 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
       nir_foreach_instr(instr, block) {
          if (!apple9_instruction_is_in_subset(
                 instr, nir->info.stage != MESA_SHADER_COMPUTE)) {
-            if (debug_get_option_cached_agx_apple9_trace_nir() != NULL) {
+            if (agx_apple9_debug_enabled(AGX_A9_DBG_NIR)) {
                fprintf(stderr, "Apple9 unsupported instruction: ");
                nir_print_instr(instr, stderr);
                fprintf(stderr, "\n");
@@ -6216,7 +6210,7 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
       agx_nir_hoist_apple9_samples(nir);
    if (!agx_nir_lower_apple9_object_calls(nir, reason))
       return false;
-   if (debug_get_option_cached_agx_apple9_trace_final_nir() != NULL)
+   if (agx_apple9_debug_enabled(AGX_A9_DBG_FINAL_NIR))
       nir_print_shader(nir, apple9_log());
 
    struct util_dynarray loads = UTIL_DYNARRAY_INIT;
@@ -6691,7 +6685,7 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
    }
    /* List final packed bytes after branch fixups, without changing codegen.
     * A row can contain multiple instructions for an expanded VIR pseudo. */
-   if (debug_get_option_cached_agx_apple9_asm() != NULL) {
+   if (agx_apple9_debug_enabled(AGX_A9_DBG_ASM)) {
       fprintf(apple9_log(), "%s_ASM_BEGIN stage=%u\n",
               preamble ? "APPLE9_PREAMBLE" : "APPLE9", nir->info.stage);
       for (unsigned i = 0; i < lower.program.instruction_count; ++i) {
@@ -6748,7 +6742,7 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
          }
       }
    }
-   if (debug_get_option_cached_agx_apple9_stats() != NULL) {
+   if (agx_apple9_debug_enabled(AGX_A9_DBG_STATS)) {
       unsigned copies = 0, waits = 0, saves = 0, fills = 0;
       for (unsigned i = 0; i < lower.program.instruction_count; ++i) {
          const struct agx_apple9_vir_instr *ins = lower.program.instructions[i];
@@ -6829,7 +6823,7 @@ apple9_compile_dag_once(nir_shader *nir, struct agx_shader_part *out,
                                   lower.per_vertex_count;
    out->info.main_size = emitter.bytes.size;
    out->info.binary_size = emitter.bytes.size;
-   if (debug_get_option_cached_agx_apple9_dump_binary() != NULL) {
+   if (agx_apple9_debug_enabled(AGX_A9_DBG_BINARY)) {
       fprintf(apple9_log(), "APPLE9_BINARY stage=%u size=%u ", nir->info.stage,
               (unsigned)emitter.bytes.size);
       for (unsigned i = 0; i < emitter.bytes.size; ++i)
@@ -8478,7 +8472,7 @@ apple9_compile_workgroup_body(nir_shader *nir, struct agx_shader_part *out,
    nir_lower_alu_to_scalar(nir, NULL, NULL);
    nir_lower_all_phis_to_scalar(nir);
 
-   if (debug_get_option_cached_agx_apple9_trace_nir() != NULL)
+   if (agx_apple9_debug_enabled(AGX_A9_DBG_NIR))
       nir_print_shader(nir, stderr);
 
    const char *reason = NULL;
@@ -8515,7 +8509,7 @@ apple9_compile_workgroup_body(nir_shader *nir, struct agx_shader_part *out,
 unsupported:
    if (reason_out != NULL)
       *reason_out = reason;
-   if (debug_get_option_cached_agx_apple9_trace_nir() != NULL)
+   if (agx_apple9_debug_enabled(AGX_A9_DBG_NIR))
       fprintf(stderr, "Apple9 compute compilation failed: %s\n",
               reason ? reason : "unknown reason");
    return false;

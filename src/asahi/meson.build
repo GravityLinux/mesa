@@ -9,6 +9,14 @@ inc_asahi = include_directories([
    '.', 'layout', 'lib', 'genxml', 'compiler'
 ])
 
+libasahi_debug = static_library(
+   'asahi_debug', 'debug.c',
+   dependencies : [idep_mesautil],
+   gnu_symbol_visibility : 'hidden',
+   build_by_default : false,
+)
+idep_asahi_debug = declare_dependency(link_with : [libasahi_debug])
+
 subdir('isa')
 
 if with_gallium_asahi or with_asahi_vk or with_tools.contains('asahi')
