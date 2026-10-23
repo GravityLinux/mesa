@@ -619,6 +619,8 @@ bool agx_apple9_vir_key(const struct agx_apple9_vir_program *program,
 struct agx_apple9_block *agx_apple9_block_create(struct agx_apple9_vir_program *program);
 void agx_apple9_block_begin(struct agx_apple9_vir_program *program,
                           struct agx_apple9_block *block);
+/* Layout position, as of the last reindex. */
+unsigned agx_apple9_instr_position(const struct agx_apple9_vir_instr *instr);
 struct agx_apple9_block *agx_apple9_instr_block(const struct agx_apple9_vir_instr *instr);
 void agx_apple9_vir_move_before(struct agx_apple9_vir_program *program,
                               struct agx_apple9_vir_instr *instr,
