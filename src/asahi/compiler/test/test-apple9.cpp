@@ -12145,6 +12145,8 @@ TEST_F(Apple9Completion, FencesAndBarriersLeaveLoadsPending)
        false},
       {AGX_APPLE9_VIR_DEVICE_FENCE, AGX_APPLE9_ENC_DEVICE_FENCE,
        AGX_APPLE9_FENCE_RASTER_ORDER, true},
+      {AGX_APPLE9_VIR_DEVICE_FENCE, AGX_APPLE9_ENC_DEVICE_FENCE,
+       AGX_APPLE9_FENCE_DEVICE_ACQUIRE, true},
    };
    for (const auto &c : cases) {
       SCOPED_TRACE(unsigned(c.immediate) + 10 * unsigned(c.op));
@@ -12233,6 +12235,23 @@ TEST_F(Apple9Completion, LoadsAfterAFenceWaitForEarlierLoads)
       ASSERT_EQ(loads, 2u);
       EXPECT_EQ(ordered, fenced);
    }
+}
+
+/* The acquiring device fence is the plain device fence's encoding; only the
+ * scheduler treats it differently. */
+TEST(Apple9Packer, AcquireFencePacksLikeTheDeviceFence)
+{
+   agx_apple9_vir_instr I = {};
+   I.op = AGX_APPLE9_VIR_DEVICE_FENCE;
+   I.encoding = AGX_APPLE9_ENC_DEVICE_FENCE;
+   I.dest = AGX_APPLE9_VREG_INVALID;
+   const uint8_t phys[] = {0};
+   agx_apple9_packed_instruction plain = {}, acquire = {};
+   ASSERT_TRUE(agx_apple9_pack_vir_instruction(&I, phys, &plain, nullptr));
+   I.immediate = AGX_APPLE9_FENCE_DEVICE_ACQUIRE;
+   ASSERT_TRUE(agx_apple9_pack_vir_instruction(&I, phys, &acquire, nullptr));
+   ASSERT_EQ(plain.length, acquire.length);
+   EXPECT_EQ(memcmp(plain.bytes, acquire.bytes, plain.length), 0);
 }
 
 /* A barrier still waits for producers outside the memory class: here an
