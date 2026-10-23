@@ -345,6 +345,9 @@ struct hk_graphics_state {
       bool prefer_native;
       /* Whether it counted fragment invocations for an active query. */
       bool fs_statistics;
+      /* Whether the resolution exported depth late for a depth/stencil
+       * feedback loop that the draw could write. */
+      bool late_zs;
       uint32_t render_gen;
       struct hk_api_shader *api[HK_APPLE9_GFX_STAGES];
       struct hk_api_shader *out[HK_APPLE9_GFX_STAGES];

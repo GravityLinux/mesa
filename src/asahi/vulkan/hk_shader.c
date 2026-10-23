@@ -1279,6 +1279,22 @@ hk_apple9_polygon_point_budget(const nir_shader *last, const nir_shader *fs,
    return true;
 }
 
+/* Whether a draw with this depth/stencil state can write the depth or
+ * stencil aspects present. A depth/stencil feedback loop needs late tests
+ * only then: an early test that writes nothing leaves the attachment the
+ * fragment shader reads unchanged (turnip applies the same condition). */
+bool
+hk_apple9_zs_writes(const struct vk_depth_stencil_state *ds,
+                    VkImageAspectFlags aspects)
+{
+   if (!ds)
+      return true;
+   struct vk_depth_stencil_state opt = *ds;
+   opt.stencil.write_enable = true;
+   vk_optimize_depth_stencil_state(&opt, aspects, true);
+   return opt.depth.write_enable || opt.stencil.write_enable;
+}
+
 static void
 hk_apple9_graphics_key(struct hk_apple9_graphics_key *key,
                        const struct vk_graphics_pipeline_state *state)
@@ -1303,8 +1319,15 @@ hk_apple9_graphics_key(struct hk_apple9_graphics_key *key,
    key->clip_negative_one_to_one =
       state->vp && state->vp->depth_clip_negative_one_to_one;
    key->sample_shading = state->ms && state->ms->sample_shading_enable;
-   key->zs_self_dep = state->pipeline_flags &
-      VK_PIPELINE_CREATE_2_DEPTH_STENCIL_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
+   /* Draw-time resolution passes the flag only for loops the draw can
+    * write; a pipeline compiled with static state applies the test here. */
+   key->zs_self_dep = (state->pipeline_flags &
+                       VK_PIPELINE_CREATE_2_DEPTH_STENCIL_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT) &&
+      hk_apple9_zs_writes(state->ds,
+         (state->rp && state->rp->depth_attachment_format != VK_FORMAT_UNDEFINED
+             ? VK_IMAGE_ASPECT_DEPTH_BIT : 0) |
+         (state->rp && state->rp->stencil_attachment_format != VK_FORMAT_UNDEFINED
+             ? VK_IMAGE_ASPECT_STENCIL_BIT : 0));
    key->line_stipple = state->rs && state->rs->line.stipple.enable;
    key->polygon_points = state->rs &&
                          state->rs->polygon_mode == VK_POLYGON_MODE_POINT;
@@ -7012,6 +7035,24 @@ hk_apple9_needs_deferral(uint32_t count,
          return true;
    }
 
+   /* A depth/stencil feedback loop keys on whether the draw can write depth
+    * or stencil (hk_apple9_zs_writes): dynamic state decides at draw time. */
+   if (state->pipeline_flags &
+       VK_PIPELINE_CREATE_2_DEPTH_STENCIL_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT) {
+      static const enum mesa_vk_dynamic_graphics_state ds_writes[] = {
+         MESA_VK_DYNAMIC_DS_DEPTH_TEST_ENABLE,
+         MESA_VK_DYNAMIC_DS_DEPTH_WRITE_ENABLE,
+         MESA_VK_DYNAMIC_DS_DEPTH_COMPARE_OP,
+         MESA_VK_DYNAMIC_DS_STENCIL_TEST_ENABLE,
+         MESA_VK_DYNAMIC_DS_STENCIL_OP,
+         MESA_VK_DYNAMIC_DS_STENCIL_WRITE_MASK,
+      };
+      for (unsigned i = 0; i < ARRAY_SIZE(ds_writes); ++i) {
+         if (BITSET_TEST(state->dynamic, ds_writes[i]))
+            return true;
+      }
+   }
+
    for (uint32_t i = 0; i < count; ++i) {
       if (infos[i].stage == MESA_SHADER_VERTEX && !state->vi)
          return true;
@@ -7249,6 +7290,14 @@ hk_apple9_deferred_sample_shading(const struct hk_api_shader *fs)
    return fs && fs->apple9_deferred && fs->apple9_deferred->sample_shading;
 }
 
+/* Whether the fragment shader's pipeline declared a depth/stencil feedback
+ * loop; draw-time resolution applies hk_apple9_zs_writes to it. */
+bool
+hk_apple9_deferred_zs_self_dep(const struct hk_api_shader *fs)
+{
+   return fs && fs->apple9_deferred && fs->apple9_deferred->zs_self_dep;
+}
+
 struct hk_apple9_variant {
    struct hk_api_shader *api[HK_APPLE9_GFX_STAGES];
    struct hk_apple9_graphics_key key;
@@ -7315,7 +7364,6 @@ hk_apple9_resolve_graphics(
    if (fs && fs->apple9_deferred) {
       u_foreach_bit(rt, fs->apple9_deferred->undefined_colors)
          search.key.blend[rt].color_attachment_unused = true;
-      search.key.zs_self_dep |= fs->apple9_deferred->zs_self_dep;
    }
 
 retry:

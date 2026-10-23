@@ -4962,6 +4962,26 @@ hk_ia_update(struct hk_cmd_buffer *cmd, struct agx_draw draw,
  * state and attachments. The synthesized pipeline state carries exactly the
  * inputs of the Apple9 graphics key.
  */
+/* Late depth/stencil tests for a feedback loop, enabled dynamically or by
+ * the fragment shader's pipeline, only when the draw can write depth or
+ * stencil (hk_apple9_zs_writes). Zink reports a loop whenever a depth texture
+ * stays bound while it is the attachment; late export costs the early
+ * rejection of hidden fragments. */
+static bool
+hk_apple9_draw_late_zs(const struct vk_dynamic_graphics_state *dyn,
+                       const struct hk_rendering_state *render,
+                       const struct hk_api_shader *fs)
+{
+   const bool dynamic = dyn->feedback_loops &
+      (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
+   const bool created = hk_apple9_deferred_zs_self_dep(fs);
+   if (!dynamic && !created)
+      return false;
+   return hk_apple9_zs_writes(&dyn->ds,
+      (render->depth_att.iview ? VK_IMAGE_ASPECT_DEPTH_BIT : 0) |
+      (render->stencil_att.iview ? VK_IMAGE_ASPECT_STENCIL_BIT : 0));
+}
+
 static bool
 hk_apple9_resolve_shaders(struct hk_cmd_buffer *cmd, bool prefer_native)
 {
@@ -5000,6 +5020,8 @@ hk_apple9_resolve_shaders(struct hk_cmd_buffer *cmd, bool prefer_native)
       MESA_VK_DYNAMIC_RS_LINE_STIPPLE_ENABLE,
       MESA_VK_DYNAMIC_RS_POLYGON_MODE,
    };
+   const bool late_zs = hk_apple9_draw_late_zs(dyn, render,
+      gfx->apple9_api[MESA_SHADER_FRAGMENT]);
    /* Fragment shaders count invocations only while such a query is active;
     * other draws use variants without the counter. */
    const bool fs_statistics = gfx->descriptors.root.draw.pipeline_stats_flags &
@@ -5007,6 +5029,7 @@ hk_apple9_resolve_shaders(struct hk_cmd_buffer *cmd, bool prefer_native)
    bool changed = !gfx->apple9_resolved.valid ||
                   gfx->apple9_resolved.prefer_native != prefer_native ||
                   gfx->apple9_resolved.fs_statistics != fs_statistics ||
+                  gfx->apple9_resolved.late_zs != late_zs ||
                   gfx->apple9_resolved.render_gen != gfx->render_gen ||
                   memcmp(gfx->apple9_resolved.api, gfx->apple9_api,
                          sizeof(gfx->apple9_api));
@@ -5051,10 +5074,8 @@ hk_apple9_resolve_shaders(struct hk_cmd_buffer *cmd, bool prefer_native)
       .rp = &rp,
       .cal = &dyn->cal,
       .pipeline_flags =
-         (dyn->feedback_loops &
-          (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))
-            ? VK_PIPELINE_CREATE_2_DEPTH_STENCIL_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT
-            : 0,
+         late_zs ? VK_PIPELINE_CREATE_2_DEPTH_STENCIL_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT
+                 : 0,
    };
    /* Color write enables are read at draw time from the sysval. */
    BITSET_SET(state.dynamic, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES);
@@ -5078,6 +5099,7 @@ hk_apple9_resolve_shaders(struct hk_cmd_buffer *cmd, bool prefer_native)
    gfx->apple9_resolved.valid = true;
    gfx->apple9_resolved.prefer_native = prefer_native;
    gfx->apple9_resolved.fs_statistics = fs_statistics;
+   gfx->apple9_resolved.late_zs = late_zs;
    gfx->apple9_resolved.render_gen = gfx->render_gen;
    memcpy(gfx->apple9_resolved.api, gfx->apple9_api, sizeof(gfx->apple9_api));
    memcpy(gfx->apple9_resolved.out, out, sizeof(out));

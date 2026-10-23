@@ -500,6 +500,10 @@ VkResult hk_apple9_resolve_graphics(
    bool fs_statistics);
 
 bool hk_apple9_deferred_sample_shading(const struct hk_api_shader *fs);
+bool hk_apple9_deferred_zs_self_dep(const struct hk_api_shader *fs);
+struct vk_depth_stencil_state;
+bool hk_apple9_zs_writes(const struct vk_depth_stencil_state *ds,
+                         VkImageAspectFlags aspects);
 
 void hk_apple9_variants_finish(struct hk_device *dev);
 void hk_apple9_bodies_finish(struct hk_device *dev);
