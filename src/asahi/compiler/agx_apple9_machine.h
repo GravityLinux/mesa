@@ -268,6 +268,20 @@ enum agx_apple9_dependency_layout {
    AGX_APPLE9_DEPENDENCY_MASK_61_63_93_95,
 };
 
+/*
+ * Pending producers grouped by what a completion barrier must order against.
+ * Memory results are device, private and threadgroup loads and returning
+ * atomics. Publications are scalar exports, consumed only through
+ * their readers' dependency fields. Everything else (fixed producers such as
+ * system values and mesh control, texture reads, scratch traffic, tile
+ * loads) is "other".
+ */
+enum agx_apple9_completion_class {
+   AGX_APPLE9_COMPLETION_MEMORY = 1 << 0,
+   AGX_APPLE9_COMPLETION_PUBLICATION = 1 << 1,
+   AGX_APPLE9_COMPLETION_OTHER = 1 << 2,
+};
+
 #define AGX_APPLE9_MAX_ENCODING_OPERANDS 11
 
 struct agx_apple9_encoding_info {
@@ -277,6 +291,11 @@ struct agx_apple9_encoding_info {
    bool allocator_safe;
    enum agx_apple9_evidence evidence;
    enum agx_apple9_dependency_layout dependency_layout;
+
+   /* A consumer that waits through its dependency field may keep the
+    * completed operands live: each register source has its own release
+    * flag. Without it, a folded wait must also be the operand's last use. */
+   bool dependency_retains_sources;
 
    /* Implicit producer slot, 1..6, or zero for no fixed assignment. This is
     * scheduler metadata, not an encoded output-tag field. Existing producers
@@ -293,6 +312,11 @@ struct agx_apple9_encoding_info {
     * scheduling requirement, not a claim that the encoding has an input
     * dependency field. The scheduler derives any wait from its live state. */
    bool requires_prior_completion;
+
+   /* Pending producer classes the instruction does not order against, even
+    * though it requires prior completion of the others. See
+    * agx_apple9_completion_class. */
+   uint8_t prior_completion_exempt;
 
    /* Several native instructions each write part of the destination, so it
     * cannot share a register with a source. */

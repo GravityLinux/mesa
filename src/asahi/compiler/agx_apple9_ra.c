@@ -948,13 +948,23 @@ apple9_init_physical(struct agx_apple9_vir_program *out)
  * merge. Each path contributes its own producer; waiting covers all of them.
  * A merge beyond the tracked capacity forgets the producers and waits on
  * entry to the block. */
-#define APPLE9_PENDING_MERGE 4
+#define APPLE9_PENDING_MERGE 8
+
+/* A slot counts its outstanding operations: native Metal issues up to seven
+ * loads and texture reads on one slot and waits for all of them with a
+ * single consumer dependency (G13 allows eight). Never exceed seven. */
+#define APPLE9_SLOT_SHARE_LIMIT 7
 
 struct apple9_pending {
    unsigned count;
    unsigned latest_issue;
+   /* Input position of the first instruction in this block that needs any
+    * of the producers, or UINT_MAX when unknown or outside the block. */
+   unsigned first_need;
    bool unknown;
    struct agx_apple9_vir_instr producer[APPLE9_PENDING_MERGE];
+   /* Whether a device fence has issued since the producer did. */
+   bool fenced[APPLE9_PENDING_MERGE];
 };
 
 /* Pending instructions include fixed producers with no GPR result. Each is
@@ -1058,8 +1068,10 @@ apple9_complete(struct apple9_completion *state, unsigned mask)
       }
       unsigned count = 0;
       for (unsigned i = 0; i < p->count; ++i) {
-         if (!(apple9_producer_slots(&p->producer[i]) & mask))
+         if (!(apple9_producer_slots(&p->producer[i]) & mask)) {
+            p->fenced[count] = p->fenced[i];
             p->producer[count++] = p->producer[i];
+         }
       }
       p->count = count;
    }
@@ -1105,58 +1117,6 @@ apple9_retire(struct agx_apple9_vir_program *out,
 }
 
 static bool
-apple9_float_consumer(enum agx_apple9_encoding encoding)
-{
-   switch (encoding) {
-   case AGX_APPLE9_ENC_FLOAT2_COMPACT:
-   case AGX_APPLE9_ENC_FLOAT2_MODIFIER_EXTENDED:
-   case AGX_APPLE9_ENC_FLOAT2_ABS_EXTENDED:
-   case AGX_APPLE9_ENC_FLOAT2_MUL_ABS_EXTENDED:
-   case AGX_APPLE9_ENC_FLOAT2_IMMEDIATE_COMPACT:
-   case AGX_APPLE9_ENC_FLOAT2_IMMEDIATE_EXTENDED:
-   case AGX_APPLE9_ENC_FLOAT3_EXTENDED:
-   case AGX_APPLE9_ENC_FLOAT3_MODIFIER_EXTENDED:
-   case AGX_APPLE9_ENC_FLOAT3_SATURATE_EXTENDED:
-      return true;
-   default:
-      return false;
-   }
-}
-
-/* Encodings that carry an explicit release flag for each register source, so
- * a consumer can take a pending result and keep it live. */
-static bool
-apple9_retaining_consumer(enum agx_apple9_encoding encoding)
-{
-   if (apple9_float_consumer(encoding))
-      return true;
-   switch (encoding) {
-   case AGX_APPLE9_ENC_FLOAT_SPECIAL:
-   case AGX_APPLE9_ENC_FLOAT_SPECIAL_UNIFORM:
-   case AGX_APPLE9_ENC_FLOAT2_EXPORT:
-   case AGX_APPLE9_ENC_LOGIC_EXTENDED:
-   case AGX_APPLE9_ENC_LOGIC_EXPORT:
-   case AGX_APPLE9_ENC_DEVICE_LOAD:
-   case AGX_APPLE9_ENC_DEVICE_LOAD_INDIRECT:
-   case AGX_APPLE9_ENC_DEVICE_LOAD_POINTER:
-   case AGX_APPLE9_ENC_INT_ADD_EXTENDED:
-   case AGX_APPLE9_ENC_INT_MAD_EXTENDED:
-   case AGX_APPLE9_ENC_INT_MUL_WIDE:
-   case AGX_APPLE9_ENC_SHIFT_LOGICAL_IMMEDIATE:
-   case AGX_APPLE9_ENC_SHIFT_LOGICAL_REGISTER:
-   case AGX_APPLE9_ENC_SHIFT_EXTENDED:
-   case AGX_APPLE9_ENC_SHIFT_ARITH_REGISTER:
-   case AGX_APPLE9_ENC_SELECT_GPR_WIDE:
-   case AGX_APPLE9_ENC_STORE_UNIFORM:
-   case AGX_APPLE9_ENC_PREDICATE_COMPARE_SHORT:
-   case AGX_APPLE9_ENC_PREDICATE_COMPARE_EXTENDED:
-      return true;
-   default:
-      return false;
-   }
-}
-
-static bool
 apple9_can_fold_wait(const struct agx_apple9_vir_instr *ins,
                      const struct agx_apple9_vir_instr *producer)
 {
@@ -1176,9 +1136,12 @@ apple9_can_fold_wait(const struct agx_apple9_vir_instr *ins,
     * would. Atomics' dependency field gates their inputs (EXP-M4-50). */
    if (!reads)
       return ins->op != AGX_APPLE9_VIR_DEVICE_ATOMIC;
+   /* Publication readers wait through their input mask (EXP-M4-61);
+    * native coverage instructions wait for their publication the same way. */
    if (apple9_scalar_publication(producer))
       return (ins->op == AGX_APPLE9_VIR_VARY_STORE ||
-              ins->op == AGX_APPLE9_VIR_OBJECT_GRID_EXPORT) &&
+              ins->op == AGX_APPLE9_VIR_OBJECT_GRID_EXPORT ||
+              ins->op == AGX_APPLE9_VIR_COVERAGE) &&
              ins->src[0] == producer->dest;
    if (ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC &&
        (ins->atomic_discard || ins->atomic_op == AGX_APPLE9_ATOMIC_CMPXCHG ||
@@ -1196,7 +1159,8 @@ apple9_can_fold_wait(const struct agx_apple9_vir_instr *ins,
     * interpolation results, including texture results in integer consumers.
     * Scratch fills keep their materialized form. */
    bool tuple = producer->op != AGX_APPLE9_VIR_SPILL_LOAD;
-   bool can_retain = tuple && apple9_retaining_consumer(ins->encoding);
+   bool can_retain =
+      tuple && agx_apple9_encoding_info(ins->encoding)->dependency_retains_sources;
    unsigned consumed = 0;
    for (unsigned s = 0; s < ins->nr_srcs; ++s) {
       if (!apple9_producer_result(producer, ins->src[s]))
@@ -1329,16 +1293,77 @@ apple9_producer_hazard(const struct agx_apple9_vir_instr *ins,
           producer->producer_scoreboard_slot == AGX_APPLE9_SCOREBOARD_SLOT_1;
 }
 
+static enum agx_apple9_completion_class
+apple9_completion_class(const struct agx_apple9_vir_instr *producer)
+{
+   if (apple9_scalar_publication(producer))
+      return AGX_APPLE9_COMPLETION_PUBLICATION;
+   /* Native T8132 Metal leaves device and threadgroup loads and returning
+    * atomics pending across fences and barriers. Threadgroup and private
+    * loads have fixed slots but are memory results too. Texture reads are
+    * not: before a texture barrier Metal waits for a pending read_write
+    * texture read, and our storage-image barriers have no such form. */
+   switch (producer->op) {
+   case AGX_APPLE9_VIR_DEVICE_LOAD:
+   case AGX_APPLE9_VIR_DEVICE_ATOMIC:
+   case AGX_APPLE9_VIR_PRIVATE_LOAD:
+   case AGX_APPLE9_VIR_SHARED_LOAD:
+   case AGX_APPLE9_VIR_SHARED_ATOMIC:
+      return AGX_APPLE9_COMPLETION_MEMORY;
+   default:
+      return AGX_APPLE9_COMPLETION_OTHER;
+   }
+}
+
+/* Producer classes a completion barrier leaves pending. Loop control and
+ * drained block ends wait for everything, as do the fence forms other than
+ * the plain device fence. */
+static unsigned
+apple9_completion_exempt(const struct agx_apple9_vir_instr *ins)
+{
+   if (apple9_after_logical_end(ins) || ins->encoding == AGX_APPLE9_ENC_PSEUDO)
+      return 0;
+   if (ins->op == AGX_APPLE9_VIR_DEVICE_FENCE &&
+       ins->immediate != AGX_APPLE9_FENCE_DEVICE)
+      return 0;
+   return agx_apple9_encoding_info(ins->encoding)->prior_completion_exempt;
+}
+
+/* Acquire ordering: a device read (plain load or returning atomic) still
+ * pending when a device fence issued must complete before a later device read
+ * is performed, or that read may observe memory older than the earlier one
+ * did (message passing through the fence). The device-fence drain this
+ * replaces satisfied it; the dependency belongs on the later read, which
+ * waits through its own input mask. Native Metal leaves such reads pending
+ * across the fence, but places the later load on the same slot, so that is no
+ * evidence they are unordered across slots. Threadgroup memory is not
+ * covered: no workgroup-scope message-passing case failed without it. */
+static bool
+apple9_acquire_hazard(const struct agx_apple9_vir_instr *ins,
+                      const struct agx_apple9_vir_instr *producer)
+{
+   return (producer->op == AGX_APPLE9_VIR_DEVICE_LOAD ||
+           (producer->op == AGX_APPLE9_VIR_DEVICE_ATOMIC &&
+            !producer->atomic_discard)) &&
+          (ins->op == AGX_APPLE9_VIR_DEVICE_LOAD ||
+           ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC ||
+           ins->op == AGX_APPLE9_VIR_TEXTURE_SAMPLE);
+}
+
 static bool
 apple9_pending_hazard(const struct agx_apple9_vir_instr *ins,
                       const struct apple9_pending *p, bool barrier)
 {
    if (!apple9_pending_active(p))
       return false;
-   if (p->unknown || barrier)
+   if (p->unknown)
       return true;
+   const unsigned exempt = barrier ? apple9_completion_exempt(ins) : 0;
    for (unsigned i = 0; i < p->count; ++i) {
-      if (apple9_producer_hazard(ins, &p->producer[i]))
+      if (barrier && !(exempt & apple9_completion_class(&p->producer[i])))
+         return true;
+      if (apple9_producer_hazard(ins, &p->producer[i]) ||
+          (p->fenced[i] && apple9_acquire_hazard(ins, &p->producer[i])))
          return true;
    }
    return false;
@@ -1372,20 +1397,134 @@ apple9_merge_pending(struct apple9_completion *to_state,
       const struct apple9_pending *f = &from[slot];
       t->unknown |= f->unknown;
       t->latest_issue = MAX2(t->latest_issue, f->latest_issue);
+      t->first_need = UINT_MAX;
       for (unsigned i = 0; i < f->count; ++i) {
          bool present = false;
-         for (unsigned j = 0; j < t->count; ++j)
-            present |= apple9_same_producer(&t->producer[j], &f->producer[i]);
+         for (unsigned j = 0; j < t->count; ++j) {
+            if (apple9_same_producer(&t->producer[j], &f->producer[i])) {
+               t->fenced[j] |= f->fenced[i];
+               present = true;
+            }
+         }
          if (present)
             continue;
-         if (t->count == APPLE9_PENDING_MERGE)
+         if (t->count == APPLE9_PENDING_MERGE) {
             t->unknown = true;
-         else
+         } else {
+            t->fenced[t->count] = f->fenced[i];
             t->producer[t->count++] = f->producer[i];
+         }
       }
       if (t->unknown)
          t->count = 0;
    }
+}
+
+/* Producers that may share a counting slot with each other. Fixed producers,
+ * publications, atomics and scratch traffic keep a slot to themselves. */
+static bool
+apple9_shares_slot(const struct agx_apple9_vir_instr *ins)
+{
+   return !apple9_fixed_producer_slot(ins) &&
+          (ins->op == AGX_APPLE9_VIR_DEVICE_LOAD ||
+           ins->op == AGX_APPLE9_VIR_TEXTURE_SAMPLE);
+}
+
+/* The first instruction in [start, end) that needs the producer's completion,
+ * by the same tests the scheduler applies, or UINT_MAX. */
+static unsigned
+apple9_first_need(const struct agx_apple9_vir_program *program, unsigned start,
+                  unsigned end, const struct agx_apple9_vir_instr *producer,
+                  bool drain)
+{
+   const unsigned limit = MIN2(end, start + 512);
+   bool fenced = false;
+   for (unsigned j = start; j < limit; ++j) {
+      const struct agx_apple9_vir_instr *ins = program->instructions[j];
+      if (ins->op == AGX_APPLE9_VIR_WAIT ||
+          ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC_RESULT)
+         continue;
+      if (fenced && apple9_acquire_hazard(ins, producer))
+         return j;
+      fenced |= ins->op == AGX_APPLE9_VIR_DEVICE_FENCE;
+      if (apple9_completion_barrier(ins, drain) &&
+          !(apple9_completion_exempt(ins) & apple9_completion_class(producer)))
+         return j;
+      if (apple9_producer_hazard(ins, producer))
+         return j;
+      for (unsigned s = 0; s < ins->nr_srcs; ++s) {
+         if (apple9_producer_result(producer, ins->src[s]))
+            return j;
+      }
+   }
+   return UINT_MAX;
+}
+
+/* Slots that fixed-slot producers issued in [start, end) will claim. A free
+ * slot chosen for an ordinary producer should not be one of them, or the
+ * fixed producer must retire it first. */
+static unsigned
+apple9_fixed_slots_ahead(const struct agx_apple9_vir_program *program,
+                         unsigned start, unsigned end)
+{
+   unsigned slots = 0;
+   for (unsigned j = start; j < MIN2(end, start + 512); ++j) {
+      const struct agx_apple9_vir_instr *ins = program->instructions[j];
+      unsigned slot = apple9_fixed_producer_slot(ins);
+      if (slot) {
+         slots |= BITFIELD_BIT(slot - 1) |
+                  agx_apple9_encoding_info(ins->encoding)->fixed_producer_alternates;
+      }
+   }
+   return slots;
+}
+
+/* Whether a sharing producer can be added to the slot without retiring it. */
+static bool
+apple9_slot_joinable(const struct apple9_completion *state, unsigned slot)
+{
+   const struct apple9_pending *p = &state->pending[slot];
+   if (!p->count || p->unknown || p->count >= APPLE9_SLOT_SHARE_LIMIT)
+      return false;
+   for (unsigned i = 0; i < p->count; ++i) {
+      if (!apple9_shares_slot(&p->producer[i]))
+         return false;
+   }
+   return apple9_conflicting_slots(state, BITFIELD_BIT(slot - 1)) ==
+          BITFIELD_BIT(slot - 1);
+}
+
+/* Choose a slot to join for a sharing producer first needed at need. With
+ * free slots, only a slot whose first need is the same instruction: that
+ * consumer waits once for both, and nothing waits earlier than it would.
+ * When every slot is occupied, joining still beats retiring a slot now:
+ * prefer the slot needed soonest at or after need (older producers are
+ * waited for slightly early), else the one needed latest. */
+static unsigned
+apple9_join_slot(const struct apple9_completion *state, unsigned need,
+                 bool exhausted)
+{
+   unsigned best = 0;
+   for (unsigned slot = 1; slot <= 6; ++slot) {
+      if (!apple9_slot_joinable(state, slot))
+         continue;
+      unsigned other = state->pending[slot].first_need;
+      if (!exhausted) {
+         if (need != UINT_MAX && other == need)
+            return slot;
+         continue;
+      }
+      if (!best) {
+         best = slot;
+         continue;
+      }
+      unsigned current = state->pending[best].first_need;
+      bool after = other >= need, best_after = current >= need;
+      if (after != best_after ? after
+                              : after ? other < current : other > current)
+         best = slot;
+   }
+   return best;
 }
 
 static void
@@ -1565,18 +1704,36 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
 
          if (apple9_async(&ins)) {
             unsigned slot = apple9_fixed_producer_slot(&ins);
+            const bool share = apple9_shares_slot(&ins);
+            const unsigned need =
+               share ? apple9_first_need(program, i + 1, end, &ins, drain)
+                     : UINT_MAX;
+            bool joined = false;
+            if (share) {
+               slot = apple9_join_slot(&state, need, false);
+               joined = slot != 0;
+            }
             if (!slot) {
                /* Samples and memory traffic share six completion tags.
                 * Keep independent operations pending until a real hazard,
                 * consumer, or tag exhaustion requires their result handoff. */
                unsigned first = ins.op == AGX_APPLE9_VIR_TEXTURE_SAMPLE ? 1 : 6;
-               for (unsigned p = 0; p < 6; ++p) {
-                  unsigned candidate = (first - 1 + p) % 6 + 1;
-                  if (!apple9_conflicting_slots(
-                         &state, BITFIELD_BIT(candidate - 1))) {
+               const unsigned avoid = apple9_fixed_slots_ahead(
+                  program, i + 1, need == UINT_MAX ? end : need);
+               for (unsigned pass = 0; !slot && pass < 2; ++pass) {
+                  for (unsigned p = 0; p < 6; ++p) {
+                     unsigned candidate = (first - 1 + p) % 6 + 1;
+                     if ((!pass && (avoid & BITFIELD_BIT(candidate - 1))) ||
+                         apple9_conflicting_slots(
+                            &state, BITFIELD_BIT(candidate - 1)))
+                        continue;
                      slot = candidate;
                      break;
                   }
+               }
+               if (!slot && share) {
+                  slot = apple9_join_slot(&state, need, true);
+                  joined = slot != 0;
                }
                if (!slot) {
                   /* All tags are occupied. Retire the oldest pending group,
@@ -1597,7 +1754,8 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
             /* In particular, never issue another U0 while one is pending.
              * The fully waited double-U0 r6 control timed out, so this is a
              * compiler scheduling invariant, not a claim that replay is safe. */
-            if (!apple9_retire(&out, &state,
+            if (!joined &&
+                !apple9_retire(&out, &state,
                                apple9_conflicting_slots(&state, reservations)))
                goto cleanup;
             ins.producer_scoreboard_slot = slot;
@@ -1609,12 +1767,27 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
                };
                ins.device_load_raw_token = tokens[slot - 1];
             }
-            pending[slot] = (struct apple9_pending){
-               .count = 1, .latest_issue = out.instruction_count, .producer = {ins}};
+            if (joined) {
+               struct apple9_pending *p = &pending[slot];
+               p->fenced[p->count] = false;
+               p->producer[p->count++] = ins;
+               p->latest_issue = out.instruction_count;
+               p->first_need = MIN2(p->first_need, need);
+            } else {
+               pending[slot] = (struct apple9_pending){
+                  .count = 1, .latest_issue = out.instruction_count,
+                  .first_need = need, .producer = {ins}};
+            }
          }
          apple9_select_compact_alu(&ins);
          if (!apple9_emit_physical(&out, &ins))
             goto cleanup;
+         if (ins.op == AGX_APPLE9_VIR_DEVICE_FENCE) {
+            for (unsigned slot = 1; slot <= 6; ++slot) {
+               for (unsigned k = 0; k < pending[slot].count; ++k)
+                  pending[slot].fenced[k] = true;
+            }
+         }
       }
       if (drain) {
          if (!apple9_retire(&out, &state, BITFIELD_MASK(6)))

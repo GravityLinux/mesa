@@ -10278,8 +10278,12 @@ TEST(Apple9Compiler, RepeatedDemotionReusesCoveragePublication)
    for (unsigned i = 0; i + 6 <= part.info.binary_size; ++i) {
       acquires += memcmp(code + i, acquire, 6) == 0;
       releases += memcmp(code + i, release, 6) == 0;
-      if (code[i] == 0x57 && (code[i+1] & 0x0f) == 0x04 && code[i+2] == 0x54) {
+      /* Bits 12..17 wait for the coverage publication supplying the
+       * operand, which the tile access before it leaves pending. */
+      if (code[i] == 0x57 && (code[i+1] & 0x0f) == 0x04 &&
+          (code[i+2] & ~3) == 0x54) {
          EXPECT_EQ(code[i+3], 0u);
+         EXPECT_NE((code[i+1] >> 4) | ((code[i+2] & 3) << 4), 0);
          ++coverage;
       }
    }
@@ -12065,7 +12069,9 @@ protected:
    }
 };
 
-TEST_F(Apple9Completion, FullScoreboardRetiresOldestLoadInsteadOfNewest)
+/* With every slot occupied, a load joins the slot needed last instead of
+ * retiring one: its consumers wait for it no earlier than their own need. */
+TEST_F(Apple9Completion, FullScoreboardJoinsTheLastNeededSlot)
 {
    auto zero = imm(0);
    uint32_t values[12];
@@ -12080,6 +12086,7 @@ TEST_F(Apple9Completion, FullScoreboardRetiresOldestLoadInsteadOfNewest)
    unsigned first_slots[6] = {};
    for (unsigned i = 0; i < p.instruction_count; ++i) {
       const auto *ins = p.instructions[i];
+      EXPECT_NE(ins->op, AGX_APPLE9_VIR_WAIT);
       if (ins->op != AGX_APPLE9_VIR_DEVICE_LOAD)
          continue;
       if (loads < 6) {
@@ -12087,15 +12094,204 @@ TEST_F(Apple9Completion, FullScoreboardRetiresOldestLoadInsteadOfNewest)
             EXPECT_NE(ins->producer_scoreboard_slot, first_slots[j]);
          first_slots[loads] = ins->producer_scoreboard_slot;
       } else {
-         EXPECT_EQ(ins->producer_scoreboard_slot, first_slots[loads - 6]);
-         ASSERT_GT(i, 0u);
-         EXPECT_EQ(p.instructions[i - 1]->op, AGX_APPLE9_VIR_WAIT);
-         EXPECT_EQ(p.instructions[i - 1]->immediate,
-                   BITFIELD_BIT(first_slots[loads - 6] - 1));
+         EXPECT_EQ(ins->producer_scoreboard_slot, first_slots[5]);
       }
       ++loads;
    }
    EXPECT_EQ(loads, ARRAY_SIZE(values));
+}
+
+/* Loads first needed by the same instruction share one slot, and that
+ * consumer waits for them once (native Metal does the same). */
+TEST_F(Apple9Completion, LoadsWithOneConsumerShareASlot)
+{
+   auto zero = imm(0);
+   uint32_t a = load(zero, 0), b2 = load(zero, 1), c = load(zero, 2);
+   uint32_t sum[] = {a, b2};
+   auto ab = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IADD,
+      AGX_APPLE9_ENC_INT_ADD_EXTENDED, sum, 2, 0);
+   output(ab, 0);
+   output(c, 1);
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
+   unsigned slots[3] = {}, loads = 0;
+   for (unsigned i = 0; i < p.instruction_count; ++i) {
+      const auto *ins = p.instructions[i];
+      EXPECT_NE(ins->op, AGX_APPLE9_VIR_WAIT);
+      if (ins->op == AGX_APPLE9_VIR_DEVICE_LOAD)
+         slots[loads++] = ins->producer_scoreboard_slot;
+      if (ins->op == AGX_APPLE9_VIR_IADD)
+         EXPECT_EQ(ins->scoreboard_slot, slots[0]);
+   }
+   ASSERT_EQ(loads, 3u);
+   EXPECT_EQ(slots[0], slots[1]);
+   EXPECT_NE(slots[0], slots[2]);
+}
+
+/* A device fence and a workgroup barrier leave memory results pending, as
+ * native Metal issues them; the result's reader waits after them. The
+ * raster-order fence form keeps its drain. */
+TEST_F(Apple9Completion, FencesAndBarriersLeaveLoadsPending)
+{
+   const struct {
+      agx_apple9_vir_opcode op;
+      agx_apple9_encoding encoding;
+      unsigned immediate;
+      bool drains;
+   } cases[] = {
+      {AGX_APPLE9_VIR_DEVICE_FENCE, AGX_APPLE9_ENC_DEVICE_FENCE,
+       AGX_APPLE9_FENCE_DEVICE, false},
+      {AGX_APPLE9_VIR_WORKGROUP_BARRIER, AGX_APPLE9_ENC_WORKGROUP_BARRIER, 0,
+       false},
+      {AGX_APPLE9_VIR_DEVICE_FENCE, AGX_APPLE9_ENC_DEVICE_FENCE,
+       AGX_APPLE9_FENCE_RASTER_ORDER, true},
+   };
+   for (const auto &c : cases) {
+      SCOPED_TRACE(unsigned(c.immediate) + 10 * unsigned(c.op));
+      TearDown();
+      SetUp();
+      auto zero = imm(0);
+      auto value = load(zero, 0);
+      ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, c.op, c.encoding,
+                                                 nullptr, 0, c.immediate));
+      output(value, 0);
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
+      unsigned waits = 0, slot = 0;
+      bool seen = false, folded = false;
+      for (unsigned i = 0; i < p.instruction_count; ++i) {
+         const auto *ins = p.instructions[i];
+         if (ins->op == AGX_APPLE9_VIR_DEVICE_LOAD)
+            slot = ins->producer_scoreboard_slot;
+         if (ins->op == AGX_APPLE9_VIR_WAIT) {
+            ++waits;
+            EXPECT_EQ(ins->immediate, BITFIELD_BIT(slot - 1));
+            EXPECT_FALSE(seen);
+         }
+         seen |= ins->op == c.op;
+         if (ins->encoding == AGX_APPLE9_ENC_LOGIC_EXPORT)
+            folded = ins->scoreboard_slot == slot;
+      }
+      EXPECT_TRUE(seen);
+      EXPECT_EQ(waits, c.drains ? 1u : 0u);
+      EXPECT_EQ(folded, !c.drains);
+   }
+}
+
+/* Texture reads are not exempt: Metal waits for a pending read_write
+ * texture read before its texture barrier. */
+TEST_F(Apple9Completion, BarriersRetirePendingTextureReads)
+{
+   auto half = imm(0x3f000000);
+   uint32_t coords[] = {half, half};
+   auto texel = agx_apple9_vir_emit_texture_sample(&p, coords, half, 0, 0);
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_WORKGROUP_BARRIER,
+      AGX_APPLE9_ENC_WORKGROUP_BARRIER, nullptr, 0, 0));
+   output(texel, 0);
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
+   bool waited = false;
+   for (unsigned i = 0; i < p.instruction_count; ++i) {
+      waited |= p.instructions[i]->op == AGX_APPLE9_VIR_WAIT;
+      if (p.instructions[i]->op == AGX_APPLE9_VIR_WORKGROUP_BARRIER)
+         break;
+   }
+   EXPECT_TRUE(waited);
+}
+
+/* Acquire through a device fence: a later device load waits, in its own
+ * input mask, for a plain load that was pending when the fence issued.
+ * Without the fence the loads stay independent. */
+TEST_F(Apple9Completion, LoadsAfterAFenceWaitForEarlierLoads)
+{
+   for (bool fenced : {false, true}) {
+      SCOPED_TRACE(fenced);
+      TearDown();
+      SetUp();
+      auto zero = imm(0);
+      auto guard = load(zero, 0);
+      if (fenced)
+         ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_DEVICE_FENCE,
+            AGX_APPLE9_ENC_DEVICE_FENCE, nullptr, 0, AGX_APPLE9_FENCE_DEVICE));
+      auto payload = load(zero, 1);
+      output(payload, 0);
+      output(guard, 1);
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
+      unsigned loads = 0, guard_slot = 0;
+      bool ordered = false;
+      for (unsigned i = 0; i < p.instruction_count; ++i) {
+         const auto *ins = p.instructions[i];
+         EXPECT_NE(ins->op, AGX_APPLE9_VIR_WAIT);
+         if (ins->op != AGX_APPLE9_VIR_DEVICE_LOAD)
+            continue;
+         if (loads++ == 0)
+            guard_slot = ins->producer_scoreboard_slot;
+         else
+            ordered = ins->scoreboard_slot == guard_slot;
+      }
+      ASSERT_EQ(loads, 2u);
+      EXPECT_EQ(ordered, fenced);
+   }
+}
+
+/* A barrier still waits for producers outside the memory class: here an
+ * asynchronous system-value read. */
+TEST_F(Apple9Completion, BarriersRetireFixedProducers)
+{
+   auto value = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_GET_SR,
+      AGX_APPLE9_ENC_GET_DRAW_ID, nullptr, 0, 0x10dd);
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_WORKGROUP_BARRIER,
+      AGX_APPLE9_ENC_WORKGROUP_BARRIER, nullptr, 0, 0));
+   output(value, 0);
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
+   bool waited = false;
+   for (unsigned i = 0; i < p.instruction_count; ++i) {
+      waited |= p.instructions[i]->op == AGX_APPLE9_VIR_WAIT;
+      if (p.instructions[i]->op == AGX_APPLE9_VIR_WORKGROUP_BARRIER)
+         break;
+   }
+   EXPECT_TRUE(waited);
+}
+
+TEST(Apple9Encoding, RetainingConsumersHaveDependencyFields)
+{
+   for (unsigned e = 0; e < AGX_APPLE9_ENC_COUNT; ++e) {
+      const auto *info = agx_apple9_encoding_info(agx_apple9_encoding(e));
+      if (info->dependency_retains_sources)
+         EXPECT_NE(info->dependency_layout, AGX_APPLE9_DEPENDENCY_NONE) << e;
+   }
+}
+
+/* Min/max takes a pending load's completion in its own field and keeps the
+ * operand for a later read, as native T8132 Metal does. */
+TEST_F(Apple9Completion, MinMaxFoldsAndRetainsAPendingLoad)
+{
+   auto zero = imm(0), bound = imm(100);
+   auto x = load(zero, 0);
+   uint32_t src[] = {x, bound};
+   auto m = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_UMAX,
+      AGX_APPLE9_ENC_MINMAX_COMPACT, src, 2, 0);
+   uint32_t sum[] = {m, x};
+   auto y = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IADD,
+      AGX_APPLE9_ENC_INT_ADD_EXTENDED, sum, 2, 0);
+   output(y, 0);
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
+   unsigned slot = 0;
+   bool folded = false;
+   for (unsigned i = 0; i < p.instruction_count; ++i) {
+      const auto *ins = p.instructions[i];
+      EXPECT_NE(ins->op, AGX_APPLE9_VIR_WAIT);
+      if (ins->op == AGX_APPLE9_VIR_DEVICE_LOAD)
+         slot = ins->producer_scoreboard_slot;
+      if (ins->op == AGX_APPLE9_VIR_UMAX) {
+         folded = ins->scoreboard_slot == slot;
+         EXPECT_TRUE(ins->live_after_mask & 1);
+      }
+   }
+   EXPECT_TRUE(folded);
 }
 
 TEST_F(Apple9Completion, PointerTupleRetiresAtRetainedAddressUse)
@@ -12164,7 +12360,7 @@ TEST_F(Apple9Completion, IndexCompletionDoesNotPreventLaterOrdinaryUse)
    EXPECT_EQ(loads, 2u);
 }
 
-TEST_F(Apple9Completion, AsyncSystemReadsRetireSlotConflictsAndFoldRealUses)
+TEST_F(Apple9Completion, AsyncSystemReadsAvoidSlotConflictsAndFoldRealUses)
 {
    auto zero = imm(0);
    auto a = load(zero, 0);
@@ -12197,14 +12393,13 @@ TEST_F(Apple9Completion, AsyncSystemReadsRetireSlotConflictsAndFoldRealUses)
          unassigned.producer_scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_NONE;
          EXPECT_FALSE(agx_apple9_pack_vir_instruction(
             &unassigned, p.phys, &packed, &reason));
-         if (reads++ == 0) {
-            ASSERT_GT(i, 0u);
-            const auto *prev = p.instructions[i - 1];
-            EXPECT_TRUE(prev->op == AGX_APPLE9_VIR_WAIT
-                           ? (prev->immediate & BITFIELD_BIT(0)) != 0
-                           : prev->scoreboard_slot == AGX_APPLE9_SCOREBOARD_SLOT_1);
-         }
+         ++reads;
       }
+      /* The loads leave slot 1 to the fixed system-value reads that follow
+       * them, so neither read has to retire a load first. */
+      if (ins->op == AGX_APPLE9_VIR_DEVICE_LOAD)
+         EXPECT_NE(ins->producer_scoreboard_slot, AGX_APPLE9_SCOREBOARD_SLOT_1);
+      EXPECT_NE(ins->op, AGX_APPLE9_VIR_WAIT);
       if (ins->op == AGX_APPLE9_VIR_IXOR) {
          EXPECT_EQ(ins->scoreboard_slot, AGX_APPLE9_SCOREBOARD_SLOT_1);
          ++consumers;
@@ -12526,7 +12721,7 @@ TEST_F(Apple9Completion, BlockImageStoresConsumeTheirCoordinatePublications)
       EXPECT_FALSE(pending);
 }
 
-TEST_F(Apple9Completion, TexturesShareTagsWithMemoryAndRetireOnExhaustion)
+TEST_F(Apple9Completion, TexturesShareTagsWithMemoryAndJoinOnExhaustion)
 {
    auto half = imm(0x3f000000), zero = imm(0);
    uint32_t values[5];
@@ -12541,30 +12736,38 @@ TEST_F(Apple9Completion, TexturesShareTagsWithMemoryAndRetireOnExhaustion)
       output(values[i], i + 2);
    const char *reason = nullptr;
    ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
-   unsigned active = 0, peak = 0, samples = 0;
+   /* Samples and loads count on shared slots; an export never joins one. */
+   unsigned count[7] = {}, samples = 0, waits = 0;
+   bool exported[7] = {};
    for (unsigned i = 0; i < p.instruction_count; ++i) {
       const auto *ins = p.instructions[i];
       if (ins->op == AGX_APPLE9_VIR_WAIT) {
-         EXPECT_EQ(active & (ins->immediate << 1), ins->immediate << 1);
-         active &= ~(ins->immediate << 1);
+         ++waits;
+         u_foreach_bit(bit, ins->immediate) {
+            EXPECT_NE(count[bit + 1], 0u);
+            count[bit + 1] = 0;
+         }
       }
       if (ins->scoreboard_slot) {
-         EXPECT_NE(active & (1u << ins->scoreboard_slot), 0u);
-         active &= ~(1u << ins->scoreboard_slot);
+         EXPECT_NE(count[ins->scoreboard_slot], 0u);
+         count[ins->scoreboard_slot] = 0;
       }
       if (ins->op == AGX_APPLE9_VIR_TEXTURE_SAMPLE ||
           ins->op == AGX_APPLE9_VIR_DEVICE_LOAD ||
           ins->encoding == AGX_APPLE9_ENC_LOGIC_EXPORT) {
-         unsigned bit = 1u << ins->producer_scoreboard_slot;
-         EXPECT_EQ(active & bit, 0u);
-         active |= bit;
-         peak = MAX2(peak, util_bitcount(active));
+         unsigned slot = ins->producer_scoreboard_slot;
+         bool exporting = ins->encoding == AGX_APPLE9_ENC_LOGIC_EXPORT;
+         if (count[slot])
+            EXPECT_FALSE(exporting || exported[slot]);
+         exported[slot] = exporting;
+         EXPECT_LE(++count[slot], 7u);
          samples += ins->op == AGX_APPLE9_VIR_TEXTURE_SAMPLE;
       }
    }
    EXPECT_EQ(samples, 2u);
-   EXPECT_EQ(peak, 6u);
-   EXPECT_EQ(active, 0u);
+   EXPECT_EQ(waits, 0u);
+   for (unsigned c : count)
+      EXPECT_EQ(c, 0u);
 }
 
 TEST(Apple9Compiler, ClipVertexUsesOrdinaryVaryingExport)
