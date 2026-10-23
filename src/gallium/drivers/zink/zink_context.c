@@ -4076,8 +4076,13 @@ flush_batch(struct zink_context *ctx, bool sync)
       zink_select_draw_mesh_tasks(ctx);
       zink_select_launch_grid(ctx);
 
-      if (ctx->oom_stall)
+      if (ctx->oom_stall) {
          stall(ctx);
+         /* completed batch states keep their resources until they are
+          * recycled: release them now, as this flush is for memory
+          */
+         zink_batch_reset_all(ctx);
+      }
       zink_reset_ds3_states(ctx);
 
       ctx->oom_flush = false;
