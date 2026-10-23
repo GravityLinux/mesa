@@ -948,11 +948,19 @@ apple9_init_physical(struct agx_apple9_vir_program *out)
  * merge. Each path contributes its own producer; waiting covers all of them.
  * A merge beyond the tracked capacity forgets the producers and waits on
  * entry to the block. */
-#define APPLE9_PENDING_MERGE 4
+#define APPLE9_PENDING_MERGE 8
+
+/* A slot counts its outstanding operations: native Metal issues up to seven
+ * loads and texture reads on one slot and waits for all of them with a
+ * single consumer dependency (G13 allows eight). Never exceed seven. */
+#define APPLE9_SLOT_SHARE_LIMIT 7
 
 struct apple9_pending {
    unsigned count;
    unsigned latest_issue;
+   /* Input position of the first instruction in this block that needs any
+    * of the producers, or UINT_MAX when unknown or outside the block. */
+   unsigned first_need;
    bool unknown;
    struct agx_apple9_vir_instr producer[APPLE9_PENDING_MERGE];
 };
@@ -1412,6 +1420,7 @@ apple9_merge_pending(struct apple9_completion *to_state,
       const struct apple9_pending *f = &from[slot];
       t->unknown |= f->unknown;
       t->latest_issue = MAX2(t->latest_issue, f->latest_issue);
+      t->first_need = UINT_MAX;
       for (unsigned i = 0; i < f->count; ++i) {
          bool present = false;
          for (unsigned j = 0; j < t->count; ++j)
@@ -1426,6 +1435,90 @@ apple9_merge_pending(struct apple9_completion *to_state,
       if (t->unknown)
          t->count = 0;
    }
+}
+
+/* Producers that may share a counting slot with each other. Fixed producers,
+ * publications, atomics and scratch traffic keep a slot to themselves. */
+static bool
+apple9_shares_slot(const struct agx_apple9_vir_instr *ins)
+{
+   return !apple9_fixed_producer_slot(ins) &&
+          (ins->op == AGX_APPLE9_VIR_DEVICE_LOAD ||
+           ins->op == AGX_APPLE9_VIR_TEXTURE_SAMPLE);
+}
+
+/* The first instruction in [start, end) that needs the producer's completion,
+ * by the same tests the scheduler applies, or UINT_MAX. */
+static unsigned
+apple9_first_need(const struct agx_apple9_vir_program *program, unsigned start,
+                  unsigned end, const struct agx_apple9_vir_instr *producer,
+                  bool drain)
+{
+   const unsigned limit = MIN2(end, start + 512);
+   for (unsigned j = start; j < limit; ++j) {
+      const struct agx_apple9_vir_instr *ins = program->instructions[j];
+      if (ins->op == AGX_APPLE9_VIR_WAIT ||
+          ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC_RESULT)
+         continue;
+      if (apple9_completion_barrier(ins, drain) &&
+          !(apple9_completion_exempt(ins) & apple9_completion_class(producer)))
+         return j;
+      if (apple9_producer_hazard(ins, producer))
+         return j;
+      for (unsigned s = 0; s < ins->nr_srcs; ++s) {
+         if (apple9_producer_result(producer, ins->src[s]))
+            return j;
+      }
+   }
+   return UINT_MAX;
+}
+
+/* Whether a sharing producer can be added to the slot without retiring it. */
+static bool
+apple9_slot_joinable(const struct apple9_completion *state, unsigned slot)
+{
+   const struct apple9_pending *p = &state->pending[slot];
+   if (!p->count || p->unknown || p->count >= APPLE9_SLOT_SHARE_LIMIT)
+      return false;
+   for (unsigned i = 0; i < p->count; ++i) {
+      if (!apple9_shares_slot(&p->producer[i]))
+         return false;
+   }
+   return apple9_conflicting_slots(state, BITFIELD_BIT(slot - 1)) ==
+          BITFIELD_BIT(slot - 1);
+}
+
+/* Choose a slot to join for a sharing producer first needed at need. With
+ * free slots, only a slot whose first need is the same instruction: that
+ * consumer waits once for both, and nothing waits earlier than it would.
+ * When every slot is occupied, joining still beats retiring a slot now:
+ * prefer the slot needed soonest at or after need (older producers are
+ * waited for slightly early), else the one needed latest. */
+static unsigned
+apple9_join_slot(const struct apple9_completion *state, unsigned need,
+                 bool exhausted)
+{
+   unsigned best = 0;
+   for (unsigned slot = 1; slot <= 6; ++slot) {
+      if (!apple9_slot_joinable(state, slot))
+         continue;
+      unsigned other = state->pending[slot].first_need;
+      if (!exhausted) {
+         if (need != UINT_MAX && other == need)
+            return slot;
+         continue;
+      }
+      if (!best) {
+         best = slot;
+         continue;
+      }
+      unsigned current = state->pending[best].first_need;
+      bool after = other >= need, best_after = current >= need;
+      if (after != best_after ? after
+                              : after ? other < current : other > current)
+         best = slot;
+   }
+   return best;
 }
 
 static void
@@ -1605,6 +1698,15 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
 
          if (apple9_async(&ins)) {
             unsigned slot = apple9_fixed_producer_slot(&ins);
+            const bool share = apple9_shares_slot(&ins);
+            const unsigned need =
+               share ? apple9_first_need(program, i + 1, end, &ins, drain)
+                     : UINT_MAX;
+            bool joined = false;
+            if (share) {
+               slot = apple9_join_slot(&state, need, false);
+               joined = slot != 0;
+            }
             if (!slot) {
                /* Samples and memory traffic share six completion tags.
                 * Keep independent operations pending until a real hazard,
@@ -1617,6 +1719,10 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
                      slot = candidate;
                      break;
                   }
+               }
+               if (!slot && share) {
+                  slot = apple9_join_slot(&state, need, true);
+                  joined = slot != 0;
                }
                if (!slot) {
                   /* All tags are occupied. Retire the oldest pending group,
@@ -1637,7 +1743,8 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
             /* In particular, never issue another U0 while one is pending.
              * The fully waited double-U0 r6 control timed out, so this is a
              * compiler scheduling invariant, not a claim that replay is safe. */
-            if (!apple9_retire(&out, &state,
+            if (!joined &&
+                !apple9_retire(&out, &state,
                                apple9_conflicting_slots(&state, reservations)))
                goto cleanup;
             ins.producer_scoreboard_slot = slot;
@@ -1649,8 +1756,16 @@ apple9_schedule_physical(struct agx_apple9_vir_program *program,
                };
                ins.device_load_raw_token = tokens[slot - 1];
             }
-            pending[slot] = (struct apple9_pending){
-               .count = 1, .latest_issue = out.instruction_count, .producer = {ins}};
+            if (joined) {
+               struct apple9_pending *p = &pending[slot];
+               p->producer[p->count++] = ins;
+               p->latest_issue = out.instruction_count;
+               p->first_need = MIN2(p->first_need, need);
+            } else {
+               pending[slot] = (struct apple9_pending){
+                  .count = 1, .latest_issue = out.instruction_count,
+                  .first_need = need, .producer = {ins}};
+            }
          }
          apple9_select_compact_alu(&ins);
          if (!apple9_emit_physical(&out, &ins))

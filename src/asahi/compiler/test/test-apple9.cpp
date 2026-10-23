@@ -12069,7 +12069,9 @@ protected:
    }
 };
 
-TEST_F(Apple9Completion, FullScoreboardRetiresOldestLoadInsteadOfNewest)
+/* With every slot occupied, a load joins the slot needed last instead of
+ * retiring one: its consumers wait for it no earlier than their own need. */
+TEST_F(Apple9Completion, FullScoreboardJoinsTheLastNeededSlot)
 {
    auto zero = imm(0);
    uint32_t values[12];
@@ -12084,6 +12086,7 @@ TEST_F(Apple9Completion, FullScoreboardRetiresOldestLoadInsteadOfNewest)
    unsigned first_slots[6] = {};
    for (unsigned i = 0; i < p.instruction_count; ++i) {
       const auto *ins = p.instructions[i];
+      EXPECT_NE(ins->op, AGX_APPLE9_VIR_WAIT);
       if (ins->op != AGX_APPLE9_VIR_DEVICE_LOAD)
          continue;
       if (loads < 6) {
@@ -12091,15 +12094,38 @@ TEST_F(Apple9Completion, FullScoreboardRetiresOldestLoadInsteadOfNewest)
             EXPECT_NE(ins->producer_scoreboard_slot, first_slots[j]);
          first_slots[loads] = ins->producer_scoreboard_slot;
       } else {
-         EXPECT_EQ(ins->producer_scoreboard_slot, first_slots[loads - 6]);
-         ASSERT_GT(i, 0u);
-         EXPECT_EQ(p.instructions[i - 1]->op, AGX_APPLE9_VIR_WAIT);
-         EXPECT_EQ(p.instructions[i - 1]->immediate,
-                   BITFIELD_BIT(first_slots[loads - 6] - 1));
+         EXPECT_EQ(ins->producer_scoreboard_slot, first_slots[5]);
       }
       ++loads;
    }
    EXPECT_EQ(loads, ARRAY_SIZE(values));
+}
+
+/* Loads first needed by the same instruction share one slot, and that
+ * consumer waits for them once (native Metal does the same). */
+TEST_F(Apple9Completion, LoadsWithOneConsumerShareASlot)
+{
+   auto zero = imm(0);
+   uint32_t a = load(zero, 0), b2 = load(zero, 1), c = load(zero, 2);
+   uint32_t sum[] = {a, b2};
+   auto ab = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IADD,
+      AGX_APPLE9_ENC_INT_ADD_EXTENDED, sum, 2, 0);
+   output(ab, 0);
+   output(c, 1);
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
+   unsigned slots[3] = {}, loads = 0;
+   for (unsigned i = 0; i < p.instruction_count; ++i) {
+      const auto *ins = p.instructions[i];
+      EXPECT_NE(ins->op, AGX_APPLE9_VIR_WAIT);
+      if (ins->op == AGX_APPLE9_VIR_DEVICE_LOAD)
+         slots[loads++] = ins->producer_scoreboard_slot;
+      if (ins->op == AGX_APPLE9_VIR_IADD)
+         EXPECT_EQ(ins->scoreboard_slot, slots[0]);
+   }
+   ASSERT_EQ(loads, 3u);
+   EXPECT_EQ(slots[0], slots[1]);
+   EXPECT_NE(slots[0], slots[2]);
 }
 
 /* A device fence and a workgroup barrier leave memory results pending, as
@@ -12600,7 +12626,7 @@ TEST_F(Apple9Completion, BlockImageStoresConsumeTheirCoordinatePublications)
       EXPECT_FALSE(pending);
 }
 
-TEST_F(Apple9Completion, TexturesShareTagsWithMemoryAndRetireOnExhaustion)
+TEST_F(Apple9Completion, TexturesShareTagsWithMemoryAndJoinOnExhaustion)
 {
    auto half = imm(0x3f000000), zero = imm(0);
    uint32_t values[5];
@@ -12615,30 +12641,38 @@ TEST_F(Apple9Completion, TexturesShareTagsWithMemoryAndRetireOnExhaustion)
       output(values[i], i + 2);
    const char *reason = nullptr;
    ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
-   unsigned active = 0, peak = 0, samples = 0;
+   /* Samples and loads count on shared slots; an export never joins one. */
+   unsigned count[7] = {}, samples = 0, waits = 0;
+   bool exported[7] = {};
    for (unsigned i = 0; i < p.instruction_count; ++i) {
       const auto *ins = p.instructions[i];
       if (ins->op == AGX_APPLE9_VIR_WAIT) {
-         EXPECT_EQ(active & (ins->immediate << 1), ins->immediate << 1);
-         active &= ~(ins->immediate << 1);
+         ++waits;
+         u_foreach_bit(bit, ins->immediate) {
+            EXPECT_NE(count[bit + 1], 0u);
+            count[bit + 1] = 0;
+         }
       }
       if (ins->scoreboard_slot) {
-         EXPECT_NE(active & (1u << ins->scoreboard_slot), 0u);
-         active &= ~(1u << ins->scoreboard_slot);
+         EXPECT_NE(count[ins->scoreboard_slot], 0u);
+         count[ins->scoreboard_slot] = 0;
       }
       if (ins->op == AGX_APPLE9_VIR_TEXTURE_SAMPLE ||
           ins->op == AGX_APPLE9_VIR_DEVICE_LOAD ||
           ins->encoding == AGX_APPLE9_ENC_LOGIC_EXPORT) {
-         unsigned bit = 1u << ins->producer_scoreboard_slot;
-         EXPECT_EQ(active & bit, 0u);
-         active |= bit;
-         peak = MAX2(peak, util_bitcount(active));
+         unsigned slot = ins->producer_scoreboard_slot;
+         bool exporting = ins->encoding == AGX_APPLE9_ENC_LOGIC_EXPORT;
+         if (count[slot])
+            EXPECT_FALSE(exporting || exported[slot]);
+         exported[slot] = exporting;
+         EXPECT_LE(++count[slot], 7u);
          samples += ins->op == AGX_APPLE9_VIR_TEXTURE_SAMPLE;
       }
    }
    EXPECT_EQ(samples, 2u);
-   EXPECT_EQ(peak, 6u);
-   EXPECT_EQ(active, 0u);
+   EXPECT_EQ(waits, 0u);
+   for (unsigned c : count)
+      EXPECT_EQ(c, 0u);
 }
 
 TEST(Apple9Compiler, ClipVertexUsesOrdinaryVaryingExport)

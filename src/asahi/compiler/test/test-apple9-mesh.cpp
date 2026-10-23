@@ -512,24 +512,21 @@ TEST(Apple9MeshIR, SubmitsDrainIndependentProducers)
                ASSERT_GE(I->producer_scoreboard_slot, 1u);
                ASSERT_LE(I->producer_scoreboard_slot, 6u);
                unsigned bit = BITFIELD_BIT(I->producer_scoreboard_slot - 1);
-               EXPECT_EQ(pending & bit, 0u);
                pending |= bit;
                issued |= bit;
             }
+            /* Every load is first needed by the submit, so they share one
+             * counting slot and the submit retires it in its own field. */
             if (I->op == AGX_APPLE9_VIR_MESH_SUBMIT_CHANNEL ||
                 I->op == AGX_APPLE9_VIR_MESH_SUBMIT_SCALAR) {
                ++submits;
                EXPECT_EQ(pending, 0u);
-               EXPECT_EQ(util_bitcount(issued), count);
+               EXPECT_EQ(util_bitcount(issued), count ? 1u : 0u);
                EXPECT_EQ(waited, issued);
                EXPECT_EQ(I->scoreboard_slot != 0, count != 0);
                EXPECT_EQ(I->producer_scoreboard_slot, 0u);
-               if (count > 1) {
-                  ASSERT_GT(i, 0u);
-                  EXPECT_EQ(p.instructions[i - 1]->op, AGX_APPLE9_VIR_WAIT);
-                  EXPECT_EQ(p.instructions[i - 1]->immediate,
-                            issued & ~BITFIELD_BIT(I->scoreboard_slot - 1));
-               }
+               if (i)
+                  EXPECT_NE(p.instructions[i - 1]->op, AGX_APPLE9_VIR_WAIT);
             }
          }
          EXPECT_EQ(submits, 1u);
@@ -1017,7 +1014,9 @@ TEST_F(Apple9MeshCompletion, PendingControlExcludesSlotsOneAndTwo)
    wait_before(AGX_APPLE9_VIR_DEVICE_FENCE);
 }
 
-TEST_F(Apple9MeshCompletion, ExhaustionRetiresControlBeforeSlotReuse)
+/* U0 reserves slots 1 and 2; once 3..6 are taken, a further load joins one
+ * of those instead of retiring U0 to reuse its selectors. */
+TEST_F(Apple9MeshCompletion, ExhaustionJoinsLoadsWithoutReusingControlSlots)
 {
    control();
    auto index = imm(0);
@@ -1040,23 +1039,17 @@ TEST_F(Apple9MeshCompletion, ExhaustionRetiresControlBeforeSlotReuse)
       waits += I->op == AGX_APPLE9_VIR_WAIT;
       if (I->op != AGX_APPLE9_VIR_DEVICE_LOAD)
          continue;
-      if (loads < 4) {
-         EXPECT_EQ(waits, 0u);
-         ASSERT_GE(I->producer_scoreboard_slot, 3u);
-         ASSERT_LE(I->producer_scoreboard_slot, 6u);
-         unsigned bit = BITFIELD_BIT(I->producer_scoreboard_slot - 1);
-         EXPECT_EQ(slots & bit, 0u);
-         slots |= bit;
-      } else {
-         EXPECT_EQ(slots, 0x3cu);
-         EXPECT_EQ(waits, 1u);
-         EXPECT_GE(I->producer_scoreboard_slot, 1u);
-         EXPECT_LE(I->producer_scoreboard_slot, 2u);
-      }
+      EXPECT_EQ(waits, 0u);
+      ASSERT_GE(I->producer_scoreboard_slot, 3u);
+      ASSERT_LE(I->producer_scoreboard_slot, 6u);
+      unsigned bit = BITFIELD_BIT(I->producer_scoreboard_slot - 1);
+      EXPECT_EQ(slots & bit, loads < 4 ? 0u : bit);
+      slots |= bit;
       ++loads;
    }
+   EXPECT_EQ(slots, 0x3cu);
    EXPECT_EQ(loads, 5u);
-   wait_before(AGX_APPLE9_VIR_DEVICE_LOAD, 4);
+   wait_before(AGX_APPLE9_VIR_DEVICE_FENCE);
 }
 
 TEST_F(Apple9MeshCompletion, JoinedSlotOneResultAndControlFoldTogether)
