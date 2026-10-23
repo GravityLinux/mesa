@@ -772,6 +772,27 @@ hk_render_merge_end(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
       render->ds_read_only, render->area);
 }
 
+/* A merged empty chain can still end without any draws. Retain the first
+ * pass's clear values so empty-render conversion does not lose them when a
+ * later LOAD pass, including suspend/resume, supplies the final render state.
+ */
+static void
+hk_render_inherit_empty_clears(struct hk_cmd_buffer *cmd)
+{
+   if (!cmd->merge_empty)
+      return;
+   struct hk_rendering_state *render = &cmd->state.gfx.render;
+   const struct hk_rendering_state *first = cmd->merge_empty_render;
+   for (unsigned i = 0; i < HK_MAX_RTS + 2; ++i) {
+      struct hk_attachment *att = i == HK_MAX_RTS ? &render->depth_att :
+         i == HK_MAX_RTS + 1 ? &render->stencil_att : &render->color_att[i];
+      const struct hk_attachment *old = i == HK_MAX_RTS ? &first->depth_att :
+         i == HK_MAX_RTS + 1 ? &first->stencil_att : &first->color_att[i];
+      att->clear = old->clear;
+      memcpy(att->clear_colour, old->clear_colour, sizeof(att->clear_colour));
+   }
+}
+
 VKAPI_ATTR void VKAPI_CALL
 hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
                      const VkRenderingInfo *pRenderingInfo)
@@ -1094,6 +1115,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       render->first_cs = cmd->merge_first_cs ? cmd->merge_cs : NULL;
       render->feedback |= cmd->merge_feedback;
       render->resumed = true;
+      hk_render_inherit_empty_clears(cmd);
       cmd->merge_cs = NULL;
       cmd->merge_empty = false;
       cmd->merge_suspended = false;
@@ -1112,6 +1134,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       /* The render's earlier passes may have read their attachments too. */
       render->feedback |= cmd->merge_feedback;
       render->merge_reach = cmd->merge_reach;
+      hk_render_inherit_empty_clears(cmd);
       cmd->merge_cs = NULL;
       cmd->merge_empty = false;
       hk_cmd_buffer_dirty_all(cmd);

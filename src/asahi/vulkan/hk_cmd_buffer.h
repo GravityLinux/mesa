@@ -1274,6 +1274,10 @@ uint64_t hk_predicate_indirect(struct hk_cmd_buffer *cmd, uint64_t in,
 static void
 hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
 {
+   /* Empty-render conversion emits meta work. Keep its own barriers separate
+    * from the API barriers that must execute after the converted clears. */
+   struct util_dynarray pending = cmd->empty_barriers;
+   cmd->empty_barriers = UTIL_DYNARRAY_INIT;
    struct hk_cs *cs = cmd->current_cs.gfx;
    /* An empty render kept open for merging ends after its render pass: the
     * empty-render optimization needs that pass's render state back. */
@@ -1329,6 +1333,9 @@ hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
     */
    cmd->uses_heap = false;
    cmd->uses_mesh_heap = false;
+   assert(!cmd->empty_barriers.size);
+   cmd->empty_barriers = pending;
+   hk_cmd_empty_barriers_flush(cmd, false);
 }
 
 static inline uint64_t

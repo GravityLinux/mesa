@@ -779,7 +779,6 @@ hk_cmd_render_merge_flush_why(struct hk_cmd_buffer *cmd, const char *why)
    hk_cs_end_hint(cmd, HK_CS_END_RENDER_PASS);
    hk_cmd_buffer_end_graphics(cmd);
    assert(!cmd->merge_cs);
-   hk_cmd_empty_barriers_flush(cmd, false);
 }
 
 /* Whether a barrier between two render passes only orders attachment access,
