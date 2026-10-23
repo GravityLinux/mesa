@@ -4258,7 +4258,7 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
              (nir_intrinsic_access(intr) & ACCESS_VOLATILE) &&
              !agx_apple9_vir_emit_side_effect(&lower->program,
                 AGX_APPLE9_VIR_DEVICE_FENCE, AGX_APPLE9_ENC_DEVICE_FENCE,
-                NULL, 0, 0))
+                NULL, 0, AGX_APPLE9_FENCE_DEVICE_ACQUIRE))
             return false;
          if (intr->intrinsic == nir_intrinsic_load_barycentric_pixel)
             continue; /* Interpolation mode is consumed by the input operation. */
@@ -4286,12 +4286,21 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
             /* As on Apple8, a subgroup executes in lockstep and shared memory
              * needs no fence. Storage images are lowered to global memory.
              */
+            /* An acquiring fence keeps its device reads ordered before it:
+             * leaving one pending across the fence, with the later read
+             * waiting instead, intermittently failed fragment
+             * memory_model.message_passing on T8132. Release-only fences
+             * may leave reads pending (native Metal). */
+            const bool acquire =
+               nir_intrinsic_memory_semantics(intr) & NIR_MEMORY_ACQUIRE;
             if (nir_intrinsic_memory_scope(intr) != SCOPE_NONE &&
                 (modes & (nir_var_mem_global | nir_var_mem_ssbo |
                           nir_var_image)) &&
                 !agx_apple9_vir_emit_side_effect(&lower->program,
                    AGX_APPLE9_VIR_DEVICE_FENCE,
-                   AGX_APPLE9_ENC_DEVICE_FENCE, NULL, 0, 0))
+                   AGX_APPLE9_ENC_DEVICE_FENCE, NULL, 0,
+                   acquire ? AGX_APPLE9_FENCE_DEVICE_ACQUIRE
+                           : AGX_APPLE9_FENCE_DEVICE))
                return false;
             if (scope == SCOPE_WORKGROUP &&
                 !agx_apple9_vir_emit_side_effect(&lower->program,

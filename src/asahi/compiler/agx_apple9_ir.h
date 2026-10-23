@@ -194,6 +194,9 @@ enum agx_apple9_fence_mode {
    AGX_APPLE9_FENCE_DEVICE = 0,
    AGX_APPLE9_FENCE_RASTER_ORDER = 1,
    AGX_APPLE9_FENCE_OBJECT_GRID = 2,
+   /* The device fence with acquire semantics: same encoding, but device
+    * reads issued before it must have completed when it executes. */
+   AGX_APPLE9_FENCE_DEVICE_ACQUIRE = 3,
 };
 
 enum agx_apple9_unpack_norm_mode {

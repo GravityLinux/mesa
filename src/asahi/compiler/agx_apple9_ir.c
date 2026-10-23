@@ -2471,7 +2471,7 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
          case AGX_APPLE9_VIR_DEVICE_FENCE:
             valid &= instruction->encoding == AGX_APPLE9_ENC_DEVICE_FENCE &&
                      instruction->nr_srcs == 0 &&
-                     instruction->immediate <= AGX_APPLE9_FENCE_OBJECT_GRID;
+                     instruction->immediate <= AGX_APPLE9_FENCE_DEVICE_ACQUIRE;
             break;
          case AGX_APPLE9_VIR_WAIT:
             valid &= instruction->encoding == AGX_APPLE9_ENC_WAIT &&
@@ -7036,7 +7036,7 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
    case AGX_APPLE9_VIR_DEVICE_FENCE: {
       if (instruction->encoding != AGX_APPLE9_ENC_DEVICE_FENCE ||
           instruction->nr_srcs ||
-          instruction->immediate > AGX_APPLE9_FENCE_OBJECT_GRID ||
+          instruction->immediate > AGX_APPLE9_FENCE_DEVICE_ACQUIRE ||
           instruction->dest != AGX_APPLE9_VREG_INVALID)
          return false;
       /* A device memory fence has no execution rendezvous. It is safe in
