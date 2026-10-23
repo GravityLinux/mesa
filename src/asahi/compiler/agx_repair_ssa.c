@@ -177,76 +177,137 @@ seal_loop_headers(struct repair_ctx *ctx, struct agx_block *exit)
    }
 }
 
+struct trivial_phi_use {
+   agx_instr *I;
+   unsigned s;
+   struct trivial_phi_use *next;
+};
+
+/*
+ * Remove phis whose normal sources are all one value or the phi itself,
+ * replacing their uses. Removing a phi only makes other phis more trivial, so
+ * the result does not depend on the order: track each value's uses and
+ * revisit just the phis whose sources changed, rather than sweeping the whole
+ * shader once per round.
+ *
+ * Only optimize trivial phis with normal sources. It is possible to optimize
+ * something like `phi #0, #0` but...
+ *
+ * 1. It would inadvently propagate constants which may be invalid. Copyprop
+ * knows the rules for this, but we don't here.
+ *
+ * 2. These trivial phis should be optimized at the NIR level. This pass is
+ * just to clean up spilling.
+ *
+ * So skip them for correctness in case NIR misses something (which can happen
+ * depending on pass order).
+ */
 static void
 agx_opt_trivial_phi(agx_context *ctx)
 {
-   agx_index *remap = calloc(ctx->alloc, sizeof(*remap));
-   for (;;) {
-      bool progress = false;
-      memset(remap, 0, ctx->alloc * sizeof(*remap));
+   unsigned nr_uses = 0;
+   agx_foreach_instr_global(ctx, I) {
+      agx_foreach_ssa_src(I, s)
+         ++nr_uses;
+   }
 
-      agx_foreach_block(ctx, block) {
-         agx_foreach_phi_in_block_safe(block, phi) {
-            agx_index same = agx_null();
-            bool all_same = true;
+   struct trivial_phi_use *pool = malloc(MAX2(nr_uses, 1) * sizeof(*pool));
+   struct trivial_phi_use **uses = calloc(ctx->alloc, sizeof(*uses));
+   BITSET_WORD *candidate = BITSET_CALLOC(ctx->alloc);
+   BITSET_WORD *removed = BITSET_CALLOC(ctx->alloc);
+   struct util_dynarray worklist;
+   util_dynarray_init(&worklist, NULL);
 
-            agx_foreach_src(phi, s) {
-               /* Only optimize trivial phis with normal sources. It is possible
-                * to optimize something like `phi #0, #0` but...
-                *
-                * 1. It would inadvently propagate constants which may be
-                * invalid. Copyprop knows the rules for this, but we don't here.
-                *
-                * 2. These trivial phis should be optimized at the NIR level.
-                * This pass is just to clean up spilling.
-                *
-                * So skip them for correctness in case NIR misses something
-                * (which can happen depending on pass order).
-                *
-                * ---
-                *
-                * TODO: Handle cycles faster.
-                */
-               if (phi->src[s].type != AGX_INDEX_NORMAL ||
-                   !agx_is_null(remap[phi->src[s].value])) {
-                  all_same = false;
-                  break;
-               }
-
-               /* Same value or self-reference */
-               if (agx_is_equiv(phi->src[s], same) ||
-                   agx_is_equiv(phi->src[s], phi->dest[0]))
-                  continue;
-
-               if (!agx_is_null(same)) {
-                  all_same = false;
-                  break;
-               }
-
-               same = phi->src[s];
-            }
-
-            if (all_same) {
-               remap[phi->dest[0].value] = same;
-               agx_remove_instruction(phi);
-               progress = true;
-            }
-         }
-      }
-
-      if (!progress)
-         break;
-
-      agx_foreach_instr_global(ctx, I) {
-         agx_foreach_ssa_src(I, s) {
-            if (!agx_is_null(remap[I->src[s].value])) {
-               agx_replace_src(I, s, remap[I->src[s].value]);
-            }
-         }
+   nr_uses = 0;
+   agx_foreach_instr_global(ctx, I) {
+      agx_foreach_ssa_src(I, s) {
+         pool[nr_uses] = (struct trivial_phi_use){
+            .I = I,
+            .s = s,
+            .next = uses[I->src[s].value],
+         };
+         uses[I->src[s].value] = &pool[nr_uses++];
       }
    }
 
-   free(remap);
+   /* Only phis at the start of their block take part. Visit them in program
+    * order first.
+    */
+   agx_foreach_block_rev(ctx, block) {
+      agx_foreach_phi_in_block(block, phi) {
+         BITSET_SET(candidate, phi->dest[0].value);
+      }
+   }
+   agx_foreach_block_rev(ctx, block) {
+      agx_foreach_instr_in_block_rev(block, phi) {
+         if (phi->op == AGX_OPCODE_PHI &&
+             BITSET_TEST(candidate, phi->dest[0].value))
+            util_dynarray_append(&worklist, phi);
+      }
+   }
+
+   while (util_dynarray_num_elements(&worklist, agx_instr *)) {
+      agx_instr *phi = util_dynarray_pop(&worklist, agx_instr *);
+      unsigned dest = phi->dest[0].value;
+      if (BITSET_TEST(removed, dest))
+         continue;
+
+      agx_index same = agx_null();
+      bool all_same = true;
+
+      agx_foreach_src(phi, s) {
+         if (phi->src[s].type != AGX_INDEX_NORMAL) {
+            all_same = false;
+            break;
+         }
+
+         /* Same value or self-reference */
+         if (agx_is_equiv(phi->src[s], same) ||
+             agx_is_equiv(phi->src[s], phi->dest[0]))
+            continue;
+
+         if (!agx_is_null(same)) {
+            all_same = false;
+            break;
+         }
+
+         same = phi->src[s];
+      }
+
+      if (!all_same)
+         continue;
+
+      BITSET_SET(removed, dest);
+      agx_remove_instruction(phi);
+
+      /* A phi of only itself has no value to forward */
+      if (agx_is_null(same))
+         continue;
+
+      struct trivial_phi_use *last = NULL;
+      for (struct trivial_phi_use *u = uses[dest]; u; u = u->next) {
+         assert(u->I->src[u->s].value == dest);
+         agx_replace_src(u->I, u->s, same);
+         last = u;
+
+         if (u->I->op == AGX_OPCODE_PHI &&
+             BITSET_TEST(candidate, u->I->dest[0].value) &&
+             !BITSET_TEST(removed, u->I->dest[0].value))
+            util_dynarray_append(&worklist, u->I);
+      }
+
+      if (last) {
+         last->next = uses[same.value];
+         uses[same.value] = uses[dest];
+         uses[dest] = NULL;
+      }
+   }
+
+   util_dynarray_fini(&worklist);
+   free(removed);
+   free(candidate);
+   free(uses);
+   free(pool);
 }
 
 void
