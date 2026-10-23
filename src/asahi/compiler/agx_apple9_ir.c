@@ -216,10 +216,21 @@ void
 agx_apple9_vir_remove(struct agx_apple9_vir_program *program,
                           struct agx_apple9_vir_instr *instr)
 {
-   struct apple9_instruction_node *node = apple9_node(instr);
-   list_del(&node->link);
-   free(node);
-   --program->instruction_count;
+   agx_apple9_vir_remove_many(program, &instr, 1);
+}
+
+/* Remove several instructions with a single reindex. */
+void
+agx_apple9_vir_remove_many(struct agx_apple9_vir_program *program,
+                           struct agx_apple9_vir_instr *const *instrs,
+                           unsigned count)
+{
+   for (unsigned i = 0; i < count; ++i) {
+      struct apple9_instruction_node *node = apple9_node(instrs[i]);
+      list_del(&node->link);
+      free(node);
+   }
+   program->instruction_count -= count;
    agx_apple9_vir_reindex(program);
 }
 

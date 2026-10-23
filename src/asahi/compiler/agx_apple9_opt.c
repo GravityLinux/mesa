@@ -964,8 +964,8 @@ fold_uniform_stores(struct agx_apple9_vir_program *p)
          ++i;
       }
    }
-   for (unsigned i = 0; i < nr_remove; ++i)
-      agx_apple9_vir_remove(p, remove[i]);
+   if (nr_remove)
+      agx_apple9_vir_remove_many(p, remove, nr_remove);
    free(remove);
    agx_apple9_invalidate_uses(p);
    return true;

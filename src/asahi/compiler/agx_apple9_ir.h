@@ -608,6 +608,9 @@ void agx_apple9_vir_move_before(struct agx_apple9_vir_program *program,
                               struct agx_apple9_vir_instr *before);
 void agx_apple9_vir_remove(struct agx_apple9_vir_program *program,
                           struct agx_apple9_vir_instr *instruction);
+void agx_apple9_vir_remove_many(struct agx_apple9_vir_program *program,
+                                struct agx_apple9_vir_instr *const *instrs,
+                                unsigned count);
 void agx_apple9_vir_reindex(struct agx_apple9_vir_program *program);
 bool agx_apple9_instr_is_pure_alu(const struct agx_apple9_vir_instr *instruction);
 bool agx_apple9_supports_special_uniform(enum agx_apple9_vir_opcode op);
