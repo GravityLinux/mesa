@@ -1397,6 +1397,8 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
       .EXT_depth_bias_control = true,
       .EXT_depth_clip_control = true,
       .EXT_image_2d_view_of_3d = true,
+      /* Storage query bounds are separate from native texture geometry. */
+      .EXT_image_sliced_view_of_3d = true,
       /* Native custom border colours need the border format: the sampler
        * record holds the colour in the format's encoding. Without
        * customBorderColorWithoutFormat, DXVK passes the view format and
@@ -1649,6 +1651,7 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
       KEEP(depthBiasExact),
       KEEP(image2DViewOf3D),
       KEEP(sampler2DViewOf3D),
+      .imageSlicedViewOf3D = true,
       KEEP(customBorderColors),
       KEEP(borderColorSwizzle),
       KEEP(primitiveTopologyListRestart),

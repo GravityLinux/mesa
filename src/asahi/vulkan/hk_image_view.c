@@ -250,6 +250,14 @@ pack_texture(struct hk_image_view *view, unsigned view_plane,
    unsigned level = view->vk.base_mip_level;
    unsigned layer = view->vk.base_array_layer;
 
+   /* AIL stores each Z slice as a complete XY miptree. Storage slicing
+    * shifts the base without changing that miptree's physical geometry.
+    * Other descriptor uses must ignore VkImageViewSlicedCreateInfoEXT.
+    */
+   if (usage == HK_DESC_USAGE_STORAGE &&
+       view->vk.view_type == VK_IMAGE_VIEW_TYPE_3D)
+      layer = view->vk.storage.z_slice_offset;
+
    enum pipe_format p_format = format_for_plane(view, view_plane);
    const struct util_format_description *desc =
       util_format_description(p_format);
@@ -425,6 +433,10 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
 
    unsigned level = view->vk.base_mip_level;
    unsigned layer = view->vk.base_array_layer;
+
+   if (usage == HK_DESC_USAGE_STORAGE &&
+       view->vk.view_type == VK_IMAGE_VIEW_TYPE_3D)
+      layer = view->vk.storage.z_slice_offset;
 
    enum pipe_format p_format = format_for_plane(view, view_plane);
    const struct util_format_description *desc =
@@ -605,8 +617,33 @@ hk_apple9_init_view_descriptors(struct hk_image_view *view)
    storage->store_encode = hk_apple9_store_encode(format);
    storage->metadata.elements =
       view->vk.base_mip_level | (view->vk.base_array_layer << 16);
-   if (agx_apple9_translate_texture(storage->texture, &storage->common.tex))
+   /* A block-texel alias rebases to a single level. Its native 3D
+    * descriptor cannot express the original image's Z stride, but
+    * software storage reads use the explicit PBE stride correctly.
+    */
+   const bool alias_3d = view->vk.view_type == VK_IMAGE_VIEW_TYPE_3D &&
+                         vk_format_is_compressed(view->vk.image->format) &&
+                         !vk_format_is_compressed(view->vk.format);
+   if (!alias_3d &&
+       agx_apple9_translate_texture(storage->texture, &storage->common.tex))
       storage->native_ok = HK_APPLE9_STORAGE_READ_VALID;
+
+   /* Native fetches need the original depth: it participates in the
+    * inferred XY miptree stride when Z is the longest axis. Queries and all
+    * storage bounds checks instead use this software prefix. libagx_txs
+    * minifies it by first_level, so encode the slice count at level zero.
+    * The texture and PBE bases already include the slice offset; software
+    * writes/atomics retain the physical stride.
+    */
+   if (view->vk.view_type == VK_IMAGE_VIEW_TYPE_3D) {
+      agx_unpack(NULL, &storage->common.tex, TEXTURE, t);
+      t.depth = view->vk.storage.z_slice_count << t.first_level;
+      /* The linear stride aliases depth in the packed descriptor. */
+      t.stride = 0;
+      agx_pack(&storage->common.tex, TEXTURE, cfg) {
+         cfg = t;
+      }
+   }
 
    /* Native accesses keep the padded alias width; queries use the logical
     * width in the legacy descriptor. */
