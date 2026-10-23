@@ -178,15 +178,22 @@ static const struct agx_apple9_encoding_info encodings[] = {
       .name = "wait", .length = 2,
       .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
    },
+   /* Native T8132 Metal issues both the fence and the barrier with device
+    * loads, returning atomics and threadgroup loads outstanding, including
+    * before another invocation's store to a loaded location, and waits at
+    * the results' consumers. The scheduler still drains the raster-order and
+    * object-grid fence forms, which have no such evidence. */
    [AGX_APPLE9_ENC_DEVICE_FENCE] = {
       .name = "device_fence", .length = 6,
       .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_BYTE_DIFF,
       .requires_prior_completion = true,
+      .prior_completion_exempt = AGX_APPLE9_COMPLETION_MEMORY,
    },
    [AGX_APPLE9_ENC_WORKGROUP_BARRIER] = {
       .name = "workgroup_barrier", .length = 6,
       .allocator_safe = true, .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
       .requires_prior_completion = true,
+      .prior_completion_exempt = AGX_APPLE9_COMPLETION_MEMORY,
    },
    [AGX_APPLE9_ENC_SHARED_LOAD] = {
       .name = "shared_load", .length = 14, .operand_count = 2,
@@ -2076,7 +2083,9 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .name = "coverage",
          .length = 6,
          /* Native captures carry byte 1 as 0x14 or 0x04: a slot-1 wait or
-          * none, at the same bits as device memory's input mask. */
+          * none, at the same bits as device memory's input mask. Native
+          * fragments with discard or depth output wait there for the
+          * coverage publication rather than before the tile access. */
          .dependency_layout = AGX_APPLE9_DEPENDENCY_MASK_12_17,
          .operand_count = 1,
          .allocator_safe = true,
@@ -2093,6 +2102,9 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .operand_count = 0,
          .allocator_safe = true,
          .requires_prior_completion = true,
+         /* Native fragments open the test domain with the coverage
+          * publication still pending; the coverage instruction waits. */
+         .prior_completion_exempt = AGX_APPLE9_COMPLETION_PUBLICATION,
          .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
       },
    [AGX_APPLE9_ENC_TILE_LOAD] =

@@ -10278,8 +10278,12 @@ TEST(Apple9Compiler, RepeatedDemotionReusesCoveragePublication)
    for (unsigned i = 0; i + 6 <= part.info.binary_size; ++i) {
       acquires += memcmp(code + i, acquire, 6) == 0;
       releases += memcmp(code + i, release, 6) == 0;
-      if (code[i] == 0x57 && (code[i+1] & 0x0f) == 0x04 && code[i+2] == 0x54) {
+      /* Bits 12..17 wait for the coverage publication supplying the
+       * operand, which the tile access before it leaves pending. */
+      if (code[i] == 0x57 && (code[i+1] & 0x0f) == 0x04 &&
+          (code[i+2] & ~3) == 0x54) {
          EXPECT_EQ(code[i+3], 0u);
+         EXPECT_NE((code[i+1] >> 4) | ((code[i+2] & 3) << 4), 0);
          ++coverage;
       }
    }
@@ -12096,6 +12100,76 @@ TEST_F(Apple9Completion, FullScoreboardRetiresOldestLoadInsteadOfNewest)
       ++loads;
    }
    EXPECT_EQ(loads, ARRAY_SIZE(values));
+}
+
+/* A device fence and a workgroup barrier leave memory results pending, as
+ * native Metal issues them; the result's reader waits after them. The
+ * raster-order fence form keeps its drain. */
+TEST_F(Apple9Completion, FencesAndBarriersLeaveLoadsPending)
+{
+   const struct {
+      agx_apple9_vir_opcode op;
+      agx_apple9_encoding encoding;
+      unsigned immediate;
+      bool drains;
+   } cases[] = {
+      {AGX_APPLE9_VIR_DEVICE_FENCE, AGX_APPLE9_ENC_DEVICE_FENCE,
+       AGX_APPLE9_FENCE_DEVICE, false},
+      {AGX_APPLE9_VIR_WORKGROUP_BARRIER, AGX_APPLE9_ENC_WORKGROUP_BARRIER, 0,
+       false},
+      {AGX_APPLE9_VIR_DEVICE_FENCE, AGX_APPLE9_ENC_DEVICE_FENCE,
+       AGX_APPLE9_FENCE_RASTER_ORDER, true},
+   };
+   for (const auto &c : cases) {
+      SCOPED_TRACE(unsigned(c.immediate) + 10 * unsigned(c.op));
+      TearDown();
+      SetUp();
+      auto zero = imm(0);
+      auto value = load(zero, 0);
+      ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, c.op, c.encoding,
+                                                 nullptr, 0, c.immediate));
+      output(value, 0);
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
+      unsigned waits = 0, slot = 0;
+      bool seen = false, folded = false;
+      for (unsigned i = 0; i < p.instruction_count; ++i) {
+         const auto *ins = p.instructions[i];
+         if (ins->op == AGX_APPLE9_VIR_DEVICE_LOAD)
+            slot = ins->producer_scoreboard_slot;
+         if (ins->op == AGX_APPLE9_VIR_WAIT) {
+            ++waits;
+            EXPECT_EQ(ins->immediate, BITFIELD_BIT(slot - 1));
+            EXPECT_FALSE(seen);
+         }
+         seen |= ins->op == c.op;
+         if (ins->encoding == AGX_APPLE9_ENC_LOGIC_EXPORT)
+            folded = ins->scoreboard_slot == slot;
+      }
+      EXPECT_TRUE(seen);
+      EXPECT_EQ(waits, c.drains ? 1u : 0u);
+      EXPECT_EQ(folded, !c.drains);
+   }
+}
+
+/* A barrier still waits for producers outside the memory class: here an
+ * asynchronous system-value read. */
+TEST_F(Apple9Completion, BarriersRetireFixedProducers)
+{
+   auto value = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_GET_SR,
+      AGX_APPLE9_ENC_GET_DRAW_ID, nullptr, 0, 0x10dd);
+   ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p, AGX_APPLE9_VIR_WORKGROUP_BARRIER,
+      AGX_APPLE9_ENC_WORKGROUP_BARRIER, nullptr, 0, 0));
+   output(value, 0);
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_allocate_shared(&p, b.shader, &reason)) << reason;
+   bool waited = false;
+   for (unsigned i = 0; i < p.instruction_count; ++i) {
+      waited |= p.instructions[i]->op == AGX_APPLE9_VIR_WAIT;
+      if (p.instructions[i]->op == AGX_APPLE9_VIR_WORKGROUP_BARRIER)
+         break;
+   }
+   EXPECT_TRUE(waited);
 }
 
 TEST_F(Apple9Completion, PointerTupleRetiresAtRetainedAddressUse)

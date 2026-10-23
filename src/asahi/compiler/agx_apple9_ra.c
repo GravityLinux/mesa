@@ -1176,9 +1176,12 @@ apple9_can_fold_wait(const struct agx_apple9_vir_instr *ins,
     * would. Atomics' dependency field gates their inputs (EXP-M4-50). */
    if (!reads)
       return ins->op != AGX_APPLE9_VIR_DEVICE_ATOMIC;
+   /* Publication readers wait through their input mask (EXP-M4-61);
+    * native coverage instructions wait for their publication the same way. */
    if (apple9_scalar_publication(producer))
       return (ins->op == AGX_APPLE9_VIR_VARY_STORE ||
-              ins->op == AGX_APPLE9_VIR_OBJECT_GRID_EXPORT) &&
+              ins->op == AGX_APPLE9_VIR_OBJECT_GRID_EXPORT ||
+              ins->op == AGX_APPLE9_VIR_COVERAGE) &&
              ins->src[0] == producer->dest;
    if (ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC &&
        (ins->atomic_discard || ins->atomic_op == AGX_APPLE9_ATOMIC_CMPXCHG ||
@@ -1329,15 +1332,52 @@ apple9_producer_hazard(const struct agx_apple9_vir_instr *ins,
           producer->producer_scoreboard_slot == AGX_APPLE9_SCOREBOARD_SLOT_1;
 }
 
+static enum agx_apple9_completion_class
+apple9_completion_class(const struct agx_apple9_vir_instr *producer)
+{
+   if (apple9_scalar_publication(producer))
+      return AGX_APPLE9_COMPLETION_PUBLICATION;
+   if (apple9_fixed_producer_slot(producer))
+      return AGX_APPLE9_COMPLETION_OTHER;
+   switch (producer->op) {
+   case AGX_APPLE9_VIR_DEVICE_LOAD:
+   case AGX_APPLE9_VIR_DEVICE_ATOMIC:
+   case AGX_APPLE9_VIR_PRIVATE_LOAD:
+   case AGX_APPLE9_VIR_SHARED_LOAD:
+   case AGX_APPLE9_VIR_SHARED_ATOMIC:
+   case AGX_APPLE9_VIR_TEXTURE_SAMPLE:
+      return AGX_APPLE9_COMPLETION_MEMORY;
+   default:
+      return AGX_APPLE9_COMPLETION_OTHER;
+   }
+}
+
+/* Producer classes a completion barrier leaves pending. Loop control and
+ * drained block ends wait for everything, as do the fence forms other than
+ * the plain device fence. */
+static unsigned
+apple9_completion_exempt(const struct agx_apple9_vir_instr *ins)
+{
+   if (apple9_after_logical_end(ins) || ins->encoding == AGX_APPLE9_ENC_PSEUDO)
+      return 0;
+   if (ins->op == AGX_APPLE9_VIR_DEVICE_FENCE &&
+       ins->immediate != AGX_APPLE9_FENCE_DEVICE)
+      return 0;
+   return agx_apple9_encoding_info(ins->encoding)->prior_completion_exempt;
+}
+
 static bool
 apple9_pending_hazard(const struct agx_apple9_vir_instr *ins,
                       const struct apple9_pending *p, bool barrier)
 {
    if (!apple9_pending_active(p))
       return false;
-   if (p->unknown || barrier)
+   if (p->unknown)
       return true;
+   const unsigned exempt = barrier ? apple9_completion_exempt(ins) : 0;
    for (unsigned i = 0; i < p->count; ++i) {
+      if (barrier && !(exempt & apple9_completion_class(&p->producer[i])))
+         return true;
       if (apple9_producer_hazard(ins, &p->producer[i]))
          return true;
    }
