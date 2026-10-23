@@ -7,6 +7,7 @@
 #include "asahi/lib/agx_apple9.h"
 #include "hk_image_view.h"
 #include "util/format/u_format.h"
+#include "util/half_float.h"
 #include "vulkan/vulkan_core.h"
 
 #include "agx_helpers.h"
@@ -570,6 +571,54 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
    };
 }
 
+/* Image views own the immutable native descriptor bytes. The writer adds
+ * residency and the PBE allocation, whose lifetimes are separate from this
+ * initialization (internal views do not allocate native storage PBEs).
+ */
+static void
+hk_apple9_init_view_descriptors(struct hk_image_view *view)
+{
+   float min_lod = MAX2(view->vk.min_lod - view->vk.base_mip_level, 0.0);
+   for (unsigned p = 0; p < view->plane_count; ++p) {
+      for (unsigned input = 0; input < 2; ++input) {
+         struct hk_apple9_image_part *part = input ? &view->planes[p].apple9_ia
+                                                  : &view->planes[p].apple9_sampled;
+         const struct agx_texture_packed *tex = input ? &view->planes[p].ia
+                                                     : &view->planes[p].sampled;
+         part->base_level = view->vk.base_mip_level;
+         part->base_layer = view->vk.base_array_layer;
+         part->min_lod_fp16 = _mesa_float_to_half(min_lod);
+         part->min_lod_uint16 = min_lod;
+         agx_apple9_translate_texture(part->texture, tex);
+         hk_apple9_texture_info(part->texture_info, tex);
+      }
+   }
+
+   if (view->plane_count != 1)
+      return;
+
+   struct hk_apple9_storage_descriptor *storage = &view->apple9_storage;
+   storage->common.tex = view->planes[0].ro_storage;
+   storage->common.pbe = view->planes[0].storage;
+   enum pipe_format format = vk_format_to_pipe_format(view->vk.format);
+   hk_apple9_texel_layout(format, &storage->metadata);
+   storage->store_encode = hk_apple9_store_encode(format);
+   storage->metadata.elements =
+      view->vk.base_mip_level | (view->vk.base_array_layer << 16);
+   if (agx_apple9_translate_texture(storage->texture, &storage->common.tex))
+      storage->native_ok = HK_APPLE9_STORAGE_READ_VALID;
+
+   /* Native accesses keep the padded alias width; queries use the logical
+    * width in the legacy descriptor. */
+   if (view->planes[0].alias_width_el) {
+      agx_unpack(NULL, &storage->common.tex, TEXTURE, t);
+      t.width = view->planes[0].alias_width_el;
+      agx_pack(&storage->common.tex, TEXTURE, cfg) {
+         cfg = t;
+      }
+   }
+}
+
 static VkResult
 hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
                    const VkImageViewCreateInfo *pCreateInfo)
@@ -618,6 +667,9 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
       pack_pbe(dev, view, p, HK_DESC_USAGE_LAYERED_BG_EOT,
                &view->planes[p].layered_eot);
    }
+
+   if (dev->dev.chip == AGX_CHIP_G16G)
+      hk_apple9_init_view_descriptors(view);
 
    return VK_SUCCESS;
 }

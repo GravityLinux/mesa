@@ -164,7 +164,7 @@ if with_tests
     ),
     suite : ['asahi', 'honeykrisp'],
   )
-  foreach t : ['hk-constant-data', 'hk-render-merge', 'hk-image-limits', 'hk-stage-output-limits', 'hk-cull-output-limits', 'hk-pregfx-recording', 'hk-heap-resubmit', 'hk-heap-addresses', 'hk-native-image-store', 'hk-mesh-query', 'hk-native-mesh']
+  foreach t : ['hk-descriptor-parts', 'hk-constant-data', 'hk-render-merge', 'hk-image-limits', 'hk-stage-output-limits', 'hk-cull-output-limits', 'hk-pregfx-recording', 'hk-heap-resubmit', 'hk-heap-addresses', 'hk-native-image-store', 'hk-mesh-query', 'hk-native-mesh']
     contract_test = executable(
       t,
       'tests/' + t + '.c',

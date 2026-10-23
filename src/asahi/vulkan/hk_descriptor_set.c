@@ -56,6 +56,60 @@ write_desc(struct hk_descriptor_set *set, uint32_t binding, uint32_t elem,
    memcpy(dst, desc_data, desc_size);
 }
 
+/* Compose native records from the view/sampler's immutable parts. A combined
+ * descriptor repeats image then sampler for each plane, replicating the last
+ * sampler plane when the image has more planes than the hardware sampler.
+ */
+static size_t
+hk_apple9_pack_sampled_image(struct hk_device *dev, void *out,
+                            VkDescriptorType type,
+                            const VkDescriptorImageInfo *info,
+                            const struct hk_sampler *sampler)
+{
+   const bool image = type != VK_DESCRIPTOR_TYPE_SAMPLER;
+   const bool sampled = type == VK_DESCRIPTOR_TYPE_SAMPLER ||
+                        type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+   const bool input = type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+   const struct hk_image_view *view =
+      image && info ? hk_image_view_from_handle(info->imageView) : NULL;
+   unsigned planes = view ? view->plane_count : 1;
+   if (sampled)
+      planes = MAX2(planes, sampler->plane_count);
+   const size_t record = (image ? sizeof(struct hk_apple9_image_part) : 0) +
+                         (sampled ? sizeof(struct hk_apple9_sampler_part) : 0);
+   for (unsigned p = 0; p < planes; ++p) {
+      uint8_t *dst = (uint8_t *)out + p * record;
+      if (image) {
+         struct hk_apple9_image_part *part = (void *)dst;
+         if (view && p < view->plane_count) {
+            *part = input ? view->planes[p].apple9_ia
+                          : view->planes[p].apple9_sampled;
+         } else {
+            *part = (struct hk_apple9_image_part){0};
+            struct agx_texture_packed null;
+            agx_set_null_texture(&null);
+            agx_apple9_translate_texture(part->texture, &null);
+            hk_apple9_texture_info(part->texture_info, &null);
+            if (view) {
+               part->base_level = view->vk.base_mip_level;
+               part->base_layer = view->vk.base_array_layer;
+            }
+         }
+         uint64_t residency = view ? hk_apple9_view_residency(dev, view, p)
+                                   : dev->apple9_resident->va->addr;
+         part->residency_lo = residency;
+         part->residency_hi = residency >> 32;
+         dst += sizeof(*part);
+      }
+      if (sampled) {
+         unsigned plane = MIN2(p, sampler->plane_count - 1);
+         memcpy(dst, &sampler->planes[plane].apple9,
+                sizeof(struct hk_apple9_sampler_part));
+      }
+   }
+   return record * planes;
+}
+
 /* Pack a sampled image, sampler or combined descriptor, one record per plane,
  * into out (HK_MAX_SAMPLED_DESCRIPTOR_SIZE bytes); returns its size. */
 static size_t
@@ -64,6 +118,9 @@ hk_pack_sampled_image(struct hk_device *dev, void *out,
                       const VkDescriptorImageInfo *const info,
                       struct hk_sampler *sampler)
 {
+   if (dev->dev.chip == AGX_CHIP_G16G)
+      return hk_apple9_pack_sampled_image(dev, out, descriptor_type, info, sampler);
+
    struct hk_sampled_image_descriptor desc[3] = {};
 
    /* "Zero" initialize */
@@ -73,7 +130,6 @@ hk_pack_sampled_image(struct hk_device *dev, void *out,
 
    uint8_t plane_count = 1;
    bool ia = (descriptor_type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT);
-   const uint32_t *border = NULL;
 
    if (descriptor_type != VK_DESCRIPTOR_TYPE_SAMPLER && info &&
        info->imageView != VK_NULL_HANDLE) {
@@ -93,8 +149,6 @@ hk_pack_sampled_image(struct hk_device *dev, void *out,
 
    if (descriptor_type == VK_DESCRIPTOR_TYPE_SAMPLER ||
        descriptor_type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
-      border = sampler->apple9_border;
-
       if (sampler->has_border)
          assert(plane_count == 1);
       else
@@ -133,47 +187,6 @@ hk_pack_sampled_image(struct hk_device *dev, void *out,
          memcpy(desc[0].border, sampler->custom_border.uint32,
                 sizeof(sampler->custom_border));
       }
-   }
-   if (dev->dev.chip == AGX_CHIP_G16G) {
-      /* One record per plane: an image part read through texture handles, a
-       * sampler part read through sampler handles, or both in that order for
-       * a combined image sampler. */
-      const bool image = descriptor_type != VK_DESCRIPTOR_TYPE_SAMPLER;
-      const bool sampled = descriptor_type == VK_DESCRIPTOR_TYPE_SAMPLER ||
-                           descriptor_type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-      const size_t record = (image ? sizeof(struct hk_apple9_image_part) : 0) +
-                            (sampled ? sizeof(struct hk_apple9_sampler_part) : 0);
-      memset(out, 0, record * plane_count);
-      for (uint8_t plane = 0; plane < plane_count; plane++) {
-         uint8_t *rec = (uint8_t *)out + plane * record;
-         if (image) {
-            struct hk_apple9_image_part *ip = (void *)rec;
-            uint64_t residency = dev->apple9_resident->va->addr;
-            if (info && info->imageView != VK_NULL_HANDLE) {
-               VK_FROM_HANDLE(hk_image_view, view, info->imageView);
-               residency = hk_apple9_view_residency(dev, view, plane);
-               ip->base_level = view->vk.base_mip_level;
-               ip->base_layer = view->vk.base_array_layer;
-            }
-            ip->residency_lo = residency;
-            ip->residency_hi = residency >> 32;
-            ip->min_lod_fp16 = desc[plane].min_lod_fp16;
-            ip->min_lod_uint16 = desc[plane].min_lod_uint16;
-            agx_apple9_translate_texture(ip->texture, &desc[plane].tex);
-            hk_apple9_texture_info(ip->texture_info, &desc[plane].tex);
-         }
-         if (sampled) {
-            struct hk_apple9_sampler_part *sp =
-               (void *)(rec + (image ? sizeof(struct hk_apple9_image_part) : 0));
-            hk_apple9_native_sampler(sp->sampler, &desc[plane].sampler, false,
-                                     border);
-            hk_apple9_runtime_sampler(sp->runtime_sampler, &desc[plane].sampler,
-                                      false);
-            sp->lod_bias_fp16 = desc[plane].lod_bias_fp16;
-            sp->txl_nudge_fp16 = desc[plane].txl_nudge_fp16;
-         }
-      }
-      return record * plane_count;
    }
 
    memcpy(out, desc, sizeof(desc[0]) * plane_count);
@@ -222,51 +235,35 @@ static size_t
 hk_pack_storage_image(struct hk_device *dev, void *out,
                       const VkDescriptorImageInfo *const info)
 {
-   struct hk_storage_image_descriptor desc = {};
-
-   if (info && info->imageView != VK_NULL_HANDLE) {
-      VK_FROM_HANDLE(hk_image_view, view, info->imageView);
-
-      /* Storage images are always single plane */
+   const struct hk_image_view *view =
+      info ? hk_image_view_from_handle(info->imageView) : NULL;
+   if (view)
       assert(view->plane_count == 1);
-      uint8_t plane = 0;
 
-      desc.tex = view->planes[plane].ro_storage;
-      desc.pbe = view->planes[plane].storage;
+   if (dev->dev.chip == AGX_CHIP_G16G) {
+      struct hk_apple9_storage_descriptor *ext = out;
+      if (view) {
+         *ext = view->apple9_storage;
+         ext->metadata.base = hk_apple9_view_residency(dev, view, 0);
+         ext->native_ok |= view->apple9_store_flags |
+                          (view->apple9_pbe_index << HK_APPLE9_STORAGE_PBE_SHIFT);
+         hk_gpu_busy_storage_format(view->vk.format, ext->store_encode);
+      } else {
+         *ext = (struct hk_apple9_storage_descriptor){0};
+         agx_set_null_texture(&ext->common.tex);
+         agx_set_null_pbe(&ext->common.pbe);
+         ext->metadata.base = dev->apple9_resident->va->addr;
+      }
+      return sizeof(*ext);
+   }
+
+   struct hk_storage_image_descriptor desc = {};
+   if (view) {
+      desc.tex = view->planes[0].ro_storage;
+      desc.pbe = view->planes[0].storage;
    } else {
       agx_set_null_texture(&desc.tex);
       agx_set_null_pbe(&desc.pbe);
-   }
-
-   if (dev->dev.chip == AGX_CHIP_G16G) {
-      struct hk_apple9_storage_descriptor ext = {.common = desc};
-      ext.metadata.base = dev->apple9_resident->va->addr;
-      if (info && info->imageView != VK_NULL_HANDLE) {
-         VK_FROM_HANDLE(hk_image_view, view, info->imageView);
-         enum pipe_format pformat = vk_format_to_pipe_format(view->vk.format);
-         hk_apple9_texel_layout(pformat, &ext.metadata);
-         ext.store_encode = hk_apple9_store_encode(pformat);
-         hk_gpu_busy_storage_format(view->vk.format, ext.store_encode);
-         ext.metadata.base = hk_apple9_view_residency(dev, view, 0);
-         ext.metadata.elements =
-            view->vk.base_mip_level | (view->vk.base_array_layer << 16);
-         if (agx_apple9_translate_texture(ext.texture, &desc.tex))
-            ext.native_ok |= HK_APPLE9_STORAGE_READ_VALID;
-         /* Native accesses keep the padded alias width. Size queries read
-          * the legacy texture: give it the logical width.
-          */
-         if (view->planes[0].alias_width_el) {
-            agx_unpack(NULL, &ext.common.tex, TEXTURE, t);
-            t.width = view->planes[0].alias_width_el;
-            agx_pack(&ext.common.tex, TEXTURE, cfg) {
-               cfg = t;
-            }
-         }
-         ext.native_ok |= view->apple9_store_flags;
-         ext.native_ok |= view->apple9_pbe_index << HK_APPLE9_STORAGE_PBE_SHIFT;
-      }
-      memcpy(out, &ext, sizeof(ext));
-      return sizeof(ext);
    }
 
    memcpy(out, &desc, sizeof(desc));

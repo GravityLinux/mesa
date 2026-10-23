@@ -10,6 +10,7 @@
 #include "agx_pack.h"
 #include "hk_private.h"
 #include "hk_descriptor_memory.h"
+#include "hk_descriptor_set.h"
 #include "vk_image.h"
 
 struct hk_device;
@@ -38,7 +39,12 @@ struct hk_image_view {
          layered_background, emrt_texture;
 
       struct agx_pbe_packed storage, eot, layered_eot, emrt_pbe;
+
+      /* Immutable descriptor bodies. Residency is resolved at the write,
+       * since image memory can be bound after creating a view. */
+      struct hk_apple9_image_part apple9_sampled, apple9_ia;
    } planes[3];
+   struct hk_apple9_storage_descriptor apple9_storage;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(hk_image_view, vk.base, VkImageView,

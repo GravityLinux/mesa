@@ -346,6 +346,18 @@ hk_CreateSampler(VkDevice device,
       sampler->has_border = true;
    }
 
+   if (g16) {
+      for (unsigned p = 0; p < sampler->plane_count; ++p) {
+         struct hk_apple9_sampler_part *part = &sampler->planes[p].apple9;
+         hk_apple9_native_sampler(part->sampler, &sampler->planes[p].hw->key,
+                                  false, sampler->apple9_border);
+         hk_apple9_runtime_sampler(part->runtime_sampler,
+                                   &sampler->planes[p].hw->key, false);
+         part->lod_bias_fp16 = sampler->lod_bias_fp16;
+         part->txl_nudge_fp16 = sampler->txl_nudge_fp16;
+      }
+   }
+
    *pSampler = hk_sampler_to_handle(sampler);
 
    return VK_SUCCESS;
