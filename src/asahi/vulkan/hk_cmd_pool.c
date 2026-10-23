@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_cmd_pool.h"
+#include "hk_cmd_buffer.h"
 #include "asahi/lib/agx_bo.h"
 #include "util/u_debug.h"
 
@@ -171,8 +172,11 @@ hk_ResetCommandPool(VkDevice device, VkCommandPool commandPool,
    VK_FROM_HANDLE(hk_cmd_pool, pool, commandPool);
 
    VkResult result = vk_common_ResetCommandPool(device, commandPool, flags);
-   if (flags & VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT)
+   if (flags & VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT) {
+      /* The common reset visits allocated buffers, not recycled ones. */
+      vk_command_pool_trim(&pool->vk, 0);
       hk_cmd_pool_destroy_bos(pool);
+   }
    return result;
 }
 
@@ -183,5 +187,15 @@ hk_TrimCommandPool(VkDevice device, VkCommandPool commandPool,
    VK_FROM_HANDLE(hk_cmd_pool, pool, commandPool);
 
    vk_command_pool_trim(&pool->vk, flags);
+   list_for_each_entry(struct hk_cmd_buffer, cmd, &pool->vk.command_buffers,
+                       vk.pool_link) {
+      if (cmd->vk.state == MESA_VK_COMMAND_BUFFER_STATE_INITIAL)
+         hk_trim_cmd_buffer(cmd);
+   }
    hk_cmd_pool_destroy_bos(pool);
+
+   /* An explicit trim is a request to return unused memory. Dropping only
+    * the pool's references leaves the BO cache holding the same pages until
+    * a later allocation/submit ages them out. Keep ordinary resets cheap. */
+   agx_bo_cache_evict_all(&hk_cmd_pool_device(pool)->dev);
 }

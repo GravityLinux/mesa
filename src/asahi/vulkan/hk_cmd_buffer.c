@@ -53,6 +53,27 @@ hk_descriptor_state_fini(struct hk_cmd_buffer *cmd,
    }
 }
 
+/* Called only after reset, or when trimming an already initial buffer. GPU
+ * storage has been released; discard CPU high-water marks on explicit trim. */
+void
+hk_trim_cmd_buffer(struct hk_cmd_buffer *cmd)
+{
+   assert(cmd->vk.state == MESA_VK_COMMAND_BUFFER_STATE_INITIAL);
+   struct util_dynarray *arrays[] = {
+      &cmd->large_bos, &cmd->implicit_sync_res, &cmd->query_adds,
+      &cmd->query_writes, &cmd->occlusion_accum, &cmd->sync_events,
+      &cmd->sync_remap,
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(arrays); ++i)
+      util_dynarray_fini(arrays[i]);
+   for (unsigned i = 0; i < HK_TESS_BATCH_LANES; ++i)
+      util_dynarray_fini(&cmd->tess_batch.lane[i]);
+   _mesa_set_destroy(cmd->apple9_pinned, NULL);
+   cmd->apple9_pinned = NULL;
+   free(cmd->merge_empty_render);
+   cmd->merge_empty_render = NULL;
+}
+
 static void
 hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd, bool release)
 {
@@ -101,6 +122,8 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd, bool release)
    util_dynarray_clear(&cmd->occlusion_accum);
    util_dynarray_clear(&cmd->sync_events);
    util_dynarray_clear(&cmd->sync_remap);
+   if (release)
+      hk_trim_cmd_buffer(cmd);
 }
 
 /* agx_device::apple9_pin_entry. Every Apple9 entry is requested while
@@ -246,6 +269,20 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    cmd->api_dispatch = false;
 
    memset(&cmd->state, 0, sizeof(cmd->state));
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+hk_ResetCommandBuffer(VkCommandBuffer commandBuffer,
+                       VkCommandBufferResetFlags flags)
+{
+   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+
+   if (cmd->vk.state != MESA_VK_COMMAND_BUFFER_STATE_INITIAL)
+      hk_reset_cmd_buffer(&cmd->vk, flags);
+   else if (flags & VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT)
+      hk_trim_cmd_buffer(cmd);
+
+   return VK_SUCCESS;
 }
 
 const struct vk_command_buffer_ops hk_cmd_buffer_ops = {

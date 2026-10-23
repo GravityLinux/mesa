@@ -1472,3 +1472,6 @@ void hk_apple9_compute_sysvals(struct hk_device *dev, void *out);
 bool hk_apple9_upload_textures(struct hk_cmd_buffer *cmd,
    const struct hk_shader *shader, bool graphics, bool first_fan, bool lines,
    uint64_t *textures, uint64_t *samplers, uint64_t *sysvals);
+
+/* Discard retained CPU storage of an initial command buffer. */
+void hk_trim_cmd_buffer(struct hk_cmd_buffer *cmd);
