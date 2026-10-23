@@ -308,7 +308,7 @@ main(void)
    dev->vk.physical = &pdev.vk;
    dev->vk.alloc = *vk_default_allocator();
    dev->dev.chip = pdev.dev.chip = AGX_CHIP_G16G;
-   simple_mtx_init(&dev->apple9_pbe_lock, mtx_plain);
+   simple_mtx_init(&dev->usc_heap_lock, mtx_plain);
    struct agx_va resident_va = {.addr = UINT64_C(0x3000000000)};
    struct agx_bo resident = {.va = &resident_va};
    dev->apple9_resident = &resident;
@@ -344,7 +344,7 @@ main(void)
    get_descriptor(dev, VK_NULL_HANDLE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &null);
    check_size(&null.common.tex, 0, 0, 0);
    CHECK(null.native_ok == 0);
-   simple_mtx_destroy(&dev->apple9_pbe_lock);
+   simple_mtx_destroy(&dev->usc_heap_lock);
    free(dev);
    glsl_type_singleton_decref();
    printf("sliced 3D: %u view/mip/format cases; query/address lowering and descriptor paths pass\n", cases);

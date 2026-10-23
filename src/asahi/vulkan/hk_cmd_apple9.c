@@ -652,7 +652,7 @@ hk_apple9_try_cached_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
          }
          if (!agx_apple9_prepare_draw_alloc(
                 &dev->dev, cmd, hk_apple9_usc_alloc, cmd, hk_apple9_context_alloc,
-                pipeline, record, previous, hk_apple9_state_cache_alloc)) {
+                pipeline, record, previous)) {
             vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
             return true;
          }
