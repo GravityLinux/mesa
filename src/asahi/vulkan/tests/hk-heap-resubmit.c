@@ -65,7 +65,9 @@ record_and_replay(bool graphics)
    uint64_t address = hk_heap(cmd);
    CHECK(address == (uintptr_t)&heap && hk_heap(cmd) == address);
    struct hk_cs *pre = cmd->current_cs.pre_gfx;
-   CHECK(pre && cmd->sync_fallback && !cmd->current_cs.post_gfx);
+   CHECK(pre && !cmd->current_cs.post_gfx);
+   CHECK(cmd->sync_fallback == !graphics);
+   CHECK(pre->sync_before_gfx == graphics);
    CHECK(reset_valid && reset_count == 1);
    CHECK(reset.address == address + offsetof(struct poly_heap, bottom));
    CHECK(reset.value == 0);

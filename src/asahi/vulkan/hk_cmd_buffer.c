@@ -690,6 +690,51 @@ hk_cmd_sync_work(struct hk_cmd_buffer *cmd, struct hk_cs *cs, unsigned stages)
    util_dynarray_append(&cmd->sync_events, event);
 }
 
+/* A pre-graphics stream executes before every draw in its render, even when
+ * the first draw needing it was recorded later. Put its event at that physical
+ * boundary, before the render's first event. Stable stream IDs survive kept
+ * barriers and render continuation; saved array offsets do not.
+ *
+ * Retain full ordering at this boundary. In particular, the shared geometry
+ * heap must not be reset or overwritten until earlier renders have consumed
+ * it. HK_SYNC_ALL also makes the following render wait for the helper output.
+ * Subsequent helper calls belong to this same physical stream and must not add
+ * events after their consumer. Other unrepresentable cases retain fallback.
+ */
+bool
+hk_cmd_sync_before_gfx(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   struct hk_cs *gfx = cmd->current_cs.gfx;
+   if (!gfx || !gfx->sync_stages || cmd->merge_pre_cs)
+      return false;
+
+   struct util_dynarray *events = &cmd->sync_events;
+   unsigned count = util_dynarray_num_elements(events, struct hk_sync_event);
+   struct hk_sync_event *ev = events->data;
+   unsigned pos = 0;
+   while (pos < count && ev[pos].stream != gfx->sync_id)
+      ++pos;
+   if (pos == count)
+      return false;
+
+   if (!util_dynarray_grow(events, struct hk_sync_event, 1)) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+      return false;
+   }
+   ev = events->data;
+   memmove(&ev[pos + 1], &ev[pos], (count - pos) * sizeof(*ev));
+   ev[pos] = (struct hk_sync_event){
+      .stream = cs->sync_id,
+      .dst = HK_SYNC_ALL,
+   };
+   if (cmd->merge_event >= pos)
+      cmd->merge_event++;
+
+   cs->sync_stages = HK_SYNC_ALL;
+   cs->sync_before_gfx = true;
+   return true;
+}
+
 /* HK_APPLE9_MERGE_TRACE (diagnostic): counts what ends renders kept open
  * for merging, printed to stderr every 5000 events as MERGE_TRACE lines. */
 void

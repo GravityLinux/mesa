@@ -114,7 +114,7 @@ main(void)
       CHECK(heap->base == selected->va->addr && heap->size == selected->size);
       CHECK(hk_heap(cmd) == descriptors[render]);
       CHECK(cmd->current_cs.pre_gfx && !cmd->current_cs.post_gfx);
-      CHECK(cmd->sync_fallback && resets == render + 1);
+      CHECK(!cmd->sync_fallback && resets == render + 1);
       CHECK(reset.address == descriptors[render] + offsetof(struct poly_heap, bottom) && reset.value == 0);
       for (unsigned i = 0; i < render; ++i)
          CHECK(descriptors[i] == descriptors[render]);
