@@ -9026,6 +9026,22 @@ apple9_lower_texture_lod_query(nir_builder *b, nir_instr *instr, void *data)
    return true;
 }
 
+bool
+agx_nir_apple9_samples_with_offsets(const nir_shader *nir)
+{
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_tex &&
+                nir_tex_instr_src_index(nir_instr_as_tex(instr),
+                                        nir_tex_src_offset) >= 0)
+               return true;
+         }
+      }
+   }
+   return false;
+}
+
 /* Sampler bias is per-draw state, independent of a shader's explicit bias.
  * Keep this in FP32, matching the rest of the Apple9 texture operands. */
 bool
@@ -9063,6 +9079,7 @@ agx_nir_lower_apple9_sampler_state(
    nir_lower_tex(nir, &options);
    nir_shader_instructions_pass(nir, apple9_lower_texture_lod_query,
                                 nir_metadata_control_flow, (void *)key);
+   mapping->runtime_samplers = agx_nir_apple9_samples_with_offsets(nir);
    if (!agx_nir_lower_apple9_texture_offsets(nir, key, reason))
       return false;
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);

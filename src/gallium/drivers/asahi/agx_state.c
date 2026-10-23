@@ -1834,6 +1834,8 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
          nir_deserialize(NULL, &agx_nir_options, &early_reader);
       struct agx_compiled_shader *compiled = CALLOC_STRUCT(agx_compiled_shader);
       const char *reason = NULL;
+      compiled->apple9_compute_textures.runtime_samplers =
+         agx_nir_apple9_samples_with_offsets(early);
 
       if (!agx_compile_apple9_tiny(
              early, &compiled->b, &compiled->apple9_compute_profile, &reason)) {
@@ -6194,14 +6196,45 @@ agx_apple9_collect_color_targets(const struct agx_batch *batch,
    return true;
 }
 
+/* Runtime sampler record (AGX_APPLE9_SAMP_*) for offset samples that the
+ * compiler lowers in software. It carries the same state as the static
+ * sampler key, plus the border preset; Gallium applies sampler LOD bias in
+ * the shader, so the record holds it too.
+ */
+static void
+agx_apple9_runtime_sampler(uint32_t *record,
+                           const struct pipe_sampler_state *state)
+{
+   memset(record, 0, AGX_APPLE9_RUNTIME_SAMPLER_STRIDE);
+   if (!state)
+      return;
+
+   record[AGX_APPLE9_SAMP_WRAP_S] = state->wrap_s;
+   record[AGX_APPLE9_SAMP_WRAP_T] = state->wrap_t;
+   record[AGX_APPLE9_SAMP_WRAP_R] = state->wrap_r;
+   record[AGX_APPLE9_SAMP_MIN] = state->min_img_filter;
+   record[AGX_APPLE9_SAMP_MAG] = state->mag_img_filter;
+   record[AGX_APPLE9_SAMP_MIP] = state->min_mip_filter;
+   record[AGX_APPLE9_SAMP_COMPARE] = state->compare_func;
+   record[AGX_APPLE9_SAMP_MIN_LOD] = fui(state->min_lod);
+   record[AGX_APPLE9_SAMP_MAX_LOD] = fui(state->max_lod);
+   record[AGX_APPLE9_SAMP_BIAS] = fui(CLAMP(state->lod_bias, -16.f, 16.f));
+   record[AGX_APPLE9_SAMP_BORDER] = apple9_border_preset(state);
+   record[AGX_APPLE9_SAMP_PIXEL_COORDS] = state->unnormalized_coords;
+   record[AGX_APPLE9_SAMP_MAX_ANISOTROPY] = fui(MAX2(state->max_anisotropy, 1));
+}
+
 static uint64_t
 agx_apple9_upload_graphics_sysvals(
    struct agx_batch *batch, struct agx_stage *stage,
    const struct agx_apple9_texture_mapping *mapping, bool first_fan)
 {
    struct agx_context *ctx = batch->ctx;
-   struct agx_ptr sysvals = agx_pool_alloc_aligned(
-      &batch->pool, AGX_APPLE9_GRAPHICS_SYSVAL_SIZE, 16);
+   size_t size = AGX_APPLE9_GRAPHICS_SYSVAL_SIZE;
+   if (mapping->runtime_samplers)
+      size = AGX_APPLE9_RUNTIME_SAMPLER_OFFSET +
+             32 * AGX_APPLE9_RUNTIME_SAMPLER_STRIDE;
+   struct agx_ptr sysvals = agx_pool_alloc_aligned(&batch->pool, size, 16);
    memcpy(sysvals.cpu, ctx->blend_color.color, 16);
    uint32_t fan = first_fan;
    memcpy((uint8_t *)sysvals.cpu + AGX_APPLE9_FIRST_FAN_OFFSET, &fan, sizeof(fan));
@@ -6230,6 +6263,12 @@ agx_apple9_upload_graphics_sysvals(
       unsigned api = mapping->samplers[i];
       struct agx_sampler_state *sampler = stage->samplers[api];
       bias[i] = sampler ? CLAMP(sampler->base.lod_bias, -16.f, 16.f) : 0;
+   }
+   for (unsigned i = 0; mapping->runtime_samplers && i < 32; ++i) {
+      uint32_t *record = (uint32_t *)((uint8_t *)sysvals.cpu +
+         AGX_APPLE9_RUNTIME_SAMPLER_OFFSET + i * AGX_APPLE9_RUNTIME_SAMPLER_STRIDE);
+      struct agx_sampler_state *sampler = stage->samplers[mapping->samplers[i]];
+      agx_apple9_runtime_sampler(record, sampler ? &sampler->base : NULL);
    }
    for (unsigned i = 0; i < 32; ++i) {
       uint32_t *info = (uint32_t *)((uint8_t *)sysvals.cpu +

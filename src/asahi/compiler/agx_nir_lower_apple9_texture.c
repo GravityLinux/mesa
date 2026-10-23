@@ -601,10 +601,12 @@ agx_nir_lower_apple9_texture_offsets(nir_shader *nir,
          bool is_gather = tex->op == nir_texop_tg4;
          if (offset < 0 || tex->op == nir_texop_txf)
             continue;
-         /* With runtime sampler state, the sample instruction encodes these
-          * offsets itself unless the backend finds no offset form for the
-          * sample's final form. Static (Gallium) keys keep the lowering. */
-         if (!key && agx_apple9_texture_native_offset(tex, NULL))
+         /* The sample instruction encodes these offsets itself unless the
+          * backend finds no offset form for the sample's final form. It then
+          * lowers the offset with runtime sampler state, which the driver
+          * must supply for any stage that samples with an offset, static
+          * key or not. */
+         if (agx_apple9_texture_native_offset(tex, NULL))
             continue;
          if ((tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
               tex->op != nir_texop_txl && tex->op != nir_texop_txd &&
@@ -616,26 +618,31 @@ agx_nir_lower_apple9_texture_offsets(nir_shader *nir,
                "Apple9 software sampling requires a bound 2D, array, or 3D texture";
             return false;
          }
+         /* Static wraps are specialized only for the modes the software
+          * filter evaluates without border colours. Others read the runtime
+          * sampler state, whose border path covers every preset and custom
+          * colour. */
+         const struct agx_apple9_sampler_key *state =
+            key ? &key[tex->sampler_index] : NULL;
+         unsigned dims = tex->sampler_dim == GLSL_SAMPLER_DIM_3D ? 3 : 2;
+         for (unsigned c = 0; state && c < dims; ++c) {
+            unsigned wrap = state->wrap[c];
+            if (wrap != PIPE_TEX_WRAP_REPEAT &&
+                wrap != PIPE_TEX_WRAP_MIRROR_REPEAT &&
+                wrap != PIPE_TEX_WRAP_CLAMP_TO_EDGE)
+               state = NULL;
+         }
          struct offset_sample s = {
             .tex = tex,
-            .state = key ? &key[tex->sampler_index] : NULL,
-            .dims = tex->sampler_dim == GLSL_SAMPLER_DIM_3D ? 3 : 2,
+            .state = state,
+            .dims = dims,
             .coord =
                tex->src[nir_tex_instr_src_index(tex, nir_tex_src_coord)].src.ssa,
             .offset = offset >= 0 ? tex->src[offset].src.ssa : NULL};
          b.cursor = nir_before_instr(instr);
          if (s.state) {
-            for (unsigned c = 0; c < s.dims; ++c) {
-               unsigned wrap = s.state->wrap[c];
-               if (wrap != PIPE_TEX_WRAP_REPEAT &&
-                   wrap != PIPE_TEX_WRAP_MIRROR_REPEAT &&
-                   wrap != PIPE_TEX_WRAP_CLAMP_TO_EDGE) {
-                  *reason =
-                     "Apple9 static offset filtering requires repeat, mirror, or edge clamping";
-                  return false;
-               }
-               s.wrap[c] = nir_imm_int(&b, wrap);
-            }
+            for (unsigned c = 0; c < s.dims; ++c)
+               s.wrap[c] = nir_imm_int(&b, s.state->wrap[c]);
             s.min_lod = nir_imm_float(&b, s.state->min_lod);
             s.max_lod = nir_imm_float(&b, s.state->max_lod);
             s.bias = nir_imm_float(&b, s.state->lod_bias);

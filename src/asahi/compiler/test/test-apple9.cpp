@@ -9903,16 +9903,61 @@ TEST(Apple9Compiler, TextureOffsetsLowerPerMipThroughOrdinaryFetches)
       agx_shader_part compiled = {};
       ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason)) << (reason ?: "");
       EXPECT_EQ(compiled.info.apple9_texture_mask, 1u << 7);
-      /* With runtime sampler state, 2D, 2D array and 3D samples encode
-       * constant offsets natively. A shadow 2D array's final form has no
-       * measured offset variant, so the backend falls back to the runtime
+      /* 2D, 2D array and 3D samples encode constant offsets natively, with
+       * runtime or static sampler state. A shadow 2D array's final form has
+       * no measured offset variant, so the backend falls back to the runtime
        * lowering, which samples single levels natively (and a custom border
-       * colour) and binds the sampler. Static keys always lower and filter
-       * with ordinary fetches. */
-      const bool native = runtime && !(kind == 1 && shadow);
-      EXPECT_EQ(compiled.info.apple9_sampler_mask,
-                native || runtime ? 1u << 5 : 0u);
+       * colour) and binds the sampler. */
+      const bool native = !(kind == 1 && shadow);
+      EXPECT_EQ(compiled.info.apple9_sampler_mask, 1u << 5);
       EXPECT_EQ(compiled.info.apple9_uses_texel_fetch, !native);
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
+}
+
+/* A static (Gallium) key whose wrap needs border colours, here on an offset
+ * the sample cannot encode, lowers through the runtime sampler state instead
+ * of failing the compile. */
+TEST(Apple9Compiler, StaticBorderWrapOffsetsUseRuntimeState)
+{
+   for (unsigned wrap : {PIPE_TEX_WRAP_CLAMP_TO_BORDER, PIPE_TEX_WRAP_CLAMP}) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "static_border_offset");
+      b.shader->info.num_ubos = 1;
+      nir_def *offset = nir_load_ubo(&b, 2, 32, nir_imm_int(&b, 0),
+         nir_imm_int(&b, 0), .align_mul = 8, .range = 8);
+      nir_def *lod = nir_imm_float(&b, 0);
+      nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
+      tex->op = nir_texop_txl;
+      tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+      tex->dest_type = nir_type_float32;
+      tex->coord_components = 2;
+      tex->texture_index = 2;
+      tex->sampler_index = 2;
+      tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord,
+                                        nir_imm_vec2(&b, .375, .625));
+      tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_lod, lod);
+      tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_offset, offset);
+      nir_def_init(&tex->instr, &tex->def, 4, 32);
+      nir_builder_instr_insert(&b, &tex->instr);
+      nir_store_output(&b, &tex->def, nir_imm_int(&b, 0), .write_mask = 15,
+         .src_type = nir_type_float32,
+         .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+      b.shader->info.io_lowered = true;
+      agx_apple9_sampler_key key[32] = {};
+      key[2].wrap[0] = wrap;
+      key[2].wrap[1] = PIPE_TEX_WRAP_REPEAT;
+      key[2].min_filter = key[2].mag_filter = PIPE_TEX_FILTER_LINEAR;
+      key[2].max_lod = 8;
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_nir_lower_apple9_texture_offsets(b.shader, key, &reason))
+         << (reason ?: "");
+      nir_validate_shader(b.shader, "static border offset lowered");
+      agx_shader_part compiled = {};
+      ASSERT_TRUE(agx_compile_apple9_fragment(b.shader, &compiled, &reason))
+         << (reason ?: "");
+      EXPECT_TRUE(compiled.info.apple9_uses_texel_fetch);
       free(compiled.binary);
       ralloc_free(b.shader);
    }
