@@ -538,6 +538,40 @@ create_fs(struct st_context *st, bool download,
    else if (conversion == ST_PBO_CONVERT_UINT_TO_SINT)
       result = nir_umin(&b, result, nir_imm_int(&b, (1u << 31) - 1));
 
+   /* GL clamps integer texels to the range of the packed type, while an
+    * image store of an unrepresentable integer is undefined (Vulkan) and
+    * wraps on some hardware. Clamp to the storing format's components.
+    */
+   if (download && util_format_is_pure_integer(format)) {
+      bool is_signed = util_format_is_pure_sint(format);
+      nir_const_value lo[4], hi[4];
+      bool need_clamp = false;
+
+      for (unsigned c = 0; c < 4; c++) {
+         unsigned bits =
+            util_format_get_component_bits(format, UTIL_FORMAT_COLORSPACE_RGB, c);
+
+         if (bits == 0 || bits >= 32) {
+            lo[c] = nir_const_value_for_int(INT32_MIN, 32);
+            hi[c] = nir_const_value_for_uint(is_signed ? INT32_MAX : UINT32_MAX, 32);
+         } else if (is_signed) {
+            lo[c] = nir_const_value_for_int(-(1 << (bits - 1)), 32);
+            hi[c] = nir_const_value_for_int((1 << (bits - 1)) - 1, 32);
+            need_clamp = true;
+         } else {
+            hi[c] = nir_const_value_for_uint((1u << bits) - 1, 32);
+            need_clamp = true;
+         }
+      }
+
+      if (need_clamp && is_signed) {
+         result = nir_imax(&b, result, nir_build_imm(&b, 4, 32, lo));
+         result = nir_imin(&b, result, nir_build_imm(&b, 4, 32, hi));
+      } else if (need_clamp) {
+         result = nir_umin(&b, result, nir_build_imm(&b, 4, 32, hi));
+      }
+   }
+
    if (download) {
       static const enum glsl_base_type types[] = {
          [ST_PBO_CONVERT_FLOAT] = GLSL_TYPE_FLOAT,
@@ -593,6 +627,36 @@ get_pbo_conversion(enum pipe_format src_format, enum pipe_format dst_format)
    return ST_PBO_CONVERT_FLOAT;
 }
 
+/* Whether a texel of src_format can exceed the range of a dst_format
+ * component, so the download has to clamp to that storing format.
+ */
+static bool
+download_needs_clamp(enum pipe_format src_format, enum pipe_format dst_format)
+{
+   if (!util_format_is_pure_integer(src_format) ||
+       !util_format_is_pure_integer(dst_format))
+      return false;
+
+   unsigned src_sign = util_format_is_pure_sint(src_format);
+   unsigned dst_sign = util_format_is_pure_sint(dst_format);
+
+   for (unsigned c = 0; c < 4; c++) {
+      unsigned src_bits =
+         util_format_get_component_bits(src_format, UTIL_FORMAT_COLORSPACE_RGB, c);
+      unsigned dst_bits =
+         util_format_get_component_bits(dst_format, UTIL_FORMAT_COLORSPACE_RGB, c);
+
+      if (src_bits == 0 || dst_bits == 0 || dst_bits >= 32)
+         continue;
+
+      /* Compare magnitude bits; negative sint to uint is already clamped. */
+      if (src_bits - src_sign > dst_bits - dst_sign)
+         return true;
+   }
+
+   return false;
+}
+
 void *
 st_pbo_get_upload_fs(struct st_context *st,
                      enum pipe_format src_format,
@@ -628,7 +692,14 @@ st_pbo_get_download_fs(struct st_context *st, enum pipe_texture_target target,
    if (!formatless_store && !st->pbo.download_fs[conversion][target][need_layer])
       st->pbo.download_fs[conversion][target][need_layer] = calloc(sizeof(void *), PIPE_FORMAT_COUNT);
 
-   if (formatless_store) {
+   if (formatless_store && download_needs_clamp(src_format, dst_format)) {
+      void ***fs_array = &st->pbo.download_fs_clamp[conversion][target][need_layer];
+      if (!*fs_array)
+         *fs_array = calloc(sizeof(void *), PIPE_FORMAT_COUNT);
+      if (!(*fs_array)[dst_format])
+         (*fs_array)[dst_format] = create_fs(st, true, target, conversion, dst_format, need_layer);
+      return (*fs_array)[dst_format];
+   } else if (formatless_store) {
       if (!st->pbo.download_fs[conversion][target][need_layer])
          st->pbo.download_fs[conversion][target][need_layer] = create_fs(st, true, target, conversion, PIPE_FORMAT_NONE, need_layer);
       return st->pbo.download_fs[conversion][target][need_layer];
@@ -718,6 +789,14 @@ st_destroy_pbo_helpers(struct st_context *st)
                   free(st->pbo.download_fs[i][j][k]);
                }
                st->pbo.download_fs[i][j][k] = NULL;
+            }
+            void **clamp_array = st->pbo.download_fs_clamp[i][j][k];
+            if (clamp_array) {
+               for (unsigned l = 0; l < PIPE_FORMAT_COUNT; l++)
+                  if (clamp_array[l])
+                     st->pipe->delete_fs_state(st->pipe, clamp_array[l]);
+               free(clamp_array);
+               st->pbo.download_fs_clamp[i][j][k] = NULL;
             }
          }
       }

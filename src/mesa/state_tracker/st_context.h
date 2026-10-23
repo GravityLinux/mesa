@@ -306,6 +306,11 @@ struct st_context
        * download FS using that PIPE_FORMAT as the storing format.
        */
       void *download_fs[5][PIPE_MAX_TEXTURE_TYPES][2];
+      /**
+       * With formatless storing, the download FSs for integer formats whose
+       * components need clamping, indexed by the storing PIPE_FORMAT.
+       */
+      void **download_fs_clamp[5][PIPE_MAX_TEXTURE_TYPES][2];
       struct hash_table *shaders;
       bool upload_enabled;
       bool download_enabled;
