@@ -518,6 +518,11 @@ struct agx_apple9_vertex_layout {
    /* The buffer table instead holds {uint64_t address, uint64_t size,
     * uint32_t stride, uint32_t pad[3]} per binding, and stride[] is ignored. */
    bool dynamic_stride;
+   /* Vertex input robustness is disabled: descriptor-table fetches skip the
+    * bounds check (an out-of-bounds attribute is undefined). Zero, the
+    * default, keeps robust fetches. Requires dynamic_stride, and the driver
+    * must describe a null binding as the zero page with size and stride 0. */
+   bool unbounded;
    bool clip_halfz;      /* Convert GL [-w,w] depth to hardware [0,w]. */
    uint8_t clip_distance_enable;
    bool cull_distance_mask; /* Cull signs are combined by software geometry. */

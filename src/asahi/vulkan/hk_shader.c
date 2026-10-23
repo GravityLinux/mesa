@@ -4962,6 +4962,8 @@ struct hk_apple9_deferred {
    /* Static depth/stencil feedback loop. The dynamic form reaches draw-time
     * variants through the dynamic feedback-loop state instead. */
    bool zs_self_dep;
+   /* Vertex shader whose pipeline disables vertex input robustness. */
+   bool vertex_unbounded;
    /* Color attachments the pipeline leaves undefined; writes are discarded
     * even when the render binds an image there. */
    uint8_t undefined_colors;
@@ -6743,6 +6745,18 @@ hk_apple9_identify_native_pair(uint32_t count, struct vk_shader **shaders,
  * native compiles only its own programs, falling back to emulation if the
  * native backend rejects the body. Independent NIR keeps either rejection
  * from leaving a half-lowered fallback behind. */
+/* Whether a vertex shader's pipeline disables vertex input robustness, so
+ * its attribute fetches may skip bounds checks. robustBufferAccess,
+ * robustness2 and VK_EXT_pipeline_robustness all resolve into the stage's
+ * vertex_inputs behaviour; shader objects take the device default. */
+static bool
+hk_apple9_vertex_unbounded(const struct vk_shader_compile_info *info)
+{
+   return info->robustness &&
+          info->robustness->vertex_inputs ==
+             VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT;
+}
+
 static VkResult
 hk_apple9_compile_graphics_mode(struct hk_device *dev, uint32_t count,
                                 struct vk_shader_compile_info *infos,
@@ -6754,10 +6768,15 @@ hk_apple9_compile_graphics_mode(struct hk_device *dev, uint32_t count,
 {
    assert(count <= HK_APPLE9_GFX_STAGES);
    struct hk_apple9_graphics_key key;
-   if (key_in)
+   if (key_in) {
       key = *key_in;
-   else
+   } else {
       hk_apple9_graphics_key(&key, state);
+      for (unsigned i = 0; i < count; ++i) {
+         if (infos[i].stage == MESA_SHADER_VERTEX)
+            key.vertex.unbounded = hk_apple9_vertex_unbounded(&infos[i]);
+      }
+   }
 
    nir_shader *mesh = NULL;
    bool task = false, per_vertex = false;
@@ -6811,7 +6830,7 @@ hk_apple9_compile_graphics_mode(struct hk_device *dev, uint32_t count,
    memset(out, 0, count * sizeof(*out));
    if (!native_only || !native) {
       result = hk_apple9_compile_graphics_path(
-         dev, count, infos, state, key_in, fs_interp, alloc, out, false, NULL);
+         dev, count, infos, state, &key, fs_interp, alloc, out, false, NULL);
       if (result != VK_SUCCESS || !native) {
          for (unsigned i = 0; i < cloned; ++i)
             ralloc_free(native_infos[i].nir);
@@ -6822,7 +6841,7 @@ hk_apple9_compile_graphics_mode(struct hk_device *dev, uint32_t count,
    struct vk_shader *native_out[HK_APPLE9_GFX_STAGES] = {0};
    bool native_unsupported = false;
    result = hk_apple9_compile_graphics_path(dev, count, native_infos, state,
-                                           key_in, fs_interp, alloc,
+                                           &key, fs_interp, alloc,
                                            native_out, true,
                                            &native_unsupported);
    if (native_unsupported) {
@@ -6830,7 +6849,7 @@ hk_apple9_compile_graphics_mode(struct hk_device *dev, uint32_t count,
       /* Allocation failures remain real Vulkan errors. Only a native-only
        * capability failure compiles/uses the emulated realization. */
       return native_only ? hk_apple9_compile_graphics_path(
-                              dev, count, infos, state, key_in, fs_interp,
+                              dev, count, infos, state, &key, fs_interp,
                               alloc, out, false, NULL)
                          : VK_SUCCESS;
    }
@@ -7191,6 +7210,8 @@ hk_apple9_defer_graphics(struct hk_device *dev, uint32_t count,
       deferred->set_layout_count = infos[i].set_layout_count;
       deferred->sample_shading =
          state && state->ms && state->ms->sample_shading_enable;
+      deferred->vertex_unbounded = infos[i].stage == MESA_SHADER_VERTEX &&
+                                   hk_apple9_vertex_unbounded(&infos[i]);
       deferred->zs_self_dep =
          state && (state->pipeline_flags &
                    VK_PIPELINE_CREATE_2_DEPTH_STENCIL_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT);
@@ -7299,6 +7320,9 @@ hk_apple9_resolve_graphics(
    memcpy(search.api, api, sizeof(search.api));
    hk_apple9_graphics_key(&search.key, state);
    search.key.no_fs_statistics = !fs_statistics;
+   const struct hk_api_shader *vs = api[MESA_SHADER_VERTEX];
+   search.key.vertex.unbounded = vs && vs->apple9_deferred &&
+                                 vs->apple9_deferred->vertex_unbounded;
    /* Collapse ineligible and non-mesh requests onto the emulated cache entry. */
    search.prefer_native = prefer_native && api[MESA_SHADER_MESH] &&
                           p_atomic_read(&api[MESA_SHADER_MESH]->apple9_native_candidate);
@@ -7669,7 +7693,7 @@ hk_deserialize_shader(struct hk_device *dev, struct blob_reader *blob,
 }
 
 /* Version the container independently of the hardware programs it owns. */
-#define HK_SHADER_CONTAINER_VERSION 0x484b0002u
+#define HK_SHADER_CONTAINER_VERSION 0x484b0003u
 
 static VkResult
 hk_deserialize_api_shader_inner(struct vk_device *vk_dev, struct blob_reader *blob,
@@ -7720,6 +7744,7 @@ hk_deserialize_api_shader_inner(struct vk_device *vk_dev, struct blob_reader *bl
       d->set_layout_count = blob_read_uint32(blob);
       d->sample_shading = blob_read_uint8(blob);
       d->zs_self_dep = blob_read_uint8(blob);
+      d->vertex_unbounded = blob_read_uint8(blob);
       d->undefined_colors = blob_read_uint8(blob);
       obj->writes_memory = blob_read_uint8(blob);
       obj->pre_raster_reads = blob_read_uint8(blob);
@@ -7821,6 +7846,7 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
       blob_write_uint32(blob, d->set_layout_count);
       blob_write_uint8(blob, d->sample_shading);
       blob_write_uint8(blob, d->zs_self_dep);
+      blob_write_uint8(blob, d->vertex_unbounded);
       blob_write_uint8(blob, d->undefined_colors);
       blob_write_uint8(blob, obj->writes_memory);
       blob_write_uint8(blob, obj->pre_raster_reads);

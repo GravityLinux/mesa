@@ -6,6 +6,7 @@
 #include "asahi/debug.h"
 #include "util/u_debug.h"
 #include "agx_compile_apple9.h"
+#include "asahi/lib/agx_abi.h"
 #include "agx_apple9_ir.h"
 #include "agx_apple9_dag_cache.h"
 #include "agx_apple9_mesh.h"
@@ -10324,12 +10325,23 @@ apple9_lower_vertex_input(nir_builder *b, nir_intrinsic_instr *intr, void *data)
                               lower->layout->offset[attribute]);
       /* Robust vertex input treats a whole attribute as out of bounds when
        * any byte of it is. Such an attribute reads the zero sink instead of
-       * its buffer, so every component loads unconditionally. */
-      nir_def *end = nir_iadd_imm(b, offset64, desc->block.bits / 8);
-      nir_def *valid = nir_uge(b, buffer_size, end);
-      buffer_address = nir_bcsel(b, valid, buffer_address,
-                                 nir_load_ro_sink_address_poly(b));
-      offset64 = nir_bcsel(b, valid, offset64, nir_imm_int64(b, 0));
+       * its buffer, so every component loads unconditionally.
+       *
+       * Unbounded fetches still must read zero from a null binding, which
+       * the driver describes as the zero page with a stride of 0 in the
+       * table. That holds only for table strides and while the attribute
+       * lies inside the zero page; otherwise the check stays.
+       */
+      bool unbounded = lower->layout->unbounded && lower->layout->dynamic_stride &&
+                       lower->layout->offset[attribute] + desc->block.bits / 8 <=
+                          AGX_ZERO_PAGE_SIZE;
+      if (!unbounded) {
+         nir_def *end = nir_iadd_imm(b, offset64, desc->block.bits / 8);
+         nir_def *valid = nir_uge(b, buffer_size, end);
+         buffer_address = nir_bcsel(b, valid, buffer_address,
+                                    nir_load_ro_sink_address_poly(b));
+         offset64 = nir_bcsel(b, valid, offset64, nir_imm_int64(b, 0));
+      }
    }
    nir_def *components[4];
    for (unsigned c = 0; c < intr->num_components; ++c) {
