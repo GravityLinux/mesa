@@ -12,8 +12,9 @@
 #include "agx_compiler.h"
 #include "agx_debug.h"
 #include "util/hash_table.h"
-#include "util/mesa-blake3.h"
 #include "util/u_debug.h"
+#define XXH_INLINE_ALL
+#include "util/xxhash.h"
 
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_parallel_ra,
                       "AGX_APPLE9_PARALLEL_RA", NULL)
@@ -1910,46 +1911,49 @@ apple9_seen_schedule(agx_context *ctx, struct util_dynarray *seen,
    /* Fingerprint the scheduled IR from its fields rather than its printed
     * form: operands, register constraints and every instruction field from
     * the opcode on. Branch targets are blocks of this candidate's own context,
-    * so they enter as block indices. */
-   struct mesa_blake3 sha;
-   _mesa_blake3_init(&sha);
-   const uint8_t flags[] = {cost_constraints, copy_register, uniform_remat};
-   _mesa_blake3_update(&sha, flags, sizeof(flags));
+    * so they enter as block indices. The fields are gathered into one buffer
+    * and hashed once with a 128-bit non-cryptographic hash. */
    struct hash_table *blocks = _mesa_pointer_hash_table_create(NULL);
    if (!blocks)
       return false;
+   struct util_dynarray bytes;
+   util_dynarray_init(&bytes, NULL);
+   const uint8_t flags[] = {cost_constraints, copy_register, uniform_remat};
+   util_dynarray_append_array(&bytes, uint8_t, flags, sizeof(flags));
    agx_foreach_block(ctx, block)
       _mesa_hash_table_insert(blocks, block, (void *)(uintptr_t)(block->index + 1));
    agx_foreach_block(ctx, block) {
       uint32_t index = block->index;
-      _mesa_blake3_update(&sha, &index, sizeof(index));
+      util_dynarray_append_array(&bytes, uint8_t, &index, sizeof(index));
       agx_foreach_instr_in_block(block, I) {
-         _mesa_blake3_update(&sha, I->dest, sizeof(agx_index) * I->nr_dests);
-         _mesa_blake3_update(&sha, I->src, sizeof(agx_index) * I->nr_srcs);
+         util_dynarray_append_array(&bytes, uint8_t, I->dest,
+                                    sizeof(agx_index) * I->nr_dests);
+         util_dynarray_append_array(&bytes, uint8_t, I->src,
+                                    sizeof(agx_index) * I->nr_srcs);
          const uint8_t constrained = I->reg_constraints != NULL;
-         _mesa_blake3_update(&sha, &constrained, 1);
+         util_dynarray_append(&bytes, constrained);
          if (constrained) {
-            _mesa_blake3_update(&sha, I->reg_constraints,
-                                sizeof(struct agx_reg_constraint) *
-                                   (I->nr_dests + I->nr_srcs));
+            util_dynarray_append_array(&bytes, uint8_t, I->reg_constraints,
+                                       sizeof(struct agx_reg_constraint) *
+                                          (I->nr_dests + I->nr_srcs));
          }
          agx_instr copy = *I;
          struct hash_entry *target = _mesa_hash_table_search(blocks, copy.target);
          if (target)
             copy.imm = (uintptr_t)target->data | (1ull << 63);
-         _mesa_blake3_update(&sha, &copy.op,
-                             sizeof(agx_instr) - offsetof(agx_instr, op));
+         util_dynarray_append_array(&bytes, uint8_t, &copy.op,
+                                    sizeof(agx_instr) - offsetof(agx_instr, op));
       }
    }
    _mesa_hash_table_destroy(blocks, NULL);
-   blake3_hash digest;
-   _mesa_blake3_final(&sha, digest);
-   for (unsigned off = 0; off + BLAKE3_OUT_LEN <= seen->size;
-        off += BLAKE3_OUT_LEN) {
-      if (!memcmp((const uint8_t *)seen->data + off, digest, BLAKE3_OUT_LEN))
+   const XXH128_hash_t digest = XXH3_128bits(bytes.data, bytes.size);
+   util_dynarray_fini(&bytes);
+   for (unsigned off = 0; off + sizeof(digest) <= seen->size;
+        off += sizeof(digest)) {
+      if (!memcmp((const uint8_t *)seen->data + off, &digest, sizeof(digest)))
          return true;
    }
-   util_dynarray_append_array(seen, uint8_t, digest, BLAKE3_OUT_LEN);
+   util_dynarray_append_array(seen, uint8_t, &digest, sizeof(digest));
    return false;
 }
 
@@ -2408,9 +2412,9 @@ apple9_candidate_jobs_run(struct apple9_candidate_job jobs[2],
    const unsigned second_size = jobs[1].seen.size - jobs[1].seen_start;
    /* The second candidate repeats the first's schedule: in serial order it
     * would have been rejected as a duplicate. */
-   for (unsigned a = 0; jobs[1].ok && a < second_size; a += BLAKE3_OUT_LEN) {
-      for (unsigned b = 0; b < first_size; b += BLAKE3_OUT_LEN) {
-         if (!memcmp(second + a, first + b, BLAKE3_OUT_LEN)) {
+   for (unsigned a = 0; jobs[1].ok && a < second_size; a += sizeof(XXH128_hash_t)) {
+      for (unsigned b = 0; b < first_size; b += sizeof(XXH128_hash_t)) {
+         if (!memcmp(second + a, first + b, sizeof(XXH128_hash_t))) {
             agx_apple9_vir_finish(&jobs[1].result);
             agx_apple9_vir_init(&jobs[1].result);
             jobs[1].ok = false;
