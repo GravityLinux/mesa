@@ -8,6 +8,7 @@
 #pragma once
 
 #include "hk_device.h"
+#include "hk_descriptor_set.h"
 #include "hk_physical_device.h"
 #include "hk_private.h"
 
@@ -32,6 +33,7 @@ struct hk_sampler {
 
    struct {
       struct hk_rc_sampler *hw;
+      struct hk_apple9_sampler_part apple9;
    } planes[2];
 };
 
