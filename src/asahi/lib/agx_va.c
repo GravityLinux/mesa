@@ -3,6 +3,10 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <inttypes.h>
+#include <stdio.h>
+#include <stdlib.h>
+
 #include "agx_bo.h"
 #include "agx_device.h"
 
@@ -64,6 +68,10 @@ agx_va_unquarantine_locked(struct agx_device *dev, enum agx_va_flags flags,
          continue;
       }
       agx_va_release_locked(dev, va);
+      if (flags & AGX_VA_FIXED)
+         dev->va_quarantine.released_fixed++;
+      else
+         dev->va_quarantine.released_exhaustion++;
       released = true;
    }
    return released;
@@ -86,6 +94,17 @@ agx_va_quarantine_init(struct agx_device *dev, uint64_t main_B,
 void
 agx_va_quarantine_finish(struct agx_device *dev)
 {
+   if (getenv("AGX_VA_QUARANTINE_STATS")) {
+      fprintf(stderr,
+              "agx: va quarantine: retired %" PRIu64 ", high water %" PRIu64
+              " B, released by cap %" PRIu64 ", exhaustion %" PRIu64
+              ", fixed %" PRIu64 "\n",
+              dev->va_quarantine.retired, dev->va_quarantine.high_water_B,
+              dev->va_quarantine.released_cap,
+              dev->va_quarantine.released_exhaustion,
+              dev->va_quarantine.released_fixed);
+   }
+
    simple_mtx_lock(&dev->vma_lock);
    list_for_each_entry_safe(struct agx_va, va, &dev->va_quarantine.list, link)
       agx_va_release_locked(dev, va);
@@ -105,11 +124,18 @@ agx_va_retire(struct agx_device *dev, struct agx_va *va)
    simple_mtx_lock(&dev->vma_lock);
    list_addtail(&va->link, &dev->va_quarantine.list);
    dev->va_quarantine.bytes[heap] += va->size_B;
+   dev->va_quarantine.retired++;
+   uint64_t total = 0;
+   for (unsigned i = 0; i < ARRAY_SIZE(dev->va_quarantine.bytes); ++i)
+      total += dev->va_quarantine.bytes[i];
+   dev->va_quarantine.high_water_B = MAX2(dev->va_quarantine.high_water_B, total);
    list_for_each_entry_safe(struct agx_va, old, &dev->va_quarantine.list, link) {
       if (dev->va_quarantine.bytes[heap] <= dev->va_quarantine.cap[heap])
          break;
-      if (agx_va_heap_index(old->flags) == heap)
+      if (agx_va_heap_index(old->flags) == heap) {
          agx_va_release_locked(dev, old);
+         dev->va_quarantine.released_cap++;
+      }
    }
    simple_mtx_unlock(&dev->vma_lock);
 }

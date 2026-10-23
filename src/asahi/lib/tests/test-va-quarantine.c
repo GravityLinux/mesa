@@ -84,6 +84,7 @@ test_cap_releases_oldest(void)
       agx_va_retire(&dev, vas[i]);
    CHECK(dev.va_quarantine.bytes[0] <= dev.va_quarantine.cap[0]);
    CHECK(dev.va_quarantine.bytes[0] == 64 * 2 * PAGE);
+   CHECK(dev.va_quarantine.released_cap == 16 && dev.va_quarantine.retired == 80);
    /* The oldest is free again: a fixed allocation there needs no flush. */
    uint64_t before = dev.va_quarantine.bytes[0];
    struct agx_va *f = alloc(PAGE, AGX_VA_FIXED, first);
@@ -106,6 +107,7 @@ test_fixed_conflict(void)
    CHECK(dev.va_quarantine.bytes[0] == 2 * PAGE); /* b is still quarantined */
    struct agx_va *g = alloc(PAGE, AGX_VA_FIXED, other);
    CHECK(g && g->addr == other && dev.va_quarantine.bytes[0] == 0);
+   CHECK(dev.va_quarantine.released_fixed == 2 && dev.va_quarantine.released_exhaustion == 0);
    agx_va_free(&dev, f, false);
    agx_va_free(&dev, g, false);
    finish();
@@ -141,6 +143,8 @@ test_exhaustion_flush(void)
    CHECK(dev.va_quarantine.bytes[0] == 4 * 2 * PAGE);
    struct agx_va *x = alloc(PAGE, 0, 0);
    CHECK(x && dev.va_quarantine.bytes[0] == 0);
+   CHECK(dev.va_quarantine.released_exhaustion == 4 &&
+         dev.va_quarantine.high_water_B == 4 * 2 * PAGE);
    agx_va_free(&dev, x, false);
    for (unsigned i = 4; i < 32; ++i)
       agx_va_free(&dev, vas[i], false);

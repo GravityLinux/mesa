@@ -149,6 +149,11 @@ struct agx_device {
    struct {
       struct list_head list;
       uint64_t bytes[5], cap[5];
+      /* Statistics (AGX_VA_QUARANTINE_STATS prints them at teardown):
+       * retired VAs, the largest total quarantined, and releases by cause.
+       */
+      uint64_t retired, high_water_B;
+      uint64_t released_cap, released_exhaustion, released_fixed;
    } va_quarantine;
 
    /* To emulate sparse-resident buffers, we map buffers in both the bottom half
