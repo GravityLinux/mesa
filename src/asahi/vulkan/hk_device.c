@@ -582,6 +582,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    simple_mtx_init(&dev->apple9_variants.lock, mtx_plain);
    simple_mtx_init(&dev->apple9_bodies.lock, mtx_plain);
+   list_inithead(&dev->apple9_bodies.slabs);
    dev->dev.apple9_pin_entry = hk_apple9_pin_entry;
    simple_mtx_init(&dev->apple9_tile_helpers.lock, mtx_plain);
    result = hk_device_init_meta(dev);
@@ -634,6 +635,13 @@ fail_meta:
    hk_device_finish_meta(dev);
 fail_mem_cache:
    vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
+   hk_apple9_variants_finish(dev);
+   hk_apple9_bodies_finish(dev);
+   hk_apple9_tile_helpers_finish(dev);
+   assert(list_is_empty(&dev->apple9_bodies.slabs));
+   simple_mtx_destroy(&dev->apple9_variants.lock);
+   simple_mtx_destroy(&dev->apple9_bodies.lock);
+   simple_mtx_destroy(&dev->apple9_tile_helpers.lock);
 fail_queues:
    vk_foreach_queue_safe(iter, &dev->vk) {
       struct hk_queue *queue = container_of(iter, struct hk_queue, vk);
@@ -704,6 +712,7 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    if (dev->null_fs_trivial)
       hk_api_shader_destroy(&dev->vk, &dev->null_fs_trivial->vk, pAllocator);
    simple_mtx_destroy(&dev->apple9_variants.lock);
+   assert(list_is_empty(&dev->apple9_bodies.slabs));
    simple_mtx_destroy(&dev->apple9_bodies.lock);
    simple_mtx_destroy(&dev->apple9_tile_helpers.lock);
 
