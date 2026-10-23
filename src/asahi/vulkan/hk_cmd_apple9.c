@@ -529,6 +529,143 @@ hk_apple9_prepare_native_mesh(struct hk_cmd_buffer *cmd,
    return agx_apple9_mesh_state_build(state, &params);
 }
 
+/* Index fetch is per-command state. It does not feed the prepared raster,
+ * shader bindings or launch records. Callers resolve null bindings and check
+ * the aperture before using this for either the full or cached draw path. */
+static void
+hk_apple9_set_index_fetch(struct agx_apple9_render_pipeline *pipeline,
+                          struct agx_draw draw, uint64_t buffer,
+                          uint64_t range, uint64_t offset)
+{
+   pipeline->index_size = agx_index_size_to_B(draw.index_size);
+   pipeline->index_buffer = buffer + offset;
+   pipeline->index_extent =
+      agx_is_indirect(draw.b)
+         ? range - offset
+         : MIN2(range - offset, (uint64_t)draw.b.count[0] * pipeline->index_size);
+}
+
+static void
+hk_apple9_emit_ordinary_draw(struct hk_cs *cs,
+                             const struct agx_apple9_render_pipeline *pipeline,
+                             struct agx_draw draw)
+{
+   if (agx_is_indirect(draw.b))
+      cs->current =
+         agx_apple9_emit_indirect_draw(cs->current, pipeline, draw.b.ptr) - 4;
+   else
+      cs->current = agx_apple9_emit_direct_draw(
+                       cs->current, pipeline, draw.b.count[0], draw.b.count[1],
+                       draw.indexed ? draw.index_bias : draw.start) - 4;
+}
+
+static void
+hk_apple9_account_draw(struct hk_cs *cs,
+                       const struct agx_apple9_render_pipeline *pipeline,
+                       struct agx_draw draw, bool emulated,
+                       const struct hk_shader *fragment)
+{
+   if (cs->primitive_count < AGX_PRIMITIVE_COUNT_UNKNOWN) {
+      /* Emulated output counts are not the API draw's primitive count. */
+      agx_add_primitive_count(
+         &cs->primitive_count,
+         agx_is_indirect(draw.b) || pipeline->primitive_restart || emulated
+            ? AGX_PRIMITIVE_COUNT_UNKNOWN
+            : agx_count_primitives(pipeline->primitive, draw.b.count[0],
+                                   draw.b.count[1]));
+   }
+   cs->stats.cmds++;
+   if (!cs->pass_count++)
+      cs->pass_code = fragment->bo ? fragment->bo->va->addr : 0;
+}
+
+/* Reuse preparation, not emission: every draw still records its scope and
+ * emits its ordinary VDM command. Root updates preserve the normal upload
+ * order and rebuild only the tables/launches that bind the changed root.
+ */
+static bool
+hk_apple9_try_cached_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
+                          struct agx_draw draw, uint64_t native_grid)
+{
+   if (!hk_apple9_draw_state_reusable(cmd, draw, native_grid))
+      return false;
+
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+   struct hk_descriptor_state *desc = &gfx->descriptors;
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   struct agx_apple9_render_pipeline *pipeline = &cmd->apple9_draw_state.pipeline;
+   if (draw.indexed) {
+      uint64_t offset = (uint64_t)draw.start * agx_index_size_to_B(draw.index_size);
+      uint64_t address = draw.index_buffer + offset;
+      if (address < dev->dev.shader_base ||
+          address >= dev->dev.shader_base + (1ull << 32))
+         return false;
+      hk_apple9_set_index_fetch(pipeline, draw, draw.index_buffer,
+                                draw.index_buffer_range_B, offset);
+      pipeline->primitive_restart =
+         cmd->vk.dynamic_graphics_state.ia.primitive_restart_enable;
+      pipeline->restart_index = gfx->index.restart;
+   } else {
+      pipeline->index_size = 0;
+      pipeline->primitive_restart = false;
+   }
+   struct hk_cs *cs = hk_cmd_buffer_get_cs(cmd, false);
+   assert(cs && cs == cmd->apple9_prev_cs);
+
+   if (desc->root.draw.draw_id != draw_id) {
+      desc->root.draw.draw_id = draw_id;
+      desc->root_dirty = true;
+   }
+   if (desc->root_dirty || desc->push_dirty) {
+      if (desc->push_dirty)
+         hk_cmd_buffer_flush_push_descriptors(cmd, desc);
+      uint64_t root = hk_cmd_buffer_upload_root(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
+      if (!root)
+         return true; /* The pool recorded the allocation failure. */
+      if (root != gfx->root) {
+         gfx->root = root;
+         const struct agx_apple9_uniform_draw *previous =
+            &cmd->apple9_draw[!cmd->apple9_draw_current];
+         struct agx_apple9_uniform_draw *record =
+            &cmd->apple9_draw[cmd->apple9_draw_current];
+         *record = *previous;
+         for (unsigned stage = 0; stage < 2; ++stage) {
+            const struct agx_apple9_render_stage *shader =
+               stage ? pipeline->fragment : pipeline->vertex;
+            for (unsigned slot = 0; slot < shader->resource_count; ++slot) {
+               if (shader->resource_binding[slot] == 0)
+                  record->buffers[stage][slot] = root;
+            }
+            uint64_t table = hk_pool_upload_last(
+               cmd, stage ? HK_UPLOAD_LAST_FRAGMENT_TABLE : HK_UPLOAD_LAST_VERTEX_TABLE,
+               record->buffers[stage], shader->resource_count * sizeof(uint64_t), 64);
+            if (stage)
+               record->fragment_table = table;
+            else
+               record->vertex_table = table;
+         }
+         if (!agx_apple9_prepare_draw_alloc(
+                &dev->dev, cmd, hk_apple9_usc_alloc, cmd, hk_apple9_context_alloc,
+                pipeline, record, previous, hk_apple9_state_cache_alloc)) {
+            vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+            return true;
+         }
+         cmd->apple9_draw_current = !cmd->apple9_draw_current;
+         pipeline->ppp = record->ppp;
+         pipeline->ppp_viewport_offset = record->ppp_viewport_offset;
+         pipeline->ppp_viewport_words = record->ppp_viewport_words;
+         pipeline->vertex_launch = record->launch[0] / 0x40;
+      }
+      desc->root_dirty = false;
+   }
+
+   hk_ensure_cs_has_space(cmd, cs, 256);
+   hk_apple9_emit_ordinary_draw(cs, pipeline, draw);
+   hk_apple9_account_draw(cs, pipeline, draw, false,
+                          cmd->apple9_draw_state.fragment);
+   return true;
+}
+
 static void
 hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
                     struct agx_draw draw, uint64_t native_grid)
@@ -538,6 +675,9 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    /* Geometry shaders can produce empty rasterization draws. */
    if (!agx_is_indirect(draw.b) && (!draw.b.count[0] || !draw.b.count[1]))
       return;
+   if (hk_apple9_try_cached_draw(cmd, draw_id, draw, native_grid))
+      return;
+   cmd->apple9_draw_state.valid = false;
    unsigned failure_line = 0;
    struct hk_shader *shaders[2] = {NULL, NULL};
 #define UNSUPPORTED()                                                          \
@@ -726,11 +866,7 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       if (pipeline.index_buffer < dev->dev.shader_base ||
           pipeline.index_buffer >= dev->dev.shader_base + (1ull << 32))
          UNSUPPORTED();
-      pipeline.index_extent =
-         agx_is_indirect(draw.b)
-            ? index_range - offset
-            : MIN2(index_range - offset,
-                   (uint64_t)draw.b.count[0] * pipeline.index_size);
+      hk_apple9_set_index_fetch(&pipeline, draw, index_buffer, index_range, offset);
       pipeline.primitive_restart =
          emulated ? draw.restart : dyn->ia.primitive_restart_enable;
       pipeline.restart_index =
@@ -1071,29 +1207,24 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
          UNSUPPORTED();
       cs->current += HK_APPLE9_MESH_COMMAND_BYTES - 4;
       cs->apple9_native_mesh = true;
-   } else if (agx_is_indirect(draw.b))
-      cs->current =
-         agx_apple9_emit_indirect_draw(cs->current, &pipeline, draw.b.ptr) - 4;
-   else
-      cs->current = agx_apple9_emit_direct_draw(
-                       cs->current, &pipeline, draw.b.count[0], draw.b.count[1],
-                       draw.indexed ? draw.index_bias : draw.start) -
-                    4;
-   if (cs->primitive_count < AGX_PRIMITIVE_COUNT_UNKNOWN) {
-      /* Mesh output counts come from the shader and its child grid. The
-       * conventional draw arguments are placeholders for the native path,
-       * so keep its render-wide count unknown as for other mesh draws.
-       */
-      agx_add_primitive_count(
-         &cs->primitive_count,
-         agx_is_indirect(draw.b) || pipeline.primitive_restart || gs || tes || mesh
-            ? AGX_PRIMITIVE_COUNT_UNKNOWN
-            : agx_count_primitives(pipeline.primitive, draw.b.count[0],
-                                   draw.b.count[1]));
+   } else {
+      hk_apple9_emit_ordinary_draw(cs, &pipeline, draw);
    }
-   cs->stats.cmds++;
-   if (!cs->pass_count++)
-      cs->pass_code = shaders[1]->bo ? shaders[1]->bo->va->addr : 0;
+   hk_apple9_account_draw(cs, &pipeline, draw, gs || tes || mesh, shaders[1]);
+   /* Only ordinary single-view draws reuse prepared state. Other paths
+    * still consume dynamic state in their software-stage lowering. */
+   if (hk_apple9_draw_cache_supported(cmd, draw, native_grid)) {
+      cmd->apple9_draw_state.valid = true;
+      cmd->apple9_draw_state.render_gen = gfx->render_gen;
+      cmd->apple9_draw_state.first_vertex = draw.indexed ? draw.index_bias : draw.start;
+      cmd->apple9_draw_state.base_instance = draw.start_instance;
+      cmd->apple9_draw_state.pipeline = pipeline;
+      cmd->apple9_draw_state.fragment = shaders[1];
+      vk_dynamic_graphics_state_clear_dirty(dyn);
+      gfx->shaders_dirty = 0;
+      gfx->dirty = 0;
+      gfx->descriptors.root_dirty = false;
+   }
    return;
 unsupported:
    fprintf(

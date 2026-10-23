@@ -389,8 +389,7 @@ hk_apple9_upload_textures(struct hk_cmd_buffer *cmd,
    gfx->apple9_sysvals_line_stipple = line_stipple;
    memcpy(gfx->apple9_sysvals_viewports, viewports, sizeof(viewports));
    gfx->apple9_sysvals_polygon_points = polygon_points;
-   /* Nothing else consumes these bits on G16, whose draws do not clear the
-    * dynamic state's dirty set. */
+   /* Draw-state reuse is invalidated before these bits are consumed. */
    BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_CB_BLEND_CONSTANTS);
    BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES);
    return true;

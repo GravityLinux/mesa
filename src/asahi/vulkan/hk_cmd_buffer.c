@@ -89,6 +89,7 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd, bool release)
    for (unsigned i = 0; i < HK_UPLOAD_LAST_COUNT; ++i)
       cmd->upload_last[i].gpu = 0;
    cmd->apple9_prev_cs = NULL;
+   cmd->apple9_draw_state.valid = false;
    cmd->apple9_linked_id[0] = cmd->apple9_linked_id[1] = 0;
    cmd->apple9_null_fs_vertex_id = 0;
    hk_descriptor_state_fini(cmd, &cmd->state.gfx.descriptors);

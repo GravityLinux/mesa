@@ -770,6 +770,17 @@ struct hk_cmd_buffer {
    unsigned apple9_draw_current;
    struct hk_cs *apple9_prev_cs;
 
+   /* Prepared ordinary draw state. Dynamic/shader/vertex state dirties this
+    * cache; root descriptor changes only need new resource tables/launches.
+    * The command buffer owns the referenced immutable uploads. */
+   struct {
+      bool valid;
+      uint32_t render_gen;
+      uint32_t first_vertex, base_instance;
+      struct agx_apple9_render_pipeline pipeline;
+      struct hk_shader *fragment;
+   } apple9_draw_state;
+
    /* The last linked Apple9 (vertex, fragment) pair, by program id: shader
     * objects pair stages only at draw time, so link once per change. */
    struct agx_apple9_render_pipeline apple9_linked;
@@ -1473,6 +1484,47 @@ bool hk_apple9_use_native_mesh(struct hk_cmd_buffer *cmd, const uint32_t *direct
                                 uint64_t count_addr);
 void hk_apple9_draw_native_mesh(struct hk_cmd_buffer *cmd, uint32_t draw_id,
                                 uint64_t grid);
+/* Software-stage outputs, queries and multiview have additional per-draw
+ * state. Keep their existing preparation path. A null/out-of-range index
+ * binding allocates a fresh zero range, so it must also use that path. */
+static inline bool
+hk_apple9_draw_cache_supported(const struct hk_cmd_buffer *cmd,
+                               struct agx_draw draw, uint64_t native_grid)
+{
+   const struct hk_graphics_state *gfx = &cmd->state.gfx;
+   return !native_grid && !agx_is_indirect(draw.b) && !cmd->in_meta &&
+          !gfx->render.view_mask && !gfx->xfb_enabled &&
+          !gfx->shaders[MESA_SHADER_GEOMETRY] &&
+          !gfx->shaders[MESA_SHADER_TESS_EVAL] &&
+          !gfx->shaders[MESA_SHADER_MESH] &&
+          !gfx->apple9_fan_unrolled && !gfx->occlusion.active_count &&
+          !gfx->occlusion.segment_dirty &&
+          gfx->occlusion.mode == AGX_VISIBILITY_MODE_NONE &&
+          !gfx->descriptors.root.draw.pipeline_stats_flags &&
+          (cmd->vk.dynamic_graphics_state.ia.primitive_topology <=
+              VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN) &&
+          (!draw.indexed || (uint64_t)draw.start *
+               agx_index_size_to_B(draw.index_size) < draw.index_buffer_range_B);
+}
+
+static inline bool
+hk_apple9_draw_state_reusable(const struct hk_cmd_buffer *cmd,
+                              struct agx_draw draw, uint64_t native_grid)
+{
+   const struct hk_graphics_state *gfx = &cmd->state.gfx;
+   return cmd->apple9_draw_state.valid &&
+          cmd->current_cs.gfx && cmd->current_cs.gfx == cmd->apple9_prev_cs &&
+          !cmd->merge_cs && cmd->apple9_draw_state.render_gen == gfx->render_gen &&
+          !gfx->dirty && !gfx->shaders_dirty &&
+          !vk_dynamic_graphics_state_any_dirty(&cmd->vk.dynamic_graphics_state) &&
+          hk_apple9_draw_cache_supported(cmd, draw, native_grid) &&
+          /* Prepared bindings read only first vertex/base vertex and base
+           * instance. Counts and index fetch state belong to the VDM draw. */
+          (draw.indexed ? draw.index_bias : draw.start) ==
+             cmd->apple9_draw_state.first_vertex &&
+          draw.start_instance == cmd->apple9_draw_state.base_instance;
+}
+
 void hk_apple9_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
                     struct agx_draw draw);
 struct hk_apple9_prerast_bindings
