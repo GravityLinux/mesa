@@ -22,8 +22,8 @@
 #include "hk_private.h"
 
 #include "hk_descriptor_table.h"
-#include "hk_usc_heap.h"
 #include "hk_queue.h"
+#include "hk_usc_heap.h"
 #include "vk_device.h"
 #include "vk_meta.h"
 #include "vk_queue.h"

@@ -4272,12 +4272,14 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
          if (shader->info.stage == MESA_SHADER_FRAGMENT) {
             simple_mtx_lock(&dev->usc_heap_lock);
             bool allocated = hk_usc_heap_alloc(
-               &dev->usc_heap, agx_apple9_coefficients_size(&shader->apple9_stage), 64,
+               &dev->usc_heap,
+               agx_apple9_coefficients_size(&shader->apple9_stage), 64,
                &shader->apple9_coefficients);
             simple_mtx_unlock(&dev->usc_heap_lock);
             if (!allocated)
                return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
-            agx_apple9_init_coefficients(&dev->dev, &shader->apple9_stage,
+            agx_apple9_init_coefficients(
+               &dev->dev, &shader->apple9_stage,
                (struct agx_ptr){.cpu = shader->apple9_coefficients.map,
                                 .gpu = shader->apple9_coefficients.addr});
          }

@@ -3,7 +3,13 @@
  * semantic allocation addresses. No shader compilation or GPU is involved. */
 #include "agx_apple9.h"
 #include "agx_device.h"
-#define CHECK(c) do { if (!(c)) { fprintf(stderr, "%u: %s\n", __LINE__, #c); abort(); } } while (0)
+#define CHECK(c)                                                               \
+   do {                                                                        \
+      if (!(c)) {                                                              \
+         fprintf(stderr, "%u: %s\n", __LINE__, #c);                            \
+         abort();                                                              \
+      }                                                                        \
+   } while (0)
 
 struct arena {
    uint8_t bytes[8192], coefficients[AGX_APPLE9_CF_BINDINGS_SIZE];
@@ -25,7 +31,8 @@ allocate(void *data, size_t size, size_t alignment)
    return (struct agx_ptr){.cpu = a->bytes + off, .gpu = a->gpu + off};
 }
 
-int main(void)
+int
+main(void)
 {
    struct agx_device *dev = calloc(1, sizeof(*dev));
    CHECK(dev);
@@ -37,14 +44,19 @@ int main(void)
    list_add(&bo.apple9_entry_link, &dev->apple9_entry_lru);
    uint8_t code[128] = {0};
    unsigned cases = 0;
-   const unsigned components[] = {0, 1, 4, 65, AGX_APPLE9_MAX_VARYING_COMPONENTS};
+   const unsigned components[] = {0, 1, 4, 65,
+                                  AGX_APPLE9_MAX_VARYING_COMPONENTS};
    for (unsigned c = 0; c < ARRAY_SIZE(components); ++c) {
       for (unsigned mode = 0; mode < 4; ++mode) {
          for (unsigned extras = 0; extras < 16; ++extras) {
             struct agx_apple9_render_stage vs = {
-               .bo = &bo, .binary = code, .binary_size = sizeof(code),
-               .publication_count_valid = true, .publication_count = 32,
-               .position_components = 4, .varying_components = components[c],
+               .bo = &bo,
+               .binary = code,
+               .binary_size = sizeof(code),
+               .publication_count_valid = true,
+               .publication_count = 32,
+               .position_components = 4,
+               .varying_components = components[c],
                .program_id = 1,
             };
             struct agx_apple9_render_stage fs = vs;
@@ -68,15 +80,18 @@ int main(void)
             memset(immutable, 0xa5, sizeof(immutable));
             uint64_t cf_gpu = dev->shader_base + 0x30000;
             unsigned size = agx_apple9_coefficients_size(&owned);
-            agx_apple9_init_coefficients(dev, &owned,
-               (struct agx_ptr){.cpu = immutable, .gpu = cf_gpu});
+            agx_apple9_init_coefficients(
+               dev, &owned, (struct agx_ptr){.cpu = immutable, .gpu = cf_gpu});
             for (unsigned i = size; i < sizeof(immutable); ++i)
                CHECK(immutable[i] == 0xa5);
             for (unsigned pv = 0; pv < 3; ++pv) {
-               unsigned offset = owned.coefficients[pv] - (cf_gpu - dev->shader_base);
+               unsigned offset =
+                  owned.coefficients[pv] - (cf_gpu - dev->shader_base);
                struct arena usc[2] = {
-                  {.gpu = dev->shader_base + 0x20000, .cf_gpu = cf_gpu + offset},
-                  {.gpu = dev->shader_base + 0x20000, .cf_gpu = cf_gpu + offset},
+                  {.gpu = dev->shader_base + 0x20000,
+                   .cf_gpu = cf_gpu + offset},
+                  {.gpu = dev->shader_base + 0x20000,
+                   .cf_gpu = cf_gpu + offset},
                };
                struct arena context[2] = {
                   {.gpu = AGX_APPLE9_RENDER_CONTEXT_BASE + 0x10000},
@@ -86,30 +101,39 @@ int main(void)
                uint8_t commands[2][256] = {0};
                for (unsigned arm = 0; arm < 2; ++arm) {
                   struct agx_apple9_render_pipeline pipeline;
-                  CHECK(agx_apple9_link_render_pipeline(&pipeline, &vs, arm ? &owned : &fs));
-                  pipeline.primitive = pv == 1 ? AGX_PRIMITIVE_TRIANGLE_FAN : AGX_PRIMITIVE_TRIANGLES;
+                  CHECK(agx_apple9_link_render_pipeline(&pipeline, &vs,
+                                                        arm ? &owned : &fs));
+                  pipeline.primitive = pv == 1 ? AGX_PRIMITIVE_TRIANGLE_FAN
+                                               : AGX_PRIMITIVE_TRIANGLES;
                   pipeline.flatshade_first = pv != 2;
                   draw[arm].flatshade_first = pv != 2;
                   draw[arm].object_type = AGX_OBJECT_TYPE_TRIANGLE;
                   draw[arm].scissor_max[0] = draw[arm].scissor_max[1] = 32;
                   draw[arm].vertex_table = 0x40000;
                   draw[arm].fragment_table = 0x50000;
-                  CHECK(agx_apple9_prepare_draw_alloc(dev, &usc[arm], allocate,
-                     &context[arm], allocate, &pipeline, &draw[arm], NULL));
+                  CHECK(agx_apple9_prepare_draw_alloc(
+                     dev, &usc[arm], allocate, &context[arm], allocate,
+                     &pipeline, &draw[arm], NULL));
                   CHECK(draw[arm].provoking_vertex == pv);
                   pipeline.ppp = draw[arm].ppp;
                   pipeline.vertex_launch = draw[arm].launch[0] / 64;
                   pipeline.pipeline_word = 0x01000000;
-                  uint8_t *end = agx_apple9_emit_direct_draw(commands[arm], &pipeline, 3, 1, 0);
-                  CHECK(end - commands[arm] == agx_apple9_direct_draw_size(&pipeline));
+                  uint8_t *end = agx_apple9_emit_direct_draw(
+                     commands[arm], &pipeline, 3, 1, 0);
+                  CHECK(end - commands[arm] ==
+                        agx_apple9_direct_draw_size(&pipeline));
                }
                CHECK(usc[0].cf_uploads == 1 && usc[1].cf_uploads == 0);
-               CHECK(!memcmp(usc[0].coefficients, immutable + offset, AGX_APPLE9_CF_BINDINGS_SIZE));
+               CHECK(!memcmp(usc[0].coefficients, immutable + offset,
+                             AGX_APPLE9_CF_BINDINGS_SIZE));
                CHECK(draw[0].cf_count == draw[1].cf_count);
-               CHECK(!memcmp(draw[0].ppp_record, draw[1].ppp_record, sizeof(draw[0].ppp_record)));
-               CHECK(usc[0].used == usc[1].used && context[0].used == context[1].used);
+               CHECK(!memcmp(draw[0].ppp_record, draw[1].ppp_record,
+                             sizeof(draw[0].ppp_record)));
+               CHECK(usc[0].used == usc[1].used &&
+                     context[0].used == context[1].used);
                CHECK(!memcmp(usc[0].bytes, usc[1].bytes, usc[0].used));
-               CHECK(!memcmp(context[0].bytes, context[1].bytes, context[0].used));
+               CHECK(
+                  !memcmp(context[0].bytes, context[1].bytes, context[0].used));
                CHECK(!memcmp(commands[0], commands[1], sizeof(commands[0])));
                ++cases;
             }
@@ -118,5 +142,7 @@ int main(void)
    }
    simple_mtx_destroy(&dev->apple9_entry_lock);
    free(dev);
-   printf("PASS %u interpolation/primitive cases: coefficient payload, roots, PPP and VDM bytes identical at fixed addresses\n", cases);
+   printf(
+      "PASS %u interpolation/primitive cases: coefficient payload, roots, PPP and VDM bytes identical at fixed addresses\n",
+      cases);
 }

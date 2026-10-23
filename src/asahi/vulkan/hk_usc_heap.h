@@ -19,13 +19,12 @@ extern "C" {
 #endif
 
 void hk_usc_heap_init(struct hk_usc_heap *table,
-                              const struct hk_descriptor_memory_ops *ops,
-                              void *data);
-bool hk_usc_heap_alloc(struct hk_usc_heap *table,
-                               uint64_t size, unsigned alignment,
-                               struct hk_descriptor_allocation *out);
+                      const struct hk_descriptor_memory_ops *ops, void *data);
+bool hk_usc_heap_alloc(struct hk_usc_heap *table, uint64_t size,
+                       unsigned alignment,
+                       struct hk_descriptor_allocation *out);
 void hk_usc_heap_free(struct hk_usc_heap *table,
-                              struct hk_descriptor_allocation *alloc);
+                      struct hk_descriptor_allocation *alloc);
 void hk_usc_heap_finish(struct hk_usc_heap *table);
 
 #ifdef __cplusplus

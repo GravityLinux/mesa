@@ -579,8 +579,9 @@ hk_apple9_init_render_view(struct hk_image_view *view)
          layered ? &view->planes[0].layered_background
                  : &view->planes[0].background;
       agx_unpack(stderr, texture, TEXTURE, image);
-      out->array = image.dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY ||
-                   image.dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY_MULTISAMPLED;
+      out->array =
+         image.dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY ||
+         image.dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY_MULTISAMPLED;
       out->dimensions[0] = u_minify(image.width, image.first_level);
       out->dimensions[1] = u_minify(image.height, image.first_level);
       out->dimensions[2] = image.depth;
@@ -725,8 +726,8 @@ hk_apple9_init_storage_pbe(struct hk_device *dev, struct hk_image_view *view)
       return;
    unsigned count = array ? view->vk.layer_count : 1;
    simple_mtx_lock(&dev->usc_heap_lock);
-   bool allocated = hk_usc_heap_alloc(&dev->usc_heap,
-      (uint64_t)count * AGX_APPLE9_TEXTURE_TABLE_STRIDE,
+   bool allocated = hk_usc_heap_alloc(
+      &dev->usc_heap, (uint64_t)count * AGX_APPLE9_TEXTURE_TABLE_STRIDE,
       AGX_APPLE9_TEXTURE_TABLE_STRIDE, &view->apple9_pbes);
    simple_mtx_unlock(&dev->usc_heap_lock);
    if (!allocated)

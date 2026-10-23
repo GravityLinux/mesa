@@ -9,18 +9,17 @@
 
 void
 hk_usc_heap_init(struct hk_usc_heap *table,
-                         const struct hk_descriptor_memory_ops *ops, void *data)
+                 const struct hk_descriptor_memory_ops *ops, void *data)
 {
    *table = (struct hk_usc_heap){.ops = ops, .data = data};
    list_inithead(&table->slabs);
 }
 
 static bool
-alloc_from_slab(struct hk_descriptor_chunk *slab, uint64_t size, unsigned alignment,
-                struct hk_descriptor_allocation *out)
+alloc_from_slab(struct hk_descriptor_chunk *slab, uint64_t size,
+                unsigned alignment, struct hk_descriptor_allocation *out)
 {
-   uint64_t addr =
-      util_vma_heap_alloc(&slab->heap, size, alignment);
+   uint64_t addr = util_vma_heap_alloc(&slab->heap, size, alignment);
    if (!addr)
       return false;
    *out = (struct hk_descriptor_allocation){
@@ -33,7 +32,7 @@ alloc_from_slab(struct hk_descriptor_chunk *slab, uint64_t size, unsigned alignm
 
 bool
 hk_usc_heap_alloc(struct hk_usc_heap *table, uint64_t size, unsigned alignment,
-                          struct hk_descriptor_allocation *out)
+                  struct hk_descriptor_allocation *out)
 {
    if (!size)
       return false;
@@ -60,7 +59,7 @@ hk_usc_heap_alloc(struct hk_usc_heap *table, uint64_t size, unsigned alignment,
 
 void
 hk_usc_heap_free(struct hk_usc_heap *table,
-                         struct hk_descriptor_allocation *alloc)
+                 struct hk_descriptor_allocation *alloc)
 {
    if (!alloc->size)
       return;

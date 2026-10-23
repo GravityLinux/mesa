@@ -226,7 +226,6 @@ void agx_apple9_initialize_entries(struct agx_device *dev);
  * The cache and all allocations have the caller's command-buffer lifetime.
  */
 
-
 /* Per-sample tile allocation for a fragment-stage launch or render. As in
  * agx_build_tilebuffer_layout, multisampled renders keep a nonempty
  * allocation even without colour targets: a large G16 2x depth-only render
@@ -244,9 +243,9 @@ agx_apple9_tile_sample_bytes(unsigned color_bytes, unsigned samples)
 bool agx_apple9_prepare_graphics_stage(
    struct agx_device *dev, void *allocator,
    struct agx_ptr (*alloc)(void *, size_t, size_t),
-   const struct agx_apple9_render_stage *shader, bool fragment,
-   uint64_t table, uint64_t textures, uint64_t samplers,
-   unsigned tile_bytes, unsigned samples, uint32_t *launch);
+   const struct agx_apple9_render_stage *shader, bool fragment, uint64_t table,
+   uint64_t textures, uint64_t samplers, unsigned tile_bytes, unsigned samples,
+   uint32_t *launch);
 
 /* Whether a draw can take the previous draw's launch for stage (0 vertex, 1
  * fragment) or its coefficient table. Both need nonzero, equal program ids:
@@ -282,13 +281,14 @@ agx_apple9_draw_reuses_coefficients(const struct agx_apple9_uniform_draw *previo
  * within the render-context aperture; USC allocations use the shader aperture.
  * A false return leaves the draw unpublished, including on allocation failure.
  */
-#define AGX_APPLE9_CF_BINDINGS_SIZE 0x2a0
+#define AGX_APPLE9_CF_BINDINGS_SIZE   0x2a0
 #define AGX_APPLE9_CF_BINDINGS_STRIDE 0x2c0
 #define AGX_APPLE9_CF_ALLOCATION_SIZE (3 * AGX_APPLE9_CF_BINDINGS_STRIDE)
-unsigned agx_apple9_coefficients_size(const struct agx_apple9_render_stage *fragment);
+unsigned
+agx_apple9_coefficients_size(const struct agx_apple9_render_stage *fragment);
 void agx_apple9_init_coefficients(struct agx_device *dev,
-                                 struct agx_apple9_render_stage *fragment,
-                                 struct agx_ptr allocation);
+                                  struct agx_apple9_render_stage *fragment,
+                                  struct agx_ptr allocation);
 
 #define AGX_APPLE9_PPP_STATIC_SIZE 0xc0
 void agx_apple9_build_ppp_static(const struct agx_apple9_render_pipeline *pipeline,

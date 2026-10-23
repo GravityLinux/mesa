@@ -1199,7 +1199,8 @@ agx_apple9_init_coefficients(struct agx_device *dev,
                              struct agx_apple9_render_stage *fragment,
                              struct agx_ptr allocation)
 {
-   unsigned count = agx_apple9_coefficients_size(fragment) / AGX_APPLE9_CF_BINDINGS_STRIDE;
+   unsigned count =
+      agx_apple9_coefficients_size(fragment) / AGX_APPLE9_CF_BINDINGS_STRIDE;
    memset(allocation.cpu, 0, count * AGX_APPLE9_CF_BINDINGS_STRIDE);
    for (unsigned pv = 0; pv < count; ++pv) {
       unsigned offset = pv * AGX_APPLE9_CF_BINDINGS_STRIDE;
@@ -1211,7 +1212,8 @@ agx_apple9_init_coefficients(struct agx_device *dev,
       fragment->coefficients[pv] = agx_usc_addr(dev, allocation.gpu + offset);
    }
    if (count == 1)
-      fragment->coefficients[1] = fragment->coefficients[2] = fragment->coefficients[0];
+      fragment->coefficients[1] = fragment->coefficients[2] =
+         fragment->coefficients[0];
 }
 
 static void
@@ -1364,9 +1366,9 @@ bool
 agx_apple9_prepare_graphics_stage(
    struct agx_device *dev, void *allocator,
    struct agx_ptr (*alloc)(void *, size_t, size_t),
-   const struct agx_apple9_render_stage *shader, bool fragment,
-   uint64_t table, uint64_t textures, uint64_t samplers,
-   unsigned tile_bytes, unsigned samples, uint32_t *launch)
+   const struct agx_apple9_render_stage *shader, bool fragment, uint64_t table,
+   uint64_t textures, uint64_t samplers, unsigned tile_bytes, unsigned samples,
+   uint32_t *launch)
 {
    if (!shader->bo || !shader->publication_count_valid)
       return false;
@@ -1509,9 +1511,9 @@ agx_apple9_prepare_draw_alloc(
    struct agx_device *dev, void *usc_allocator,
    struct agx_ptr (*usc_alloc)(void *, size_t, size_t), void *context_allocator,
    struct agx_ptr (*context_alloc)(void *, size_t, size_t),
-                        const struct agx_apple9_render_pipeline *pipeline,
-                        struct agx_apple9_uniform_draw *draw,
-                        const struct agx_apple9_uniform_draw *previous)
+   const struct agx_apple9_render_pipeline *pipeline,
+   struct agx_apple9_uniform_draw *draw,
+   const struct agx_apple9_uniform_draw *previous)
 {
    const struct agx_apple9_render_stage *stages[] = {pipeline->vertex,
                                                      pipeline->fragment};
@@ -1561,7 +1563,8 @@ agx_apple9_prepare_draw_alloc(
    bool reuse_coefficients = agx_apple9_draw_reuses_coefficients(previous, draw);
    unsigned cf_count;
    if (pipeline->fragment->coefficients[draw->provoking_vertex]) {
-      draw->coefficients = pipeline->fragment->coefficients[draw->provoking_vertex];
+      draw->coefficients =
+         pipeline->fragment->coefficients[draw->provoking_vertex];
       cf_count = pipeline->fragment->coefficient_count;
    } else if (reuse_coefficients) {
       draw->coefficients = previous->coefficients;
@@ -1705,7 +1708,8 @@ agx_apple9_prepare_draw_alloc(
        !memcmp(previous->ppp_record, ppp, draw->ppp_size)) {
       draw->ppp = previous->ppp;
    } else {
-      struct agx_ptr record = context_alloc(context_allocator, draw->ppp_size, 64);
+      struct agx_ptr record =
+         context_alloc(context_allocator, draw->ppp_size, 64);
       if (!record.cpu || record.gpu < AGX_APPLE9_RENDER_CONTEXT_BASE ||
           record.gpu - AGX_APPLE9_RENDER_CONTEXT_BASE >
              UINT32_MAX - draw->ppp_size + 1)
@@ -1723,9 +1727,9 @@ agx_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
                         struct agx_apple9_uniform_draw *draw,
                         const struct agx_apple9_uniform_draw *previous)
 {
-   return agx_apple9_prepare_draw_alloc(
-      dev, usc_pool, apple9_pool_alloc, context_pool, apple9_pool_alloc,
-      pipeline, draw, previous);
+   return agx_apple9_prepare_draw_alloc(dev, usc_pool, apple9_pool_alloc,
+                                        context_pool, apple9_pool_alloc,
+                                        pipeline, draw, previous);
 }
 
 struct agx_apple9_ppp_update {

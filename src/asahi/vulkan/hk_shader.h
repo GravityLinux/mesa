@@ -7,17 +7,17 @@
 
 #pragma once
 
-#include "hk_descriptor_memory.h"
+#include "asahi/compiler/agx_apple9_profile.h"
 #include "asahi/compiler/agx_compile.h"
+#include "asahi/lib/agx_apple9.h"
 #include "poly/nir/poly_nir.h"
 #include "util/macros.h"
 #include "agx_linker.h"
-#include "asahi/compiler/agx_apple9_profile.h"
-#include "asahi/lib/agx_apple9.h"
 #include "agx_nir_lower_vbo.h"
 #include "agx_pack.h"
 #include "agx_usc.h"
 #include "agx_uvs.h"
+#include "hk_descriptor_memory.h"
 
 #include "hk_device.h"
 #include "hk_apple9_mesh.h"

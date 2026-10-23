@@ -3,7 +3,8 @@
 static void
 test_reset_usc_heap(struct hk_device *dev)
 {
-   list_for_each_entry(struct hk_descriptor_chunk, slab, &dev->usc_heap.slabs, link) {
+   list_for_each_entry(struct hk_descriptor_chunk, slab, &dev->usc_heap.slabs,
+                       link) {
       uint64_t addr = util_vma_heap_alloc(&slab->heap, slab->backing.size, 1);
       CHECK(addr == slab->backing.addr);
       util_vma_heap_free(&slab->heap, addr, slab->backing.size);

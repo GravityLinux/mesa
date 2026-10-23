@@ -88,5 +88,6 @@ int main(void)
    hk_DestroyCommandPool(device, handle, NULL);
    CHECK(!live_bos);
    free(dev);
-   puts("PASS direct uploads; recording lifetime; reset, trim and recycled-buffer release");
+   puts(
+      "PASS direct uploads; recording lifetime; reset, trim and recycled-buffer release");
 }

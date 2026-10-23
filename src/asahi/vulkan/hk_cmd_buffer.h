@@ -966,9 +966,9 @@ struct agx_ptr hk_pool_alloc_internal(struct hk_cmd_buffer *cmd, uint32_t size,
 uint64_t hk_pool_upload(struct hk_cmd_buffer *cmd, const void *data,
                         uint32_t size, uint32_t alignment);
 
-uint64_t hk_pool_upload_last(struct hk_cmd_buffer *cmd, enum hk_upload_last slot,
-                             const void *data, uint32_t size,
-                             uint32_t alignment);
+uint64_t hk_pool_upload_last(struct hk_cmd_buffer *cmd,
+                             enum hk_upload_last slot, const void *data,
+                             uint32_t size, uint32_t alignment);
 static inline struct agx_ptr
 hk_pool_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment)
 {

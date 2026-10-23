@@ -5,9 +5,9 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_device.h"
+#include "pipe/p_defines.h"
 #include "agx_timeline.h"
 #include "vk_util.h"
-#include "pipe/p_defines.h"
 #include "wsi_common_entrypoints.h"
 
 #include "agx_bg_eot.h"
@@ -159,12 +159,13 @@ hk_destroy_internal_shaders(struct hk_device *dev,
  * its allocation; addresses stay fixed for the lifetime of that object. */
 static bool
 hk_usc_slab_create(void *data, uint64_t size, uint64_t reserve,
-                         struct hk_descriptor_backing *out)
+                   struct hk_descriptor_backing *out)
 {
    struct hk_device *dev = data;
    assert(!reserve);
-   struct agx_bo *bo = agx_bo_create(&dev->dev, size, 0,
-      AGX_BO_LOW_VA | AGX_BO_READONLY | AGX_BO_WRITEBACK, "Immutable USC state");
+   struct agx_bo *bo = agx_bo_create(
+      &dev->dev, size, 0, AGX_BO_LOW_VA | AGX_BO_READONLY | AGX_BO_WRITEBACK,
+      "Immutable USC state");
    if (!bo)
       return false;
    *out = (struct hk_descriptor_backing){
@@ -181,7 +182,8 @@ hk_usc_slab_destroy(void *data, struct hk_descriptor_backing *backing)
 }
 
 static const struct hk_descriptor_memory_ops hk_usc_ops = {
-   .create = hk_usc_slab_create, .destroy = hk_usc_slab_destroy,
+   .create = hk_usc_slab_create,
+   .destroy = hk_usc_slab_destroy,
 };
 
 void
@@ -513,8 +515,8 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       memset(samplers, 0, 64 + AGX_APPLE9_SAMPLER_TABLE_STRIDE);
       agx_apple9_pack_fetch_sampler(samplers);
       agx_apple9_pack_sampler(samplers + 64, false, false, 1, 0, 14,
-                             PIPE_TEX_WRAP_CLAMP_TO_EDGE,
-                             PIPE_TEX_WRAP_CLAMP_TO_EDGE, 1);
+                              PIPE_TEX_WRAP_CLAMP_TO_EDGE,
+                              PIPE_TEX_WRAP_CLAMP_TO_EDGE, 1);
       dev->apple9_reload_sampler = dev->apple9_fetch_sampler->va->addr + 64;
 
       dev->apple9_compute_sysvals =

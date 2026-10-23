@@ -268,8 +268,10 @@ TEST(HkUscHeap, MixedObjectSizesAlignmentAndLifetime)
    ASSERT_TRUE(hk_usc_heap_alloc(&heap, 704, 64, &smooth));
    EXPECT_EQ(smooth.addr, address);
    memset(smooth.map, 0x44, smooth.size);
-   for (unsigned i = 0; i < view.size; ++i) EXPECT_EQ(view.map[i], 0x11);
-   for (unsigned i = 0; i < flat.size; ++i) EXPECT_EQ(flat.map[i], 0x33);
+   for (unsigned i = 0; i < view.size; ++i)
+      EXPECT_EQ(view.map[i], 0x11);
+   for (unsigned i = 0; i < flat.size; ++i)
+      EXPECT_EQ(flat.map[i], 0x33);
    hk_usc_heap_free(&heap, &flat);
    hk_usc_heap_free(&heap, &view);
    hk_usc_heap_free(&heap, &smooth);

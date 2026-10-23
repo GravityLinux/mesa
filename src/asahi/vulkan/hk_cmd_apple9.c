@@ -131,7 +131,8 @@ hk_apple9_render_inputs(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
       const struct hk_image_view *view = render->color_att[rt].iview;
       if (!view)
          continue;
-      memcpy(&params[16 + rt * 4], &info->pColorAttachments[rt].clearValue.color, 16);
+      memcpy(&params[16 + rt * 4],
+             &info->pColorAttachments[rt].clearValue.color, 16);
       uint8_t *dimensions = metadata + AGX_APPLE9_TEXTURE_INFO_OFFSET +
                             rt * AGX_APPLE9_TEXTURE_INFO_STRIDE;
       memcpy(dimensions, view->apple9_render[layered].dimensions, 16);
@@ -213,7 +214,8 @@ hk_apple9_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
       if (!view || !view->apple9_render[key.layered].texture_valid)
          goto fail;
       memcpy((uint8_t *)textures.cpu + slot++ * AGX_APPLE9_TEXTURE_TABLE_STRIDE,
-             view->apple9_render[key.layered].texture, AGX_APPLE9_TEXTURE_TABLE_STRIDE);
+             view->apple9_render[key.layered].texture,
+             AGX_APPLE9_TEXTURE_TABLE_STRIDE);
    }
    u_foreach_bit(rt, part_info->apple9_image_mask) {
       const struct hk_image_view *view =
@@ -221,7 +223,8 @@ hk_apple9_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
       if (!view || !view->apple9_render[key.layered].store_valid)
          goto fail;
       memcpy((uint8_t *)textures.cpu + slot++ * AGX_APPLE9_TEXTURE_TABLE_STRIDE,
-             view->apple9_render[key.layered].store, AGX_APPLE9_TEXTURE_TABLE_STRIDE);
+             view->apple9_render[key.layered].store,
+             AGX_APPLE9_TEXTURE_TABLE_STRIDE);
    }
    uint64_t resources[AGX_APPLE9_MAX_GRAPHICS_BUFFERS] = {0};
    for (unsigned i = 0; i < part_info->apple9_resource_count; ++i) {
