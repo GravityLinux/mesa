@@ -10,6 +10,7 @@
 #include "agx_apple9_encoding.h"
 #include "agx_apple9_profile.h"
 #include "agx_builder.h"
+#include "util/hash_table.h"
 #include "util/u_dynarray.h"
 
 #include <assert.h>
@@ -263,6 +264,287 @@ agx_apple9_vir_finish(struct agx_apple9_vir_program *program)
    free(program->max_phys);
    free(program->live_out);
    agx_apple9_vir_init(program);
+}
+
+static void *
+apple9_dup(const void *data, size_t size)
+{
+   if (!data || !size)
+      return NULL;
+   void *copy = malloc(size);
+   if (copy)
+      memcpy(copy, data, size);
+   return copy;
+}
+
+/* A pointer into the source program, as the matching clone pointer. A pointer
+ * outside the source program fails the clone. */
+static void *
+apple9_clone_map(struct hash_table *map, const void *ptr, bool *ok)
+{
+   if (!ptr)
+      return NULL;
+   struct hash_entry *entry = _mesa_hash_table_search(map, ptr);
+   *ok &= entry != NULL;
+   return entry ? entry->data : NULL;
+}
+
+bool
+agx_apple9_vir_clone(struct agx_apple9_vir_program *dst,
+                     const struct agx_apple9_vir_program *src)
+{
+   *dst = *src;
+   dst->instructions = NULL;
+   dst->blocks = dst->last_block = dst->current_block = NULL;
+   dst->allocated_blocks = NULL;
+   dst->use_analysis = NULL;
+   dst->instruction_capacity = 0;
+   dst->fixed_phys = apple9_dup(src->fixed_phys, src->value_count);
+   dst->max_phys = apple9_dup(src->max_phys, src->value_count);
+   dst->live_out = apple9_dup(src->live_out, src->live_out_count * sizeof(*src->live_out));
+   dst->live_out_capacity = src->live_out ? src->live_out_count : 0;
+   dst->phys = apple9_dup(src->phys, src->phys_capacity);
+   dst->publication = apple9_dup(src->publication,
+                                 src->publication_capacity * sizeof(*src->publication));
+   if (!dst->phys)
+      dst->phys_capacity = 0;
+   if (!dst->publication)
+      dst->publication_capacity = 0;
+
+   struct hash_table *map = _mesa_pointer_hash_table_create(NULL);
+   unsigned nr_blocks = 0;
+   for (struct agx_apple9_block *b = src->allocated_blocks; b; b = b->allocated_next)
+      ++nr_blocks;
+   struct agx_apple9_block **order = malloc(MAX2(nr_blocks, 1) * sizeof(*order));
+   bool ok = map && order &&
+             (!src->value_count || (dst->fixed_phys && dst->max_phys)) &&
+             (!src->live_out || dst->live_out) &&
+             (!src->phys || dst->phys) && (!src->publication || dst->publication);
+   if (!ok)
+      goto done;
+
+   /* Recreate in reverse, as creation prepends to the allocation list. */
+   nr_blocks = 0;
+   for (struct agx_apple9_block *b = src->allocated_blocks; b; b = b->allocated_next)
+      order[nr_blocks++] = b;
+   for (unsigned i = nr_blocks; i-- > 0;) {
+      struct agx_apple9_block *block = agx_apple9_block_create(dst);
+      if (!block || !_mesa_hash_table_insert(map, order[i], block)) {
+         ok = false;
+         goto done;
+      }
+   }
+
+#define MAP(ptr) apple9_clone_map(map, (ptr), &ok)
+   for (unsigned i = 0; i < nr_blocks && ok; ++i) {
+      const struct agx_apple9_block *from = order[i];
+      struct agx_apple9_block *to = MAP(from);
+      to->next = MAP(from->next);
+      to->prev = MAP(from->prev);
+      to->nir = from->nir;
+      to->nir_exit = from->nir_exit;
+      to->placed = from->placed;
+      to->index = from->index;
+      to->successors[0] = MAP(from->successors[0]);
+      to->successors[1] = MAP(from->successors[1]);
+      to->start_index = from->start_index;
+      to->offset = from->offset;
+      to->predecessor_count = from->predecessor_count;
+      if (from->predecessor_count) {
+         to->predecessors = malloc(from->predecessor_count * sizeof(*to->predecessors));
+         ok &= to->predecessors != NULL;
+         for (unsigned p = 0; ok && p < from->predecessor_count; ++p)
+            to->predecessors[p] = MAP(from->predecessors[p]);
+      }
+      if (from->live_in && from->live_out) {
+         to->live_in = apple9_dup(from->live_in, from->live_words * sizeof(BITSET_WORD));
+         to->live_out = apple9_dup(from->live_out, from->live_words * sizeof(BITSET_WORD));
+         to->live_words = from->live_words;
+         ok &= to->live_in && to->live_out;
+      }
+      list_for_each_entry(struct apple9_instruction_node, node, &from->instructions, link) {
+         struct apple9_instruction_node *copy = malloc(sizeof(*copy));
+         if (!copy || !_mesa_hash_table_insert(map, &node->instruction, &copy->instruction)) {
+            free(copy);
+            ok = false;
+            break;
+         }
+         *copy = *node;
+         copy->block = to;
+         list_addtail(&copy->link, &to->instructions);
+      }
+   }
+   if (!ok)
+      goto done;
+   dst->blocks = MAP(src->blocks);
+   dst->last_block = MAP(src->last_block);
+   dst->current_block = MAP(src->current_block);
+   if (!ok)
+      goto done;
+
+   dst->instructions = malloc(MAX2(src->instruction_count, 1) * sizeof(*dst->instructions));
+   if (!dst->instructions) {
+      ok = false;
+      goto done;
+   }
+   dst->instruction_capacity = MAX2(src->instruction_count, 1);
+   for (unsigned i = 0; i < src->instruction_count; ++i)
+      dst->instructions[i] = MAP(src->instructions[i]);
+   for (unsigned i = 0; i < nr_blocks; ++i) {
+      list_for_each_entry(struct apple9_instruction_node, node,
+                          &((struct agx_apple9_block *)MAP(order[i]))->instructions, link) {
+         struct agx_apple9_vir_instr *I = &node->instruction;
+         I->branch_target = MAP(I->branch_target);
+         I->phi_block = MAP(I->phi_block);
+         I->phi_edge = MAP(I->phi_edge);
+         I->completion_consumer = MAP(I->completion_consumer);
+      }
+   }
+   for (unsigned i = 0; ok && i < src->instruction_count; ++i)
+      ok &= dst->instructions[i] != NULL;
+#undef MAP
+
+done:
+   free(order);
+   _mesa_hash_table_destroy(map, NULL);
+   if (!ok) {
+      agx_apple9_vir_finish(dst);
+      return false;
+   }
+   return true;
+}
+
+static uint32_t
+apple9_block_ref(const struct agx_apple9_block *block)
+{
+   return block ? block->index : UINT32_MAX;
+}
+
+static uint32_t
+apple9_instr_ref(const struct agx_apple9_vir_instr *instr)
+{
+   return instr ? apple9_node(instr)->position : UINT32_MAX;
+}
+
+struct apple9_key_nir {
+   uint32_t first, last, first_exit;
+};
+
+/* The first and last placed block selected from a NIR block, and the first
+ * block with it as NIR exit, as layout indices: the relations allocation
+ * derives from the logical CFG. */
+static void
+apple9_key_nir_block(struct hash_table *nir_blocks, const struct nir_block *nir,
+                     struct util_dynarray *key)
+{
+   struct hash_entry *entry = nir ? _mesa_hash_table_search(nir_blocks, nir) : NULL;
+   const struct apple9_key_nir none = {UINT32_MAX, UINT32_MAX, UINT32_MAX};
+   const struct apple9_key_nir *k = entry ? entry->data : &none;
+   util_dynarray_append(key, k->first);
+   util_dynarray_append(key, k->last);
+   util_dynarray_append(key, k->first_exit);
+}
+
+static struct apple9_key_nir *
+apple9_key_nir_entry(struct hash_table *nir_blocks, const struct nir_block *nir)
+{
+   struct hash_entry *entry = _mesa_hash_table_search(nir_blocks, nir);
+   if (entry)
+      return entry->data;
+   struct apple9_key_nir *k = ralloc(nir_blocks, struct apple9_key_nir);
+   if (!k)
+      return NULL;
+   *k = (struct apple9_key_nir){UINT32_MAX, UINT32_MAX, UINT32_MAX};
+   _mesa_hash_table_insert(nir_blocks, nir, k);
+   return k;
+}
+
+bool
+agx_apple9_vir_key(const struct agx_apple9_vir_program *program,
+                   struct util_dynarray *key)
+{
+   const uint32_t header[] = {
+      program->instruction_count, program->value_count, program->output,
+      program->fragment_shader, program->physical,
+      program->dependencies_finalized, program->live_out_count,
+      program->publication_count, program->peak_live_gprs,
+      program->max_phys_gpr, program->private_size, program->scratch_size,
+      program->spill_slots, program->phys ? program->phys_capacity : 0,
+      program->publication ? program->publication_capacity : 0,
+   };
+   util_dynarray_append_array(key, uint8_t, header, sizeof(header));
+   util_dynarray_append_array(key, uint8_t, program->reserved_gprs,
+                              sizeof(program->reserved_gprs));
+   if (program->value_count) {
+      util_dynarray_append_array(key, uint8_t, program->fixed_phys, program->value_count);
+      util_dynarray_append_array(key, uint8_t, program->max_phys, program->value_count);
+   }
+   if (program->live_out_count)
+      util_dynarray_append_array(key, uint8_t, program->live_out,
+                                 program->live_out_count * sizeof(*program->live_out));
+   if (program->phys)
+      util_dynarray_append_array(key, uint8_t, program->phys, program->phys_capacity);
+   if (program->publication)
+      util_dynarray_append_array(key, uint8_t, program->publication,
+                                 program->publication_capacity * sizeof(bool));
+
+   struct hash_table *nir_blocks = _mesa_pointer_hash_table_create(NULL);
+   if (!nir_blocks)
+      return false;
+   for (const struct agx_apple9_block *b = program->blocks; b; b = b->next) {
+      struct apple9_key_nir *k = b->nir ? apple9_key_nir_entry(nir_blocks, b->nir) : NULL;
+      struct apple9_key_nir *e = b->nir_exit ? apple9_key_nir_entry(nir_blocks, b->nir_exit) : NULL;
+      if ((b->nir && !k) || (b->nir_exit && !e)) {
+         _mesa_hash_table_destroy(nir_blocks, NULL);
+         return false;
+      }
+      if (k) {
+         if (k->first == UINT32_MAX)
+            k->first = b->index;
+         k->last = b->index;
+      }
+      if (e && e->first_exit == UINT32_MAX)
+         e->first_exit = b->index;
+   }
+
+   for (const struct agx_apple9_block *b = program->blocks; b; b = b->next) {
+      const uint32_t fields[] = {
+         b->index, b->placed, b->start_index, b->predecessor_count,
+         apple9_block_ref(b->successors[0]), apple9_block_ref(b->successors[1]),
+         b->nir != NULL, b->nir_exit != NULL,
+      };
+      util_dynarray_append_array(key, uint8_t, fields, sizeof(fields));
+      for (unsigned p = 0; p < b->predecessor_count; ++p)
+         util_dynarray_append(key, apple9_block_ref(b->predecessors[p]));
+      /* Earlier liveness, which publication lifetimes still consult. */
+      const uint32_t live_words = b->live_in && b->live_out ? b->live_words : UINT32_MAX;
+      util_dynarray_append(key, live_words);
+      if (live_words != UINT32_MAX) {
+         util_dynarray_append_array(key, uint8_t, b->live_in, live_words * sizeof(BITSET_WORD));
+         util_dynarray_append_array(key, uint8_t, b->live_out, live_words * sizeof(BITSET_WORD));
+      }
+      apple9_key_nir_block(nir_blocks, b->nir, key);
+      apple9_key_nir_block(nir_blocks, b->nir_exit, key);
+      const struct nir_block *exit = b->nir_exit ? b->nir_exit : b->nir;
+      for (unsigned s = 0; exit && s < 2; ++s) {
+         util_dynarray_append(key, (uint32_t)(exit->successors[s] != NULL));
+         apple9_key_nir_block(nir_blocks, exit->successors[s], key);
+      }
+   }
+   _mesa_hash_table_destroy(nir_blocks, NULL);
+
+   for (unsigned i = 0; i < program->instruction_count; ++i) {
+      const struct agx_apple9_vir_instr *I = program->instructions[i];
+      struct agx_apple9_vir_instr copy = *I;
+      copy.branch_target = (void *)(uintptr_t)apple9_block_ref(I->branch_target);
+      copy.phi_block = (void *)(uintptr_t)apple9_block_ref(I->phi_block);
+      copy.phi_edge = (void *)(uintptr_t)apple9_instr_ref(I->phi_edge);
+      copy.completion_consumer =
+         (void *)(uintptr_t)apple9_instr_ref(I->completion_consumer);
+      util_dynarray_append(key, apple9_block_ref(agx_apple9_instr_block(I)));
+      util_dynarray_append_array(key, uint8_t, &copy, sizeof(copy));
+   }
+   return true;
 }
 
 static uint32_t
@@ -2904,6 +3186,8 @@ retry:
    free(program->phys);
    program->publication = calloc(MAX2(program->value_count, 1), sizeof(bool));
    program->phys = malloc(MAX2(program->value_count, 1));
+   program->publication_capacity = program->phys_capacity =
+      MAX2(program->value_count, 1);
    if (!program->publication || !program->phys ||
        !agx_apple9_analyze_uses(program))
       return false;
@@ -3078,6 +3362,7 @@ apple9_liveness(struct agx_apple9_vir_program *program, unsigned *last_use)
       free(b->live_out);
       b->live_in = calloc(words, sizeof(*live));
       b->live_out = calloc(words, sizeof(*live));
+      b->live_words = words;
       if (!b->live_in || !b->live_out) {
          free(live);
          return false;
@@ -3183,6 +3468,7 @@ agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
    /* Empty fragment entrypoints are valid; don't rely on malloc(0). */
    unsigned allocation_count = MAX2(program->value_count, 1);
    program->publication = calloc(allocation_count, sizeof(bool));
+   program->publication_capacity = allocation_count;
    program->publication_count = 0;
    if (!program->publication) {
       if (reason)
@@ -3745,6 +4031,7 @@ agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
 
    free(program->phys);
    program->phys = phys;
+   program->phys_capacity = allocation_count;
    program->peak_live_gprs = peak;
    program->max_phys_gpr = max_phys;
    free(last_use);

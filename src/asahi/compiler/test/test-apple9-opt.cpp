@@ -117,6 +117,47 @@ TEST_F(Apple9Optimization, SetSourceMatchesRebuiltUses)
    EXPECT_EQ(Y->src[1], b);
 }
 
+/* A clone has the original's key, owns its instructions and blocks, and
+ * redirects internal pointers into itself; a changed field changes the key. */
+TEST_F(Apple9Optimization, CloneKeepsKeyAndOwnsPointers)
+{
+   auto a = imm(1), b = imm(2);
+   auto x = add(a, b);
+   auto *second = agx_apple9_block_create(&p);
+   agx_apple9_block_begin(&p, second);
+   auto y = add(x, a);
+   p.output = y;
+   agx_apple9_vir_reindex(&p);
+   p.instructions[2]->completion_consumer = p.instructions[3];
+
+   agx_apple9_vir_program c;
+   ASSERT_TRUE(agx_apple9_vir_clone(&c, &p));
+   struct util_dynarray kp, kc;
+   util_dynarray_init(&kp, NULL);
+   util_dynarray_init(&kc, NULL);
+   ASSERT_TRUE(agx_apple9_vir_key(&p, &kp));
+   ASSERT_TRUE(agx_apple9_vir_key(&c, &kc));
+   EXPECT_EQ(kp.size, kc.size);
+   EXPECT_EQ(memcmp(kp.data, kc.data, kp.size), 0);
+
+   ASSERT_EQ(c.instruction_count, p.instruction_count);
+   for (unsigned i = 0; i < p.instruction_count; ++i) {
+      EXPECT_NE(c.instructions[i], p.instructions[i]);
+      EXPECT_EQ(agx_apple9_instr_block(c.instructions[i])->program, &c);
+   }
+   EXPECT_EQ(c.instructions[2]->completion_consumer, c.instructions[3]);
+   EXPECT_EQ(c.blocks->next, c.last_block);
+   EXPECT_EQ(agx_apple9_instr_block(c.instructions[3]), c.last_block);
+
+   c.instructions[3]->immediate ^= 1;
+   util_dynarray_clear(&kc);
+   ASSERT_TRUE(agx_apple9_vir_key(&c, &kc));
+   EXPECT_TRUE(kp.size != kc.size || memcmp(kp.data, kc.data, kp.size));
+   util_dynarray_fini(&kp);
+   util_dynarray_fini(&kc);
+   agx_apple9_vir_finish(&c);
+}
+
 TEST_F(Apple9Optimization, FoldsWrappingArithmeticAndArithmeticRightShift)
 {
    auto sum = add(imm(0xffffffff), imm(2));

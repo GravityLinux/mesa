@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include "util/bitset.h"
 #include "util/list.h"
+#include "util/u_dynarray.h"
 
 #include "agx_apple9_machine.h"
 
@@ -534,6 +535,7 @@ struct agx_apple9_block {
    unsigned index;
    struct agx_apple9_block *successors[2];
    BITSET_WORD *live_in, *live_out;
+   unsigned live_words; /* Allocated size of live_in and live_out. */
    unsigned start_index; /* Derived analysis position, never a branch identity. */
    unsigned offset;
 };
@@ -582,6 +584,9 @@ struct agx_apple9_vir_program {
     * through completion; ordinary GPRs with the same index are independent. */
    bool *publication;
    unsigned publication_count;
+   /* Allocated entries of phys and publication. Values created after their
+    * allocation have no entry. */
+   unsigned phys_capacity, publication_capacity;
    unsigned peak_live_gprs;
    unsigned max_phys_gpr;
    unsigned private_size; /* NIR private arrays, placed after register spills. */
@@ -601,6 +606,15 @@ void agx_apple9_vir_set_source(struct agx_apple9_vir_program *program,
 
 void agx_apple9_vir_init(struct agx_apple9_vir_program *program);
 void agx_apple9_vir_finish(struct agx_apple9_vir_program *program);
+/* Deep copy. Logical NIR block pointers are copied as they are. */
+bool agx_apple9_vir_clone(struct agx_apple9_vir_program *dst,
+                          const struct agx_apple9_vir_program *src);
+/* Append a serialization of everything an allocation reads from the program:
+ * equal keys mean equal programs, with pointers expressed as layout indices
+ * and NIR blocks as their relation to the program's blocks. Padding is
+ * included, so equal programs may still differ in key. */
+bool agx_apple9_vir_key(const struct agx_apple9_vir_program *program,
+                        struct util_dynarray *key);
 
 struct agx_apple9_block *agx_apple9_block_create(struct agx_apple9_vir_program *program);
 void agx_apple9_block_begin(struct agx_apple9_vir_program *program,

@@ -1390,6 +1390,31 @@ validate_constraint_windows(agx_context *ctx, unsigned bound)
    return true;
 }
 
+/* out bit r is set iff any of x's bits r .. r + count - 1 is set, for the
+ * whole register file: doubling ORs of right shifts, then one overlapping
+ * shift for a count that is not a power of two. */
+static void
+window_intersections(const BITSET_WORD *x, unsigned count, BITSET_WORD *out)
+{
+   const unsigned words = BITSET_WORDS(AGX_NUM_REGS);
+   memcpy(out, x, words * sizeof(*out));
+   unsigned span = 1;
+   while (2 * span <= count) {
+      for (unsigned w = 0; w < words; ++w) {
+         BITSET_WORD next = w + 1 < words ? out[w + 1] : 0;
+         out[w] |= (out[w] >> span) | (next << (BITSET_WORDBITS - span));
+      }
+      span *= 2;
+   }
+   if (span < count) {
+      const unsigned shift = count - span;
+      for (unsigned w = 0; w < words; ++w) {
+         BITSET_WORD next = w + 1 < words ? out[w + 1] : 0;
+         out[w] |= (out[w] >> shift) | (next << (BITSET_WORDBITS - shift));
+      }
+   }
+}
+
 static unsigned
 place_constrained_value(struct ra_ctx *rctx, agx_index value,
                         struct agx_reg_constraint c, bool defined)
@@ -1457,22 +1482,37 @@ place_constrained_value(struct ra_ctx *rctx, agx_index value,
       .dead = rctx->dead_total - max_dead,
       .affinity = rctx->affinity_total - max_affinity,
    };
+   /* Neither set changes while candidates are costed: answer each window
+    * test with one bit when the windows fit the precomputed masks. */
+   BITSET_DECLARE(pinned_window, AGX_NUM_REGS);
+   BITSET_DECLARE(used_window, AGX_NUM_REGS);
+   const bool masks = count < BITSET_WORDBITS && last + count <= AGX_NUM_REGS;
+   if (masks) {
+      window_intersections(rctx->pinned, count, pinned_window);
+      window_intersections(rctx->used_regs[RA_GPR], count, used_window);
+   }
+#define PINNED_WINDOW(reg)                                                     \
+   (masks ? BITSET_TEST(pinned_window, reg)                                    \
+          : BITSET_TEST_COUNT(rctx->pinned, reg, count))
+#define USED_WINDOW(reg)                                                       \
+   (masks ? BITSET_TEST(used_window, reg)                                      \
+          : BITSET_TEST_COUNT(rctx->used_regs[RA_GPR], reg, count))
+
    /* Moves rank first: when any aligned window is free, only free windows
     * can win, so occupied ones need no costing. */
    bool any_free = false;
    for (unsigned reg = first; reg <= last && !any_free; reg += align) {
-      any_free = !BITSET_TEST_COUNT(rctx->pinned, reg, count) &&
-                 !BITSET_TEST_COUNT(rctx->used_regs[RA_GPR], reg, count);
+      any_free = !PINNED_WINDOW(reg) && !USED_WINDOW(reg);
    }
    for (unsigned reg = first; reg <= last; reg += align) {
       if (chosen != ~0u &&
           placement_cheaper(best, placement_floor(rctx, ssa, reg, count, &floors,
                                                   last_preference)))
          break;
-      if (BITSET_TEST_COUNT(rctx->pinned, reg, count))
+      if (PINNED_WINDOW(reg))
          continue;
       /* Moves rank first, so an occupied region never beats a free one. */
-      bool occupied = BITSET_TEST_COUNT(rctx->used_regs[RA_GPR], reg, count);
+      bool occupied = USED_WINDOW(reg);
       if (occupied && (any_free || (chosen != ~0u && !best.moves)))
          continue;
       struct placement_cost cost = placement_cost(rctx, ssa, reg, count);
@@ -1568,6 +1608,8 @@ place_constrained_value(struct ra_ctx *rctx, agx_index value,
    }
    return chosen;
 }
+#undef PINNED_WINDOW
+#undef USED_WINDOW
 
 static bool
 assign_constrained_operands(struct ra_ctx *rctx, agx_instr *I)

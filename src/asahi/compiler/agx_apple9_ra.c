@@ -13,8 +13,9 @@
 #include "agx_compiler.h"
 #include "agx_debug.h"
 #include "util/hash_table.h"
-#include "util/mesa-blake3.h"
 #include "util/u_debug.h"
+#define XXH_INLINE_ALL
+#include "util/xxhash.h"
 
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_parallel_ra,
                       "AGX_APPLE9_PARALLEL_RA", NULL)
@@ -941,6 +942,7 @@ apple9_init_physical(struct agx_apple9_vir_program *out)
    }
    out->phys = malloc(out->value_count);
    out->publication = calloc(out->value_count, sizeof(bool));
+   out->phys_capacity = out->publication_capacity = out->value_count;
    if (!out->phys || !out->publication)
       return false;
    for (unsigned r = 0; r < out->value_count; ++r) {
@@ -1889,10 +1891,167 @@ static const char apple9_duplicate_candidate_reason[] =
  * can never be strictly cheaper than the one already compared. */
 static _Thread_local bool agx_apple9_ra_probe;
 
+/* A probe allocates only each program's first candidate, and the full search
+ * that follows nearly always receives the same program again (ELDEN RING:
+ * 1,444 of 1,446 probes). Keep each probe's first allocation, with everything
+ * that step changed, for a later program with exactly the same key. */
+struct apple9_probe_result {
+   struct util_dynarray key, seen;
+   struct agx_apple9_vir_program result;
+   /* For each result block, in allocation order: the layout index of the
+    * input block with the same NIR block and NIR exit, or UINT32_MAX. */
+   uint32_t *nir_block, *nir_exit;
+   /* The input's retain masks after the step. */
+   uint16_t *retain;
+   bool remat_used, copy_register;
+};
+static _Thread_local struct util_dynarray apple9_probe_results;
+
+void
+agx_apple9_ra_release_probe_results(void)
+{
+   util_dynarray_foreach(&apple9_probe_results, struct apple9_probe_result, r) {
+      util_dynarray_fini(&r->key);
+      util_dynarray_fini(&r->seen);
+      agx_apple9_vir_finish(&r->result);
+      free(r->nir_block);
+      free(r->nir_exit);
+      free(r->retain);
+   }
+   util_dynarray_fini(&apple9_probe_results);
+   util_dynarray_init(&apple9_probe_results, NULL);
+}
+
 void
 agx_apple9_ra_set_probe(bool probe)
 {
+   if (probe)
+      agx_apple9_ra_release_probe_results();
    agx_apple9_ra_probe = probe;
+}
+
+static bool
+apple9_probe_key(const struct agx_apple9_vir_program *program,
+                 const nir_shader *nir, struct util_dynarray *key)
+{
+   /* The allocator also reads these shader properties. */
+   const uint32_t info[] = {
+      nir->info.stage, nir->info.workgroup_size_variable,
+      nir->info.workgroup_size[0], nir->info.workgroup_size[1],
+      nir->info.workgroup_size[2],
+   };
+   util_dynarray_append_array(key, uint8_t, info, sizeof(info));
+   return agx_apple9_vir_key(program, key);
+}
+
+/* The layout index of the first input block with this NIR block, plus one. */
+static uint32_t
+apple9_input_block_index(struct hash_table *map, const struct nir_block *nir)
+{
+   struct hash_entry *entry = nir ? _mesa_hash_table_search(map, nir) : NULL;
+   return entry ? (uintptr_t)entry->data - 1 : UINT32_MAX;
+}
+
+static void
+apple9_store_probe_result(struct util_dynarray *key,
+                          const struct agx_apple9_vir_program *input,
+                          const struct agx_apple9_vir_program *best,
+                          const struct util_dynarray *seen, bool remat_used,
+                          bool copy_register)
+{
+   struct apple9_probe_result r = {.remat_used = remat_used,
+                                   .copy_register = copy_register};
+   unsigned nr_blocks = 0;
+   for (struct agx_apple9_block *b = best->allocated_blocks; b; b = b->allocated_next)
+      ++nr_blocks;
+   r.nir_block = malloc(MAX2(nr_blocks, 1) * sizeof(*r.nir_block));
+   r.nir_exit = malloc(MAX2(nr_blocks, 1) * sizeof(*r.nir_exit));
+   r.retain = malloc(MAX2(input->instruction_count, 1) * sizeof(*r.retain));
+   util_dynarray_init(&r.seen, NULL);
+   struct hash_table *nir_map = _mesa_pointer_hash_table_create(NULL);
+   struct hash_table *exit_map = _mesa_pointer_hash_table_create(NULL);
+   bool ok = nir_map && exit_map && r.nir_block && r.nir_exit && r.retain &&
+             agx_apple9_vir_clone(&r.result, best);
+   for (const struct agx_apple9_block *b = input->blocks; ok && b; b = b->next) {
+      if (b->nir && !_mesa_hash_table_search(nir_map, b->nir))
+         _mesa_hash_table_insert(nir_map, b->nir, (void *)(uintptr_t)(b->index + 1));
+      if (b->nir_exit && !_mesa_hash_table_search(exit_map, b->nir_exit))
+         _mesa_hash_table_insert(exit_map, b->nir_exit, (void *)(uintptr_t)(b->index + 1));
+   }
+   unsigned i = 0;
+   for (struct agx_apple9_block *b = best->allocated_blocks; ok && b;
+        b = b->allocated_next, ++i) {
+      r.nir_block[i] = apple9_input_block_index(nir_map, b->nir);
+      r.nir_exit[i] = apple9_input_block_index(exit_map, b->nir_exit);
+      ok &= (!b->nir || r.nir_block[i] != UINT32_MAX) &&
+            (!b->nir_exit || r.nir_exit[i] != UINT32_MAX);
+   }
+   for (unsigned j = 0; ok && j < input->instruction_count; ++j)
+      r.retain[j] = input->instructions[j]->retain_mask;
+   if (nir_map)
+      _mesa_hash_table_destroy(nir_map, NULL);
+   if (exit_map)
+      _mesa_hash_table_destroy(exit_map, NULL);
+   if (ok) {
+      util_dynarray_append_array(&r.seen, uint8_t, seen->data, seen->size);
+      r.key = *key;
+      util_dynarray_init(key, NULL);
+      util_dynarray_append(&apple9_probe_results, r);
+      return;
+   }
+   if (r.result.allocated_blocks)
+      agx_apple9_vir_finish(&r.result);
+   free(r.nir_block);
+   free(r.nir_exit);
+   free(r.retain);
+   util_dynarray_fini(&r.seen);
+}
+
+/* Replay a stored probe step for an input with the same key: its allocation,
+ * with NIR blocks taken from this input, and its effects on the input. */
+static bool
+apple9_take_probe_result(const struct util_dynarray *key,
+                         struct agx_apple9_vir_program *input,
+                         struct agx_apple9_vir_program *best,
+                         struct util_dynarray *seen, bool *remat_used,
+                         bool *copy_register)
+{
+   util_dynarray_foreach(&apple9_probe_results, struct apple9_probe_result, r) {
+      if (r->key.size != key->size || memcmp(r->key.data, key->data, key->size))
+         continue;
+      unsigned nr_input = 0;
+      for (struct agx_apple9_block *b = input->blocks; b; b = b->next)
+         ++nr_input;
+      struct agx_apple9_block **blocks = malloc(MAX2(nr_input, 1) * sizeof(*blocks));
+      if (!blocks)
+         return false;
+      for (struct agx_apple9_block *b = input->blocks; b; b = b->next) {
+         assert(b->index < nr_input);
+         blocks[b->index] = b;
+      }
+      struct agx_apple9_vir_program copy;
+      if (!agx_apple9_vir_clone(&copy, &r->result)) {
+         free(blocks);
+         return false;
+      }
+      unsigned i = 0;
+      for (struct agx_apple9_block *b = copy.allocated_blocks; b; b = b->allocated_next, ++i) {
+         b->nir = r->nir_block[i] == UINT32_MAX ? NULL : blocks[r->nir_block[i]]->nir;
+         b->nir_exit = r->nir_exit[i] == UINT32_MAX ? NULL : blocks[r->nir_exit[i]]->nir_exit;
+      }
+      free(blocks);
+      for (unsigned j = 0; j < input->instruction_count; ++j)
+         input->instructions[j]->retain_mask = r->retain[j];
+      agx_apple9_vir_finish(best);
+      *best = copy;
+      for (struct agx_apple9_block *b = best->allocated_blocks; b; b = b->allocated_next)
+         b->program = best;
+      util_dynarray_append_array(seen, uint8_t, r->seen.data, r->seen.size);
+      *remat_used = r->remat_used;
+      *copy_register = r->copy_register;
+      return true;
+   }
+   return false;
 }
 
 bool
@@ -1909,46 +2068,49 @@ apple9_seen_schedule(agx_context *ctx, struct util_dynarray *seen,
    /* Fingerprint the scheduled IR from its fields rather than its printed
     * form: operands, register constraints and every instruction field from
     * the opcode on. Branch targets are blocks of this candidate's own context,
-    * so they enter as block indices. */
-   struct mesa_blake3 sha;
-   _mesa_blake3_init(&sha);
-   const uint8_t flags[] = {cost_constraints, copy_register, uniform_remat};
-   _mesa_blake3_update(&sha, flags, sizeof(flags));
+    * so they enter as block indices. The fields are gathered into one buffer
+    * and hashed once with a 128-bit non-cryptographic hash. */
    struct hash_table *blocks = _mesa_pointer_hash_table_create(NULL);
    if (!blocks)
       return false;
+   struct util_dynarray bytes;
+   util_dynarray_init(&bytes, NULL);
+   const uint8_t flags[] = {cost_constraints, copy_register, uniform_remat};
+   util_dynarray_append_array(&bytes, uint8_t, flags, sizeof(flags));
    agx_foreach_block(ctx, block)
       _mesa_hash_table_insert(blocks, block, (void *)(uintptr_t)(block->index + 1));
    agx_foreach_block(ctx, block) {
       uint32_t index = block->index;
-      _mesa_blake3_update(&sha, &index, sizeof(index));
+      util_dynarray_append_array(&bytes, uint8_t, &index, sizeof(index));
       agx_foreach_instr_in_block(block, I) {
-         _mesa_blake3_update(&sha, I->dest, sizeof(agx_index) * I->nr_dests);
-         _mesa_blake3_update(&sha, I->src, sizeof(agx_index) * I->nr_srcs);
+         util_dynarray_append_array(&bytes, uint8_t, I->dest,
+                                    sizeof(agx_index) * I->nr_dests);
+         util_dynarray_append_array(&bytes, uint8_t, I->src,
+                                    sizeof(agx_index) * I->nr_srcs);
          const uint8_t constrained = I->reg_constraints != NULL;
-         _mesa_blake3_update(&sha, &constrained, 1);
+         util_dynarray_append(&bytes, constrained);
          if (constrained) {
-            _mesa_blake3_update(&sha, I->reg_constraints,
-                                sizeof(struct agx_reg_constraint) *
-                                   (I->nr_dests + I->nr_srcs));
+            util_dynarray_append_array(&bytes, uint8_t, I->reg_constraints,
+                                       sizeof(struct agx_reg_constraint) *
+                                          (I->nr_dests + I->nr_srcs));
          }
          agx_instr copy = *I;
          struct hash_entry *target = _mesa_hash_table_search(blocks, copy.target);
          if (target)
             copy.imm = (uintptr_t)target->data | (1ull << 63);
-         _mesa_blake3_update(&sha, &copy.op,
-                             sizeof(agx_instr) - offsetof(agx_instr, op));
+         util_dynarray_append_array(&bytes, uint8_t, &copy.op,
+                                    sizeof(agx_instr) - offsetof(agx_instr, op));
       }
    }
    _mesa_hash_table_destroy(blocks, NULL);
-   blake3_hash digest;
-   _mesa_blake3_final(&sha, digest);
-   for (unsigned off = 0; off + BLAKE3_OUT_LEN <= seen->size;
-        off += BLAKE3_OUT_LEN) {
-      if (!memcmp((const uint8_t *)seen->data + off, digest, BLAKE3_OUT_LEN))
+   const XXH128_hash_t digest = XXH3_128bits(bytes.data, bytes.size);
+   util_dynarray_fini(&bytes);
+   for (unsigned off = 0; off + sizeof(digest) <= seen->size;
+        off += sizeof(digest)) {
+      if (!memcmp((const uint8_t *)seen->data + off, &digest, sizeof(digest)))
          return true;
    }
-   util_dynarray_append_array(seen, uint8_t, digest, BLAKE3_OUT_LEN);
+   util_dynarray_append_array(seen, uint8_t, &digest, sizeof(digest));
    return false;
 }
 
@@ -2407,9 +2569,9 @@ apple9_candidate_jobs_run(struct apple9_candidate_job jobs[2],
    const unsigned second_size = jobs[1].seen.size - jobs[1].seen_start;
    /* The second candidate repeats the first's schedule: in serial order it
     * would have been rejected as a duplicate. */
-   for (unsigned a = 0; jobs[1].ok && a < second_size; a += BLAKE3_OUT_LEN) {
-      for (unsigned b = 0; b < first_size; b += BLAKE3_OUT_LEN) {
-         if (!memcmp(second + a, first + b, BLAKE3_OUT_LEN)) {
+   for (unsigned a = 0; jobs[1].ok && a < second_size; a += sizeof(XXH128_hash_t)) {
+      for (unsigned b = 0; b < first_size; b += sizeof(XXH128_hash_t)) {
+         if (!memcmp(second + a, first + b, sizeof(XXH128_hash_t))) {
             agx_apple9_vir_finish(&jobs[1].result);
             agx_apple9_vir_init(&jobs[1].result);
             jobs[1].ok = false;
@@ -2486,11 +2648,20 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
     * (slack 0, current copy_register) actually rematerialized a uniform. If
     * not, the non-rematerializing allocation is the same computation. */
    bool remat_known[2][2] = {{false}}, remat_used[2][2] = {{false}};
-   if (!apple9_allocate_candidate(program, nir, false, false, 0, false, true,
+   struct util_dynarray probe_key;
+   util_dynarray_init(&probe_key, NULL);
+   const bool keyed = (agx_apple9_ra_probe || apple9_probe_results.size) &&
+                      apple9_probe_key(program, nir, &probe_key);
+   if (keyed && !agx_apple9_ra_probe &&
+       apple9_take_probe_result(&probe_key, program, &best, &seen,
+                                &remat_used[0][0], &copy_register)) {
+      /* The probe's first step, replayed. */
+   } else if (!apple9_allocate_candidate(program, nir, false, false, 0, false, true,
                                   UINT64_MAX, &best,
                                   reason, &remat_used[0][0], NULL, &seen)) {
       if (*reason != apple9_copy_register_reason) {
          util_dynarray_fini(&seen);
+         util_dynarray_fini(&probe_key);
          return false;
       }
       agx_apple9_vir_finish(&best);
@@ -2500,9 +2671,14 @@ agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
                                      UINT64_MAX, &best,
                                      reason, &remat_used[0][0], NULL, &seen)) {
          util_dynarray_fini(&seen);
+         util_dynarray_fini(&probe_key);
          return false;
       }
    }
+   if (keyed && agx_apple9_ra_probe)
+      apple9_store_probe_result(&probe_key, program, &best, &seen,
+                                remat_used[0][0], copy_register);
+   util_dynarray_fini(&probe_key);
    remat_known[0][0] = true;
    /* A spill probe needs only the first allocation. */
    if (agx_apple9_ra_probe) {
