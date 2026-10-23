@@ -567,10 +567,16 @@ modes.
 
 For vertex bounds, compile `tests/apple9-vertex-bounds.vert` and `.frag` with
 `glslangValidator -V`, build `tests/apple9-render-draw.c` against the Vulkan
-loader, and pass the vertex and fragment SPIR-V paths followed by `bounds` or
-`bounds-wrap`. The first mode checks that a short buffer does not expose adjacent
-allocation contents; the second checks that 64-bit fetch offsets stay out of
-bounds instead of wrapping to the start of the buffer.
+loader, and pass the vertex and fragment SPIR-V paths followed by `bounds`, `bounds-scalar` or `bounds-wrap`. `bounds` checks G16's
+whole-attribute bounds policy: a vec4 attribute that extends beyond the four-byte
+buffer returns zero, without exposing poisoned adjacent allocation bytes.
+Core robustBufferAccess permits treating the entire attribute as out of bounds;
+it does not require retaining the first in-bounds scalar. `bounds-scalar` is an
+independent positive control: an R32_SFLOAT attribute fits that same buffer and
+must retain red. `bounds-wrap` checks that 64-bit fetch offsets stay out of bounds
+instead of wrapping to the start of the buffer. All modes retain complete image
+and readback guard checks. The rules are specified in
+[Shader Out-of-Bounds Memory Access](https://docs.vulkan.org/spec/latest/chapters/shaders.html#shaders-robust-buffer-access).
 Use the ordinary draw vertex shader with `apple9-sample-mask.frag` and the
 `sample-mask` argument to check single-sample shader sample-mask writes.
 
