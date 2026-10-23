@@ -4987,6 +4987,8 @@ hk_destroy_linked_shader(struct hk_device *dev, struct hk_linked_shader *linked)
    ralloc_free(linked);
 }
 
+#define HK_APPLE9_CACHED_VARIANTS_PER_SOURCE 64
+
 struct hk_apple9_cached_variant {
    struct hk_apple9_cached_variant *next;
    struct vk_pipeline_cache_object *object;
@@ -5013,16 +5015,23 @@ struct hk_apple9_deferred {
     * The list owns only serialized bytes, never other API shader objects. */
    simple_mtx_t variant_lock;
    struct hk_apple9_cached_variant *variants;
+   unsigned variant_count;
 };
 
 static void
-hk_apple9_remember_variant(struct hk_api_shader *api,
+hk_apple9_remember_variant(struct hk_device *dev, struct hk_api_shader *api,
                             struct vk_pipeline_cache_object *object)
 {
    struct hk_apple9_deferred *d = api->apple9_deferred;
+   struct hk_apple9_cached_variant *evicted = NULL;
    simple_mtx_lock(&d->variant_lock);
-   for (struct hk_apple9_cached_variant *v = d->variants; v; v = v->next) {
-      if (v->object == object) {
+   for (struct hk_apple9_cached_variant **p = &d->variants; *p;
+        p = &(*p)->next) {
+      if ((*p)->object == object) {
+         struct hk_apple9_cached_variant *v = *p;
+         *p = v->next;
+         v->next = d->variants;
+         d->variants = v;
          simple_mtx_unlock(&d->variant_lock);
          return;
       }
@@ -5032,8 +5041,23 @@ hk_apple9_remember_variant(struct hk_api_shader *api,
       v->object = vk_pipeline_cache_object_ref(object);
       v->next = d->variants;
       d->variants = v;
+      if (d->variant_count == HK_APPLE9_CACHED_VARIANTS_PER_SOURCE) {
+         struct hk_apple9_cached_variant **tail = &d->variants;
+         while ((*tail)->next)
+            tail = &(*tail)->next;
+         evicted = *tail;
+         *tail = NULL;
+      } else {
+         ++d->variant_count;
+      }
    }
    simple_mtx_unlock(&d->variant_lock);
+   /* Cache serialization takes the runtime-cache lock before variant_lock.
+    * A last unref takes that cache lock, so eviction must happen outside. */
+   if (evicted) {
+      vk_pipeline_cache_object_unref(&dev->vk, evicted->object);
+      free(evicted);
+   }
 }
 
 static bool
@@ -5043,8 +5067,16 @@ hk_apple9_serialize_variants(struct hk_apple9_deferred *d, struct blob *blob)
    if (count_at < 0)
       return false;
    uint32_t count = 0;
+   struct hk_apple9_cached_variant *variants[HK_APPLE9_CACHED_VARIANTS_PER_SOURCE];
    simple_mtx_lock(&d->variant_lock);
    for (struct hk_apple9_cached_variant *v = d->variants; v; v = v->next) {
+      assert(count < ARRAY_SIZE(variants));
+      variants[count++] = v;
+   }
+   /* Import remembers each entry at the head: write oldest first to preserve
+    * recency when an application cache is loaded in another process. */
+   for (unsigned i = count; i > 0; --i) {
+      struct hk_apple9_cached_variant *v = variants[i - 1];
       struct vk_raw_data_cache_object *raw =
          container_of(v->object, struct vk_raw_data_cache_object, base);
       assert(v->object->key_size == BLAKE3_OUT_LEN);
@@ -5055,7 +5087,6 @@ hk_apple9_serialize_variants(struct hk_apple9_deferred *d, struct blob *blob)
       blob_write_bytes(blob, v->object->key_data, BLAKE3_OUT_LEN);
       blob_write_uint32(blob, raw->data_size);
       blob_write_bytes(blob, raw->data, raw->data_size);
-      ++count;
    }
    simple_mtx_unlock(&d->variant_lock);
    blob_overwrite_uint32(blob, count_at, count);
@@ -5083,7 +5114,7 @@ hk_apple9_deserialize_variants(struct hk_device *dev,
             dev->vk.mem_cache, key, BLAKE3_OUT_LEN, data, size,
             &vk_raw_data_cache_object_ops);
       if (object) {
-         hk_apple9_remember_variant(api, object);
+         hk_apple9_remember_variant(dev, api, object);
          vk_pipeline_cache_object_unref(&dev->vk, object);
       }
    }
@@ -7676,7 +7707,7 @@ compile:;
       v->cache_object = cache_object;
       for (unsigned s = 0; s < HK_APPLE9_GFX_STAGES; ++s)
          if (api[s])
-            hk_apple9_remember_variant(api[s], cache_object);
+            hk_apple9_remember_variant(dev, api[s], cache_object);
       simple_mtx_lock(&dev->apple9_variants.lock);
       if (search.prefer_native &&
           !v->shaders[MESA_SHADER_MESH]->apple9_native_leaf)
@@ -7825,7 +7856,7 @@ compile:;
    if (cache_object) {
       for (unsigned s = 0; s < HK_APPLE9_GFX_STAGES; ++s)
          if (api[s])
-            hk_apple9_remember_variant(api[s], cache_object);
+            hk_apple9_remember_variant(dev, api[s], cache_object);
    }
    simple_mtx_lock(&dev->apple9_variants.lock);
    if (result == VK_SUCCESS && search.prefer_native &&

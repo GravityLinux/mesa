@@ -432,6 +432,61 @@ native_cache_tests(struct hk_device *dev)
 }
 
 static void
+embedded_limit_tests(struct hk_device *dev)
+{
+   dev->vk.mem_cache = cache_create(dev, NULL, 0, false);
+   struct hk_api_shader *api[HK_APPLE9_GFX_STAGES],
+                        *again[HK_APPLE9_GFX_STAGES];
+   api_create(dev, api, false);
+   api_create(dev, again, false);
+   struct hk_api_shader *src = api[MESA_SHADER_VERTEX];
+   const unsigned limit = HK_APPLE9_CACHED_VARIANTS_PER_SOURCE;
+   for (unsigned i = 0; i <= limit; ++i) {
+      /* Refresh the oldest entry before overflow: key 1 must be evicted. */
+      if (i == limit) {
+         struct hk_apple9_cached_variant *tail = src->apple9_deferred->variants;
+         while (tail->next)
+            tail = tail->next;
+         CHECK(((const uint8_t *)tail->object->key_data)[0] == 0);
+         hk_apple9_remember_variant(dev, src, tail->object);
+      }
+      blake3_hash key = {i};
+      const uint32_t data = i;
+      struct vk_pipeline_cache_object *obj =
+         vk_pipeline_cache_create_and_insert_object(
+            dev->vk.mem_cache, key, sizeof(key), &data, sizeof(data),
+            &vk_raw_data_cache_object_ops);
+      CHECK(obj);
+      hk_apple9_remember_variant(dev, src, obj);
+      vk_pipeline_cache_object_unref(&dev->vk, obj);
+      CHECK(src->apple9_deferred->variant_count == MIN2(i + 1, limit));
+   }
+   CHECK(dev->vk.mem_cache->object_cache->entries == limit);
+   const blake3_hash evicted_key = {1};
+   CHECK(!vk_pipeline_cache_lookup_object(dev->vk.mem_cache, evicted_key,
+            sizeof(evicted_key), &vk_raw_data_cache_object_ops, NULL));
+   struct blob blob;
+   blob_init(&blob);
+   CHECK(hk_apple9_serialize_variants(src->apple9_deferred, &blob));
+   struct blob_reader reader;
+   blob_reader_init(&reader, blob.data, blob.size);
+   CHECK(blob_read_uint32(&reader) == limit);
+   blob_reader_init(&reader, blob.data, blob.size);
+   CHECK(hk_apple9_deserialize_variants(dev, again[MESA_SHADER_VERTEX], &reader));
+   CHECK(!reader.overrun && reader.current == reader.end);
+   CHECK(again[MESA_SHADER_VERTEX]->apple9_deferred->variant_count == limit);
+   CHECK(again[MESA_SHADER_VERTEX]->apple9_deferred->variants->object ==
+         src->apple9_deferred->variants->object);
+   blob_finish(&blob);
+   api_destroy(dev, api);
+   CHECK(dev->vk.mem_cache->object_cache->entries == limit);
+   api_destroy(dev, again);
+   CHECK(dev->vk.mem_cache->object_cache->entries == 0);
+   vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
+   puts("embedded variants: 64-entry LRU, refresh, eviction, serialization and shared lifetime pass");
+}
+
+static void
 persistent_process(struct hk_device *dev, struct hk_api_shader **api,
                    const char *mode)
 {
@@ -481,7 +536,6 @@ main(int argc, char **argv)
    struct hk_api_shader *api[HK_APPLE9_GFX_STAGES];
    struct hk_api_shader *again[HK_APPLE9_GFX_STAGES];
    struct hk_api_shader *out[HK_APPLE9_GFX_STAGES];
-   payload_bounds_tests(dev);
    if (argc == 2 && !strcmp(argv[1], "--native-cache")) {
       native_cache_tests(dev);
       goto finish;
@@ -504,6 +558,8 @@ main(int argc, char **argv)
       persistent_process(dev, api, argv[1]);
       goto finish;
    }
+   payload_bounds_tests(dev);
+   embedded_limit_tests(dev);
    key_tests(dev, api);
    CHECK(getenv("MESA_SHADER_CACHE_DIR"));
    pdev->vk.disk_cache = disk_cache_create("hk-variant-test", "test-build", 0);
