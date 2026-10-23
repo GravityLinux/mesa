@@ -1337,6 +1337,10 @@ agx_apple9_prepare_graphics_stage(
               (size_t)shader->binary_size);
       return false;
    }
+   /* The launch loads GRAPHICS_ROOT_WORDS 32-bit words. Align the following
+    * launch program to 64 bytes; the old 256-byte root reservation copied
+    * another 192 bytes of zeros per stage without any consumer. */
+   enum { roots_size = ALIGN_POT(AGX_APPLE9_GRAPHICS_ROOT_WORDS * 4, 64) };
    const unsigned launch_size = AGX_APPLE9_GRAPHICS_LAUNCH_SIZE;
    struct agx_apple9_launch_parameters params;
    apple9_graphics_launch_params(&params, dev, shader, fragment, tile_bytes,
@@ -1352,46 +1356,46 @@ agx_apple9_prepare_graphics_stage(
                                         samples)
          : NULL;
    if (tmpl) {
-      struct agx_ptr state = alloc(allocator, 0x100 + launch_size, 64);
+      struct agx_ptr state = alloc(allocator, roots_size + launch_size, 64);
       if (!state.cpu)
          return false;
       uint8_t *roots = state.cpu;
-      memset(roots, 0, 0x100);
+      memset(roots, 0, roots_size);
       apple9_put_u64(roots, textures);
       apple9_put_u64(roots + 8, samplers);
       apple9_put_u64(roots + 0x10, table);
-      if (!agx_apple9_launch_template_emit(roots + 0x100, tmpl, state.gpu,
-                                           entry, state.gpu + 0x100))
+      if (!agx_apple9_launch_template_emit(roots + roots_size, tmpl, state.gpu,
+                                           entry, state.gpu + roots_size))
          return false;
       if (debug_get_option_apple9_launch_check()) {
          uint8_t ref[AGX_APPLE9_GRAPHICS_LAUNCH_SIZE];
          params.resource_table = state.gpu;
-         params.launch_address = state.gpu + 0x100;
+         params.launch_address = state.gpu + roots_size;
          if (!agx_apple9_launch_build(
                 ref, launch_size,
                 fragment ? AGX_APPLE9_LAUNCH_FRAGMENT : AGX_APPLE9_LAUNCH_VERTEX,
                 &params) ||
-             memcmp(ref, roots + 0x100, launch_size)) {
+             memcmp(ref, roots + roots_size, launch_size)) {
             fprintf(stderr, "HK_APPLE9_LAUNCH_CHECK: graphics template launch differs\n");
             abort();
          }
       }
-      *launch = agx_usc_addr(dev, state.gpu + 0x100);
+      *launch = agx_usc_addr(dev, state.gpu + roots_size);
       return true;
    }
 
-   uint8_t canonical[0x100 + AGX_APPLE9_GRAPHICS_LAUNCH_SIZE] = {0};
+   uint8_t canonical[roots_size + AGX_APPLE9_GRAPHICS_LAUNCH_SIZE] = {0};
    uint8_t *roots = canonical;
    apple9_put_u64(roots, textures);
    apple9_put_u64(roots + 8, samplers);
    apple9_put_u64(roots + 0x10, table);
-   params.launch_address = dev->shader_base + 0x100;
+   params.launch_address = dev->shader_base + roots_size;
    params.resource_table = dev->shader_base;
    bool is_new = true;
    struct agx_ptr state;
    if (cached_alloc) {
       if (!agx_apple9_launch_build(
-             canonical + 0x100, launch_size,
+             canonical + roots_size, launch_size,
              fragment ? AGX_APPLE9_LAUNCH_FRAGMENT : AGX_APPLE9_LAUNCH_VERTEX,
              &params))
          return false;
@@ -1403,15 +1407,15 @@ agx_apple9_prepare_graphics_stage(
    if (!state.cpu)
       return false;
    if (!is_new) {
-      *launch = agx_usc_addr(dev, state.gpu + 0x100);
+      *launch = agx_usc_addr(dev, state.gpu + roots_size);
       return true;
    }
    roots = state.cpu;
-   memcpy(roots, canonical, 0x100);
-   params.launch_address = state.gpu + 0x100;
+   memcpy(roots, canonical, roots_size);
+   params.launch_address = state.gpu + roots_size;
    params.resource_table = state.gpu;
    if (!agx_apple9_launch_build(
-          roots + 0x100, launch_size,
+          roots + roots_size, launch_size,
           fragment ? AGX_APPLE9_LAUNCH_FRAGMENT : AGX_APPLE9_LAUNCH_VERTEX,
           &params)) {
       fprintf(stderr,
@@ -1427,7 +1431,7 @@ agx_apple9_prepare_graphics_stage(
               params.tile_bytes, params.samples);
       return false;
    }
-   *launch = agx_usc_addr(dev, state.gpu + 0x100);
+   *launch = agx_usc_addr(dev, state.gpu + roots_size);
    return true;
 }
 
