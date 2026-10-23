@@ -252,6 +252,22 @@ hk_pack_storage_image(struct hk_device *dev, void *out,
             view->vk.base_mip_level | (view->vk.base_array_layer << 16);
          if (agx_apple9_translate_texture(ext.texture, &desc.tex))
             ext.native_ok |= HK_APPLE9_STORAGE_READ_VALID;
+         /* Native fetches need the original depth: it participates in the
+          * inferred XY miptree stride when Z is the longest axis. Queries
+          * and all storage bounds checks instead use this software prefix.
+          * libagx_txs minifies it by first_level, so encode the slice count
+          * at level zero. The texture and PBE bases already include the
+          * slice offset; software writes/atomics retain the physical stride.
+          */
+         if (view->vk.view_type == VK_IMAGE_VIEW_TYPE_3D) {
+            agx_unpack(NULL, &ext.common.tex, TEXTURE, t);
+            t.depth = view->vk.storage.z_slice_count << t.first_level;
+            /* The linear stride aliases depth in the packed descriptor. */
+            t.stride = 0;
+            agx_pack(&ext.common.tex, TEXTURE, cfg) {
+               cfg = t;
+            }
+         }
          /* Native accesses keep the padded alias width. Size queries read
           * the legacy texture: give it the logical width.
           */

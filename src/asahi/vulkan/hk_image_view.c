@@ -249,6 +249,14 @@ pack_texture(struct hk_image_view *view, unsigned view_plane,
    unsigned level = view->vk.base_mip_level;
    unsigned layer = view->vk.base_array_layer;
 
+   /* AIL stores each Z slice as a complete XY miptree. Storage slicing
+    * shifts the base without changing that miptree's physical geometry.
+    * Other descriptor uses must ignore VkImageViewSlicedCreateInfoEXT.
+    */
+   if (usage == HK_DESC_USAGE_STORAGE &&
+       view->vk.view_type == VK_IMAGE_VIEW_TYPE_3D)
+      layer = view->vk.storage.z_slice_offset;
+
    enum pipe_format p_format = format_for_plane(view, view_plane);
    const struct util_format_description *desc =
       util_format_description(p_format);
@@ -424,6 +432,10 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
 
    unsigned level = view->vk.base_mip_level;
    unsigned layer = view->vk.base_array_layer;
+
+   if (usage == HK_DESC_USAGE_STORAGE &&
+       view->vk.view_type == VK_IMAGE_VIEW_TYPE_3D)
+      layer = view->vk.storage.z_slice_offset;
 
    enum pipe_format p_format = format_for_plane(view, view_plane);
    const struct util_format_description *desc =
