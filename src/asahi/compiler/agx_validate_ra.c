@@ -140,8 +140,27 @@ validate_src(agx_instr *I, unsigned s, struct regfile *file, agx_index idx)
    return true;
 }
 
+/* Registers at or above a class's limit are never named, so they stay
+ * undefined in every file and the predecessor merge can skip them. */
+static void
+note_register(unsigned *limit, agx_index idx)
+{
+   unsigned base;
+   if (idx.type == AGX_INDEX_REGISTER)
+      base = idx.value;
+   else if (idx.type == AGX_INDEX_NORMAL && idx.has_reg)
+      base = idx.reg;
+   else
+      return;
+
+   enum ra_class cls = ra_class_for_index(idx);
+   limit[cls] = MIN2(MAX2(limit[cls], base + agx_index_size_16(idx)),
+                     AGX_NUM_MODELED_REGS);
+}
+
 static bool
-validate_block(agx_context *ctx, agx_block *block, struct regfile *blocks)
+validate_block(agx_context *ctx, agx_block *block, struct regfile *blocks,
+               const unsigned *limit)
 {
    struct regfile *file = &blocks[block->index];
    bool success = true;
@@ -165,7 +184,7 @@ validate_block(agx_context *ctx, agx_block *block, struct regfile *blocks)
          struct regfile *pred_file = &blocks[(*pred)->index];
 
          for (enum ra_class cls = 0; cls < RA_CLASSES; ++cls) {
-            for (unsigned r = 0; r < AGX_NUM_MODELED_REGS; ++r) {
+            for (unsigned r = 0; r < limit[cls]; ++r) {
                if (first_pred)
                   file->r[cls][r] = pred_file->r[cls][r];
                else if (!vars_equal(file->r[cls][r], pred_file->r[cls][r]))
@@ -288,9 +307,17 @@ agx_validate_ra(agx_context *ctx)
 {
    bool succ = true;
    struct regfile *blocks = calloc(ctx->num_blocks, sizeof(*blocks));
+   unsigned limit[RA_CLASSES] = {0};
+
+   agx_foreach_instr_global(ctx, I) {
+      agx_foreach_dest(I, d)
+         note_register(limit, I->dest[d]);
+      agx_foreach_src(I, s)
+         note_register(limit, I->src[s]);
+   }
 
    agx_foreach_block(ctx, block) {
-      succ &= validate_block(ctx, block, blocks);
+      succ &= validate_block(ctx, block, blocks, limit);
    }
 
    if (!succ) {
