@@ -121,6 +121,25 @@ main(void)
    CHECK(dev->heap == old && map.size == old_size && bound_B == old->size);
    CHECK(live == 1);
 
+   /* Decay: a period has passed on an idle device (no queues here) needing
+    * 4 MiB, so the 1 GiB backing shrinks to the minimum and high_water clears,
+    * and a later spike is counted again. */
+   dev->heap_va->size_B = HK_HEAP_VA_MAX_B;
+   map.high_water = 0;
+   map.bottom = (4 * mib) / POLY_HEAP_UNIT_B;
+   dev->heap_period_need_B = 0;
+   dev->heap_period_start_ns = 0;
+   hk_heap_prepare_submit(dev, 0);
+   CHECK(dev->heap->size == HK_HEAP_MIN_B);
+   CHECK(map.size == HK_HEAP_MIN_B - POLY_HEAP_SINK_B && map.base == va.addr);
+   CHECK(map.high_water == 0 && map.bottom == 0 && !dev->heap_reported_B);
+
+   /* Within the new period, a tessellation command buffer grows it again, and
+    * it does not shrink back yet. */
+   hk_heap_prepare_submit(dev, HK_HEAP_GEOMETRY_MIN_B);
+   hk_heap_prepare_submit(dev, 0);
+   CHECK(dev->heap->size == HK_HEAP_GEOMETRY_MIN_B && live == 1);
+
    agx_bo_unreference(&dev->dev, dev->heap);
    printf("geometry heap growth: %u backings, %u overflows\n", creates,
           dev->heap_overflows);

@@ -158,6 +158,8 @@ struct hk_device {
    simple_mtx_t heap_lock;
    uint32_t heap_overflows;
    uint64_t heap_reported_B;
+   /* What the heap needed in the current decay period, see hk_heap_decay. */
+   uint64_t heap_period_need_B, heap_period_start_ns;
    struct agx_bo *mesh_heap;
    util_once_flag mesh_heap_init_once;
 

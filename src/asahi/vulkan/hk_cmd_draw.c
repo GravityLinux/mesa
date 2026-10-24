@@ -1806,6 +1806,54 @@ hk_init_heap(const void *data)
    }
 }
 
+/* Whether every queue has finished its submissions, without waiting. */
+static bool
+hk_device_idle(struct hk_device *dev)
+{
+   vk_foreach_queue(iter, &dev->vk) {
+      struct hk_queue *queue = container_of(iter, struct hk_queue, vk);
+      uint64_t completed = 0;
+      if (drmSyncobjQuery(dev->dev.fd, &queue->drm.syncobj, &completed, 1) ||
+          completed < queue->drm.timeline_value)
+         return false;
+   }
+   return true;
+}
+
+/* Return a spike's memory. high_water only grows, so the heap's need is kept
+ * per period of HK_HEAP_DECAY_NS instead: when one has passed and the device is
+ * already idle (never wait for it), start a new period from a cleared
+ * high_water, and shrink the backing if it is more than twice what this
+ * submission and the period needed (at least HK_HEAP_MIN_B).
+ */
+static void
+hk_heap_decay(struct hk_device *dev, uint64_t min_B, uint64_t needed_B)
+{
+   dev->heap_period_need_B = MAX2(dev->heap_period_need_B, needed_B);
+
+   uint64_t now = os_time_get_nano();
+   if (now - dev->heap_period_start_ns < HK_HEAP_DECAY_NS ||
+       !hk_device_idle(dev))
+      return;
+
+   uint64_t target_B =
+      MAX3(min_B, HK_HEAP_MIN_B,
+           util_next_power_of_two64(dev->heap_period_need_B + POLY_HEAP_SINK_B));
+   if (dev->heap->size > 2 * target_B) {
+      perf_debug_dev(&dev->dev, "Shrinking the geometry heap to %" PRIu64
+                     " MiB", target_B >> 20);
+      if (hk_heap_back(dev, target_B))
+         dev->heap_reported_B = 0;
+   }
+
+   /* The heap is idle, so nothing races these writes. */
+   struct poly_heap *heap = hk_heap_map(dev);
+   heap->high_water = 0;
+   heap->bottom = 0;
+   dev->heap_period_need_B = 0;
+   dev->heap_period_start_ns = now;
+}
+
 /* Before a submission whose command buffers use the geometry heap, with the
  * heap lock held: back at least min_B bytes, and what earlier submissions
  * needed. Allocations that did not fit dropped their draws, and the heap grows
@@ -1833,8 +1881,10 @@ hk_heap_prepare_submit(struct hk_device *dev, uint64_t min_B)
                      ? util_next_power_of_two64(needed_B + POLY_HEAP_SINK_B)
                      : 0);
    target_B = MIN2(target_B, dev->heap_va->size_B);
-   if (target_B <= dev->heap->size)
+   if (target_B <= dev->heap->size) {
+      hk_heap_decay(dev, min_B, needed_B);
       return;
+   }
 
    /* Earlier submissions may still use the heap. */
    vk_foreach_queue(iter, &dev->vk) {

@@ -1186,6 +1186,8 @@ hk_cmd_flush_empty_clears(struct hk_cmd_buffer *cmd)
 #define HK_HEAP_VA_MAX_B       (1024ull * 1024 * 1024)
 #define HK_HEAP_GEOMETRY_MIN_B (128ull * 1024 * 1024)
 #define HK_HEAP_MIN_B          (8ull * 1024 * 1024)
+/* Period over which a grown geometry heap may shrink back, see hk_heap_decay. */
+#define HK_HEAP_DECAY_NS       (10ull * 1000 * 1000 * 1000)
 
 uint64_t hk_heap(struct hk_cmd_buffer *cmd);
 void hk_heap_prepare_submit(struct hk_device *dev, uint64_t min_B);
