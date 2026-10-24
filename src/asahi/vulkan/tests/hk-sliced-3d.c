@@ -185,6 +185,35 @@ check_updates(struct hk_device *dev, VkImageView view,
    free(layout);
 }
 
+/* Storage PBE tables come from the USC heap; back its slabs with host memory. */
+struct agx_bo *__wrap_agx_bo_create(struct agx_device *, size_t, unsigned,
+                                    enum agx_bo_flags, const char *);
+void __wrap_agx_bo_unreference(struct agx_device *, struct agx_bo *);
+static unsigned slabs;
+struct agx_bo *
+__wrap_agx_bo_create(struct agx_device *dev, size_t size, unsigned alignment,
+                     enum agx_bo_flags flags, const char *label)
+{
+   struct agx_bo *bo = calloc(1, sizeof(*bo));
+   bo->va = calloc(1, sizeof(*bo->va));
+   bo->_map = calloc(1, size);
+   bo->dev = dev;
+   bo->size = size;
+   bo->refcnt = 1;
+   /* Small addresses keep PBE table indices within their 27-bit field. */
+   bo->va->addr = (uint64_t)(++slabs) << 24;
+   return bo;
+}
+void
+__wrap_agx_bo_unreference(struct agx_device *dev, struct agx_bo *bo)
+{
+   if (!bo)
+      return;
+   free(bo->_map);
+   free(bo->va);
+   free(bo);
+}
+
 static unsigned cases;
 static void
 check_view(struct hk_device *dev, VkExtent3D extent, unsigned levels, unsigned level,
@@ -247,8 +276,27 @@ check_view(struct hk_device *dev, VkExtent3D extent, unsigned levels, unsigned l
    struct hk_apple9_storage_descriptor desc;
    get_descriptor(dev, sliced, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &desc);
    CHECK(sizeof(desc) == HK_APPLE9_DB_STORAGE_SIZE);
-   CHECK(desc.native_ok == (alias ? 0 : HK_APPLE9_STORAGE_READ_VALID));
-   CHECK(!s->apple9_pbes.map);
+   /* Native stores get one 2D PBE per slice of the view, from its slice
+    * offset, at the base level only; block views, sparse images and capture
+    * replay keep the converter. */
+   bool pbes = !alias && level == 0 &&
+               !(flags & (VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
+                          VK_IMAGE_CREATE_DESCRIPTOR_BUFFER_CAPTURE_REPLAY_BIT_EXT));
+   CHECK((desc.native_ok & BITFIELD_MASK(HK_APPLE9_STORAGE_PBE_SHIFT)) ==
+         ((alias ? 0 : HK_APPLE9_STORAGE_READ_VALID) |
+          (pbes ? HK_APPLE9_STORAGE_LAYER_WRITE_VALID : 0)));
+   CHECK(!!s->apple9_pbes.map == pbes);
+   if (pbes) {
+      CHECK(s->apple9_pbes.size >= (uint64_t)slices * AGX_APPLE9_TEXTURE_TABLE_STRIDE);
+      const unsigned probe[] = {0, slices - 1};
+      for (unsigned i = 0; i < ARRAY_SIZE(probe); ++i) {
+         uint64_t entry_address;
+         memcpy(&entry_address, (uint8_t *)s->apple9_pbes.map +
+                probe[i] * AGX_APPLE9_TEXTURE_TABLE_STRIDE + 8, 8);
+         CHECK((entry_address & ((UINT64_C(1) << 40) - 1)) ==
+               (image.planes[0].addr + ail_get_layer_level_B(layout, offset + probe[i], 0)) >> 4);
+      }
+   }
    agx_unpack(NULL, &desc.common.tex, TEXTURE, query);
    agx_unpack(NULL, &desc.common.pbe, PBE, pbe);
    agx_unpack(NULL, &s->planes[0].ro_storage, TEXTURE, native);
@@ -308,7 +356,7 @@ main(void)
    dev->vk.physical = &pdev.vk;
    dev->vk.alloc = *vk_default_allocator();
    dev->dev.chip = pdev.dev.chip = AGX_CHIP_G16G;
-   simple_mtx_init(&dev->usc_heap_lock, mtx_plain);
+   hk_device_init_usc_heap(dev);
    struct agx_va resident_va = {.addr = UINT64_C(0x3000000000)};
    struct agx_bo resident = {.va = &resident_va};
    dev->apple9_resident = &resident;
@@ -344,7 +392,7 @@ main(void)
    get_descriptor(dev, VK_NULL_HANDLE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &null);
    check_size(&null.common.tex, 0, 0, 0);
    CHECK(null.native_ok == 0);
-   simple_mtx_destroy(&dev->usc_heap_lock);
+   hk_device_finish_usc_heap(dev);
    free(dev);
    glsl_type_singleton_decref();
    printf("sliced 3D: %u view/mip/format cases; query/address lowering and descriptor paths pass\n", cases);

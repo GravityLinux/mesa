@@ -813,7 +813,10 @@ hk_apple9_init_storage_pbe(struct hk_device *dev, struct hk_image_view *view)
    bool array = view->vk.view_type == VK_IMAGE_VIEW_TYPE_2D_ARRAY ||
                 view->vk.view_type == VK_IMAGE_VIEW_TYPE_CUBE ||
                 view->vk.view_type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
-   bool slices = view->vk.view_type == VK_IMAGE_VIEW_TYPE_3D;
+   /* 3D views: the view's depth slices (VK_EXT_image_sliced_view_of_3d), at
+    * the base level only; deeper levels of a Z-mipmapped tree are unqualified. */
+   bool slices = view->vk.view_type == VK_IMAGE_VIEW_TYPE_3D &&
+                 view->vk.base_mip_level == 0;
    if (!array && !slices && view->vk.view_type != VK_IMAGE_VIEW_TYPE_2D)
       return;
    /* Opaque capture data does not preserve table allocation addresses. */
@@ -834,7 +837,8 @@ hk_apple9_init_storage_pbe(struct hk_device *dev, struct hk_image_view *view)
        format_for_plane(view, 0) != layout->format)
       return;
    /* Depth slices are laid out as layers, each with its own miptree. */
-   unsigned count = slices ? u_minify(image->vk.extent.depth, view->vk.base_mip_level)
+   unsigned first = slices ? view->vk.storage.z_slice_offset : view->vk.base_array_layer;
+   unsigned count = slices ? view->vk.storage.z_slice_count
                     : array ? view->vk.layer_count : 1;
    simple_mtx_lock(&dev->usc_heap_lock);
    bool allocated = hk_usc_heap_alloc(
@@ -854,7 +858,7 @@ hk_apple9_init_storage_pbe(struct hk_device *dev, struct hk_image_view *view)
    uint8_t *entries = view->apple9_pbes.map;
    for (unsigned i = 0; i < count; ++i) {
       uint64_t base = hk_image_base_address(image, plane) +
-         ail_get_layer_level_B(layout, view->vk.base_array_layer + i, 0);
+         ail_get_layer_level_B(layout, first + i, 0);
       if (!hk_apple9_translate_storage_pbe(entries + i * AGX_APPLE9_TEXTURE_TABLE_STRIDE,
              &view->planes[0].storage, format_for_plane(view, 0), layout, base,
              view->vk.base_mip_level)) {
