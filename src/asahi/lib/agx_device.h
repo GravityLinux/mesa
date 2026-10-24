@@ -154,6 +154,10 @@ struct agx_device {
        */
       uint64_t retired, high_water_B;
       uint64_t released_cap, released_exhaustion, released_fixed;
+      /* Bytes taken from each heap (live plus quarantined), its high water,
+       * and the context heap's size, for the same report.
+       */
+      uint64_t heap_used_B[5], heap_high_water_B[5], context_size_B;
    } va_quarantine;
 
    /* To emulate sparse-resident buffers, we map buffers in both the bottom half

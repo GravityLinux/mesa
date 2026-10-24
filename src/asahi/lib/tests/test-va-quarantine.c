@@ -204,6 +204,29 @@ test_finish_releases_all(void)
    finish();
 }
 
+/* Heap use counts live and quarantined VAs and keeps its high water; the
+ * context heap's figure is what the report prints. */
+static void
+test_context_high_water(void)
+{
+   init(1024);
+   util_vma_heap_init(&dev.context_heap, USC_BASE + (1ull << 30), 1ull << 28);
+   agx_va_quarantine_init(&dev, 1024 * PAGE, 1ull << 28, 1ull << 28);
+   CHECK(dev.va_quarantine.context_size_B == 1ull << 28);
+   struct agx_va *a = alloc(PAGE, AGX_VA_CONTEXT, 0);
+   struct agx_va *b = alloc(3 * PAGE, AGX_VA_CONTEXT, 0);
+   CHECK(a && b && dev.va_quarantine.heap_used_B[2] == 6 * PAGE);
+   agx_va_retire(&dev, a); /* quarantined VA space is still taken */
+   CHECK(dev.va_quarantine.heap_used_B[2] == 6 * PAGE);
+   agx_va_free(&dev, b, false);
+   CHECK(dev.va_quarantine.heap_used_B[2] == 2 * PAGE);
+   CHECK(dev.va_quarantine.heap_high_water_B[2] == 6 * PAGE);
+   CHECK(dev.va_quarantine.heap_used_B[0] == 0);
+   finish();
+   CHECK(dev.va_quarantine.heap_used_B[2] == 0);
+   util_vma_heap_finish(&dev.context_heap);
+}
+
 int
 main(void)
 {
@@ -215,6 +238,7 @@ main(void)
    test_flush_is_per_heap();
    test_forked_child_no_flush();
    test_finish_releases_all();
+   test_context_high_water();
    printf("va-quarantine: 8 tests passed\n");
    return 0;
 }

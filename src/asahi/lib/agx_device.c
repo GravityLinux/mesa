@@ -653,12 +653,15 @@ agx_open_device(void *memctx, struct agx_device *dev)
       vm_create.kernel_end =
          AGX_APPLE9_RENDER_CONTEXT_BASE + (1ull << 32);
       vm_create.kernel_start = vm_create.kernel_end - kernel_size;
+      /* PPP and VDM records share the same 4-GiB aperture, between the low
+       * 64 MiB of fixed aliases and the kernel heap. Keep at least 1 GiB for
+       * them rather than wrapping or starving that heap. */
       if (kernel_size < 0x4000000ull ||
-          vm_create.kernel_end >
-             AGX_APPLE9_RENDER_CONTEXT_BASE + (1ull << 32)) {
+          kernel_size > (1ull << 32) - 0x4000000ull - (1ull << 30)) {
          fprintf(stderr,
-                 "G16 kernel-private heap does not fit its compact render "
-                 "context\n");
+                 "G16 kernel-private heap (%" PRIu64 " MiB) does not fit its "
+                 "compact render context with 1 GiB for render records\n",
+                 kernel_size >> 20);
          return false;
       }
    } else {
