@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "hk_shader.h"
+#include "hk_apple9_mesh.h"
 #include "hk_physical_device.h"
 #include "asahi/compiler/agx_nir.h"
 #include "compiler/nir/nir_builder.h"
@@ -100,8 +101,16 @@ check(nir_shader *nir, bool expected)
          CHECK(!hk_apple9_native_shader_valid(&part.info, &bad, HK_APPLE9_NATIVE_MESH));
          bad = body; bad.layout.max_primitives = 15;
          CHECK(!hk_apple9_native_shader_valid(&part.info, &bad, HK_APPLE9_NATIVE_MESH));
+         /* Class binaries recompute T16/T32 from the logical size. Model
+          * binaries always launch at T32, where the width carries no logical
+          * size; their binding is the publication_rounds flag instead. */
          bad = body; bad.logical_size[0] /= 2;
-         CHECK(!hk_apple9_native_shader_valid(&part.info, &bad, HK_APPLE9_NATIVE_MESH));
+         CHECK(body.publication_rounds ||
+               !hk_apple9_native_shader_valid(&part.info, &bad, HK_APPLE9_NATIVE_MESH));
+         /* A model binary cannot pass as a class binary. */
+         bad = body; bad.publication_rounds = false;
+         CHECK(!body.publication_rounds ||
+               !hk_apple9_native_shader_valid(&part.info, &bad, HK_APPLE9_NATIVE_MESH));
       }
    }
    free(part.binary); ralloc_free(nir);
@@ -210,7 +219,10 @@ main(int argc, char **argv)
       nir_imm_int(&b, 0), .write_mask = 1, .src_type = nir_type_float32,
       .io_semantics = {.location = VARYING_SLOT_VAR0, .num_slots = 1});
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
-   check(nir, false);
+   /* The packed class path stays position-only; with research enabled the
+    * publication model takes declarations with attributes at T32 instead. */
+   CHECK(!hk_apple9_native_mesh_packed_shape_eligible(nir));
+   check(nir, on);
    struct hk_physical_device pdev = {0};
    printf("compiler_flags=%016llx\n", (unsigned long long)hk_physical_device_compiler_flags(&pdev));
    glsl_type_singleton_decref();

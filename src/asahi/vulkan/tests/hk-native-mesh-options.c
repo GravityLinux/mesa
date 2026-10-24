@@ -320,9 +320,9 @@ check_capabilities(void)
       nir_shader *nir = producer(true);
       nir->info.mesh.max_vertices_out = declarations[i][0];
       nir->info.mesh.max_primitives_out = declarations[i][1];
-      /* Declarations beyond one publication round compile through rounds;
-       * other non-P1 declarations stay outside the research P1 path. */
-      check_capability(nir, hk_apple9_native_mesh_round_counts_eligible(
+      /* This producer writes attributes, so every research non-P1
+       * declaration compiles through the publication model at T32. */
+      check_capability(nir, hk_apple9_native_mesh_model_counts_eligible(
                                nir->info.workgroup_size, declarations[i][0],
                                declarations[i][1]));
    }

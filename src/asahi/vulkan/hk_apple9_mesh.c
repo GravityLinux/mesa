@@ -246,6 +246,18 @@ hk_apple9_native_mesh_round_counts_eligible(const uint16_t size[3],
 }
 
 bool
+hk_apple9_native_mesh_model_counts_eligible(const uint16_t size[3],
+                                             unsigned vertices,
+                                             unsigned primitives)
+{
+   /* Research: any T16/T32 declaration the publication model covers, launched
+    * at T32. V3/P1 keeps the P1 path, which also lowers primitive outputs. */
+   return hk_apple9_native_mesh_enabled() && hk_apple9_native_mesh_threads(size) &&
+          vertices && vertices <= 256 && primitives && primitives <= 256 &&
+          !(vertices == 3 && primitives == 1);
+}
+
+bool
 hk_apple9_native_mesh_round_shape_eligible(const nir_shader *nir)
 {
    return nir->info.stage == MESA_SHADER_MESH && !nir->info.task_payload_size &&
@@ -255,9 +267,18 @@ hk_apple9_native_mesh_round_shape_eligible(const nir_shader *nir)
           nir->info.derivative_group == DERIVATIVE_GROUP_NONE &&
           !(nir->info.per_primitive_outputs & ~VARYING_BIT_PRIMITIVE_INDICES) &&
           !nir->info.outputs_written_16bit &&
-          hk_apple9_native_mesh_round_counts_eligible(
+          hk_apple9_native_mesh_model_counts_eligible(
              nir->info.workgroup_size, nir->info.mesh.max_vertices_out,
-             nir->info.mesh.max_primitives_out);
+             nir->info.mesh.max_primitives_out) &&
+          /* Within one round, position-only shapes stay under the explicit
+           * class list (T16V16P16 is deliberately excluded); the model takes
+           * only the outputs that path cannot carry. */
+          (hk_apple9_native_mesh_round_counts_eligible(
+              nir->info.workgroup_size, nir->info.mesh.max_vertices_out,
+              nir->info.mesh.max_primitives_out) ||
+           (nir->info.outputs_written &
+            ~(VARYING_BIT_POS | VARYING_BIT_PRIMITIVE_INDICES |
+              VARYING_BIT_PRIMITIVE_COUNT | VARYING_BIT_PSIZ)));
 }
 
 bool
@@ -388,10 +409,13 @@ hk_apple9_native_shader_valid(const struct agx_shader_info *code,
    const struct agx_apple9_mesh_layout *l = &body->layout;
    /* The lowering flag binds the binary to this path: a class binary with
     * stale metadata cannot pass as a masked T32 round binary, or vice versa. */
-   if (body->publication_rounds !=
-       hk_apple9_native_mesh_round_counts_eligible(body->logical_size,
-                                                   l->max_vertices,
-                                                   l->max_primitives))
+   if (body->publication_rounds
+          ? !hk_apple9_native_mesh_model_counts_eligible(body->logical_size,
+                                                          l->max_vertices,
+                                                          l->max_primitives)
+          : hk_apple9_native_mesh_round_counts_eligible(body->logical_size,
+                                                         l->max_vertices,
+                                                         l->max_primitives))
       return false;
    if (body->publication_rounds) {
       unsigned count_B = ALIGN_POT(3 * l->max_primitives, 16);

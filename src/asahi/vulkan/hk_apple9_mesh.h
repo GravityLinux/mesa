@@ -83,6 +83,11 @@ unsigned hk_apple9_native_mesh_threads(const uint16_t local_size[3]);
 bool hk_apple9_native_mesh_round_counts_eligible(const uint16_t local_size[3],
                                                  unsigned vertices,
                                                  unsigned primitives);
+/* Research envelope of the publication model at T32: every T16/T32
+ * declaration up to V256/P256 except V3/P1. */
+bool hk_apple9_native_mesh_model_counts_eligible(const uint16_t local_size[3],
+                                                 unsigned vertices,
+                                                 unsigned primitives);
 bool hk_apple9_native_mesh_round_shape_eligible(const nir_shader *nir);
 
 bool hk_apple9_native_shader_valid(
