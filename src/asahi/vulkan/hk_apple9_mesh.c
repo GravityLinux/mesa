@@ -15,6 +15,13 @@ DEBUG_GET_ONCE_BOOL_OPTION(native_index, "HK_APPLE9_NATIVE_INDEX", false)
 DEBUG_GET_ONCE_OPTION(native_stages, "HK_APPLE9_NATIVE_STAGES", NULL)
 DEBUG_GET_ONCE_BOOL_OPTION(native_gs, "HK_APPLE9_GS_NATIVE", false)
 DEBUG_GET_ONCE_BOOL_OPTION(native_tess, "HK_APPLE9_TESS_NATIVE", false)
+DEBUG_GET_ONCE_BOOL_OPTION(native_gs_pack, "HK_APPLE9_NATIVE_GS_PACK", false)
+
+bool
+hk_apple9_native_gs_pack_enabled(void)
+{
+   return debug_get_option_native_gs_pack();
+}
 
 bool
 hk_apple9_native_tess_enabled(void)
@@ -190,6 +197,12 @@ hk_apple9_native_stage_class(mesa_shader_stage stage, unsigned threads,
 {
    /* The initial GS/TES contract never inherits the wider index class list.
     * In particular W64 and T16V16P16 cannot enter through a generated stage. */
+   /* Packed GS publishes 8 triangles' fixed slots through two qualified
+    * index classes (Air 39b7da1: 2.2 vs 9.4 ns of TA per triangle). */
+   if (stage == MESA_SHADER_GEOMETRY && threads == 32 &&
+       hk_apple9_native_gs_pack_enabled())
+      return (vertices == 3 * HK_APPLE9_NATIVE_GS_PACK && primitives == 17) ||
+             (vertices == 4 * HK_APPLE9_NATIVE_GS_PACK && primitives == 16);
    if (threads != 16)
       return false;
    if (stage == MESA_SHADER_GEOMETRY)
