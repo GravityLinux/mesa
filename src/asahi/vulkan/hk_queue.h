@@ -9,6 +9,7 @@
 
 #include "hk_private.h"
 #include "hk_sync.h"
+#include "hk_queue_completion.h"
 #include "vk_queue.h"
 
 struct hk_device;
@@ -19,6 +20,8 @@ struct hk_queue {
    struct hk_gpu_busy_queue *gpu_busy;
 #endif
    struct hk_sync_state sync;
+   struct hk_queue_completion completion;
+   bool completion_initialized;
 
    /* A render that writes memory other than its attachments (stores,
     * atomics, transform feedback) was submitted, and no later render's

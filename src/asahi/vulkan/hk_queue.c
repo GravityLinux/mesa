@@ -98,8 +98,32 @@ queue_submit_empty(struct hk_device *dev, struct hk_queue *queue,
       assert(vk_sync_type_is_drm_syncobj(wait->sync->type));
       const struct vk_drm_syncobj *syncobj = vk_sync_as_drm_syncobj(wait->sync);
 
+      if (queue->completion_initialized &&
+          hk_queue_completion_begin(&queue->completion) < 0) {
+         wd_result = -1;
+         wd_error = EIO;
+         break;
+      }
+
       int ret = drmSyncobjTransfer(fd, queue->drm.syncobj, ++queue->drm.timeline_value,
                                   syncobj->syncobj, wait->wait_value, 0);
+      int transfer_error = errno;
+      if (queue->completion_initialized) {
+         /* Retain each imported fence independently. Appending another point
+          * may otherwise garbage-collect a signaled error from the timeline.
+          */
+         if (!ret) {
+            ret = drmSyncobjTransfer(fd, queue->completion.syncobj, 0,
+                                     syncobj->syncobj, wait->wait_value, 0);
+            transfer_error = errno;
+         }
+         int status = hk_queue_completion_end(&queue->completion, ret == 0);
+         if (!ret && status < 0) {
+            ret = -1;
+            transfer_error = -status;
+         }
+      }
+      errno = transfer_error;
       u_watchdog_ioctl("HK empty submit wait transfer", fd, ret, errno);
       if (ret) {
          wd_result = ret;
@@ -358,10 +382,33 @@ struct hk_extres {
 
 static VkResult
 queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
-                    unsigned ring_idx, const struct hk_extres *extres)
+                    struct hk_queue *queue, const struct hk_extres *extres)
 {
+   /* A binary output keeps the underlying error-bearing fence alive without
+    * a transfer from the timeline. Reuse the syncobj; retain only its immutable
+    * sync-file snapshots until retirement. Do this for every ioctl slice.
+    */
+   struct drm_asahi_submit tracked_submit = *submit;
+   if (queue->completion_initialized) {
+      unsigned count = submit->in_sync_count + submit->out_sync_count;
+      struct drm_asahi_sync *syncs = alloca((count + 1) * sizeof(*syncs));
+      if (count)
+         memcpy(syncs, (const void *)(uintptr_t)submit->syncs,
+                count * sizeof(*syncs));
+      syncs[count] = (struct drm_asahi_sync){
+         .sync_type = DRM_ASAHI_SYNC_SYNCOBJ,
+         .handle = queue->completion.syncobj,
+      };
+      tracked_submit.syncs = (uint64_t)(uintptr_t)syncs;
+      tracked_submit.out_sync_count++;
+      submit = &tracked_submit;
+
+      if (hk_queue_completion_begin(&queue->completion) < 0)
+         return VK_ERROR_DEVICE_LOST;
+   }
+
    struct agx_submit_virt virt = {
-      .ring_idx = ring_idx,
+      .ring_idx = queue->drm.virt_ring_idx,
       .extres_count = extres->count,
       .extres = extres->res,
    };
@@ -393,6 +440,13 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
    agx_timeline_emit(TL_IOCTL_END, 0, trace_id, (uint64_t)(int64_t)ret,
                      errno, 0, 0, 0, 0, 0);
    int submit_errno = errno;
+   if (queue->completion_initialized) {
+      int status = hk_queue_completion_end(&queue->completion, ret == 0);
+      if (!ret && status < 0) {
+         ret = -1;
+         submit_errno = -status;
+      }
+   }
    u_watchdog_submit_result(wd_id, ret, errno);
    u_watchdog_ioctl("HK submit", dev->dev.fd, ret, errno);
 
@@ -416,7 +470,7 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
  */
 static VkResult
 queue_submit_looped(struct hk_device *dev, struct drm_asahi_submit *submit,
-                    unsigned command_count, unsigned ring_idx,
+                    unsigned command_count, struct hk_queue *queue,
                     const struct hk_extres *extres)
 {
    uint8_t *cmdbuf = (uint8_t *)(uintptr_t)submit->cmdbuf;
@@ -466,7 +520,7 @@ queue_submit_looped(struct hk_device *dev, struct drm_asahi_submit *submit,
       if (slice_extres.reasons)
          slice_extres.reasons += command_count - commands_remaining - count;
       VkResult result =
-         queue_submit_single(dev, &submit_ioctl, ring_idx, &slice_extres);
+         queue_submit_single(dev, &submit_ioctl, queue, &slice_extres);
       if (result != VK_SUCCESS)
          return result;
 
@@ -1282,11 +1336,10 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
 
    VkResult result;
    if (command_count <= max_commands_per_submit(dev)) {
-      result = queue_submit_single(dev, &submit_ioctl,
-                                   queue->drm.virt_ring_idx, &extres);
+      result = queue_submit_single(dev, &submit_ioctl, queue, &extres);
    } else {
       result = queue_submit_looped(dev, &submit_ioctl, command_count,
-                                   queue->drm.virt_ring_idx, &extres);
+                                   queue, &extres);
    }
 
    free(reasons);
@@ -1440,6 +1493,17 @@ hk_queue_init(struct hk_device *dev, const VkDeviceQueueCreateInfo *pCreateInfo,
                        "DRM_IOCTL_TIMELINE_SYNCOBJ_SIGNAL failed: %m");
    }
 
+   if (!dev->dev.is_virtio) {
+      queue->completion_initialized = true;
+      int status = hk_queue_completion_init(&queue->completion, dev->dev.fd);
+      if (status < 0) {
+         hk_queue_finish(dev, queue);
+         return vk_errorf(dev, VK_ERROR_OUT_OF_HOST_MEMORY,
+                          "Queue completion initialization failed: %s",
+                          strerror(-status));
+      }
+   }
+
    hk_gpu_busy_init(queue);
    return VK_SUCCESS;
 }
@@ -1448,6 +1512,8 @@ void
 hk_queue_finish(struct hk_device *dev, struct hk_queue *queue)
 {
    hk_gpu_busy_finish(queue);
+   if (queue->completion_initialized)
+      hk_queue_completion_finish(&queue->completion);
    u_watchdog_forget_queue(dev->dev.fd, queue->drm.id);
    drmSyncobjDestroy(dev->dev.fd, queue->drm.syncobj);
    agx_destroy_command_queue(&dev->dev, queue->drm.id);
