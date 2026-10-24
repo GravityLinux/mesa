@@ -1953,13 +1953,12 @@ hk_upload_geometry_params(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 }
 
 static void
-hk_upload_tess_params(struct hk_cmd_buffer *cmd, struct poly_tess_params *out,
-                      struct agx_draw draw)
+hk_upload_tess_params_for_tcs(struct hk_cmd_buffer *cmd,
+                              struct poly_tess_params *out,
+                              struct agx_draw draw, struct hk_shader *tcs)
 {
    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
    struct hk_graphics_state *gfx = &cmd->state.gfx;
-   struct hk_shader *tcs = hk_only_variant(gfx->shaders[MESA_SHADER_TESS_CTRL]);
-
    enum poly_tess_partitioning partitioning =
       gfx->tess.info.spacing == TESS_SPACING_EQUAL
          ? POLY_TESS_PARTITIONING_INTEGER
@@ -2033,6 +2032,15 @@ hk_upload_tess_params(struct hk_cmd_buffer *cmd, struct poly_tess_params *out,
    memcpy(out, &args, sizeof(args));
 }
 
+static void
+hk_upload_tess_params(struct hk_cmd_buffer *cmd, struct poly_tess_params *out,
+                      struct agx_draw draw)
+{
+   hk_upload_tess_params_for_tcs(
+      cmd, out, draw,
+      hk_only_variant(cmd->state.gfx.shaders[MESA_SHADER_TESS_CTRL]));
+}
+
 /* The Apple9 passthrough geometry shader key is the common key followed by
  * the fragment shader's {flat, linear} input masks, which shape the
  * rasterized varying layout, and the per-slot component masks of the
@@ -2068,6 +2076,7 @@ struct hk_apple9_passthrough_suffix {
  * lines their second vertex. The passthrough GS emits API vertex i as its
  * i-th vertex.
  */
+
 static void
 hk_apple9_write_per_vertex_copies(nir_shader *s,
                                   const struct hk_apple9_passthrough_suffix *suffix)
@@ -2758,13 +2767,20 @@ hk_apple9_robust_index(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 }
 
 static void
-hk_apple9_merge_tess_info(struct hk_cmd_buffer *cmd)
+hk_apple9_merge_tess_info(struct hk_cmd_buffer *cmd, bool native)
 {
    struct hk_graphics_state *gfx = &cmd->state.gfx;
-   struct hk_shader *tcs = hk_only_variant(gfx->shaders[MESA_SHADER_TESS_CTRL]);
-   struct hk_shader *tes = hk_any_variant(gfx->shaders[MESA_SHADER_TESS_EVAL]);
-
-   gfx->tess.info = hk_tess_info_merge(tes->info.tess.info, tcs->info.tess.info);
+   struct hk_api_shader *tcs_api = gfx->shaders[MESA_SHADER_TESS_CTRL];
+   struct hk_api_shader *tes_api = gfx->shaders[MESA_SHADER_TESS_EVAL];
+   if (native) {
+      tcs_api = hk_api_shader_native(tcs_api);
+      tes_api = hk_api_shader_native(tes_api);
+   }
+   struct hk_shader *tcs = hk_only_variant(tcs_api);
+   struct hk_tess_info tes_info = native
+                                     ? tes_api->apple9_native_tess
+                                     : hk_any_variant(tes_api)->info.tess.info;
+   gfx->tess.info = hk_tess_info_merge(tes_info, tcs->info.tess.info);
    if (gfx->tess.info.points)
       gfx->tess.prim = MESA_PRIM_POINTS;
    else if (gfx->tess.info.mode == TESS_PRIMITIVE_ISOLINES)
@@ -2778,7 +2794,8 @@ hk_apple9_merge_tess_info(struct hk_cmd_buffer *cmd)
  * domain.
  */
 static struct agx_draw
-hk_apple9_launch_tess(struct hk_cmd_buffer *cmd, struct agx_draw draw)
+hk_apple9_launch_tess(struct hk_cmd_buffer *cmd, struct agx_draw draw,
+                      bool native)
 {
    /* Largest direct draw, in patches x instances, that is batched. */
    const unsigned max_batch_patches = 2048;
@@ -2786,20 +2803,26 @@ hk_apple9_launch_tess(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    struct hk_descriptor_state *desc = &gfx->descriptors;
    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
    struct hk_api_shader *tcs_api = gfx->shaders[MESA_SHADER_TESS_CTRL];
-   struct hk_api_shader *tes_api = gfx->shaders[MESA_SHADER_TESS_EVAL];
-   struct hk_shader *vs =
-      &gfx->shaders[MESA_SHADER_VERTEX]->variants[HK_VS_VARIANT_SW];
+   struct hk_api_shader *vs_api = gfx->shaders[MESA_SHADER_VERTEX];
+   if (native) {
+      tcs_api = hk_api_shader_native(tcs_api);
+      vs_api = hk_api_shader_native(vs_api);
+   }
+   struct hk_shader *vs = &vs_api->variants[HK_VS_VARIANT_SW];
    struct hk_shader *tcs = hk_only_variant(tcs_api);
 
-   (void)tes_api;
    struct hk_apple9_prerast_bindings bindings =
       hk_apple9_draw_bindings(cmd, draw);
 
-   desc->root.draw.vertex_params = hk_upload_vertex_params(cmd, draw);
+   desc->root.draw.vertex_params =
+      native ? hk_upload_vertex_params_for_vs(cmd, draw, vs)
+             : hk_upload_vertex_params(cmd, draw);
    struct agx_ptr tess_args =
       hk_pool_alloc(cmd, sizeof(struct poly_tess_params), 4);
+   if (!tess_args.cpu)
+      return draw;
    desc->root.draw.tess_params = tess_args.gpu;
-   hk_upload_tess_params(cmd, tess_args.cpu, draw);
+   hk_upload_tess_params_for_tcs(cmd, tess_args.cpu, draw, tcs);
    desc->root_dirty = true;
    hk_cmd_buffer_flush_push_descriptors(cmd, desc);
    gfx->root = hk_cmd_buffer_upload_root(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
@@ -2880,12 +2903,16 @@ hk_apple9_launch_tess(struct hk_cmd_buffer *cmd, struct agx_draw draw)
       agx_is_indirect(draw.b) ? 0
                               : (draw.b.count[0] / input_patch_size) *
                                    draw.b.count[1];
-   bool batch = batch_env && !agx_is_indirect(draw.b) &&
-                batch_patches <= max_batch_patches &&
-                !hk_stat_enabled(hk_pipeline_stat_addr(
-                   cmd, VK_QUERY_PIPELINE_STATISTIC_TESSELLATION_CONTROL_SHADER_PATCHES_BIT)) &&
-                !hk_stat_enabled(c_prims) && !hk_stat_enabled(c_inv) &&
-                !gfx->xfb_enabled;
+   /* The native object reads this draw's count. Keep all five producer passes
+    * inline in pre_gfx, after flushing older lanes, so no later batch flush can
+    * move the count write behind its consumer. Each pass has HK_SYNC_ALL. */
+   bool batch =
+      batch_env && !native && !agx_is_indirect(draw.b) &&
+      batch_patches <= max_batch_patches &&
+      !hk_stat_enabled(hk_pipeline_stat_addr(
+         cmd,
+         VK_QUERY_PIPELINE_STATISTIC_TESSELLATION_CONTROL_SHADER_PATCHES_BIT)) &&
+      !hk_stat_enabled(c_prims) && !hk_stat_enabled(c_inv) && !gfx->xfb_enabled;
    if (!batch)
       hk_tess_batch_flush(cmd);
 
@@ -5379,6 +5406,104 @@ hk_apple9_native_gs_state_eligible(struct hk_cmd_buffer *cmd,
    return true;
 }
 
+/* Stage 2 admits one direct patch and one instance only. */
+static bool
+hk_apple9_native_tess_state_eligible(struct hk_cmd_buffer *cmd,
+                                     struct agx_draw draw)
+{
+   const struct hk_graphics_state *gfx = &cmd->state.gfx;
+   const struct vk_dynamic_graphics_state *dyn =
+      &cmd->vk.dynamic_graphics_state;
+   if (!hk_apple9_native_tess_enabled() || cmd->in_meta ||
+       agx_is_indirect(draw.b) || draw.indexed || draw.restart || draw.start ||
+       draw.start_instance || !dyn->ts.patch_control_points ||
+       dyn->ts.patch_control_points > 32 ||
+       draw.b.count[0] != dyn->ts.patch_control_points ||
+       draw.b.count[1] != 1 || draw.b.count[2] != 1 ||
+       dyn->ia.primitive_topology != VK_PRIMITIVE_TOPOLOGY_PATCH_LIST ||
+       dyn->ia.primitive_restart_enable ||
+       !gfx->shaders[MESA_SHADER_TESS_CTRL] ||
+       !gfx->shaders[MESA_SHADER_TESS_EVAL] ||
+       gfx->shaders[MESA_SHADER_GEOMETRY] || gfx->shaders[MESA_SHADER_TASK] ||
+       gfx->shaders[MESA_SHADER_MESH] || gfx->render.view_mask ||
+       gfx->render.layer_count != 1 || hk_cond_render_applies(cmd) ||
+       gfx->descriptors.root.draw.pipeline_stats_flags ||
+       gfx->occlusion.active_count || gfx->mesh_pg_query || gfx->xfb_enabled ||
+       dyn->rs.rasterization_stream || dyn->rs.rasterizer_discard_enable ||
+       dyn->rs.polygon_mode != VK_POLYGON_MODE_FILL ||
+       dyn->rs.conservative_mode !=
+          VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT ||
+       MAX2(gfx->render.tilebuffer.nr_samples ?: dyn->ms.rasterization_samples,
+            1) != 1)
+      return false;
+   for (unsigned i = 0; i < ARRAY_SIZE(gfx->pg_query); ++i) {
+      if (gfx->pg_query[i] || gfx->xfb_query[i])
+         return false;
+   }
+   return true;
+}
+
+bool
+hk_apple9_use_native_tess(struct hk_cmd_buffer *cmd, struct agx_draw draw)
+{
+   const struct hk_graphics_state *gfx = &cmd->state.gfx;
+   if (!hk_apple9_native_tess_state_eligible(cmd, draw))
+      return false;
+   struct hk_api_shader *tes =
+      hk_api_shader_native(gfx->shaders[MESA_SHADER_TESS_EVAL]);
+   if (!tes || !tes->apple9_native_leaf)
+      return false;
+   const mesa_shader_stage stages[] = {
+      MESA_SHADER_VERTEX,
+      MESA_SHADER_TESS_CTRL,
+      MESA_SHADER_FRAGMENT,
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(stages); ++i) {
+      struct hk_api_shader *api = gfx->shaders[stages[i]];
+      if (stages[i] == MESA_SHADER_FRAGMENT &&
+          (!api || api == hk_cmd_buffer_device(cmd)->null_fs))
+         continue;
+      api = hk_api_shader_native(api);
+      if (!api || !api->apple9_native_leaf ||
+          (stages[i] != MESA_SHADER_FRAGMENT && api->writes_memory) ||
+          memcmp(tes->apple9_native_pair_id, api->apple9_native_pair_id,
+                 sizeof(tes->apple9_native_pair_id)))
+         return false;
+   }
+   const struct hk_shader *main = hk_native_producer_main(tes);
+   const struct agx_apple9_mesh_body_info *body = &main->info.apple9_native;
+   return main->info.apple9_native_stage == HK_APPLE9_NATIVE_MESH &&
+          hk_native_producer_object(tes)->info.apple9_native_stage ==
+             HK_APPLE9_NATIVE_OBJECT &&
+          body->key.physical_threads == 16 && body->layout.max_vertices == 3 &&
+          body->layout.max_primitives == 1 &&
+          hk_apple9_packed_mesh_class_selected(
+             hk_apple9_native_mesh_packed_shapes(), 16, 3, 1);
+}
+
+DEBUG_GET_ONCE_BOOL_OPTION(tess_route_log, "HK_APPLE9_TESS_ROUTE_LOG", false)
+
+static void
+hk_apple9_launch_native_tess(struct hk_cmd_buffer *cmd, uint32_t draw_id,
+                             struct agx_draw draw)
+{
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+   struct hk_descriptor_state *desc = &gfx->descriptors;
+   hk_tess_batch_flush(cmd);
+   hk_apple9_merge_tess_info(cmd, true);
+   desc->root.draw.geometry_params = 0;
+   desc->root.draw.api_gs = false;
+   desc->root.draw.rasterization_stream = 0;
+   desc->root.draw.draw_id = draw_id;
+   desc->root_dirty = true;
+   hk_apple9_launch_tess(cmd, draw, true);
+   /* The render consumes both the count written by prefix sum and the
+    * indices/coordinates written by emit. HK_READS_INTERNAL in prepare_draw
+    * gives it the pre_gfx tiling dependency, including merge continuations. */
+   if (!vk_command_buffer_has_error(&cmd->vk))
+      hk_apple9_draw_native_mesh(cmd, draw_id, gfx->tess.out_draws);
+}
+
 bool
 hk_apple9_use_native_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 {
@@ -5466,12 +5591,17 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
          return;
       uint64_t t_resolve = hk_cpu_sub_begin();
       const struct hk_graphics_state *gfx = &cmd->state.gfx;
+      mesa_shader_stage producer = gfx->shaders[MESA_SHADER_GEOMETRY]
+                                      ? MESA_SHADER_GEOMETRY
+                                      : MESA_SHADER_TESS_EVAL;
       const struct hk_api_shader *source =
-         gfx->apple9_api[MESA_SHADER_GEOMETRY] ?:
-            gfx->shaders[MESA_SHADER_GEOMETRY];
-      bool prefer_native = source && !source->is_passthrough &&
+         gfx->apple9_api[producer] ?: gfx->shaders[producer];
+      bool prefer_native =
+         source && !source->is_passthrough &&
          p_atomic_read(&source->apple9_native_candidate) &&
-         hk_apple9_native_gs_state_eligible(cmd, draw_);
+         (producer == MESA_SHADER_GEOMETRY
+             ? hk_apple9_native_gs_state_eligible(cmd, draw_)
+             : hk_apple9_native_tess_state_eligible(cmd, draw_));
       bool resolved = hk_apple9_resolve_shaders(cmd, prefer_native);
       hk_cpu_sub_end(t_resolve, HK_CPU_SUB_RESOLVE);
       if (!resolved)
@@ -5486,12 +5616,14 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
          }
       }
       bool native_gs = hk_apple9_use_native_gs(cmd, draw_);
-      if (!native_gs && gfx->shaders[MESA_SHADER_GEOMETRY] &&
-          gfx->shaders[MESA_SHADER_GEOMETRY]->apple9_native_leaf) {
+      bool native_tess = hk_apple9_use_native_tess(cmd, draw_);
+      if (!native_gs && !native_tess && gfx->shaders[producer] &&
+          gfx->shaders[producer]->apple9_native_leaf) {
          if (!hk_apple9_resolve_shaders(cmd, false))
             return;
       }
-      if (source && debug_get_option_gs_route_log()) {
+      if (producer == MESA_SHADER_GEOMETRY && source &&
+          debug_get_option_gs_route_log()) {
          fprintf(stderr, "HK_GS_SELECT candidate=%u prefer=%u state=%u leaf=%u vs_leaf=%u vs_writes=%u\n",
                  p_atomic_read(&source->apple9_native_candidate), prefer_native,
                  hk_apple9_native_gs_state_eligible(cmd, draw_),
@@ -5510,6 +5642,16 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
       if (native_gs) {
          if (hk_apple9_prepare_draw(cmd, true, true))
             hk_apple9_launch_native_gs(cmd, draw_id, draw_);
+         return;
+      }
+      if (producer == MESA_SHADER_TESS_EVAL && source &&
+          debug_get_option_tess_route_log())
+         fprintf(stderr, "HK_TESS_ROUTE native=%u candidate=%u prefer=%u\n",
+                 native_tess, p_atomic_read(&source->apple9_native_candidate),
+                 prefer_native);
+      if (native_tess) {
+         if (hk_apple9_prepare_draw(cmd, true, true))
+            hk_apple9_launch_native_tess(cmd, draw_id, draw_);
          return;
       }
       if (hk_cond_render_applies(cmd)) {
@@ -5535,7 +5677,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
          hk_ia_update(cmd, draw_, ia_verts, ia_prims, vs_inv, c_prims, c_inv);
       }
       if (cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL])
-         hk_apple9_merge_tess_info(cmd);
+         hk_apple9_merge_tess_info(cmd, false);
       hk_handle_passthrough_gs(cmd, draw_);
       if (!hk_sw_vs_outputs_fit(cmd, draw_))
          return;
@@ -5571,7 +5713,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
          }
          if (cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL]) {
             uint64_t t = hk_cpu_sub_begin();
-            draw = hk_apple9_launch_tess(cmd, draw);
+            draw = hk_apple9_launch_tess(cmd, draw, false);
             hk_cpu_sub_end(t, HK_CPU_SUB_TESS);
          }
          if (cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY]) {

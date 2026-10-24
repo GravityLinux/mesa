@@ -758,8 +758,9 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    /* Mesh shaders have written their records as compute. */
    struct hk_api_shader *mesh = gfx->shaders[MESA_SHADER_MESH];
    if (native_grid) {
-      mesh = hk_api_shader_native(mesh ?: gs);
-      if (!mesh || (gs && !hk_apple9_native_gs_enabled()))
+      mesh = hk_api_shader_native(mesh ?: gs ?: tes);
+      if (!mesh || (gs && !hk_apple9_native_gs_enabled()) ||
+          (tes && !hk_apple9_native_tess_enabled()))
          UNSUPPORTED();
    }
    /* Without an API fragment shader, the null program only applies the API
@@ -787,10 +788,9 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    shaders[1] = hk_any_variant(null_trivial ? dev->null_fs_trivial
                                            : fragment_api ?: dev->null_fs);
    if (native_grid &&
-       (!mesh || gfx->shaders[MESA_SHADER_TASK] || tes ||
+       (!mesh || gfx->shaders[MESA_SHADER_TASK] || (tes && gs) ||
         shaders[0]->info.apple9_native_stage != HK_APPLE9_NATIVE_MESH ||
-        dyn->rs.polygon_mode != VK_POLYGON_MODE_FILL ||
-        gfx->render.view_mask))
+        dyn->rs.polygon_mode != VK_POLYGON_MODE_FILL || gfx->render.view_mask))
       UNSUPPORTED();
    /* Geometry and tessellation have already run as compute, and draw their
     * own output topology. Adjacency primitives without a geometry shader
@@ -1158,10 +1158,10 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    }
    memcpy(&record->raster_control, &cull, 4);
    bool front_ccw = dyn->rs.front_face == VK_FRONT_FACE_COUNTER_CLOCKWISE;
-   /* The tessellator emits its domain's winding; a geometry shader emits
-    * its own.
-    */
-   if (tes && !gs) {
+   /* The hardware-VS TES consumes the tessellator's unswapped indices, so
+    * encode its domain winding here. Native TES already applies the existing
+    * software-TES index swap, including domain origin: do not flip twice. */
+   if (tes && !gs && !native_grid) {
       front_ccw ^= gfx->tess.info.ccw;
       front_ccw ^= dyn->ts.domain_origin ==
                    VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT;

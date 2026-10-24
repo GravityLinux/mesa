@@ -47,6 +47,7 @@ hk_files = files(
   'hk_nir_lower_descriptors.c',
   'hk_nir_lower_mesh.c',
   'hk_nir_gs_mesh.c',
+  'hk_nir_tes_mesh.c',
   'hk_physical_device.c',
   'hk_physical_device.h',
   'hk_private.h',
@@ -180,7 +181,7 @@ if with_tests
     dependencies : [hk_deps], link_with : [libhk],
     link_args : ['-Wl,--wrap=hk_meta_decompress_color', '-Wl,--wrap=__vk_errorf']),
     suite : ['asahi', 'honeykrisp'])
-  foreach t : ['hk-feedback', 'hk-descriptor-parts', 'hk-constant-data', 'hk-draw-state-cache', 'hk-render-merge', 'hk-empty-clear-barriers', 'hk-image-limits', 'hk-sliced-3d', 'hk-stage-output-limits', 'hk-cull-output-limits', 'hk-pregfx-recording', 'hk-heap-resubmit', 'hk-heap-addresses', 'hk-native-image-store', 'hk-mesh-query', 'hk-native-mesh', 'hk-robust-bounded-vector', 'hk-gs-mesh']
+  foreach t : ['hk-feedback', 'hk-descriptor-parts', 'hk-constant-data', 'hk-draw-state-cache', 'hk-render-merge', 'hk-empty-clear-barriers', 'hk-image-limits', 'hk-sliced-3d', 'hk-stage-output-limits', 'hk-cull-output-limits', 'hk-pregfx-recording', 'hk-heap-resubmit', 'hk-heap-addresses', 'hk-native-image-store', 'hk-mesh-query', 'hk-native-mesh', 'hk-robust-bounded-vector', 'hk-gs-mesh', 'hk-tes-mesh']
     contract_test = executable(
       t,
       'tests/' + t + '.c',
@@ -262,6 +263,10 @@ if with_tests
     env : ['HK_APPLE9_NATIVE_MESH=1', 'HK_APPLE9_GS_NATIVE=1',
            'HK_APPLE9_NATIVE_MESH_PACKED_SHAPES=T16V3P1,T16V4P2'],
     suite : ['asahi', 'honeykrisp'])
+  test('hk-native-tess-routing', routing_test,
+    env : ['HK_APPLE9_NATIVE_MESH=1', 'HK_APPLE9_TESS_NATIVE=1',
+           'HK_APPLE9_NATIVE_MESH_PACKED_SHAPES=T16V3P1,T16V4P2'],
+    suite : ['asahi', 'honeykrisp'])
   hybrid_test = executable(
     'hk-native-mesh-hybrid', 'tests/hk-native-mesh-hybrid.c',
     include_directories : [inc_gallium, inc_gallium_aux, inc_include,
@@ -275,6 +280,10 @@ if with_tests
   )
   test('hk-native-gs-hybrid', hybrid_test,
     env : ['HK_APPLE9_NATIVE_MESH=1', 'HK_APPLE9_GS_NATIVE=1',
+           'HK_APPLE9_NATIVE_MESH_PACKED_SHAPES=T16V3P1,T16V4P2'],
+    suite : ['asahi', 'honeykrisp'])
+  test('hk-native-tess-hybrid', hybrid_test,
+    env : ['HK_APPLE9_NATIVE_MESH=1', 'HK_APPLE9_TESS_NATIVE=1',
            'HK_APPLE9_NATIVE_MESH_PACKED_SHAPES=T16V3P1,T16V4P2'],
     suite : ['asahi', 'honeykrisp'])
   test('hk-native-mesh-hybrid', hybrid_test,

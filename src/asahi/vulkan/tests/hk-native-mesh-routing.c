@@ -196,6 +196,132 @@ gs_routes(struct hk_cmd_buffer *cmd)
 }
 
 static void
+tess_routes(struct hk_cmd_buffer *cmd)
+{
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+   struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
+   struct hk_api_shader *gs = shader(MESA_SHADER_TESS_EVAL);
+   struct hk_api_shader *tcs = shader(MESA_SHADER_TESS_CTRL);
+   struct hk_api_shader *nc = shader(MESA_SHADER_TESS_CTRL);
+   struct hk_api_shader *vs = shader(MESA_SHADER_VERTEX);
+   struct hk_api_shader *fs = shader(MESA_SHADER_FRAGMENT);
+   struct hk_api_shader *ng = shader(MESA_SHADER_TESS_EVAL);
+   struct hk_api_shader *nv = shader(MESA_SHADER_VERTEX);
+   struct hk_api_shader *nf = shader(MESA_SHADER_FRAGMENT);
+   gs->apple9_native = ng;
+   vs->apple9_native = nv;
+   fs->apple9_native = nf;
+   tcs->apple9_native = nc;
+   nc->apple9_native_leaf = true;
+   ng->apple9_native_leaf = nv->apple9_native_leaf = nf->apple9_native_leaf =
+      true;
+   memset(ng->apple9_native_pair_id, 0x71, sizeof(ng->apple9_native_pair_id));
+   memcpy(nv->apple9_native_pair_id, ng->apple9_native_pair_id,
+          sizeof(ng->apple9_native_pair_id));
+   memcpy(nf->apple9_native_pair_id, ng->apple9_native_pair_id,
+          sizeof(ng->apple9_native_pair_id));
+   memcpy(nc->apple9_native_pair_id, ng->apple9_native_pair_id,
+          sizeof(ng->apple9_native_pair_id));
+   struct hk_shader *main = hk_native_producer_main(ng);
+   main->info.apple9_native_stage = HK_APPLE9_NATIVE_MESH;
+   hk_native_producer_object(ng)->info.apple9_native_stage =
+      HK_APPLE9_NATIVE_OBJECT;
+   main->info.apple9_native.key.physical_threads = 16;
+   main->info.apple9_native.layout.max_vertices = 3;
+   main->info.apple9_native.layout.max_primitives = 1;
+   gfx->shaders[MESA_SHADER_TESS_EVAL] = gs;
+   gfx->shaders[MESA_SHADER_TESS_CTRL] = tcs;
+   gfx->shaders[MESA_SHADER_VERTEX] = vs;
+   gfx->shaders[MESA_SHADER_FRAGMENT] = fs;
+   gfx->render.layer_count = 1;
+   dyn->rs.polygon_mode = VK_POLYGON_MODE_FILL;
+   dyn->ia.primitive_topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+   struct agx_draw draw = {.b = agx_3d(3, 1, 1)};
+   dyn->ts.patch_control_points = 3;
+   bool enabled = hk_apple9_native_tess_enabled();
+   CHECK(hk_apple9_use_native_tess(cmd, draw) == enabled);
+   if (enabled) {
+#define FALLBACK(field, value)                                                 \
+   do {                                                                        \
+      __typeof__(field) saved = field;                                         \
+      field = value;                                                           \
+      CHECK(!hk_apple9_use_native_tess(cmd, draw));                            \
+      field = saved;                                                           \
+      CHECK(hk_apple9_use_native_tess(cmd, draw));                             \
+   } while (0)
+      FALLBACK(cmd->in_meta, true);
+      FALLBACK(gs->apple9_native, NULL);
+      FALLBACK(vs->apple9_native, NULL);
+      FALLBACK(fs->apple9_native, NULL);
+      FALLBACK(ng->apple9_native_leaf, false);
+      FALLBACK(nv->apple9_native_pair_id[0], 0x13);
+      FALLBACK(nf->apple9_native_pair_id[31], 0x13);
+      FALLBACK(tcs->apple9_native, NULL);
+      FALLBACK(nc->apple9_native_pair_id[0], 0x13);
+      FALLBACK(nc->writes_memory, true);
+      FALLBACK(dyn->ts.patch_control_points, 0);
+      FALLBACK(dyn->ts.patch_control_points, 33);
+      FALLBACK(nv->writes_memory, true);
+      FALLBACK(main->info.apple9_native_stage, HK_APPLE9_NATIVE_NONE);
+      FALLBACK(hk_native_producer_object(ng)->info.apple9_native_stage,
+               HK_APPLE9_NATIVE_NONE);
+      FALLBACK(main->info.apple9_native.key.physical_threads, 32);
+      FALLBACK(main->info.apple9_native.layout.max_vertices, 5);
+      FALLBACK(draw.indexed, true);
+      FALLBACK(draw.restart, true);
+      FALLBACK(draw.start, 1);
+      FALLBACK(draw.start_instance, 1);
+      FALLBACK(draw.b.count[0], 6);
+      FALLBACK(draw.b.count[1], 2);
+      FALLBACK(draw.b.count[2], 2);
+      CHECK(!hk_apple9_use_native_tess(cmd, agx_draw_indirect(0x1000)));
+      FALLBACK(dyn->ia.primitive_restart_enable, true);
+      FALLBACK(dyn->ia.primitive_topology,
+               VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP);
+      FALLBACK(gfx->shaders[MESA_SHADER_TESS_CTRL], NULL);
+      FALLBACK(gfx->shaders[MESA_SHADER_GEOMETRY], gs);
+      FALLBACK(gfx->shaders[MESA_SHADER_TASK], gs);
+      FALLBACK(gfx->shaders[MESA_SHADER_MESH], gs);
+      FALLBACK(gfx->render.view_mask, 3);
+      FALLBACK(gfx->render.layer_count, 2);
+      FALLBACK(cmd->state.cond_render.active, true);
+      FALLBACK(gfx->descriptors.root.draw.pipeline_stats_flags, 1);
+      FALLBACK(gfx->occlusion.active_count, 1);
+      FALLBACK(gfx->mesh_pg_query, 0x1000);
+      FALLBACK(gfx->pg_query[0], 0x1000);
+      FALLBACK(gfx->xfb_query[3], 0x1000);
+      FALLBACK(gfx->xfb_enabled, true);
+      FALLBACK(dyn->rs.rasterization_stream, 1);
+      FALLBACK(dyn->rs.rasterizer_discard_enable, true);
+      FALLBACK(dyn->rs.polygon_mode, VK_POLYGON_MODE_LINE);
+      FALLBACK(dyn->rs.conservative_mode,
+               VK_CONSERVATIVE_RASTERIZATION_MODE_OVERESTIMATE_EXT);
+      FALLBACK(dyn->ms.rasterization_samples, 4);
+      FALLBACK(gfx->render.tilebuffer.nr_samples, 4);
+#undef FALLBACK
+      for (unsigned p = 1; p <= 32; ++p) {
+         draw.b.count[0] = dyn->ts.patch_control_points = p;
+         CHECK(hk_apple9_use_native_tess(cmd, draw));
+      }
+      gfx->shaders[MESA_SHADER_TESS_EVAL] = ng;
+      gfx->shaders[MESA_SHADER_VERTEX] = nv;
+      gfx->shaders[MESA_SHADER_FRAGMENT] = nf;
+      CHECK(hk_apple9_use_native_tess(cmd, draw));
+      gfx->shaders[MESA_SHADER_FRAGMENT] = NULL;
+      CHECK(hk_apple9_use_native_tess(cmd, draw));
+   }
+   memset(gfx->shaders, 0, sizeof(gfx->shaders));
+   free(tcs);
+   free(nc);
+   free(gs);
+   free(vs);
+   free(fs);
+   free(ng);
+   free(nv);
+   free(nf);
+}
+
+static void
 mark_draw(struct hk_cs *cs, bool native)
 {
    /* The classification/transition test owns CPU storage, not GPU execution.
@@ -278,6 +404,7 @@ main(void)
    cmd->vk.state = MESA_VK_COMMAND_BUFFER_STATE_RECORDING;
    routes(cmd);
    gs_routes(cmd);
+   tess_routes(cmd);
    transitions(cmd);
    free(cmd);
    free(dev);

@@ -42,6 +42,14 @@ bool hk_apple9_compile_gs_mesh_program(
    struct agx_shader_part *out, struct agx_apple9_mesh_body_info *info,
    const char **reason);
 
+/* Position-only TES realization over the existing tessellator index stream. */
+nir_shader *hk_nir_tes_mesh(const nir_shader *source, const char **reason);
+nir_shader *hk_nir_tes_mesh_object(void);
+bool hk_apple9_compile_tes_mesh_program(
+   const nir_shader *source, const struct hk_apple9_graphics_key *key,
+   struct agx_shader_part *out, struct agx_apple9_mesh_body_info *info,
+   const char **reason);
+
 struct hk_physical_device;
 struct hk_pipeline_compilation_ctx;
 struct vk_descriptor_set_layout;
@@ -511,6 +519,10 @@ struct hk_api_shader {
    bool apple9_native_candidate;
    bool apple9_native_cull_primitive;
 
+   /* A native TES uses the program-info union for mesh metadata. Retain
+    * the API tessellation mode independently for the existing producer. */
+   struct hk_tess_info apple9_native_tess;
+
    /* Immutable after compilation/cache reload; avoids walking variants at
     * every shader bind, including shaders with no constant data. */
    uint64_t constant_data_addr;
@@ -531,9 +543,12 @@ static inline struct hk_shader *
 hk_native_producer_main(struct hk_api_shader *shader)
 {
    assert(shader->vk.stage == MESA_SHADER_MESH ||
-          shader->vk.stage == MESA_SHADER_GEOMETRY);
+          shader->vk.stage == MESA_SHADER_GEOMETRY ||
+          shader->vk.stage == MESA_SHADER_TESS_EVAL);
    return &shader->variants[shader->vk.stage == MESA_SHADER_GEOMETRY
                                ? HK_GS_VARIANT_NATIVE_MESH
+                            : shader->vk.stage == MESA_SHADER_TESS_EVAL
+                               ? HK_VS_VARIANT_HW
                                : HK_MESH_VARIANT_MAIN];
 }
 
@@ -541,9 +556,12 @@ static inline struct hk_shader *
 hk_native_producer_object(struct hk_api_shader *shader)
 {
    assert(shader->vk.stage == MESA_SHADER_MESH ||
-          shader->vk.stage == MESA_SHADER_GEOMETRY);
+          shader->vk.stage == MESA_SHADER_GEOMETRY ||
+          shader->vk.stage == MESA_SHADER_TESS_EVAL);
    return &shader->variants[shader->vk.stage == MESA_SHADER_GEOMETRY
                                ? HK_GS_VARIANT_NATIVE_OBJECT
+                            : shader->vk.stage == MESA_SHADER_TESS_EVAL
+                               ? HK_VS_VARIANT_SW
                                : HK_MESH_VARIANT_OBJECT];
 }
 

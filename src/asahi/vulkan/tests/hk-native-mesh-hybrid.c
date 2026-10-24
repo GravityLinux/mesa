@@ -563,6 +563,196 @@ compile_gs(struct hk_device *dev, unsigned vertices, bool deferred,
    return compiled_allocations;
 }
 
+static nir_shader *
+tess_source(mesa_shader_stage stage, unsigned vertices)
+{
+   if (stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_FRAGMENT)
+      return gs_source(stage, 0);
+   nir_builder b = nir_builder_init_simple_shader(stage, &agx_nir_options,
+                                                  "native TES ownership");
+   b.shader->info.io_lowered = true;
+   if (stage == MESA_SHADER_TESS_CTRL) {
+      b.shader->info.tess.tcs_vertices_out = vertices;
+      nir_def *id = nir_load_invocation_id(&b);
+      nir_def *pos = nir_load_per_vertex_input(
+         &b, 4, 32, id, nir_imm_int(&b, 0), .dest_type = nir_type_float32,
+         .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+      nir_store_per_vertex_output(
+         &b, pos, id, nir_imm_int(&b, 0), .write_mask = 15,
+         .src_type = nir_type_float32,
+         .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+      nir_push_if(&b, nir_ieq_imm(&b, id, 0));
+      nir_store_output(
+         &b, nir_imm_vec4(&b, 1, 1, 1, 1), nir_imm_int(&b, 0), .write_mask = 15,
+         .src_type = nir_type_float32,
+         .io_semantics = {.location = VARYING_SLOT_TESS_LEVEL_OUTER,
+                          .num_slots = 1});
+      nir_store_output(
+         &b, nir_imm_vec2(&b, 1, 1), nir_imm_int(&b, 0), .write_mask = 3,
+         .src_type = nir_type_float32,
+         .io_semantics = {.location = VARYING_SLOT_TESS_LEVEL_INNER,
+                          .num_slots = 1});
+      nir_pop_if(&b, NULL);
+   } else {
+      b.shader->info.tess._primitive_mode = TESS_PRIMITIVE_TRIANGLES;
+      b.shader->info.tess.spacing = TESS_SPACING_EQUAL;
+      nir_def *coord = nir_load_tess_coord(&b);
+      nir_def *pos = nir_load_per_vertex_input(
+         &b, 4, 32, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
+         .dest_type = nir_type_float32,
+         .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+      pos = nir_fadd(
+         &b, pos,
+         nir_vec4(&b, nir_channel(&b, coord, 0), nir_channel(&b, coord, 1),
+                  nir_imm_float(&b, 0), nir_imm_float(&b, 0)));
+      nir_store_output(
+         &b, pos, nir_imm_int(&b, 0), .write_mask = 15,
+         .src_type = nir_type_float32,
+         .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+   }
+   b.shader->constant_data_size = 64;
+   b.shader->constant_data = ralloc_size(b.shader, 64);
+   memset(b.shader->constant_data, 0x30 + stage, 64);
+   nir_shader_gather_info(b.shader, nir_shader_get_entrypoint(b.shader));
+   return b.shader;
+}
+
+static void
+check_tess_programs(struct hk_api_shader **api, bool native, unsigned vertices)
+{
+   const mesa_shader_stage stages[] = {
+      MESA_SHADER_VERTEX, MESA_SHADER_TESS_CTRL, MESA_SHADER_TESS_EVAL,
+      MESA_SHADER_FRAGMENT};
+   struct hk_api_shader *ng = hk_api_shader_native(api[MESA_SHADER_TESS_EVAL]);
+   for (unsigned i = 0; i < ARRAY_SIZE(stages); ++i) {
+      struct hk_api_shader *s = api[stages[i]];
+      CHECK(s && s->vk.stage == stages[i] && !s->apple9_deferred);
+      CHECK(s->constant_data_addr);
+      struct hk_api_shader *n = hk_api_shader_native(s);
+      CHECK(!!n == native);
+      if (!native)
+         continue;
+      CHECK(n->vk.stage == s->vk.stage && n->apple9_native_leaf);
+      CHECK(!n->apple9_native && n->constant_data_addr);
+      CHECK(!memcmp(n->apple9_native_pair_id, ng->apple9_native_pair_id,
+                    sizeof(n->apple9_native_pair_id)));
+      CHECK(n->variants[0].data_size == 64);
+      for (unsigned j = 0; j < 64; ++j)
+         CHECK(((uint8_t *)n->variants[0].data_ptr)[j] == 0x30 + stages[i]);
+   }
+   if (native) {
+      CHECK(hk_native_producer_main(ng)->bo);
+      CHECK(hk_native_producer_object(ng)->bo);
+      CHECK(hk_native_producer_main(ng)->info.apple9_native_stage ==
+            HK_APPLE9_NATIVE_MESH);
+      CHECK(hk_native_producer_object(ng)->info.apple9_native_stage ==
+            HK_APPLE9_NATIVE_OBJECT);
+      CHECK(
+         hk_native_producer_main(ng)->info.apple9_native.layout.max_vertices ==
+         3);
+      CHECK(hk_native_producer_main(ng)
+               ->info.apple9_native.layout.max_primitives == 1);
+      struct hk_api_shader *nv = hk_api_shader_native(api[MESA_SHADER_VERTEX]);
+      CHECK(nv->variants[HK_VS_VARIANT_SW].bo && !nv->writes_memory);
+      CHECK(nv->variants[HK_VS_VARIANT_SW].b.info.outputs & VARYING_BIT_POS);
+      struct hk_api_shader *nc =
+         hk_api_shader_native(api[MESA_SHADER_TESS_CTRL]);
+      CHECK(nc->variants[0].bo && !nc->writes_memory);
+      CHECK(nc->variants[0].info.tess.tcs_output_patch_size == vertices);
+      CHECK(ng->apple9_native_tess.mode == TESS_PRIMITIVE_TRIANGLES);
+      CHECK(ng->apple9_native_tess.spacing == TESS_SPACING_EQUAL);
+   } else {
+      CHECK(api[MESA_SHADER_TESS_EVAL]->variants[HK_VS_VARIANT_HW].bo);
+      CHECK(!api[MESA_SHADER_TESS_EVAL]->variants[0].info.apple9_native_stage);
+   }
+}
+
+/* Exercise eager ownership, deferred native/fallback/native reuse, backend
+ * rejection and every BO allocation failure, including the software VS. */
+static unsigned
+compile_tess(struct hk_device *dev, unsigned vertices, bool deferred,
+             bool reject, unsigned failure)
+{
+   const mesa_shader_stage stages[] = {
+      MESA_SHADER_VERTEX, MESA_SHADER_TESS_CTRL, MESA_SHADER_TESS_EVAL,
+      MESA_SHADER_FRAGMENT};
+   struct vk_shader_compile_info infos[4] = {0};
+   struct vk_shader *out[4] = {0};
+   struct hk_api_shader *api[HK_APPLE9_GFX_STAGES] = {0};
+   struct hk_api_shader *copies[HK_APPLE9_GFX_STAGES] = {0};
+   struct hk_api_shader *resolved[HK_APPLE9_GFX_STAGES] = {0};
+   for (unsigned i = 0; i < 4; ++i) {
+      infos[i].stage = stages[i];
+      infos[i].nir = tess_source(stages[i], vertices);
+      infos[i].robustness = &vk_robustness_disabled;
+      infos[i].next_stage_mask =
+         i == 0   ? VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT
+         : i == 1 ? VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT
+                  : 0;
+   }
+   allocations = native_compiles = emulated_compiles = fragment_compiles = 0;
+   fail_allocation = failure;
+   reject_native = reject;
+   VkResult result =
+      deferred ? hk_apple9_defer_graphics(dev, 4, infos, NULL, NULL, out)
+               : hk_apple9_compile_graphics(dev, 4, infos, NULL, NULL, NULL,
+                                            NULL, out);
+   unsigned compiled_allocations = allocations;
+   bool native = hk_apple9_native_tess_enabled() && vertices <= 32 && !reject;
+   if (!deferred && failure) {
+      CHECK(result == VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      CHECK(!out[0] && !out[1] && !out[2] && !out[3]);
+   } else {
+      CHECK(result == VK_SUCCESS);
+      for (unsigned i = 0; i < 4; ++i) {
+         api[stages[i]] = container_of(out[i], struct hk_api_shader, vk);
+         copies[stages[i]] = roundtrip(dev, api[stages[i]]);
+      }
+      if (deferred) {
+         CHECK(allocations == 0);
+         result = hk_apple9_resolve_graphics(dev, copies, NULL, resolved, true,
+                                             false);
+         compiled_allocations = allocations;
+         if (failure) {
+            CHECK(result == VK_ERROR_OUT_OF_DEVICE_MEMORY);
+         } else {
+            CHECK(result == VK_SUCCESS);
+            check_tess_programs(resolved, native, vertices);
+            CHECK(native_compiles ==
+                  (hk_apple9_native_tess_enabled() && vertices <= 32));
+            unsigned before = allocations, compiles = native_compiles;
+            struct hk_api_shader *first = resolved[MESA_SHADER_TESS_EVAL];
+            CHECK(hk_apple9_resolve_graphics(dev, copies, NULL, resolved, true,
+                                             false) == VK_SUCCESS);
+            CHECK(allocations == before &&
+                  resolved[MESA_SHADER_TESS_EVAL] == first);
+            CHECK(hk_apple9_resolve_graphics(dev, copies, NULL, resolved, false,
+                                             false) == VK_SUCCESS);
+            check_tess_programs(resolved, false, vertices);
+            before = allocations;
+            CHECK(hk_apple9_resolve_graphics(dev, copies, NULL, resolved, true,
+                                             false) == VK_SUCCESS);
+            CHECK(allocations == before &&
+                  resolved[MESA_SHADER_TESS_EVAL] == first);
+            CHECK(native_compiles == compiles);
+         }
+      } else {
+         check_tess_programs(api, native, vertices);
+         check_tess_programs(copies, native, vertices);
+      }
+      for (unsigned i = 0; i < 4; ++i) {
+         hk_api_shader_destroy(&dev->vk, out[i], NULL);
+         hk_api_shader_destroy(&dev->vk, &copies[stages[i]]->vk, NULL);
+      }
+   }
+   reject_native = false;
+   hk_apple9_variants_finish(dev);
+   hk_apple9_bodies_finish(dev);
+   test_reset_usc_heap(dev);
+   CHECK(live_bos == 0);
+   return compiled_allocations;
+}
+
 static unsigned
 store_guard_depth(nir_shader *nir)
 {
@@ -627,6 +817,20 @@ main(void)
    simple_mtx_init(&dev->apple9_bodies.lock, mtx_plain);
    list_inithead(&dev->apple9_bodies.slabs);
    simple_mtx_init(&pdev->debug_compile_lock, mtx_plain);
+   for (unsigned v = 1; v <= 32; v = v == 1 ? 3 : v == 3 ? 32 : 33) {
+      compile_tess(dev, v, false, false, 0);
+      compile_tess(dev, v, true, false, 0);
+   }
+   if (hk_apple9_native_tess_enabled()) {
+      compile_tess(dev, 3, false, true, 0);
+      compile_tess(dev, 3, true, true, 0);
+      for (unsigned deferred = 0; deferred < 2; ++deferred) {
+         unsigned count = compile_tess(dev, 3, deferred, false, 0);
+         for (unsigned i = 1; i <= count; ++i)
+            compile_tess(dev, 3, deferred, false, i);
+      }
+      goto done;
+   }
    for (unsigned v = 3; v <= 5; ++v) {
       compile_gs(dev, v, false, false, 0);
       compile_gs(dev, v, true, false, 0);
