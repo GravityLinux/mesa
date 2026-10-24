@@ -522,6 +522,10 @@ struct hk_api_shader {
    /* A native TES uses the program-info union for mesh metadata. Retain
     * the API tessellation mode independently for the existing producer. */
    struct hk_tess_info apple9_native_tess;
+   /* Production admission of the API producer. Also persisted on deferred
+    * candidates and every leaf in a linked native realization. Zero denotes
+    * ordinary fallback or an explicitly selected research realization. */
+   uint8_t apple9_native_stage_mask;
 
    /* Immutable after compilation/cache reload; avoids walking variants at
     * every shader bind, including shaders with no constant data. */
@@ -795,6 +799,8 @@ struct hk_apple9_graphics_key {
    bool gs_cull_planes;
    /* Per-device policy; actual use still requires an exact qualified mesh. */
    bool native_index;
+   /* Independently keyed stage admission; never implied by a native mesh. */
+   uint8_t native_stages;
 };
 
 bool hk_apple9_compile_native_mesh_program(

@@ -22,6 +22,19 @@ uint64_t hk_apple9_native_index_shapes(void);
 /* Separate default-off GS route; also requires native mesh and exact classes. */
 bool hk_apple9_native_gs_enabled(void);
 bool hk_apple9_native_tess_enabled(void);
+
+/* Stage policy is narrower than native-index qualification. These bits name
+ * the API producer, not the generated mesh/object execution stages. */
+#define HK_APPLE9_NATIVE_GS_BIT (1u << 0)
+#define HK_APPLE9_NATIVE_TES_BIT (1u << 1)
+#define HK_APPLE9_NATIVE_STAGE_BITS \
+   (HK_APPLE9_NATIVE_GS_BIT | HK_APPLE9_NATIVE_TES_BIT)
+uint8_t hk_apple9_native_stage_policy(const struct hk_physical_device *pdev);
+bool hk_apple9_native_stage_available_device(struct hk_device *dev,
+                                             mesa_shader_stage stage);
+bool hk_apple9_native_stage_class(mesa_shader_stage stage, unsigned threads,
+                                  unsigned vertices, unsigned primitives);
+
 bool hk_apple9_native_mesh_attributes_enabled(void);
 bool hk_apple9_native_mesh_primitive_lowering_enabled(void);
 

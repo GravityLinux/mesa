@@ -18,6 +18,9 @@ def declare_options():
     B = drirc_gen.DrircBool
 
     misc_options = [
+        B("hk_disable_native_stages", False,
+          "Disable qualified Apple9 native GS and TES execution",
+          c_name="disable_native_stages"),
         B("hk_disable_native_index", False,
           "Disable qualified Apple9 native mesh index publication",
           c_name="disable_native_index"),

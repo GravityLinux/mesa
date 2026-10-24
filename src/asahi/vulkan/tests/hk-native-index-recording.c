@@ -107,6 +107,10 @@ main(int argc, char **argv)
    ralloc_free(nir);
    main->bo = agx_bo_create(&dev->dev, 4096, 4096, 0, "mesh");
    object->bo = agx_bo_create(&dev->dev, 4096, 4096, 0, "object");
+   agx_shader_body_init_bo(main->bo);
+   agx_shader_body_init_bo(object->bo);
+   main->apple9_body = &main->bo->apple9_body;
+   object->apple9_body = &object->bo->apple9_body;
    cmd->state.gfx.shaders[MESA_SHADER_MESH] = mesh;
    cmd->state.gfx.shaders[MESA_SHADER_FRAGMENT] = fs;
    cmd->state.gfx.render.layer_count = 1;
@@ -134,17 +138,19 @@ main(int argc, char **argv)
       CHECK(command[0] == 0x40000d2c);
       CHECK(command[10] == 1 && command[11] == 0x400810);
       CHECK(command[39] == 0xc0000000);
-      CHECK(main->bo->apple9_entry_pins == 1 && object->bo->apple9_entry_pins == 1);
+      CHECK(main->apple9_body->entry_pins == 1 && object->apple9_body->entry_pins == 1);
    } else {
       uint8_t ordinary[1024] = {0};
       uint8_t *end = agx_apple9_emit_direct_draw(ordinary, &pipeline, 6, 1, 0);
       CHECK(cs.current - cs.start == end - ordinary - 4);
       CHECK(!memcmp(command, ordinary, end - ordinary));
-      CHECK(main->bo->apple9_entry_pins == 0 && object->bo->apple9_entry_pins == 0);
+      CHECK(main->apple9_body->entry_pins == 0 && object->apple9_body->entry_pins == 0);
       uint32_t state[AGX_APPLE9_MESH_STATE_WORDS];
       CHECK(!hk_apple9_prepare_native_mesh(cmd, main, object, &record, 0x8000, state));
    }
    hk_DestroyCommandPool(device, pool, NULL);
+   CHECK(main->apple9_body->entry_pins == 0 && object->apple9_body->entry_pins == 0);
+   CHECK(main->bo->refcnt == 1 && object->bo->refcnt == 1);
    agx_bo_unreference(&dev->dev, main->bo);
    agx_bo_unreference(&dev->dev, object->bo);
    free(main->b.binary); free(object->b.binary);

@@ -5381,7 +5381,8 @@ hk_apple9_native_gs_state_eligible(struct hk_cmd_buffer *cmd,
 {
    const struct hk_graphics_state *gfx = &cmd->state.gfx;
    const struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
-   if (!hk_apple9_native_gs_enabled() || cmd->in_meta || agx_is_indirect(draw.b) ||
+   if (!hk_apple9_native_stage_available_device(hk_cmd_buffer_device(cmd),
+                                                MESA_SHADER_GEOMETRY) || cmd->in_meta || agx_is_indirect(draw.b) ||
        draw.indexed || draw.restart || draw.start || draw.start_instance ||
        draw.b.count[0] != 3 || draw.b.count[1] != 1 || draw.b.count[2] != 1 ||
        dyn->ia.primitive_topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST ||
@@ -5414,7 +5415,8 @@ hk_apple9_native_tess_state_eligible(struct hk_cmd_buffer *cmd,
    const struct hk_graphics_state *gfx = &cmd->state.gfx;
    const struct vk_dynamic_graphics_state *dyn =
       &cmd->vk.dynamic_graphics_state;
-   if (!hk_apple9_native_tess_enabled() || cmd->in_meta ||
+   if (!hk_apple9_native_stage_available_device(hk_cmd_buffer_device(cmd),
+                                                MESA_SHADER_TESS_EVAL) || cmd->in_meta ||
        agx_is_indirect(draw.b) || draw.indexed || draw.restart || draw.start ||
        draw.start_instance || !dyn->ts.patch_control_points ||
        dyn->ts.patch_control_points > 32 ||
@@ -5451,7 +5453,9 @@ hk_apple9_use_native_tess(struct hk_cmd_buffer *cmd, struct agx_draw draw)
       return false;
    struct hk_api_shader *tes =
       hk_api_shader_native(gfx->shaders[MESA_SHADER_TESS_EVAL]);
-   if (!tes || !tes->apple9_native_leaf)
+   if (!tes || !tes->apple9_native_leaf ||
+       (!hk_apple9_native_tess_enabled() &&
+        tes->apple9_native_stage_mask != HK_APPLE9_NATIVE_TES_BIT))
       return false;
    const mesa_shader_stage stages[] = {
       MESA_SHADER_VERTEX,
@@ -5466,6 +5470,7 @@ hk_apple9_use_native_tess(struct hk_cmd_buffer *cmd, struct agx_draw draw)
       api = hk_api_shader_native(api);
       if (!api || !api->apple9_native_leaf ||
           (stages[i] != MESA_SHADER_FRAGMENT && api->writes_memory) ||
+          api->apple9_native_stage_mask != tes->apple9_native_stage_mask ||
           memcmp(tes->apple9_native_pair_id, api->apple9_native_pair_id,
                  sizeof(tes->apple9_native_pair_id)))
          return false;
@@ -5475,10 +5480,12 @@ hk_apple9_use_native_tess(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    return main->info.apple9_native_stage == HK_APPLE9_NATIVE_MESH &&
           hk_native_producer_object(tes)->info.apple9_native_stage ==
              HK_APPLE9_NATIVE_OBJECT &&
-          body->key.physical_threads == 16 && body->layout.max_vertices == 3 &&
-          body->layout.max_primitives == 1 &&
+          hk_apple9_native_stage_class(
+             MESA_SHADER_TESS_EVAL, body->key.physical_threads,
+             body->layout.max_vertices, body->layout.max_primitives) &&
           hk_apple9_packed_mesh_class_selected(
-             hk_apple9_native_mesh_packed_shapes(), 16, 3, 1);
+             hk_apple9_native_mesh_packed_shapes(), body->key.physical_threads,
+             body->layout.max_vertices, body->layout.max_primitives);
 }
 
 DEBUG_GET_ONCE_BOOL_OPTION(tess_route_log, "HK_APPLE9_TESS_ROUTE_LOG", false)
@@ -5516,6 +5523,9 @@ hk_apple9_use_native_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
        gfx->shaders[MESA_SHADER_GEOMETRY]->is_passthrough ||
        gs->is_passthrough || !gs->apple9_native_leaf ||
        !vs->apple9_native_leaf || vs->writes_memory ||
+       (!hk_apple9_native_gs_enabled() &&
+        gs->apple9_native_stage_mask != HK_APPLE9_NATIVE_GS_BIT) ||
+       vs->apple9_native_stage_mask != gs->apple9_native_stage_mask ||
        memcmp(gs->apple9_native_pair_id, vs->apple9_native_pair_id,
               sizeof(gs->apple9_native_pair_id)))
       return false;
@@ -5523,6 +5533,7 @@ hk_apple9_use_native_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    if (fs && fs != hk_cmd_buffer_device(cmd)->null_fs) {
       fs = hk_api_shader_native(fs);
       if (!fs || !fs->apple9_native_leaf ||
+          fs->apple9_native_stage_mask != gs->apple9_native_stage_mask ||
           memcmp(gs->apple9_native_pair_id, fs->apple9_native_pair_id,
                  sizeof(gs->apple9_native_pair_id)))
          return false;
@@ -5532,6 +5543,9 @@ hk_apple9_use_native_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    return main->info.apple9_native_stage == HK_APPLE9_NATIVE_MESH &&
           hk_native_producer_object(gs)->info.apple9_native_stage ==
              HK_APPLE9_NATIVE_OBJECT &&
+          (hk_apple9_native_gs_enabled() || hk_apple9_native_stage_class(
+             MESA_SHADER_GEOMETRY, body->key.physical_threads,
+             body->layout.max_vertices, body->layout.max_primitives)) &&
           hk_apple9_packed_mesh_class_selected(
              hk_apple9_native_mesh_packed_shapes(), body->key.physical_threads,
              body->layout.max_vertices, body->layout.max_primitives);

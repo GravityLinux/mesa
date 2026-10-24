@@ -42,6 +42,7 @@ struct hk_physical_device {
    bool apple9_d3d_mip_rounding;
    /* Kill switch for the qualified native-index default, not research opt-ins. */
    bool disable_native_index;
+   bool disable_native_stages;
    dev_t render_dev;
    int master_fd;
 

@@ -5,12 +5,14 @@
 #include "hk_physical_device.h"
 #include "hk_device.h"
 #include "hk_apple9_native_index_classes.h"
+#include "util/u_atomic.h"
 #include "util/u_debug.h"
 #include <string.h>
 
 DEBUG_GET_ONCE_BOOL_OPTION(native_mesh, "HK_APPLE9_NATIVE_MESH", false)
 /* Land the qualified path without enabling the 31-class default. */
 DEBUG_GET_ONCE_BOOL_OPTION(native_index, "HK_APPLE9_NATIVE_INDEX", false)
+DEBUG_GET_ONCE_OPTION(native_stages, "HK_APPLE9_NATIVE_STAGES", NULL)
 DEBUG_GET_ONCE_BOOL_OPTION(native_gs, "HK_APPLE9_GS_NATIVE", false)
 DEBUG_GET_ONCE_BOOL_OPTION(native_tess, "HK_APPLE9_TESS_NATIVE", false)
 
@@ -140,6 +142,60 @@ hk_apple9_native_mesh_available_device(struct hk_device *dev)
    return hk_apple9_native_mesh_enabled() ||
           (dev->dev.native_mesh_qualified &&
            hk_apple9_native_index_enabled(hk_device_physical(dev)));
+}
+
+uint8_t
+hk_apple9_native_stage_policy(const struct hk_physical_device *pdev)
+{
+   /* Stage qualification and its default decision are independent of native
+    * index. An explicit stage selection enables host/device qualification;
+    * absence, zero or an unknown selection keeps production GS/TES off. */
+   if (!hk_apple9_native_index_enabled(pdev) || pdev->disable_native_stages)
+      return 0;
+   const char *selection = debug_get_option_native_stages();
+   if (!selection || !strcmp(selection, "0"))
+      return 0;
+   if (!strcmp(selection, "gs"))
+      return HK_APPLE9_NATIVE_GS_BIT;
+   if (!strcmp(selection, "tes"))
+      return HK_APPLE9_NATIVE_TES_BIT;
+   if (!strcmp(selection, "gs,tes"))
+      return HK_APPLE9_NATIVE_STAGE_BITS;
+
+   static bool warned_invalid;
+   if (!p_atomic_xchg(&warned_invalid, true))
+      fprintf(stderr, "HK_APPLE9_NATIVE_STAGES: unknown selection '%s'; "
+                      "expected 0, gs, tes or gs,tes; stages disabled\n",
+              selection);
+   return 0;
+}
+
+bool
+hk_apple9_native_stage_available_device(struct hk_device *dev,
+                                        mesa_shader_stage stage)
+{
+   if (stage == MESA_SHADER_GEOMETRY && hk_apple9_native_gs_enabled())
+      return true;
+   if (stage == MESA_SHADER_TESS_EVAL && hk_apple9_native_tess_enabled())
+      return true;
+   unsigned bit = stage == MESA_SHADER_GEOMETRY ? HK_APPLE9_NATIVE_GS_BIT
+                : stage == MESA_SHADER_TESS_EVAL ? HK_APPLE9_NATIVE_TES_BIT : 0;
+   return dev->dev.native_mesh_qualified &&
+          (hk_apple9_native_stage_policy(hk_device_physical(dev)) & bit);
+}
+
+bool
+hk_apple9_native_stage_class(mesa_shader_stage stage, unsigned threads,
+                             unsigned vertices, unsigned primitives)
+{
+   /* The initial GS/TES contract never inherits the wider index class list.
+    * In particular W64 and T16V16P16 cannot enter through a generated stage. */
+   if (threads != 16)
+      return false;
+   if (stage == MESA_SHADER_GEOMETRY)
+      return (vertices == 3 && primitives == 1) ||
+             (vertices == 4 && primitives == 2);
+   return stage == MESA_SHADER_TESS_EVAL && vertices == 3 && primitives == 1;
 }
 
 const char *

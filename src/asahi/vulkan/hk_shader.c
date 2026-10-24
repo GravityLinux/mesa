@@ -164,6 +164,7 @@ static const char *const hk_codegen_env[] = {
    "HK_APPLE9_NATIVE_MESH_PRIMITIVE_LOWERING",
    "HK_APPLE9_NATIVE_MESH_PACKED_SHAPES",
    "HK_APPLE9_NATIVE_INDEX",
+   "HK_APPLE9_NATIVE_STAGES",
    "HK_APPLE9_GS_MESH_PROBE",
    "HK_APPLE9_GS_NATIVE",
    "HK_APPLE9_TESS_MESH_PROBE",
@@ -293,7 +294,8 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
                     ((uint64_t)pdev->apple9_layered_2d << 63) |
                     ((uint64_t)agx_has_soft_fault((struct agx_device *)&pdev->dev) << 62) |
                     ((uint64_t)pdev->apple9_d3d_mip_rounding << 61) |
-                    ((uint64_t)hk_apple9_native_index_enabled(pdev) << 60);
+                    ((uint64_t)hk_apple9_native_index_enabled(pdev) << 60) |
+                    ((uint64_t)hk_apple9_native_stage_policy(pdev) << 58);
    return flags ^ hk_compiler_env_hash_value;
 }
 
@@ -1506,6 +1508,7 @@ hk_apple9_graphics_key_device(struct hk_apple9_graphics_key *key,
 {
    hk_apple9_graphics_key(key, state);
    key->native_index = hk_apple9_native_index_enabled(pdev);
+   key->native_stages = hk_apple9_native_stage_policy(pdev);
 }
 
 static void
@@ -6715,8 +6718,24 @@ hk_apple9_native_gs_check(const nir_shader *source,
                          bool *supported, const char **reason)
 {
    *supported = false;
-   if (!hk_apple9_native_gs_enabled())
+   bool production = key->native_stages & HK_APPLE9_NATIVE_GS_BIT;
+   if (!production && !hk_apple9_native_gs_enabled())
       return VK_SUCCESS;
+   /* Reject common declaration/interface exclusions before cloning NIR. The
+    * normal lowering still validates every instruction in admitted sources. */
+   if (production &&
+       (source->info.gs.input_primitive != MESA_PRIM_TRIANGLES ||
+        source->info.gs.output_primitive != MESA_PRIM_TRIANGLE_STRIP ||
+        source->info.gs.invocations != 1 || source->info.gs.active_stream_mask != 1 ||
+        source->info.gs.vertices_out < 3 || source->info.gs.vertices_out > 4 ||
+        source->info.outputs_written != VARYING_BIT_POS ||
+        (source->info.inputs_read & ~VARYING_BIT_POS) ||
+        source->info.clip_distance_array_size || source->info.cull_distance_array_size ||
+        source->xfb_info || source->info.writes_memory)) {
+      if (reason)
+         *reason = "GS declaration/interface is outside the admitted stage contract";
+      return VK_SUCCESS;
+   }
    const char *local_reason = NULL;
    if (!reason)
       reason = &local_reason;
@@ -6736,11 +6755,14 @@ hk_apple9_native_gs_check(const nir_shader *source,
       return VK_SUCCESS;
    }
    VkResult result = VK_SUCCESS;
-   if (hk_apple9_native_mesh_packed_shape_eligible(mesh)) {
+   if (hk_apple9_native_mesh_packed_shape_eligible(mesh) &&
+       (!production || hk_apple9_native_stage_class(
+          source->info.stage, mesh->info.workgroup_size[0],
+          mesh->info.mesh.max_vertices_out, mesh->info.mesh.max_primitives_out))) {
       hk_apple9_lower_prerast_sysvals(mesh, MESA_SHADER_COMPUTE);
       result = hk_apple9_native_mesh_check(mesh, key, supported, reason);
    } else {
-      *reason = "GS declaration is not an explicitly selected packed class";
+      *reason = "GS declaration is outside the admitted stage classes";
    }
    if (debug_get_option_gs_native_log())
       fprintf(stderr, "HK_GS_CAP accepted=%u reason=%s\n", *supported, *reason ?: "supported");
@@ -6756,8 +6778,22 @@ hk_apple9_native_tess_check(const nir_shader *source,
                             bool *supported, const char **reason)
 {
    *supported = false;
-   if (!hk_apple9_native_tess_enabled())
+   bool production = key->native_stages & HK_APPLE9_NATIVE_TES_BIT;
+   if (!production && !hk_apple9_native_tess_enabled())
       return VK_SUCCESS;
+   if (production &&
+       ((source->info.tess._primitive_mode != TESS_PRIMITIVE_TRIANGLES &&
+         source->info.tess._primitive_mode != TESS_PRIMITIVE_QUADS) ||
+        source->info.tess.point_mode || source->info.patch_inputs_read ||
+        source->info.outputs_written != VARYING_BIT_POS ||
+        (source->info.inputs_read & ~(VARYING_BIT_POS | VARYING_BIT_TESS_LEVEL_INNER |
+                                     VARYING_BIT_TESS_LEVEL_OUTER)) ||
+        source->info.clip_distance_array_size || source->info.cull_distance_array_size ||
+        source->xfb_info || source->info.writes_memory)) {
+      if (reason)
+         *reason = "TES declaration/interface is outside the admitted stage contract";
+      return VK_SUCCESS;
+   }
    const char *local_reason = NULL;
    if (!reason)
       reason = &local_reason;
@@ -6778,11 +6814,14 @@ hk_apple9_native_tess_check(const nir_shader *source,
       return VK_SUCCESS;
    }
    VkResult result = VK_SUCCESS;
-   if (hk_apple9_native_mesh_packed_shape_eligible(mesh)) {
+   if (hk_apple9_native_mesh_packed_shape_eligible(mesh) &&
+       (!production || hk_apple9_native_stage_class(
+          source->info.stage, mesh->info.workgroup_size[0],
+          mesh->info.mesh.max_vertices_out, mesh->info.mesh.max_primitives_out))) {
       hk_apple9_lower_prerast_sysvals(mesh, MESA_SHADER_COMPUTE);
       result = hk_apple9_native_mesh_check(mesh, key, supported, reason);
    } else {
-      *reason = "TES declaration is not an explicitly selected packed class";
+      *reason = "TES declaration is outside the admitted stage classes";
    }
    if (debug_get_option_tess_native_log())
       fprintf(stderr, "HK_TESS_CAP accepted=%u reason=%s\n", *supported,
@@ -7582,12 +7621,21 @@ hk_apple9_identify_native_pair(uint32_t count, struct vk_shader **shaders,
             _mesa_blake3_update(&ctx, shader->data_ptr, shader->data_size);
       }
    }
+   uint8_t stage_mask = 0;
+   for (unsigned i = 0; i < count; ++i) {
+      if (shaders[i]->stage == MESA_SHADER_GEOMETRY)
+         stage_mask = key->native_stages & HK_APPLE9_NATIVE_GS_BIT;
+      if (shaders[i]->stage == MESA_SHADER_TESS_EVAL)
+         stage_mask = key->native_stages & HK_APPLE9_NATIVE_TES_BIT;
+   }
+   _mesa_blake3_update(&ctx, &stage_mask, sizeof(stage_mask));
    blake3_hash id;
    _mesa_blake3_final(&ctx, id);
    for (unsigned i = 0; i < count; ++i) {
       struct hk_api_shader *obj =
          container_of(shaders[i], struct hk_api_shader, vk);
       obj->apple9_native_leaf = true;
+      obj->apple9_native_stage_mask = stage_mask;
       memcpy(obj->apple9_native_pair_id, id, sizeof(id));
       if (obj->vk.stage == MESA_SHADER_MESH ||
           obj->vk.stage == MESA_SHADER_GEOMETRY ||
@@ -7639,7 +7687,10 @@ hk_apple9_compile_graphics_mode(struct hk_device *dev, uint32_t count,
 
    nir_shader *mesh = NULL, *gs = NULL, *tes = NULL, *tcs = NULL;
    bool task = false, tess = false, per_vertex = false, fs_inputs = false;
+   bool producer_effects = false;
    for (unsigned i = 0; i < count; ++i) {
+      if (infos[i].stage != MESA_SHADER_FRAGMENT)
+         producer_effects |= infos[i].nir->info.writes_memory || infos[i].nir->xfb_info;
       if (infos[i].stage == MESA_SHADER_MESH)
          mesh = infos[i].nir;
       if (infos[i].stage == MESA_SHADER_GEOMETRY)
@@ -7675,9 +7726,11 @@ hk_apple9_compile_graphics_mode(struct hk_device *dev, uint32_t count,
    if (mesh && !task && !per_vertex && !key.polygon_points)
       result = hk_apple9_native_mesh_check(mesh, &key, &native, &reason);
    else if (gs && !mesh && !task && !tess && !per_vertex && !fs_inputs &&
+            !producer_effects &&
             !key.polygon_points && !key.line_stipple)
       result = hk_apple9_native_gs_check(gs, &key, &native, &reason);
    else if (tes && tcs && !gs && !mesh && !task && !per_vertex && !fs_inputs &&
+            !producer_effects &&
             !key.polygon_points && !key.line_stipple)
       result = hk_apple9_native_tess_check(tes, &key, &native, &reason);
 
@@ -7754,6 +7807,7 @@ hk_apple9_compile_graphics_mode(struct hk_device *dev, uint32_t count,
                                      infos[i].stage == MESA_SHADER_TESS_EVAL;
       obj->apple9_native_cull_primitive =
          obj->apple9_native->apple9_native_cull_primitive;
+      obj->apple9_native_stage_mask = obj->apple9_native->apple9_native_stage_mask;
       hk_api_shader_init_constant_data(obj);
    }
    return VK_SUCCESS;
@@ -8059,8 +8113,7 @@ hk_apple9_defer_graphics(struct hk_device *dev, uint32_t count,
          if (result != VK_SUCCESS)
             break;
       }
-      if (infos[i].stage == MESA_SHADER_GEOMETRY &&
-          hk_apple9_native_gs_enabled()) {
+      if (infos[i].stage == MESA_SHADER_GEOMETRY) {
          struct hk_apple9_graphics_key key;
          hk_apple9_graphics_key_device(&key, state, hk_device_physical(dev));
          result = hk_apple9_native_gs_check(infos[i].nir, &key,
@@ -8068,8 +8121,7 @@ hk_apple9_defer_graphics(struct hk_device *dev, uint32_t count,
          if (result != VK_SUCCESS)
             break;
       }
-      if (infos[i].stage == MESA_SHADER_TESS_EVAL &&
-          hk_apple9_native_tess_enabled()) {
+      if (infos[i].stage == MESA_SHADER_TESS_EVAL) {
          struct hk_apple9_graphics_key key;
          hk_apple9_graphics_key_device(&key, state, hk_device_physical(dev));
          result = hk_apple9_native_tess_check(infos[i].nir, &key,
@@ -8120,6 +8172,13 @@ hk_apple9_defer_graphics(struct hk_device *dev, uint32_t count,
       }
       obj->apple9_deferred = deferred;
       obj->apple9_native_candidate = native_candidate;
+      if (native_candidate) {
+         uint8_t policy = hk_apple9_native_stage_policy(hk_device_physical(dev));
+         if (infos[i].stage == MESA_SHADER_GEOMETRY)
+            obj->apple9_native_stage_mask = policy & HK_APPLE9_NATIVE_GS_BIT;
+         if (infos[i].stage == MESA_SHADER_TESS_EVAL)
+            obj->apple9_native_stage_mask = policy & HK_APPLE9_NATIVE_TES_BIT;
+      }
       obj->apple9_native_cull_primitive =
          infos[i].stage == MESA_SHADER_MESH &&
          (infos[i].nir->info.outputs_written & VARYING_BIT_CULL_PRIMITIVE);
@@ -8842,7 +8901,7 @@ hk_deserialize_shader(struct hk_device *dev, struct blob_reader *blob,
 }
 
 /* Version the container independently of the hardware programs it owns. */
-#define HK_SHADER_CONTAINER_VERSION 0x484b0006u
+#define HK_SHADER_CONTAINER_VERSION 0x484b0007u
 
 static VkResult
 hk_deserialize_api_shader_inner(struct vk_device *vk_dev, struct blob_reader *blob,
@@ -8871,12 +8930,29 @@ hk_deserialize_api_shader_inner(struct vk_device *vk_dev, struct blob_reader *bl
    obj->apple9_native_candidate = native_candidate;
    obj->apple9_native_cull_primitive = blob_read_uint8(blob);
    obj->apple9_native_leaf = blob_read_uint8(blob);
+   obj->apple9_native_stage_mask = blob_read_uint8(blob);
+   uint8_t stage_policy = hk_apple9_native_stage_policy(hk_device_physical(dev));
+   uint8_t mask = obj->apple9_native_stage_mask;
+   bool pair_stage =
+      mask == 0 ||
+      (mask == HK_APPLE9_NATIVE_GS_BIT &&
+       (stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_GEOMETRY ||
+        stage == MESA_SHADER_FRAGMENT)) ||
+      (mask == HK_APPLE9_NATIVE_TES_BIT &&
+       (stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_TESS_CTRL ||
+        stage == MESA_SHADER_TESS_EVAL || stage == MESA_SHADER_FRAGMENT));
+   if (!pair_stage || (mask & ~stage_policy)) {
+      hk_api_shader_destroy(vk_dev, &obj->vk, pAllocator);
+      return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
+   }
    blob_copy_bytes(blob, obj->apple9_native_pair_id,
                    sizeof(obj->apple9_native_pair_id));
-   bool gs_leaf = hk_apple9_native_gs_enabled() &&
+   bool gs_leaf = (hk_apple9_native_gs_enabled() ||
+                   (obj->apple9_native_stage_mask == HK_APPLE9_NATIVE_GS_BIT)) &&
                   (stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_GEOMETRY);
    bool tess_leaf =
-      hk_apple9_native_tess_enabled() &&
+      (hk_apple9_native_tess_enabled() ||
+       (obj->apple9_native_stage_mask == HK_APPLE9_NATIVE_TES_BIT)) &&
       (stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_TESS_CTRL ||
        stage == MESA_SHADER_TESS_EVAL);
    if (blob->overrun ||
@@ -8887,7 +8963,8 @@ hk_deserialize_api_shader_inner(struct vk_device *vk_dev, struct blob_reader *bl
    }
 
    if (blob_read_uint8(blob)) {
-      if (obj->apple9_native_leaf) {
+      if (obj->apple9_native_leaf ||
+          (mask && stage != MESA_SHADER_GEOMETRY && stage != MESA_SHADER_TESS_EVAL)) {
          hk_api_shader_destroy(vk_dev, &obj->vk, pAllocator);
          return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
       }
@@ -8945,7 +9022,8 @@ hk_deserialize_api_shader_inner(struct vk_device *vk_dev, struct blob_reader *bl
                    sizeof(obj->push_constant_mask));
    bool has_native = blob_read_uint8(blob);
    if (blob->overrun ||
-       (has_native && (!allow_native || obj->apple9_native_leaf))) {
+       (has_native && (!allow_native || obj->apple9_native_leaf)) ||
+       (mask && !has_native && !obj->apple9_native_leaf)) {
       hk_api_shader_destroy(vk_dev, &obj->vk, pAllocator);
       return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
    }
@@ -8959,7 +9037,8 @@ hk_deserialize_api_shader_inner(struct vk_device *vk_dev, struct blob_reader *bl
       }
       obj->apple9_native = container_of(native, struct hk_api_shader, vk);
       if (native->stage != stage || obj->apple9_native->apple9_deferred ||
-          !obj->apple9_native->apple9_native_leaf) {
+          !obj->apple9_native->apple9_native_leaf ||
+          obj->apple9_native->apple9_native_stage_mask != mask) {
          hk_api_shader_destroy(vk_dev, &obj->vk, pAllocator);
          return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
       }
@@ -9005,6 +9084,7 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
    blob_write_uint8(blob, p_atomic_read(&obj->apple9_native_candidate));
    blob_write_uint8(blob, obj->apple9_native_cull_primitive);
    blob_write_uint8(blob, obj->apple9_native_leaf);
+   blob_write_uint8(blob, obj->apple9_native_stage_mask);
    blob_write_bytes(blob, obj->apple9_native_pair_id,
                     sizeof(obj->apple9_native_pair_id));
 

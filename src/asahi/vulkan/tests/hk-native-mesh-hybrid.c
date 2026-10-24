@@ -190,6 +190,7 @@ roundtrip(struct hk_device *dev, struct hk_api_shader *src)
    blob_finish(&blob);
    struct hk_api_shader *copy = container_of(result, struct hk_api_shader, vk);
    CHECK(copy->apple9_native_leaf == src->apple9_native_leaf);
+   CHECK(copy->apple9_native_stage_mask == src->apple9_native_stage_mask);
    CHECK(!memcmp(copy->apple9_native_pair_id, src->apple9_native_pair_id,
                  sizeof(copy->apple9_native_pair_id)));
    if (src->apple9_native) {
@@ -515,7 +516,8 @@ compile_gs(struct hk_device *dev, unsigned vertices, bool deferred,
       ? hk_apple9_defer_graphics(dev, 3, infos, NULL, NULL, out)
       : hk_apple9_compile_graphics(dev, 3, infos, NULL, NULL, NULL, NULL, out);
    unsigned compiled_allocations = allocations;
-   bool native = hk_apple9_native_gs_enabled() && vertices <= 4 && !reject;
+   bool native = (hk_apple9_native_gs_enabled() ||
+       (hk_apple9_native_stage_policy(hk_device_physical(dev)) & HK_APPLE9_NATIVE_GS_BIT)) && vertices <= 4 && !reject;
    if (!deferred && failure) {
       CHECK(result == VK_ERROR_OUT_OF_DEVICE_MEMORY);
       CHECK(!out[0] && !out[1] && !out[2]);
@@ -534,7 +536,8 @@ compile_gs(struct hk_device *dev, unsigned vertices, bool deferred,
          } else {
             CHECK(result == VK_SUCCESS);
             check_gs_programs(resolved, native, vertices);
-            CHECK(native_compiles == (hk_apple9_native_gs_enabled() && vertices <= 4));
+            CHECK(native_compiles == ((hk_apple9_native_gs_enabled() ||
+       (hk_apple9_native_stage_policy(hk_device_physical(dev)) & HK_APPLE9_NATIVE_GS_BIT)) && vertices <= 4));
             unsigned before = allocations, compiles = native_compiles;
             struct hk_api_shader *first = resolved[MESA_SHADER_GEOMETRY];
             CHECK(hk_apple9_resolve_graphics(dev, copies, NULL, resolved, true, false) == VK_SUCCESS);
@@ -698,7 +701,8 @@ compile_tess(struct hk_device *dev, unsigned vertices, bool deferred,
                : hk_apple9_compile_graphics(dev, 4, infos, NULL, NULL, NULL,
                                             NULL, out);
    unsigned compiled_allocations = allocations;
-   bool native = hk_apple9_native_tess_enabled() && vertices <= 32 && !reject;
+   bool native = (hk_apple9_native_tess_enabled() ||
+       (hk_apple9_native_stage_policy(hk_device_physical(dev)) & HK_APPLE9_NATIVE_TES_BIT)) && vertices <= 32 && !reject;
    if (!deferred && failure) {
       CHECK(result == VK_ERROR_OUT_OF_DEVICE_MEMORY);
       CHECK(!out[0] && !out[1] && !out[2] && !out[3]);
@@ -719,7 +723,8 @@ compile_tess(struct hk_device *dev, unsigned vertices, bool deferred,
             CHECK(result == VK_SUCCESS);
             check_tess_programs(resolved, native, vertices);
             CHECK(native_compiles ==
-                  (hk_apple9_native_tess_enabled() && vertices <= 32));
+                  ((hk_apple9_native_tess_enabled() ||
+       (hk_apple9_native_stage_policy(hk_device_physical(dev)) & HK_APPLE9_NATIVE_TES_BIT)) && vertices <= 32));
             unsigned before = allocations, compiles = native_compiles;
             struct hk_api_shader *first = resolved[MESA_SHADER_TESS_EVAL];
             CHECK(hk_apple9_resolve_graphics(dev, copies, NULL, resolved, true,

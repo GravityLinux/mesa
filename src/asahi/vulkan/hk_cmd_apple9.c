@@ -794,8 +794,10 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    struct hk_api_shader *mesh = gfx->shaders[MESA_SHADER_MESH];
    if (native_grid) {
       mesh = hk_api_shader_native(mesh ?: gs ?: tes);
-      if (!mesh || (gs && !hk_apple9_native_gs_enabled()) ||
-          (tes && !hk_apple9_native_tess_enabled()))
+      if (!mesh || (gs && !hk_apple9_native_stage_available_device(
+                             dev, MESA_SHADER_GEOMETRY)) ||
+          (tes && !hk_apple9_native_stage_available_device(
+                             dev, MESA_SHADER_TESS_EVAL)))
          UNSUPPORTED();
    }
    /* Without an API fragment shader, the null program only applies the API

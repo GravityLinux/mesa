@@ -80,3 +80,28 @@ TEST(HkDrirc, NativeIndexKillSwitch)
    driDestroyOptionCache(&drirc.options);
    driDestroyOptionInfo(&drirc.available_options);
 }
+
+TEST(HkDrirc, NativeStageKillSwitch)
+{
+   const char *option = "hk_disable_native_stages";
+   for (const char *value : {"false", "true"}) {
+      setenv(option, value, 1);
+      struct hk_drirc drirc;
+      driConfigFileParseParams params = {};
+      params.driverName = "hk";
+      params.deviceName = "G16";
+      hk_parse_dri_options(&drirc, &params);
+      EXPECT_EQ(drirc.misc.disable_native_stages, value[0] == 't');
+      driDestroyOptionCache(&drirc.options);
+      driDestroyOptionInfo(&drirc.available_options);
+   }
+   unsetenv(option);
+   struct hk_drirc drirc;
+   driConfigFileParseParams params = {};
+   params.driverName = "hk";
+   params.deviceName = "G16";
+   hk_parse_dri_options(&drirc, &params);
+   EXPECT_FALSE(drirc.misc.disable_native_stages);
+   driDestroyOptionCache(&drirc.options);
+   driDestroyOptionInfo(&drirc.available_options);
+}

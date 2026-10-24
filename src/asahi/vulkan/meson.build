@@ -296,6 +296,20 @@ if with_tests
                  '-Wl,--wrap=agx_compile_apple9_tiny',
                  '-Wl,--wrap=agx_compile_apple9_fragment_mrt'],
   )
+  native_stage_policy = executable(
+    'hk-native-stage-policy', 'tests/hk-native-stage-policy.c',
+    include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                           inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+    dependencies : [hk_deps], link_with : [libhk],
+    link_args : ['-Wl,--wrap=agx_bo_create', '-Wl,--wrap=agx_bo_reference',
+                 '-Wl,--wrap=agx_bo_unreference', '-Wl,--wrap=agx_bo_cache_evict_all',
+                 '-Wl,--wrap=__vk_errorf', '-Wl,--wrap=agx_compile_apple9_native_mesh',
+                 '-Wl,--wrap=agx_compile_apple9_tiny',
+                 '-Wl,--wrap=agx_compile_apple9_fragment_mrt'],
+  )
+  test('hk-native-stage-policy', prog_python,
+    args : [files('tests/check-native-stage-policy.py'), native_stage_policy],
+    suite : ['asahi', 'honeykrisp'])
   native_index_identity = executable(
     'hk-native-index-identity', 'tests/hk-native-index-identity.c',
     include_directories : [inc_gallium, inc_gallium_aux, inc_include,
