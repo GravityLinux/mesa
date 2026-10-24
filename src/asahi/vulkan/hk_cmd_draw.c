@@ -2568,8 +2568,31 @@ hk_draw_without_restart(struct hk_cmd_buffer *cmd, struct agx_draw draw,
                                    false /* restart */);
 }
 
+/* Whether a vertex-shader pipeline exposes its provoking vertex: through a
+ * flat, per-vertex or barycentric fragment input, or a layer or viewport index
+ * written by the vertex shader. Primitive ID is not taken from a vertex, and a
+ * fragment shader's layer reads zero unless the vertex shader writes it. */
+static bool
+hk_apple9_provoking_observed(struct hk_cmd_buffer *cmd)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+   struct hk_api_shader *vs = gfx->shaders[MESA_SHADER_VERTEX];
+   struct hk_api_shader *fs = gfx->shaders[MESA_SHADER_FRAGMENT];
+
+   if (vs && hk_any_variant(vs)->b.info.writes_layer_viewport)
+      return true;
+   if (!fs || fs == dev->null_fs)
+      return false;
+
+   const struct agx_shader_info *info = &hk_any_variant(fs)->b.info;
+   return info->apple9_flat_mask.lo || info->apple9_flat_mask.hi ||
+          info->apple9_barycentric_mask || info->apple9_per_vertex_count;
+}
+
 /* Native Apple9 fans flat shade consistently only from their first vertex.
- * Draw fans with the last provoking vertex as an unrolled triangle list. */
+ * Draw fans with an observable last provoking vertex as an unrolled triangle
+ * list. */
 static struct agx_draw
 hk_apple9_unroll_fan(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 {
@@ -5942,12 +5965,15 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
       hk_handle_passthrough_gs(cmd, draw_);
       if (!hk_sw_vs_outputs_fit(cmd, draw_))
          return;
-      /* Geometry and tessellation emulation decompose fans themselves. */
+      /* Geometry and tessellation emulation decompose fans themselves. When
+       * nothing observes the provoking vertex, the fan is drawn natively from
+       * its first vertex, see hk_apple9_draw_impl. */
       cmd->state.gfx.apple9_fan_unrolled =
          dyn->ia.primitive_topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN &&
          dyn->rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT &&
          !cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY] &&
-         !cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL];
+         !cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL] &&
+         hk_apple9_provoking_observed(cmd);
       if (cmd->state.gfx.apple9_fan_unrolled)
          draw_ = hk_apple9_unroll_fan(cmd, draw_);
       /* Software stages read the draw ID from the root table they upload,
