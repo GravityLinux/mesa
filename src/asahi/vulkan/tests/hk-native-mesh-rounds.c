@@ -220,6 +220,13 @@ main(int argc, char **argv)
        * independent primitive records stay rejected. */
       uint16_t size[3] = {32, 1, 1};
       CHECK(!hk_apple9_native_mesh_round_counts_eligible(size, 32, 42));
+      /* Single-round non-class shapes use the model too; V3/P1 does not. */
+      CHECK(hk_apple9_native_mesh_model_counts_eligible(size, 32, 42));
+      CHECK(!hk_apple9_native_mesh_model_counts_eligible(size, 3, 1));
+      /* Within one round: attributes take the model, position-only stays
+       * under the class list (V20/P10 is not a class). */
+      check(32, 20, 10, true, false, 32);
+      check(32, 20, 10, false, false, 0);
       CHECK(!hk_apple9_native_mesh_round_counts_eligible(size, 257, 126));
       CHECK(!hk_apple9_native_mesh_round_counts_eligible(size, 64, 257));
       size[0] = 129;
