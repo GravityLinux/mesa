@@ -24,6 +24,7 @@
 #include "shader_enums.h"
 
 #include "hk_private.h"
+#include "hk_apple9_native_batch.h"
 #include "hk_shader.h"
 #include "hk_sync.h"
 
@@ -555,8 +556,12 @@ struct hk_cs {
    /* The stream's render stores a linear colour attachment. */
    bool linear_store;
 
-   /* The paired native kernel accepts one mesh draw in a separate stream. */
+   /* The stream leads with a native mesh block. With a qualified
+    * asahi_native_blocks profile, further native and (if mixed) ordinary
+    * blocks may follow it (hk_apple9_native_stream_admits). */
    bool apple9_native_mesh;
+   /* Native dispatches (blocks) in the stream. */
+   unsigned apple9_native_dispatches;
 
    /* enum hk_cs_end, and whether an hk meta operation created the stream. */
    uint8_t end_reason;
@@ -1117,6 +1122,8 @@ hk_cmd_flush_empty_clears(struct hk_cmd_buffer *cmd)
 
 uint64_t hk_heap(struct hk_cmd_buffer *cmd);
 
+size_t hk_apple9_graphics_root_size(const struct hk_device *dev);
+
 static inline struct hk_cs *
 hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
                              bool compute, unsigned stages)
@@ -1136,7 +1143,8 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
       /* Most control streams are short. Reserve only a small root block;
        * hk_ensure_cs_has_space() chains larger blocks for long streams.
        */
-      size_t initial_size = 4096;
+      size_t initial_size =
+         compute ? 4096 : hk_apple9_graphics_root_size(hk_cmd_buffer_device(cmd));
       struct agx_ptr root = hk_pool_cs_alloc(cmd, initial_size, 1024, compute);
       if (!root.cpu)
          return NULL;
@@ -1527,6 +1535,10 @@ bool hk_apple9_pin_entry(void *allocator, struct agx_shader_body *body);
 void hk_apple9_unpin_entries(struct hk_cmd_buffer *cmd);
 /* reads_buffers: the draw's tiling reads buffer memory itself (indices or
  * indirect arguments). */
+struct hk_apple9_native_profile hk_apple9_native_profile(const struct hk_device *dev);
+bool hk_apple9_native_blocks_enabled(const struct hk_device *dev);
+bool hk_apple9_native_lanes(const struct hk_device *dev);
+void hk_apple9_end_native_batch(struct hk_cmd_buffer *cmd);
 bool hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool reads_buffers,
                              bool native_mesh);
 bool hk_apple9_use_native_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw);

@@ -1069,12 +1069,26 @@ hk_defer_empty_barriers(struct hk_cmd_buffer *cmd, const VkDependencyInfo *info)
    return true;
 }
 
+/* No API ordering operation (barrier, event, timestamp) may be hoisted
+ * through a batched native render: end it first. */
+void
+hk_apple9_end_native_batch(struct hk_cmd_buffer *cmd)
+{
+   if (cmd->current_cs.gfx && cmd->current_cs.gfx->apple9_native_dispatches &&
+       hk_apple9_native_blocks_enabled(hk_cmd_buffer_device(cmd))) {
+      hk_cs_end_hint(cmd, HK_CS_END_RENDER_SPLIT);
+      hk_cmd_buffer_end_graphics(cmd);
+   }
+}
+
 VKAPI_ATTR void VKAPI_CALL
 hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
                        const VkDependencyInfo *pDependencyInfo)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+
+   hk_apple9_end_native_batch(cmd);
 
    if (HK_PERF(dev, NOBARRIER))
       return;

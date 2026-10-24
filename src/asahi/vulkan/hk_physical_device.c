@@ -2063,6 +2063,7 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
    pdev->apple9_d3d_mip_rounding = pdev->dev.chip == AGX_CHIP_G16G &&
       instance->drirc.misc.apple9_d3d_mip_rounding;
    pdev->disable_native_index = instance->drirc.misc.disable_native_index;
+   pdev->disable_native_blocks = instance->drirc.misc.disable_native_blocks;
    pdev->disable_native_stages = instance->drirc.misc.disable_native_stages;
 
    hk_physical_device_init_pipeline_cache(pdev);
