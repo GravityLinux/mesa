@@ -276,10 +276,10 @@ check_view(struct hk_device *dev, VkExtent3D extent, unsigned levels, unsigned l
    struct hk_apple9_storage_descriptor desc;
    get_descriptor(dev, sliced, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &desc);
    CHECK(sizeof(desc) == HK_APPLE9_DB_STORAGE_SIZE);
-   /* Native stores get one 2D PBE per slice of the view, from its slice
-    * offset, at the base level only; block views, sparse images and capture
+   /* Native stores get one 2D PBE per slice for full views of the base level
+    * only; partial slice ranges, block views, sparse images and capture
     * replay keep the converter. */
-   bool pbes = !alias && level == 0 &&
+   bool pbes = !alias && level == 0 && offset == 0 && slices == extent.depth &&
                !(flags & (VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
                           VK_IMAGE_CREATE_DESCRIPTOR_BUFFER_CAPTURE_REPLAY_BIT_EXT));
    CHECK((desc.native_ok & BITFIELD_MASK(HK_APPLE9_STORAGE_PBE_SHIFT)) ==

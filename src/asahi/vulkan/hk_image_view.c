@@ -813,10 +813,14 @@ hk_apple9_init_storage_pbe(struct hk_device *dev, struct hk_image_view *view)
    bool array = view->vk.view_type == VK_IMAGE_VIEW_TYPE_2D_ARRAY ||
                 view->vk.view_type == VK_IMAGE_VIEW_TYPE_CUBE ||
                 view->vk.view_type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
-   /* 3D views: the view's depth slices (VK_EXT_image_sliced_view_of_3d), at
-    * the base level only; deeper levels of a Z-mipmapped tree are unqualified. */
+   /* 3D views: one entry per depth slice, for full views of the base level
+    * only. Deeper levels of a Z-mipmapped tree and partial slice ranges
+    * (VK_EXT_image_sliced_view_of_3d) have no device coverage yet and keep
+    * the converter. */
    bool slices = view->vk.view_type == VK_IMAGE_VIEW_TYPE_3D &&
-                 view->vk.base_mip_level == 0;
+                 view->vk.base_mip_level == 0 &&
+                 view->vk.storage.z_slice_offset == 0 &&
+                 view->vk.storage.z_slice_count == view->vk.image->extent.depth;
    if (!array && !slices && view->vk.view_type != VK_IMAGE_VIEW_TYPE_2D)
       return;
    /* Opaque capture data does not preserve table allocation addresses. */
