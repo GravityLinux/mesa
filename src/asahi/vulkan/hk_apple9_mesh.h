@@ -22,6 +22,7 @@ uint64_t hk_apple9_native_index_shapes(void);
 /* Separate default-off GS route; also requires native mesh and exact classes. */
 bool hk_apple9_native_gs_enabled(void);
 bool hk_apple9_native_tess_enabled(void);
+bool hk_apple9_native_task_bridge_enabled(void);
 
 /* Research (HK_APPLE9_NATIVE_GS_PACK, default off): native GS runs up to
  * HK_APPLE9_NATIVE_GS_PACK input triangles per T32 mesh group, one GS

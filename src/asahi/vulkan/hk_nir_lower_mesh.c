@@ -12,6 +12,7 @@
  */
 
 #include "compiler/nir/nir_builder.h"
+#include "compiler/nir/nir_control_flow.h"
 #include "util/bitscan.h"
 #include "agx_nir.h"
 #include "asahi/libagx/mesh.h"
@@ -348,6 +349,121 @@ hk_find_task(nir_builder *b, nir_def *grids, nir_def *tasks, nir_def *g)
    }
    nir_pop_loop(b, NULL);
    return nir_load_var(b, lo);
+}
+
+/* A task workgroup executes at most one terminating EmitMeshTasks. Bound the
+ * grid product before choosing native execution; unknown/oversized bounds
+ * remain emulated. This analysis never clamps the application's launch. */
+uint32_t
+hk_nir_task_mesh_bound(nir_shader *nir)
+{
+   struct hash_table *bounds =
+      _mesa_hash_table_create(NULL, _mesa_hash_pointer, _mesa_key_pointer_equal);
+   if (!bounds)
+      return UINT32_MAX;
+   uint32_t maximum = 0;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_launch_mesh_workgroups)
+               continue;
+            uint64_t product = 1;
+            for (unsigned c = 0; c < 3; ++c) {
+               uint32_t bound = nir_unsigned_upper_bound(
+                  nir, bounds, nir_scalar_resolved(intr->src[0].ssa, c));
+               product = MIN2(product * bound, (uint64_t)UINT32_MAX);
+            }
+            maximum = MAX2(maximum, product);
+         }
+      }
+   }
+   _mesa_hash_table_destroy(bounds, NULL);
+   return maximum;
+}
+
+static bool
+hk_lower_native_task_intrinsic(nir_builder *b, nir_intrinsic_instr *intr,
+                                void *data)
+{
+   struct hk_lower_mesh_state *s = data;
+   b->cursor = nir_before_instr(&intr->instr);
+   if (intr->intrinsic == nir_intrinsic_load_global_invocation_id) {
+      unsigned bits = intr->def.bit_size;
+      nir_def *size = nir_imm_ivec3(b, b->shader->info.workgroup_size[0],
+         b->shader->info.workgroup_size[1], b->shader->info.workgroup_size[2]);
+      nir_def_replace(&intr->def, nir_iadd(b,
+         nir_imul(b, nir_u2uN(b, s->workgroup_id, bits), nir_u2uN(b, size, bits)),
+         nir_u2uN(b, nir_load_local_invocation_id(b), bits)));
+      return true;
+   }
+   if (intr->intrinsic == nir_intrinsic_barrier) {
+      /* Native outputs remain in local memory. Only task payloads move to
+       * global records; do not apply the emulation's shader-out conversion. */
+      nir_variable_mode modes = nir_intrinsic_memory_modes(intr);
+      if (!(modes & nir_var_mem_task_payload))
+         return false;
+      nir_intrinsic_set_memory_modes(intr,
+         (modes & ~nir_var_mem_task_payload) | nir_var_mem_global);
+      return true;
+   }
+   return hk_lower_task_payload(b, intr, s) ||
+          hk_lower_mesh_workgroup(b, intr, s);
+}
+
+/* The compute task stage publishes one immutable payload and a child grid
+ * per API parent. A GPU prefix pass flattens those grids for the native
+ * object stage. Each native mesh finds its parent and reconstructs the API's
+ * three-dimensional IDs. A zero-child draw launches one empty hardware group;
+ * its guard excludes all application instructions, including side effects. */
+void
+hk_nir_lower_native_mesh_task(nir_shader *nir)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   nir_cf_list body;
+   nir_cf_extract(&body, nir_before_impl(impl), nir_after_impl(impl));
+   nir_builder b = nir_builder_at(nir_before_impl(impl));
+   struct hk_lower_mesh_state s = {
+      .params = hk_mesh_params(&b),
+      .native_id = nir_load_workgroup_id(&b),
+      .native_count = nir_load_num_workgroups(&b),
+   };
+   nir_def *g = nir_channel(&b, s.native_id, 0);
+   nir_def *count = hk_mesh_param(&b, s.params, 1, 32, mesh_count);
+   nir_if *active = nir_push_if(&b, nir_ult(&b, g, count));
+   active->control = nir_selection_control_dont_flatten;
+   nir_def *grids = hk_mesh_param(&b, s.params, 1, 64, task_grids);
+   nir_def *tasks = hk_mesh_param(&b, s.params, 1, 32, task_count);
+   nir_def *t = hk_find_task(&b, grids, tasks, g);
+   nir_def *grid = nir_load_global(
+      &b, 4, 32, nir_iadd(&b, grids, nir_imul_imm(&b, nir_u2u64(&b, t), 16)),
+      .align_mul = 16);
+   nir_def *x = nir_channel(&b, grid, 0), *y = nir_channel(&b, grid, 1);
+   nir_def *xy = nir_imul(&b, x, y);
+   nir_def *base = nir_isub(&b, nir_channel(&b, grid, 3),
+                            nir_imul(&b, xy, nir_channel(&b, grid, 2)));
+   nir_def *local = nir_isub(&b, g, base);
+   s.workgroup_id = nir_vec3(&b, nir_umod(&b, local, x),
+      nir_umod(&b, nir_udiv(&b, local, x), y), nir_udiv(&b, local, xy));
+   s.num_workgroups = nir_trim_vector(&b, grid, 3);
+   nir_def *stride = hk_mesh_param(&b, s.params, 1, 32, payload_stride_B);
+   s.payload = nir_iadd(&b, hk_mesh_param(&b, s.params, 1, 64, payloads),
+      nir_imul(&b, nir_u2u64(&b, t), nir_u2u64(&b, stride)));
+   b.cursor = nir_cf_reinsert(&body, b.cursor);
+   nir_push_else(&b, active);
+   nir_set_vertex_and_primitive_count(&b, nir_imm_int(&b, 0),
+                                      nir_imm_int(&b, 0), nir_imm_int(&b, 0));
+   nir_pop_if(&b, active);
+   nir_progress(true, impl, nir_metadata_none);
+   nir_shader_intrinsics_pass(nir, hk_lower_native_task_intrinsic,
+                               nir_metadata_none, &s);
+   NIR_PASS(_, nir, nir_lower_vars_to_ssa);
+   NIR_PASS(_, nir, nir_opt_dce);
+   nir->info.task_payload_size = 0;
+   nir_shader_gather_info(nir, impl);
+   nir_validate_shader(nir, "native mesh compute-task bridge");
 }
 
 /* Lower a mesh shader to the compute kernel writing its records. Without a

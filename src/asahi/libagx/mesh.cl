@@ -101,3 +101,23 @@ libagx_mesh_prefix(global struct libagx_mesh_params *p,
    p->mesh_dispatch[1] = 1;
    p->mesh_dispatch[2] = 1;
 }
+
+/* Native children need no emulated output records. The CPU proves the sum
+ * fits a one-dimensional native grid before recording any task work, and
+ * allocates independent task records in the command pool. Keep payloads and
+ * task-grid records until the whole native render retires. */
+KERNEL(1024)
+libagx_mesh_prefix_native(global struct libagx_mesh_params *p)
+{
+   local uint scratch[32];
+   uint tasks = p->task_count;
+   poly_prefix_sum(scratch, p->task_grids, tasks, 4, 3, 1024);
+   barrier(CLK_GLOBAL_MEM_FENCE | CLK_LOCAL_MEM_FENCE);
+   if (cl_local_id.x != 0)
+      return;
+   uint total = tasks ? p->task_grids[(tasks - 1) * 4 + 3] : 0;
+   p->mesh_count = total;
+   p->mesh_dispatch[0] = max(total, 1u);
+   p->mesh_dispatch[1] = 1;
+   p->mesh_dispatch[2] = 1;
+}

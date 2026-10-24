@@ -240,6 +240,55 @@ gs_routes(struct hk_cmd_buffer *cmd)
 }
 
 static void
+task_routes(struct hk_cmd_buffer *cmd)
+{
+   if (!hk_apple9_native_task_bridge_enabled())
+      return;
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+   struct hk_api_shader *mesh = shader(MESA_SHADER_MESH);
+   struct hk_api_shader *task = shader(MESA_SHADER_TASK);
+   mesh->apple9_native_leaf = task->apple9_native_leaf = true;
+   memset(mesh->apple9_native_pair_id, 0x92, sizeof(mesh->apple9_native_pair_id));
+   memcpy(task->apple9_native_pair_id, mesh->apple9_native_pair_id,
+          sizeof(mesh->apple9_native_pair_id));
+   struct hk_shader *m = &mesh->variants[HK_MESH_VARIANT_MAIN];
+   struct hk_shader *t = hk_only_variant(task);
+   m->info.apple9_native_stage = HK_APPLE9_NATIVE_MESH;
+   m->info.apple9_native.layout.max_primitives = 1;
+   m->info.mesh.native_task_bridge = true;
+   t->info.task.max_mesh_groups = 3;
+   t->info.task.payload_B = 16384;
+   gfx->shaders[MESA_SHADER_MESH] = mesh;
+   gfx->shaders[MESA_SHADER_TASK] = task;
+   gfx->render.layer_count = 1;
+   cmd->vk.dynamic_graphics_state.rs.polygon_mode = VK_POLYGON_MODE_FILL;
+   uint32_t direct[] = {2,3,4};
+   CHECK(hk_apple9_use_native_mesh(cmd, direct, 0));
+   t->info.task.max_mesh_groups = 0;
+   CHECK(hk_apple9_use_native_mesh(cmd, direct, 0));
+   t->info.task.max_mesh_groups = UINT32_MAX;
+   CHECK(!hk_apple9_use_native_mesh(cmd, direct, 0));
+   t->info.task.max_mesh_groups = 3;
+   task->apple9_native_pair_id[5] ^= 1;
+   CHECK(!hk_apple9_use_native_mesh(cmd, direct, 0));
+   task->apple9_native_pair_id[5] ^= 1;
+   m->info.mesh.native_task_bridge = false;
+   CHECK(!hk_apple9_use_native_mesh(cmd, direct, 0));
+   m->info.mesh.native_task_bridge = true;
+   gfx->shaders[MESA_SHADER_TASK] = NULL;
+   CHECK(!hk_apple9_use_native_mesh(cmd, direct, 0));
+   gfx->shaders[MESA_SHADER_TASK] = task;
+   direct[0] = 21845; direct[1] = direct[2] = 1;
+   CHECK(hk_apple9_use_native_mesh(cmd, direct, 0)); /* 65535 children */
+   direct[0]++;
+   CHECK(!hk_apple9_use_native_mesh(cmd, direct, 0));
+   direct[0] = 2;
+   CHECK(hk_apple9_use_native_mesh(cmd, direct, 0));
+   gfx->shaders[MESA_SHADER_TASK] = gfx->shaders[MESA_SHADER_MESH] = NULL;
+   free(mesh); free(task);
+}
+
+static void
 tess_routes(struct hk_cmd_buffer *cmd)
 {
    struct hk_graphics_state *gfx = &cmd->state.gfx;
@@ -447,6 +496,7 @@ main(void)
    cmd->vk.base.device = &dev->vk;
    cmd->vk.state = MESA_VK_COMMAND_BUFFER_STATE_RECORDING;
    routes(cmd);
+   task_routes(cmd);
    gs_routes(cmd);
    tess_routes(cmd);
    transitions(cmd);
