@@ -294,7 +294,11 @@ varying_layout(const struct agx_apple9_mesh_body_info *info,
    if (layout->vertex_components > 4 + AGX_APPLE9_MAX_VARYING_COMPONENTS)
       return fail(reason, "native mesh exceeds 124 user varying scalars");
    for (unsigned slot = 0; slot < VARYING_SLOT_MAX; ++slot) {
-      if (slot == VARYING_SLOT_POS)
+      /* Clip distances are rasterizer outputs only, published once after the
+       * user varyings (Air 2026-10-24: a linked copy as well makes the
+       * vertex stride disagree with the PPP output count). */
+      if (slot == VARYING_SLOT_POS || slot == VARYING_SLOT_CLIP_DIST0 ||
+          slot == VARYING_SLOT_CLIP_DIST1)
          continue;
       for (unsigned c = 0; c < 4; ++c) {
          if (layout->vertex_component[slot][c] == AGX_APPLE9_MESH_UNUSED)
@@ -330,6 +334,9 @@ agx_nir_lower_apple9_native_mesh(
 
    if (packed_indices && options->primitive_broadcast)
       return fail(reason, "packed index candidate has no primitive broadcast");
+   bool rounds = options && options->publication_rounds;
+   if (rounds && (!packed_indices || physical_threads != AGX_APPLE9_NATIVE_SERIAL_THREADS))
+      return fail(reason, "multi-round publication requires packed indices at T32");
 
    nir_remove_dead_variables(nir, nir_var_mem_shared, NULL);
    nir_lower_vars_to_explicit_types(nir, nir_var_mem_shared,
@@ -372,10 +379,23 @@ agx_nir_lower_apple9_native_mesh(
       return false;
    memcpy(info->logical_size, logical_size, sizeof(logical_size));
    info->primitive_broadcast = primitive_broadcast;
+   info->publication_rounds = rounds;
    const struct agx_apple9_mesh_layout *layout = &info->layout;
    struct agx_apple9_varying_layout varyings;
    if (!varying_layout(info, options, &varyings, reason))
       return false;
+   /* Every declared clip distance needs its plane; cull distances keep the
+    * emulated path until native primitive culling covers them. */
+   info->clip_distances = nir->info.clip_distance_array_size;
+   if (nir->info.cull_distance_array_size || info->clip_distances > 8)
+      return fail(reason, "native mesh supports up to eight clip and no cull distances");
+   for (unsigned d = 0; d < info->clip_distances; ++d) {
+      if (layout->vertex_component[VARYING_SLOT_CLIP_DIST0 + d / 4][d % 4] ==
+          AGX_APPLE9_MESH_UNUSED)
+         return fail(reason, "native mesh clip distance is declared but not written");
+   }
+   if (4 + varyings.count + info->clip_distances > 4 + AGX_APPLE9_MAX_VARYING_COMPONENTS)
+      return fail(reason, "native mesh varyings and clip distances exceed the UVS");
    nir_shader_intrinsics_pass(nir, consume_count, nir_metadata_none, info);
    nir_lower_returns(nir);
    if (!agx_nir_mask_apple9_mesh_body(nir, &key, layout, reason))
@@ -482,6 +502,7 @@ agx_nir_lower_apple9_native_mesh(
     * keep destination 0 and emit the same code. Rounds beyond the runtime
     * counts are skipped, never issued empty. */
    const unsigned round = MIN2(physical_threads, AGX_APPLE9_PUBLICATION_ROUND);
+   const unsigned clip_distances = info->clip_distances;
    for (unsigned first = 0; first < layout->max_vertices; first += round) {
       nir_def *active = nir_ult(&b, nir_iadd_imm(&b, lane, first), vertices);
       if (round != physical_threads)
@@ -506,6 +527,19 @@ agx_nir_lower_apple9_native_mesh(
                nir_imm_int(&b, plane + 4 * first));
             device_fence(&b);
          }
+      }
+      /* Rasterizer clip distances follow the user varyings, as in the
+       * vertex path's UVS order (mesh writes no point size or layer word).
+       * They are published once, so the mesh state's plane count equals the
+       * PPP output count 4 + varyings + clip distances. */
+      for (unsigned d = 0; d < clip_distances; ++d) {
+         unsigned slot = VARYING_SLOT_CLIP_DIST0 + d / 4;
+         unsigned plane = layout->position_B + layout->vertex_pitch_B *
+                             layout->vertex_component[slot][d % 4];
+         nir_mesh_submit_channel_apple9_agx(
+            &b, nir_imm_int(&b, (4 + varyings.count + d) | destination),
+            nir_imm_int(&b, plane + 4 * first));
+         device_fence(&b);
       }
       nir_pop_if(&b, NULL);
    }
@@ -552,6 +586,7 @@ agx_compile_apple9_native_mesh(
       return false;
    if (!agx_compile_apple9_mesh_lowered(nir, &info->key, out, reason))
       return false;
+   out->info.apple9_clip_distance_count = info->clip_distances;
    return varying_layout(info, options, &out->info.apple9_varyings,
                          reason);
 }

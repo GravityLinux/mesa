@@ -93,6 +93,10 @@ struct agx_apple9_mesh_body_info {
    bool requires_object_completion;
    bool requires_mesh_completion;
    bool uses_vertex_count;
+   /* Lowered for multi-round publication at T32 (bound at upload). */
+   bool publication_rounds;
+   /* Rasterizer clip distances published after the user varyings. */
+   unsigned clip_distances;
    /* V3/P1 primitive outputs lowered to flat planes or a local cull flag. */
    uint64_t primitive_broadcast;
    unsigned argument_uniform_words;
@@ -198,6 +202,8 @@ struct agx_apple9_native_mesh_options {
    /* Provisional packed-index publication. Compiler-only opt-in until the
     * narrow declaration class and launch path receive device qualification. */
    bool packed_index_publication;
+   /* The driver selected multi-round publication; requires T32. */
+   bool publication_rounds;
    uint64_t outputs_flat, outputs_linear;
 };
 

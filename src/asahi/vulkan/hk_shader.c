@@ -6698,11 +6698,13 @@ hk_apple9_native_mesh_options(nir_shader *nir,
    bool packed = (key->native_index || hk_apple9_native_mesh_enabled()) &&
                  hk_apple9_native_mesh_packed_shape_eligible(nir);
    return (struct agx_apple9_native_mesh_options){
-      .physical_threads = hk_apple9_native_mesh_threads(nir->info.workgroup_size),
+      .physical_threads = rounds ? AGX_APPLE9_NATIVE_SERIAL_THREADS
+                                 : hk_apple9_native_mesh_threads(nir->info.workgroup_size),
       .clip_halfz = key->clip_negative_one_to_one,
       .attributes = (rounds || !packed) && hk_apple9_native_mesh_attributes_enabled(),
       .primitive_broadcast = !rounds && !packed && hk_apple9_native_mesh_primitive_lowering_enabled(),
       .packed_index_publication = rounds || packed,
+      .publication_rounds = rounds,
       .outputs_flat = key->vertex.outputs_flat,
       .outputs_linear = key->vertex.outputs_linear,
    };
