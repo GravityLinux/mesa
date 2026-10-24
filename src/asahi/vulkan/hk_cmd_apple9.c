@@ -990,7 +990,11 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    shaders[1] = hk_any_variant(null_trivial ? dev->null_fs_trivial
                                            : fragment_api ?: dev->null_fs);
    if (native_grid &&
-       (!mesh || gfx->shaders[MESA_SHADER_TASK] || (tes && gs) ||
+       (!mesh ||
+        (gfx->shaders[MESA_SHADER_TASK] &&
+         (!hk_apple9_native_task_bridge_enabled() ||
+          mesh->vk.stage != MESA_SHADER_MESH ||
+          !shaders[0]->info.mesh.native_task_bridge)) || (tes && gs) ||
         shaders[0]->info.apple9_native_stage != HK_APPLE9_NATIVE_MESH ||
         dyn->rs.polygon_mode != VK_POLYGON_MODE_FILL || gfx->render.view_mask))
       UNSUPPORTED();
