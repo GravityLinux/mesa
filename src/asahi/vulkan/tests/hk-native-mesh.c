@@ -311,7 +311,9 @@ check_child_grids(void)
 int
 main(int argc, char **argv)
 {
-   CHECK(!hk_apple9_native_mesh_enabled());
+   /* The broad logical-workgroup/attribute contract is the explicit research
+    * route. The mask-only compiler fixture does not enable driver routing. */
+   CHECK(hk_apple9_native_mesh_enabled() == (argc == 1));
    glsl_type_singleton_init_or_ref();
    if (argc == 2 && !strcmp(argv[1], "--mask-fixtures")) {
       mask_fixtures();

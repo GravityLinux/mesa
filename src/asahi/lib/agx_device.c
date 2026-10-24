@@ -9,6 +9,7 @@
 
 #include "util/u_wait_watchdog.h"
 #include "agx_device.h"
+#include "agx_native_mesh.h"
 #include "agx_apple9_layout.h"
 #include <inttypes.h>
 #include "clc/asahi_clc.h"
@@ -549,6 +550,30 @@ agx_open_device(void *memctx, struct agx_device *dev)
    assert(params_size >= sizeof(dev->params));
 
    assert(dev->params.gpu_generation >= 13);
+
+   /* Identify the chip before any helpers consume device state. */
+   switch (dev->params.gpu_generation) {
+   case 13:
+      dev->chip = dev->params.num_clusters_total > 1 ? AGX_CHIP_G13X
+                                                     : AGX_CHIP_G13G;
+      break;
+   case 14:
+   case 15:
+      dev->chip = dev->params.num_clusters_total > 1 ? AGX_CHIP_G14X
+                                                     : AGX_CHIP_G14G;
+      break;
+   case 16:
+      assert(dev->params.gpu_variant == 'G');
+      dev->chip = AGX_CHIP_G16G;
+      break;
+   case 17:
+      assert(dev->params.gpu_variant == 'P');
+      dev->chip = AGX_CHIP_G17P;
+      break;
+   default:
+      UNREACHABLE("Unsupported AGX generation");
+   }
+
    const char *variant = " Unknown";
    switch (dev->params.gpu_variant) {
    case 'G':
@@ -679,12 +704,26 @@ agx_open_device(void *memctx, struct agx_device *dev)
    assert(user_start < user_end);
    uint64_t user_size = user_end - user_start;
 
+   /* Only native G16G VMs can qualify for the current mesh profile. */
+   const char *classes = dev->params.gpu_generation == 16 &&
+                         dev->params.gpu_variant == 'G' && !dev->is_virtio
+                            ? dev->native_mesh_classes : NULL;
+   struct agx_native_mesh_support before =
+      agx_native_mesh_probe(dev->fd, classes);
+   dev->native_mesh_qualified = false;
    int ret = asahi_simple_ioctl(dev, DRM_IOCTL_ASAHI_VM_CREATE, &vm_create);
    if (ret) {
       fprintf(stderr, "DRM_IOCTL_ASAHI_VM_CREATE failed: %m\n");
       assert(0);
       return false;
    }
+
+   /* The kernel latches profile+generation at VM_CREATE and retains that
+    * profile for the VM lifetime. A concurrent mode change fails closed. */
+   struct agx_native_mesh_support after =
+      agx_native_mesh_probe(dev->fd, classes);
+   dev->native_mesh_qualified =
+      agx_native_mesh_same_qualification(before, after);
 
    /* Round the user VA window to powers-of-two... */
    user_start = util_next_power_of_two64(user_start);
@@ -751,28 +790,6 @@ agx_open_device(void *memctx, struct agx_device *dev)
       dev->libagx_programs = libagx_g13x;
    } else {
       dev->libagx_programs = libagx_g13g;
-   }
-
-   switch (dev->params.gpu_generation) {
-   case 13:
-      dev->chip = dev->params.num_clusters_total > 1 ? AGX_CHIP_G13X
-                                                     : AGX_CHIP_G13G;
-      break;
-   case 14:
-   case 15:
-      dev->chip = dev->params.num_clusters_total > 1 ? AGX_CHIP_G14X
-                                                     : AGX_CHIP_G14G;
-      break;
-   case 16:
-      assert(dev->params.gpu_variant == 'G');
-      dev->chip = AGX_CHIP_G16G;
-      break;
-   case 17:
-      assert(dev->params.gpu_variant == 'P');
-      dev->chip = AGX_CHIP_G17P;
-      break;
-   default:
-      UNREACHABLE("Unsupported AGX generation");
    }
 
    /* Apple9 GPUs require their generation-specific graphics path. */

@@ -18,6 +18,9 @@ def declare_options():
     B = drirc_gen.DrircBool
 
     misc_options = [
+        B("hk_disable_native_index", False,
+          "Disable qualified Apple9 native mesh index publication",
+          c_name="disable_native_index"),
         B("hk_disable_border_emulation", False,
           "Disable custom border colour emulation",
           c_name="disable_border_emulation"),

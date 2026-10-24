@@ -1,6 +1,27 @@
-# Packed index publication: explicit driver research selection
+# Packed index publication: qualified opt-in policy
 
-Default off. This caller prepares device testing after native-capability v3;
+The qualified mode-4 path is **disabled by default**. Set
+`HK_APPLE9_NATIVE_INDEX=1` to opt into the 31 exact declarations in
+`hk_apple9_native_index_shapes.def` on G16G. This also requires a positive
+kernel advertisement sampled around each VM creation. A missing, malformed,
+research or changing advertisement falls back to emulation. T16V16P16 is held.
+The Position-only, triangle, fixed T x 1 x 1 predicate still applies.
+
+`HK_APPLE9_NATIVE_INDEX=0` or drirc `hk_disable_native_index=true` disables
+this policy. The latter may be set per application. An explicitly present
+`HK_APPLE9_NATIVE_MESH` retains the separate research configuration: `0` opts
+out, and `1` selects the research route and its explicit class list. A shape
+list alone cannot enable or widen qualified admission.
+
+The physical-device policy participates in compiler/cache identity. Each
+logical VM must independently qualify before native draw recording. Native
+preflight examines a clone and compilation retains the software realization.
+Default settings preserve ordinary shader code and data. This series lands
+the implementation; it does not enable the 31-class default.
+
+## Original research control
+
+The explicit research route defaults off. This caller prepared device testing after native-capability v3;
 no v3 result or production enablement is assumed. It sits on compiler proposal
 3e86031221a, reviewed as default-off research in compiler review. Its arithmetic
 bound is a compiler constraint, not a driver capability range.
@@ -27,7 +48,8 @@ primitive broadcast stay on their existing path. This deliberately narrow
 candidate can leave CTS shaders on emulation; native route logs distinguish
 that from candidate execution.
 
-The same predicate controls early output-deref lowering and the options used
+In the explicit research route, the predicate controls early output-deref
+lowering. In both routes it controls the options used
 by both immutable creation-time preflight and actual compilation. Candidate
 options disable attributes/primitive broadcast and enable the generalized
 compiler rule. Unsupported shaders keep the existing software realization.

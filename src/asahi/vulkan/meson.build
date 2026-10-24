@@ -112,11 +112,19 @@ if get_option('hk-gpu-busy-counters')
   hk_diagnostic_c_args += '-DHK_GPU_BUSY_COUNTERS=1'
 endif
 
+hk_native_index_classes = custom_target(
+  'hk_apple9_native_index_classes.h',
+  input : 'hk_apple9_native_index_shapes.def',
+  output : 'hk_apple9_native_index_classes.h',
+  command : [prog_python, files('hk_apple9_native_index_hash.py'), '@INPUT@', '@OUTPUT@'],
+)
+
 libhk = static_library(
   'hk',
   [
     hk_entrypoints,
     hk_drirc,
+    hk_native_index_classes,
     hk_files,
     sha1_h,
   ],
@@ -194,6 +202,7 @@ if with_tests
     test(
       t,
       contract_test,
+      env : t == 'hk-native-mesh' ? ['HK_APPLE9_NATIVE_MESH=1'] : [],
       suite : ['asahi', 'honeykrisp'],
     )
     if t == 'hk-native-mesh'
@@ -202,6 +211,15 @@ if with_tests
         suite : ['asahi', 'honeykrisp'])
     endif
   endforeach
+  test('hk-native-mesh-open', executable('hk-native-mesh-open',
+    'tests/hk-native-mesh-open.c',
+    include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                           inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+    dependencies : [hk_deps], link_with : [libhk],
+    link_args : ['-Wl,--wrap=drmGetVersion', '-Wl,--wrap=drmFreeVersion',
+                 '-Wl,--wrap=drmIoctl', '-Wl,--wrap=agx_native_mesh_probe',
+                 '-Wl,--wrap=agx_bo_create']), env : ['HK_APPLE9_NATIVE_INDEX=1'],
+    suite : ['asahi', 'honeykrisp'])
   routing_test = executable(
     'hk-native-mesh-routing', 'tests/hk-native-mesh-routing.c',
     include_directories : [inc_gallium, inc_gallium_aux, inc_include,
@@ -278,6 +296,35 @@ if with_tests
                  '-Wl,--wrap=agx_compile_apple9_tiny',
                  '-Wl,--wrap=agx_compile_apple9_fragment_mrt'],
   )
+  native_index_identity = executable(
+    'hk-native-index-identity', 'tests/hk-native-index-identity.c',
+    include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                           inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+    dependencies : [hk_deps], link_with : [libhk],
+    link_args : ['-Wl,--wrap=agx_bo_create', '-Wl,--wrap=agx_bo_reference',
+                 '-Wl,--wrap=agx_bo_unreference', '-Wl,--wrap=__vk_errorf',
+                 '-Wl,--wrap=agx_compile_apple9_native_mesh',
+                 '-Wl,--wrap=agx_compile_apple9_tiny',
+                 '-Wl,--wrap=agx_compile_apple9_fragment_mrt'],
+  )
+  native_index_recording = executable(
+    'hk-native-index-recording', 'tests/hk-native-index-recording.c',
+    include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                           inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+    dependencies : [hk_deps], link_with : [libhk],
+    link_args : ['-Wl,--wrap=agx_bo_create', '-Wl,--wrap=agx_bo_unreference',
+                 '-Wl,--wrap=agx_bo_cache_evict_all'],
+  )
+  foreach mode, controls : {
+    'default': [], 'enabled': ['HK_APPLE9_NATIVE_INDEX=1'],
+    'env': ['HK_APPLE9_NATIVE_INDEX=0'],
+    'drirc': ['HK_APPLE9_NATIVE_INDEX=1'],
+    'kernel-absent': ['HK_APPLE9_NATIVE_INDEX=1'],
+    'vm-absent': ['HK_APPLE9_NATIVE_INDEX=1'],
+  }
+    test('hk-native-index-recording-' + mode, native_index_recording,
+      args : [mode], env : controls, suite : ['asahi', 'honeykrisp'])
+  endforeach
   test('hk-native-gs-hybrid', hybrid_test,
     env : ['HK_APPLE9_NATIVE_MESH=1', 'HK_APPLE9_GS_NATIVE=1',
            'HK_APPLE9_NATIVE_MESH_PACKED_SHAPES=T16V3P1,T16V4P2'],
@@ -324,6 +371,25 @@ if with_tests
       env : ['HK_APPLE9_NATIVE_MESH=' + (mode == 'off' ? '0' : '1'),
              'HK_APPLE9_NATIVE_MESH_PACKED_SHAPES=' + selection],
       suite : ['asahi', 'honeykrisp'])
+  endforeach
+  foreach mode, controls : {
+    'default': [],
+    'enabled': ['HK_APPLE9_NATIVE_INDEX=1'],
+    'shape-cannot-widen': ['HK_APPLE9_NATIVE_INDEX=1',
+                           'HK_APPLE9_NATIVE_MESH_PACKED_SHAPES=T16V16P16'],
+    'killed': ['HK_APPLE9_NATIVE_INDEX=0'],
+    'legacy-off': ['HK_APPLE9_NATIVE_INDEX=1', 'HK_APPLE9_NATIVE_MESH=0'],
+    'drirc': ['HK_APPLE9_NATIVE_INDEX=1'],
+  }
+    argument = mode
+    if mode == 'shape-cannot-widen'
+      argument = 'enabled'
+    elif mode == 'legacy-off'
+      argument = 'killed'
+    endif
+    test('hk-native-index-' + mode, packed_indices_test,
+      args : [argument],
+      env : controls, suite : ['asahi', 'honeykrisp'])
   endforeach
   test(
     'hk_sparse_residency',

@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_device.h"
+#include "hk_apple9_mesh.h"
 #include "pipe/p_defines.h"
 #include "agx_timeline.h"
 #include "vk_util.h"
@@ -473,6 +474,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       dev->vk.enabled_features.bufferDeviceAddressCaptureReplayEXT ||
       dev->vk.enabled_features.descriptorBufferCaptureReplay;
 
+   dev->dev.native_mesh_classes = hk_apple9_native_index_class_hash();
    bool succ = agx_open_device(NULL, &dev->dev);
    drmFreeDevice(&drm_device);
    if (!succ) {

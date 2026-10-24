@@ -124,6 +124,11 @@ struct agx_device {
    /* Device handle */
    int fd;
 
+   /* Set the expected class hash before opening the device. Qualification is
+    * sampled around this VM's creation and never upgraded later. */
+   const char *native_mesh_classes;
+   bool native_mesh_qualified;
+
    /* VM handle */
    uint32_t vm_id;
 

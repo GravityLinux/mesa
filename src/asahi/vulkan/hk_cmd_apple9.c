@@ -519,7 +519,8 @@ hk_apple9_prepare_native_mesh(struct hk_cmd_buffer *cmd,
                                uint32_t state[AGX_APPLE9_MESH_STATE_WORDS])
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   if (!hk_apple9_native_mesh_enabled() || !grid || (grid & 3) ||
+   if (!hk_apple9_native_mesh_available_device(dev) ||
+       !grid || (grid & 3) ||
        mesh->info.apple9_native_stage != HK_APPLE9_NATIVE_MESH ||
        object->info.apple9_native_stage != HK_APPLE9_NATIVE_OBJECT)
       return false;
@@ -604,6 +605,40 @@ hk_apple9_emit_ordinary_draw(struct hk_cs *cs,
       cs->current = agx_apple9_emit_direct_draw(
                        cs->current, pipeline, draw.b.count[0], draw.b.count[1],
                        draw.indexed ? draw.index_bias : draw.start) - 4;
+}
+
+/* Record the final draw packet after its resources and pipeline are prepared.
+ * Keep both routes here so admission and actual packet emission use one policy. */
+static bool
+hk_apple9_record_draw(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+                       const struct agx_apple9_render_pipeline *pipeline,
+                       struct agx_draw draw, uint64_t native_grid,
+                       struct hk_api_shader *mesh,
+                       const struct hk_shader *vertex,
+                       const struct agx_apple9_uniform_draw *record)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (native_grid) {
+      uint32_t state[AGX_APPLE9_MESH_STATE_WORDS];
+      const uint32_t object_groups[] = {1, 1, 1};
+      const struct hk_shader *object = hk_native_producer_object(mesh);
+      const uint32_t object_local_size[] = {
+         object->b.info.workgroup_size[0], object->b.info.workgroup_size[1],
+         object->b.info.workgroup_size[2],
+      };
+      if (!hk_apple9_prepare_native_mesh(
+             cmd, vertex, object, record, native_grid, state) ||
+          !hk_apple9_mesh_command_build(
+             cs->current, HK_APPLE9_MESH_COMMAND_BYTES, pipeline, state,
+             object_groups, object_local_size,
+             hk_apple9_native_mesh_available_device(dev)))
+         return false;
+      cs->current += HK_APPLE9_MESH_COMMAND_BYTES - 4;
+      cs->apple9_native_mesh = true;
+   } else {
+      hk_apple9_emit_ordinary_draw(cs, pipeline, draw);
+   }
+   return true;
 }
 
 static void
@@ -1253,25 +1288,9 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    pipeline.vertex_launch = record->launch[0] / 0x40;
    pipeline.pipeline_word = 0x01000000;
    hk_ensure_cs_has_space(cmd, cs, 256);
-   if (native_grid) {
-      uint32_t state[AGX_APPLE9_MESH_STATE_WORDS];
-      const uint32_t object_groups[] = {1, 1, 1};
-      const struct hk_shader *object = hk_native_producer_object(mesh);
-      const uint32_t object_local_size[] = {
-         object->b.info.workgroup_size[0], object->b.info.workgroup_size[1],
-         object->b.info.workgroup_size[2],
-      };
-      if (!hk_apple9_prepare_native_mesh(
-             cmd, shaders[0], object, record, native_grid, state) ||
-          !hk_apple9_mesh_command_build(
-             cs->current, HK_APPLE9_MESH_COMMAND_BYTES, &pipeline, state,
-             object_groups, object_local_size, hk_apple9_native_mesh_enabled()))
-         UNSUPPORTED();
-      cs->current += HK_APPLE9_MESH_COMMAND_BYTES - 4;
-      cs->apple9_native_mesh = true;
-   } else {
-      hk_apple9_emit_ordinary_draw(cs, &pipeline, draw);
-   }
+   if (!hk_apple9_record_draw(cmd, cs, &pipeline, draw, native_grid,
+                               mesh, shaders[0], record))
+      UNSUPPORTED();
    hk_apple9_account_draw(cs, &pipeline, draw, gs || tes || mesh, shaders[1]);
    /* Only ordinary single-view draws reuse prepared state. Other paths
     * still consume dynamic state in their software-stage lowering. */

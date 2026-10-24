@@ -163,6 +163,7 @@ static const char *const hk_codegen_env[] = {
    "HK_APPLE9_NATIVE_MESH_ATTRIBUTES",
    "HK_APPLE9_NATIVE_MESH_PRIMITIVE_LOWERING",
    "HK_APPLE9_NATIVE_MESH_PACKED_SHAPES",
+   "HK_APPLE9_NATIVE_INDEX",
    "HK_APPLE9_GS_MESH_PROBE",
    "HK_APPLE9_GS_NATIVE",
    "HK_APPLE9_TESS_MESH_PROBE",
@@ -291,7 +292,8 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
    uint64_t flags = pdev->dev.debug |
                     ((uint64_t)pdev->apple9_layered_2d << 63) |
                     ((uint64_t)agx_has_soft_fault((struct agx_device *)&pdev->dev) << 62) |
-                    ((uint64_t)pdev->apple9_d3d_mip_rounding << 61);
+                    ((uint64_t)pdev->apple9_d3d_mip_rounding << 61) |
+                    ((uint64_t)hk_apple9_native_index_enabled(pdev) << 60);
    return flags ^ hk_compiler_env_hash_value;
 }
 
@@ -1498,6 +1500,15 @@ hk_apple9_color_layout_varies(const struct vk_graphics_pipeline_state *state,
 }
 
 static void
+hk_apple9_graphics_key_device(struct hk_apple9_graphics_key *key,
+                               const struct vk_graphics_pipeline_state *state,
+                               const struct hk_physical_device *pdev)
+{
+   hk_apple9_graphics_key(key, state);
+   key->native_index = hk_apple9_native_index_enabled(pdev);
+}
+
+static void
 hk_hash_graphics_state(struct vk_physical_device *device,
                        const struct vk_graphics_pipeline_state *state,
                        const struct vk_features *features,
@@ -1508,7 +1519,7 @@ hk_hash_graphics_state(struct vk_physical_device *device,
    struct hk_physical_device *pdev = container_of(device, struct hk_physical_device, vk);
    if (pdev->dev.chip == AGX_CHIP_G16G && state) {
       struct hk_apple9_graphics_key key;
-      hk_apple9_graphics_key(&key, state);
+      hk_apple9_graphics_key_device(&key, state, pdev);
       _mesa_blake3_update(&blake3_ctx, &key, sizeof(key));
 
       /* Deferred shaders differ from precompiled ones for the same key. */
@@ -1542,7 +1553,7 @@ hk_hash_graphics_state(struct vk_physical_device *device,
 
    if (pdev->dev.chip == AGX_CHIP_G16G &&
        (stages & (VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT)) &&
-       debug_get_bool_option("HK_APPLE9_NATIVE_MESH", false))
+       hk_apple9_native_mesh_available(pdev))
       hk_hash_apple9_native_mesh_abi(&blake3_ctx);
 
    enum hk_feature_key feature_key = hk_make_feature_key(features);
@@ -3995,8 +4006,10 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    /* Native mesh links a fixed component map. Resolve indirect output-array
     * slots while their declared bounds are still available as derefs. This
     * also covers arrays nested inside per-vertex/per-primitive blocks. */
-   if (dev->dev.chip == AGX_CHIP_G16G && hk_apple9_native_mesh_enabled() &&
-       (agx_apple9_native_mesh_shape_eligible(nir) ||
+   if (dev->dev.chip == AGX_CHIP_G16G &&
+       hk_apple9_native_mesh_available(hk_device_physical(dev)) &&
+       ((hk_apple9_native_mesh_enabled() &&
+         agx_apple9_native_mesh_shape_eligible(nir)) ||
         hk_apple9_native_mesh_packed_shape_eligible(nir)))
       lower_indirect_modes |= nir_var_shader_out;
 
@@ -4023,10 +4036,16 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
             nir_lower_io_lower_64bit_to_32 |
                nir_lower_io_use_interpolated_input_intrinsics);
 
-   if (nir->info.stage == MESA_SHADER_FRAGMENT &&
-       !(dev->dev.chip == AGX_CHIP_G16G && hk_apple9_native_mesh_enabled())) {
-      /* Hybrid linking retains these semantic inputs until the mesh path is
-       * known. The emulated path reads records; native P1 uses flat channels. */
+   /* The qualified index profile publishes Position only. It cannot consume
+    * per-primitive fragment inputs, so keep their original early lowering.
+    * Only the broader research P1 interface defers these inputs to linking.
+    * Delaying them for every enabled device would change excluded shaders. */
+   bool native_primitive_inputs =
+      dev->dev.chip == AGX_CHIP_G16G &&
+      hk_apple9_native_mesh_available(hk_device_physical(dev)) &&
+      hk_apple9_native_mesh_enabled();
+   if (nir->info.stage == MESA_SHADER_FRAGMENT && !native_primitive_inputs) {
+      /* The emulated path reads records; research P1 uses flat channels. */
       bool native_broadcast = false;
       NIR_PASS(_, nir, nir_shader_intrinsics_pass,
                hk_lower_per_primitive_input, nir_metadata_control_flow,
@@ -4413,7 +4432,8 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
 {
    bool native = shader->info.apple9_native_stage != HK_APPLE9_NATIVE_NONE;
    if ((shader->b.info.apple9_body_only || native) &&
-       !(dev->dev.chip == AGX_CHIP_G16G && hk_apple9_native_mesh_enabled() &&
+       !(dev->dev.chip == AGX_CHIP_G16G &&
+         hk_apple9_native_mesh_available(hk_device_physical(dev)) &&
          shader->info.stage == (shader->info.apple9_native_stage ==
                                    HK_APPLE9_NATIVE_OBJECT
                                       ? MESA_SHADER_TASK : MESA_SHADER_MESH) &&
@@ -6617,7 +6637,8 @@ static struct agx_apple9_native_mesh_options
 hk_apple9_native_mesh_options(nir_shader *nir,
                               const struct hk_apple9_graphics_key *key)
 {
-   bool packed = hk_apple9_native_mesh_packed_shape_eligible(nir);
+   bool packed = (key->native_index || hk_apple9_native_mesh_enabled()) &&
+                 hk_apple9_native_mesh_packed_shape_eligible(nir);
    return (struct agx_apple9_native_mesh_options){
       .physical_threads = hk_apple9_native_mesh_threads(nir->info.workgroup_size),
       .clip_halfz = key->clip_negative_one_to_one,
@@ -6642,7 +6663,8 @@ hk_apple9_native_mesh_check(nir_shader *nir,
    *supported = false;
    if (reason)
       *reason = NULL;
-   if (!hk_apple9_native_mesh_enabled())
+   if (!hk_apple9_native_mesh_enabled() &&
+       !(key->native_index && hk_apple9_native_mesh_packed_shape_eligible(nir)))
       return VK_SUCCESS;
 
    struct agx_apple9_native_mesh_options options =
@@ -6677,7 +6699,9 @@ hk_apple9_compile_native_mesh_program(
       return false;
    }
    return agx_compile_apple9_native_mesh(
-      nir, hk_apple9_native_mesh_enabled(), &options, out, info, reason);
+      nir, hk_apple9_native_mesh_enabled() ||
+           (key->native_index && options.packed_index_publication),
+      &options, out, info, reason);
 }
 
 /* GS capability is established on an immutable clone before normal
@@ -6815,7 +6839,8 @@ hk_apple9_compile_native_mesh(struct hk_device *dev, nir_shader *nir,
    object->info.apple9_native_stage = HK_APPLE9_NATIVE_OBJECT;
    hk_assert_final_push_mask(generated, object);
    compiled = agx_compile_apple9_native_object(
-      generated, hk_apple9_native_mesh_enabled(), &k, &object->b,
+      generated, hk_apple9_native_mesh_available(hk_device_physical(dev)),
+      &k, &object->b,
       &object->info.apple9_native, reason);
    object->code_ptr = object->b.binary;
    object->code_size = object->b.info.binary_size;
@@ -6894,7 +6919,7 @@ hk_apple9_compile_graphics_path(struct hk_device *dev, uint32_t count,
    if (key_in)
       key = *key_in;
    else
-      hk_apple9_graphics_key(&key, state);
+      hk_apple9_graphics_key_device(&key, state, hk_device_physical(dev));
    struct agx_apple9_varying_layout varyings = {0};
    const char *reason = NULL;
    simple_mtx_t *lock = agx_get_compiler_debug()
@@ -7605,7 +7630,7 @@ hk_apple9_compile_graphics_mode(struct hk_device *dev, uint32_t count,
    if (key_in) {
       key = *key_in;
    } else {
-      hk_apple9_graphics_key(&key, state);
+      hk_apple9_graphics_key_device(&key, state, hk_device_physical(dev));
       for (unsigned i = 0; i < count; ++i) {
          if (infos[i].stage == MESA_SHADER_VERTEX)
             key.vertex.unbounded = hk_apple9_vertex_unbounded(&infos[i]);
@@ -7806,7 +7831,7 @@ hk_apple9_compile_internal_gs(struct hk_device *dev, nir_shader *nir,
       .robustness = &rs,
    };
    struct hk_apple9_graphics_key key;
-   hk_apple9_graphics_key(&key, NULL);
+   hk_apple9_graphics_key_device(&key, NULL, hk_device_physical(dev));
    key.gs_cull_planes = !cull_mask;
    struct vk_shader *shader = NULL;
    VkResult result =
@@ -8028,7 +8053,7 @@ hk_apple9_defer_graphics(struct hk_device *dev, uint32_t count,
       bool native_candidate = false;
       if (infos[i].stage == MESA_SHADER_MESH) {
          struct hk_apple9_graphics_key key;
-         hk_apple9_graphics_key(&key, state);
+         hk_apple9_graphics_key_device(&key, state, hk_device_physical(dev));
          result = hk_apple9_native_mesh_check(infos[i].nir, &key,
                                                &native_candidate, NULL);
          if (result != VK_SUCCESS)
@@ -8037,7 +8062,7 @@ hk_apple9_defer_graphics(struct hk_device *dev, uint32_t count,
       if (infos[i].stage == MESA_SHADER_GEOMETRY &&
           hk_apple9_native_gs_enabled()) {
          struct hk_apple9_graphics_key key;
-         hk_apple9_graphics_key(&key, state);
+         hk_apple9_graphics_key_device(&key, state, hk_device_physical(dev));
          result = hk_apple9_native_gs_check(infos[i].nir, &key,
                                            &native_candidate, NULL);
          if (result != VK_SUCCESS)
@@ -8046,7 +8071,7 @@ hk_apple9_defer_graphics(struct hk_device *dev, uint32_t count,
       if (infos[i].stage == MESA_SHADER_TESS_EVAL &&
           hk_apple9_native_tess_enabled()) {
          struct hk_apple9_graphics_key key;
-         hk_apple9_graphics_key(&key, state);
+         hk_apple9_graphics_key_device(&key, state, hk_device_physical(dev));
          result = hk_apple9_native_tess_check(infos[i].nir, &key,
                                               &native_candidate, NULL);
          if (result != VK_SUCCESS)
@@ -8335,7 +8360,7 @@ hk_apple9_resolve_graphics(
    struct hk_apple9_variant search;
    memset(&search, 0, sizeof(search));
    memcpy(search.api, api, sizeof(search.api));
-   hk_apple9_graphics_key(&search.key, state);
+   hk_apple9_graphics_key_device(&search.key, state, hk_device_physical(dev));
    search.key.no_fs_statistics = !fs_statistics;
    const struct hk_api_shader *vs = api[MESA_SHADER_VERTEX];
    search.key.vertex.unbounded = vs && vs->apple9_deferred &&

@@ -11,6 +11,14 @@
 /* Explicit userspace/kernel development pairing. The stable UAPI has no
  * native-mesh capability bit; enabling this requires the matching kernel. */
 bool hk_apple9_native_mesh_enabled(void);
+struct hk_physical_device;
+struct hk_device;
+/* Default publication policy is separate from the broader research opt-in. */
+bool hk_apple9_native_index_enabled(const struct hk_physical_device *pdev);
+bool hk_apple9_native_mesh_available(const struct hk_physical_device *pdev);
+bool hk_apple9_native_mesh_available_device(struct hk_device *dev);
+const char *hk_apple9_native_index_class_hash(void);
+uint64_t hk_apple9_native_index_shapes(void);
 /* Separate default-off GS route; also requires native mesh and exact classes. */
 bool hk_apple9_native_gs_enabled(void);
 bool hk_apple9_native_tess_enabled(void);

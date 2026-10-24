@@ -62,7 +62,7 @@ for name in ('HK_APPLE9_VARIANT_CACHE_VERIFY', 'HK_APPLE9_DUMP_FRAGMENT_DIR',
 # Code-generation controls continue to separate cache entries.
 for name in ('AGX_SPILL_COALESCE', 'AGX_APPLE9_HOIST_LOADS',
              'AGX_APPLE9_SAFE_HOIST_STAGES', 'HK_APPLE9_NATIVE_MESH',
-             'HK_APPLE9_TESS_NATIVE'):
+             'HK_APPLE9_TESS_NATIVE', 'HK_APPLE9_NATIVE_INDEX'):
     zero = read(**{name: '0'})[0]
     one = read(**{name: '1'})[0]
     assert len({base, zero, one}) == 3, name

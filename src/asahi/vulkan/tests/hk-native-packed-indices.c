@@ -44,10 +44,12 @@ source(unsigned v, unsigned p, unsigned t)
    return b.shader;
 }
 
+static bool default_policy;
+
 static void
 check(nir_shader *nir, bool expected)
 {
-   struct hk_apple9_graphics_key key = {0};
+   struct hk_apple9_graphics_key key = {.native_index = default_policy};
    struct blob before, after;
    blob_init(&before); blob_init(&after);
    nir_serialize(&before, nir, false);
@@ -65,6 +67,15 @@ check(nir_shader *nir, bool expected)
    CHECK(hk_apple9_compile_native_mesh_program(nir, &key, &part, &body, &reason) == expected);
    if (expected) {
       CHECK(hk_apple9_native_shader_valid(&part.info, &body, HK_APPLE9_NATIVE_MESH));
+      if (default_policy) {
+         struct agx_apple9_mesh_body_info bad = body;
+         bad.logical_size[0] /= 2;
+         CHECK(!hk_apple9_native_shader_valid(&part.info, &bad, HK_APPLE9_NATIVE_MESH));
+         bad = body;
+         bad.layout.max_vertices = 16;
+         bad.layout.max_primitives = 16;
+         CHECK(!hk_apple9_native_shader_valid(&part.info, &bad, HK_APPLE9_NATIVE_MESH));
+      }
       struct agx_apple9_launch_parameters launch;
       CHECK(hk_apple9_native_launch_parameters(&launch, &part.info, &body,
          HK_APPLE9_NATIVE_MESH, 0, 0x1000));
@@ -115,6 +126,50 @@ main(int argc, char **argv)
    CHECK(argc == 2);
    glsl_type_singleton_init_or_ref();
    selection();
+   if (!strcmp(argv[1], "default") || !strcmp(argv[1], "enabled") ||
+       !strcmp(argv[1], "killed") ||
+       !strcmp(argv[1], "drirc")) {
+      bool enabled = !strcmp(argv[1], "enabled");
+      struct hk_physical_device pdev = {.dev.chip = AGX_CHIP_G16G,
+                                       .dev.native_mesh_qualified = true};
+      pdev.disable_native_index = !strcmp(argv[1], "drirc");
+      default_policy = hk_apple9_native_index_enabled(&pdev);
+      CHECK(default_policy == enabled);
+      CHECK(hk_apple9_native_mesh_available(&pdev) == enabled);
+      CHECK(!hk_apple9_native_mesh_enabled());
+      CHECK(!hk_apple9_native_gs_enabled() && !hk_apple9_native_tess_enabled());
+      CHECK(util_bitcount64(hk_apple9_native_index_shapes()) == 31);
+      uint64_t active_flags = hk_physical_device_compiler_flags(&pdev);
+      pdev.dev.native_mesh_qualified = false;
+      CHECK(!hk_apple9_native_index_enabled(&pdev));
+      CHECK(!hk_apple9_native_mesh_available(&pdev));
+      CHECK((active_flags != hk_physical_device_compiler_flags(&pdev)) == enabled);
+      pdev.dev.native_mesh_qualified = true;
+      pdev.disable_native_index = true;
+      CHECK((active_flags != hk_physical_device_compiler_flags(&pdev)) == enabled);
+      pdev.disable_native_index = false;
+      pdev.dev.chip = AGX_CHIP_G14G;
+      CHECK(!hk_apple9_native_index_enabled(&pdev));
+      CHECK(!hk_apple9_native_mesh_available(&pdev));
+#define HK_NATIVE_INDEX_SHAPE(t, v, p) check(source(v, p, t), enabled);
+#include "../hk_apple9_native_index_shapes.def"
+#undef HK_NATIVE_INDEX_SHAPE
+      check(source(16, 16, 16), false);
+      check(source(16, 15, 16), false);
+      check(source(3, 2, 32), false);
+      check(source(3, 1, 1), false);
+      check(source(3, 1, 64), false);
+      nir_shader *nir = source(3, 2, 16);
+      nir->info.shared_size = 16; check(nir, false);
+      nir = source(3, 2, 16);
+      nir->info.task_payload_size = 16; check(nir, false);
+      nir = source(3, 2, 16);
+      nir->info.workgroup_size[0] = 8;
+      nir->info.workgroup_size[1] = 2; check(nir, false);
+      glsl_type_singleton_decref();
+      puts("exact opt-in scope, default-off and kill policy, immutable preflight and cache partition pass");
+      return 0;
+   }
    bool on = hk_apple9_native_mesh_enabled();
    bool subset = !strcmp(argv[1], "subset"), capacity = !strcmp(argv[1], "capacity");
    bool v16 = !strcmp(argv[1], "v16");

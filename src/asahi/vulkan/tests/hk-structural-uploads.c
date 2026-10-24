@@ -54,7 +54,9 @@ __wrap_agx_bo_unreference(struct agx_device *dev, struct agx_bo *bo)
 {
    if (!bo)
       return;
-   CHECK(bo->refcnt == 1);
+   CHECK(bo->refcnt > 0);
+   if (--bo->refcnt)
+      return;
    bos[bo->va->addr / HK_CMD_BO_SIZE] = NULL;
    free(bo->_map);
    free(bo->va);
@@ -294,4 +296,5 @@ main(void)
    printf(
       "PASS %u render view cases; cross-render metadata/argument reuse, changed inputs and reset lifetime\n",
       view_cases);
+   return 0;
 }

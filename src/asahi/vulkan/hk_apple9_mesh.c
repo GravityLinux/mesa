@@ -2,10 +2,15 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_apple9_mesh.h"
+#include "hk_physical_device.h"
+#include "hk_device.h"
+#include "hk_apple9_native_index_classes.h"
 #include "util/u_debug.h"
 #include <string.h>
 
 DEBUG_GET_ONCE_BOOL_OPTION(native_mesh, "HK_APPLE9_NATIVE_MESH", false)
+/* Land the qualified path without enabling the 31-class default. */
+DEBUG_GET_ONCE_BOOL_OPTION(native_index, "HK_APPLE9_NATIVE_INDEX", false)
 DEBUG_GET_ONCE_BOOL_OPTION(native_gs, "HK_APPLE9_GS_NATIVE", false)
 DEBUG_GET_ONCE_BOOL_OPTION(native_tess, "HK_APPLE9_TESS_NATIVE", false)
 
@@ -89,10 +94,58 @@ packed_class_enabled(unsigned threads, unsigned vertices, unsigned primitives)
 uint64_t
 hk_apple9_native_mesh_packed_shapes(void)
 {
-   return hk_apple9_native_mesh_enabled()
-             ? hk_apple9_packed_mesh_shapes_parse(
-                  debug_get_option_native_mesh_packed_shapes())
-             : 0;
+   /* An explicit legacy research configuration keeps its original semantics,
+    * including HK_APPLE9_NATIVE_MESH=0 as a complete opt-out. An explicit
+    * shape list alone must not widen the production qualification. */
+   if (getenv("HK_APPLE9_NATIVE_MESH"))
+      return hk_apple9_native_mesh_enabled()
+                ? hk_apple9_packed_mesh_shapes_parse(
+                     debug_get_option_native_mesh_packed_shapes())
+                : 0;
+   return debug_get_option_native_index() ? hk_apple9_native_index_shapes() : 0;
+}
+
+uint64_t
+hk_apple9_native_index_shapes(void)
+{
+   static const char names[] =
+#define HK_NATIVE_INDEX_SHAPE(t, v, p) ",T" #t "V" #v "P" #p
+#include "hk_apple9_native_index_shapes.def"
+#undef HK_NATIVE_INDEX_SHAPE
+      ;
+   return hk_apple9_packed_mesh_shapes_parse(names + 1);
+}
+
+bool
+hk_apple9_native_index_enabled(const struct hk_physical_device *pdev)
+{
+   return pdev && pdev->dev.chip == AGX_CHIP_G16G &&
+          pdev->dev.native_mesh_qualified && !pdev->disable_native_index &&
+          debug_get_option_native_index() &&
+          !getenv("HK_APPLE9_NATIVE_MESH");
+}
+
+bool
+hk_apple9_native_mesh_available(const struct hk_physical_device *pdev)
+{
+   return hk_apple9_native_mesh_enabled() || hk_apple9_native_index_enabled(pdev);
+}
+
+bool
+hk_apple9_native_mesh_available_device(struct hk_device *dev)
+{
+   /* The discovery VM partitions physical-device compiler/cache policy. It
+    * cannot authorize a distinct logical VM: recording also needs that VM's
+    * own immutable qualification. Research keeps its explicit pairing. */
+   return hk_apple9_native_mesh_enabled() ||
+          (dev->dev.native_mesh_qualified &&
+           hk_apple9_native_index_enabled(hk_device_physical(dev)));
+}
+
+const char *
+hk_apple9_native_index_class_hash(void)
+{
+   return HK_APPLE9_NATIVE_INDEX_CLASSES_SHA256;
 }
 
 bool
@@ -229,7 +282,10 @@ hk_apple9_native_shader_valid(const struct agx_shader_info *code,
    if (!logical_limit || !logical_size_valid(body->logical_size, logical_limit))
       return false;
    const struct agx_apple9_mesh_layout *l = &body->layout;
-   if (l->max_vertices != 3 || l->max_primitives != 1) {
+   /* The default policy also checks the exact P1 declaration at upload;
+    * a research P1 shader binary must not bypass the production scope. */
+   if (l->max_vertices != 3 || l->max_primitives != 1 ||
+       !hk_apple9_native_mesh_enabled()) {
       unsigned count_B = ALIGN_POT(3 * l->max_primitives, 16);
       unsigned position_B = count_B + 16;
       unsigned pitch_B = ALIGN_POT(l->max_vertices, 4) * 4;

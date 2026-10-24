@@ -1985,6 +1985,7 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
    pdev->master_fd = -1;
    pdev->render_dev = render_dev;
    pdev->dev.fd = fd;
+   pdev->dev.native_mesh_classes = hk_apple9_native_index_class_hash();
 
    if (!agx_open_device(NULL, &pdev->dev)) {
       /* Fail silently, for virtgpu */
@@ -2061,6 +2062,7 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
       instance->drirc.misc.apple9_arrayed_2d_views;
    pdev->apple9_d3d_mip_rounding = pdev->dev.chip == AGX_CHIP_G16G &&
       instance->drirc.misc.apple9_d3d_mip_rounding;
+   pdev->disable_native_index = instance->drirc.misc.disable_native_index;
 
    hk_physical_device_init_pipeline_cache(pdev);
 

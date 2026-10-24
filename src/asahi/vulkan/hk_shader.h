@@ -793,6 +793,8 @@ struct hk_apple9_graphics_key {
     * publishes interpolated cull planes, see hk_apple9_compile_vertex_culls.
     * Otherwise geometry shaders publish one flat primitive cull mask. */
    bool gs_cull_planes;
+   /* Per-device policy; actual use still requires an exact qualified mesh. */
+   bool native_index;
 };
 
 bool hk_apple9_compile_native_mesh_program(

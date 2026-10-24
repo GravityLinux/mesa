@@ -5920,7 +5920,8 @@ hk_apple9_native_mesh_state_eligible(struct hk_cmd_buffer *cmd,
 {
    const struct hk_graphics_state *gfx = &cmd->state.gfx;
    const struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
-   if (!hk_apple9_native_mesh_enabled() || !direct || count_addr ||
+   if (!hk_apple9_native_mesh_available_device(hk_cmd_buffer_device(cmd)) ||
+       !direct || count_addr ||
        !hk_apple9_native_mesh_grid_valid(direct) ||
        gfx->shaders[MESA_SHADER_TASK] || gfx->shaders[MESA_SHADER_GEOMETRY] ||
        gfx->shaders[MESA_SHADER_TESS_EVAL] || gfx->render.view_mask ||
