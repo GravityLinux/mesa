@@ -5734,15 +5734,17 @@ hk_apple9_native_gs_groups(const struct hk_cmd_buffer *cmd, struct agx_draw draw
       &hk_native_producer_main(hk_api_shader_native(gfx->shaders[MESA_SHADER_GEOMETRY]))
           ->info.apple9_native;
    /* One logical GS run per input triangle and GS invocation. */
-   const uint32_t runs =
-      hk_apple9_native_gs_triangles(&cmd->vk.dynamic_graphics_state, draw) *
+   const uint64_t runs =
+      (uint64_t)hk_apple9_native_gs_triangles(&cmd->vk.dynamic_graphics_state, draw) *
       MAX2(hk_native_producer_main(hk_api_shader_native(gfx->shaders[MESA_SHADER_GEOMETRY]))
               ->info.apple9_gs_invocations, 1);
    bool packed = hk_apple9_native_gs_packed_class(
       body->key.physical_threads, body->layout.max_vertices, body->layout.max_primitives);
    /* Unpacked bodies publish V(n)/P(n-2) (T32 only for n > 16 on the
     * development route), never a packed class, so the class alone decides. */
-   return packed ? DIV_ROUND_UP(runs, HK_APPLE9_NATIVE_GS_PACK) : runs;
+   const uint64_t groups = packed ? DIV_ROUND_UP(runs, HK_APPLE9_NATIVE_GS_PACK) : runs;
+   /* Saturate so an oversized grid fails hk_apple9_native_mesh_grid_valid. */
+   return MIN2(groups, UINT32_MAX);
 }
 
 static void
