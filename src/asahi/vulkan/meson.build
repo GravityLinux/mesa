@@ -289,6 +289,27 @@ if with_tests
            'HK_APPLE9_NATIVE_MESH_PRIMITIVE_LOWERING=1'],
     suite : ['asahi', 'honeykrisp'],
   )
+  packed_indices_test = executable(
+    'hk-native-packed-indices', 'tests/hk-native-packed-indices.c',
+    include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                           inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+    dependencies : [hk_deps], link_with : [libhk],
+  )
+  foreach mode, selection : {
+    'base': '',
+    'subset': 'T16V3P2,T16V4P2',
+    'capacity': 'T16V16P21,T32V32P42',
+    'v16': 'T16V16P16',
+    'boolean': '1',
+    'unlisted': 'T16V3P2,T16V16P15',
+    'off': 'T16V3P2',
+  }
+    test('hk-native-packed-indices-' + mode, packed_indices_test,
+      args : [mode],
+      env : ['HK_APPLE9_NATIVE_MESH=' + (mode == 'off' ? '0' : '1'),
+             'HK_APPLE9_NATIVE_MESH_PACKED_SHAPES=' + selection],
+      suite : ['asahi', 'honeykrisp'])
+  endforeach
   test(
     'hk_sparse_residency',
     executable(

@@ -156,6 +156,7 @@ static const char *const hk_codegen_env[] = {
    "HK_APPLE9_MESH_SHADER", "HK_APPLE9_NATIVE_MESH",
    "HK_APPLE9_NATIVE_MESH_ATTRIBUTES",
    "HK_APPLE9_NATIVE_MESH_PRIMITIVE_LOWERING",
+   "HK_APPLE9_NATIVE_MESH_PACKED_SHAPES",
 };
 
 /* These controls change diagnostics, memory backing, when a variant is
@@ -169,6 +170,7 @@ static const char *const hk_ignored_env[] = {
    "HK_APPLE9_MERGE_RENDERS", "HK_APPLE9_MERGE_RESUME",
    "HK_APPLE9_MERGE_HOIST_BARRIERS", "HK_APPLE9_MERGE_MOVE_COMPUTE",
    "HK_APPLE9_FRAGMENT_BARRIER", "HK_APPLE9_NO_TILING_ELISION",
+   "HK_APPLE9_MESH_ROUTE_LOG",
 };
 
 static bool
@@ -209,6 +211,7 @@ static void
 hk_hash_apple9_native_mesh_abi(struct mesa_blake3 *ctx)
 {
    const struct agx_apple9_mesh_key k = AGX_APPLE9_MESH_KEY;
+   uint64_t packed_shapes = hk_apple9_native_mesh_packed_shapes();
    const uint32_t abi[] = {
       AGX_APPLE9_MESH_ABI_VERSION,
       k.reserved_uniform_words,
@@ -222,6 +225,7 @@ hk_hash_apple9_native_mesh_abi(struct mesa_blake3 *ctx)
       AGX_APPLE9_MESH_ARGUMENT_WORDS,
       hk_apple9_native_mesh_attributes_enabled(),
       2, /* Explicit native pairing and on-demand deferred realizations. */
+      packed_shapes, packed_shapes >> 32,
    };
    _mesa_blake3_update(ctx, abi, sizeof(abi));
 }
@@ -3979,7 +3983,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
     * slots while their declared bounds are still available as derefs. This
     * also covers arrays nested inside per-vertex/per-primitive blocks. */
    if (dev->dev.chip == AGX_CHIP_G16G && hk_apple9_native_mesh_enabled() &&
-       agx_apple9_native_mesh_shape_eligible(nir))
+       (agx_apple9_native_mesh_shape_eligible(nir) ||
+        hk_apple9_native_mesh_packed_shape_eligible(nir)))
       lower_indirect_modes |= nir_var_shader_out;
 
    NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
@@ -6539,11 +6544,13 @@ static struct agx_apple9_native_mesh_options
 hk_apple9_native_mesh_options(nir_shader *nir,
                               const struct hk_apple9_graphics_key *key)
 {
+   bool packed = hk_apple9_native_mesh_packed_shape_eligible(nir);
    return (struct agx_apple9_native_mesh_options){
       .physical_threads = hk_apple9_native_mesh_threads(nir->info.workgroup_size),
       .clip_halfz = key->clip_negative_one_to_one,
-      .attributes = hk_apple9_native_mesh_attributes_enabled(),
-      .primitive_broadcast = hk_apple9_native_mesh_primitive_lowering_enabled(),
+      .attributes = !packed && hk_apple9_native_mesh_attributes_enabled(),
+      .primitive_broadcast = !packed && hk_apple9_native_mesh_primitive_lowering_enabled(),
+      .packed_index_publication = packed,
       .outputs_flat = key->vertex.outputs_flat,
       .outputs_linear = key->vertex.outputs_linear,
    };

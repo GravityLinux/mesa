@@ -67,6 +67,7 @@
 #include "vk_util.h"
 
 DEBUG_GET_ONCE_OPTION(cached_hk_apple9_tess_batch, "HK_APPLE9_TESS_BATCH", NULL)
+DEBUG_GET_ONCE_BOOL_OPTION(mesh_route_log, "HK_APPLE9_MESH_ROUTE_LOG", false)
 DEBUG_GET_ONCE_OPTION(cached_hk_apple9_tess_scan_block,
                       "HK_APPLE9_TESS_SCAN_BLOCK", NULL)
 
@@ -5732,6 +5733,11 @@ hk_apple9_draw_mesh(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       return;
    struct hk_shader *main = &(native ? hk_api_shader_native(mesh) : mesh)
                                 ->variants[HK_MESH_VARIANT_MAIN];
+   if (debug_get_option_mesh_route_log()) {
+      fprintf(stderr, "HK_MESH_ROUTE native=%u T=%u V=%u P=%u\n", native,
+              native ? main->info.apple9_native.key.physical_threads : 0,
+              main->info.mesh.max_vertices, main->info.mesh.max_primitives);
+   }
    if (native) {
       /* One object workgroup publishes the nonempty direct child grid. */
       uint64_t grid = hk_pool_upload(cmd, direct, 3 * sizeof(uint32_t), 4);

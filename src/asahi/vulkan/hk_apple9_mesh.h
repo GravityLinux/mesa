@@ -14,6 +14,16 @@ bool hk_apple9_native_mesh_enabled(void);
 bool hk_apple9_native_mesh_attributes_enabled(void);
 bool hk_apple9_native_mesh_primitive_lowering_enabled(void);
 
+/* Explicit research selection, e.g. T16V3P2,T32V32P42, after qualification.
+ * Empty, boolean/wildcard or malformed selections enable no new class.
+ * The pure parser/predicate are shared with host tests. */
+uint64_t hk_apple9_packed_mesh_shapes_parse(const char *selection);
+uint64_t hk_apple9_native_mesh_packed_shapes(void);
+bool hk_apple9_packed_mesh_class_selected(uint64_t selection,
+                                         unsigned threads, unsigned vertices,
+                                         unsigned primitives);
+bool hk_apple9_native_mesh_packed_shape_eligible(const nir_shader *nir);
+
 enum hk_apple9_native_stage {
    HK_APPLE9_NATIVE_NONE,
    HK_APPLE9_NATIVE_OBJECT,

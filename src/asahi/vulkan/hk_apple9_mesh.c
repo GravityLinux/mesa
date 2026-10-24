@@ -10,6 +10,98 @@ DEBUG_GET_ONCE_BOOL_OPTION(native_mesh, "HK_APPLE9_NATIVE_MESH", false)
  * switches remain available for explicit comparisons within that path. */
 DEBUG_GET_ONCE_BOOL_OPTION(native_mesh_attributes, "HK_APPLE9_NATIVE_MESH_ATTRIBUTES", true)
 DEBUG_GET_ONCE_BOOL_OPTION(native_mesh_primitive_lowering, "HK_APPLE9_NATIVE_MESH_PRIMITIVE_LOWERING", true)
+DEBUG_GET_ONCE_OPTION(native_mesh_packed_shapes,
+                      "HK_APPLE9_NATIVE_MESH_PACKED_SHAPES", NULL)
+
+static const struct {
+   unsigned threads, vertices, primitives;
+   const char *name;
+} packed_shapes[] = {
+#define HK_PACKED_MESH_SHAPE(t, v, p) {t, v, p, "T" #t "V" #v "P" #p},
+#include "hk_apple9_packed_mesh_shapes.def"
+#undef HK_PACKED_MESH_SHAPE
+};
+static_assert(ARRAY_SIZE(packed_shapes) <= 64, "packed shape selection mask");
+
+uint64_t
+hk_apple9_packed_mesh_shapes_parse(const char *selection)
+{
+   uint64_t mask = 0;
+   if (!selection || !*selection)
+      return 0;
+
+   do {
+      size_t length = strcspn(selection, ",");
+      unsigned i;
+      for (i = 0; i < ARRAY_SIZE(packed_shapes); ++i) {
+         if (strlen(packed_shapes[i].name) == length &&
+             !strncmp(selection, packed_shapes[i].name, length)) {
+            mask |= BITFIELD64_BIT(i);
+            break;
+         }
+      }
+      /* Reject the whole selection, rather than silently widen or truncate a
+       * malformed qualification list. In particular, "1" and "all" fail. */
+      if (i == ARRAY_SIZE(packed_shapes))
+         return 0;
+      selection += length;
+      if (!*selection)
+         return mask;
+   } while (*++selection);
+   return 0;
+}
+
+bool
+hk_apple9_packed_mesh_class_selected(uint64_t selection, unsigned threads,
+                                    unsigned vertices, unsigned primitives)
+{
+   for (unsigned i = 0; i < ARRAY_SIZE(packed_shapes); ++i) {
+      if ((selection & BITFIELD64_BIT(i)) &&
+          threads == packed_shapes[i].threads &&
+          vertices == packed_shapes[i].vertices &&
+          primitives == packed_shapes[i].primitives)
+         return true;
+   }
+   return false;
+}
+
+static bool
+packed_class_enabled(unsigned threads, unsigned vertices, unsigned primitives)
+{
+   return hk_apple9_packed_mesh_class_selected(
+      hk_apple9_native_mesh_packed_shapes(), threads, vertices, primitives);
+}
+
+uint64_t
+hk_apple9_native_mesh_packed_shapes(void)
+{
+   return hk_apple9_native_mesh_enabled()
+             ? hk_apple9_packed_mesh_shapes_parse(
+                  debug_get_option_native_mesh_packed_shapes())
+             : 0;
+}
+
+bool
+hk_apple9_native_mesh_packed_shape_eligible(const nir_shader *nir)
+{
+   unsigned threads = hk_apple9_native_mesh_threads(nir->info.workgroup_size);
+   /* Match the qualified class, not every shape satisfying ceil(3P/4)<=W.
+    * The v3 programs use W x 1 x 1, no API shared allocation and Position
+    * only. Logical workgroup expansion/serialization remains a P1 feature. */
+   return nir->info.stage == MESA_SHADER_MESH &&
+          nir->info.mesh.primitive_type == MESA_PRIM_TRIANGLES &&
+          !nir->info.task_payload_size && !nir->info.shared_size &&
+          !nir->info.workgroup_size_variable &&
+          (!nir->info.api_subgroup_size || nir->info.api_subgroup_size == 32) &&
+          nir->info.workgroup_size[0] == threads &&
+          nir->info.workgroup_size[1] == 1 && nir->info.workgroup_size[2] == 1 &&
+          !(nir->info.outputs_written &
+            ~(VARYING_BIT_POS | VARYING_BIT_PRIMITIVE_INDICES)) &&
+          !nir->info.outputs_written_16bit &&
+          !(nir->info.per_primitive_outputs & ~VARYING_BIT_PRIMITIVE_INDICES) &&
+          packed_class_enabled(threads, nir->info.mesh.max_vertices_out,
+                                nir->info.mesh.max_primitives_out);
+}
 
 bool
 hk_apple9_native_mesh_attributes_enabled(void)
@@ -123,6 +215,23 @@ hk_apple9_native_shader_valid(const struct agx_shader_info *code,
    if (!logical_limit || !logical_size_valid(body->logical_size, logical_limit))
       return false;
    const struct agx_apple9_mesh_layout *l = &body->layout;
+   if (l->max_vertices != 3 || l->max_primitives != 1) {
+      unsigned count_B = ALIGN_POT(3 * l->max_primitives, 16);
+      unsigned position_B = count_B + 16;
+      unsigned pitch_B = ALIGN_POT(l->max_vertices, 4) * 4;
+      return packed_class_enabled(k->physical_threads, l->max_vertices,
+                                   l->max_primitives) &&
+             body->logical_size[0] == k->physical_threads &&
+             body->logical_size[1] == 1 && body->logical_size[2] == 1 &&
+             !body->shared_size_B && !body->primitive_broadcast &&
+             l->indices_per_primitive == 3 && l->vertex_components == 4 &&
+             !code->apple9_varyings.count && !l->primitive_components &&
+             !l->primitive_stride_B && !l->culling &&
+             l->primitive_count_B == count_B &&
+             l->vertex_count_B == count_B + 4 && l->cull_B == position_B &&
+             l->position_B == position_B && l->vertex_pitch_B == pitch_B &&
+             l->local_size_B == position_B + 4 * pitch_B;
+   }
    return l->max_vertices == 3 && l->max_primitives == 1 &&
           l->indices_per_primitive == 3 && l->vertex_components >= 4 &&
           l->vertex_components <= 4 + AGX_APPLE9_MAX_VARYING_COMPONENTS &&
