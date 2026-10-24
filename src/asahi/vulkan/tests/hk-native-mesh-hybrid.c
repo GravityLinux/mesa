@@ -479,8 +479,15 @@ check_gs_programs(struct hk_api_shader **api, bool native, unsigned vertices)
       CHECK(hk_native_producer_object(ng)->bo);
       CHECK(hk_native_producer_main(ng)->info.apple9_native_stage == HK_APPLE9_NATIVE_MESH);
       CHECK(hk_native_producer_object(ng)->info.apple9_native_stage == HK_APPLE9_NATIVE_OBJECT);
-      CHECK(hk_native_producer_main(ng)->info.apple9_native.layout.max_vertices == vertices);
-      CHECK(hk_native_producer_main(ng)->info.apple9_native.layout.max_primitives == vertices - 2);
+      /* Packed GS publishes HK_APPLE9_NATIVE_GS_PACK triangles' fixed slots. */
+      const struct agx_apple9_mesh_layout *l = &hk_native_producer_main(ng)->info.apple9_native.layout;
+      if (hk_apple9_native_gs_pack_enabled() && (vertices == 3 || vertices == 4)) {
+         CHECK(l->max_vertices == HK_APPLE9_NATIVE_GS_PACK * vertices);
+         CHECK(l->max_primitives == (vertices == 3 ? 17 : 16));
+      } else {
+         CHECK(l->max_vertices == vertices);
+         CHECK(l->max_primitives == vertices - 2);
+      }
       struct hk_api_shader *nv = hk_api_shader_native(api[MESA_SHADER_VERTEX]);
       CHECK(nv->variants[HK_VS_VARIANT_SW].bo && !nv->writes_memory);
       CHECK(nv->variants[HK_VS_VARIANT_SW].b.info.outputs & VARYING_BIT_POS);
