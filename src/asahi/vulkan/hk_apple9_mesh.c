@@ -2,14 +2,280 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_apple9_mesh.h"
+#include "hk_physical_device.h"
+#include "hk_device.h"
+#include "hk_apple9_native_index_classes.h"
+#include "util/u_atomic.h"
 #include "util/u_debug.h"
 #include <string.h>
 
 DEBUG_GET_ONCE_BOOL_OPTION(native_mesh, "HK_APPLE9_NATIVE_MESH", false)
+/* Land the qualified path without enabling the 31-class default. */
+DEBUG_GET_ONCE_BOOL_OPTION(native_index, "HK_APPLE9_NATIVE_INDEX", false)
+DEBUG_GET_ONCE_OPTION(native_stages, "HK_APPLE9_NATIVE_STAGES", NULL)
+DEBUG_GET_ONCE_BOOL_OPTION(native_gs, "HK_APPLE9_GS_NATIVE", false)
+DEBUG_GET_ONCE_BOOL_OPTION(native_tess, "HK_APPLE9_TESS_NATIVE", false)
+
+bool
+hk_apple9_native_tess_enabled(void)
+{
+   return hk_apple9_native_mesh_enabled() && debug_get_option_native_tess();
+}
+
+bool
+hk_apple9_native_gs_enabled(void)
+{
+   return hk_apple9_native_mesh_enabled() && debug_get_option_native_gs();
+}
 /* Qualified attribute/P1 support belongs to the opt-in native path. These
  * switches remain available for explicit comparisons within that path. */
 DEBUG_GET_ONCE_BOOL_OPTION(native_mesh_attributes, "HK_APPLE9_NATIVE_MESH_ATTRIBUTES", true)
 DEBUG_GET_ONCE_BOOL_OPTION(native_mesh_primitive_lowering, "HK_APPLE9_NATIVE_MESH_PRIMITIVE_LOWERING", true)
+DEBUG_GET_ONCE_OPTION(native_mesh_packed_shapes,
+                      "HK_APPLE9_NATIVE_MESH_PACKED_SHAPES", NULL)
+
+static const struct {
+   unsigned threads, vertices, primitives;
+   const char *name;
+} packed_shapes[] = {
+#define HK_PACKED_MESH_SHAPE(t, v, p) {t, v, p, "T" #t "V" #v "P" #p},
+#include "hk_apple9_packed_mesh_shapes.def"
+#undef HK_PACKED_MESH_SHAPE
+};
+static_assert(ARRAY_SIZE(packed_shapes) <= 64, "packed shape selection mask");
+
+uint64_t
+hk_apple9_packed_mesh_shapes_parse(const char *selection)
+{
+   uint64_t mask = 0;
+   if (!selection || !*selection)
+      return 0;
+
+   do {
+      size_t length = strcspn(selection, ",");
+      unsigned i;
+      for (i = 0; i < ARRAY_SIZE(packed_shapes); ++i) {
+         if (strlen(packed_shapes[i].name) == length &&
+             !strncmp(selection, packed_shapes[i].name, length)) {
+            mask |= BITFIELD64_BIT(i);
+            break;
+         }
+      }
+      /* Reject the whole selection, rather than silently widen or truncate a
+       * malformed qualification list. In particular, "1" and "all" fail. */
+      if (i == ARRAY_SIZE(packed_shapes))
+         return 0;
+      selection += length;
+      if (!*selection)
+         return mask;
+   } while (*++selection);
+   return 0;
+}
+
+bool
+hk_apple9_packed_mesh_class_selected(uint64_t selection, unsigned threads,
+                                    unsigned vertices, unsigned primitives)
+{
+   for (unsigned i = 0; i < ARRAY_SIZE(packed_shapes); ++i) {
+      if ((selection & BITFIELD64_BIT(i)) &&
+          threads == packed_shapes[i].threads &&
+          vertices == packed_shapes[i].vertices &&
+          primitives == packed_shapes[i].primitives)
+         return true;
+   }
+   return false;
+}
+
+static bool
+packed_class_enabled(unsigned threads, unsigned vertices, unsigned primitives)
+{
+   return hk_apple9_packed_mesh_class_selected(
+      hk_apple9_native_mesh_packed_shapes(), threads, vertices, primitives);
+}
+
+uint64_t
+hk_apple9_native_mesh_packed_shapes(void)
+{
+   /* An explicit legacy research configuration keeps its original semantics,
+    * including HK_APPLE9_NATIVE_MESH=0 as a complete opt-out. An explicit
+    * shape list alone must not widen the production qualification. */
+   if (getenv("HK_APPLE9_NATIVE_MESH"))
+      return hk_apple9_native_mesh_enabled()
+                ? hk_apple9_packed_mesh_shapes_parse(
+                     debug_get_option_native_mesh_packed_shapes())
+                : 0;
+   return debug_get_option_native_index() ? hk_apple9_native_index_shapes() : 0;
+}
+
+uint64_t
+hk_apple9_native_index_shapes(void)
+{
+   static const char names[] =
+#define HK_NATIVE_INDEX_SHAPE(t, v, p) ",T" #t "V" #v "P" #p
+#include "hk_apple9_native_index_shapes.def"
+#undef HK_NATIVE_INDEX_SHAPE
+      ;
+   return hk_apple9_packed_mesh_shapes_parse(names + 1);
+}
+
+bool
+hk_apple9_native_index_enabled(const struct hk_physical_device *pdev)
+{
+   return pdev && pdev->dev.chip == AGX_CHIP_G16G &&
+          pdev->dev.native_mesh_qualified && !pdev->disable_native_index &&
+          debug_get_option_native_index() &&
+          !getenv("HK_APPLE9_NATIVE_MESH");
+}
+
+bool
+hk_apple9_native_mesh_available(const struct hk_physical_device *pdev)
+{
+   return hk_apple9_native_mesh_enabled() || hk_apple9_native_index_enabled(pdev);
+}
+
+bool
+hk_apple9_native_mesh_available_device(struct hk_device *dev)
+{
+   /* The discovery VM partitions physical-device compiler/cache policy. It
+    * cannot authorize a distinct logical VM: recording also needs that VM's
+    * own immutable qualification. Research keeps its explicit pairing. */
+   return hk_apple9_native_mesh_enabled() ||
+          (dev->dev.native_mesh_qualified &&
+           hk_apple9_native_index_enabled(hk_device_physical(dev)));
+}
+
+uint8_t
+hk_apple9_native_stage_policy(const struct hk_physical_device *pdev)
+{
+   /* Stage qualification and its default decision are independent of native
+    * index. An explicit stage selection enables host/device qualification;
+    * absence, zero or an unknown selection keeps production GS/TES off. */
+   if (!hk_apple9_native_index_enabled(pdev) || pdev->disable_native_stages)
+      return 0;
+   const char *selection = debug_get_option_native_stages();
+   if (!selection || !strcmp(selection, "0"))
+      return 0;
+   if (!strcmp(selection, "gs"))
+      return HK_APPLE9_NATIVE_GS_BIT;
+   if (!strcmp(selection, "tes"))
+      return HK_APPLE9_NATIVE_TES_BIT;
+   if (!strcmp(selection, "gs,tes"))
+      return HK_APPLE9_NATIVE_STAGE_BITS;
+
+   static bool warned_invalid;
+   if (!p_atomic_xchg(&warned_invalid, true))
+      fprintf(stderr, "HK_APPLE9_NATIVE_STAGES: unknown selection '%s'; "
+                      "expected 0, gs, tes or gs,tes; stages disabled\n",
+              selection);
+   return 0;
+}
+
+bool
+hk_apple9_native_stage_available_device(struct hk_device *dev,
+                                        mesa_shader_stage stage)
+{
+   if (stage == MESA_SHADER_GEOMETRY && hk_apple9_native_gs_enabled())
+      return true;
+   if (stage == MESA_SHADER_TESS_EVAL && hk_apple9_native_tess_enabled())
+      return true;
+   unsigned bit = stage == MESA_SHADER_GEOMETRY ? HK_APPLE9_NATIVE_GS_BIT
+                : stage == MESA_SHADER_TESS_EVAL ? HK_APPLE9_NATIVE_TES_BIT : 0;
+   return dev->dev.native_mesh_qualified &&
+          (hk_apple9_native_stage_policy(hk_device_physical(dev)) & bit);
+}
+
+bool
+hk_apple9_native_stage_class(mesa_shader_stage stage, unsigned threads,
+                             unsigned vertices, unsigned primitives)
+{
+   /* The initial GS/TES contract never inherits the wider index class list.
+    * In particular W64 and T16V16P16 cannot enter through a generated stage. */
+   if (threads != 16)
+      return false;
+   if (stage == MESA_SHADER_GEOMETRY)
+      return (vertices == 3 && primitives == 1) ||
+             (vertices == 4 && primitives == 2);
+   return stage == MESA_SHADER_TESS_EVAL && vertices == 3 && primitives == 1;
+}
+
+const char *
+hk_apple9_native_index_class_hash(void)
+{
+   return HK_APPLE9_NATIVE_INDEX_CLASSES_SHA256;
+}
+
+bool
+hk_apple9_native_mesh_workgroup_eligible(const nir_shader *nir)
+{
+   unsigned threads = hk_apple9_native_mesh_threads(nir->info.workgroup_size);
+   if (!threads || nir->info.workgroup_size_variable ||
+       (nir->info.api_subgroup_size && nir->info.api_subgroup_size != 32))
+      return false;
+
+   if (nir->info.workgroup_size[0] == threads &&
+       nir->info.workgroup_size[1] == 1 && nir->info.workgroup_size[2] == 1)
+      return true;
+
+   /* Output resource classes describe physical publication, independently
+    * of the application's logical workgroup. The existing P1 lowering masks
+    * 1..16 logical lanes onto T16 and serializes up to four architectural
+    * subgroups onto T32. Keep the larger-output gate at its qualified shape
+    * while this logical P1 range is validated through ordinary Vulkan.
+    * Derivative-bearing expansion needs its own geometry-preservation proof.
+    */
+   return nir->info.stage == MESA_SHADER_MESH &&
+          nir->info.mesh.max_vertices_out == 3 &&
+          nir->info.mesh.max_primitives_out == 1 &&
+          nir->info.derivative_group == DERIVATIVE_GROUP_NONE;
+}
+
+bool
+hk_apple9_native_mesh_round_counts_eligible(const uint16_t size[3],
+                                             unsigned vertices,
+                                             unsigned primitives)
+{
+   /* Research only: declarations beyond one publication round of the
+    * physical T16/T32 width. Shapes that fit one round keep the class path. */
+   unsigned threads = hk_apple9_native_mesh_threads(size);
+   unsigned round = MIN2(threads, AGX_APPLE9_PUBLICATION_ROUND);
+   return hk_apple9_native_mesh_enabled() && threads && vertices &&
+          vertices <= 256 && primitives && primitives <= 256 &&
+          (vertices > round || DIV_ROUND_UP(3 * primitives, 4) > round);
+}
+
+bool
+hk_apple9_native_mesh_round_shape_eligible(const nir_shader *nir)
+{
+   return nir->info.stage == MESA_SHADER_MESH && !nir->info.task_payload_size &&
+          nir->info.mesh.primitive_type == MESA_PRIM_TRIANGLES &&
+          !nir->info.workgroup_size_variable &&
+          (!nir->info.api_subgroup_size || nir->info.api_subgroup_size == 32) &&
+          nir->info.derivative_group == DERIVATIVE_GROUP_NONE &&
+          !(nir->info.per_primitive_outputs & ~VARYING_BIT_PRIMITIVE_INDICES) &&
+          !nir->info.outputs_written_16bit &&
+          hk_apple9_native_mesh_round_counts_eligible(
+             nir->info.workgroup_size, nir->info.mesh.max_vertices_out,
+             nir->info.mesh.max_primitives_out);
+}
+
+bool
+hk_apple9_native_mesh_packed_shape_eligible(const nir_shader *nir)
+{
+   unsigned threads = hk_apple9_native_mesh_threads(nir->info.workgroup_size);
+   /* Match the qualified class, not every shape satisfying ceil(3P/4)<=W.
+    * Larger output classes retain W x 1 x 1. P1 logical expansion and
+    * serialization do not change the physical output allocation. */
+   return nir->info.stage == MESA_SHADER_MESH &&
+          nir->info.mesh.primitive_type == MESA_PRIM_TRIANGLES &&
+          !nir->info.task_payload_size && !nir->info.shared_size &&
+          hk_apple9_native_mesh_workgroup_eligible(nir) &&
+          !(nir->info.outputs_written &
+            ~(VARYING_BIT_POS | VARYING_BIT_PRIMITIVE_INDICES)) &&
+          !nir->info.outputs_written_16bit &&
+          !(nir->info.per_primitive_outputs & ~VARYING_BIT_PRIMITIVE_INDICES) &&
+          packed_class_enabled(threads, nir->info.mesh.max_vertices_out,
+                                nir->info.mesh.max_primitives_out);
+}
 
 bool
 hk_apple9_native_mesh_attributes_enabled(void)
@@ -115,14 +381,54 @@ hk_apple9_native_shader_valid(const struct agx_shader_info *code,
              body->logical_size[0] == 1 && body->logical_size[1] == 1 &&
              body->logical_size[2] == 1 && !body->shared_size_B &&
              !body->layout.local_size_B && !code->local_size;
-   unsigned logical_limit =
+   const struct agx_apple9_mesh_layout *l = &body->layout;
+   if (hk_apple9_native_mesh_round_counts_eligible(body->logical_size,
+                                                   l->max_vertices,
+                                                   l->max_primitives)) {
+      unsigned count_B = ALIGN_POT(3 * l->max_primitives, 16);
+      unsigned position_B = count_B + 16;
+      unsigned pitch_B = ALIGN_POT(l->max_vertices, 4) * 4;
+      return hk_apple9_native_mesh_threads(body->logical_size) == k->physical_threads &&
+             !body->primitive_broadcast && l->indices_per_primitive == 3 &&
+             l->vertex_components >= 4 &&
+             l->vertex_components <= 4 + AGX_APPLE9_MAX_VARYING_COMPONENTS &&
+             code->apple9_varyings.count == l->vertex_components - 4 &&
+             !l->primitive_components && !l->primitive_stride_B && !l->culling &&
+             l->primitive_count_B == count_B && l->vertex_count_B == count_B + 4 &&
+             l->cull_B == position_B && l->position_B == position_B &&
+             l->vertex_pitch_B == pitch_B &&
+             l->local_size_B == position_B + l->vertex_components * pitch_B;
+   }
+  unsigned logical_limit =
       k->physical_threads == AGX_APPLE9_NATIVE_THREADS
          ? AGX_APPLE9_NATIVE_THREADS
          : k->physical_threads == AGX_APPLE9_NATIVE_SERIAL_THREADS
               ? AGX_APPLE9_NATIVE_MAX_INVOCATIONS : 0;
    if (!logical_limit || !logical_size_valid(body->logical_size, logical_limit))
       return false;
-   const struct agx_apple9_mesh_layout *l = &body->layout;
+   if (hk_apple9_native_mesh_threads(body->logical_size) != k->physical_threads)
+      return false;
+   /* The default policy also checks the exact P1 declaration at upload;
+    * a research P1 shader binary must not bypass the production scope. */
+   if (l->max_vertices != 3 || l->max_primitives != 1 ||
+       !hk_apple9_native_mesh_enabled()) {
+      unsigned count_B = ALIGN_POT(3 * l->max_primitives, 16);
+      unsigned position_B = count_B + 16;
+      unsigned pitch_B = ALIGN_POT(l->max_vertices, 4) * 4;
+      return packed_class_enabled(k->physical_threads, l->max_vertices,
+                                   l->max_primitives) &&
+             ((l->max_vertices == 3 && l->max_primitives == 1) ||
+              (body->logical_size[0] == k->physical_threads &&
+               body->logical_size[1] == 1 && body->logical_size[2] == 1)) &&
+             !body->shared_size_B && !body->primitive_broadcast &&
+             l->indices_per_primitive == 3 && l->vertex_components == 4 &&
+             !code->apple9_varyings.count && !l->primitive_components &&
+             !l->primitive_stride_B && !l->culling &&
+             l->primitive_count_B == count_B &&
+             l->vertex_count_B == count_B + 4 && l->cull_B == position_B &&
+             l->position_B == position_B && l->vertex_pitch_B == pitch_B &&
+             l->local_size_B == position_B + 4 * pitch_B;
+   }
    return l->max_vertices == 3 && l->max_primitives == 1 &&
           l->indices_per_primitive == 3 && l->vertex_components >= 4 &&
           l->vertex_components <= 4 + AGX_APPLE9_MAX_VARYING_COMPONENTS &&

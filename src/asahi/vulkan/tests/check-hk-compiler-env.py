@@ -55,12 +55,14 @@ for name in ('HK_APPLE9_VARIANT_CACHE_VERIFY', 'HK_APPLE9_DUMP_FRAGMENT_DIR',
              'HK_APPLE9_TESS_BATCH', 'HK_APPLE9_TESS_SCAN_BLOCK',
              'HK_APPLE9_MERGE_RENDERS', 'HK_APPLE9_MERGE_RESUME',
              'HK_APPLE9_MERGE_HOIST_BARRIERS', 'HK_APPLE9_MERGE_MOVE_COMPUTE',
-             'HK_APPLE9_FRAGMENT_BARRIER', 'HK_APPLE9_NO_TILING_ELISION'):
+             'HK_APPLE9_FRAGMENT_BARRIER', 'HK_APPLE9_NO_TILING_ELISION',
+             'HK_APPLE9_TESS_ROUTE_LOG'):
     for value in ('0', '1', '/tmp/trace-a', '/tmp/trace-b'):
         assert read(**{name: value}) == (base, 0), (name, value)
 # Code-generation controls continue to separate cache entries.
 for name in ('AGX_SPILL_COALESCE', 'AGX_APPLE9_HOIST_LOADS',
-             'AGX_APPLE9_SAFE_HOIST_STAGES', 'HK_APPLE9_NATIVE_MESH'):
+             'AGX_APPLE9_SAFE_HOIST_STAGES', 'HK_APPLE9_NATIVE_MESH',
+             'HK_APPLE9_TESS_NATIVE', 'HK_APPLE9_NATIVE_INDEX'):
     zero = read(**{name: '0'})[0]
     one = read(**{name: '1'})[0]
     assert len({base, zero, one}) == 3, name

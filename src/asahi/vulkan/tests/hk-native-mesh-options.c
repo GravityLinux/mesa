@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "hk_shader.h"
+#include "hk_apple9_mesh.h"
 #include "asahi/compiler/agx_nir.h"
 #include "compiler/nir/nir_builder.h"
 #include "compiler/nir/nir_serialize.h"
@@ -192,6 +193,13 @@ check_workgroup_key(const uint16_t size[3], bool shared, unsigned expected)
       CHECK(part.info.workgroup_size[0] == expected);
       CHECK(part.info.workgroup_size[1] == 1 && part.info.workgroup_size[2] == 1);
       CHECK(hk_apple9_native_shader_valid(&part.info, &info, HK_APPLE9_NATIVE_MESH));
+      /* A cached body cannot change its logical workgroup across the T16/T32
+       * selection boundary while retaining the original compiled width. */
+      struct agx_apple9_mesh_body_info stale = info;
+      stale.logical_size[0] = expected == 16 ? 17 : 16;
+      stale.logical_size[1] = stale.logical_size[2] = 1;
+      CHECK(!hk_apple9_native_shader_valid(&part.info, &stale,
+                                          HK_APPLE9_NATIVE_MESH));
       struct agx_apple9_launch_parameters launch;
       CHECK(hk_apple9_native_launch_parameters(&launch, &part.info, &info,
          HK_APPLE9_NATIVE_MESH, 0, 0x1000));
@@ -312,7 +320,11 @@ check_capabilities(void)
       nir_shader *nir = producer(true);
       nir->info.mesh.max_vertices_out = declarations[i][0];
       nir->info.mesh.max_primitives_out = declarations[i][1];
-      check_capability(nir, false);
+      /* Declarations beyond one publication round compile through rounds;
+       * other non-P1 declarations stay outside the research P1 path. */
+      check_capability(nir, hk_apple9_native_mesh_round_counts_eligible(
+                               nir->info.workgroup_size, declarations[i][0],
+                               declarations[i][1]));
    }
    for (unsigned prim = MESA_PRIM_POINTS; prim <= MESA_PRIM_LINES; ++prim) {
       nir_shader *nir = producer(true);

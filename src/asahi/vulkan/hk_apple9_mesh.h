@@ -11,8 +11,43 @@
 /* Explicit userspace/kernel development pairing. The stable UAPI has no
  * native-mesh capability bit; enabling this requires the matching kernel. */
 bool hk_apple9_native_mesh_enabled(void);
+struct hk_physical_device;
+struct hk_device;
+/* Default publication policy is separate from the broader research opt-in. */
+bool hk_apple9_native_index_enabled(const struct hk_physical_device *pdev);
+bool hk_apple9_native_mesh_available(const struct hk_physical_device *pdev);
+bool hk_apple9_native_mesh_available_device(struct hk_device *dev);
+const char *hk_apple9_native_index_class_hash(void);
+uint64_t hk_apple9_native_index_shapes(void);
+/* Separate default-off GS route; also requires native mesh and exact classes. */
+bool hk_apple9_native_gs_enabled(void);
+bool hk_apple9_native_tess_enabled(void);
+
+/* Stage policy is narrower than native-index qualification. These bits name
+ * the API producer, not the generated mesh/object execution stages. */
+#define HK_APPLE9_NATIVE_GS_BIT (1u << 0)
+#define HK_APPLE9_NATIVE_TES_BIT (1u << 1)
+#define HK_APPLE9_NATIVE_STAGE_BITS \
+   (HK_APPLE9_NATIVE_GS_BIT | HK_APPLE9_NATIVE_TES_BIT)
+uint8_t hk_apple9_native_stage_policy(const struct hk_physical_device *pdev);
+bool hk_apple9_native_stage_available_device(struct hk_device *dev,
+                                             mesa_shader_stage stage);
+bool hk_apple9_native_stage_class(mesa_shader_stage stage, unsigned threads,
+                                  unsigned vertices, unsigned primitives);
+
 bool hk_apple9_native_mesh_attributes_enabled(void);
 bool hk_apple9_native_mesh_primitive_lowering_enabled(void);
+
+/* Explicit research selection, e.g. T16V3P2,T32V32P42, after qualification.
+ * Empty, boolean/wildcard or malformed selections enable no new class.
+ * The pure parser/predicate are shared with host tests. */
+uint64_t hk_apple9_packed_mesh_shapes_parse(const char *selection);
+uint64_t hk_apple9_native_mesh_packed_shapes(void);
+bool hk_apple9_packed_mesh_class_selected(uint64_t selection,
+                                         unsigned threads, unsigned vertices,
+                                         unsigned primitives);
+bool hk_apple9_native_mesh_packed_shape_eligible(const nir_shader *nir);
+bool hk_apple9_native_mesh_workgroup_eligible(const nir_shader *nir);
 
 enum hk_apple9_native_stage {
    HK_APPLE9_NATIVE_NONE,
@@ -43,6 +78,12 @@ bool hk_apple9_native_mesh_grid_valid(const uint32_t groups[3]);
 
 /* Zero rejects an invalid logical shape before any multiplication overflows. */
 unsigned hk_apple9_native_mesh_threads(const uint16_t local_size[3]);
+/* Research envelope beyond one publication round at physical T16/T32;
+ * independent of the qualified class list. */
+bool hk_apple9_native_mesh_round_counts_eligible(const uint16_t local_size[3],
+                                                 unsigned vertices,
+                                                 unsigned primitives);
+bool hk_apple9_native_mesh_round_shape_eligible(const nir_shader *nir);
 
 bool hk_apple9_native_shader_valid(
    const struct agx_shader_info *code,
