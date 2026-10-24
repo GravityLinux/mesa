@@ -5765,6 +5765,19 @@ hk_apple9_launch_native_gs(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       hk_apple9_draw_native_mesh(cmd, draw_id, grid);
 }
 
+/* Index size and primitive restart come from command buffer state, not the
+ * draw entry points (hk_draw_indexed passes neither). Everything that routes
+ * or launches a draw reads both - an indexed native GS fetches with this index
+ * size - so G16 completes the draw before any of it. */
+static struct agx_draw
+hk_draw_complete_from_state(const struct hk_cmd_buffer *cmd, struct agx_draw draw)
+{
+   draw.restart = cmd->vk.dynamic_graphics_state.ia.primitive_restart_enable &&
+                  draw.indexed;
+   draw.index_size = cmd->state.gfx.index.size;
+   return draw;
+}
+
 static void
 hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
 {
@@ -5777,11 +5790,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
       return;
 
    if (hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G) {
-      /* Index size and primitive restart come from command buffer state, not
-       * the draw entry point. Native GS/TES routing reads both (an indexed
-       * native GS fetches with this index size), so set them before it. */
-      draw_.restart = dyn->ia.primitive_restart_enable && draw_.indexed;
-      draw_.index_size = cmd->state.gfx.index.size;
+      draw_ = hk_draw_complete_from_state(cmd, draw_);
       if (!hk_feedback_prepare_draw(cmd))
          return;
       /* Binned-primitive estimate for the native render bound; native
