@@ -88,6 +88,20 @@ routes(struct hk_cmd_buffer *cmd)
       VARYING_BIT_CULL_PRIMITIVE;
    FALLBACK(dyn->rs.conservative_mode,
             VK_CONSERVATIVE_RASTERIZATION_MODE_OVERESTIMATE_EXT);
+   /* CullDistance alone also removes a whole triangle with degenerate
+    * indices. A cached native pair must fall back under conservative raster. */
+   nm->variants[HK_MESH_VARIANT_MAIN].info.apple9_native.primitive_broadcast = 0;
+   nm->variants[HK_MESH_VARIANT_MAIN].info.apple9_native.cull_distances = 2;
+   FALLBACK(dyn->rs.conservative_mode,
+            VK_CONSERVATIVE_RASTERIZATION_MODE_OVERESTIMATE_EXT);
+   FALLBACK(dyn->rs.conservative_mode,
+            VK_CONSERVATIVE_RASTERIZATION_MODE_UNDERESTIMATE_EXT);
+   gfx->shaders[MESA_SHADER_MESH] = nm;
+   gfx->shaders[MESA_SHADER_FRAGMENT] = nf;
+   FALLBACK(dyn->rs.conservative_mode,
+            VK_CONSERVATIVE_RASTERIZATION_MODE_OVERESTIMATE_EXT);
+   gfx->shaders[MESA_SHADER_MESH] = mesh;
+   gfx->shaders[MESA_SHADER_FRAGMENT] = fs;
    gfx->shaders[MESA_SHADER_FRAGMENT] = NULL;
    CHECK(hk_apple9_use_native_mesh(cmd, direct, 0));
 #undef FALLBACK

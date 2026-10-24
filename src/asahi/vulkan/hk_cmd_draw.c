@@ -5971,8 +5971,8 @@ hk_apple9_native_mesh_state_eligible(struct hk_cmd_buffer *cmd,
             1) != 1)
       return false;
 
-   /* P1 culling uses degenerate indices, which conservative rasterization
-    * may still cover. Other pipelines use the ordinary raster state. */
+   /* Primitive and cull-distance culling use degenerate indices, which
+    * conservative rasterization may still cover. */
    return !cull_primitive || dyn->rs.conservative_mode ==
                                 VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT;
 }
@@ -5999,8 +5999,9 @@ hk_apple9_use_native_mesh(struct hk_cmd_buffer *cmd, const uint32_t *direct,
       return false;
    return hk_apple9_native_mesh_state_eligible(
       cmd, direct, count_addr,
-      main->info.apple9_native.primitive_broadcast &
-         VARYING_BIT_CULL_PRIMITIVE);
+      (main->info.apple9_native.primitive_broadcast &
+         VARYING_BIT_CULL_PRIMITIVE) ||
+      main->info.apple9_native.cull_distances);
 }
 
 /* Mesh shader draws run the task and mesh workgroups as compute kernels, and

@@ -517,6 +517,8 @@ struct hk_api_shader {
     * Draw state can still require the emulated realization. A deferred native
     * rejection clears this atomically while recording threads may read it. */
    bool apple9_native_candidate;
+   /* Whole-primitive culling that requires degenerate triangles to be empty,
+    * including CullPrimitiveEXT and per-vertex CullDistance. */
    bool apple9_native_cull_primitive;
 
    /* A native TES uses the program-info union for mesh metadata. Retain

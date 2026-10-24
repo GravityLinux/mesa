@@ -508,8 +508,8 @@ agx_nir_lower_apple9_native_mesh(
    struct agx_apple9_varying_layout varyings;
    if (!varying_layout(info, options, &varyings, reason))
       return false;
-   /* Every declared clip distance needs its plane; cull distances keep the
-    * emulated path until native primitive culling covers them. */
+   /* Clip distances need rasterizer planes; cull distances stay in shared
+    * storage until completion evaluates whole-primitive culling. */
    info->clip_distances = nir->info.clip_distance_array_size;
    info->cull_distances = cull.cull;
    info->cull_B = cull.base;
