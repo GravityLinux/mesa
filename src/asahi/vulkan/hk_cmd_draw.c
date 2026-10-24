@@ -2917,7 +2917,12 @@ hk_apple9_launch_tess(struct hk_cmd_buffer *cmd, struct agx_draw draw,
          cmd,
          VK_QUERY_PIPELINE_STATISTIC_TESSELLATION_CONTROL_SHADER_PATCHES_BIT)) &&
       !hk_stat_enabled(c_prims) && !hk_stat_enabled(c_inv) && !gfx->xfb_enabled;
-   if (!batch)
+   /* A full fold table starts a new batch. */
+   bool fold = batch && hk_tess_fold_enabled();
+   if (!batch ||
+       (fold && util_dynarray_num_elements(&cmd->tess_batch.fold,
+                                           struct hk_tess_fold) >=
+                   HK_TESS_FOLD_MAX_DRAWS))
       hk_tess_batch_flush(cmd);
 
 #define HK_TESS_LANE(l) cmd->tess_batch.capture = batch ? &cmd->tess_batch.lane[l] : NULL
@@ -2926,6 +2931,22 @@ hk_apple9_launch_tess(struct hk_cmd_buffer *cmd, struct agx_draw draw,
    hk_apple9_dispatch_prerast(cmd, vs, grid_vs, &bindings);
    HK_TESS_LANE(1);
    hk_apple9_dispatch_prerast(cmd, tcs, grid_tcs, &bindings);
+
+   if (fold) {
+      /* The flush runs the count, prefix sum and emit passes of every folded
+       * draw (hk_tess_fold_flush).
+       */
+      struct hk_tess_fold f = {
+         .params = state,
+         .nr_patches = ((struct poly_tess_params *)tess_args.cpu)->nr_patches,
+         .prim = gfx->tess.info.mode,
+      };
+      util_dynarray_append(&cmd->tess_batch.fold, f);
+      cmd->tess_batch.capture = NULL;
+      cmd->tess_batch.draws++;
+      return hk_heap_indexed_indirect(cmd, gfx->tess.out_draws,
+                                      AGX_INDEX_SIZE_U32, false);
+   }
 
    /* First generate counts, then prefix sum them, and then tessellate. */
    HK_TESS_LANE(2);

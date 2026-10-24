@@ -189,6 +189,18 @@ if with_tests
     dependencies : [hk_deps], link_with : [libhk],
     link_args : ['-Wl,--wrap=hk_meta_decompress_color', '-Wl,--wrap=__vk_errorf']),
     suite : ['asahi', 'honeykrisp'])
+  test(
+    'hk-tess-fold-oom',
+    executable(
+      'hk-tess-fold-oom', 'tests/hk-tess-fold-oom.c',
+      include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                             inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+      dependencies : [hk_deps],
+      link_with : [libhk],
+      link_args : ['-Wl,--wrap=hk_pool_alloc_internal', '-Wl,--wrap=__vk_errorf'],
+    ),
+    suite : ['asahi', 'honeykrisp'],
+  )
   foreach t : ['hk-feedback', 'hk-descriptor-parts', 'hk-constant-data', 'hk-draw-state-cache', 'hk-render-merge', 'hk-empty-clear-barriers', 'hk-image-limits', 'hk-stage-output-limits', 'hk-cull-output-limits', 'hk-pregfx-recording', 'hk-heap-resubmit', 'hk-heap-addresses', 'hk-native-image-store', 'hk-native-store-rw', 'hk-mesh-query', 'hk-native-mesh', 'hk-robust-bounded-vector', 'hk-gs-mesh', 'hk-tes-mesh']
     contract_test = executable(
       t,
