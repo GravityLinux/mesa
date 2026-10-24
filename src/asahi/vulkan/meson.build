@@ -216,6 +216,10 @@ if with_tests
     include_directories : [inc_gallium, inc_gallium_aux, inc_include,
                            inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
     dependencies : [hk_deps], link_with : [libhk], build_by_default : false)
+  test('hk-native-batch-admits',
+       executable('hk-native-batch-admits', 'tests/hk-native-batch-admits.c',
+                  include_directories : [inc_src]),
+       suite : ['asahi', 'honeykrisp'])
   test('hk-native-mesh-open', executable('hk-native-mesh-open',
     'tests/hk-native-mesh-open.c',
     include_directories : [inc_gallium, inc_gallium_aux, inc_include,
