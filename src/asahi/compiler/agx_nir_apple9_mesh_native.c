@@ -22,20 +22,21 @@ agx_apple9_native_mesh_shape_eligible(const nir_shader *nir)
 }
 
 static bool
-eligible(nir_shader *nir, unsigned physical_threads,
-         bool packed_indices, const char **reason)
+eligible(nir_shader *nir, unsigned physical_threads, bool packed_indices,
+         const char **reason)
 {
    if (packed_indices) {
-      /* This explicit compiler option does not widen the driver's native
-       * shape predicate. The single-submit candidate cannot cover more than
-       * one physical group of packed words, or multi-round vertex outputs. */
+      /* This compiler option does not widen the driver's native shape
+       * predicate. Publication repeats in rounds of at most
+       * AGX_APPLE9_PUBLICATION_ROUND entries, so the API maxima are covered,
+       * subject to the local output allocation. */
       if (nir->info.stage != MESA_SHADER_MESH || nir->info.task_payload_size ||
           nir->info.mesh.primitive_type != MESA_PRIM_TRIANGLES ||
           !nir->info.mesh.max_vertices_out ||
-          nir->info.mesh.max_vertices_out > physical_threads ||
+          nir->info.mesh.max_vertices_out > 256 ||
           !nir->info.mesh.max_primitives_out ||
-          nir->info.mesh.max_primitives_out > (4 * physical_threads) / 3)
-         return fail(reason, "packed index candidate exceeds one narrow publication");
+          nir->info.mesh.max_primitives_out > 256)
+         return fail(reason, "packed index candidate requires V1..256 P1..256 triangles");
    } else if (!agx_apple9_native_mesh_shape_eligible(nir))
       return fail(reason,
                   "native mesh development class requires V3 P1 triangles without payload");
@@ -327,8 +328,8 @@ agx_nir_lower_apple9_native_mesh(
    if (!eligible(nir, physical_threads, packed_indices, reason))
       return false;
 
-   if (packed_indices && (options->attributes || options->primitive_broadcast))
-      return fail(reason, "packed index candidate is position-only");
+   if (packed_indices && options->primitive_broadcast)
+      return fail(reason, "packed index candidate has no primitive broadcast");
 
    nir_remove_dead_variables(nir, nir_var_mem_shared, NULL);
    nir_lower_vars_to_explicit_types(nir, nir_var_mem_shared,
@@ -436,8 +437,11 @@ agx_nir_lower_apple9_native_mesh(
        * U consumes it for clipping and perspective division.
        * This is the vertex path's c=1/2 depth conversion, not a state-word
        * change. The body barrier above makes its final Z/W visible. */
-      nir_push_if(&b, nir_ult(&b, lane, vertices));
-      nir_def *offset = nir_imul_imm(&b, lane, 4);
+      for (unsigned first = 0; first < layout->max_vertices;
+           first += physical_threads) {
+      nir_def *vertex = nir_iadd_imm(&b, lane, first);
+      nir_push_if(&b, nir_ult(&b, vertex, vertices));
+      nir_def *offset = nir_imul_imm(&b, vertex, 4);
       nir_def *z_address = nir_iadd_imm(
          &b, offset, layout->position_B + layout->vertex_pitch_B *
                         layout->vertex_component[VARYING_SLOT_POS][2]);
@@ -454,6 +458,7 @@ agx_nir_lower_apple9_native_mesh(
       nir_store_local_apple9_agx(&b, converted, z_address,
                                   .base = key.output_root, .bit_size = 32);
       nir_pop_if(&b, NULL);
+      }
       nir_barrier(&b, .execution_scope = SCOPE_WORKGROUP,
                   .memory_scope = SCOPE_WORKGROUP,
                   .memory_semantics = NIR_MEMORY_ACQ_REL,
@@ -467,38 +472,66 @@ agx_nir_lower_apple9_native_mesh(
    nir_mesh_control_apple9_agx(&b, nir_u2u16(&b, primitives),
                                nir_u2u16(&b, vertices), .base = 1);
 
-   nir_push_if(&b, nir_ult(&b, lane, vertices));
-   for (unsigned c = 0; c < 4; ++c) {
-      unsigned plane =
-         layout->position_B +
-         layout->vertex_pitch_B * layout->vertex_component[VARYING_SLOT_POS][c];
-      nir_mesh_submit_channel_apple9_agx(&b, nir_imm_int(&b, c),
-                                         nir_imm_int(&b, plane));
-      device_fence(&b);
-   }
-   for (unsigned slot = 0; slot < ARRAY_SIZE(varyings.mask); ++slot) {
-      u_foreach_bit(c, varyings.mask[slot]) {
-         unsigned channel = 4 + agx_apple9_varying_index(&varyings, slot, c);
-         unsigned plane = layout->position_B + layout->vertex_pitch_B *
-                             layout->vertex_component[slot][c];
-         nir_mesh_submit_channel_apple9_agx(&b, nir_imm_int(&b, channel),
-                                            nir_imm_int(&b, plane));
+   /* Each channel/index collective publishes at most one round of entries.
+    * Its lanes form a contiguous prefix supplying one common source byte
+    * offset (second operand, S2's uniform-base invariant); the destination
+    * entry is bits 16 and up of the first operand: the channel selector for
+    * vertex channels, the vertex-count operand for packed index words. Later
+    * rounds advance both. Air 2026-10-24: a repeat without the destination
+    * aliases entry 0; with it V64/P126 at T32 is exact. Single-round classes
+    * keep destination 0 and emit the same code. Rounds beyond the runtime
+    * counts are skipped, never issued empty. */
+   const unsigned round = MIN2(physical_threads, AGX_APPLE9_PUBLICATION_ROUND);
+   for (unsigned first = 0; first < layout->max_vertices; first += round) {
+      nir_def *active = nir_ult(&b, nir_iadd_imm(&b, lane, first), vertices);
+      if (round != physical_threads)
+         active = nir_iand(&b, active, nir_ult_imm(&b, lane, round));
+      nir_push_if(&b, active);
+      const uint32_t destination = first << 16;
+      for (unsigned c = 0; c < 4; ++c) {
+         unsigned plane =
+            layout->position_B +
+            layout->vertex_pitch_B * layout->vertex_component[VARYING_SLOT_POS][c];
+         nir_mesh_submit_channel_apple9_agx(&b, nir_imm_int(&b, c | destination),
+                                            nir_imm_int(&b, plane + 4 * first));
          device_fence(&b);
       }
+      for (unsigned slot = 0; slot < ARRAY_SIZE(varyings.mask); ++slot) {
+         u_foreach_bit(c, varyings.mask[slot]) {
+            unsigned channel = 4 + agx_apple9_varying_index(&varyings, slot, c);
+            unsigned plane = layout->position_B + layout->vertex_pitch_B *
+                                layout->vertex_component[slot][c];
+            nir_mesh_submit_channel_apple9_agx(
+               &b, nir_imm_int(&b, channel | destination),
+               nir_imm_int(&b, plane + 4 * first));
+            device_fence(&b);
+         }
+      }
+      nir_pop_if(&b, NULL);
    }
-   nir_pop_if(&b, NULL);
-   nir_def *active = packed_indices
-      ? nir_ult(&b, lane, agx_nir_apple9_index_publication_lanes(
-                            &b, primitives, layout->indices_per_primitive))
-      : nir_ieq_imm(&b, lane, 0);
-   nir_push_if(&b, active);
-   /* Every publishing lane supplies the common array base. The v2 triangle
-    * discriminators support this prefix-participation candidate; they do not
-    * establish per-lane offset arithmetic or a new completion scoreboard.
-    * Preserve the qualified first operand (actual vertex count). */
-   nir_mesh_submit_scalar_apple9_agx(&b, vertices, nir_imm_int(&b, 0));
-   device_fence(&b);
-   nir_pop_if(&b, NULL);
+   /* Preserve the qualified first operand (actual vertex count) in the low
+    * bits. Index words start at byte 0 of the output root. */
+   if (packed_indices) {
+      nir_def *words = agx_nir_apple9_index_publication_lanes(
+         &b, primitives, layout->indices_per_primitive);
+      unsigned max_words =
+         MAX2(DIV_ROUND_UP(layout->max_primitives * layout->indices_per_primitive, 4), 1);
+      for (unsigned first = 0; first < max_words; first += round) {
+         nir_def *active = nir_ult(&b, nir_iadd_imm(&b, lane, first), words);
+         if (round != physical_threads)
+            active = nir_iand(&b, active, nir_ult_imm(&b, lane, round));
+         nir_push_if(&b, active);
+         nir_def *count = first ? nir_ior_imm(&b, vertices, first << 16) : vertices;
+         nir_mesh_submit_scalar_apple9_agx(&b, count, nir_imm_int(&b, 4 * first));
+         device_fence(&b);
+         nir_pop_if(&b, NULL);
+      }
+   } else {
+      nir_push_if(&b, nir_ieq_imm(&b, lane, 0));
+      nir_mesh_submit_scalar_apple9_agx(&b, vertices, nir_imm_int(&b, 0));
+      device_fence(&b);
+      nir_pop_if(&b, NULL);
+   }
 
    info->requires_mesh_completion = false;
    nir_progress(true, nir_shader_get_entrypoint(nir), nir_metadata_none);

@@ -370,6 +370,17 @@ if with_tests
            'HK_APPLE9_NATIVE_MESH_PRIMITIVE_LOWERING=1'],
     suite : ['asahi', 'honeykrisp'],
   )
+  native_rounds_test = executable(
+    'hk-native-mesh-rounds', 'tests/hk-native-mesh-rounds.c',
+    include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                           inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+    dependencies : [hk_deps], link_with : [libhk],
+  )
+  test('hk-native-mesh-rounds-off', native_rounds_test,
+    suite : ['asahi', 'honeykrisp'])
+  test('hk-native-mesh-rounds-research', native_rounds_test, args : ['research'],
+    env : ['HK_APPLE9_NATIVE_MESH=1'],
+    suite : ['asahi', 'honeykrisp'])
   packed_indices_test = executable(
     'hk-native-packed-indices', 'tests/hk-native-packed-indices.c',
     include_directories : [inc_gallium, inc_gallium_aux, inc_include,

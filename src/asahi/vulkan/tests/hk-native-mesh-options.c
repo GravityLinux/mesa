@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "hk_shader.h"
+#include "hk_apple9_mesh.h"
 #include "asahi/compiler/agx_nir.h"
 #include "compiler/nir/nir_builder.h"
 #include "compiler/nir/nir_serialize.h"
@@ -319,7 +320,11 @@ check_capabilities(void)
       nir_shader *nir = producer(true);
       nir->info.mesh.max_vertices_out = declarations[i][0];
       nir->info.mesh.max_primitives_out = declarations[i][1];
-      check_capability(nir, false);
+      /* Declarations beyond one publication round compile through rounds;
+       * other non-P1 declarations stay outside the research P1 path. */
+      check_capability(nir, hk_apple9_native_mesh_round_counts_eligible(
+                               nir->info.workgroup_size, declarations[i][0],
+                               declarations[i][1]));
    }
    for (unsigned prim = MESA_PRIM_POINTS; prim <= MESA_PRIM_LINES; ++prim) {
       nir_shader *nir = producer(true);

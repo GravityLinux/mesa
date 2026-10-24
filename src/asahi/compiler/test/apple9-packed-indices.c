@@ -59,7 +59,8 @@ int main(void)
    glsl_type_singleton_init_or_ref();participation();
    unsigned accepted=0,rejected=0;
    const unsigned cases[][4]={{3,1,16,1},{3,2,16,1},{16,16,16,1},{16,21,16,1},
-      {32,32,32,1},{32,42,32,1},{16,22,16,0},{32,43,32,0},{17,2,16,0},{64,1,64,0}};
+      /* Beyond one 16/32-entry round: destination-addressed rounds. */
+      {32,32,32,1},{32,42,32,1},{16,22,16,1},{32,43,32,1},{17,2,16,1},{64,1,64,0}};
    for(unsigned i=0;i<ARRAY_SIZE(cases);++i) {
       unsigned v=cases[i][0],p=cases[i][1],t=cases[i][2];
       const struct agx_apple9_native_mesh_options opts={.physical_threads=t,.packed_index_publication=true};

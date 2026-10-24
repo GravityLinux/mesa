@@ -62,6 +62,10 @@ bool agx_apple9_native_mesh_shape_eligible(const nir_shader *nir);
 /* 32-bit component maps shared with the future launch and fragment linkers.
  * Local vertex outputs are component-major; primitive attributes are device
  * records. Indices and culling have distinct byte-addressed local regions. */
+/* Most entries a single channel or packed-index collective publishes; more
+ * vertices or index words repeat it with an explicit destination. */
+#define AGX_APPLE9_PUBLICATION_ROUND 32
+
 struct agx_apple9_mesh_layout {
    uint16_t vertex_component[VARYING_SLOT_MAX][4];
    uint16_t primitive_component[VARYING_SLOT_MAX][4];

@@ -242,6 +242,7 @@ hk_hash_apple9_native_mesh_abi(struct mesa_blake3 *ctx)
       hk_apple9_native_gs_enabled(),
       hk_apple9_native_tess_enabled(),
       1, /* P1 logical workgroups independent of physical output class. */
+      2, /* Destination-addressed publication rounds beyond 32 entries. */
    };
    _mesa_blake3_update(ctx, abi, sizeof(abi));
 }
@@ -4014,7 +4015,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
        hk_apple9_native_mesh_available(hk_device_physical(dev)) &&
        ((hk_apple9_native_mesh_enabled() &&
          agx_apple9_native_mesh_shape_eligible(nir)) ||
-        hk_apple9_native_mesh_packed_shape_eligible(nir)))
+        hk_apple9_native_mesh_packed_shape_eligible(nir) ||
+        hk_apple9_native_mesh_round_shape_eligible(nir)))
       lower_indirect_modes |= nir_var_shader_out;
 
    NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
@@ -6641,14 +6643,15 @@ static struct agx_apple9_native_mesh_options
 hk_apple9_native_mesh_options(nir_shader *nir,
                               const struct hk_apple9_graphics_key *key)
 {
+   bool rounds = hk_apple9_native_mesh_round_shape_eligible(nir);
    bool packed = (key->native_index || hk_apple9_native_mesh_enabled()) &&
                  hk_apple9_native_mesh_packed_shape_eligible(nir);
    return (struct agx_apple9_native_mesh_options){
       .physical_threads = hk_apple9_native_mesh_threads(nir->info.workgroup_size),
       .clip_halfz = key->clip_negative_one_to_one,
-      .attributes = !packed && hk_apple9_native_mesh_attributes_enabled(),
-      .primitive_broadcast = !packed && hk_apple9_native_mesh_primitive_lowering_enabled(),
-      .packed_index_publication = packed,
+      .attributes = (rounds || !packed) && hk_apple9_native_mesh_attributes_enabled(),
+      .primitive_broadcast = !rounds && !packed && hk_apple9_native_mesh_primitive_lowering_enabled(),
+      .packed_index_publication = rounds || packed,
       .outputs_flat = key->vertex.outputs_flat,
       .outputs_linear = key->vertex.outputs_linear,
    };

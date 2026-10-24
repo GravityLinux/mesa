@@ -78,6 +78,12 @@ bool hk_apple9_native_mesh_grid_valid(const uint32_t groups[3]);
 
 /* Zero rejects an invalid logical shape before any multiplication overflows. */
 unsigned hk_apple9_native_mesh_threads(const uint16_t local_size[3]);
+/* Research envelope beyond one publication round at physical T16/T32;
+ * independent of the qualified class list. */
+bool hk_apple9_native_mesh_round_counts_eligible(const uint16_t local_size[3],
+                                                 unsigned vertices,
+                                                 unsigned primitives);
+bool hk_apple9_native_mesh_round_shape_eligible(const nir_shader *nir);
 
 bool hk_apple9_native_shader_valid(
    const struct agx_shader_info *code,

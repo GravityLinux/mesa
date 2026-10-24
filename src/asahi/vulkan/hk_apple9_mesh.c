@@ -230,6 +230,35 @@ hk_apple9_native_mesh_workgroup_eligible(const nir_shader *nir)
 }
 
 bool
+hk_apple9_native_mesh_round_counts_eligible(const uint16_t size[3],
+                                             unsigned vertices,
+                                             unsigned primitives)
+{
+   /* Research only: declarations beyond one publication round of the
+    * physical T16/T32 width. Shapes that fit one round keep the class path. */
+   unsigned threads = hk_apple9_native_mesh_threads(size);
+   unsigned round = MIN2(threads, AGX_APPLE9_PUBLICATION_ROUND);
+   return hk_apple9_native_mesh_enabled() && threads && vertices &&
+          vertices <= 256 && primitives && primitives <= 256 &&
+          (vertices > round || DIV_ROUND_UP(3 * primitives, 4) > round);
+}
+
+bool
+hk_apple9_native_mesh_round_shape_eligible(const nir_shader *nir)
+{
+   return nir->info.stage == MESA_SHADER_MESH && !nir->info.task_payload_size &&
+          nir->info.mesh.primitive_type == MESA_PRIM_TRIANGLES &&
+          !nir->info.workgroup_size_variable &&
+          (!nir->info.api_subgroup_size || nir->info.api_subgroup_size == 32) &&
+          nir->info.derivative_group == DERIVATIVE_GROUP_NONE &&
+          !(nir->info.per_primitive_outputs & ~VARYING_BIT_PRIMITIVE_INDICES) &&
+          !nir->info.outputs_written_16bit &&
+          hk_apple9_native_mesh_round_counts_eligible(
+             nir->info.workgroup_size, nir->info.mesh.max_vertices_out,
+             nir->info.mesh.max_primitives_out);
+}
+
+bool
 hk_apple9_native_mesh_packed_shape_eligible(const nir_shader *nir)
 {
    unsigned threads = hk_apple9_native_mesh_threads(nir->info.workgroup_size);
@@ -352,7 +381,25 @@ hk_apple9_native_shader_valid(const struct agx_shader_info *code,
              body->logical_size[0] == 1 && body->logical_size[1] == 1 &&
              body->logical_size[2] == 1 && !body->shared_size_B &&
              !body->layout.local_size_B && !code->local_size;
-   unsigned logical_limit =
+   const struct agx_apple9_mesh_layout *l = &body->layout;
+   if (hk_apple9_native_mesh_round_counts_eligible(body->logical_size,
+                                                   l->max_vertices,
+                                                   l->max_primitives)) {
+      unsigned count_B = ALIGN_POT(3 * l->max_primitives, 16);
+      unsigned position_B = count_B + 16;
+      unsigned pitch_B = ALIGN_POT(l->max_vertices, 4) * 4;
+      return hk_apple9_native_mesh_threads(body->logical_size) == k->physical_threads &&
+             !body->primitive_broadcast && l->indices_per_primitive == 3 &&
+             l->vertex_components >= 4 &&
+             l->vertex_components <= 4 + AGX_APPLE9_MAX_VARYING_COMPONENTS &&
+             code->apple9_varyings.count == l->vertex_components - 4 &&
+             !l->primitive_components && !l->primitive_stride_B && !l->culling &&
+             l->primitive_count_B == count_B && l->vertex_count_B == count_B + 4 &&
+             l->cull_B == position_B && l->position_B == position_B &&
+             l->vertex_pitch_B == pitch_B &&
+             l->local_size_B == position_B + l->vertex_components * pitch_B;
+   }
+  unsigned logical_limit =
       k->physical_threads == AGX_APPLE9_NATIVE_THREADS
          ? AGX_APPLE9_NATIVE_THREADS
          : k->physical_threads == AGX_APPLE9_NATIVE_SERIAL_THREADS
@@ -361,7 +408,6 @@ hk_apple9_native_shader_valid(const struct agx_shader_info *code,
       return false;
    if (hk_apple9_native_mesh_threads(body->logical_size) != k->physical_threads)
       return false;
-   const struct agx_apple9_mesh_layout *l = &body->layout;
    /* The default policy also checks the exact P1 declaration at upload;
     * a research P1 shader binary must not bypass the production scope. */
    if (l->max_vertices != 3 || l->max_primitives != 1 ||
