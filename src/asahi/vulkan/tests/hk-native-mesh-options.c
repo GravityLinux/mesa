@@ -192,6 +192,13 @@ check_workgroup_key(const uint16_t size[3], bool shared, unsigned expected)
       CHECK(part.info.workgroup_size[0] == expected);
       CHECK(part.info.workgroup_size[1] == 1 && part.info.workgroup_size[2] == 1);
       CHECK(hk_apple9_native_shader_valid(&part.info, &info, HK_APPLE9_NATIVE_MESH));
+      /* A cached body cannot change its logical workgroup across the T16/T32
+       * selection boundary while retaining the original compiled width. */
+      struct agx_apple9_mesh_body_info stale = info;
+      stale.logical_size[0] = expected == 16 ? 17 : 16;
+      stale.logical_size[1] = stale.logical_size[2] = 1;
+      CHECK(!hk_apple9_native_shader_valid(&part.info, &stale,
+                                          HK_APPLE9_NATIVE_MESH));
       struct agx_apple9_launch_parameters launch;
       CHECK(hk_apple9_native_launch_parameters(&launch, &part.info, &info,
          HK_APPLE9_NATIVE_MESH, 0, 0x1000));

@@ -69,7 +69,11 @@ check(nir_shader *nir, bool expected)
       CHECK(hk_apple9_native_shader_valid(&part.info, &body, HK_APPLE9_NATIVE_MESH));
       if (default_policy) {
          struct agx_apple9_mesh_body_info bad = body;
-         bad.logical_size[0] /= 2;
+         bad.logical_size[0] = AGX_APPLE9_NATIVE_MAX_INVOCATIONS + 1;
+         CHECK(!hk_apple9_native_shader_valid(&part.info, &bad, HK_APPLE9_NATIVE_MESH));
+         bad = body;
+         bad.logical_size[0] = body.key.physical_threads == 16 ? 17 : 16;
+         bad.logical_size[1] = bad.logical_size[2] = 1;
          CHECK(!hk_apple9_native_shader_valid(&part.info, &bad, HK_APPLE9_NATIVE_MESH));
          bad = body;
          bad.layout.max_vertices = 16;
@@ -157,8 +161,16 @@ main(int argc, char **argv)
       check(source(16, 16, 16), false);
       check(source(16, 15, 16), false);
       check(source(3, 2, 32), false);
-      check(source(3, 1, 1), false);
-      check(source(3, 1, 64), false);
+      /* Range corners and fixed interior values, not an exact logical list. */
+      for (unsigned logical = 1; logical <= 128; ++logical)
+         check(source(3, 1, logical), enabled);
+      check(source(3, 1, 129), false);
+      nir_shader *logical = source(3, 1, 8);
+      logical->info.workgroup_size[1] = 8;
+      check(logical, enabled);
+      logical = source(3, 1, 1);
+      logical->info.derivative_group = DERIVATIVE_GROUP_QUADS;
+      check(logical, false);
       nir_shader *nir = source(3, 2, 16);
       nir->info.shared_size = 16; check(nir, false);
       nir = source(3, 2, 16);

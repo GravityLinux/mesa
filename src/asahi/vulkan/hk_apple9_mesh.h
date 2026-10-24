@@ -47,6 +47,7 @@ bool hk_apple9_packed_mesh_class_selected(uint64_t selection,
                                          unsigned threads, unsigned vertices,
                                          unsigned primitives);
 bool hk_apple9_native_mesh_packed_shape_eligible(const nir_shader *nir);
+bool hk_apple9_native_mesh_workgroup_eligible(const nir_shader *nir);
 
 enum hk_apple9_native_stage {
    HK_APPLE9_NATIVE_NONE,

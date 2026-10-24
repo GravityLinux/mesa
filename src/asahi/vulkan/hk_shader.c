@@ -241,6 +241,7 @@ hk_hash_apple9_native_mesh_abi(struct mesa_blake3 *ctx)
       packed_shapes >> 32,
       hk_apple9_native_gs_enabled(),
       hk_apple9_native_tess_enabled(),
+      1, /* P1 logical workgroups independent of physical output class. */
    };
    _mesa_blake3_update(ctx, abi, sizeof(abi));
 }

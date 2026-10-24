@@ -205,19 +205,41 @@ hk_apple9_native_index_class_hash(void)
 }
 
 bool
+hk_apple9_native_mesh_workgroup_eligible(const nir_shader *nir)
+{
+   unsigned threads = hk_apple9_native_mesh_threads(nir->info.workgroup_size);
+   if (!threads || nir->info.workgroup_size_variable ||
+       (nir->info.api_subgroup_size && nir->info.api_subgroup_size != 32))
+      return false;
+
+   if (nir->info.workgroup_size[0] == threads &&
+       nir->info.workgroup_size[1] == 1 && nir->info.workgroup_size[2] == 1)
+      return true;
+
+   /* Output resource classes describe physical publication, independently
+    * of the application's logical workgroup. The existing P1 lowering masks
+    * 1..16 logical lanes onto T16 and serializes up to four architectural
+    * subgroups onto T32. Keep the larger-output gate at its qualified shape
+    * while this logical P1 range is validated through ordinary Vulkan.
+    * Derivative-bearing expansion needs its own geometry-preservation proof.
+    */
+   return nir->info.stage == MESA_SHADER_MESH &&
+          nir->info.mesh.max_vertices_out == 3 &&
+          nir->info.mesh.max_primitives_out == 1 &&
+          nir->info.derivative_group == DERIVATIVE_GROUP_NONE;
+}
+
+bool
 hk_apple9_native_mesh_packed_shape_eligible(const nir_shader *nir)
 {
    unsigned threads = hk_apple9_native_mesh_threads(nir->info.workgroup_size);
    /* Match the qualified class, not every shape satisfying ceil(3P/4)<=W.
-    * The v3 programs use W x 1 x 1, no API shared allocation and Position
-    * only. Logical workgroup expansion/serialization remains a P1 feature. */
+    * Larger output classes retain W x 1 x 1. P1 logical expansion and
+    * serialization do not change the physical output allocation. */
    return nir->info.stage == MESA_SHADER_MESH &&
           nir->info.mesh.primitive_type == MESA_PRIM_TRIANGLES &&
           !nir->info.task_payload_size && !nir->info.shared_size &&
-          !nir->info.workgroup_size_variable &&
-          (!nir->info.api_subgroup_size || nir->info.api_subgroup_size == 32) &&
-          nir->info.workgroup_size[0] == threads &&
-          nir->info.workgroup_size[1] == 1 && nir->info.workgroup_size[2] == 1 &&
+          hk_apple9_native_mesh_workgroup_eligible(nir) &&
           !(nir->info.outputs_written &
             ~(VARYING_BIT_POS | VARYING_BIT_PRIMITIVE_INDICES)) &&
           !nir->info.outputs_written_16bit &&
@@ -337,6 +359,8 @@ hk_apple9_native_shader_valid(const struct agx_shader_info *code,
               ? AGX_APPLE9_NATIVE_MAX_INVOCATIONS : 0;
    if (!logical_limit || !logical_size_valid(body->logical_size, logical_limit))
       return false;
+   if (hk_apple9_native_mesh_threads(body->logical_size) != k->physical_threads)
+      return false;
    const struct agx_apple9_mesh_layout *l = &body->layout;
    /* The default policy also checks the exact P1 declaration at upload;
     * a research P1 shader binary must not bypass the production scope. */
@@ -347,8 +371,9 @@ hk_apple9_native_shader_valid(const struct agx_shader_info *code,
       unsigned pitch_B = ALIGN_POT(l->max_vertices, 4) * 4;
       return packed_class_enabled(k->physical_threads, l->max_vertices,
                                    l->max_primitives) &&
-             body->logical_size[0] == k->physical_threads &&
-             body->logical_size[1] == 1 && body->logical_size[2] == 1 &&
+             ((l->max_vertices == 3 && l->max_primitives == 1) ||
+              (body->logical_size[0] == k->physical_threads &&
+               body->logical_size[1] == 1 && body->logical_size[2] == 1)) &&
              !body->shared_size_B && !body->primitive_broadcast &&
              l->indices_per_primitive == 3 && l->vertex_components == 4 &&
              !code->apple9_varyings.count && !l->primitive_components &&
