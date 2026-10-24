@@ -24,6 +24,15 @@ hk_apple9_native_gs_pack_enabled(void)
 }
 
 bool
+hk_apple9_native_gs_packed_class(unsigned threads, unsigned vertices,
+                                 unsigned primitives)
+{
+   return threads == 32 &&
+          ((vertices == 3 * HK_APPLE9_NATIVE_GS_PACK && primitives == 17) ||
+           (vertices == 4 * HK_APPLE9_NATIVE_GS_PACK && primitives == 16));
+}
+
+bool
 hk_apple9_native_tess_enabled(void)
 {
    return hk_apple9_native_mesh_enabled() && debug_get_option_native_tess();
@@ -201,8 +210,7 @@ hk_apple9_native_stage_class(mesa_shader_stage stage, unsigned threads,
     * index classes (Air 39b7da1: 2.2 vs 9.4 ns of TA per triangle). */
    if (stage == MESA_SHADER_GEOMETRY && threads == 32 &&
        hk_apple9_native_gs_pack_enabled())
-      return (vertices == 3 * HK_APPLE9_NATIVE_GS_PACK && primitives == 17) ||
-             (vertices == 4 * HK_APPLE9_NATIVE_GS_PACK && primitives == 16);
+      return hk_apple9_native_gs_packed_class(threads, vertices, primitives);
    if (threads != 16)
       return false;
    if (stage == MESA_SHADER_GEOMETRY)

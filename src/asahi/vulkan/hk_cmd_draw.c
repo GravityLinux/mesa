@@ -5700,15 +5700,20 @@ hk_apple9_use_native_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 DEBUG_GET_ONCE_BOOL_OPTION(gs_route_log, "HK_APPLE9_GS_ROUTE_LOG", false)
 
 /* Mesh groups per instance of a native GS draw: one per input triangle, or
- * one per HK_APPLE9_NATIVE_GS_PACK triangles for a packed (T32) body. */
+ * one per HK_APPLE9_NATIVE_GS_PACK triangles for a packed body, recognised by
+ * its exact class (hk_nir_gs_mesh). */
 static uint32_t
 hk_apple9_native_gs_groups(const struct hk_graphics_state *gfx, struct agx_draw draw)
 {
-   const struct hk_shader *main =
-      hk_native_producer_main(hk_api_shader_native(gfx->shaders[MESA_SHADER_GEOMETRY]));
+   const struct agx_apple9_mesh_body_info *body =
+      &hk_native_producer_main(hk_api_shader_native(gfx->shaders[MESA_SHADER_GEOMETRY]))
+          ->info.apple9_native;
    const uint32_t triangles = draw.b.count[0] / 3;
-   return main->info.apple9_native.key.physical_threads == 32
-             ? DIV_ROUND_UP(triangles, HK_APPLE9_NATIVE_GS_PACK) : triangles;
+   bool packed = hk_apple9_native_gs_packed_class(
+      body->key.physical_threads, body->layout.max_vertices, body->layout.max_primitives);
+   /* Unpacked bodies publish V(n)/P(n-2) (T32 only for n > 16 on the
+    * development route), never a packed class, so the class alone decides. */
+   return packed ? DIV_ROUND_UP(triangles, HK_APPLE9_NATIVE_GS_PACK) : triangles;
 }
 
 static void

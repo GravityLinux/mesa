@@ -30,6 +30,9 @@ bool hk_apple9_native_tess_enabled(void);
  * T32 class alone. */
 #define HK_APPLE9_NATIVE_GS_PACK 8
 bool hk_apple9_native_gs_pack_enabled(void);
+/* Whether a GS mesh body's class is one of the two packed layouts. */
+bool hk_apple9_native_gs_packed_class(unsigned threads, unsigned vertices,
+                                      unsigned primitives);
 
 /* Stage policy is narrower than native-index qualification. These bits name
  * the API producer, not the generated mesh/object execution stages. */

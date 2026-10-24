@@ -280,6 +280,14 @@ hk_nir_gs_mesh(const nir_shader *source, const char **reason)
       nir_if *active = nir_push_if(&b, nir_ult(&b, lane, live));
       active->control = nir_selection_control_dont_flatten;
       b.cursor = nir_cf_reinsert(&body, b.cursor);
+      /* A lane whose GS emitted nothing still publishes its slots: give the
+       * degenerate fill a finite vertex. */
+      nir_push_if(&b, nir_ieq_imm(&b, nir_load_var(&b, s.vertices), 0));
+      nir_store_per_vertex_output(
+         &b, nir_imm_vec4(&b, 0, 0, 0, 1), s.vertex_base, nir_imm_int(&b, 0),
+         .write_mask = 15, .src_type = nir_type_float32,
+         .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+      nir_pop_if(&b, NULL);
       nir_def *p = nir_load_var(&b, s.primitives);
       for (unsigned i = 0; i < vertices - 2; ++i) {
          nir_push_if(&b, nir_ule_imm(&b, p, i));
