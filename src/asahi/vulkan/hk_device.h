@@ -120,14 +120,14 @@ struct hk_device {
       struct hash_table *ht;
    } apple9_variants;
 
-   /* Apple9 shader code BOs shared by byte-identical bodies, see
+   /* Apple9 shader code slices shared by byte-identical bodies, see
     * hk_upload_shader. */
    struct {
       simple_mtx_t lock;
       struct hash_table *ht;
-      struct list_head lru;
+      struct list_head lru, slabs;
       unsigned count;
-      uint64_t bytes;
+      uint64_t bytes, backing_bytes;
    } apple9_bodies;
 
 

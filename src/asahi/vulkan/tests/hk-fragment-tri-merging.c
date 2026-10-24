@@ -168,6 +168,7 @@ main(void)
    hk_device_init_usc_heap(dev);
    simple_mtx_init(&dev->apple9_variants.lock, mtx_plain);
    simple_mtx_init(&dev->apple9_bodies.lock, mtx_plain);
+   list_inithead(&dev->apple9_bodies.slabs);
    simple_mtx_init(&pdev->debug_compile_lock, mtx_plain);
 
    /* Off-centre interpolation keeps triangles apart, counter or not. */

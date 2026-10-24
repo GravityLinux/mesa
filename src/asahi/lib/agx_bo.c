@@ -675,18 +675,7 @@ agx_bo_unreference(struct agx_device *dev, struct agx_bo *bo)
 
       assert(!p_atomic_read_relaxed(&bo->writer));
 
-      if (bo->apple9_entry_offset || bo->apple9_entry_fixed) {
-         simple_mtx_lock(&dev->apple9_entry_lock);
-         if (bo->apple9_entry_offset) {
-            util_vma_heap_free(&dev->apple9_entry_heap,
-                              bo->apple9_entry_offset - AGX_APPLE9_ENTRY_CODE_OFFSET,
-                              AGX_APPLE9_ENTRY_BLOCK_SIZE);
-            bo->apple9_entry_offset = 0;
-            list_del(&bo->apple9_entry_link);
-         }
-         bo->apple9_entry_fixed = false;
-         simple_mtx_unlock(&dev->apple9_entry_lock);
-      }
+      agx_shader_body_finish(dev, &bo->apple9_body);
 
       if (dev->debug & AGX_DBG_TRACE)
          agxdecode_track_free(dev->agxdecode, bo);
@@ -784,6 +773,7 @@ agx_bo_finish_create(struct agx_device *dev, struct agx_bo *bo,
    if (bo->shim_cpu_epoch)
       *bo->shim_cpu_epoch = 0; /* Cache reuse must opt in again. */
    bo->label = label;
+   agx_shader_body_init_bo(bo);
    if (agx_apple9_debug_enabled(AGX_A9_DBG_BO_LABELS))
       fprintf(stderr, "AGX_BO_LABEL fd=%d handle=%u flags=%u size=%zu label=%s\n",
               dev->fd, bo->uapi_handle, bo->flags, bo->size, label);

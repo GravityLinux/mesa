@@ -19,8 +19,10 @@ int main(void)
    simple_mtx_init(&dev->apple9_entry_lock, mtx_plain);
    list_inithead(&dev->apple9_entry_lru);
    struct agx_va va = {.addr = dev->shader_base + 0x10000};
-   struct agx_bo bo = {.va = &va, .apple9_entry_offset = 0x400};
-   list_add(&bo.apple9_entry_link, &dev->apple9_entry_lru);
+   struct agx_bo bo = {.va = &va};
+   agx_shader_body_init_bo(&bo);
+   bo.apple9_body.entry_offset = 0x400;
+   list_add(&bo.apple9_body.entry_link, &dev->apple9_entry_lru);
    struct agx_apple9_render_stage shader = {
       .bo = &bo, .publication_count_valid = true,
       .publication_count = 32, .binary_size = 128,
@@ -47,7 +49,7 @@ int main(void)
                CHECK(!memcmp(a.data, roots, sizeof(roots)));
                struct agx_apple9_launch_parameters p = {
                   .shader_base = dev->shader_base,
-                  .entry_offset = bo.apple9_entry_offset,
+                  .entry_offset = bo.apple9_body.entry_offset,
                   .publication_count = shader.publication_count,
                   .resource_table = a.gpu, .launch_address = a.gpu + 64,
                   .tile_bytes = fragment ? 16 : 0,

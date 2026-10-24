@@ -172,18 +172,18 @@ struct agx_device {
    struct agx_bo *zero_bo, *scratch_bo;
 
    /* One stable, GPU-read-only entry arena shared by graphics and compute.
-    * Suballocations follow the lifetime of the immutable shader body BOs. */
+    * Suballocations follow the lifetime of immutable shader bodies. */
    struct agx_bo *apple9_entries;
    void *apple9_entry_map;
    struct util_vma_heap apple9_entry_heap;
    simple_mtx_t apple9_entry_lock;
-   /* BOs holding an entry, least recently pinned first. */
+   /* Bodies holding an entry, least recently pinned first. */
    struct list_head apple9_entry_lru;
-   /* Optional: pin a shader BO for the lifetime of the recording that
+   /* Optional: pin a shader body for the lifetime of the recording that
     * allocator belongs to, with apple9_entry_lock held. Returns false if the
-    * BO cannot be pinned. Without it, entries are never evicted.
+    * body cannot be pinned. Without it, entries are never evicted.
     */
-   bool (*apple9_pin_entry)(void *allocator, struct agx_bo *bo);
+   bool (*apple9_pin_entry)(void *allocator, struct agx_shader_body *body);
 
    struct renderonly *ro;
 

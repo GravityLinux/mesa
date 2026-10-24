@@ -11,7 +11,7 @@ struct agx_bo;
 #ifdef HK_GPU_BUSY_COUNTERS
 void hk_gpu_busy_set_pass(struct hk_queue *queue, uint64_t code,
                           const uint32_t grid[3], uint32_t count);
-void hk_gpu_busy_shader(struct agx_bo *bo, const void *code, uint32_t size,
+void hk_gpu_busy_shader(uint64_t address, const void *code, uint32_t size,
                         unsigned stage);
 /* GPU_STORAGE_FORMAT: once per storage-image view format: its VkFormat and
  * the G16 store encoder class it selects. */

@@ -575,6 +575,7 @@ main(int argc, char **argv)
    simple_mtx_init(&dev->apple9_variants.lock, mtx_plain);
    simple_mtx_init(&pdev->debug_compile_lock, mtx_plain);
    simple_mtx_init(&dev->apple9_bodies.lock, mtx_plain);
+   list_inithead(&dev->apple9_bodies.slabs);
    struct hk_api_shader *api[HK_APPLE9_GFX_STAGES];
    struct hk_api_shader *again[HK_APPLE9_GFX_STAGES];
    struct hk_api_shader *out[HK_APPLE9_GFX_STAGES];
@@ -664,15 +665,18 @@ main(int argc, char **argv)
    before = nir_loads;
    CHECK(hk_apple9_resolve_graphics(dev, api, NULL, out, false, false) == VK_SUCCESS);
    CHECK(nir_loads == before);
-   /* Partial reload OOM falls back to compilation and keeps ownership sound. */
+   /* Reload OOM falls back to compilation and keeps ownership sound. Drop
+    * existing owners so the reload needs backing instead of a free slab slice.
+    */
    api_create(dev, again, false);
+   api_destroy(dev, api);
    hk_apple9_bodies_finish(dev);
-   fail_allocation = allocations + 2;
+   CHECK(list_is_empty(&dev->apple9_bodies.slabs));
+   fail_allocation = allocations + 1;
    CHECK(hk_apple9_resolve_graphics(dev, again, NULL, out, false, false) == VK_SUCCESS);
    CHECK(nir_loads == before + 2);
    fail_allocation = 0;
    api_destroy(dev, again);
-   api_destroy(dev, api);
    hk_apple9_variants_finish(dev);
    vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
    dev->vk.mem_cache = cache_create(dev, NULL, 0, false);

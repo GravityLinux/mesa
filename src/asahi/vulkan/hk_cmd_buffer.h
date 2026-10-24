@@ -935,10 +935,10 @@ struct hk_cmd_buffer {
     * recording accesses; submissions list them as external resources. */
    struct util_dynarray implicit_sync_res;
 
-   /* Apple9 shader BOs whose arena entries this recording may encode, each
+   /* Apple9 shader bodies whose arena entries this recording may encode, each
     * referenced and pinned once until reset, and the last two pinned. */
    struct set *apple9_pinned;
-   struct agx_bo *apple9_last_pin[2];
+   struct agx_shader_body *apple9_last_pin[2];
 };
 
 VK_DEFINE_HANDLE_CASTS(hk_cmd_buffer, vk.base, VkCommandBuffer,
@@ -1490,7 +1490,7 @@ struct hk_apple9_prerast_bindings {
 
 /* Native grid counts are threads; indirect grids point to group counts. */
 void hk_apple9_dispatch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
-                       struct agx_bo *body,
+                       struct agx_shader_body *body,
                        const struct agx_apple9_compute_profile *profile,
                        struct agx_grid grid, uint64_t root,
                        const struct hk_shader *shader,
@@ -1515,7 +1515,8 @@ struct hk_bg_eot hk_apple9_build_bg_eot(
    struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
    bool store, bool partial, bool incomplete);
 
-bool hk_apple9_pin_entry(void *allocator, struct agx_bo *bo);
+bool hk_apple9_pin_entry(void *allocator, struct agx_shader_body *body);
+void hk_apple9_unpin_entries(struct hk_cmd_buffer *cmd);
 /* reads_buffers: the draw's tiling reads buffer memory itself (indices or
  * indirect arguments). */
 bool hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool reads_buffers,

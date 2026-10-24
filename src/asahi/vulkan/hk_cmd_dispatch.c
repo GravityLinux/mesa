@@ -429,7 +429,7 @@ hk_apple9_report_dispatch_reject(const char *where, struct agx_grid grid,
 
 void
 hk_apple9_dispatch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
-                   struct agx_bo *body,
+                   struct agx_shader_body *body,
                    const struct agx_apple9_compute_profile *p,
                    struct agx_grid grid, uint64_t root,
                    const struct hk_shader *shader,
@@ -508,8 +508,8 @@ hk_apple9_dispatch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    if (!root || !agx_apple9_prepare_compute_dispatch_alloc_tmpl(
           &dev->dev, cmd, hk_apple9_alloc, body, p, resources,
           p->resource_binding_count, textures, samplers, &geometry,
-          p->preamble_size ? body->va->addr + p->preamble_offset : 0,
-          shader && shader->bo == body ? shader->apple9_launch : NULL, &launch)) {
+          p->preamble_size ? body->addr + p->preamble_offset : 0,
+          shader && shader->apple9_body == body ? shader->apple9_launch : NULL, &launch)) {
       fprintf(stderr, "Apple9 dispatch failed (5)\n");
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       return;
@@ -591,7 +591,7 @@ hk_apple9_dispatch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    cs->stats.cmds++;
    cs->stats.calls++;
    if (!cs->pass_count++) {
-      cs->pass_code = body->va->addr;
+      cs->pass_code = body->addr;
       for (unsigned i = 0; i < 3; ++i)
          cs->pass_grid[i] = agx_is_indirect(grid) ? 0 : grid.count[i];
    }
@@ -649,7 +649,7 @@ dispatch(struct hk_cmd_buffer *cmd, struct agx_grid grid)
       }
       uint64_t root = hk_cmd_buffer_upload_root(cmd, VK_PIPELINE_BIND_POINT_COMPUTE);
       cmd->api_dispatch = !cmd->in_meta;
-      hk_apple9_dispatch(cmd, cs, s->bo, &s->info.apple9, grid, root, s, NULL);
+      hk_apple9_dispatch(cmd, cs, s->apple9_body, &s->info.apple9, grid, root, s, NULL);
       cmd->api_dispatch = false;
       static int split = -1;
       if (split < 0)

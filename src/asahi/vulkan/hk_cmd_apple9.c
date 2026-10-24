@@ -518,14 +518,14 @@ hk_apple9_prepare_native_mesh(struct hk_cmd_buffer *cmd,
    const struct hk_shader *shaders[] = {mesh, object};
    for (unsigned i = 0; i < 2; ++i) {
       const struct hk_shader *shader = shaders[i];
-      if (!shader->bo ||
+      if (!shader->apple9_body ||
           !hk_apple9_native_launch_parameters(
              &p[i], &shader->b.info, &shader->info.apple9_native,
              shader->info.apple9_native_stage, dev->dev.shader_base,
-             shader->bo->va->addr))
+             shader->apple9_body->addr))
          return false;
       simple_mtx_lock(&dev->dev.apple9_entry_lock);
-      bool pinned = hk_apple9_pin_entry(cmd, shader->bo);
+      bool pinned = hk_apple9_pin_entry(cmd, shader->apple9_body);
       simple_mtx_unlock(&dev->dev.apple9_entry_lock);
       if (!pinned)
          return false;
@@ -614,7 +614,8 @@ hk_apple9_account_draw(struct hk_cs *cs,
    }
    cs->stats.cmds++;
    if (!cs->pass_count++)
-      cs->pass_code = fragment->bo ? fragment->bo->va->addr : 0;
+      cs->pass_code = fragment->apple9_body ? fragment->apple9_body->addr :
+                      (fragment->bo ? fragment->bo->va->addr : 0);
 }
 
 /* Whether a bound stage reads the draw index from the root table. Other
