@@ -782,6 +782,20 @@ hk_apple9_native_store_image(const struct hk_image *image, unsigned plane)
           !image->planes[plane].layout.compressed;
 }
 
+/* A storage PBE takes its extent and tiling from the image layout, so the view
+ * must address the layout's own texel blocks. Block-texel views of compressed
+ * images (an RGBA16F view of BC1, an RGBA32F view of ASTC) address blocks, not
+ * the layout's texels, and would write outside them; they keep the software
+ * converter, which addresses the view's elements. */
+bool
+hk_apple9_native_store_view_layout(const struct ail_layout *layout,
+                                   enum pipe_format view_format)
+{
+   return !util_format_is_compressed(layout->format) &&
+          util_format_get_blocksize(layout->format) ==
+             util_format_get_blocksize(view_format);
+}
+
 /* Storage writes use the native representation of the existing PBE half.
  * Per-layer 2D entries keep layer selection in descriptor addressing. The
  * shader never modifies descriptors, so divergent layers cannot race. */
@@ -810,7 +824,8 @@ hk_apple9_init_storage_pbe(struct hk_device *dev, struct hk_image_view *view)
    const struct hk_image *image = container_of(view->vk.image, struct hk_image, vk);
    unsigned plane = view->planes[0].image_plane;
    const struct ail_layout *layout = &image->planes[plane].layout;
-   if (!hk_apple9_native_store_image(image, plane))
+   if (!hk_apple9_native_store_image(image, plane) ||
+       !hk_apple9_native_store_view_layout(layout, format_for_plane(view, 0)))
       return;
    unsigned count = array ? view->vk.layer_count : 1;
    simple_mtx_lock(&dev->usc_heap_lock);
