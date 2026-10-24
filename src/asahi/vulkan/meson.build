@@ -179,7 +179,7 @@ if with_tests
     dependencies : [hk_deps], link_with : [libhk],
     link_args : ['-Wl,--wrap=hk_meta_decompress_color', '-Wl,--wrap=__vk_errorf']),
     suite : ['asahi', 'honeykrisp'])
-  foreach t : ['hk-feedback', 'hk-descriptor-parts', 'hk-constant-data', 'hk-draw-state-cache', 'hk-render-merge', 'hk-empty-clear-barriers', 'hk-image-limits', 'hk-sliced-3d', 'hk-stage-output-limits', 'hk-cull-output-limits', 'hk-pregfx-recording', 'hk-heap-resubmit', 'hk-heap-addresses', 'hk-native-image-store', 'hk-mesh-query', 'hk-native-mesh', 'hk-robust-bounded-vector']
+  foreach t : ['hk-feedback', 'hk-descriptor-parts', 'hk-constant-data', 'hk-draw-state-cache', 'hk-render-merge', 'hk-empty-clear-barriers', 'hk-image-limits', 'hk-sliced-3d', 'hk-stage-output-limits', 'hk-cull-output-limits', 'hk-pregfx-recording', 'hk-heap-resubmit', 'hk-heap-addresses', 'hk-native-image-store', 'hk-native-store-rw', 'hk-mesh-query', 'hk-native-mesh', 'hk-robust-bounded-vector']
     contract_test = executable(
       t,
       'tests/' + t + '.c',

@@ -4617,6 +4617,12 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
             continue;
          }
          if (intr->intrinsic == nir_intrinsic_image_store_apple9_agx) {
+            /* Only the 32-bit data forms are encoded. */
+            unsigned data_bits = nir_alu_type_get_type_size(nir_intrinsic_src_type(intr));
+            if (data_bits != 0 && data_bits != 32) {
+               lower->reason = "Apple9 native image store with 16-bit data";
+               return false;
+            }
             uint32_t index = apple9_lower_dag_scalar(lower, nir_get_scalar(intr->src[0].ssa, 0));
             uint32_t xy[2], rgba[4];
             for (unsigned c = 0; c < 2; ++c)
@@ -4624,7 +4630,10 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
             for (unsigned c = 0; c < 4; ++c)
                rgba[c] = apple9_lower_dag_scalar(lower, nir_get_scalar(intr->src[2].ssa, c));
             if (index == AGX_APPLE9_VREG_INVALID ||
-                !agx_apple9_vir_emit_image_store(&lower->program, xy, rgba, index))
+                !agx_apple9_vir_emit_image_store(&lower->program, xy, rgba, index,
+                   nir_alu_type_get_base_type(nir_intrinsic_src_type(intr)) !=
+                      nir_type_float &&
+                   nir_intrinsic_src_type(intr) != nir_type_invalid))
                return false;
             continue;
          }

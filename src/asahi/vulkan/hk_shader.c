@@ -2993,30 +2993,69 @@ hk_apple9_native_ok(nir_builder *b, nir_def *tex)
          .align_mul = 4), HK_APPLE9_STORAGE_READ_VALID), 0);
 }
 
+static nir_cf_node *
+hk_apple9_outer_loop(nir_block *block)
+{
+   nir_cf_node *loop = NULL;
+   for (nir_cf_node *node = block->cf_node.parent; node; node = node->parent) {
+      if (node->type == nir_cf_node_loop)
+         loop = node;
+   }
+   return loop;
+}
+
 /* PBE export completion makes writes visible after a dispatch, but our
  * same-invocation check did not observe a native write through global image
- * memory. Until that visibility operation is qualified, keep read/write
- * shaders on the converter. Decide before lowering removes any image loads. */
+ * memory, so no invocation may read after its own native store. That holds
+ * when every image read precedes every image store in program order and no
+ * loop holds both; a read by another invocation after a store needs a barrier
+ * the read would then follow, so the same order covers it. Block order is
+ * program order only within one inlined entry point, so refuse calls. Decide
+ * before lowering removes any image loads. */
 bool
 hk_apple9_native_store_shader(const nir_shader *nir)
 {
+   unsigned impls = 0;
+   nir_foreach_function_impl(impl, nir)
+      ++impls;
+   if (impls != 1)
+      return false;
+   bool stored = false, ok = true;
+   struct set *read_loops = _mesa_pointer_set_create(NULL);
+   struct set *store_loops = _mesa_pointer_set_create(NULL);
    nir_foreach_function_impl(impl, nir) {
       nir_foreach_block(block, impl) {
          nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_call)
+               ok = false;
             if (instr->type != nir_instr_type_intrinsic)
                continue;
+            nir_cf_node *loop = hk_apple9_outer_loop(block);
             switch (nir_instr_as_intrinsic(instr)->intrinsic) {
             case nir_intrinsic_bindless_image_load:
+            case nir_intrinsic_bindless_image_sparse_load:
             case nir_intrinsic_bindless_image_atomic:
             case nir_intrinsic_bindless_image_atomic_swap:
-               return false;
+               ok &= !stored;
+               if (loop)
+                  _mesa_set_add(read_loops, loop);
+               break;
+            case nir_intrinsic_bindless_image_store:
+               stored = true;
+               if (loop)
+                  _mesa_set_add(store_loops, loop);
+               break;
             default:
                break;
             }
          }
       }
    }
-   return true;
+   set_foreach(store_loops, entry)
+      ok &= !_mesa_set_search(read_loops, entry->key);
+   _mesa_set_destroy(read_loops, NULL);
+   _mesa_set_destroy(store_loops, NULL);
+   return ok;
 }
 
 struct hk_apple9_storage_lowering {
@@ -3024,6 +3063,16 @@ struct hk_apple9_storage_lowering {
    bool native_stores;
 };
 
+/* The image-write data type must be known: untyped stores (meta copies of raw
+ * texels through canonical uint views) would be encoded as float data. */
+static bool
+hk_apple9_native_store_type(nir_alu_type type)
+{
+   nir_alu_type base = nir_alu_type_get_base_type(type);
+   return base == nir_type_float || base == nir_type_int || base == nir_type_uint;
+}
+
+/* 3D views have one 2D entry per depth slice, addressed like array layers. */
 static bool
 hk_apple9_can_native_store(const nir_builder *b, const nir_intrinsic_instr *intr,
                             bool native_stores)
@@ -3033,9 +3082,10 @@ hk_apple9_can_native_store(const nir_builder *b, const nir_intrinsic_instr *intr
    return native_stores &&
           (format == PIPE_FORMAT_NONE || hk_apple9_native_store_format(format)) &&
           b->shader->info.stage == MESA_SHADER_COMPUTE &&
-          (dim == GLSL_SAMPLER_DIM_2D || dim == GLSL_SAMPLER_DIM_CUBE) &&
+          (dim == GLSL_SAMPLER_DIM_2D || dim == GLSL_SAMPLER_DIM_CUBE ||
+           dim == GLSL_SAMPLER_DIM_3D) &&
           intr->src[3].ssa->bit_size == 32 &&
-          nir_alu_type_get_base_type(nir_intrinsic_src_type(intr)) == nir_type_float &&
+          hk_apple9_native_store_type(nir_intrinsic_src_type(intr)) &&
           !(nir_intrinsic_access(intr) & (ACCESS_COHERENT | ACCESS_VOLATILE));
 }
 
@@ -3062,12 +3112,13 @@ hk_apple9_native_store(nir_builder *b, nir_intrinsic_instr *intr,
    nir_def *index = nir_iand_imm(b,
       nir_ushr_imm(b, packed, HK_APPLE9_STORAGE_PBE_SHIFT),
       HK_APPLE9_STORAGE_PBE_MASK);
-   /* Storage cube coordinates already contain the flattened face layer. */
+   /* Storage cube coordinates already contain the flattened face layer, and
+    * 3D views have one 2D entry per depth slice. */
    if (array)
       index = nir_iadd(b, index, nir_channel(b, coord, 2));
    nir_image_store_apple9_agx(b, index, nir_trim_vector(b, nir_u2u32(b, coord), 2),
       nir_pad_vector_imm_int(b, intr->src[3].ssa, 0, 4),
-      .access = nir_intrinsic_access(intr));
+      .access = nir_intrinsic_access(intr), .src_type = nir_intrinsic_src_type(intr));
 }
 
 static bool
@@ -3137,7 +3188,7 @@ hk_apple9_lower_formatless_storage(nir_builder *b, nir_intrinsic_instr *intr,
     * so compute it ahead of the bounds check: its uniform part can then
     * move to the preamble. Only the access below depends on the check. */
    bool native = !load && hk_apple9_can_native_store(b, intr, native_stores);
-   bool native_array = array || cube;
+   bool native_array = array || cube || dim == GLSL_SAMPLER_DIM_3D;
    nir_def *ok = route ? hk_apple9_native_ok(b, tex) :
       native ? hk_apple9_native_write_ok(b, tex, native_array) : NULL;
    nir_def *pbe_addr = nir_load_from_texture_handle_agx(b, pbe);
@@ -3546,7 +3597,7 @@ hk_apple9_lower_storage_image(nir_builder *b, nir_intrinsic_instr *intr,
    }
    /* Typed loads decode with a known format through global memory. */
    bool native = !load && hk_apple9_can_native_store(b, intr, lower->native_stores);
-   bool native_array = array || cube;
+   bool native_array = array || cube || dim == GLSL_SAMPLER_DIM_3D;
    nir_def *ok = native ? hk_apple9_native_write_ok(b, tex, native_array) : NULL;
    /* See hk_apple9_lower_formatless_storage: address ahead of the check. */
    nir_def *addr = native ? NULL : nir_bindless_image_texel_address(b, 64, pbe, coord,

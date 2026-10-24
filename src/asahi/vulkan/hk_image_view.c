@@ -813,7 +813,8 @@ hk_apple9_init_storage_pbe(struct hk_device *dev, struct hk_image_view *view)
    bool array = view->vk.view_type == VK_IMAGE_VIEW_TYPE_2D_ARRAY ||
                 view->vk.view_type == VK_IMAGE_VIEW_TYPE_CUBE ||
                 view->vk.view_type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
-   if (!array && view->vk.view_type != VK_IMAGE_VIEW_TYPE_2D)
+   bool slices = view->vk.view_type == VK_IMAGE_VIEW_TYPE_3D;
+   if (!array && !slices && view->vk.view_type != VK_IMAGE_VIEW_TYPE_2D)
       return;
    /* Opaque capture data does not preserve table allocation addresses. */
    if ((view->vk.create_flags &
@@ -827,7 +828,14 @@ hk_apple9_init_storage_pbe(struct hk_device *dev, struct hk_image_view *view)
    if (!hk_apple9_native_store_image(image, plane) ||
        !hk_apple9_native_store_view_layout(layout, format_for_plane(view, 0)))
       return;
-   unsigned count = array ? view->vk.layer_count : 1;
+   /* Integer native stores are qualified only on views of their image's own
+    * format, not on raw reinterpretations such as meta copies. */
+   if (util_format_is_pure_integer(format_for_plane(view, 0)) &&
+       format_for_plane(view, 0) != layout->format)
+      return;
+   /* Depth slices are laid out as layers, each with its own miptree. */
+   unsigned count = slices ? u_minify(image->vk.extent.depth, view->vk.base_mip_level)
+                    : array ? view->vk.layer_count : 1;
    simple_mtx_lock(&dev->usc_heap_lock);
    bool allocated = hk_usc_heap_alloc(
       &dev->usc_heap, (uint64_t)count * AGX_APPLE9_TEXTURE_TABLE_STRIDE,
@@ -857,7 +865,7 @@ hk_apple9_init_storage_pbe(struct hk_device *dev, struct hk_image_view *view)
       }
    }
    view->apple9_pbe_index = index;
-   view->apple9_store_flags = array ? HK_APPLE9_STORAGE_LAYER_WRITE_VALID
+   view->apple9_store_flags = array || slices ? HK_APPLE9_STORAGE_LAYER_WRITE_VALID
                                     : HK_APPLE9_STORAGE_WRITE_VALID;
 }
 

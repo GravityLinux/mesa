@@ -3351,7 +3351,7 @@ load("viewport_z_range_kk", [1], [], [CAN_ELIMINATE, CAN_REORDER])
 
 # Apple9 native storage write. src0 is a USC-relative 32-byte PBE index;
 # coordinates/data remain per-invocation values. The PBE supplies the format.
-intrinsic("image_store_apple9_agx", [1, 2, 4], indices=[ACCESS])
+intrinsic("image_store_apple9_agx", [1, 2, 4], indices=[ACCESS, SRC_TYPE])
 
 # Apple9 native mesh/task stage-body IO. BASE names a local-root selector,
 # not a captured value or GPR. Offsets are byte offsets, and output stores
