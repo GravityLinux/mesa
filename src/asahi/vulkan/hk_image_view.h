@@ -69,6 +69,8 @@ bool hk_apple9_image_view_eot(const struct hk_image_view *view, bool layered,
 
 /* Image memory must be dense and uncompressed for native storage writes. */
 bool hk_apple9_native_store_image(const struct hk_image *image, unsigned plane);
+bool hk_apple9_native_store_view_layout(const struct ail_layout *layout,
+                                        enum pipe_format view_format);
 
 /* Native writes address an individual 2D plane of the storage PBE. */
 bool hk_apple9_translate_storage_pbe(void *out, const struct agx_pbe_packed *state,

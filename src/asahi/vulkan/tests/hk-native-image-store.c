@@ -49,6 +49,16 @@ test_image_storage(void)
    CHECK(hk_apple9_native_store_image(&image, 0));
    image.planes[0].layout.compressed = true;
    CHECK(!hk_apple9_native_store_image(&image, 0));
+   /* Block-texel views of compressed images address blocks, not the layout's
+    * texels; same-size reinterpretations of uncompressed images stay native. */
+   struct ail_layout bc1 = {.format = PIPE_FORMAT_DXT1_RGB};
+   CHECK(!hk_apple9_native_store_view_layout(&bc1, PIPE_FORMAT_R16G16B16A16_FLOAT));
+   struct ail_layout astc = {.format = PIPE_FORMAT_ASTC_4x4};
+   CHECK(!hk_apple9_native_store_view_layout(&astc, PIPE_FORMAT_R32G32B32A32_FLOAT));
+   struct ail_layout rgba8 = {.format = PIPE_FORMAT_R8G8B8A8_UNORM};
+   CHECK(hk_apple9_native_store_view_layout(&rgba8, PIPE_FORMAT_R8G8B8A8_UNORM));
+   CHECK(hk_apple9_native_store_view_layout(&rgba8, PIPE_FORMAT_R32_FLOAT));
+   CHECK(!hk_apple9_native_store_view_layout(&rgba8, PIPE_FORMAT_R16G16B16A16_FLOAT));
    puts("native storage: sparse layouts and VA use software stores");
    return 0;
 }
