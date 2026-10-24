@@ -332,6 +332,17 @@ hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
       NIR_PASS(progress, nir, nir_opt_loop_unroll);
    } while (progress);
 
+   /* Treat position, point size, clip/cull distances and tessellation levels
+    * as invariant, as RADV does. Whether NIR fuses a multiply into an add
+    * depends on the multiply's other users, so the same position math rounds
+    * differently in shaders that also write other outputs from it. Blender
+    * EEVEE's motion-vector prepass and its material pass then disagree on
+    * depth by a few ULPs, and the material pass's EQUAL test drops most of
+    * its pixels.
+    */
+   if (nir->info.stage != MESA_SHADER_FRAGMENT)
+      NIR_PASS(_, nir, nir_propagate_invariant, true);
+
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       struct nir_lower_sysvals_to_varyings_options sysvals_opts = {
          .point_coord = true,
