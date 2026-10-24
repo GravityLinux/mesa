@@ -30,6 +30,10 @@ bool hk_apple9_native_tess_enabled(void);
  * T32 class alone. */
 #define HK_APPLE9_NATIVE_GS_PACK 8
 bool hk_apple9_native_gs_pack_enabled(void);
+/* Research (HK_APPLE9_NATIVE_TES_PACK, default off): native TES evaluates
+ * HK_APPLE9_NATIVE_GS_PACK tessellated triangles per T32 mesh group (lane l
+ * evaluates corner l % 3 of triangle l / 3), published as T32 V24/P17. */
+bool hk_apple9_native_tes_pack_enabled(void);
 /* Whether a GS mesh body's class is one of the two packed layouts. */
 bool hk_apple9_native_gs_packed_class(unsigned threads, unsigned vertices,
                                       unsigned primitives);

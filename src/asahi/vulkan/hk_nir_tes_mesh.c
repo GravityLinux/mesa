@@ -5,16 +5,21 @@
 #include "compiler/nir/nir_builder.h"
 #include "compiler/nir/nir_control_flow.h"
 #include "poly/tessellator.h"
+#include "hk_apple9_mesh.h"
 #include "hk_shader.h"
 
 /* The count pass publishes an indexed triangle draw. The object consumes its
  * index count directly, without a CPU copy or a second producer ABI. Native
  * routing admits one patch, whose tessellator output fits the hardware grid.
  * Use one guarded group for an empty patch; it publishes zero vertices and
- * primitives without relying on a zero-child-grid launch. */
+ * primitives without relying on a zero-child-grid launch. A packed body
+ * (HK_APPLE9_NATIVE_TES_PACK) takes HK_APPLE9_NATIVE_GS_PACK triangles per
+ * group. */
 nir_shader *
 hk_nir_tes_mesh_object(void)
 {
+   const unsigned pack =
+      hk_apple9_native_tes_pack_enabled() ? HK_APPLE9_NATIVE_GS_PACK : 1;
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_TASK, &agx_nir_options, "TES triangle grid");
    b.shader->info.workgroup_size[0] = b.shader->info.workgroup_size[1] =
@@ -25,6 +30,8 @@ hk_nir_tes_mesh_object(void)
    nir_def *indices = nir_load_global(&b, 1, 32, draw, .align_mul = 4,
                                       .access = ACCESS_NON_WRITEABLE);
    nir_def *triangles = nir_udiv_imm(&b, indices, 3);
+   if (pack > 1)
+      triangles = nir_udiv_imm(&b, nir_iadd_imm(&b, triangles, pack - 1), pack);
    nir_launch_mesh_workgroups(
       &b, nir_vec3(&b, nir_umax(&b, triangles, nir_imm_int(&b, 1)),
                    nir_imm_int(&b, 1), nir_imm_int(&b, 1)));
@@ -35,6 +42,9 @@ hk_nir_tes_mesh_object(void)
 /* Consume the existing tessellator's triangle index stream. This compiler-only
  * contract does not dispatch work or replace tessellation factor generation.
  * Each workgroup evaluates one triangle; lanes 0..2 evaluate its corners.
+ * Packed, a workgroup evaluates HK_APPLE9_NATIVE_GS_PACK consecutive
+ * triangles: lane l evaluates stream index group * 3 * pack + l, which is
+ * corner l % 3 of the group's triangle l / 3, so output slot l is that corner.
  */
 static bool
 supported(const nir_shader *s, unsigned *vertices_in, const char **reason)
@@ -183,6 +193,9 @@ hk_nir_tes_mesh(const nir_shader *source, const char **reason)
    nir_cf_list body;
    nir_cf_extract(&body, nir_before_impl(impl), nir_after_impl(impl));
    nir_builder b = nir_builder_at(nir_before_impl(impl));
+   const unsigned pack =
+      hk_apple9_native_tes_pack_enabled() ? HK_APPLE9_NATIVE_GS_PACK : 1;
+   const unsigned corners = 3 * pack;
    nir_def *lane = nir_load_local_invocation_index(&b);
    nir_def *group = nir_load_workgroup_id(&b);
    nir_def *in_grid =
@@ -190,7 +203,7 @@ hk_nir_tes_mesh(const nir_shader *source, const char **reason)
                nir_ieq_imm(&b, nir_channel(&b, group, 2), 0));
    /* Even metadata reads are suppressed for unused lanes and y/z slices. */
    nir_if *active =
-      nir_push_if(&b, nir_iand(&b, nir_ult_imm(&b, lane, 3), in_grid));
+      nir_push_if(&b, nir_iand(&b, nir_ult_imm(&b, lane, corners), in_grid));
    active->control = nir_selection_control_dont_flatten;
    nir_def *params = nir_load_tess_param_buffer_poly(&b);
    nir_def *draw = nir_load_global_constant(
@@ -204,33 +217,38 @@ hk_nir_tes_mesh(const nir_shader *source, const char **reason)
       nir_iadd_imm(&b, params,
                    offsetof(struct poly_tess_params, output_patch_size)),
       .align_mul = 4);
-   nir_def *valid = nir_iand(
-      &b, nir_ult(&b, nir_channel(&b, group, 0), nir_udiv_imm(&b, count, 3)),
-      nir_iand(&b, nir_uge_imm(&b, patch_size, vertices_in),
-               nir_ule_imm(&b, patch_size, 32)));
-   /* Bound the reads and stores themselves. Test before multiplication so
-    * oversized groups cannot wrap to a valid index. Ignore a partial triangle.
-    * Index contents and backing allocations retain the producer's contract. */
+   nir_def *triangles = nir_udiv_imm(&b, count, 3);
+   nir_def *first = nir_imul_imm(&b, nir_channel(&b, group, 0), pack);
+   /* Triangles this group evaluates: 0 or 1 unpacked, up to pack packed.
+    * Test before multiplication so oversized groups cannot wrap to a valid
+    * index. Ignore a partial triangle. Index contents and backing
+    * allocations retain the producer's contract. */
+   nir_def *patch_ok = nir_iand(&b, nir_uge_imm(&b, patch_size, vertices_in),
+                                nir_ule_imm(&b, patch_size, 32));
+   nir_def *live = nir_bcsel(
+      &b, nir_iand(&b, patch_ok, nir_ult(&b, first, triangles)),
+      nir_umin(&b, nir_isub(&b, triangles, first), nir_imm_int(&b, pack)),
+      nir_imm_int(&b, 0));
+   nir_def *valid = nir_ult(&b, nir_udiv_imm(&b, lane, 3), live);
    nir_if *bounded = nir_push_if(&b, valid);
    bounded->control = nir_selection_control_dont_flatten;
    struct tes_mesh_state s = {
       .lane = lane,
-      .index =
-         nir_iadd(&b, nir_imul_imm(&b, nir_channel(&b, group, 0), 3), lane),
+      .index = nir_iadd(&b, nir_imul_imm(&b, nir_channel(&b, group, 0), corners), lane),
    };
    b.cursor = nir_cf_reinsert(&body, b.cursor);
-   nir_push_if(&b, nir_ieq_imm(&b, lane, 0));
+   nir_push_if(&b, nir_ieq_imm(&b, nir_umod_imm(&b, lane, 3), 0));
    nir_store_per_primitive_output(
-      &b, nir_imm_ivec3(&b, 0, 1, 2), nir_imm_int(&b, 0), nir_imm_int(&b, 0),
+      &b, nir_iadd(&b, nir_imm_ivec3(&b, 0, 1, 2), lane),
+      nir_udiv_imm(&b, lane, 3), nir_imm_int(&b, 0),
       .write_mask = 7, .src_type = nir_type_uint32,
       .io_semantics = {.location = VARYING_SLOT_PRIMITIVE_INDICES,
                        .num_slots = 1});
    nir_pop_if(&b, NULL);
    nir_pop_if(&b, NULL);
    nir_push_if(&b, nir_ieq_imm(&b, lane, 0));
-   nir_set_vertex_and_primitive_count(
-      &b, nir_bcsel(&b, valid, nir_imm_int(&b, 3), nir_imm_int(&b, 0)),
-      nir_b2i32(&b, valid), nir_imm_int(&b, 0));
+   nir_set_vertex_and_primitive_count(&b, nir_imul_imm(&b, live, 3), live,
+                                      nir_imm_int(&b, 0));
    nir_pop_if(&b, NULL);
    nir_pop_if(&b, NULL);
    /* Out-of-grid workgroups publish an empty mesh from lane zero. */
@@ -244,10 +262,11 @@ hk_nir_tes_mesh(const nir_shader *source, const char **reason)
    memset(&nir->info.mesh, 0, sizeof(nir->info.mesh));
    nir->info.stage = MESA_SHADER_MESH;
    nir->info.mesh.primitive_type = MESA_PRIM_TRIANGLES;
-   nir->info.mesh.max_vertices_out = 3;
-   nir->info.mesh.max_primitives_out = 1;
+   /* Unpacked T16 V3/P1; packed the qualified T32 V24/P17. */
+   nir->info.mesh.max_vertices_out = corners;
+   nir->info.mesh.max_primitives_out = pack > 1 ? 17 : 1;
    nir->info.workgroup_size_variable = false;
-   nir->info.workgroup_size[0] = 16;
+   nir->info.workgroup_size[0] = pack > 1 ? 32 : 16;
    nir->info.workgroup_size[1] = nir->info.workgroup_size[2] = 1;
    nir_progress(true, impl, nir_metadata_none);
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
