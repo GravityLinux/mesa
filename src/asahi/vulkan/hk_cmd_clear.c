@@ -14,6 +14,7 @@
 #include "hk_device.h"
 #include "hk_entrypoints.h"
 #include "hk_image.h"
+#include "hk_feedback.h"
 #include "hk_image_view.h"
 #include "hk_physical_device.h"
 
@@ -27,6 +28,12 @@ hk_clear_image(struct hk_cmd_buffer *cmd, struct hk_image *image,
 {
    const uint32_t level_count =
       vk_image_subresource_level_count(&image->vk, range);
+
+   /* Empty-render optimization also calls here directly, without meta_begin.
+    * A fast clear writes solid compression metadata, so it ends raw storage.
+    */
+   hk_feedback_invalidate_range(cmd, image, range->baseMipLevel, level_count,
+      range->baseArrayLayer, vk_image_subresource_layer_count(&image->vk, range));
 
    bool z = (range->aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT);
    bool s = (range->aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT);

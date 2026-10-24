@@ -4,6 +4,7 @@
  * Copyright 2022-2023 Collabora Ltd. and Red Hat Inc.
  * SPDX-License-Identifier: MIT
  */
+#include "hk_feedback.h"
 #include "hk_event.h"
 #include "vulkan/vulkan_core.h"
 
@@ -195,6 +196,8 @@ hk_CmdWaitEvents2(VkCommandBuffer commandBuffer, uint32_t eventCount,
                   const VkDependencyInfo *pDependencyInfos)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   if (!cmd->in_meta)
+      hk_feedback_invalidate(cmd);
    hk_cmd_render_merge_flush(cmd);
    perf_debug(cmd, "Wait events");
 

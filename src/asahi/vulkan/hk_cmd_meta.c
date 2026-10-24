@@ -15,6 +15,9 @@
 #include "hk_device.h"
 #include "hk_entrypoints.h"
 #include "hk_image.h"
+#include "hk_image_view.h"
+#include "hk_feedback.h"
+#include "agx_helpers.h"
 #include "hk_physical_device.h"
 
 #include "layout.h"
@@ -141,6 +144,8 @@ hk_meta_begin(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
    static_assert(sizeof(save->push) == sizeof(desc->root.push));
    memcpy(save->push, desc->root.push, sizeof(save->push));
 
+   if (!cmd->feedback_decompress)
+      hk_feedback_invalidate(cmd);
    cmd->in_meta = true;
    cmd->sync_scope = HK_SYNC_TRANSFER;
    /* Its compute work may run ahead of a render kept open for merging. */
@@ -235,6 +240,84 @@ hk_meta_end(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
    cmd->in_meta = false;
    cmd->sync_scope = 0;
    cmd->merge_move_stage = 0;
+}
+
+/* Render tiles contain whole compression blocks. Every source texel in this
+ * self-blit is read before its tile stores, and no tile reads a different tile.
+ * Use integer channel aliases: no sRGB, SNORM or floating-point conversion.
+ */
+bool
+hk_meta_decompress_color(struct hk_cmd_buffer *cmd,
+                          const struct hk_image_view *view, unsigned layer)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   struct hk_image *image = container_of(view->vk.image, struct hk_image, vk);
+   struct ail_layout *layout = &image->planes[0].layout;
+   unsigned level = view->vk.base_mip_level;
+   bool hit = hk_feedback_is_raw(cmd, image, level, layer);
+   if (unlikely(hk_cpu_level)) {
+      cmd->feedback_stats.calls++;
+      if (hit) {
+         cmd->feedback_stats.hits++;
+      } else {
+         cmd->feedback_stats.misses++;
+         cmd->feedback_stats.bytes +=
+            (uint64_t)u_minify(image->vk.extent.width, level) *
+            u_minify(image->vk.extent.height, level) *
+            vk_format_get_blocksize(image->vk.format);
+      }
+   }
+   if (hit)
+      return true;
+
+   VkFormat raw = hk_feedback_raw_format(image->vk.format);
+   assert(raw != VK_FORMAT_UNDEFINED);
+   const VkImageBlit2 region = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_BLIT_2,
+      .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, layer, 1},
+      .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, layer, 1},
+      .srcOffsets[1] = {u_minify(image->vk.extent.width, level),
+                        u_minify(image->vk.extent.height, level), 1},
+      .dstOffsets[1] = {u_minify(image->vk.extent.width, level),
+                        u_minify(image->vk.extent.height, level), 1},
+   };
+   hk_cmd_render_merge_flush(cmd);
+   hk_cmd_sync_barrier(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+      VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+      VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+   struct hk_meta_save save;
+   cmd->feedback_decompress = true;
+   hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS);
+   vk_meta_blit_image(&cmd->vk, &dev->meta,
+      &image->vk, raw, VK_IMAGE_LAYOUT_GENERAL,
+      &image->vk, raw, VK_IMAGE_LAYOUT_GENERAL, 1, &region, VK_FILTER_NEAREST);
+   hk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS);
+   cmd->feedback_decompress = false;
+   hk_cmd_buffer_end_graphics(cmd);
+   if (vk_command_buffer_has_error(&cmd->vk))
+      return false;
+
+   /* A raw PBE store leaves compression metadata untouched. Publish its new
+    * interpretation only once the blit completed, before any feedback read.
+    */
+   uint64_t start = layout->level_offsets_compressed_B[level];
+   uint64_t end = level + 1 < layout->levels &&
+                    ail_is_level_allocated_compressed(layout, level + 1)
+                     ? layout->level_offsets_compressed_B[level + 1]
+                     : layout->compression_layer_stride_B;
+   uint64_t mode = ail_tile_mode_uncompressed(layout->format);
+   uint64_t address = hk_image_base_address(image, 0) + layout->metadata_offset_B +
+                      layer * layout->compression_layer_stride_B + start;
+   assert(end >= start && (end - start) % 16 == 0);
+   assert(address % 16 == 0);
+   libagx_fill_uint4(cmd, agx_1d((end - start) / 16), AGX_BARRIER_ALL,
+                     address, 0, mode, mode >> 32, mode, mode >> 32);
+   hk_cmd_buffer_end_compute(cmd);
+   hk_cmd_sync_barrier(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+      VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+      VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+   return !vk_command_buffer_has_error(&cmd->vk) &&
+          hk_feedback_mark_raw(cmd, image, level, layer);
 }
 
 #define BINDING_OUTPUT 0
@@ -1522,6 +1605,8 @@ hk_CmdCopyBuffer2(VkCommandBuffer commandBuffer, const VkCopyBufferInfo2 *info)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    hk_cmd_flush_empty_clears(cmd);
+   /* Buffer destinations may alias image storage or its compression metadata. */
+   hk_feedback_invalidate(cmd);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    hk_cmd_use_implicit_sync(
       cmd, hk_buffer_from_handle(info->srcBuffer)->implicit_sync_res);
@@ -1647,6 +1732,8 @@ hk_CmdFillBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    hk_cmd_flush_empty_clears(cmd);
+   /* Buffer destinations may alias image storage or its compression metadata. */
+   hk_feedback_invalidate(cmd);
    VK_FROM_HANDLE(hk_buffer, buffer, dstBuffer);
    hk_cmd_use_implicit_sync(cmd, buffer->implicit_sync_res);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
@@ -1673,6 +1760,8 @@ hk_CmdUpdateBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    hk_cmd_flush_empty_clears(cmd);
+   /* Buffer destinations may alias image storage or its compression metadata. */
+   hk_feedback_invalidate(cmd);
    VK_FROM_HANDLE(hk_buffer, buffer, dstBuffer);
    hk_cmd_use_implicit_sync(cmd, buffer->implicit_sync_res);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);

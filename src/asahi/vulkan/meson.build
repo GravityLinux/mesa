@@ -36,6 +36,8 @@ hk_files = files(
   'hk_event.c',
   'hk_event.h',
   'hk_format.c',
+  'hk_feedback.c',
+  'hk_feedback.h',
   'hk_image.c',
   'hk_image.h',
   'hk_image_view.c',
@@ -171,7 +173,13 @@ if with_tests
     ),
     suite : ['asahi', 'honeykrisp'],
   )
-  foreach t : ['hk-descriptor-parts', 'hk-constant-data', 'hk-draw-state-cache', 'hk-render-merge', 'hk-empty-clear-barriers', 'hk-image-limits', 'hk-sliced-3d', 'hk-stage-output-limits', 'hk-cull-output-limits', 'hk-pregfx-recording', 'hk-heap-resubmit', 'hk-heap-addresses', 'hk-native-image-store', 'hk-mesh-query', 'hk-native-mesh', 'hk-robust-bounded-vector']
+  test('hk-feedback-oom', executable('hk-feedback-oom', 'tests/hk-feedback-oom.c',
+    include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                           inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+    dependencies : [hk_deps], link_with : [libhk],
+    link_args : ['-Wl,--wrap=hk_meta_decompress_color', '-Wl,--wrap=__vk_errorf']),
+    suite : ['asahi', 'honeykrisp'])
+  foreach t : ['hk-feedback', 'hk-descriptor-parts', 'hk-constant-data', 'hk-draw-state-cache', 'hk-render-merge', 'hk-empty-clear-barriers', 'hk-image-limits', 'hk-sliced-3d', 'hk-stage-output-limits', 'hk-cull-output-limits', 'hk-pregfx-recording', 'hk-heap-resubmit', 'hk-heap-addresses', 'hk-native-image-store', 'hk-mesh-query', 'hk-native-mesh', 'hk-robust-bounded-vector']
     contract_test = executable(
       t,
       'tests/' + t + '.c',

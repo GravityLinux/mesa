@@ -25,6 +25,7 @@
 #include "hk_device.h"
 #include "hk_entrypoints.h"
 #include "hk_image.h"
+#include "hk_feedback.h"
 #include "hk_image_view.h"
 #include "hk_physical_device.h"
 #include "hk_private.h"
@@ -682,7 +683,10 @@ hk_render_merge_begin(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
       if (!ds[i] || !ds[i]->imageView)
          continue;
       if (ds[i]->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ||
-          ds[i]->resolveMode != VK_RESOLVE_MODE_NONE)
+          ds[i]->resolveMode != VK_RESOLVE_MODE_NONE ||
+          hk_attachment_may_be_sampled(ds[i]) ||
+          (cmd->vk.dynamic_graphics_state.feedback_loops &
+             (i ? VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT)))
          return false;
       if (empty && (ds[i]->loadOp != VK_ATTACHMENT_LOAD_OP_LOAD ||
                     (ds[i]->imageLayout != VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL &&
@@ -712,7 +716,10 @@ hk_render_merge_begin(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
            hk_attachment_may_be_sampled(att)))
          return false;
       /* Clears would need an in-pass clear over the render area. */
-      if (att->imageView && att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
+      if (att->imageView &&
+          (att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ||
+           hk_attachment_may_be_sampled(att) ||
+           (cmd->vk.dynamic_graphics_state.feedback_loops & VK_IMAGE_ASPECT_COLOR_BIT)))
          return false;
       if (att->imageView && is_attachment_stored(att))
          store_mask |= BITFIELD_BIT(i);
@@ -725,7 +732,7 @@ hk_render_merge_begin(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
       return false;
    }
 
-   return hk_render_merge_enabled(cmd) &&
+   return !cmd->merge_feedback && hk_render_merge_enabled(cmd) &&
           hk_render_merge_key_init(&key,
                               info->flags & ~(empty ? VK_RENDERING_SUSPENDING_BIT : 0),
                               info->layerCount,
@@ -745,7 +752,8 @@ hk_render_suspend_keeps_open(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    if (enabled < 0)
       enabled = debug_get_bool_option("HK_APPLE9_MERGE_RESUME", true);
    const struct hk_rendering_state *render = &cmd->state.gfx.render;
-   return enabled && cs && (render->flags & VK_RENDERING_SUSPENDING_BIT) &&
+   return enabled && cs && !render->feedback && !render->raw_color_mask &&
+          (render->flags & VK_RENDERING_SUSPENDING_BIT) &&
           hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G &&
           cmd->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY && !cmd->in_meta &&
           !cmd->sync_fallback && !cmd->current_cs.pre_gfx &&
@@ -759,7 +767,8 @@ hk_render_merge_end(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    struct hk_rendering_state *render = &cmd->state.gfx.render;
    struct hk_image_view *views[HK_MAX_RTS] = {NULL};
 
-   if (!cs || !hk_render_merge_enabled(cmd) ||
+   if (!cs || render->feedback || render->raw_color_mask ||
+       !hk_render_merge_enabled(cmd) ||
        cmd->sync_fallback || cmd->current_cs.pre_gfx ||
        cmd->current_cs.post_gfx || cmd->tess_batch.draws ||
        cmd->state.gfx.occlusion.active_count)
@@ -806,11 +815,148 @@ hk_render_inherit_empty_clears(struct hk_cmd_buffer *cmd)
    }
 }
 
+/* A compressed attachment must use raw stores as soon as feedback is possible.
+ * GENERAL alone does not imply sampling, but the layout/enable bit or explicit
+ * dynamic feedback state does. Keep raw stores sticky within the render.
+ */
+static uint8_t
+hk_feedback_color_mask(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   uint8_t mask = 0;
+   for (unsigned i = 0; i < info->colorAttachmentCount; i++) {
+      const VkRenderingAttachmentInfo *a = &info->pColorAttachments[i];
+      if (!a->imageView)
+         continue;
+      const struct hk_image_view *view = hk_image_view_from_handle(a->imageView);
+      const struct hk_image *image = container_of(view->vk.image, struct hk_image, vk);
+      if (!hk_feedback_can_compress(&dev->dev, image->vk.image_type,
+                                    image->vk.format, image->vk.samples) ||
+          !ail_is_level_logically_compressed(&image->planes[0].layout,
+                                             view->vk.base_mip_level))
+         continue;
+      if (cmd->feedback_decompress || hk_attachment_may_be_sampled(a) ||
+          (cmd->vk.dynamic_graphics_state.feedback_loops & VK_IMAGE_ASPECT_COLOR_BIT))
+         mask |= BITFIELD_BIT(i);
+   }
+   return mask;
+}
+
+static bool
+hk_feedback_decompress(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
+                         uint8_t mask)
+{
+   if (cmd->feedback_decompress)
+      return true;
+   u_foreach_bit(i, mask) {
+      const struct hk_image_view *view =
+         hk_image_view_from_handle(info->pColorAttachments[i].imageView);
+      if (info->viewMask) {
+         u_foreach_bit(v, info->viewMask) {
+            if (!hk_meta_decompress_color(cmd, view, view->vk.base_array_layer + v))
+               return false;
+         }
+      } else {
+         for (unsigned v = 0; v < info->layerCount; v++) {
+            if (!hk_meta_decompress_color(cmd, view, view->vk.base_array_layer + v))
+               return false;
+         }
+      }
+   }
+   return true;
+}
+
+/* Splitting a live render keeps the partial EOT's stores and the partial BG's
+ * loads. Rebuild only its final/partial colour stores with the new raw mask.
+ * This also handles feedback enabled by binding a static-state pipeline.
+ */
+static bool
+hk_feedback_prepare_draw(struct hk_cmd_buffer *cmd)
+{
+   if (vk_command_buffer_has_error(&cmd->vk))
+      return false;
+
+   struct hk_rendering_state *render = &cmd->state.gfx.render;
+   if (!cmd->rendering || cmd->in_meta ||
+       !(cmd->vk.dynamic_graphics_state.feedback_loops & VK_IMAGE_ASPECT_COLOR_BIT))
+      return true;
+   VkRenderingAttachmentInfo attachments[HK_MAX_RTS];
+   for (unsigned i = 0; i < render->color_att_count; i++) {
+      attachments[i] = (VkRenderingAttachmentInfo){
+         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+         .imageView = hk_image_view_to_handle(render->color_att[i].iview),
+         .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+         .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+         .storeOp = render->store_mask & BITFIELD_BIT(i)
+                       ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE,
+      };
+   }
+   const VkRenderingInfo info = {
+      .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+      .renderArea = render->area,
+      .layerCount = render->layer_count,
+      .viewMask = render->view_mask,
+      .colorAttachmentCount = render->color_att_count,
+      .pColorAttachments = attachments,
+   };
+   uint8_t mask = hk_feedback_color_mask(cmd, &info) & ~render->raw_color_mask;
+   if (!mask)
+      return true;
+
+   hk_cs_end_hint(cmd, HK_CS_END_RENDER_SPLIT);
+   hk_cmd_buffer_end_graphics(cmd);
+   struct hk_rendering_state saved = *render;
+   if (!hk_feedback_decompress(cmd, &info, mask))
+      return false;
+   *render = saved;
+   cmd->rendering = true;
+   render->feedback = true;
+   render->raw_color_mask |= mask;
+   render->cr.bg.main = render->cr.bg.partial;
+   for (unsigned i = 0; i < render->color_att_count; i++)
+      render->color_att[i].clear = false;
+   render->cr.eot.main = hk_build_bg_eot(cmd, &info, true, false, true);
+   render->cr.eot.partial = hk_build_bg_eot(cmd, &info, true, true, true);
+   cmd->sync_render_continuation = false;
+   cmd->state.gfx.render_gen++;
+   hk_cmd_buffer_dirty_all(cmd);
+   return !vk_command_buffer_has_error(&cmd->vk);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+hk_CmdSetAttachmentFeedbackLoopEnableEXT(VkCommandBuffer commandBuffer,
+                                          VkImageAspectFlags aspectMask)
+{
+   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
+   if (!BITSET_TEST(dyn->set, MESA_VK_DYNAMIC_ATTACHMENT_FEEDBACK_LOOP_ENABLE) ||
+       dyn->feedback_loops != aspectMask) {
+      dyn->feedback_loops = aspectMask;
+      BITSET_SET(dyn->set, MESA_VK_DYNAMIC_ATTACHMENT_FEEDBACK_LOOP_ENABLE);
+      BITSET_SET(dyn->dirty, MESA_VK_DYNAMIC_ATTACHMENT_FEEDBACK_LOOP_ENABLE);
+   }
+   if (cmd->rendering && aspectMask)
+      cmd->state.gfx.render.feedback = true;
+   if (hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G)
+      hk_feedback_prepare_draw(cmd);
+}
+
 VKAPI_ATTR void VKAPI_CALL
 hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
                      const VkRenderingInfo *pRenderingInfo)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   if (vk_command_buffer_has_error(&cmd->vk))
+      return;
+
+   uint8_t raw_mask = hk_feedback_color_mask(cmd, pRenderingInfo);
+   if (raw_mask) {
+      hk_cmd_render_merge_flush(cmd);
+      if (!hk_feedback_decompress(cmd, pRenderingInfo, raw_mask))
+         return;
+   }
+   if (!cmd->feedback_decompress && raw_mask)
+      cmd->sync_render_continuation = false;
    bool merge = false;
    /* The resuming render pass of a suspended one continues its render. */
    bool resume = false;
@@ -835,12 +981,15 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
    /* A continued render needs no dependency on itself. */
    cmd->sync_render_continuation =
-      (pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT) != 0 && !resume;
+      (pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT) != 0 && !resume && !raw_mask;
    cmd->sync_render_stages = cmd->sync_scope ?: HK_SYNC_GRAPHICS;
    cmd->state.gfx.render_gen++;
    struct hk_rendering_state *render = &cmd->state.gfx.render;
 
    memset(render, 0, sizeof(*render));
+   cmd->rendering = true;
+   render->raw_color_mask = raw_mask;
+   render->feedback = cmd->vk.dynamic_graphics_state.feedback_loops != 0;
 
    render->flags = pRenderingInfo->flags;
    render->area = pRenderingInfo->renderArea;
@@ -867,6 +1016,11 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    for (unsigned i = 0; i < ARRAY_SIZE(feedback_att); ++i) {
       if (hk_attachment_may_be_sampled(feedback_att[i]))
          render->feedback = true;
+   }
+   for (unsigned i = 0; i < pRenderingInfo->colorAttachmentCount; i++) {
+      if (!(raw_mask & BITFIELD_BIT(i)))
+         hk_feedback_invalidate_view(cmd,
+            hk_image_view_from_handle(pRenderingInfo->pColorAttachments[i].imageView));
    }
    render->view_mask = pRenderingInfo->viewMask;
    render->layer_count = pRenderingInfo->layerCount;
@@ -940,6 +1094,15 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
          agx_apple9_tile_sample_bytes(bytes, render->tilebuffer.nr_samples), 8);
       render->tilebuffer.tile_size = render->tilebuffer.nr_samples == 4
                                        ? 32 * 16 : 32 * 32;
+   }
+
+   if (cmd->feedback_decompress) {
+      /* A self-blit must retire each whole compression block before another
+       * tile reads it. The metadata covers 16x16 texels for every colour bpp. */
+      struct drm_asahi_cmd_render raw = {0};
+      agx_tilebuffer_set_drm_cmd(&raw, &render->tilebuffer);
+      assert(raw.utile_width_px % 16 == 0);
+      assert(raw.utile_height_px % 16 == 0);
    }
 
    const VkRenderingAttachmentLocationInfoKHR ral_info = {
@@ -1309,6 +1472,9 @@ hk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
                        const VkRenderingEndInfoKHR *pRenderingEndInfo)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   if (vk_command_buffer_has_error(&cmd->vk))
+      return;
+
    struct hk_rendering_state *render = &cmd->state.gfx.render;
 
    /* The last control stream of the render pass is special since it gets its
@@ -1316,7 +1482,10 @@ hk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
     */
    struct hk_cs *cs = cmd->current_cs.gfx;
    if (cs) {
-      cs->cr.eot.main = render->cr.eot.main;
+      cs->cr.eot.main = (render->flags & VK_RENDERING_SUSPENDING_BIT)
+                           ? render->cr.eot.partial : render->cr.eot.main;
+      /* zls_last already preserves suspended stores. Its first-stream
+       * loads must retain CLEAR; the partial control would force a load. */
       cs->cr.zls_control = cs == render->first_cs ? render->zls_last
                                                   : render->zls_partial_last;
    }
@@ -1451,6 +1620,7 @@ hk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
       need_resolve = false;
 
    memset(render, 0, sizeof(*render));
+   cmd->rendering = false;
 
    if (need_resolve) {
       perf_debug(cmd, "Resolving render pass, colour store op %u",
@@ -5180,6 +5350,8 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
       return;
 
    if (hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G) {
+      if (!hk_feedback_prepare_draw(cmd))
+         return;
       /* Index fetch and indirect arguments are buffer reads of tiling. */
       if (!hk_apple9_prepare_draw(cmd, agx_is_indirect(draw_.b) || draw_.indexed, false))
          return;
@@ -5188,6 +5360,15 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
       hk_cpu_sub_end(t_resolve, HK_CPU_SUB_RESOLVE);
       if (!resolved)
          return;
+      if (cmd->feedback_raw.size) {
+         for (unsigned stage = 0; stage <= MESA_SHADER_MESH; stage++) {
+            if (cmd->state.gfx.shaders[stage] &&
+                cmd->state.gfx.shaders[stage]->writes_memory) {
+               hk_feedback_invalidate(cmd);
+               break;
+            }
+         }
+      }
       if (hk_cond_render_applies(cmd)) {
          draw_ = hk_apple9_predicate_draw(cmd, draw_);
          if (!draw_.b.ptr)
@@ -5508,6 +5689,11 @@ hk_apple9_draw_mesh(struct hk_cmd_buffer *cmd, uint32_t draw_id,
                     const uint32_t *direct, uint64_t grid_addr,
                     uint64_t count_addr)
 {
+   /* Includes the hybrid native path: static pipeline feedback may change
+    * after BeginRendering, and a failed decompression poisons recording. */
+   if (!hk_feedback_prepare_draw(cmd))
+      return;
+
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct hk_descriptor_state *desc = &gfx->descriptors;
 

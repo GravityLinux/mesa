@@ -237,6 +237,12 @@ struct vk_device_dispatch_table;
 void hk_cpu_timing_install(struct vk_device_dispatch_table *table);
 /* Heap-using renders in one command buffer, or summed over one submit. */
 void hk_cpu_timing_note_heap(unsigned renders, bool submit);
+/* Debug counts recorded per CB, accumulated per actual submission. */
+struct hk_feedback_stats {
+   uint64_t calls, bytes, hits, misses;
+};
+void hk_cpu_timing_note_feedback(const struct hk_feedback_stats *stats);
+
 void hk_cpu_timing_note_gs_slow(unsigned shape, bool indirect, uint64_t prims,
                                 unsigned max_indices);
 struct hk_cpu_compile_scope {

@@ -283,6 +283,8 @@ struct hk_rendering_state {
    /* A stored colour attachment is linear, so buffers aliasing its memory
     * can observe the render's writes (hk_queue's tiling-wait elision). */
    bool linear_store;
+   /* Feedback stores stay raw until the end of this render instance. */
+   uint8_t raw_color_mask;
 
    VkRenderingFlagBits flags;
 
@@ -559,6 +561,7 @@ struct hk_cs {
    /* enum hk_cs_end, and whether an hk meta operation created the stream. */
    uint8_t end_reason;
    bool meta;
+   bool feedback_decompression, feedback_color;
 
    /* Parent command buffer. Convenience. */
    struct hk_cmd_buffer *cmd;
@@ -824,6 +827,10 @@ struct hk_cmd_buffer {
    bool sync_render_continuation;
    bool sync_fallback;
    bool api_dispatch;
+   bool feedback_decompress;
+   bool rendering;
+   struct util_dynarray feedback_raw;
+   struct hk_feedback_stats feedback_stats;
 
    /* HK_APPLE9_MERGE_RENDERS: the control stream of a render pass that has
     * ended but is kept open, so the next render pass on the same attachments
@@ -1151,6 +1158,7 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
          .end = root.cpu + initial_size,
          .sync_id = util_dynarray_num_elements(&cmd->sync_remap, uint32_t),
          .meta = cmd->in_meta,
+         .feedback_decompression = cmd->feedback_decompress,
       };
 
       util_dynarray_append(&cmd->sync_remap, cs->sync_id);

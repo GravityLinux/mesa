@@ -115,6 +115,7 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd, bool release)
    util_dynarray_clear(&cmd->sync_first_event);
    if (release)
       hk_trim_cmd_buffer(cmd);
+   util_dynarray_clear(&cmd->feedback_raw);
 }
 
 void
@@ -182,6 +183,7 @@ hk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
       util_dynarray_fini(&cmd->tess_batch.lane[i]);
    util_dynarray_fini(&cmd->sync_remap);
    util_dynarray_fini(&cmd->sync_first_event);
+   util_dynarray_fini(&cmd->feedback_raw);
    free(cmd->merge_empty_render);
    vk_command_buffer_finish(&cmd->vk);
    vk_free(&pool->vk.alloc, cmd);
@@ -223,6 +225,7 @@ hk_create_cmd_buffer(struct vk_command_pool *vk_pool,
    cmd->empty_barriers = UTIL_DYNARRAY_INIT;
    cmd->sync_remap = UTIL_DYNARRAY_INIT;
    cmd->sync_first_event = UTIL_DYNARRAY_INIT;
+   cmd->feedback_raw = UTIL_DYNARRAY_INIT;
    for (unsigned i = 0; i < HK_TESS_BATCH_LANES; ++i)
       cmd->tess_batch.lane[i] = UTIL_DYNARRAY_INIT;
 
@@ -281,6 +284,9 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    cmd->sync_render_stages = 0;
    cmd->sync_render_continuation = false;
    cmd->api_dispatch = false;
+   cmd->feedback_decompress = false;
+   memset(&cmd->feedback_stats, 0, sizeof(cmd->feedback_stats));
+   cmd->rendering = false;
 
    memset(&cmd->state, 0, sizeof(cmd->state));
 }
@@ -463,6 +469,11 @@ VKAPI_ATTR VkResult VKAPI_CALL
 hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   /* Failed meta recording can leave a partial stream. Report the original
+    * recording error without trying to finish or merge that stream. */
+   if (vk_command_buffer_has_error(&cmd->vk))
+      return vk_command_buffer_end(&cmd->vk);
+
 
    hk_cmd_render_merge_flush(cmd);
    assert(cmd->current_cs.gfx == NULL && cmd->current_cs.pre_gfx == NULL &&
@@ -1741,6 +1752,7 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    uint8_t *map = cs->current;
 
    cs->tib = render->tilebuffer;
+   cs->feedback_color = render->feedback;
    /* Segment slots are per control stream; active queries continue in a new
     * segment here. */
    cs->occlusion_base = 0;

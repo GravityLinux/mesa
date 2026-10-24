@@ -4,6 +4,7 @@
  * Copyright 2022-2023 Collabora Ltd. and Red Hat Inc.
  * SPDX-License-Identifier: MIT
  */
+#include "hk_feedback.h"
 #include "libagx/query.h"
 #include "vulkan/vulkan_core.h"
 #include "agx_helpers.h"
@@ -699,6 +700,8 @@ hk_CmdDispatchBase(VkCommandBuffer commandBuffer, uint32_t baseGroupX,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    hk_cmd_flush_empty_clears(cmd);
+   if (!cmd->in_meta)
+      hk_feedback_invalidate(cmd);
    struct hk_descriptor_state *desc = &cmd->state.cs.descriptors;
    if (desc->push_dirty)
       hk_cmd_buffer_flush_push_descriptors(cmd, desc);
@@ -734,6 +737,8 @@ hk_CmdDispatchIndirect(VkCommandBuffer commandBuffer, VkBuffer _buffer,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    hk_cmd_flush_empty_clears(cmd);
+   if (!cmd->in_meta)
+      hk_feedback_invalidate(cmd);
    VK_FROM_HANDLE(hk_buffer, buffer, _buffer);
    struct hk_descriptor_state *desc = &cmd->state.cs.descriptors;
    if (desc->push_dirty)

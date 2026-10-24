@@ -679,7 +679,7 @@ hk_apple9_init_render_view(struct hk_image_view *view)
          cfg = image;
       }
       out->texture_valid = agx_apple9_translate_texture(out->texture, &packed);
-      out->store_valid = hk_apple9_image_view_eot(view, layered, out->store);
+      out->store_valid = hk_apple9_image_view_eot(view, layered, false, out->store);
    }
 }
 
@@ -873,7 +873,7 @@ hk_CreateImageView(VkDevice _device, const VkImageViewCreateInfo *pCreateInfo,
 }
 
 bool
-hk_apple9_image_view_eot(const struct hk_image_view *view, bool layered, void *out)
+hk_apple9_image_view_eot(const struct hk_image_view *view, bool layered, bool raw, void *out)
 {
    if (view->plane_count != 1)
       return false;
@@ -894,8 +894,10 @@ hk_apple9_image_view_eot(const struct hk_image_view *view, bool layered, void *o
    enum agx_texture_dimension dimension = translate_image_view_type(
       view->vk.view_type, view->vk.image->samples > 1, layers > 1,
       layered ? HK_DESC_USAGE_LAYERED_BG_EOT : HK_DESC_USAGE_BG_EOT);
+   struct ail_layout store_layout = *layout;
+   store_layout.compressed &= !raw;
    return agx_apple9_translate_pbe(
-      out, state, format_for_plane(view, 0), layout, base, view->vk.base_mip_level,
+      out, state, format_for_plane(view, 0), &store_layout, base, view->vk.base_mip_level,
       layered ? layers : 1, layered, dimension);
 }
 
