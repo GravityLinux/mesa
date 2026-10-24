@@ -455,7 +455,7 @@ merge_control_streams(struct hk_cmd_buffer *cmd)
       if (cs->type == HK_CS_CDM && last && last->type == HK_CS_CDM &&
           !last->timestamp.end.handle) {
 
-         hk_cs_merge_cdm(last, cs);
+         hk_cs_merge_cdm(last, cs, hk_cmd_buffer_device(cmd)->dev.chip);
          last->sync_stages |= cs->sync_stages;
          *util_dynarray_element(&cmd->sync_remap, uint32_t, cs->sync_id) =
             last->sync_id;
