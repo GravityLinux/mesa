@@ -5412,6 +5412,7 @@ hk_apple9_resolve_shaders(struct hk_cmd_buffer *cmd, bool prefer_native)
       MESA_VK_DYNAMIC_ATTACHMENT_FEEDBACK_LOOP_ENABLE,
       MESA_VK_DYNAMIC_RS_LINE_STIPPLE_ENABLE,
       MESA_VK_DYNAMIC_RS_POLYGON_MODE,
+      MESA_VK_DYNAMIC_RS_DEPTH_CLAMP_ENABLE,
    };
    const bool late_zs = hk_apple9_draw_late_zs(dyn, render,
       gfx->apple9_api[MESA_SHADER_FRAGMENT]);

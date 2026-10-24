@@ -219,6 +219,30 @@ api_destroy(struct hk_device *dev, struct hk_api_shader **api)
          hk_api_shader_destroy(&dev->vk, &api[s]->vk, NULL);
 }
 
+/* Shader-triggered early tests export a clamped depth only when depth clamp
+ * can take the rasterizer's depth outside the viewport range: enabled,
+ * dynamic, or unknown. */
+static void
+early_depth_key_tests(void)
+{
+   struct vk_rasterization_state rs = {0};
+   struct vk_graphics_pipeline_state state = {.rs = &rs};
+   struct hk_apple9_graphics_key key;
+   hk_apple9_graphics_key(&key, &state);
+   CHECK(!key.blend[0].clamp_early_depth);
+   rs.depth_clamp_enable = true;
+   hk_apple9_graphics_key(&key, &state);
+   CHECK(key.blend[0].clamp_early_depth);
+   rs.depth_clamp_enable = false;
+   BITSET_SET(state.dynamic, MESA_VK_DYNAMIC_RS_DEPTH_CLAMP_ENABLE);
+   hk_apple9_graphics_key(&key, &state);
+   CHECK(key.blend[0].clamp_early_depth);
+   state.rs = NULL;
+   BITSET_CLEAR(state.dynamic, MESA_VK_DYNAMIC_RS_DEPTH_CLAMP_ENABLE);
+   hk_apple9_graphics_key(&key, &state);
+   CHECK(key.blend[0].clamp_early_depth);
+}
+
 static void
 key_tests(struct hk_device *dev, struct hk_api_shader **api)
 {
@@ -248,6 +272,8 @@ key_tests(struct hk_device *dev, struct hk_api_shader **api)
              dev->vk.enabled_features.customBorderColors = false);
    DIFFERENT(key.zs_self_dep = !key.zs_self_dep,
              key.zs_self_dep = !key.zs_self_dep);
+   DIFFERENT(key.blend[0].clamp_early_depth = !key.blend[0].clamp_early_depth,
+             key.blend[0].clamp_early_depth = !key.blend[0].clamp_early_depth);
    struct hk_apple9_deferred *d = api[MESA_SHADER_VERTEX]->apple9_deferred;
    DIFFERENT(((uint8_t *)d->nir)[d->nir_size - 1] ^= 1,
              ((uint8_t *)d->nir)[d->nir_size - 1] ^= 1);
@@ -605,6 +631,7 @@ main(int argc, char **argv)
    payload_bounds_tests(dev);
    embedded_limit_tests(dev);
    key_tests(dev, api);
+   early_depth_key_tests();
    CHECK(getenv("MESA_SHADER_CACHE_DIR"));
    pdev->vk.disk_cache = disk_cache_create("hk-variant-test", "test-build", 0);
    CHECK(pdev->vk.disk_cache);
