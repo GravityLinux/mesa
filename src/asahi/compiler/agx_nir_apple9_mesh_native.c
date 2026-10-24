@@ -297,8 +297,11 @@ varying_layout(const struct agx_apple9_mesh_body_info *info,
       /* Clip distances are rasterizer outputs only, published once after the
        * user varyings (Air 2026-10-24: a linked copy as well makes the
        * vertex stride disagree with the PPP output count). */
-      if (slot == VARYING_SLOT_POS || slot == VARYING_SLOT_CLIP_DIST0 ||
-          slot == VARYING_SLOT_CLIP_DIST1)
+      bool clip = slot == VARYING_SLOT_CLIP_DIST0 || slot == VARYING_SLOT_CLIP_DIST1;
+      bool mirror = slot == AGX_APPLE9_CLIP_MIRROR_SLOT ||
+                    slot == AGX_APPLE9_CLIP_MIRROR_SLOT + 1;
+      if (slot == VARYING_SLOT_POS || (clip && !info->clip_linked) ||
+          (mirror && info->clip_linked))
          continue;
       for (unsigned c = 0; c < 4; ++c) {
          if (layout->vertex_component[slot][c] == AGX_APPLE9_MESH_UNUSED)
@@ -374,6 +377,35 @@ move_cull_distance(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       nir_intrinsic_set_write_mask(intr, mask & ~cull_mask);
    else
       nir_instr_remove(&intr->instr);
+   return true;
+}
+
+/* Mirror each clip-distance store into the private slots, so the linked
+ * varying and the rasterizer copy have separate planes and the mesh plane
+ * count stays equal to the PPP output count. */
+static bool
+mirror_clip_distance(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   const unsigned *clip = data;
+   if (intr->intrinsic != nir_intrinsic_store_per_vertex_output)
+      return false;
+   nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+   if (sem.location != VARYING_SLOT_CLIP_DIST0 && sem.location != VARYING_SLOT_CLIP_DIST1)
+      return false;
+   unsigned first = 4 * (sem.location - VARYING_SLOT_CLIP_DIST0 +
+                         nir_src_as_uint(intr->src[2])) + nir_intrinsic_component(intr);
+   b->cursor = nir_after_instr(&intr->instr);
+   u_foreach_bit(c, nir_intrinsic_write_mask(intr)) {
+      unsigned d = first + c;
+      if (d >= *clip)
+         continue;
+      nir_io_semantics mirror = {
+         .location = AGX_APPLE9_CLIP_MIRROR_SLOT + d / 4, .num_slots = 1,
+      };
+      nir_store_per_vertex_output(b, nir_channel(b, intr->src[0].ssa, c), intr->src[1].ssa,
+                                  nir_imm_int(b, 0), .component = d % 4, .write_mask = 1,
+                                  .src_type = nir_type_float32, .io_semantics = mirror);
+   }
    return true;
 }
 
@@ -467,6 +499,18 @@ agx_nir_lower_apple9_native_mesh(
       nir->info.shared_size = cull.base + nir->info.mesh.max_vertices_out * cull.cull * 4;
       nir->info.cull_distance_array_size = 0;
    }
+   bool clip_linked = options && options->link_clip_distances &&
+                      nir->info.clip_distance_array_size;
+   if (clip_linked) {
+      if (nir->info.outputs_written &
+          BITFIELD64_RANGE(AGX_APPLE9_CLIP_MIRROR_SLOT, 2))
+         return fail(reason, "native mesh clip mirror slots are already written");
+      unsigned clip = nir->info.clip_distance_array_size;
+      nir_shader_intrinsics_pass(nir, mirror_clip_distance, nir_metadata_control_flow, &clip);
+      nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+      nir->info.clip_distance_array_size = clip;
+      nir->info.cull_distance_array_size = 0;
+   }
 
    uint16_t logical_size[3];
    memcpy(logical_size, nir->info.workgroup_size, sizeof(logical_size));
@@ -506,6 +550,7 @@ agx_nir_lower_apple9_native_mesh(
    info->publication_rounds = rounds;
    const struct agx_apple9_mesh_layout *layout = &info->layout;
    struct agx_apple9_varying_layout varyings;
+   info->clip_linked = clip_linked;
    if (!varying_layout(info, options, &varyings, reason))
       return false;
    /* Clip distances need rasterizer planes; cull distances stay in shared
@@ -661,7 +706,8 @@ agx_nir_lower_apple9_native_mesh(
        * They are published once, so the mesh state's plane count equals the
        * PPP output count 4 + varyings + clip distances. */
       for (unsigned d = 0; d < clip_distances; ++d) {
-         unsigned slot = VARYING_SLOT_CLIP_DIST0 + d / 4;
+         unsigned slot = (info->clip_linked ? AGX_APPLE9_CLIP_MIRROR_SLOT
+                                            : VARYING_SLOT_CLIP_DIST0) + d / 4;
          unsigned plane = layout->position_B + layout->vertex_pitch_B *
                              layout->vertex_component[slot][d % 4];
          nir_mesh_submit_channel_apple9_agx(

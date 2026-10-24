@@ -281,6 +281,28 @@ main(int argc, char **argv)
          ralloc_free(nir);
       }
       clip_distances = cull_distances = 0;
+      /* A fragment shader reading gl_ClipDistance links the distances as
+       * varyings; the rasterizer copy reads mirror planes, so planes still
+       * equal 4 + varyings + clip distances (the PPP output count). */
+      for (clip_distances = 1; clip_distances <= 5; clip_distances += 4) {
+         nir_shader *nir = source(32, 64, 126, false, false);
+         struct hk_apple9_graphics_key key = {.fs_reads_clip_distance = true};
+         struct agx_shader_part part = {0};
+         struct agx_apple9_mesh_body_info body;
+         const char *why = NULL;
+         bool ok = hk_apple9_compile_native_mesh_program(nir, &key, &part, &body, &why);
+         if (!ok) fprintf(stderr, "linked clip %u: %s\n", clip_distances, why);
+         CHECK(ok && body.clip_linked && body.clip_distances == clip_distances);
+         CHECK(part.info.apple9_varyings.count == clip_distances);
+         CHECK(body.layout.vertex_components == 4 + 2 * clip_distances);
+         CHECK(part.info.apple9_varyings.mask[VARYING_SLOT_CLIP_DIST0]);
+         CHECK(hk_apple9_native_shader_valid(&part.info, &body, HK_APPLE9_NATIVE_MESH));
+         printf("linked clip %u: planes=%u varyings=%u\n", clip_distances,
+                body.layout.vertex_components, part.info.apple9_varyings.count);
+         free(part.binary);
+         ralloc_free(nir);
+      }
+      clip_distances = 0;
    }
    glsl_type_singleton_decref();
    return 0;

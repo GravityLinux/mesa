@@ -6705,6 +6705,7 @@ hk_apple9_native_mesh_options(nir_shader *nir,
       .primitive_broadcast = !rounds && !packed && hk_apple9_native_mesh_primitive_lowering_enabled(),
       .packed_index_publication = rounds || packed,
       .publication_rounds = rounds,
+      .link_clip_distances = key->fs_reads_clip_distance,
       .outputs_flat = key->vertex.outputs_flat,
       .outputs_linear = key->vertex.outputs_linear,
    };
@@ -7219,6 +7220,8 @@ hk_apple9_compile_graphics_path(struct hk_device *dev, uint32_t count,
                                    ~(infos[i].nir->info.perspective_varyings |
                                      infos[i].nir->info.linear_varyings);
          key.vertex.outputs_linear = infos[i].nir->info.linear_varyings;
+         key.fs_reads_clip_distance = infos[i].nir->info.inputs_read &
+            (VARYING_BIT_CLIP_DIST0 | VARYING_BIT_CLIP_DIST1);
       }
    }
 

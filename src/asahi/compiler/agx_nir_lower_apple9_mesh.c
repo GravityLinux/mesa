@@ -229,7 +229,9 @@ validate(nir_shader *nir, const struct agx_apple9_mesh_key *key,
             /* Clip distances are per-vertex planes, linked like user
              * varyings; completion adds the rasterizer copy. */
             bool clip = (slot == VARYING_SLOT_CLIP_DIST0 ||
-                         slot == VARYING_SLOT_CLIP_DIST1) && !prim;
+                         slot == VARYING_SLOT_CLIP_DIST1 ||
+                         slot == AGX_APPLE9_CLIP_MIRROR_SLOT ||
+                         slot == AGX_APPLE9_CLIP_MIRROR_SLOT + 1) && !prim;
             if (slot != VARYING_SLOT_POS && !clip &&
                 !(slot == VARYING_SLOT_PRIMITIVE_ID && !prim) &&
                 slot < VARYING_SLOT_VAR0)
