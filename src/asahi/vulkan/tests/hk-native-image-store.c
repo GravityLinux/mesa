@@ -71,11 +71,13 @@ int main(void)
       PIPE_FORMAT_R11G11B10_FLOAT, PIPE_FORMAT_R16G16B16A16_FLOAT,
       PIPE_FORMAT_R8G8B8A8_UNORM, PIPE_FORMAT_R32_FLOAT,
       PIPE_FORMAT_R16G16_FLOAT, PIPE_FORMAT_R32G32B32A32_FLOAT,
+      PIPE_FORMAT_R32_UINT, PIPE_FORMAT_R32_SINT, PIPE_FORMAT_R32G32B32A32_UINT,
+      PIPE_FORMAT_R8G8B8A8_UINT, PIPE_FORMAT_R16G16B16A16_UINT,
    };
    for (unsigned i = 0; i < ARRAY_SIZE(supported); ++i)
       CHECK(hk_apple9_native_store_format(supported[i]));
    const enum pipe_format fallback[] = {
-      PIPE_FORMAT_R8G8B8A8_SRGB, PIPE_FORMAT_R32_UINT, PIPE_FORMAT_R32_SINT,
+      PIPE_FORMAT_R8G8B8A8_SRGB, PIPE_FORMAT_R8G8B8A8_SINT, PIPE_FORMAT_R16_UINT,
       PIPE_FORMAT_R16_FLOAT, PIPE_FORMAT_R9G9B9E5_FLOAT, PIPE_FORMAT_Z32_FLOAT,
    };
    for (unsigned i = 0; i < ARRAY_SIZE(fallback); ++i)
@@ -117,8 +119,8 @@ int main(void)
       CHECK(!(address >> 44)); /* No array operand or count on a 2D entry. */
    }
    CHECK(!memcmp(&legacy, &saved, sizeof(legacy)));
-   /* Eligibility is frozen before any load is lowered/removed: a later
-    * store in a read/write shader must not regain native eligibility. */
+   /* Eligibility is frozen before any load is lowered/removed: a read after
+    * a store must keep every store of the shader on the converter. */
    const nir_intrinsic_op reads[] = {
       nir_intrinsic_bindless_image_load, nir_intrinsic_bindless_image_atomic,
       nir_intrinsic_bindless_image_atomic_swap,
@@ -126,6 +128,17 @@ int main(void)
    for (unsigned i = 0; i < ARRAY_SIZE(reads); ++i) {
       const nir_shader_compiler_options options = {0};
       nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, &options, "read_write");
+      CHECK(hk_apple9_native_store_shader(b.shader));
+      const nir_intrinsic_info *store_info = &nir_intrinsic_infos[nir_intrinsic_bindless_image_store];
+      nir_intrinsic_instr *store = nir_intrinsic_instr_create(b.shader, nir_intrinsic_bindless_image_store);
+      store->num_components = 4;
+      nir_intrinsic_set_image_dim(store, GLSL_SAMPLER_DIM_2D);
+      nir_intrinsic_set_format(store, PIPE_FORMAT_R32_UINT);
+      for (unsigned j = 0; j < store_info->num_srcs; ++j) {
+         unsigned components = store_info->src_components[j] ? store_info->src_components[j] : 4;
+         store->src[j] = nir_src_for_ssa(nir_imm_zero(&b, components, j == 0 ? 64 : 32));
+      }
+      nir_builder_instr_insert(&b, &store->instr);
       CHECK(hk_apple9_native_store_shader(b.shader));
       nir_intrinsic_instr *read = nir_intrinsic_instr_create(b.shader, reads[i]);
       read->num_components = reads[i] == nir_intrinsic_bindless_image_load ? 4 : 1;

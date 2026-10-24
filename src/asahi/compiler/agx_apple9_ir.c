@@ -1121,7 +1121,7 @@ agx_apple9_vir_emit_publication_pair(struct agx_apple9_vir_program *program,
 bool
 agx_apple9_vir_emit_image_store(struct agx_apple9_vir_program *program,
                                 const uint32_t xy[2], const uint32_t rgba[4],
-                                uint32_t index)
+                                uint32_t index, bool integer)
 {
    if (!program || !xy || !rgba || index >= program->value_count)
       return false;
@@ -1156,7 +1156,7 @@ agx_apple9_vir_emit_image_store(struct agx_apple9_vir_program *program,
    sources[8] = pair;
    sources[9] = pair + 1;
    return agx_apple9_vir_emit_side_effect(program, AGX_APPLE9_VIR_IMAGE_STORE,
-      AGX_APPLE9_ENC_IMAGE_WRITE, sources, 10, 0);
+      AGX_APPLE9_ENC_IMAGE_WRITE, sources, 10, integer);
 }
 
 /* Publish a coordinate/byte-offset tuple, then export the implicit tile.
@@ -7832,7 +7832,7 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
    }
    case AGX_APPLE9_VIR_IMAGE_STORE: {
       if (instruction->encoding != AGX_APPLE9_ENC_IMAGE_WRITE ||
-          instruction->nr_srcs != 10)
+          instruction->nr_srcs != 10 || instruction->immediate > 1)
          return false;
       unsigned base = phys[instruction->src[0]];
       unsigned index = phys[instruction->src[8]];
@@ -7842,14 +7842,14 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       for (unsigned i = 1; i < 8; ++i)
          if (phys[instruction->src[i]] != base + i)
             return false;
-      /* FP32 data, 2D coordinates, immediate LOD zero, bindless GPR-index
-       * operand. Source release follows SSA liveness; the PBE determines
+      /* 32-bit data (bit 4; bit 5 float, clear for integer), 2D coordinates,
+       * immediate LOD zero, bindless GPR-index operand. Source release follows SSA liveness; the PBE determines
        * format and physical layout. Join the PBE export domain before the
        * publication is reused, as for block-image stores. */
       const uint8_t bytes[] = {
          0xd7, 0x10, 0x54, base << 1, 0, 0x40, 0, index << 1,
          0x20 | ((instruction->live_after_mask & (3u << 8)) ? 0 : 1),
-         0x04, 0, 0, 0x88, 0x3a, 0x89, 0,
+         0x04, 0, 0, 0x88, instruction->immediate ? 0x1a : 0x3a, 0x89, 0,
          0x07, 0x12, 0x54, 0, 3, 0,
       };
       packed_init(packed, bytes, sizeof(bytes));

@@ -9496,6 +9496,32 @@ TEST(Apple9Packer, IntegerPublicationBoundsAllRegisterOperands)
    }
 }
 
+TEST(Apple9Packer, ImageWriteDataTypeSelectsFloatOrInteger)
+{
+   agx_apple9_vir_instr instruction = {};
+   instruction.op = AGX_APPLE9_VIR_IMAGE_STORE;
+   instruction.encoding = AGX_APPLE9_ENC_IMAGE_WRITE;
+   instruction.nr_srcs = 10;
+   uint8_t phys[10];
+   for (unsigned i = 0; i < 10; ++i) {
+      instruction.src[i] = i;
+      phys[i] = i < 8 ? 8 + i : 24 + (i - 8);
+   }
+   agx_apple9_packed_instruction packed = {};
+   const char *reason = nullptr;
+   const uint8_t data_type[] = {0x3a, 0x1a};
+   for (unsigned integer = 0; integer < 2; ++integer) {
+      instruction.immediate = integer;
+      ASSERT_TRUE(agx_apple9_pack_vir_instruction(&instruction, phys, &packed, &reason))
+         << reason;
+      EXPECT_EQ(packed.bytes[0], 0xd7);
+      EXPECT_EQ(packed.bytes[12], 0x88);
+      EXPECT_EQ(packed.bytes[13], data_type[integer]);
+   }
+   instruction.immediate = 2;
+   EXPECT_FALSE(agx_apple9_pack_vir_instruction(&instruction, phys, &packed, &reason));
+}
+
 TEST(Apple9Allocator, PublicationsDoNotOccupyGprs)
 {
    for (unsigned count : {1u, 36u, 64u, 65u, 96u, 128u, 129u}) {
@@ -12947,7 +12973,7 @@ TEST_F(Apple9Completion, ImageStoresConsumeTheirCoordinateAndDataPublications)
    for (unsigned i = 0; i < 4; ++i) {
       uint32_t xy[] = {x, y};
       uint32_t rgba[] = {data, data, data, data};
-      ASSERT_TRUE(agx_apple9_vir_emit_image_store(&p, xy, rgba, zero));
+      ASSERT_TRUE(agx_apple9_vir_emit_image_store(&p, xy, rgba, zero, i & 1));
       uint32_t src[] = {x, y};
       x = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IADD,
          AGX_APPLE9_ENC_INT_ADD_EXTENDED, src, 2, 0);

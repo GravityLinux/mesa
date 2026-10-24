@@ -813,7 +813,15 @@ hk_apple9_init_storage_pbe(struct hk_device *dev, struct hk_image_view *view)
    bool array = view->vk.view_type == VK_IMAGE_VIEW_TYPE_2D_ARRAY ||
                 view->vk.view_type == VK_IMAGE_VIEW_TYPE_CUBE ||
                 view->vk.view_type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
-   if (!array && view->vk.view_type != VK_IMAGE_VIEW_TYPE_2D)
+   /* 3D views: one entry per depth slice, for full views of the base level
+    * only. Deeper levels of a Z-mipmapped tree and partial slice ranges
+    * (VK_EXT_image_sliced_view_of_3d) have no device coverage yet and keep
+    * the converter. */
+   bool slices = view->vk.view_type == VK_IMAGE_VIEW_TYPE_3D &&
+                 view->vk.base_mip_level == 0 &&
+                 view->vk.storage.z_slice_offset == 0 &&
+                 view->vk.storage.z_slice_count == view->vk.image->extent.depth;
+   if (!array && !slices && view->vk.view_type != VK_IMAGE_VIEW_TYPE_2D)
       return;
    /* Opaque capture data does not preserve table allocation addresses. */
    if ((view->vk.create_flags &
@@ -827,7 +835,15 @@ hk_apple9_init_storage_pbe(struct hk_device *dev, struct hk_image_view *view)
    if (!hk_apple9_native_store_image(image, plane) ||
        !hk_apple9_native_store_view_layout(layout, format_for_plane(view, 0)))
       return;
-   unsigned count = array ? view->vk.layer_count : 1;
+   /* Integer native stores are qualified only on views of their image's own
+    * format, not on raw reinterpretations such as meta copies. */
+   if (util_format_is_pure_integer(format_for_plane(view, 0)) &&
+       format_for_plane(view, 0) != layout->format)
+      return;
+   /* Depth slices are laid out as layers, each with its own miptree. */
+   unsigned first = slices ? view->vk.storage.z_slice_offset : view->vk.base_array_layer;
+   unsigned count = slices ? view->vk.storage.z_slice_count
+                    : array ? view->vk.layer_count : 1;
    simple_mtx_lock(&dev->usc_heap_lock);
    bool allocated = hk_usc_heap_alloc(
       &dev->usc_heap, (uint64_t)count * AGX_APPLE9_TEXTURE_TABLE_STRIDE,
@@ -846,7 +862,7 @@ hk_apple9_init_storage_pbe(struct hk_device *dev, struct hk_image_view *view)
    uint8_t *entries = view->apple9_pbes.map;
    for (unsigned i = 0; i < count; ++i) {
       uint64_t base = hk_image_base_address(image, plane) +
-         ail_get_layer_level_B(layout, view->vk.base_array_layer + i, 0);
+         ail_get_layer_level_B(layout, first + i, 0);
       if (!hk_apple9_translate_storage_pbe(entries + i * AGX_APPLE9_TEXTURE_TABLE_STRIDE,
              &view->planes[0].storage, format_for_plane(view, 0), layout, base,
              view->vk.base_mip_level)) {
@@ -857,7 +873,7 @@ hk_apple9_init_storage_pbe(struct hk_device *dev, struct hk_image_view *view)
       }
    }
    view->apple9_pbe_index = index;
-   view->apple9_store_flags = array ? HK_APPLE9_STORAGE_LAYER_WRITE_VALID
+   view->apple9_store_flags = array || slices ? HK_APPLE9_STORAGE_LAYER_WRITE_VALID
                                     : HK_APPLE9_STORAGE_WRITE_VALID;
 }
 
