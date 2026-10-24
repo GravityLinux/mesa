@@ -201,7 +201,7 @@ if with_tests
     include_directories : [inc_gallium, inc_gallium_aux, inc_include,
                            inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
     dependencies : [hk_deps], link_with : [libhk],
-    link_args : ['-Wl,--wrap=hk_meta_decompress_color', '-Wl,--wrap=__vk_errorf']),
+    link_args : ['-Wl,--wrap=hk_meta_decompress_view', '-Wl,--wrap=__vk_errorf']),
     suite : ['asahi', 'honeykrisp'])
   test(
     'hk-tess-fold-oom',
