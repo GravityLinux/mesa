@@ -245,6 +245,17 @@ void hk_cpu_timing_note_feedback(const struct hk_feedback_stats *stats);
 
 void hk_cpu_timing_note_gs_slow(unsigned shape, bool indirect, uint64_t prims,
                                 unsigned max_indices);
+/* Why a passthrough geometry shader was bound (bit mask, counted per bind). */
+enum hk_cpu_ptgs {
+   HK_CPU_PTGS_XFB = 1 << 0,
+   HK_CPU_PTGS_PG_QUERY = 1 << 1,
+   HK_CPU_PTGS_STIPPLE = 1 << 2,
+   HK_CPU_PTGS_POINTS = 1 << 3,
+   HK_CPU_PTGS_CULL_MASK = 1 << 4,
+   HK_CPU_PTGS_FS_COPIES = 1 << 5,
+   HK_CPU_PTGS_COUNT = 6,
+};
+void hk_cpu_timing_note_ptgs_slow(unsigned reasons);
 struct hk_cpu_compile_scope {
    bool active;
    uint64_t wall, cpu;
@@ -303,6 +314,13 @@ hk_cpu_timing_note_gs(unsigned shape, bool indirect, uint64_t prims,
 {
    if (unlikely(hk_cpu_level))
       hk_cpu_timing_note_gs_slow(shape, indirect, prims, max_indices);
+}
+
+static inline void
+hk_cpu_timing_note_ptgs(unsigned reasons)
+{
+   if (unlikely(hk_cpu_level))
+      hk_cpu_timing_note_ptgs_slow(reasons);
 }
 
 static inline void
