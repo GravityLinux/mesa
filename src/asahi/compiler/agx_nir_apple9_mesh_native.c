@@ -380,6 +380,18 @@ agx_nir_lower_apple9_native_mesh(
    struct agx_apple9_varying_layout varyings;
    if (!varying_layout(info, options, &varyings, reason))
       return false;
+   /* Every declared clip distance needs its plane; cull distances keep the
+    * emulated path until native primitive culling covers them. */
+   info->clip_distances = nir->info.clip_distance_array_size;
+   if (nir->info.cull_distance_array_size || info->clip_distances > 8)
+      return fail(reason, "native mesh supports up to eight clip and no cull distances");
+   for (unsigned d = 0; d < info->clip_distances; ++d) {
+      if (layout->vertex_component[VARYING_SLOT_CLIP_DIST0 + d / 4][d % 4] ==
+          AGX_APPLE9_MESH_UNUSED)
+         return fail(reason, "native mesh clip distance is declared but not written");
+   }
+   if (4 + varyings.count + info->clip_distances > 4 + AGX_APPLE9_MAX_VARYING_COMPONENTS)
+      return fail(reason, "native mesh varyings and clip distances exceed the UVS");
    nir_shader_intrinsics_pass(nir, consume_count, nir_metadata_none, info);
    nir_lower_returns(nir);
    if (!agx_nir_mask_apple9_mesh_body(nir, &key, layout, reason))
@@ -486,6 +498,7 @@ agx_nir_lower_apple9_native_mesh(
     * keep destination 0 and emit the same code. Rounds beyond the runtime
     * counts are skipped, never issued empty. */
    const unsigned round = MIN2(physical_threads, AGX_APPLE9_PUBLICATION_ROUND);
+   const unsigned clip_distances = info->clip_distances;
    for (unsigned first = 0; first < layout->max_vertices; first += round) {
       nir_def *active = nir_ult(&b, nir_iadd_imm(&b, lane, first), vertices);
       if (round != physical_threads)
@@ -510,6 +523,18 @@ agx_nir_lower_apple9_native_mesh(
                nir_imm_int(&b, plane + 4 * first));
             device_fence(&b);
          }
+      }
+      /* Rasterizer clip distances follow the user varyings, as in the
+       * vertex path's UVS order (mesh writes no point size or layer word);
+       * they read the same planes as the linked varyings. */
+      for (unsigned d = 0; d < clip_distances; ++d) {
+         unsigned slot = VARYING_SLOT_CLIP_DIST0 + d / 4;
+         unsigned plane = layout->position_B + layout->vertex_pitch_B *
+                             layout->vertex_component[slot][d % 4];
+         nir_mesh_submit_channel_apple9_agx(
+            &b, nir_imm_int(&b, (4 + varyings.count + d) | destination),
+            nir_imm_int(&b, plane + 4 * first));
+         device_fence(&b);
       }
       nir_pop_if(&b, NULL);
    }
@@ -556,6 +581,7 @@ agx_compile_apple9_native_mesh(
       return false;
    if (!agx_compile_apple9_mesh_lowered(nir, &info->key, out, reason))
       return false;
+   out->info.apple9_clip_distance_count = info->clip_distances;
    return varying_layout(info, options, &out->info.apple9_varyings,
                          reason);
 }

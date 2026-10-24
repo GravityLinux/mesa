@@ -376,7 +376,9 @@ hk_apple9_native_shader_valid(const struct agx_shader_info *code,
        k->payload_uniform != expected.payload_uniform ||
        k->grid_root != expected.grid_root || k->grid_offset_B ||
        code->workgroup_size[0] != k->physical_threads ||
-       !local_allocation_valid(code, body))
+       !local_allocation_valid(code, body) ||
+       code->apple9_clip_distance_count != body->clip_distances ||
+       body->clip_distances > 8)
       return false;
    if (stage == HK_APPLE9_NATIVE_OBJECT)
       return k->physical_threads == AGX_APPLE9_NATIVE_THREADS &&

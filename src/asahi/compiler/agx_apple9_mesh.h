@@ -95,6 +95,8 @@ struct agx_apple9_mesh_body_info {
    bool uses_vertex_count;
    /* Lowered for multi-round publication at T32 (bound at upload). */
    bool publication_rounds;
+   /* Rasterizer clip distances published after the user varyings. */
+   unsigned clip_distances;
    /* V3/P1 primitive outputs lowered to flat planes or a local cull flag. */
    uint64_t primitive_broadcast;
    unsigned argument_uniform_words;

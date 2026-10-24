@@ -12,6 +12,8 @@
 #include "compiler/nir/nir_builder.h"
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "%u: %s\n", __LINE__, #c); exit(1); } } while (0)
 
+static unsigned clip_distances;
+
 static nir_shader *
 source(unsigned logical, unsigned vertices, unsigned primitives, bool attributes,
        bool primitive_attribute)
@@ -43,6 +45,17 @@ source(unsigned logical, unsigned vertices, unsigned primitives, bool attributes
             nir_imm_int(&b, 0), .write_mask = 1, .src_type = nir_type_float32,
             .io_semantics = {.location = VARYING_SLOT_VAR0 + c, .num_slots = 1});
    }
+   if (clip_distances) {
+      nir_store_per_vertex_output(&b, nir_imm_vec4(&b, 1, -1, .5, 2), i,
+         nir_imm_int(&b, 0), .write_mask = BITFIELD_MASK(MIN2(clip_distances, 4)),
+         .src_type = nir_type_float32,
+         .io_semantics = {.location = VARYING_SLOT_CLIP_DIST0, .num_slots = 1});
+      if (clip_distances > 4)
+         nir_store_per_vertex_output(&b, nir_imm_vec4(&b, 1, 1, 1, 1), i,
+            nir_imm_int(&b, 0), .write_mask = BITFIELD_MASK(clip_distances - 4),
+            .src_type = nir_type_float32,
+            .io_semantics = {.location = VARYING_SLOT_CLIP_DIST1, .num_slots = 1});
+   }
    nir_store_var(&b, v, nir_iadd_imm(&b, i, logical), 1);
    nir_pop_loop(&b, NULL);
    nir_store_var(&b, v, lane, 1);
@@ -59,6 +72,7 @@ source(unsigned logical, unsigned vertices, unsigned primitives, bool attributes
    nir_store_var(&b, v, nir_iadd_imm(&b, i, logical), 1);
    nir_pop_loop(&b, NULL);
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+   nir->info.clip_distance_array_size = clip_distances;
    return nir;
 }
 
@@ -211,6 +225,29 @@ main(int argc, char **argv)
       size[0] = 129;
       CHECK(!hk_apple9_native_mesh_round_counts_eligible(size, 64, 126));
       check(32, 64, 126, true, true, 0);
+      /* ClipDistance: planes linked as varyings plus rasterizer channels
+       * 4 + varyings + d in every round; PPP sees the count. */
+      for (clip_distances = 1; clip_distances <= 8; clip_distances += 7) {
+         nir_shader *nir = source(32, 64, 126, false, false);
+         struct hk_apple9_graphics_key key = {0};
+         struct agx_shader_part part = {0};
+         struct agx_apple9_mesh_body_info body;
+         const char *why = NULL;
+         bool ok = hk_apple9_compile_native_mesh_program(nir, &key, &part, &body, &why);
+         if (!ok) fprintf(stderr, "clip %u: %s\n", clip_distances, why);
+         CHECK(ok && body.clip_distances == clip_distances);
+         CHECK(part.info.apple9_clip_distance_count == clip_distances);
+         CHECK(part.info.apple9_varyings.count == clip_distances);
+         CHECK(hk_apple9_native_shader_valid(&part.info, &body, HK_APPLE9_NATIVE_MESH));
+         struct agx_apple9_mesh_body_info stale = body;
+         stale.clip_distances = 0;
+         CHECK(!hk_apple9_native_shader_valid(&part.info, &stale, HK_APPLE9_NATIVE_MESH));
+         printf("clip %u: T%u bytes=%u\n", clip_distances, body.key.physical_threads,
+                part.info.binary_size);
+         free(part.binary);
+         ralloc_free(nir);
+      }
+      clip_distances = 0;
    }
    glsl_type_singleton_decref();
    return 0;
