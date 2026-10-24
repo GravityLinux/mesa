@@ -24,6 +24,7 @@
 #ifndef _SIMPLE_MTX_H
 #define _SIMPLE_MTX_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /* mtx_t - Fast, simple mutex
@@ -122,6 +123,18 @@ simple_mtx_lock(simple_mtx_t *mtx)
    HG(ANNOTATE_RWLOCK_ACQUIRED(mtx, 1));
 }
 
+static inline bool
+simple_mtx_trylock(simple_mtx_t *mtx)
+{
+   uint32_t old = p_atomic_cmpxchg(&mtx->val, 0, 1);
+   assert(old != _SIMPLE_MTX_INVALID_VALUE);
+   if (old != 0)
+      return false;
+
+   HG(ANNOTATE_RWLOCK_ACQUIRED(mtx, 1));
+   return true;
+}
+
 static inline void
 simple_mtx_unlock(simple_mtx_t *mtx)
 {
@@ -174,6 +187,13 @@ simple_mtx_lock(simple_mtx_t *mtx)
 {
    _simple_mtx_init_with_once(mtx);
    mtx_lock(&mtx->mtx);
+}
+
+static inline bool
+simple_mtx_trylock(simple_mtx_t *mtx)
+{
+   _simple_mtx_init_with_once(mtx);
+   return mtx_trylock(&mtx->mtx) == thrd_success;
 }
 
 static inline void
