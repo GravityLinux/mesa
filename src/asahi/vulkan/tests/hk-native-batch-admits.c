@@ -200,6 +200,29 @@ main(void)
       d = native_mesh();
       CHECK(hk_apple9_native_stream_admits(&s, &d, &p));
    }
+   /* The native render primitive bound (TVB cap): the render's running
+    * estimate plus the next draw must stay within it, an unknown estimate
+    * never appends, and 0 means unbounded. */
+   {
+      struct hk_apple9_native_profile b = {64, true, true, 4096, 1000};
+      s = (struct hk_apple9_stream_summary){true, 1, 152, 16384 - 0x800 - 16, 900};
+      d = native_mesh();
+      d.primitives = 100;
+      CHECK(hk_apple9_native_stream_admits(&s, &d, &b));
+      d.primitives = 101;
+      CHECK(!hk_apple9_native_stream_admits(&s, &d, &b));
+      d = vertex();
+      d.primitives = 200;
+      CHECK(!hk_apple9_native_stream_admits(&s, &d, &b));
+      d.primitives = UINT64_MAX;
+      s.primitives = 0;
+      CHECK(!hk_apple9_native_stream_admits(&s, &d, &b));
+      b.max_render_primitives = 0;
+      CHECK(hk_apple9_native_stream_admits(&s, &d, &b));
+      const struct agx_native_blocks_support q = {true, 7, 64, true, 4096};
+      CHECK(hk_apple9_native_profile_from_kernel(&q, true, false).max_render_primitives ==
+            HK_APPLE9_NATIVE_RENDER_PRIMITIVES);
+   }
    printf("PASS\n");
    return 0;
 }

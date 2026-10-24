@@ -564,6 +564,9 @@ struct hk_cs {
    bool apple9_native_mesh;
    /* Native dispatches (blocks) in the stream. */
    unsigned apple9_native_dispatches;
+   /* Estimated binned primitives of the stream's native render (blocks
+    * and the ordinary draws between them). */
+   uint64_t apple9_native_primitives;
 
    /* enum hk_cs_end, and whether an hk meta operation created the stream. */
    uint8_t end_reason;
@@ -805,6 +808,9 @@ struct hk_cmd_buffer {
     * without hashing. Records are allocated per control stream (batch). */
    struct agx_apple9_uniform_draw apple9_draw[2];
    unsigned apple9_draw_current;
+   /* Estimated binned primitives of the draw being recorded, for the native
+    * render bound (hk_apple9_native_stream_admits); UINT64_MAX: unknown. */
+   uint64_t apple9_draw_primitives;
    struct hk_cs *apple9_prev_cs;
 
    /* Prepared ordinary draw state. Dynamic/shader/vertex state dirties this
@@ -1559,6 +1565,7 @@ void hk_apple9_unpin_entries(struct hk_cmd_buffer *cmd);
 struct hk_apple9_native_profile hk_apple9_native_profile(const struct hk_device *dev);
 bool hk_apple9_native_blocks_enabled(const struct hk_device *dev);
 bool hk_apple9_native_lanes(const struct hk_device *dev);
+uint64_t hk_apple9_native_render_primitives(void);
 void hk_apple9_end_native_batch(struct hk_cmd_buffer *cmd);
 bool hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool reads_buffers,
                              bool native_mesh);
