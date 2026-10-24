@@ -401,7 +401,7 @@ hk_apple9_native_shader_valid(const struct agx_shader_info *code,
              !body->primitive_broadcast && l->indices_per_primitive == 3 &&
              l->vertex_components >= 4 &&
              l->vertex_components <= 4 + AGX_APPLE9_MAX_VARYING_COMPONENTS &&
-             code->apple9_varyings.count == l->vertex_components - 4 &&
+             code->apple9_varyings.count == l->vertex_components - 4 - body->clip_distances &&
              !l->primitive_components && !l->primitive_stride_B && !l->culling &&
              l->primitive_count_B == count_B && l->vertex_count_B == count_B + 4 &&
              l->cull_B == position_B && l->position_B == position_B &&
@@ -441,7 +441,7 @@ hk_apple9_native_shader_valid(const struct agx_shader_info *code,
    return l->max_vertices == 3 && l->max_primitives == 1 &&
           l->indices_per_primitive == 3 && l->vertex_components >= 4 &&
           l->vertex_components <= 4 + AGX_APPLE9_MAX_VARYING_COMPONENTS &&
-          code->apple9_varyings.count == l->vertex_components - 4 &&
+          code->apple9_varyings.count == l->vertex_components - 4 - body->clip_distances &&
           !l->primitive_components && !l->primitive_stride_B && !l->culling &&
           l->local_size_B == 32 + 16 * l->vertex_components && l->position_B == 32 &&
           l->vertex_pitch_B == 16;

@@ -294,7 +294,11 @@ varying_layout(const struct agx_apple9_mesh_body_info *info,
    if (layout->vertex_components > 4 + AGX_APPLE9_MAX_VARYING_COMPONENTS)
       return fail(reason, "native mesh exceeds 124 user varying scalars");
    for (unsigned slot = 0; slot < VARYING_SLOT_MAX; ++slot) {
-      if (slot == VARYING_SLOT_POS)
+      /* Clip distances are rasterizer outputs only, published once after the
+       * user varyings (Air 2026-10-24: a linked copy as well makes the
+       * vertex stride disagree with the PPP output count). */
+      if (slot == VARYING_SLOT_POS || slot == VARYING_SLOT_CLIP_DIST0 ||
+          slot == VARYING_SLOT_CLIP_DIST1)
          continue;
       for (unsigned c = 0; c < 4; ++c) {
          if (layout->vertex_component[slot][c] == AGX_APPLE9_MESH_UNUSED)
@@ -525,8 +529,9 @@ agx_nir_lower_apple9_native_mesh(
          }
       }
       /* Rasterizer clip distances follow the user varyings, as in the
-       * vertex path's UVS order (mesh writes no point size or layer word);
-       * they read the same planes as the linked varyings. */
+       * vertex path's UVS order (mesh writes no point size or layer word).
+       * They are published once, so the mesh state's plane count equals the
+       * PPP output count 4 + varyings + clip distances. */
       for (unsigned d = 0; d < clip_distances; ++d) {
          unsigned slot = VARYING_SLOT_CLIP_DIST0 + d / 4;
          unsigned plane = layout->position_B + layout->vertex_pitch_B *

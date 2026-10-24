@@ -237,7 +237,7 @@ main(int argc, char **argv)
          if (!ok) fprintf(stderr, "clip %u: %s\n", clip_distances, why);
          CHECK(ok && body.clip_distances == clip_distances);
          CHECK(part.info.apple9_clip_distance_count == clip_distances);
-         CHECK(part.info.apple9_varyings.count == clip_distances);
+         CHECK(part.info.apple9_varyings.count == 0 && body.layout.vertex_components == 4 + clip_distances);
          CHECK(hk_apple9_native_shader_valid(&part.info, &body, HK_APPLE9_NATIVE_MESH));
          struct agx_apple9_mesh_body_info stale = body;
          stale.clip_distances = 0;
