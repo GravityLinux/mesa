@@ -1067,16 +1067,21 @@ agx_set_framebuffer_state(struct pipe_context *pctx,
    if (!state)
       return;
 
-   util_copy_framebuffer_state(&ctx->framebuffer, state);
-
-   for (unsigned i = 0; i < ctx->framebuffer.nr_cbufs; ++i) {
-      agx_legalize_compression(ctx,
-                               agx_resource(ctx->framebuffer.cbufs[i].texture),
-                               ctx->framebuffer.cbufs[i].format);
+   /* Legalize the new attachments before installing them. Decompression
+    * copies through u_blitter on Apple9, which saves and restores the current
+    * framebuffer; restoring a framebuffer that still names the compressed
+    * resource would decompress it again, recursively, allocating a new copy
+    * each time.
+    */
+   for (unsigned i = 0; i < state->nr_cbufs; ++i) {
+      agx_legalize_compression(ctx, agx_resource(state->cbufs[i].texture),
+                               state->cbufs[i].format);
    }
 
-   agx_legalize_compression(ctx, agx_resource(ctx->framebuffer.zsbuf.texture),
-                            ctx->framebuffer.zsbuf.format);
+   agx_legalize_compression(ctx, agx_resource(state->zsbuf.texture),
+                            state->zsbuf.format);
+
+   util_copy_framebuffer_state(&ctx->framebuffer, state);
 
    ctx->batch = NULL;
    agx_dirty_all(ctx);
