@@ -234,13 +234,15 @@ hk_apple9_native_mesh_round_counts_eligible(const uint16_t size[3],
                                              unsigned vertices,
                                              unsigned primitives)
 {
-   /* Research only: declarations beyond one publication round of the
-    * physical T16/T32 width. Shapes that fit one round keep the class path. */
+   /* Research only: declarations beyond one publication round of their
+    * natural T16/T32 width. Shapes that fit one round keep the class path.
+    * Rounds are qualified at T32 only (Air 2026-10-24: 16-entry rounds at T16
+    * over-count primitives), so these shapes always launch at T32 and 1..16
+    * API invocations run masked. */
    unsigned threads = hk_apple9_native_mesh_threads(size);
-   unsigned round = MIN2(threads, AGX_APPLE9_PUBLICATION_ROUND);
    return hk_apple9_native_mesh_enabled() && threads && vertices &&
           vertices <= 256 && primitives && primitives <= 256 &&
-          (vertices > round || DIV_ROUND_UP(3 * primitives, 4) > round);
+          (vertices > threads || DIV_ROUND_UP(3 * primitives, 4) > threads);
 }
 
 bool
@@ -382,13 +384,18 @@ hk_apple9_native_shader_valid(const struct agx_shader_info *code,
              body->logical_size[2] == 1 && !body->shared_size_B &&
              !body->layout.local_size_B && !code->local_size;
    const struct agx_apple9_mesh_layout *l = &body->layout;
-   if (hk_apple9_native_mesh_round_counts_eligible(body->logical_size,
+   /* The lowering flag binds the binary to this path: a class binary with
+    * stale metadata cannot pass as a masked T32 round binary, or vice versa. */
+   if (body->publication_rounds !=
+       hk_apple9_native_mesh_round_counts_eligible(body->logical_size,
                                                    l->max_vertices,
-                                                   l->max_primitives)) {
+                                                   l->max_primitives))
+      return false;
+   if (body->publication_rounds) {
       unsigned count_B = ALIGN_POT(3 * l->max_primitives, 16);
       unsigned position_B = count_B + 16;
       unsigned pitch_B = ALIGN_POT(l->max_vertices, 4) * 4;
-      return hk_apple9_native_mesh_threads(body->logical_size) == k->physical_threads &&
+      return k->physical_threads == AGX_APPLE9_NATIVE_SERIAL_THREADS &&
              !body->primitive_broadcast && l->indices_per_primitive == 3 &&
              l->vertex_components >= 4 &&
              l->vertex_components <= 4 + AGX_APPLE9_MAX_VARYING_COMPONENTS &&

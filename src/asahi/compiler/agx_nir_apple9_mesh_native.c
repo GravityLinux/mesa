@@ -330,6 +330,9 @@ agx_nir_lower_apple9_native_mesh(
 
    if (packed_indices && options->primitive_broadcast)
       return fail(reason, "packed index candidate has no primitive broadcast");
+   bool rounds = options && options->publication_rounds;
+   if (rounds && (!packed_indices || physical_threads != AGX_APPLE9_NATIVE_SERIAL_THREADS))
+      return fail(reason, "multi-round publication requires packed indices at T32");
 
    nir_remove_dead_variables(nir, nir_var_mem_shared, NULL);
    nir_lower_vars_to_explicit_types(nir, nir_var_mem_shared,
@@ -372,6 +375,7 @@ agx_nir_lower_apple9_native_mesh(
       return false;
    memcpy(info->logical_size, logical_size, sizeof(logical_size));
    info->primitive_broadcast = primitive_broadcast;
+   info->publication_rounds = rounds;
    const struct agx_apple9_mesh_layout *layout = &info->layout;
    struct agx_apple9_varying_layout varyings;
    if (!varying_layout(info, options, &varyings, reason))
