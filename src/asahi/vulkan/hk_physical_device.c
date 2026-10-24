@@ -1794,9 +1794,15 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
    props->apiVersion = VK_MAKE_API_VERSION(0, 1, 4, VK_HEADER_VERSION);
    props->conformanceVersion = (VkConformanceVersion){0};
 
-   /* Subgroup operations are lowered to native ballot and simd_shuffle. */
+   /* Subgroup operations are lowered to native ballot and simd_shuffle. Task
+    * and mesh shaders run as compute kernels on the mesh path, with the same
+    * 32-lane subgroups.
+    */
    props->subgroupSupportedStages = VK_SHADER_STAGE_COMPUTE_BIT |
                                     VK_SHADER_STAGE_ALL_GRAPHICS;
+   if (feat->meshShader)
+      props->subgroupSupportedStages |= VK_SHADER_STAGE_TASK_BIT_EXT |
+                                        VK_SHADER_STAGE_MESH_BIT_EXT;
    props->subgroupSupportedOperations =
       VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_VOTE_BIT |
       VK_SUBGROUP_FEATURE_BALLOT_BIT | VK_SUBGROUP_FEATURE_SHUFFLE_BIT |
