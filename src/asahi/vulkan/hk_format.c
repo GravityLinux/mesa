@@ -18,9 +18,11 @@
 #include "vk_enum_defines.h"
 #include "vk_format.h"
 
-/* The Apple9 path currently implements typed storage access only. Formats
- * outside the SPIR-V/Vulkan image-format compatibility table cannot advertise
- * storage access without support for untyped reads or writes.
+/* Storage formats on the Apple9 path: the SPIR-V/Vulkan image-format
+ * compatibility table, plus B8G8R8A8_UNORM, which has no SPIR-V format and is
+ * only reached formatless. Formatless accesses decode and encode through the
+ * descriptor's per-component texel layout, which follows the format swizzle,
+ * and native stores through the PBE, which renders BGRA swapchains.
  * https://docs.vulkan.org/spec/latest/chapters/formats.html
  */
 bool
@@ -73,6 +75,8 @@ hk_apple9_storage_format_supported(VkFormat format)
    case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
    case VK_FORMAT_A2B10G10R10_UINT_PACK32:
    case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
+   /* Swapchain format; compute writers ask for STORAGE swapchains. */
+   case VK_FORMAT_B8G8R8A8_UNORM:
       return true;
    default:
       return false;
