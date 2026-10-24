@@ -710,7 +710,11 @@ agx_open_device(void *memctx, struct agx_device *dev)
                             ? dev->native_mesh_classes : NULL;
    struct agx_native_mesh_support before =
       agx_native_mesh_probe(dev->fd, classes);
+   struct agx_native_blocks_support blocks_before =
+      classes ? agx_native_blocks_probe(dev->fd)
+              : (struct agx_native_blocks_support){0};
    dev->native_mesh_qualified = false;
+   dev->native_blocks = (struct agx_native_blocks_support){0};
    int ret = asahi_simple_ioctl(dev, DRM_IOCTL_ASAHI_VM_CREATE, &vm_create);
    if (ret) {
       fprintf(stderr, "DRM_IOCTL_ASAHI_VM_CREATE failed: %m\n");
@@ -724,6 +728,16 @@ agx_open_device(void *memctx, struct agx_device *dev)
       agx_native_mesh_probe(dev->fd, classes);
    dev->native_mesh_qualified =
       agx_native_mesh_same_qualification(before, after);
+
+   /* Batched native blocks are a property of the same latched profile: both
+    * attributes, sampled around VM_CREATE, must agree on one generation. */
+   struct agx_native_blocks_support blocks_after =
+      classes ? agx_native_blocks_probe(dev->fd)
+              : (struct agx_native_blocks_support){0};
+   if (dev->native_mesh_qualified &&
+       agx_native_blocks_same(blocks_before, blocks_after) &&
+       blocks_before.generation == before.generation)
+      dev->native_blocks = blocks_before;
 
    /* Round the user VA window to powers-of-two... */
    user_start = util_next_power_of_two64(user_start);

@@ -77,6 +77,9 @@ libasahi_lib = static_library(
 if with_tests
   test('native-mesh-advertisement', executable('native-mesh-advertisement',
     'tests/test-native-mesh-advertisement.c'), suite : ['asahi'])
+  test('native-blocks-advertisement', executable('native-blocks-advertisement',
+    'tests/test-native-blocks-advertisement.c', 'agx_native_mesh.c'),
+    suite : ['asahi'])
   test('apple9-draw-tables', executable('apple9-draw-tables',
     'tests/test-apple9-draw-tables.c',
     include_directories : [inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],

@@ -4,6 +4,7 @@
  */
 
 #pragma once
+#include "agx_native_mesh.h"
 
 #include <stdint.h>
 #include <xf86drm.h>
@@ -128,6 +129,9 @@ struct agx_device {
     * sampled around this VM's creation and never upgraded later. */
    const char *native_mesh_classes;
    bool native_mesh_qualified;
+   /* The VM's latched asahi_native_blocks profile; qualified only together
+    * with native_mesh_qualified, at the same generation. */
+   struct agx_native_blocks_support native_blocks;
 
    /* VM handle */
    uint32_t vm_id;

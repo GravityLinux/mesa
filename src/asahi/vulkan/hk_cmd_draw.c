@@ -2905,9 +2905,13 @@ hk_apple9_launch_tess(struct hk_cmd_buffer *cmd, struct agx_draw draw,
                                    draw.b.count[1];
    /* The native object reads this draw's count. Keep all five producer passes
     * inline in pre_gfx, after flushing older lanes, so no later batch flush can
-    * move the count write behind its consumer. Each pass has HK_SYNC_ALL. */
+    * move the count write behind its consumer. Each pass has HK_SYNC_ALL.
+    * Batched native renders record them into the lanes too:
+    * hk_cmd_buffer_end_graphics flushes the lanes into the ending render's
+    * own pre_gfx stream, so they still complete before its tiling. */
    bool batch =
-      batch_env && !native && !agx_is_indirect(draw.b) &&
+      batch_env && (!native || hk_apple9_native_lanes(hk_cmd_buffer_device(cmd))) &&
+      !agx_is_indirect(draw.b) &&
       batch_patches <= max_batch_patches &&
       !hk_stat_enabled(hk_pipeline_stat_addr(
          cmd,
@@ -5496,7 +5500,8 @@ hk_apple9_launch_native_tess(struct hk_cmd_buffer *cmd, uint32_t draw_id,
 {
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct hk_descriptor_state *desc = &gfx->descriptors;
-   hk_tess_batch_flush(cmd);
+   if (!hk_apple9_native_lanes(hk_cmd_buffer_device(cmd)))
+      hk_tess_batch_flush(cmd);
    hk_apple9_merge_tess_info(cmd, true);
    desc->root.draw.geometry_params = 0;
    desc->root.draw.api_gs = false;
@@ -5564,8 +5569,14 @@ hk_apple9_launch_native_gs(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    struct hk_shader *vs = &vs_api->variants[HK_VS_VARIANT_SW];
    /* Complete any previously captured pre-raster lanes before this VS.
     * The existing pre_gfx stream is a dependency of the isolated render;
-    * HK_READS_INTERNAL keeps the wait at tiling, never fragment-only. */
-   hk_tess_batch_flush(cmd);
+    * HK_READS_INTERNAL keeps the wait at tiling, never fragment-only.
+    * In a batched native render the VS joins lane 0 instead (see
+    * hk_apple9_native_lanes). */
+   bool lanes = hk_apple9_native_lanes(hk_cmd_buffer_device(cmd)) &&
+                !agx_is_indirect(draw.b) &&
+                !desc->root.draw.pipeline_stats_flags;
+   if (!lanes)
+      hk_tess_batch_flush(cmd);
    struct hk_apple9_prerast_bindings bindings = hk_apple9_draw_bindings(cmd, draw);
    desc->root.draw.vertex_params = hk_upload_vertex_params_for_vs(cmd, draw, vs);
    desc->root.draw.geometry_params = 0;
@@ -5577,7 +5588,11 @@ hk_apple9_launch_native_gs(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    gfx->root = hk_cmd_buffer_upload_root(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
    if (vk_command_buffer_has_error(&cmd->vk))
       return;
+   cmd->tess_batch.capture = lanes ? &cmd->tess_batch.lane[0] : NULL;
    hk_apple9_dispatch_prerast(cmd, vs, draw.b, &bindings);
+   cmd->tess_batch.capture = NULL;
+   if (lanes)
+      cmd->tess_batch.draws++;
    if (vk_command_buffer_has_error(&cmd->vk))
       return;
    const uint32_t groups[] = {1, 1, 1};
@@ -5600,8 +5615,14 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
    if (hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G) {
       if (!hk_feedback_prepare_draw(cmd))
          return;
+      /* Batched native renders defer the ordinary split until stage
+       * selection: a native GS/TES draw may continue the render. */
+      bool defer_prepare =
+         hk_apple9_native_blocks_enabled(hk_cmd_buffer_device(cmd)) &&
+         cmd->current_cs.gfx && cmd->current_cs.gfx->apple9_native_mesh;
       /* Index fetch and indirect arguments are buffer reads of tiling. */
-      if (!hk_apple9_prepare_draw(cmd, agx_is_indirect(draw_.b) || draw_.indexed, false))
+      if (!defer_prepare &&
+          !hk_apple9_prepare_draw(cmd, agx_is_indirect(draw_.b) || draw_.indexed, false))
          return;
       uint64_t t_resolve = hk_cpu_sub_begin();
       const struct hk_graphics_state *gfx = &cmd->state.gfx;
@@ -5668,6 +5689,9 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
             hk_apple9_launch_native_tess(cmd, draw_id, draw_);
          return;
       }
+      if (defer_prepare &&
+          !hk_apple9_prepare_draw(cmd, agx_is_indirect(draw_.b) || draw_.indexed, false))
+         return;
       if (hk_cond_render_applies(cmd)) {
          draw_ = hk_apple9_predicate_draw(cmd, draw_);
          if (!draw_.b.ptr)

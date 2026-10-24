@@ -162,6 +162,7 @@ hk_CmdSetEvent2(VkCommandBuffer commandBuffer, VkEvent _event,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    hk_cmd_render_merge_flush(cmd);
+   hk_apple9_end_native_batch(cmd);
    VK_FROM_HANDLE(hk_event, event, _event);
 
    perf_debug(cmd, "Set event");
@@ -179,6 +180,7 @@ hk_CmdResetEvent2(VkCommandBuffer commandBuffer, VkEvent _event,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    hk_cmd_render_merge_flush(cmd);
+   hk_apple9_end_native_batch(cmd);
    VK_FROM_HANDLE(hk_event, event, _event);
 
    perf_debug(cmd, "Reset event");
@@ -199,6 +201,7 @@ hk_CmdWaitEvents2(VkCommandBuffer commandBuffer, uint32_t eventCount,
    if (!cmd->in_meta)
       hk_feedback_invalidate(cmd);
    hk_cmd_render_merge_flush(cmd);
+   hk_apple9_end_native_batch(cmd);
    perf_debug(cmd, "Wait events");
 
    /* The big hammer. Need to check if this is actually needed.

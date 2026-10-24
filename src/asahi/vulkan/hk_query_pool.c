@@ -455,6 +455,7 @@ hk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    hk_cmd_render_merge_flush(cmd);
+   hk_apple9_end_native_batch(cmd);
    VK_FROM_HANDLE(hk_query_pool, pool, queryPool);
 
    uint64_t report_addr = hk_query_report_addr(pool, query);
