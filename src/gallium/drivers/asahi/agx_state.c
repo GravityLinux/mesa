@@ -6091,6 +6091,9 @@ agx_apple9_native_linear_texture(struct agx_resource *rsrc)
           !(agx_map_texture_gpu(rsrc, 0) & 15);
 }
 
+/* Views of later layers need no special case: agx_pack_texture offsets the
+ * address and compression metadata by first_layer, as hk does for
+ * baseArrayLayer, and the Apple9 descriptor is translated from that. */
 static bool
 agx_apple9_texture_view_supported(const struct agx_sampler_view *view)
 {
@@ -6115,7 +6118,6 @@ agx_apple9_texture_view_supported(const struct agx_sampler_view *view)
            state->target == PIPE_TEXTURE_CUBE ||
            state->target == PIPE_TEXTURE_CUBE_ARRAY) &&
           agx_apple9_texture_format_supported(view->format) &&
-          !state->u.tex.first_layer &&
           (resource->layout.tiling == AIL_TILING_GPU ||
            agx_apple9_native_linear_texture(resource));
 }
