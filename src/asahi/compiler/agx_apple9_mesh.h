@@ -191,8 +191,18 @@ struct agx_apple9_native_mesh_options {
    bool attributes;
    /* Exact single-primitive lowering; no native primitive-record ABI. */
    bool primitive_broadcast;
+   /* Provisional packed-index publication. Compiler-only opt-in until the
+    * narrow declaration class and launch path receive device qualification. */
+   bool packed_index_publication;
    uint64_t outputs_flat, outputs_linear;
 };
+
+/* Candidate number of publishing lanes for packed 8-bit topology indices.
+ * Caller proves ceil(K * maximum_P / 4) fits the physical completion width.
+ * The result is a prefix length, not a per-lane source offset. */
+struct nir_builder;
+nir_def *agx_nir_apple9_index_publication_lanes(struct nir_builder *b,
+                                              nir_def *primitives, unsigned k);
 
 /* Compiler-only native development gate, disabled unless explicitly enabled.
  * This accepts API sizes 1..16 at physical T16, or 1..128 at explicit T32,

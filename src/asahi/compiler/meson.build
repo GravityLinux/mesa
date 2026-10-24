@@ -199,6 +199,14 @@ if with_tests
     dependencies : [idep_nir, idep_mesautil],
     link_with : [libasahi_compiler],
   )
+  apple9_packed_indices_test = executable('apple9-packed-indices',
+    'test/apple9-packed-indices.c',
+    c_args : [c_msvc_compat_args, no_override_init_args],
+    gnu_symbol_visibility : 'hidden',
+    dependencies : [idep_nir, idep_mesautil],
+    link_with : [libasahi_compiler],
+  )
+  test('apple9-packed-indices', apple9_packed_indices_test, suite : ['asahi'])
   executable('apple9-native-capability-probe',
     'research/native-capability-20261022/compile_native.c',
     c_args : [c_msvc_compat_args, no_override_init_args],

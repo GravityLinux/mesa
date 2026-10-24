@@ -22,9 +22,21 @@ agx_apple9_native_mesh_shape_eligible(const nir_shader *nir)
 }
 
 static bool
-eligible(nir_shader *nir, unsigned physical_threads, const char **reason)
+eligible(nir_shader *nir, unsigned physical_threads,
+         bool packed_indices, const char **reason)
 {
-   if (!agx_apple9_native_mesh_shape_eligible(nir))
+   if (packed_indices) {
+      /* This explicit compiler option does not widen the driver's native
+       * shape predicate. The single-submit candidate cannot cover more than
+       * one physical group of packed words, or multi-round vertex outputs. */
+      if (nir->info.stage != MESA_SHADER_MESH || nir->info.task_payload_size ||
+          nir->info.mesh.primitive_type != MESA_PRIM_TRIANGLES ||
+          !nir->info.mesh.max_vertices_out ||
+          nir->info.mesh.max_vertices_out > physical_threads ||
+          !nir->info.mesh.max_primitives_out ||
+          nir->info.mesh.max_primitives_out > (4 * physical_threads) / 3)
+         return fail(reason, "packed index candidate exceeds one narrow publication");
+   } else if (!agx_apple9_native_mesh_shape_eligible(nir))
       return fail(reason,
                   "native mesh development class requires V3 P1 triangles without payload");
    if (physical_threads == AGX_APPLE9_NATIVE_THREADS) {
@@ -77,6 +89,17 @@ consume_count(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       return true;
    }
    return false;
+}
+
+nir_def *
+agx_nir_apple9_index_publication_lanes(nir_builder *b, nir_def *primitives,
+                                       unsigned k)
+{
+   assert(k >= 1 && k <= 3);
+   nir_def *bytes = nir_imul_imm(b, primitives, k);
+   /* Counts are normalized before publication; one lane retains the empty
+    * handoff used by the existing native path. */
+   return nir_umax_imm(b, nir_ushr_imm(b, nir_iadd_imm(b, bytes, 3), 2), 1);
 }
 
 static void
@@ -300,8 +323,12 @@ agx_nir_lower_apple9_native_mesh(
    unsigned physical_threads = options && options->physical_threads
                                   ? options->physical_threads
                                   : AGX_APPLE9_NATIVE_THREADS;
-   if (!eligible(nir, physical_threads, reason))
+   bool packed_indices = options && options->packed_index_publication;
+   if (!eligible(nir, physical_threads, packed_indices, reason))
       return false;
+
+   if (packed_indices && (options->attributes || options->primitive_broadcast))
+      return fail(reason, "packed index candidate is position-only");
 
    nir_remove_dead_variables(nir, nir_var_mem_shared, NULL);
    nir_lower_vars_to_explicit_types(nir, nir_var_mem_shared,
@@ -460,9 +487,15 @@ agx_nir_lower_apple9_native_mesh(
       }
    }
    nir_pop_if(&b, NULL);
-   nir_push_if(&b, nir_ieq_imm(&b, lane, 0));
-   /* Hardware consumes base+1 even in scalar mode. Zero is measured safe;
-    * leaving this word to unrelated allocation can suppress all geometry. */
+   nir_def *active = packed_indices
+      ? nir_ult(&b, lane, agx_nir_apple9_index_publication_lanes(
+                            &b, primitives, layout->indices_per_primitive))
+      : nir_ieq_imm(&b, lane, 0);
+   nir_push_if(&b, active);
+   /* Every publishing lane supplies the common array base. The v2 triangle
+    * discriminators support this prefix-participation candidate; they do not
+    * establish per-lane offset arithmetic or a new completion scoreboard.
+    * Preserve the qualified first operand (actual vertex count). */
    nir_mesh_submit_scalar_apple9_agx(&b, vertices, nir_imm_int(&b, 0));
    device_fence(&b);
    nir_pop_if(&b, NULL);
