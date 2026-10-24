@@ -211,6 +211,11 @@ if with_tests
         suite : ['asahi', 'honeykrisp'])
     endif
   endforeach
+  # Corpus inspection is an explicit host tool, not part of the driver.
+  executable('hk-native-mesh-coverage', 'tests/hk-native-mesh-coverage.c',
+    include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                           inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+    dependencies : [hk_deps], link_with : [libhk], build_by_default : false)
   test('hk-native-mesh-open', executable('hk-native-mesh-open',
     'tests/hk-native-mesh-open.c',
     include_directories : [inc_gallium, inc_gallium_aux, inc_include,
