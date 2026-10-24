@@ -294,9 +294,9 @@ varying_layout(const struct agx_apple9_mesh_body_info *info,
    if (layout->vertex_components > 4 + AGX_APPLE9_MAX_VARYING_COMPONENTS)
       return fail(reason, "native mesh exceeds 124 user varying scalars");
    for (unsigned slot = 0; slot < VARYING_SLOT_MAX; ++slot) {
-      /* Clip distances are rasterizer outputs only, published once after the
-       * user varyings (Air 2026-10-24: a linked copy as well makes the
-       * vertex stride disagree with the PPP output count). */
+      /* Link clip distances only when the fragment stage reads them. The
+       * rasterizer then consumes distinct mirror planes; excluding those
+       * from the varyings keeps the stride equal to the PPP output count. */
       bool clip = slot == VARYING_SLOT_CLIP_DIST0 || slot == VARYING_SLOT_CLIP_DIST1;
       bool mirror = slot == AGX_APPLE9_CLIP_MIRROR_SLOT ||
                     slot == AGX_APPLE9_CLIP_MIRROR_SLOT + 1;
