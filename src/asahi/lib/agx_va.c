@@ -46,6 +46,7 @@ agx_va_release_locked(struct agx_device *dev, struct agx_va *va)
 {
    list_del(&va->link);
    dev->va_quarantine.bytes[agx_va_heap_index(va->flags)] -= va->size_B;
+   dev->va_quarantine.heap_used_B[agx_va_heap_index(va->flags)] -= va->size_B;
    util_vma_heap_free(agx_vma_heap(dev, va->flags), va->addr, va->size_B);
    free(va);
 }
@@ -87,6 +88,7 @@ agx_va_quarantine_init(struct agx_device *dev, uint64_t main_B,
    dev->va_quarantine.cap[0] = MIN2(main_B / 8, max_B);
    dev->va_quarantine.cap[1] = MIN2(usc_B / 8, max_B);
    dev->va_quarantine.cap[2] = MIN2(context_B / 8, max_B);
+   dev->va_quarantine.context_size_B = context_B;
    /* Replay heaps keep cap 0: replay needs its exact addresses back. */
 }
 
@@ -102,6 +104,13 @@ agx_va_quarantine_finish(struct agx_device *dev)
               dev->va_quarantine.released_cap,
               dev->va_quarantine.released_exhaustion,
               dev->va_quarantine.released_fixed);
+      if (dev->va_quarantine.context_size_B) {
+         fprintf(stderr,
+                 "agx: context heap: high water %" PRIu64 " B of %" PRIu64
+                 " B\n",
+                 dev->va_quarantine.heap_high_water_B[2],
+                 dev->va_quarantine.context_size_B);
+      }
    }
 
    simple_mtx_lock(&dev->vma_lock);
@@ -187,6 +196,13 @@ agx_va_alloc(struct agx_device *dev, uint64_t size_B, uint64_t align_B,
          addr = util_vma_heap_alloc(heap, size_B, align_B);
       }
    }
+   if (addr) {
+      unsigned index = agx_va_heap_index(flags);
+      dev->va_quarantine.heap_used_B[index] += size_B;
+      dev->va_quarantine.heap_high_water_B[index] =
+         MAX2(dev->va_quarantine.heap_high_water_B[index],
+              dev->va_quarantine.heap_used_B[index]);
+   }
    simple_mtx_unlock(&dev->vma_lock);
 
    if (addr == 0)
@@ -214,6 +230,7 @@ agx_va_free(struct agx_device *dev, struct agx_va *va, bool unbind)
    struct util_vma_heap *heap = agx_vma_heap(dev, va->flags);
 
    simple_mtx_lock(&dev->vma_lock);
+   dev->va_quarantine.heap_used_B[agx_va_heap_index(va->flags)] -= va->size_B;
    util_vma_heap_free(heap, va->addr, va->size_B);
    simple_mtx_unlock(&dev->vma_lock);
    free(va);
