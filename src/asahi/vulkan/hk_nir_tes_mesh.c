@@ -220,9 +220,10 @@ hk_nir_tes_mesh(const nir_shader *source, const char **reason)
    nir_def *triangles = nir_udiv_imm(&b, count, 3);
    nir_def *first = nir_imul_imm(&b, nir_channel(&b, group, 0), pack);
    /* Triangles this group evaluates: 0 or 1 unpacked, up to pack packed.
-    * Test before multiplication so oversized groups cannot wrap to a valid
-    * index. Ignore a partial triangle. Index contents and backing
-    * allocations retain the producer's contract. */
+    * group * pack cannot wrap (x <= 65535 groups), and lanes past the live
+    * triangles stay inactive, so no index beyond the stream is formed. Ignore
+    * a partial triangle. Index contents and backing allocations retain the
+    * producer's contract. */
    nir_def *patch_ok = nir_iand(&b, nir_uge_imm(&b, patch_size, vertices_in),
                                 nir_ule_imm(&b, patch_size, 32));
    nir_def *live = nir_bcsel(
