@@ -318,6 +318,14 @@ if with_tests
   test('hk-native-mesh-routing', routing_test,
     env : ['HK_APPLE9_NATIVE_MESH=1'],
     suite : ['asahi', 'honeykrisp'])
+  test('hk-native-draw-state', executable('hk-native-draw-state', 'tests/hk-native-draw-state.c',
+    include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                           inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+    dependencies : [hk_deps], link_with : [libhk],
+    link_args : ['-Wl,--wrap=__vk_errorf']),
+    env : ['HK_APPLE9_NATIVE_MESH=1', 'HK_APPLE9_GS_NATIVE=1',
+           'HK_APPLE9_NATIVE_MESH_PACKED_SHAPES=T16V3P1,T16V4P2'],
+    suite : ['asahi', 'honeykrisp'])
   test('hk-native-gs-routing', routing_test,
     env : ['HK_APPLE9_NATIVE_MESH=1', 'HK_APPLE9_GS_NATIVE=1',
            'HK_APPLE9_NATIVE_MESH_PACKED_SHAPES=T16V3P1,T16V4P2'],

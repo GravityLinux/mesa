@@ -5505,10 +5505,25 @@ hk_apple9_resolve_shaders(struct hk_cmd_buffer *cmd, bool prefer_native)
 static struct agx_draw hk_apple9_predicate_draw(struct hk_cmd_buffer *cmd,
                                                 struct agx_draw draw);
 
-/* Direct triangle lists: one mesh group per input triangle and instance,
- * within one grid dimension each. Groups publish in index order, so API
- * primitive order holds. Multiple GS invocations, indexed draws and other
- * topologies need their own input mapping.
+/* Input triangles per instance of a direct triangle list, strip or fan. */
+static uint32_t
+hk_apple9_native_gs_triangles(const struct vk_dynamic_graphics_state *dyn,
+                              struct agx_draw draw)
+{
+   if (dyn->ia.primitive_topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+      return draw.b.count[0] / 3;
+   return draw.b.count[0] >= 3 ? draw.b.count[0] - 2 : 0;
+}
+
+/* Direct triangle lists, strips and fans, indexed or not: one mesh group per
+ * input triangle and instance, within one grid dimension each. Strips and
+ * fans map corners as the fallback's software input assembly does
+ * (hk_nir_gs_mesh), from the topology in the draw's geometry parameters. The software VS runs once per
+ * index position (applying the index buffer, firstIndex, vertexOffset and
+ * firstInstance as for the fallback GS), so a list's triangle x reads VS
+ * outputs 3x..3x+2 either way. Groups publish in index order, so API
+ * primitive order holds. Multiple GS invocations, primitive restart and
+ * other topologies need their own input mapping.
  *
  * Native GS/TES draws are direct and exclude conditional rendering and
  * queries, so no GPU pass writes a native block's words, launch records or
@@ -5524,11 +5539,14 @@ hk_apple9_native_gs_state_eligible(struct hk_cmd_buffer *cmd,
    const struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
    if (!hk_apple9_native_stage_available_device(hk_cmd_buffer_device(cmd),
                                                 MESA_SHADER_GEOMETRY) || cmd->in_meta || agx_is_indirect(draw.b) ||
-       draw.indexed || draw.restart || draw.start || draw.start_instance ||
-       draw.b.count[0] < 3 || draw.b.count[0] % 3 || draw.b.count[2] != 1 ||
+       draw.restart || draw.b.count[0] < 3 || draw.b.count[2] != 1 ||
+       (dyn->ia.primitive_topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST &&
+        dyn->ia.primitive_topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP &&
+        dyn->ia.primitive_topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN) ||
+       (dyn->ia.primitive_topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST &&
+        draw.b.count[0] % 3) ||
        !hk_apple9_native_mesh_grid_valid(
-          (const uint32_t[]){draw.b.count[0] / 3, draw.b.count[1], 1}) ||
-       dyn->ia.primitive_topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST ||
+          (const uint32_t[]){hk_apple9_native_gs_triangles(dyn, draw), draw.b.count[1], 1}) ||
        dyn->ia.primitive_restart_enable ||
        gfx->shaders[MESA_SHADER_TESS_CTRL] ||
        gfx->shaders[MESA_SHADER_TESS_EVAL] || gfx->shaders[MESA_SHADER_TASK] ||
@@ -5703,12 +5721,14 @@ DEBUG_GET_ONCE_BOOL_OPTION(gs_route_log, "HK_APPLE9_GS_ROUTE_LOG", false)
  * one per HK_APPLE9_NATIVE_GS_PACK triangles for a packed body, recognised by
  * its exact class (hk_nir_gs_mesh). */
 static uint32_t
-hk_apple9_native_gs_groups(const struct hk_graphics_state *gfx, struct agx_draw draw)
+hk_apple9_native_gs_groups(const struct hk_cmd_buffer *cmd, struct agx_draw draw)
 {
+   const struct hk_graphics_state *gfx = &cmd->state.gfx;
    const struct agx_apple9_mesh_body_info *body =
       &hk_native_producer_main(hk_api_shader_native(gfx->shaders[MESA_SHADER_GEOMETRY]))
           ->info.apple9_native;
-   const uint32_t triangles = draw.b.count[0] / 3;
+   const uint32_t triangles =
+      hk_apple9_native_gs_triangles(&cmd->vk.dynamic_graphics_state, draw);
    bool packed = hk_apple9_native_gs_packed_class(
       body->key.physical_threads, body->layout.max_vertices, body->layout.max_primitives);
    /* Unpacked bodies publish V(n)/P(n-2) (T32 only for n > 16 on the
@@ -5737,7 +5757,14 @@ hk_apple9_launch_native_gs(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       hk_tess_batch_flush(cmd);
    struct hk_apple9_prerast_bindings bindings = hk_apple9_draw_bindings(cmd, draw);
    desc->root.draw.vertex_params = hk_upload_vertex_params_for_vs(cmd, draw, vs);
-   desc->root.draw.geometry_params = 0;
+   /* The body reads only input_topology (list, strip or fan). */
+   const struct poly_geometry_params gp = {
+      .input_topology =
+         vk_topology_to_mesa(cmd->vk.dynamic_graphics_state.ia.primitive_topology),
+   };
+   desc->root.draw.geometry_params = hk_pool_upload(cmd, &gp, sizeof(gp), 8);
+   if (!desc->root.draw.geometry_params)
+      return;
    desc->root.draw.api_gs = true;
    desc->root.draw.rasterization_stream = 0;
    desc->root.draw.draw_id = draw_id;
@@ -5756,10 +5783,23 @@ hk_apple9_launch_native_gs(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    /* One mesh group per input triangle (x) and instance (y), or per
     * HK_APPLE9_NATIVE_GS_PACK triangles for a packed (T32) body; the body
     * reads its corners from the VS buffer (hk_nir_gs_mesh). */
-   const uint32_t groups[] = {hk_apple9_native_gs_groups(gfx, draw), draw.b.count[1], 1};
+   const uint32_t groups[] = {hk_apple9_native_gs_groups(cmd, draw), draw.b.count[1], 1};
    uint64_t grid = hk_pool_upload(cmd, groups, sizeof(groups), 4);
    if (grid)
       hk_apple9_draw_native_mesh(cmd, draw_id, grid);
+}
+
+/* Index size and primitive restart come from command buffer state, not the
+ * draw entry points (hk_draw_indexed passes neither). Everything that routes
+ * or launches a draw reads both - an indexed native GS fetches with this index
+ * size - so G16 completes the draw before any of it. */
+static struct agx_draw
+hk_draw_complete_from_state(const struct hk_cmd_buffer *cmd, struct agx_draw draw)
+{
+   draw.restart = cmd->vk.dynamic_graphics_state.ia.primitive_restart_enable &&
+                  draw.indexed;
+   draw.index_size = cmd->state.gfx.index.size;
+   return draw;
 }
 
 static void
@@ -5774,6 +5814,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
       return;
 
    if (hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G) {
+      draw_ = hk_draw_complete_from_state(cmd, draw_);
       if (!hk_feedback_prepare_draw(cmd))
          return;
       /* Binned-primitive estimate for the native render bound; native
@@ -5849,7 +5890,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
             (uint64_t)hk_native_producer_main(
                hk_api_shader_native(gfx->shaders[MESA_SHADER_GEOMETRY]))
                ->info.apple9_native.layout.max_primitives *
-            hk_apple9_native_gs_groups(gfx, draw_) * draw_.b.count[1];
+            hk_apple9_native_gs_groups(cmd, draw_) * draw_.b.count[1];
          /* The software VS writes every vertex of every instance. The grid
           * bound keeps that buffer small today; check it as fallback does. */
          if (!hk_sw_vs_outputs_fit(cmd, draw_))
