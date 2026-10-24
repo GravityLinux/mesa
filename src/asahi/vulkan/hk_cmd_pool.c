@@ -38,8 +38,9 @@ hk_cmd_bo_create(struct hk_cmd_pool *pool, enum hk_cmd_pool_kind kind,
    struct hk_device *dev = hk_cmd_pool_device(pool);
    struct hk_cmd_bo *bo;
 
-   bo = vk_zalloc(&pool->vk.alloc, sizeof(*bo), 8,
-                  VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+   /* Device scope: an idle BO may be reused by any pool of the device. */
+   bo = vk_zalloc(&dev->vk.alloc, sizeof(*bo), 8,
+                  VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
    if (bo == NULL)
       return vk_error(pool, VK_ERROR_OUT_OF_HOST_MEMORY);
 
@@ -53,7 +54,7 @@ hk_cmd_bo_create(struct hk_cmd_pool *pool, enum hk_cmd_pool_kind kind,
                           hk_cmd_pool_bo_flags(dev, kind), labels[kind]);
    hk_cpu_sub_end(t_bo, HK_CPU_SUB_CMD_BO);
    if (bo->bo == NULL) {
-      vk_free(&pool->vk.alloc, bo);
+      vk_free(&dev->vk.alloc, bo);
       return vk_error(pool, VK_ERROR_OUT_OF_DEVICE_MEMORY);
    }
 
@@ -64,11 +65,39 @@ hk_cmd_bo_create(struct hk_cmd_pool *pool, enum hk_cmd_pool_kind kind,
 }
 
 static void
-hk_cmd_bo_destroy(struct hk_cmd_pool *pool, struct hk_cmd_bo *bo)
+hk_cmd_bo_destroy(struct hk_device *dev, struct hk_cmd_bo *bo)
 {
-   struct hk_device *dev = hk_cmd_pool_device(pool);
    agx_bo_unreference(&dev->dev, bo->bo);
-   vk_free(&pool->vk.alloc, bo);
+   vk_free(&dev->vk.alloc, bo);
+}
+
+/* Hand every idle BO back to the BO cache. */
+void
+hk_cmd_bo_cache_trim(struct hk_device *dev)
+{
+   struct hk_cmd_bo_cache *cache = &dev->cmd_bos;
+   struct hk_cmd_bo *idle[HK_CMD_POOL_COUNT];
+
+   simple_mtx_lock(&cache->lock);
+   memcpy(idle, cache->free, sizeof(idle));
+   memset(cache->free, 0, sizeof(cache->free));
+   cache->bytes = 0;
+   simple_mtx_unlock(&cache->lock);
+
+   for (unsigned i = 0; i < HK_CMD_POOL_COUNT; ++i) {
+      while (idle[i]) {
+         struct hk_cmd_bo *bo = idle[i];
+         idle[i] = bo->next_free;
+         hk_cmd_bo_destroy(dev, bo);
+      }
+   }
+}
+
+void
+hk_cmd_bo_cache_finish(struct hk_device *dev)
+{
+   hk_cmd_bo_cache_trim(dev);
+   simple_mtx_destroy(&dev->cmd_bos.lock);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -92,34 +121,27 @@ hk_CreateCommandPool(VkDevice _device,
       return result;
    }
 
-   for (unsigned i = 0; i < HK_CMD_POOL_COUNT; ++i)
-      list_inithead(&pool->free_bos[i]);
-
    *pCmdPool = hk_cmd_pool_to_handle(pool);
 
    return VK_SUCCESS;
-}
-
-static void
-hk_cmd_pool_destroy_bos(struct hk_cmd_pool *pool)
-{
-   for (unsigned i = 0; i < HK_CMD_POOL_COUNT; ++i) {
-      list_for_each_entry_safe(struct hk_cmd_bo, bo, &pool->free_bos[i], link)
-         hk_cmd_bo_destroy(pool, bo);
-      list_inithead(&pool->free_bos[i]);
-      pool->num_free_bos[i] = 0;
-   }
 }
 
 VkResult
 hk_cmd_pool_alloc_bo(struct hk_cmd_pool *pool, enum hk_cmd_pool_kind kind,
                      struct hk_cmd_bo **bo_out)
 {
-   if (!list_is_empty(&pool->free_bos[kind])) {
-      struct hk_cmd_bo *bo =
-         list_first_entry(&pool->free_bos[kind], struct hk_cmd_bo, link);
-      list_del(&bo->link);
-      pool->num_free_bos[kind]--;
+   struct hk_cmd_bo_cache *cache = &hk_cmd_pool_device(pool)->cmd_bos;
+   struct hk_cmd_bo *bo = NULL;
+
+   simple_mtx_lock(&cache->lock);
+   bo = cache->free[kind];
+   if (bo) {
+      cache->free[kind] = bo->next_free;
+      cache->bytes -= HK_CMD_BO_SIZE;
+   }
+   simple_mtx_unlock(&cache->lock);
+
+   if (bo) {
       *bo_out = bo;
       return VK_SUCCESS;
    }
@@ -127,26 +149,37 @@ hk_cmd_pool_alloc_bo(struct hk_cmd_pool *pool, enum hk_cmd_pool_kind kind,
    return hk_cmd_bo_create(pool, kind, bo_out);
 }
 
-/* Return a command buffer's BOs to the pool's free list (at most
- * HK_CMD_POOL_BO_MAX per kind), or with release (a reset with
- * RELEASE_RESOURCES) to the device. As in NVK and ANV, there is no device-wide
- * budget: a pool keeps its free list until trim, a releasing reset or destroy,
- * and the BO cache ages out what is returned. */
+/* Return a command buffer's BOs to the device's idle list, up to
+ * HK_CMD_BO_CACHE_BYTES, or with release (a reset with RELEASE_RESOURCES) to
+ * the BO cache. As in ANV, idle BOs are shared by every pool of the device;
+ * unlike ANV's pool, the idle list is bounded, and the BO cache ages out what
+ * does not fit. */
 void
 hk_cmd_pool_free_bo_list(struct hk_cmd_pool *pool, enum hk_cmd_pool_kind kind,
                          struct list_head *bos, bool release)
 {
+   struct hk_device *dev = hk_cmd_pool_device(pool);
+   struct hk_cmd_bo_cache *cache = &dev->cmd_bos;
+   struct list_head excess;
+   list_inithead(&excess);
+
+   simple_mtx_lock(&cache->lock);
    list_for_each_entry_safe(struct hk_cmd_bo, bo, bos, link) {
       list_del(&bo->link);
-      const bool cap = pool->num_free_bos[kind] >= HK_CMD_POOL_BO_MAX;
-      if (release || cap) {
-         hk_cpu_sub_count(release ? HK_CPU_SUB_CMD_BO_DESTROY_RELEASE
-                                  : HK_CPU_SUB_CMD_BO_DESTROY_CAP);
-         hk_cmd_bo_destroy(pool, bo);
+      if (release || cache->bytes + HK_CMD_BO_SIZE > HK_CMD_BO_CACHE_BYTES) {
+         list_addtail(&bo->link, &excess);
       } else {
-         list_addtail(&bo->link, &pool->free_bos[kind]);
-         pool->num_free_bos[kind]++;
+         bo->next_free = cache->free[kind];
+         cache->free[kind] = bo;
+         cache->bytes += HK_CMD_BO_SIZE;
       }
+   }
+   simple_mtx_unlock(&cache->lock);
+
+   list_for_each_entry_safe(struct hk_cmd_bo, bo, &excess, link) {
+      hk_cpu_sub_count(release ? HK_CPU_SUB_CMD_BO_DESTROY_RELEASE
+                               : HK_CPU_SUB_CMD_BO_DESTROY_CAP);
+      hk_cmd_bo_destroy(dev, bo);
    }
 }
 
@@ -161,7 +194,6 @@ hk_DestroyCommandPool(VkDevice _device, VkCommandPool commandPool,
       return;
 
    vk_command_pool_finish(&pool->vk);
-   hk_cmd_pool_destroy_bos(pool);
    vk_free2(&device->vk.alloc, pAllocator, pool);
 }
 
@@ -175,7 +207,6 @@ hk_ResetCommandPool(VkDevice device, VkCommandPool commandPool,
    if (flags & VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT) {
       /* The common reset visits allocated buffers, not recycled ones. */
       vk_command_pool_trim(&pool->vk, 0);
-      hk_cmd_pool_destroy_bos(pool);
    }
    return result;
 }
@@ -185,6 +216,7 @@ hk_TrimCommandPool(VkDevice device, VkCommandPool commandPool,
                    VkCommandPoolTrimFlags flags)
 {
    VK_FROM_HANDLE(hk_cmd_pool, pool, commandPool);
+   struct hk_device *dev = hk_cmd_pool_device(pool);
 
    vk_command_pool_trim(&pool->vk, flags);
    list_for_each_entry(struct hk_cmd_buffer, cmd, &pool->vk.command_buffers,
@@ -192,10 +224,11 @@ hk_TrimCommandPool(VkDevice device, VkCommandPool commandPool,
       if (cmd->vk.state == MESA_VK_COMMAND_BUFFER_STATE_INITIAL)
          hk_trim_cmd_buffer(cmd);
    }
-   hk_cmd_pool_destroy_bos(pool);
 
-   /* An explicit trim is a request to return unused memory. Dropping only
-    * the pool's references leaves the BO cache holding the same pages until
-    * a later allocation/submit ages them out. Keep ordinary resets cheap. */
-   agx_bo_cache_evict_all(&hk_cmd_pool_device(pool)->dev);
+   /* An explicit trim is a request to return unused memory. Drop the
+    * device's idle BOs (other pools only reallocate) and the BO cache's copies
+    * of the same pages, rather than waiting for a later allocation or submit
+    * to age them out. Ordinary resets stay cheap. */
+   hk_cmd_bo_cache_trim(dev);
+   agx_bo_cache_evict_all(&dev->dev);
 }

@@ -591,6 +591,7 @@ fail_meta:
    hk_device_finish_meta(dev);
 fail_mem_cache:
    vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
+   hk_cmd_bo_cache_finish(dev);
    hk_apple9_variants_finish(dev);
    hk_apple9_bodies_finish(dev);
    hk_apple9_tile_helpers_finish(dev);
@@ -678,6 +679,7 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
       agx_bo_unreference(&dev->dev, dev->apple9_compute_sysvals);
    if (dev->apple9_resident)
       agx_bo_unreference(&dev->dev, dev->apple9_resident);
+   hk_cmd_bo_cache_finish(dev);
    hk_destroy_sampler_heap(dev, &dev->samplers);
    agx_bo_unreference(&dev->dev, dev->rodata.bo);
    if (dev->heap_va) {

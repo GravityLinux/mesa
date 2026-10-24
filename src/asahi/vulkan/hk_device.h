@@ -15,6 +15,7 @@
 #include "agx_bg_eot.h"
 #include "agx_pack.h"
 #include "agx_scratch.h"
+#include "hk_cmd_pool.h"
 #include "decode.h"
 #include "vk_cmd_queue.h"
 #include "vk_dispatch_table.h"
@@ -164,6 +165,8 @@ struct hk_device {
       struct agx_scratch vs, fs, cs;
       simple_mtx_t lock;
    } scratch;
+
+   struct hk_cmd_bo_cache cmd_bos;
 
    uint32_t perftest;
 
