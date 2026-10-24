@@ -6769,6 +6769,7 @@ hk_apple9_native_mesh_options(nir_shader *nir,
       .primitive_broadcast = !rounds && !packed && hk_apple9_native_mesh_primitive_lowering_enabled(),
       .packed_index_publication = rounds || packed,
       .publication_rounds = rounds,
+      .link_clip_distances = key->fs_reads_clip_distance,
       .outputs_flat = key->vertex.outputs_flat,
       .outputs_linear = key->vertex.outputs_linear,
    };
@@ -7283,6 +7284,8 @@ hk_apple9_compile_graphics_path(struct hk_device *dev, uint32_t count,
                                    ~(infos[i].nir->info.perspective_varyings |
                                      infos[i].nir->info.linear_varyings);
          key.vertex.outputs_linear = infos[i].nir->info.linear_varyings;
+         key.fs_reads_clip_distance = infos[i].nir->info.inputs_read &
+            (VARYING_BIT_CLIP_DIST0 | VARYING_BIT_CLIP_DIST1);
       }
    }
 
@@ -7763,8 +7766,9 @@ hk_apple9_identify_native_pair(uint32_t count, struct vk_shader **shaders,
           obj->vk.stage == MESA_SHADER_TESS_EVAL) {
          obj->apple9_native_candidate = true;
          obj->apple9_native_cull_primitive =
-            hk_native_producer_main(obj)->info.apple9_native.primitive_broadcast &
-            VARYING_BIT_CULL_PRIMITIVE;
+            (hk_native_producer_main(obj)->info.apple9_native.primitive_broadcast &
+             VARYING_BIT_CULL_PRIMITIVE) ||
+            hk_native_producer_main(obj)->info.apple9_native.cull_distances;
       }
    }
 }
@@ -8302,7 +8306,8 @@ hk_apple9_defer_graphics(struct hk_device *dev, uint32_t count,
       }
       obj->apple9_native_cull_primitive =
          infos[i].stage == MESA_SHADER_MESH &&
-         (infos[i].nir->info.outputs_written & VARYING_BIT_CULL_PRIMITIVE);
+         ((infos[i].nir->info.outputs_written & VARYING_BIT_CULL_PRIMITIVE) ||
+          infos[i].nir->info.cull_distance_array_size);
       simple_mtx_init(&deferred->variant_lock, mtx_plain);
       obj->writes_memory = infos[i].nir->info.writes_memory;
       obj->pre_raster_reads = hk_nir_pre_raster_reads(infos[i].nir);

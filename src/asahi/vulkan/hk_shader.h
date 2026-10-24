@@ -517,6 +517,8 @@ struct hk_api_shader {
     * Draw state can still require the emulated realization. A deferred native
     * rejection clears this atomically while recording threads may read it. */
    bool apple9_native_candidate;
+   /* Whole-primitive culling that requires degenerate triangles to be empty,
+    * including CullPrimitiveEXT and per-vertex CullDistance. */
    bool apple9_native_cull_primitive;
 
    /* A native TES uses the program-info union for mesh metadata. Retain
@@ -797,6 +799,9 @@ struct hk_apple9_graphics_key {
     * publishes interpolated cull planes, see hk_apple9_compile_vertex_culls.
     * Otherwise geometry shaders publish one flat primitive cull mask. */
    bool gs_cull_planes;
+   /* The linked fragment shader reads gl_ClipDistance: a native mesh also
+    * links its clip distances as varyings (hk_apple9_native_mesh_options). */
+   bool fs_reads_clip_distance;
    /* Per-device policy; actual use still requires an exact qualified mesh. */
    bool native_index;
    /* Independently keyed stage admission; never implied by a native mesh. */

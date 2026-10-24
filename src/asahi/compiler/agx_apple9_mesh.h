@@ -66,6 +66,11 @@ bool agx_apple9_native_mesh_shape_eligible(const nir_shader *nir);
  * vertices or index words repeat it with an explicit destination. */
 #define AGX_APPLE9_PUBLICATION_ROUND 32
 
+/* Compiler-private per-vertex slots mirroring gl_ClipDistance when a fragment
+ * shader also reads it: GL-only legacy varyings that SPIR-V mesh shaders never
+ * write, excluded from the linked varyings. */
+#define AGX_APPLE9_CLIP_MIRROR_SLOT VARYING_SLOT_TEX6
+
 struct agx_apple9_mesh_layout {
    uint16_t vertex_component[VARYING_SLOT_MAX][4];
    uint16_t primitive_component[VARYING_SLOT_MAX][4];
@@ -97,6 +102,12 @@ struct agx_apple9_mesh_body_info {
    bool publication_rounds;
    /* Rasterizer clip distances published after the user varyings. */
    unsigned clip_distances;
+   /* Clip distances are also linked varyings; their rasterizer copy reads
+    * the mirror planes at AGX_APPLE9_CLIP_MIRROR_SLOT. */
+   bool clip_linked;
+   /* Cull distances evaluated at completion from compiler-owned shared
+    * storage at cull_B within the shared region; not published. */
+   unsigned cull_distances, cull_B;
    /* V3/P1 primitive outputs lowered to flat planes or a local cull flag. */
    uint64_t primitive_broadcast;
    unsigned argument_uniform_words;
@@ -204,6 +215,9 @@ struct agx_apple9_native_mesh_options {
    bool packed_index_publication;
    /* The driver selected multi-round publication; requires T32. */
    bool publication_rounds;
+   /* The fragment shader reads gl_ClipDistance: also link the distances as
+    * varyings; the rasterizer copy then reads private mirror planes. */
+   bool link_clip_distances;
    uint64_t outputs_flat, outputs_linear;
 };
 

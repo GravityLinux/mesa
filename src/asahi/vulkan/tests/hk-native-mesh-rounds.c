@@ -12,7 +12,8 @@
 #include "compiler/nir/nir_builder.h"
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "%u: %s\n", __LINE__, #c); exit(1); } } while (0)
 
-static unsigned clip_distances;
+static unsigned clip_distances, cull_distances;
+static bool dynamic_clip_offset;
 
 static nir_shader *
 source(unsigned logical, unsigned vertices, unsigned primitives, bool attributes,
@@ -45,14 +46,15 @@ source(unsigned logical, unsigned vertices, unsigned primitives, bool attributes
             nir_imm_int(&b, 0), .write_mask = 1, .src_type = nir_type_float32,
             .io_semantics = {.location = VARYING_SLOT_VAR0 + c, .num_slots = 1});
    }
-   if (clip_distances) {
+   if (clip_distances + cull_distances) {
       nir_store_per_vertex_output(&b, nir_imm_vec4(&b, 1, -1, .5, 2), i,
-         nir_imm_int(&b, 0), .write_mask = BITFIELD_MASK(MIN2(clip_distances, 4)),
+         dynamic_clip_offset ? nir_iand_imm(&b, i, 1) : nir_imm_int(&b, 0), .write_mask = BITFIELD_MASK(MIN2(clip_distances + cull_distances, 4)),
          .src_type = nir_type_float32,
-         .io_semantics = {.location = VARYING_SLOT_CLIP_DIST0, .num_slots = 1});
-      if (clip_distances > 4)
+         .io_semantics = {.location = VARYING_SLOT_CLIP_DIST0,
+                          .num_slots = dynamic_clip_offset ? 2 : 1});
+      if (clip_distances + cull_distances > 4)
          nir_store_per_vertex_output(&b, nir_imm_vec4(&b, 1, 1, 1, 1), i,
-            nir_imm_int(&b, 0), .write_mask = BITFIELD_MASK(clip_distances - 4),
+            nir_imm_int(&b, 0), .write_mask = BITFIELD_MASK(clip_distances + cull_distances - 4),
             .src_type = nir_type_float32,
             .io_semantics = {.location = VARYING_SLOT_CLIP_DIST1, .num_slots = 1});
    }
@@ -73,6 +75,7 @@ source(unsigned logical, unsigned vertices, unsigned primitives, bool attributes
    nir_pop_loop(&b, NULL);
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
    nir->info.clip_distance_array_size = clip_distances;
+   nir->info.cull_distance_array_size = cull_distances;
    return nir;
 }
 
@@ -254,6 +257,66 @@ main(int argc, char **argv)
          free(part.binary);
          ralloc_free(nir);
       }
+      clip_distances = 0;
+      /* Cull distances: evaluated at completion from compiler-owned shared
+       * storage; not published, so the planes/PPP count exclude them. */
+      const unsigned combos[][2] = {{0, 1}, {2, 2}, {1, 7}};
+      for (unsigned k = 0; k < ARRAY_SIZE(combos); ++k) {
+         clip_distances = combos[k][0];
+         cull_distances = combos[k][1];
+         nir_shader *nir = source(32, 64, 126, false, false);
+         struct hk_apple9_graphics_key key = {0};
+         struct agx_shader_part part = {0};
+         struct agx_apple9_mesh_body_info body;
+         const char *why = NULL;
+         bool ok = hk_apple9_compile_native_mesh_program(nir, &key, &part, &body, &why);
+         if (!ok) fprintf(stderr, "clip %u cull %u: %s\n", clip_distances, cull_distances, why);
+         CHECK(ok && body.clip_distances == clip_distances &&
+               body.cull_distances == cull_distances);
+         CHECK(body.layout.vertex_components == 4 + clip_distances);
+         CHECK(part.info.apple9_clip_distance_count == clip_distances);
+         CHECK(body.shared_size_B >= 64 * 4 * cull_distances);
+         CHECK(hk_apple9_native_shader_valid(&part.info, &body, HK_APPLE9_NATIVE_MESH));
+         printf("clip %u cull %u: T%u bytes=%u shared=%u\n", clip_distances, cull_distances,
+                body.key.physical_threads, part.info.binary_size, body.shared_size_B);
+         free(part.binary);
+         ralloc_free(nir);
+      }
+      clip_distances = cull_distances = 0;
+      /* A fragment shader reading gl_ClipDistance links the distances as
+       * varyings; the rasterizer copy reads mirror planes, so planes still
+       * equal 4 + varyings + clip distances (the PPP output count). */
+      for (clip_distances = 1; clip_distances <= 5; clip_distances += 4) {
+         nir_shader *nir = source(32, 64, 126, false, false);
+         struct hk_apple9_graphics_key key = {.fs_reads_clip_distance = true};
+         struct agx_shader_part part = {0};
+         struct agx_apple9_mesh_body_info body;
+         const char *why = NULL;
+         bool ok = hk_apple9_compile_native_mesh_program(nir, &key, &part, &body, &why);
+         if (!ok) fprintf(stderr, "linked clip %u: %s\n", clip_distances, why);
+         CHECK(ok && body.clip_linked && body.clip_distances == clip_distances);
+         CHECK(part.info.apple9_varyings.count == clip_distances);
+         CHECK(body.layout.vertex_components == 4 + 2 * clip_distances);
+         CHECK(part.info.apple9_varyings.mask[VARYING_SLOT_CLIP_DIST0]);
+         CHECK(hk_apple9_native_shader_valid(&part.info, &body, HK_APPLE9_NATIVE_MESH));
+         printf("linked clip %u: planes=%u varyings=%u\n", clip_distances,
+                body.layout.vertex_components, part.info.apple9_varyings.count);
+         free(part.binary);
+         ralloc_free(nir);
+      }
+      /* Capability probing must reject dynamic clip slots before the mirror
+       * pass reads an immediate. The ordinary IO validator handles this
+       * unsupported shape, but runs after mirror construction. */
+      clip_distances = 8;
+      dynamic_clip_offset = true;
+      nir_shader *nir = source(32, 64, 126, false, false);
+      struct hk_apple9_graphics_key key = {.fs_reads_clip_distance = true};
+      const char *why = NULL;
+      bool supported = true;
+      CHECK(hk_apple9_native_mesh_check(nir, &key, &supported, &why) == VK_SUCCESS);
+      CHECK(!supported && why && strstr(why, "constant"));
+      ralloc_free(nir);
+      dynamic_clip_offset = false;
       clip_distances = 0;
    }
    glsl_type_singleton_decref();
