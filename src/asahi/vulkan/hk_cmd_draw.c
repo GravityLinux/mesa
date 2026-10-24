@@ -5504,8 +5504,10 @@ hk_apple9_resolve_shaders(struct hk_cmd_buffer *cmd, bool prefer_native)
 static struct agx_draw hk_apple9_predicate_draw(struct hk_cmd_buffer *cmd,
                                                 struct agx_draw draw);
 
-/* Start with one input triangle and one instance. Multiple GS invocations,
- * input primitives and instances need separate ordering qualification. */
+/* Direct triangle lists: one mesh group per input triangle and instance,
+ * within one grid dimension each. Groups publish in index order, so API
+ * primitive order holds. Multiple GS invocations, indexed draws and other
+ * topologies need their own input mapping. */
 static bool
 hk_apple9_native_gs_state_eligible(struct hk_cmd_buffer *cmd,
                                   struct agx_draw draw)
@@ -5515,7 +5517,9 @@ hk_apple9_native_gs_state_eligible(struct hk_cmd_buffer *cmd,
    if (!hk_apple9_native_stage_available_device(hk_cmd_buffer_device(cmd),
                                                 MESA_SHADER_GEOMETRY) || cmd->in_meta || agx_is_indirect(draw.b) ||
        draw.indexed || draw.restart || draw.start || draw.start_instance ||
-       draw.b.count[0] != 3 || draw.b.count[1] != 1 || draw.b.count[2] != 1 ||
+       draw.b.count[0] < 3 || draw.b.count[0] % 3 || draw.b.count[2] != 1 ||
+       !hk_apple9_native_mesh_grid_valid(
+          (const uint32_t[]){draw.b.count[0] / 3, draw.b.count[1], 1}) ||
        dyn->ia.primitive_topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST ||
        dyn->ia.primitive_restart_enable ||
        gfx->shaders[MESA_SHADER_TESS_CTRL] ||
@@ -5722,7 +5726,9 @@ hk_apple9_launch_native_gs(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       cmd->tess_batch.draws++;
    if (vk_command_buffer_has_error(&cmd->vk))
       return;
-   const uint32_t groups[] = {1, 1, 1};
+   /* One mesh group per input triangle (x) and instance (y); the body reads
+    * its corners from the VS buffer at that primitive (hk_nir_gs_mesh). */
+   const uint32_t groups[] = {draw.b.count[0] / 3, draw.b.count[1], 1};
    uint64_t grid = hk_pool_upload(cmd, groups, sizeof(groups), 4);
    if (grid)
       hk_apple9_draw_native_mesh(cmd, draw_id, grid);
@@ -5809,10 +5815,13 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                  body ? body->layout.max_primitives : 0);
       }
       if (native_gs) {
-         /* One input primitive (hk_apple9_native_gs_state_eligible). */
+         /* Each input triangle of each instance emits at most the body's
+          * declared primitives (hk_apple9_native_gs_state_eligible). */
          cmd->apple9_draw_primitives =
-            hk_native_producer_main(hk_api_shader_native(gfx->shaders[MESA_SHADER_GEOMETRY]))
-               ->info.apple9_native.layout.max_primitives;
+            (uint64_t)hk_native_producer_main(
+               hk_api_shader_native(gfx->shaders[MESA_SHADER_GEOMETRY]))
+               ->info.apple9_native.layout.max_primitives *
+            (draw_.b.count[0] / 3) * draw_.b.count[1];
          if (hk_apple9_prepare_draw(cmd, true, true))
             hk_apple9_launch_native_gs(cmd, draw_id, draw_);
          return;
