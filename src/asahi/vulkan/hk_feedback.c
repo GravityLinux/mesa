@@ -44,15 +44,18 @@ hk_feedback_raw_format(VkFormat format)
 }
 
 /* Depth and stencil planes compress with the colour scheme of their integer
- * alias (Z32F as R32, Z16 as R16, S8 as R8). They decompress through raw
- * colour stores of those aliases like colour, and feedback renders keep their
- * ZLS stores raw.
+ * alias (Z32F as R32, S8 as R8). They decompress through raw colour stores of
+ * those aliases like colour, and feedback renders keep their ZLS stores raw.
+ *
+ * D16 keeps the feedback allocation ban: with a feedback loop enabled only by
+ * the pipeline (GENERAL layout), compressed D16 failed the
+ * attachment_feedback_loop_layout depth_read_write_different_areas cases on
+ * G16 while D32 and D32S8 passed.
  */
 bool
 hk_feedback_is_zs_format(VkFormat format)
 {
    switch (format) {
-   case VK_FORMAT_D16_UNORM:
    case VK_FORMAT_D32_SFLOAT:
    case VK_FORMAT_S8_UINT:
    case VK_FORMAT_D32_SFLOAT_S8_UINT:

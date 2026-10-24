@@ -44,8 +44,7 @@ main(void)
    }
    CHECK(hk_feedback_raw_format(VK_FORMAT_B10G11R11_UFLOAT_PACK32) ==
          VK_FORMAT_UNDEFINED);
-   const VkFormat zs_formats[] = {VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT,
-                                  VK_FORMAT_S8_UINT,
+   const VkFormat zs_formats[] = {VK_FORMAT_D32_SFLOAT, VK_FORMAT_S8_UINT,
                                   VK_FORMAT_D32_SFLOAT_S8_UINT};
    for (unsigned i = 0; i < ARRAY_SIZE(zs_formats); ++i) {
       /* Depth/stencil planes decompress through copies, not raw blits. */
@@ -53,6 +52,7 @@ main(void)
       CHECK(hk_feedback_can_compress(&dev, VK_IMAGE_TYPE_2D, zs_formats[i], 1));
       CHECK(!hk_feedback_can_compress(&dev, VK_IMAGE_TYPE_2D, zs_formats[i], 4));
    }
+   CHECK(!hk_feedback_can_compress(&dev, VK_IMAGE_TYPE_2D, VK_FORMAT_D16_UNORM, 1));
    CHECK(!hk_feedback_can_compress(&dev, VK_IMAGE_TYPE_2D,
                                    VK_FORMAT_D16_UNORM_S8_UINT, 1));
    dev.chip = AGX_CHIP_G14G;
