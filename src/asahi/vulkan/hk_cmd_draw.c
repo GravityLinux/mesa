@@ -5777,6 +5777,11 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
       return;
 
    if (hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G) {
+      /* Index size and primitive restart come from command buffer state, not
+       * the draw entry point. Native GS/TES routing reads both (an indexed
+       * native GS fetches with this index size), so set them before it. */
+      draw_.restart = dyn->ia.primitive_restart_enable && draw_.indexed;
+      draw_.index_size = cmd->state.gfx.index.size;
       if (!hk_feedback_prepare_draw(cmd))
          return;
       /* Binned-primitive estimate for the native render bound; native
