@@ -20,16 +20,17 @@ vertex_stores(const char *device, const char *engine)
    return enabled;
 }
 
-TEST(HkDrirc, ZinkVertexStoresRequireG16)
+TEST(HkDrirc, VertexStoresDefaultOnG16Only)
 {
    unsetenv("hk_enable_vertex_pipeline_stores_atomics");
    EXPECT_FALSE(vertex_stores(nullptr, "mesa zink"));
    EXPECT_FALSE(vertex_stores("G13", "mesa zink"));
    EXPECT_FALSE(vertex_stores("G14", "mesa zink"));
+   EXPECT_FALSE(vertex_stores("G13", nullptr));
    EXPECT_TRUE(vertex_stores("G16", "mesa zink"));
-   EXPECT_FALSE(vertex_stores("G16", nullptr));
-   EXPECT_FALSE(vertex_stores("G16", "mesa zink other"));
-   EXPECT_FALSE(vertex_stores("G16", "other mesa zink"));
+   EXPECT_TRUE(vertex_stores("G16", nullptr));
+   EXPECT_TRUE(vertex_stores("G16", "mesa zink other"));
+   EXPECT_TRUE(vertex_stores("G16", "other mesa zink"));
 }
 
 TEST(HkDrirc, ProtonVertexStoresRemainEnabled)
