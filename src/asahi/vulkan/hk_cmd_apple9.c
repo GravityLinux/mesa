@@ -758,8 +758,8 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    /* Mesh shaders have written their records as compute. */
    struct hk_api_shader *mesh = gfx->shaders[MESA_SHADER_MESH];
    if (native_grid) {
-      mesh = hk_api_shader_native(mesh);
-      if (!mesh)
+      mesh = hk_api_shader_native(mesh ?: gs);
+      if (!mesh || (gs && !hk_apple9_native_gs_enabled()))
          UNSUPPORTED();
    }
    /* Without an API fragment shader, the null program only applies the API
@@ -779,15 +779,15 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
          UNSUPPORTED();
    }
    shaders[0] =
-      mesh  ? &mesh->variants[native_grid ? HK_MESH_VARIANT_MAIN
-                                         : HK_MESH_VARIANT_RAST]
+      native_grid ? hk_native_producer_main(mesh)
+      : mesh ? &mesh->variants[HK_MESH_VARIANT_RAST]
       : gs  ? &gs->variants[HK_GS_VARIANT_RAST]
       : tes ? &tes->variants[HK_VS_VARIANT_HW]
             : hk_any_variant(gfx->shaders[MESA_SHADER_VERTEX]);
    shaders[1] = hk_any_variant(null_trivial ? dev->null_fs_trivial
                                            : fragment_api ?: dev->null_fs);
    if (native_grid &&
-       (!mesh || gfx->shaders[MESA_SHADER_TASK] || gs || tes ||
+       (!mesh || gfx->shaders[MESA_SHADER_TASK] || tes ||
         shaders[0]->info.apple9_native_stage != HK_APPLE9_NATIVE_MESH ||
         dyn->rs.polygon_mode != VK_POLYGON_MODE_FILL ||
         gfx->render.view_mask))
@@ -1256,7 +1256,7 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    if (native_grid) {
       uint32_t state[AGX_APPLE9_MESH_STATE_WORDS];
       const uint32_t object_groups[] = {1, 1, 1};
-      const struct hk_shader *object = &mesh->variants[HK_MESH_VARIANT_OBJECT];
+      const struct hk_shader *object = hk_native_producer_object(mesh);
       const uint32_t object_local_size[] = {
          object->b.info.workgroup_size[0], object->b.info.workgroup_size[1],
          object->b.info.workgroup_size[2],

@@ -11,6 +11,8 @@
 /* Explicit userspace/kernel development pairing. The stable UAPI has no
  * native-mesh capability bit; enabling this requires the matching kernel. */
 bool hk_apple9_native_mesh_enabled(void);
+/* Separate default-off GS route; also requires native mesh and exact classes. */
+bool hk_apple9_native_gs_enabled(void);
 bool hk_apple9_native_mesh_attributes_enabled(void);
 bool hk_apple9_native_mesh_primitive_lowering_enabled(void);
 

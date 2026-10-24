@@ -34,6 +34,14 @@
 #define HK_APPLE9_DRAW_PARAMS_BINDING 65
 #define HK_APPLE9_VERTEX_BUFFERS_BINDING 66
 
+/* Compiler-only research: no native GS draw routing is enabled. */
+struct hk_apple9_graphics_key;
+nir_shader *hk_nir_gs_mesh(const nir_shader *source, const char **reason);
+bool hk_apple9_compile_gs_mesh_program(
+   const nir_shader *source, const struct hk_apple9_graphics_key *key,
+   struct agx_shader_part *out, struct agx_apple9_mesh_body_info *info,
+   const char **reason);
+
 struct hk_physical_device;
 struct hk_pipeline_compilation_ctx;
 struct vk_descriptor_set_layout;
@@ -372,6 +380,11 @@ enum hk_gs_variant {
    HK_GS_VARIANT_PRE,
 
    HK_GS_VARIANTS,
+
+   /* A native GS leaf retains its API stage, but owns mesh and object code.
+    * These names must never be used for the compute/raster realization. */
+   HK_GS_VARIANT_NATIVE_MESH = HK_GS_VARIANT_RAST,
+   HK_GS_VARIANT_NATIVE_OBJECT = HK_GS_VARIANT_MAIN,
 };
 
 enum hk_mesh_variant {
@@ -512,6 +525,26 @@ hk_api_shader_native(const struct hk_api_shader *shader)
       return NULL;
    return shader->apple9_native_leaf ? (struct hk_api_shader *)shader
                                      : shader->apple9_native;
+}
+
+static inline struct hk_shader *
+hk_native_producer_main(struct hk_api_shader *shader)
+{
+   assert(shader->vk.stage == MESA_SHADER_MESH ||
+          shader->vk.stage == MESA_SHADER_GEOMETRY);
+   return &shader->variants[shader->vk.stage == MESA_SHADER_GEOMETRY
+                               ? HK_GS_VARIANT_NATIVE_MESH
+                               : HK_MESH_VARIANT_MAIN];
+}
+
+static inline struct hk_shader *
+hk_native_producer_object(struct hk_api_shader *shader)
+{
+   assert(shader->vk.stage == MESA_SHADER_MESH ||
+          shader->vk.stage == MESA_SHADER_GEOMETRY);
+   return &shader->variants[shader->vk.stage == MESA_SHADER_GEOMETRY
+                               ? HK_GS_VARIANT_NATIVE_OBJECT
+                               : HK_MESH_VARIANT_OBJECT];
 }
 
 struct vk_graphics_pipeline_state;

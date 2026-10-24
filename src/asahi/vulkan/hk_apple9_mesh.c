@@ -6,6 +6,13 @@
 #include <string.h>
 
 DEBUG_GET_ONCE_BOOL_OPTION(native_mesh, "HK_APPLE9_NATIVE_MESH", false)
+DEBUG_GET_ONCE_BOOL_OPTION(native_gs, "HK_APPLE9_GS_NATIVE", false)
+
+bool
+hk_apple9_native_gs_enabled(void)
+{
+   return hk_apple9_native_mesh_enabled() && debug_get_option_native_gs();
+}
 /* Qualified attribute/P1 support belongs to the opt-in native path. These
  * switches remain available for explicit comparisons within that path. */
 DEBUG_GET_ONCE_BOOL_OPTION(native_mesh_attributes, "HK_APPLE9_NATIVE_MESH_ATTRIBUTES", true)

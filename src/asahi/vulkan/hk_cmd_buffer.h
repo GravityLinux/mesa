@@ -1529,6 +1529,7 @@ void hk_apple9_unpin_entries(struct hk_cmd_buffer *cmd);
  * indirect arguments). */
 bool hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool reads_buffers,
                              bool native_mesh);
+bool hk_apple9_use_native_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw);
 bool hk_apple9_use_native_mesh(struct hk_cmd_buffer *cmd, const uint32_t *direct,
                                 uint64_t count_addr);
 void hk_apple9_draw_native_mesh(struct hk_cmd_buffer *cmd, uint32_t draw_id,
