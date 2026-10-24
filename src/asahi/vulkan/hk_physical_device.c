@@ -1994,6 +1994,8 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
    pdev->render_dev = render_dev;
    pdev->dev.fd = fd;
    pdev->dev.native_mesh_classes = hk_apple9_native_index_class_hash();
+   /* Logical devices open their own agx_device, see hk_CreateDevice. */
+   pdev->dev.probe_only = true;
 
    if (!agx_open_device(NULL, &pdev->dev)) {
       /* Fail silently, for virtgpu */

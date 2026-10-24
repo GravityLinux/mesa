@@ -817,8 +817,12 @@ agx_open_device(void *memctx, struct agx_device *dev)
       util_vma_heap_init(&dev->apple9_entry_heap, AGX_APPLE9_ENTRY_HEADER_SIZE,
                         AGX_APPLE9_ENTRY_ARENA_SIZE - AGX_APPLE9_ENTRY_HEADER_SIZE);
       dev->apple9_entry_heap.alloc_high = false;
-      /* Entry instructions are CPU-authored and GPU-read-only. The same
-       * mapping remains installed for every graphics and compute job. */
+   }
+
+   /* Entry instructions are CPU-authored and GPU-read-only. The same mapping
+    * remains installed for every graphics and compute job. */
+   if ((dev->chip == AGX_CHIP_G16G || dev->chip == AGX_CHIP_G17P) &&
+       !dev->probe_only) {
       dev->apple9_entries =
          agx_bo_create(dev, AGX_APPLE9_ENTRY_ARENA_SIZE,
                        AGX_APPLE9_ENTRY_ARENA_SIZE,
