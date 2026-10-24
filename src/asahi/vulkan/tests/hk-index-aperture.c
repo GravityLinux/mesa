@@ -13,7 +13,7 @@ __wrap_hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
                           enum libagx_program idx, void *data, size_t size)
 {
    CHECK(barrier & AGX_PREGFX);
-   if (idx == LIBAGX_WRITE_U32)
+   if (idx == LIBAGX_HEAP_RESET)
       resets++;
    else
       copies++;
@@ -34,6 +34,8 @@ main(void)
    dev->dev.chip = AGX_CHIP_G16G;
    dev->dev.shader_base = base;
    dev->heap = &bo;
+   dev->heap_va = &va;
+   va.size_B = bo.size;
    dev->heap_init_once.called = true;
    dev->rodata.heap = (uintptr_t)&heap;
    cmd->vk.base.device = &dev->vk;

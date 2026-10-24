@@ -192,13 +192,46 @@ poly_heap_alloc_points(constant struct poly_tess_params *p, uint patch,
       atomic_fetch_add((volatile atomic_uint *)(p->statistic), count);
    }
 
+   /* A patch whose points do not fit writes them to the heap's sink, and
+    * poly_tess_patch_finish collapses its indices.
+    */
    uint32_t elsize_B = sizeof(struct poly_tess_point);
-   uint32_t alloc_B = poly_heap_alloc_offs(p->heap, elsize_B * count);
+   uint32_t alloc_B;
+   if (!poly_heap_try_alloc_offs(p->heap, elsize_B * count, &alloc_B))
+      alloc_B = p->heap->size;
    uint32_t alloc_el = alloc_B / elsize_B;
 
    p->coord_allocs[patch] = alloc_el;
    return (global struct poly_tess_point *)(((uintptr_t)p->heap->base) +
                                             alloc_B);
+}
+
+/* Whether to skip a patch: in the emit pass, a draw whose index buffer did not
+ * fit was dropped with a zero count, see libagx_tess_alloc_draw.
+ */
+static inline bool
+poly_tess_patch_dropped(constant struct poly_tess_params *p,
+                        enum poly_tess_mode mode)
+{
+   return mode == POLY_TESS_MODE_WITH_COUNTS && !p->index_buffer;
+}
+
+/* After the emit pass of a patch whose domain points went to the sink: repeat
+ * its first index, so that it draws only degenerate primitives (points mode
+ * draws one point).
+ */
+static inline void
+poly_tess_patch_finish(constant struct poly_tess_params *p, uint patch,
+                       enum poly_tess_mode mode)
+{
+   if (mode != POLY_TESS_MODE_WITH_COUNTS ||
+       p->coord_allocs[patch] * sizeof(struct poly_tess_point) !=
+          p->heap->size)
+      return;
+
+   uint start = patch ? p->counts[patch - 1] : 0;
+   for (uint i = start + 1; i < p->counts[patch]; ++i)
+      p->index_buffer[i] = p->index_buffer[start];
 }
 
 // Microsoft D3D11 Fixed Function Tessellator Reference - May 7, 2012

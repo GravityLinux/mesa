@@ -27,21 +27,30 @@ libagx_tess_isoline(constant struct poly_tess_params *p,
                     enum poly_tess_mode mode__2)
 {
    uint patch = cl_global_id.x;
+   if (poly_tess_patch_dropped(p, mode__2))
+      return;
    poly_tess_isoline_process(p, patch, mode__2);
+   poly_tess_patch_finish(p, patch, mode__2);
 }
 
 KERNEL(64)
 libagx_tess_tri(constant struct poly_tess_params *p, enum poly_tess_mode mode__2)
 {
    uint patch = cl_global_id.x;
+   if (poly_tess_patch_dropped(p, mode__2))
+      return;
    poly_tess_tri_process(p, patch, mode__2);
+   poly_tess_patch_finish(p, patch, mode__2);
 }
 
 KERNEL(64)
 libagx_tess_quad(constant struct poly_tess_params *p, enum poly_tess_mode mode__2)
 {
    uint patch = cl_global_id.x;
+   if (poly_tess_patch_dropped(p, mode__2))
+      return;
    poly_tess_quad_process(p, patch, mode__2);
+   poly_tess_patch_finish(p, patch, mode__2);
 }
 
 /* The draw of a folded dispatch that workgroup group belongs to: the last one
@@ -71,9 +80,12 @@ libagx_tess_fold_find(constant struct libagx_tess_fold_draw *draws,
       uint patch = (cl_group_id.x - draws[d].first_group) *                    \
                       LIBAGX_TESS_FOLD_GROUP +                                 \
                    cl_local_id.x;                                              \
-      if (patch < draws[d].nr_patches)                                         \
-         process((constant struct poly_tess_params *)draws[d].p, patch,       \
-                 mode__2);                                                     \
+      constant struct poly_tess_params *p =                                    \
+         (constant struct poly_tess_params *)draws[d].p;                       \
+      if (patch < draws[d].nr_patches && !poly_tess_patch_dropped(p, mode__2)) {\
+         process(p, patch, mode__2);                                           \
+         poly_tess_patch_finish(p, patch, mode__2);                            \
+      }                                                                        \
    }
 
 TESS_FOLD_KERNEL(libagx_tess_isoline_fold, poly_tess_isoline_process)

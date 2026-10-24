@@ -129,7 +129,8 @@ poly_work_group_first_true(bool cond, local void *scratch)
 /*
  * When unrolling the index buffer for a draw, we translate the old indirect
  * draws to new indirect draws. This routine allocates the new index buffer and
- * sets up most of the new draw descriptor.
+ * sets up most of the new draw descriptor, or returns zero if the heap is
+ * exhausted.
  */
 static inline global void *
 poly_setup_unroll_for_draw(global struct poly_heap *heap,
@@ -150,7 +151,9 @@ poly_setup_unroll_for_draw(global struct poly_heap *heap,
     * TODO: For multidraw, should be atomic. But multidraw+unroll isn't
     * currently wired up in any driver.
     */
-   uint old_heap_bottom_B = poly_heap_alloc_offs(heap, alloc_size);
+   uint old_heap_bottom_B = 0;
+   if (!poly_heap_try_alloc_offs(heap, alloc_size, &old_heap_bottom_B))
+      return 0;
 
    /* Setup most of the descriptor. Count will be determined after unroll. */
    uint vertex_offset_idx = in_index_size_B > 0 ? 3 : 2;
@@ -194,6 +197,15 @@ poly_unroll_geometry(global uint32_t *out_draw,
       out_ptr = *(uintptr_t *)scratch;
    } else {
       out_ptr = sub_group_broadcast(out_ptr, 0);
+   }
+
+   /* An exhausted heap draws nothing: no instances, no indices. */
+   if (!out_ptr) {
+      if (tid == 0) {
+         for (uint i = 0; i < 5; ++i)
+            out_draw[i] = 0;
+      }
+      return;
    }
 
    uintptr_t in_ptr = (uintptr_t)(poly_index_buffer(

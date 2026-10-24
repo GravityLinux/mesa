@@ -144,9 +144,19 @@ struct hk_device {
     *
     * Control streams accessing the heap must be serialized. This is not
     * expected to be a legitimate problem. If it is, we can rework later.
+    *
+    * Recorded draws address the heap by its fixed VA range, backed from its
+    * start by the heap BO. Submissions using the heap hold heap_lock, under
+    * which hk_heap_prepare_submit grows the backing. heap_overflows counts
+    * the new maxima of what the heap needed past its backing (draws were
+    * dropped), heap_reported_B is the last such maximum.
     */
+   struct agx_va *heap_va;
    struct agx_bo *heap;
    util_once_flag heap_init_once;
+   simple_mtx_t heap_lock;
+   uint32_t heap_overflows;
+   uint64_t heap_reported_B;
    struct agx_bo *mesh_heap;
    util_once_flag mesh_heap_init_once;
 

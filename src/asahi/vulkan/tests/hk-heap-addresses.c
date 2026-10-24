@@ -8,7 +8,7 @@
 
 static unsigned failures;
 static unsigned resets;
-static struct libagx_write_u32_args reset;
+static struct libagx_heap_reset_args reset;
 
 #define CHECK(c)                                                               \
    do {                                                                        \
@@ -27,10 +27,10 @@ __wrap_hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
                            enum agx_barrier barrier, enum libagx_program idx,
                            void *data, size_t size)
 {
-   if (idx == LIBAGX_WRITE_U32) {
+   if (idx == LIBAGX_HEAP_RESET) {
       CHECK(size == sizeof(reset));
       CHECK(barrier == (AGX_BARRIER_ALL | AGX_PREGFX));
-      reset = *(struct libagx_write_u32_args *)data;
+      reset = *(struct libagx_heap_reset_args *)data;
       resets++;
    }
    struct hk_cs **target =
@@ -67,6 +67,8 @@ main(void)
    struct poly_heap heap = {.base = va.addr, .size = bo.size};
    dev->dev.chip = AGX_CHIP_G16G;
    dev->heap = &bo;
+   dev->heap_va = &va;
+   va.size_B = bo.size;
    dev->heap_init_once.called = true;
    dev->rodata.heap = (uintptr_t)&heap;
    cmd->vk.base.device = &dev->vk;
@@ -117,7 +119,7 @@ main(void)
       CHECK(hk_heap(cmd) == descriptors[render]);
       CHECK(cmd->current_cs.pre_gfx && !cmd->current_cs.post_gfx);
       CHECK(!cmd->sync_fallback && resets == render + 1);
-      CHECK(reset.address == descriptors[render] + offsetof(struct poly_heap, bottom) && reset.value == 0);
+      CHECK(reset.heap == descriptors[render]);
       for (unsigned i = 0; i < render; ++i)
          CHECK(descriptors[i] == descriptors[render]);
 

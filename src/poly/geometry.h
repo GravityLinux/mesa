@@ -107,39 +107,99 @@ poly_gs_index_size(enum poly_gs_shape shape)
    }
 }
 
-/* Heap to allocate from. */
+/* Heap to allocate from.
+ *
+ * bottom counts allocated POLY_HEAP_UNIT_B units, including allocations that
+ * did not fit: after the heap's users have run, it holds what they needed, and
+ * 32 bits of units do not wrap below 64 GiB, however many allocations fail
+ * concurrently. high_water is the largest bottom before a poly_heap_reset, so
+ * that a driver can size the heap for later work. size is in bytes, and every
+ * heap reserves POLY_HEAP_SINK_B more bytes after it, which allocations that
+ * cannot fail before writing (tessellator domain points) use when they do.
+ */
 struct poly_heap {
    DEVICE(uchar) base;
    uint32_t bottom, size;
+   uint32_t high_water, pad;
 } PACKED;
-static_assert(sizeof(struct poly_heap) == 4 * 4,
-              "struct poly_heap must be 4 words");
+static_assert(sizeof(struct poly_heap) == 6 * 4,
+              "struct poly_heap must be 6 words");
+
+#define POLY_HEAP_UNIT_B 16
+
+/* The domain points of the largest patch: 65 x 65 points of 8 bytes. */
+#define POLY_HEAP_SINK_B (64 * 1024)
+
+/* Bytes a heap needed so far, from the CPU: the largest of high_water and the
+ * current bottom. */
+static inline uint64_t
+poly_heap_needed_B(const struct poly_heap *heap)
+{
+   uint32_t units =
+      heap->bottom > heap->high_water ? heap->bottom : heap->high_water;
+   return (uint64_t)units * POLY_HEAP_UNIT_B;
+}
 
 #ifdef __OPENCL_VERSION__
+/* Allocate size_B bytes, returning their offset in *offs_B, or return false
+ * when the heap is exhausted. A failed allocation still counts in bottom.
+ */
+static inline bool
+poly_heap_try_alloc_offs(global struct poly_heap *heap, uint size_B,
+                         uint *offs_B)
+{
+   uint units = (size_B / POLY_HEAP_UNIT_B) + ((size_B % POLY_HEAP_UNIT_B) != 0);
+   uint first =
+      atomic_fetch_add((volatile atomic_uint *)(&heap->bottom), units);
+
+   if (((uint64_t)first + units) * POLY_HEAP_UNIT_B > heap->size)
+      return false;
+
+   *offs_B = first * POLY_HEAP_UNIT_B;
+   return true;
+}
+
+/* As poly_heap_try_alloc_offs, returning the allocation or zero. */
+static inline global void *
+poly_heap_try_alloc(global struct poly_heap *heap, uint size_B)
+{
+   uint offs_B;
+   if (!poly_heap_try_alloc_offs(heap, size_B, &offs_B))
+      return 0;
+
+   return heap->base + offs_B;
+}
+
+/* For allocations that cannot fail, aborting when the heap is exhausted. */
 static inline uint
 poly_heap_alloc_offs(global struct poly_heap *heap, uint size_B)
 {
-   size_B = align(size_B, 16);
-
-   uint offs =
-      atomic_fetch_add((volatile atomic_uint *)(&heap->bottom), size_B);
+   uint offs_B;
 
    /* Use printf+abort because assert is stripped from release builds. */
-   if (heap->bottom >= heap->size) {
-      printf(
-         "FATAL: GPU heap overflow, allocating size %u, at offset %u, heap size %u!",
-         size_B, offs, heap->size);
+   if (!poly_heap_try_alloc_offs(heap, size_B, &offs_B)) {
+      printf("FATAL: GPU heap overflow, allocating size %u, heap size %u!",
+             size_B, heap->size);
 
       abort();
    }
 
-   return offs;
+   return offs_B;
 }
 
 static inline global void *
 poly_heap_alloc(global struct poly_heap *heap, uint size_B)
 {
    return heap->base + poly_heap_alloc_offs(heap, size_B);
+}
+
+/* Free every allocation, keeping what they needed in high_water. Run by a
+ * single invocation, ordered after every user of the heap. */
+static inline void
+poly_heap_reset(global struct poly_heap *heap)
+{
+   heap->high_water = max(heap->high_water, heap->bottom);
+   heap->bottom = 0;
 }
 
 uint64_t nir_load_ro_sink_address_poly(void);
@@ -730,21 +790,31 @@ poly_gs_setup_indirect(uint64_t index_buffer, constant uint *draw,
    /* We need to allocate VS and GS count buffers, do so now */
    uint vertex_buffer_size =
       poly_tcs_in_size(vertex_count * instance_count, vs_outputs);
+   bool fits = true;
 
    if (is_prefix_summing) {
-      p->count_buffer = poly_heap_alloc(
+      p->count_buffer = poly_heap_try_alloc(
          heap, p->input_primitives * p->count_buffer_stride);
+      fits &= p->count_buffer != 0;
    }
 
-   vp->output_buffer = (uintptr_t)poly_heap_alloc(heap, vertex_buffer_size);
+   vp->output_buffer = (uintptr_t)poly_heap_try_alloc(heap, vertex_buffer_size);
+   fits &= vp->output_buffer != 0;
 
    vp->outputs = vs_outputs;
 
    if (shape == POLY_GS_SHAPE_DYNAMIC_INDEXED) {
-      const uint32_t index_offset =
-         poly_heap_alloc_offs(heap, p->draw.index_count * 4);
+      uint32_t index_offset = 0;
+      fits &= poly_heap_try_alloc_offs(heap, p->draw.index_count * 4,
+                                       &index_offset);
       p->draw.first_index = index_offset / 4;
       p->output_index_buffer = (global uint *)(heap->base + index_offset);
+   }
+
+   /* An exhausted heap drops the draw like one that cannot fit at all. */
+   if (!fits) {
+      poly_vertex_params_set_draw(vp, 0, 0);
+      poly_geometry_params_set_draw(p, prim, shape, max_indices, 0, 0);
    }
 }
 

@@ -145,6 +145,15 @@ libagx_prefix_sum_geom(constant struct poly_geometry_params *p)
                    p->count_buffer_stride / 4, cl_group_id.x, 1024);
 }
 
+/* Free the geometry heap before its next user, keeping in high_water what
+ * earlier users needed, see hk_heap.
+ */
+KERNEL(1)
+libagx_heap_reset(global struct poly_heap *heap)
+{
+   poly_heap_reset(heap);
+}
+
 /* Allocate the index buffer for the prefix-summed patch counts, write the
  * indexed draw and, if requested, the clipper statistics.
  */
@@ -153,11 +162,18 @@ libagx_tess_alloc_draw(global struct poly_tess_params *p, uint total,
                        global uint *c_prims, global uint *c_invs,
                        uint increment_stats)
 {
-   /* Allocate 4-byte indices */
+   /* Allocate 4-byte indices. An exhausted heap draws nothing, and the emit
+    * pass skips the draw's patches, see poly_tess_patch_dropped.
+    */
    uint32_t elsize_B = sizeof(uint32_t);
-   uint32_t size_B = total * elsize_B;
-   uint alloc_B = poly_heap_alloc_offs(p->heap, size_B);
-   p->index_buffer = (global uint32_t *)(((uintptr_t)p->heap->base) + alloc_B);
+   uint alloc_B = 0;
+   if (poly_heap_try_alloc_offs(p->heap, total * elsize_B, &alloc_B)) {
+      p->index_buffer =
+         (global uint32_t *)(((uintptr_t)p->heap->base) + alloc_B);
+   } else {
+      p->index_buffer = 0;
+      total = 0;
+   }
 
    /* ...and now we can generate the API indexed draw */
    global uint32_t *desc = p->out_draws;

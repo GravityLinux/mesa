@@ -281,6 +281,7 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    cmd->geom_instance_count = 0;
    cmd->uses_heap = false;
    cmd->heap_renders = 0;
+   cmd->heap_min_B = 0;
    cmd->uses_mesh_heap = false;
    cmd->sync_fallback = false;
    cmd->sync_next_group = 0;
