@@ -5507,7 +5507,14 @@ static struct agx_draw hk_apple9_predicate_draw(struct hk_cmd_buffer *cmd,
 /* Direct triangle lists: one mesh group per input triangle and instance,
  * within one grid dimension each. Groups publish in index order, so API
  * primitive order holds. Multiple GS invocations, indexed draws and other
- * topologies need their own input mapping. */
+ * topologies need their own input mapping.
+ *
+ * Native GS/TES draws are direct and exclude conditional rendering and
+ * queries, so no GPU pass writes a native block's words, launch records or
+ * argument words: they are CPU-written before SUBMIT. The kernel may rely on
+ * this to decode native renders without waiting for their producers. Keep it
+ * true (or tell the kernel) before admitting indirect, predicated or queried
+ * native draws. */
 static bool
 hk_apple9_native_gs_state_eligible(struct hk_cmd_buffer *cmd,
                                   struct agx_draw draw)
@@ -5542,7 +5549,9 @@ hk_apple9_native_gs_state_eligible(struct hk_cmd_buffer *cmd,
    return true;
 }
 
-/* Stage 2 admits one direct patch and one instance only. */
+/* Stage 2 admits one direct patch and one instance only. As for GS, native
+ * block words stay CPU-written (hk_apple9_native_gs_state_eligible); the TES
+ * mesh grid itself is GPU-written, but only the object shader reads it. */
 static bool
 hk_apple9_native_tess_state_eligible(struct hk_cmd_buffer *cmd,
                                      struct agx_draw draw)
