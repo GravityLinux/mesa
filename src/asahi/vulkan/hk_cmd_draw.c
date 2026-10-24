@@ -5822,6 +5822,10 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                hk_api_shader_native(gfx->shaders[MESA_SHADER_GEOMETRY]))
                ->info.apple9_native.layout.max_primitives *
             (draw_.b.count[0] / 3) * draw_.b.count[1];
+         /* The software VS writes every vertex of every instance. The grid
+          * bound keeps that buffer small today; check it as fallback does. */
+         if (!hk_sw_vs_outputs_fit(cmd, draw_))
+            return;
          if (hk_apple9_prepare_draw(cmd, true, true))
             hk_apple9_launch_native_gs(cmd, draw_id, draw_);
          return;
