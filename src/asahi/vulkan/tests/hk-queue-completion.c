@@ -30,6 +30,14 @@ static bool alloc_fail;
 
 void *__real_realloc(void *, size_t);
 void *__real_calloc(size_t, size_t);
+void *__wrap_realloc(void *, size_t);
+void *__wrap_calloc(size_t, size_t);
+int __wrap_drmSyncobjCreate(int, uint32_t, uint32_t *);
+int __wrap_drmSyncobjDestroy(int, uint32_t);
+int __wrap_drmSyncobjExportSyncFile(int, uint32_t, int *);
+int __wrap_close(int);
+int __wrap_poll(struct pollfd *, nfds_t, int);
+int __wrap_ioctl(int, unsigned long, ...);
 void *
 __wrap_realloc(void *p, size_t size)
 {
