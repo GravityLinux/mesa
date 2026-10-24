@@ -6,6 +6,7 @@
  */
 #include "hk_feedback.h"
 #include "libagx/query.h"
+#include "util/u_debug.h"
 #include "vulkan/vulkan_core.h"
 #include "agx_helpers.h"
 #include "agx_apple9.h"
@@ -24,6 +25,7 @@
 #include "hk_shader.h"
 #include "libagx_dgc.h"
 #include "libagx_shaders.h"
+#include "libagx/tessellator_fold.h"
 #include "pool.h"
 
 void
@@ -755,6 +757,124 @@ hk_CmdDispatchIndirect(VkCommandBuffer commandBuffer, VkBuffer _buffer,
    dispatch(cmd, agx_grid_indirect(dispatch_addr));
 }
 
+DEBUG_GET_ONCE_BOOL_OPTION(tess_fold, "HK_APPLE9_TESS_FOLD", true)
+
+/* Fold the libagx passes of batched tessellated draws (see tess_batch in
+ * struct hk_cmd_buffer). HK_APPLE9_TESS_FOLD=0 opts out. Air, TES D64 per
+ * render: 3.85 -> 3.51 us/draw emulated, 11.91 -> 11.66 native.
+ */
+bool
+hk_tess_fold_enabled(void)
+{
+   return debug_get_option_tess_fold();
+}
+
+/* HK_APPLE9_RESEARCH_TESS_FOLD_LOG=1 prints each lane flush, so device kits
+ * can check what folded.
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(research_tess_fold_log,
+                           "HK_APPLE9_RESEARCH_TESS_FOLD_LOG", false)
+
+/* Record a libagx program's dispatch into a batch lane. Called while
+ * flushing, so it bypasses hk_dispatch_precomp's stream selection.
+ */
+static void
+hk_tess_fold_dispatch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+                      struct util_dynarray *lane, enum libagx_program idx,
+                      struct agx_grid grid, const void *data, size_t size)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   struct agx_precompiled_shader *prog = agx_get_precompiled(&dev->bg_eot, idx);
+   uint64_t args = hk_pool_upload(cmd, data, size, 8);
+   if (!prog || !prog->apple9 || !args) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      return;
+   }
+
+   cmd->tess_batch.capture = lane;
+   hk_apple9_dispatch(cmd, cs, &prog->bo->apple9_body, &prog->apple9_profile,
+                      grid, args, NULL, NULL);
+   cmd->tess_batch.capture = NULL;
+}
+
+/* Turn the folded draws into lane records: per primitive one count dispatch
+ * (lane 2) and one emit dispatch (lane 4), and one prefix sum of every draw
+ * (lane 3). The draws share one table, grouped by primitive.
+ */
+static void
+hk_tess_fold_flush(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   unsigned n = util_dynarray_num_elements(&cmd->tess_batch.fold,
+                                           struct hk_tess_fold);
+   if (!n)
+      return;
+
+   struct agx_ptr table =
+      hk_pool_alloc(cmd, n * sizeof(struct libagx_tess_fold_draw), 16);
+   if (!table.cpu) {
+      /* The folded draws' indirect draws read counts no pass will write, so
+       * the command buffer must not be submitted.
+       */
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      util_dynarray_clear(&cmd->tess_batch.fold);
+      return;
+   }
+
+   static const enum tess_primitive_mode prims[] = {
+      TESS_PRIMITIVE_TRIANGLES,
+      TESS_PRIMITIVE_QUADS,
+      TESS_PRIMITIVE_ISOLINES,
+   };
+   struct libagx_tess_fold_draw *draws = table.cpu;
+   unsigned start[ARRAY_SIZE(prims)], count[ARRAY_SIZE(prims)];
+   unsigned groups[ARRAY_SIZE(prims)];
+   unsigned d = 0;
+   for (unsigned i = 0; i < ARRAY_SIZE(prims); ++i) {
+      start[i] = d;
+      groups[i] = 0;
+      util_dynarray_foreach(&cmd->tess_batch.fold, struct hk_tess_fold, f) {
+         if (f->prim != prims[i])
+            continue;
+         draws[d++] = (struct libagx_tess_fold_draw){
+            .p = f->params,
+            .first_group = groups[i],
+            .nr_patches = f->nr_patches,
+         };
+         groups[i] += DIV_ROUND_UP(f->nr_patches, LIBAGX_TESS_FOLD_GROUP);
+      }
+      count[i] = d - start[i];
+   }
+   assert(d == n);
+   util_dynarray_clear(&cmd->tess_batch.fold);
+
+   for (unsigned stage = 0; stage < 2; ++stage) {
+      enum poly_tess_mode mode =
+         stage ? POLY_TESS_MODE_WITH_COUNTS : POLY_TESS_MODE_COUNT;
+      struct util_dynarray *lane = &cmd->tess_batch.lane[stage ? 4 : 2];
+
+      for (unsigned i = 0; i < ARRAY_SIZE(prims); ++i) {
+         if (!groups[i])
+            continue;
+
+         uint64_t addr =
+            table.gpu + start[i] * sizeof(struct libagx_tess_fold_draw);
+         struct agx_grid grid = agx_1d(groups[i] * LIBAGX_TESS_FOLD_GROUP);
+         /* The three kernels take the same arguments. */
+         struct libagx_tess_tri_fold_args args = {addr, count[i]};
+         enum libagx_program idx =
+            prims[i] == TESS_PRIMITIVE_TRIANGLES ? LIBAGX_TESS_TRI_FOLD(mode)
+            : prims[i] == TESS_PRIMITIVE_QUADS   ? LIBAGX_TESS_QUAD_FOLD(mode)
+                                                 : LIBAGX_TESS_ISOLINE_FOLD(mode);
+         hk_tess_fold_dispatch(cmd, cs, lane, idx, grid, &args, sizeof(args));
+      }
+   }
+
+   struct libagx_prefix_sum_tess_fold_args args = {table.gpu};
+   hk_tess_fold_dispatch(cmd, cs, &cmd->tess_batch.lane[3],
+                         LIBAGX_PREFIX_SUM_TESS_FOLD, agx_1d(1024 * n), &args,
+                         sizeof(args));
+}
+
 /* Emit the batched tessellation lanes into the pre-gfx stream: each lane's
  * records back to back, then the compute-only barrier, so stage N of every
  * batched draw finishes before stage N+1 of any starts. The stream stays
@@ -768,11 +888,30 @@ hk_tess_batch_flush(struct hk_cmd_buffer *cmd)
 
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_cs *cs = cmd->current_cs.pre_gfx;
+   unsigned draws = cmd->tess_batch.draws;
    cmd->tess_batch.draws = 0;
    if (!cs) {
       for (unsigned i = 0; i < HK_TESS_BATCH_LANES; ++i)
          util_dynarray_clear(&cmd->tess_batch.lane[i]);
+      util_dynarray_clear(&cmd->tess_batch.fold);
       return;
+   }
+
+   unsigned folded = util_dynarray_num_elements(&cmd->tess_batch.fold,
+                                                struct hk_tess_fold);
+   hk_tess_fold_flush(cmd, cs);
+   if (unlikely(debug_get_option_research_tess_fold_log())) {
+      unsigned records[HK_TESS_BATCH_LANES] = {0};
+      for (unsigned l = 0; l < HK_TESS_BATCH_LANES; ++l) {
+         struct util_dynarray *lane = &cmd->tess_batch.lane[l];
+         for (uint8_t *at = lane->data; at < (uint8_t *)lane->data + lane->size;
+              at += 1 + *at)
+            records[l]++;
+      }
+      fprintf(stderr,
+              "HK_TESS_FLUSH draws=%u folded=%u records=%u,%u,%u,%u,%u\n",
+              draws, folded, records[0], records[1], records[2], records[3],
+              records[4]);
    }
 
    for (unsigned l = 0; l < HK_TESS_BATCH_LANES; ++l) {

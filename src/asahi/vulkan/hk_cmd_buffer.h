@@ -727,6 +727,18 @@ struct hk_uploader {
 
 #define HK_TESS_BATCH_LANES 5
 
+/* Most batched tessellated draws folded into one flush */
+#define HK_TESS_FOLD_MAX_DRAWS 256
+
+/* A batched tessellated draw whose libagx passes are folded with those of
+ * the other draws in its batch (see tess_batch in struct hk_cmd_buffer).
+ */
+struct hk_tess_fold {
+   uint64_t params;
+   uint32_t nr_patches;
+   enum tess_primitive_mode prim;
+};
+
 enum hk_upload_last {
    HK_UPLOAD_LAST_DRAW_PARAMS,
    HK_UPLOAD_LAST_VERTEX_BUFFERS,
@@ -900,11 +912,17 @@ struct hk_cmd_buffer {
     * and the lanes are emitted in order into the pre-gfx stream with one
     * compute barrier after each (hk_tess_batch_flush). capture, if set,
     * redirects hk_apple9_dispatch into a lane.
+    *
+    * With folding (hk_tess_fold_enabled, the default), batched draws leave the count,
+    * prefix sum and emit lanes empty and append a struct hk_tess_fold to
+    * fold instead; the flush turns them into one dispatch per stage and
+    * primitive.
     */
    struct {
       struct util_dynarray lane[HK_TESS_BATCH_LANES];
       struct util_dynarray *capture;
       unsigned draws;
+      struct util_dynarray fold;
    } tess_batch;
 
    /* Are we currently inside a vk_meta operation? This alters sample location
@@ -1257,6 +1275,7 @@ hk_cs_destroy(struct hk_cs *cs)
 
 void hk_dispatch_imm_writes(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
 void hk_tess_batch_flush(struct hk_cmd_buffer *cmd);
+bool hk_tess_fold_enabled(void);
 
 /* Record why the next stream end happens, unless a caller already did. */
 static inline void

@@ -9,6 +9,7 @@
 #include "poly/geometry.h"
 #include "poly/prim.h"
 #include "poly/tessellator.h"
+#include "tessellator_fold.h"
 #include "util/macros.h"
 #include "util/u_math.h"
 
@@ -181,11 +182,15 @@ libagx_tess_alloc_draw(global struct poly_tess_params *p, uint total,
    }
 }
 
-KERNEL(1024)
-libagx_prefix_sum_tess(global struct poly_tess_params *p, global uint *c_prims,
-                       global uint *c_invs, uint increment_stats__2)
+/* Prefix sum one draw's patch counts in a 1024-thread workgroup, then
+ * allocate its index buffer and write its draw.
+ */
+static void
+libagx_prefix_sum_tess_draw(local uint *scratch,
+                            global struct poly_tess_params *p,
+                            global uint *c_prims, global uint *c_invs,
+                            uint increment_stats)
 {
-   local uint scratch[32];
    poly_prefix_sum(scratch, p->counts, p->nr_patches, 1 /* words */,
                    0 /* word */, 1024);
 
@@ -198,7 +203,28 @@ libagx_prefix_sum_tess(global struct poly_tess_params *p, global uint *c_prims,
 
    /* The last element of an inclusive prefix sum is the total sum */
    uint total = p->nr_patches > 0 ? p->counts[p->nr_patches - 1] : 0;
-   libagx_tess_alloc_draw(p, total, c_prims, c_invs, increment_stats__2);
+   libagx_tess_alloc_draw(p, total, c_prims, c_invs, increment_stats);
+}
+
+KERNEL(1024)
+libagx_prefix_sum_tess(global struct poly_tess_params *p, global uint *c_prims,
+                       global uint *c_invs, uint increment_stats__2)
+{
+   local uint scratch[32];
+   libagx_prefix_sum_tess_draw(scratch, p, c_prims, c_invs,
+                               increment_stats__2);
+}
+
+/* libagx_prefix_sum_tess of each draw of a folded dispatch, one workgroup
+ * per draw. Folded draws have no statistics.
+ */
+KERNEL(1024)
+libagx_prefix_sum_tess_fold(constant struct libagx_tess_fold_draw *draws)
+{
+   local uint scratch[32];
+   global struct poly_tess_params *p =
+      (global struct poly_tess_params *)draws[cl_group_id.x].p;
+   libagx_prefix_sum_tess_draw(scratch, p, NULL, NULL, 0);
 }
 
 /*
