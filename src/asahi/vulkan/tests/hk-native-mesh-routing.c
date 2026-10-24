@@ -196,7 +196,15 @@ gs_routes(struct hk_cmd_buffer *cmd)
 #undef ADMITTED
       CHECK(!hk_apple9_use_native_gs(cmd, agx_draw_indirect(0x1000)));
       FALLBACK(dyn->ia.primitive_restart_enable, true);
-      FALLBACK(dyn->ia.primitive_topology, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP);
+      /* Triangle strips and fans map corners in the body (hk_nir_gs_mesh). */
+      dyn->ia.primitive_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+      CHECK(hk_apple9_use_native_gs(cmd, draw));
+      dyn->ia.primitive_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
+      CHECK(hk_apple9_use_native_gs(cmd, draw));
+      dyn->ia.primitive_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+      FALLBACK(dyn->ia.primitive_topology, VK_PRIMITIVE_TOPOLOGY_LINE_LIST);
+      FALLBACK(dyn->ia.primitive_topology,
+               VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY);
       FALLBACK(gfx->shaders[MESA_SHADER_TESS_CTRL], gs);
       FALLBACK(gfx->shaders[MESA_SHADER_TESS_EVAL], gs);
       FALLBACK(gfx->shaders[MESA_SHADER_TASK], gs);

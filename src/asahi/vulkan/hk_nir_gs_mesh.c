@@ -105,11 +105,38 @@ struct gs_mesh_state {
     * vertex and primitive slot: workgroup x and 0, 0 unpacked; with packing,
     * x * HK_APPLE9_NATIVE_GS_PACK + lane and the lane's fixed slots. */
    nir_def *primitive, *vertex_base, *primitive_base;
+   /* The draw's triangle-class topology (list, strip or fan) and provoking
+    * mode, as the fallback GS's software input assembly sees them. */
+   nir_def *topology, *flatshade_first;
    nir_variable *position;
    nir_variable *vertices;
    nir_variable *primitives;
    nir_variable *strip;
 };
+
+/* VS output of corner vert (0..2) of triangle prim in a triangle list, strip
+ * or fan, matching poly_vertex_id_for_tri_class. */
+static nir_def *
+tri_class_vertex(nir_builder *b, const struct gs_mesh_state *s, nir_def *prim,
+                 unsigned vert)
+{
+   nir_def *list = nir_iadd_imm(b, nir_imul_imm(b, prim, 3), vert);
+   /* Strip: odd triangles swap the two non-provoking corners. */
+   nir_def *pv = nir_bcsel(b, s->flatshade_first, nir_imm_int(b, 0), nir_imm_int(b, 2));
+   nir_def *keep = nir_ior(b, nir_ieq_imm(b, pv, vert),
+                           nir_ieq_imm(b, nir_iand_imm(b, prim, 1), 0));
+   nir_def *strip = nir_iadd(
+      b, prim,
+      nir_bcsel(b, keep, nir_imm_int(b, vert), nir_isub_imm(b, 3 - vert, pv)));
+   /* Fan: first-provoking rotates the corners; corner 0 is the hub. */
+   nir_def *fan_vert = nir_bcsel(b, s->flatshade_first,
+                                 nir_imm_int(b, (vert + 1) % 3), nir_imm_int(b, vert));
+   nir_def *fan = nir_bcsel(b, nir_ieq_imm(b, fan_vert, 0), nir_imm_int(b, 0),
+                            nir_iadd(b, prim, fan_vert));
+   return nir_bcsel(b, nir_ieq_imm(b, s->topology, MESA_PRIM_TRIANGLE_STRIP), strip,
+                    nir_bcsel(b, nir_ieq_imm(b, s->topology, MESA_PRIM_TRIANGLE_FAN),
+                              fan, list));
+}
 
 static bool
 lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
@@ -180,7 +207,7 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          .align_mul = 4);
       nir_def *vertex =
          nir_iadd(b, nir_imul(b, nir_channel(b, id, 1), verts),
-                  nir_iadd(b, nir_imul_imm(b, s->primitive, 3), intr->src[0].ssa));
+                  tri_class_vertex(b, s, s->primitive, nir_src_as_uint(intr->src[0])));
       /* Stage is still GS here so poly reads the producer's output mask. */
       nir_def_replace(&intr->def, poly_load_per_vertex_input(b, intr, vertex));
       return true;
@@ -224,7 +251,15 @@ hk_nir_gs_mesh(const nir_shader *source, const char **reason)
    nir_builder b = nir_builder_at(nir_before_impl(impl));
    nir_def *lane = nir_load_local_invocation_index(&b);
    nir_def *group = nir_channel(&b, nir_load_workgroup_id(&b), 0);
+   /* The launch passes the draw's topology in geometry parameters. */
+   nir_def *topology = nir_load_global_constant(
+      &b, 1, 32,
+      nir_iadd_imm(&b, nir_load_geometry_param_buffer_poly(&b),
+                   offsetof(struct poly_geometry_params, input_topology)),
+      .align_mul = 4);
    struct gs_mesh_state s = {
+      .topology = topology,
+      .flatshade_first = nir_ieq_imm(&b, nir_load_provoking_last(&b), 0),
       .max_vertices = vertices,
       .primitive = pack > 1 ? nir_iadd(&b, nir_imul_imm(&b, group, pack), lane) : group,
       .vertex_base = pack > 1 ? nir_imul_imm(&b, lane, vertices) : nir_imm_int(&b, 0),
@@ -273,7 +308,9 @@ hk_nir_gs_mesh(const nir_shader *source, const char **reason)
          &b, 1, 32,
          nir_iadd_imm(&b, vp, offsetof(struct poly_vertex_params, grid[0])),
          .align_mul = 4);
-      nir_def *triangles = nir_udiv_imm(&b, verts, 3);
+      nir_def *triangles = nir_bcsel(
+         &b, nir_ieq_imm(&b, topology, MESA_PRIM_TRIANGLES), nir_udiv_imm(&b, verts, 3),
+         nir_usub_sat(&b, verts, nir_imm_int(&b, 2)));
       nir_def *first = nir_imul_imm(&b, group, pack);
       nir_def *live = nir_umin(&b, nir_usub_sat(&b, triangles, first),
                                nir_imm_int(&b, pack));
