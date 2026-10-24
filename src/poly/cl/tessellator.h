@@ -217,8 +217,8 @@ poly_tess_patch_dropped(constant struct poly_tess_params *p,
 }
 
 /* After the emit pass of a patch whose domain points went to the sink: repeat
- * its first index, so that it draws only degenerate primitives (points mode
- * draws one point).
+ * its first index, so that it draws only degenerate primitives. In points mode
+ * that is one stray point, at whatever the sink holds, until the heap grows.
  */
 static inline void
 poly_tess_patch_finish(constant struct poly_tess_params *p, uint patch,

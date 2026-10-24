@@ -2668,7 +2668,8 @@ hk_draw_without_restart(struct hk_cmd_buffer *cmd, struct agx_draw draw,
 /* Whether a vertex-shader pipeline exposes its provoking vertex: through a
  * flat, per-vertex or barycentric fragment input, or a layer or viewport index
  * written by the vertex shader. Primitive ID is not taken from a vertex, and a
- * fragment shader's layer reads zero unless the vertex shader writes it. */
+ * fragment shader's layer reads zero unless the vertex shader writes it. A
+ * vertex-written primitive shading rate would observe it too, once supported. */
 static bool
 hk_apple9_provoking_observed(struct hk_cmd_buffer *cmd)
 {
