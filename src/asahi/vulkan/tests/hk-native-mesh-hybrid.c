@@ -657,11 +657,13 @@ check_tess_programs(struct hk_api_shader **api, bool native, unsigned vertices)
             HK_APPLE9_NATIVE_MESH);
       CHECK(hk_native_producer_object(ng)->info.apple9_native_stage ==
             HK_APPLE9_NATIVE_OBJECT);
+      /* Packed TES evaluates HK_APPLE9_NATIVE_GS_PACK triangles per group. */
+      const bool tes_pack = hk_apple9_native_tes_pack_enabled();
       CHECK(
          hk_native_producer_main(ng)->info.apple9_native.layout.max_vertices ==
-         3);
+         (tes_pack ? 3 * HK_APPLE9_NATIVE_GS_PACK : 3));
       CHECK(hk_native_producer_main(ng)
-               ->info.apple9_native.layout.max_primitives == 1);
+               ->info.apple9_native.layout.max_primitives == (tes_pack ? 17 : 1));
       struct hk_api_shader *nv = hk_api_shader_native(api[MESA_SHADER_VERTEX]);
       CHECK(nv->variants[HK_VS_VARIANT_SW].bo && !nv->writes_memory);
       CHECK(nv->variants[HK_VS_VARIANT_SW].b.info.outputs & VARYING_BIT_POS);

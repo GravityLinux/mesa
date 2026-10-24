@@ -16,6 +16,13 @@ DEBUG_GET_ONCE_OPTION(native_stages, "HK_APPLE9_NATIVE_STAGES", NULL)
 DEBUG_GET_ONCE_BOOL_OPTION(native_gs, "HK_APPLE9_GS_NATIVE", false)
 DEBUG_GET_ONCE_BOOL_OPTION(native_tess, "HK_APPLE9_TESS_NATIVE", false)
 DEBUG_GET_ONCE_BOOL_OPTION(native_gs_pack, "HK_APPLE9_NATIVE_GS_PACK", false)
+DEBUG_GET_ONCE_BOOL_OPTION(native_tes_pack, "HK_APPLE9_NATIVE_TES_PACK", false)
+
+bool
+hk_apple9_native_tes_pack_enabled(void)
+{
+   return debug_get_option_native_tes_pack();
+}
 
 bool
 hk_apple9_native_gs_pack_enabled(void)
@@ -211,6 +218,9 @@ hk_apple9_native_stage_class(mesa_shader_stage stage, unsigned threads,
    if (stage == MESA_SHADER_GEOMETRY && threads == 32 &&
        hk_apple9_native_gs_pack_enabled())
       return hk_apple9_native_gs_packed_class(threads, vertices, primitives);
+   if (stage == MESA_SHADER_TESS_EVAL && threads == 32 &&
+       hk_apple9_native_tes_pack_enabled())
+      return vertices == 3 * HK_APPLE9_NATIVE_GS_PACK && primitives == 17;
    if (threads != 16)
       return false;
    if (stage == MESA_SHADER_GEOMETRY)

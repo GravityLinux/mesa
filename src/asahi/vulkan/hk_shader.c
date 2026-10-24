@@ -242,6 +242,7 @@ hk_hash_apple9_native_mesh_abi(struct mesa_blake3 *ctx)
       hk_apple9_native_gs_enabled(),
       hk_apple9_native_tess_enabled(),
       hk_apple9_native_gs_pack_enabled() ? HK_APPLE9_NATIVE_GS_PACK : 1,
+      hk_apple9_native_tes_pack_enabled() ? HK_APPLE9_NATIVE_GS_PACK : 1,
       1, /* P1 logical workgroups independent of physical output class. */
       2, /* Destination-addressed publication rounds beyond 32 entries. */
    };

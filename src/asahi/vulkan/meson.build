@@ -355,6 +355,10 @@ if with_tests
     args : [files('tests/check-native-stage-policy.py'), native_stage_policy],
     env : ['HK_APPLE9_NATIVE_GS_PACK=1'],
     suite : ['asahi', 'honeykrisp'])
+  test('hk-native-stage-policy-tes-pack', prog_python,
+    args : [files('tests/check-native-stage-policy.py'), native_stage_policy],
+    env : ['HK_APPLE9_NATIVE_TES_PACK=1'],
+    suite : ['asahi', 'honeykrisp'])
   native_index_identity = executable(
     'hk-native-index-identity', 'tests/hk-native-index-identity.c',
     include_directories : [inc_gallium, inc_gallium_aux, inc_include,
