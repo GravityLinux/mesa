@@ -589,6 +589,17 @@ struct hk_cs {
     */
    bool cdm_compute_barrier;
 
+   /* The stream's final full flush, emitted when it ended. Merging the next
+    * CDM stream of the command buffer into this one turns it into a junction
+    * between dispatches of one firmware command.
+    */
+   uint32_t *end_flush;
+
+   /* An indirect grid was fetched before the stream's first full flush, so
+    * the junction in front of it must remain a full flush.
+    */
+   bool head_flushed, head_indirect;
+
    /* Address of the root control stream for the job */
    uint64_t addr;
 
@@ -692,15 +703,27 @@ struct hk_cs {
  * stream to the first one. Must sync with hk_cs.
  */
 static inline void
-hk_cs_merge_cdm(struct hk_cs *a, const struct hk_cs *b)
+hk_cs_merge_cdm(struct hk_cs *a, const struct hk_cs *b, enum agx_chip chip)
 {
    assert(a->type == HK_CS_CDM && b->type == HK_CS_CDM);
    assert(a->cmd == b->cmd);
    assert(!a->timestamp.end.handle);
 
+   /* On G16 the compute-only barrier orders every shader-to-shader dependency
+    * and makes its writes visible, so a junction followed by compute in the
+    * same firmware command needs no drain. Consumers outside it run in later
+    * commands, behind the merged stream's own final flush. The CDM fetches
+    * indirect grids itself; keep the full flush ahead of those.
+    */
+   if (a->end_flush &&
+       (uint8_t *)a->end_flush + AGX_CDM_BARRIER_LENGTH == a->current &&
+       !b->head_indirect && chip == AGX_CHIP_G16G)
+      *a->end_flush = 0x60000160;
+
    agx_cdm_jump(a->current, b->addr);
    a->current = b->current;
    a->stream_linked = true;
+   a->end_flush = b->end_flush;
 
    a->uses_sampler_heap |= b->uses_sampler_heap;
    a->scratch.cs.main |= b->scratch.cs.main;
@@ -1086,6 +1109,13 @@ hk_cmd_use_implicit_sync(struct hk_cmd_buffer *cmd, uint32_t res)
    util_dynarray_append(&cmd->implicit_sync_res, res);
 }
 void hk_cdm_compute_barrier(struct hk_device *dev, struct hk_cs *cs);
+
+static inline void
+hk_cs_note_indirect(struct hk_cs *cs)
+{
+   if (!cs->head_flushed)
+      cs->head_indirect = true;
+}
 uint32_t hk_default_sample_positions(unsigned nr_samples);
 struct vk_sample_locations_state;
 uint32_t hk_pack_ppp_multisamplectrl(const struct vk_sample_locations_state *sl);
@@ -1304,8 +1334,10 @@ hk_cmd_buffer_end_compute_internal(struct hk_cmd_buffer *cmd,
       }
 
       /* Availability at the stream boundary, including the last dispatch. */
-      if (cs->cdm_dirty)
+      if (cs->cdm_dirty) {
+         cs->end_flush = (uint32_t *)cs->current;
          hk_cdm_cache_flush(hk_cmd_buffer_device(cmd), cs);
+      }
    }
 
    *ptr = NULL;
