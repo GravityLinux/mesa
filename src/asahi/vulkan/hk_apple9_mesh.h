@@ -23,6 +23,17 @@ uint64_t hk_apple9_native_index_shapes(void);
 bool hk_apple9_native_gs_enabled(void);
 bool hk_apple9_native_tess_enabled(void);
 
+/* Research (HK_APPLE9_NATIVE_GS_PACK, default off): native GS runs up to
+ * HK_APPLE9_NATIVE_GS_PACK input triangles per T32 mesh group, one GS
+ * invocation per lane, in fixed per-lane output slots (T32 V24/P17 for 3
+ * output vertices, T32 V32/P16 for 4). A packed body is recognised by its
+ * T32 class alone. */
+#define HK_APPLE9_NATIVE_GS_PACK 8
+bool hk_apple9_native_gs_pack_enabled(void);
+/* Whether a GS mesh body's class is one of the two packed layouts. */
+bool hk_apple9_native_gs_packed_class(unsigned threads, unsigned vertices,
+                                      unsigned primitives);
+
 /* Stage policy is narrower than native-index qualification. These bits name
  * the API producer, not the generated mesh/object execution stages. */
 #define HK_APPLE9_NATIVE_GS_BIT (1u << 0)

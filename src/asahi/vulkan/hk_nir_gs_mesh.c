@@ -5,6 +5,7 @@
 #include "compiler/nir/nir_builder.h"
 #include "compiler/nir/nir_control_flow.h"
 #include "poly/geometry.h"
+#include "hk_apple9_mesh.h"
 #include "hk_shader.h"
 
 /* First GS-to-mesh stage: one triangle-list input primitive, one GS
@@ -100,6 +101,10 @@ supported(const nir_shader *s, const char **reason)
 
 struct gs_mesh_state {
    unsigned max_vertices;
+   /* Input triangle within the draw, and this invocation's first output
+    * vertex and primitive slot: workgroup x and 0, 0 unpacked; with packing,
+    * x * HK_APPLE9_NATIVE_GS_PACK + lane and the lane's fixed slots. */
+   nir_def *primitive, *vertex_base, *primitive_base;
    nir_variable *position;
    nir_variable *vertices;
    nir_variable *primitives;
@@ -132,7 +137,7 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          nir_def *p = nir_load_var(b, s->primitives);
          nir_def *n = nir_load_var(b, s->strip);
          nir_store_per_vertex_output(
-            b, nir_load_var(b, s->position), v, nir_imm_int(b, 0),
+            b, nir_load_var(b, s->position), nir_iadd(b, s->vertex_base, v), nir_imm_int(b, 0),
             .write_mask = 15, .src_type = nir_type_float32,
             .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
          nir_push_if(b, nir_uge_imm(b, n, 2));
@@ -141,10 +146,12 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
              * its first two corners; mesh output is an explicit triangle list. */
             nir_def *odd = nir_ine_imm(b, nir_iand_imm(b, n, 1), 0);
             nir_def *a = nir_iadd_imm(b, v, -2), *c = nir_iadd_imm(b, v, -1);
-            nir_def *indices =
-               nir_vec3(b, nir_bcsel(b, odd, c, a), nir_bcsel(b, odd, a, c), v);
+            nir_def *indices = nir_iadd(
+               b, nir_vec3(b, nir_bcsel(b, odd, c, a), nir_bcsel(b, odd, a, c), v),
+               s->vertex_base);
             nir_store_per_primitive_output(
-               b, indices, p, nir_imm_int(b, 0), .write_mask = 7,
+               b, indices, nir_iadd(b, s->primitive_base, p), nir_imm_int(b, 0),
+               .write_mask = 7,
                .src_type = nir_type_uint32,
                .io_semantics = {.location = VARYING_SLOT_PRIMITIVE_INDICES,
                                 .num_slots = 1});
@@ -173,8 +180,7 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          .align_mul = 4);
       nir_def *vertex =
          nir_iadd(b, nir_imul(b, nir_channel(b, id, 1), verts),
-                  nir_iadd(b, nir_imul_imm(b, nir_channel(b, id, 0), 3),
-                           intr->src[0].ssa));
+                  nir_iadd(b, nir_imul_imm(b, s->primitive, 3), intr->src[0].ssa));
       /* Stage is still GS here so poly reads the producer's output mask. */
       nir_def_replace(&intr->def, poly_load_per_vertex_input(b, intr, vertex));
       return true;
@@ -183,12 +189,10 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       nir_def_replace(&intr->def, nir_imm_int(b, 0));
       return true;
    case nir_intrinsic_load_primitive_id:
+      nir_def_replace(&intr->def, s->primitive);
+      return true;
    case nir_intrinsic_load_instance_id:
-      nir_def_replace(
-         &intr->def,
-         nir_channel(
-            b, nir_load_workgroup_id(b),
-            intr->intrinsic == nir_intrinsic_load_instance_id ? 1 : 0));
+      nir_def_replace(&intr->def, nir_channel(b, nir_load_workgroup_id(b), 1));
       return true;
    default:
       return false;
@@ -212,8 +216,20 @@ hk_nir_gs_mesh(const nir_shader *source, const char **reason)
    }
    NIR_PASS(_, nir, nir_lower_returns);
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   unsigned vertices = source->info.gs.vertices_out;
+   /* Packing covers the qualified per-triangle shapes V3/P1 and V4/P2. */
+   const unsigned pack =
+      hk_apple9_native_gs_pack_enabled() && (vertices == 3 || vertices == 4)
+         ? HK_APPLE9_NATIVE_GS_PACK : 1;
+   nir_builder b = nir_builder_at(nir_before_impl(impl));
+   nir_def *lane = nir_load_local_invocation_index(&b);
+   nir_def *group = nir_channel(&b, nir_load_workgroup_id(&b), 0);
    struct gs_mesh_state s = {
-      .max_vertices = source->info.gs.vertices_out,
+      .max_vertices = vertices,
+      .primitive = pack > 1 ? nir_iadd(&b, nir_imul_imm(&b, group, pack), lane) : group,
+      .vertex_base = pack > 1 ? nir_imul_imm(&b, lane, vertices) : nir_imm_int(&b, 0),
+      .primitive_base =
+         pack > 1 ? nir_imul_imm(&b, lane, vertices - 2) : nir_imm_int(&b, 0),
       .position =
          nir_local_variable_create(impl, glsl_vec4_type(), "gs_position"),
       .vertices =
@@ -223,32 +239,87 @@ hk_nir_gs_mesh(const nir_shader *source, const char **reason)
       .strip =
          nir_local_variable_create(impl, glsl_uint_type(), "gs_strip_vertices"),
    };
-   nir_builder b = nir_builder_at(nir_before_impl(impl));
    nir_store_var(&b, s.position, nir_undef(&b, 4, 32), 15);
    nir_store_var(&b, s.vertices, nir_imm_int(&b, 0), 1);
    nir_store_var(&b, s.primitives, nir_imm_int(&b, 0), 1);
    nir_store_var(&b, s.strip, nir_imm_int(&b, 0), 1);
+   nir_cursor after_setup = b.cursor;
    NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower, nir_metadata_none, &s);
-   b.cursor = nir_after_impl(impl);
-   nir_def *p = nir_load_var(&b, s.primitives);
-   nir_def *v = nir_bcsel(&b, nir_ine_imm(&b, p, 0),
-                          nir_load_var(&b, s.vertices), nir_imm_int(&b, 0));
-   nir_set_vertex_and_primitive_count(&b, v, p, nir_imm_int(&b, 0));
 
-   nir_cf_list body;
-   nir_cf_extract(&body, nir_before_impl(impl), nir_after_impl(impl));
-   b.cursor = nir_before_impl(impl);
-   nir_push_if(&b, nir_ieq_imm(&b, nir_load_local_invocation_index(&b), 0));
-   b.cursor = nir_cf_reinsert(&body, b.cursor);
-   nir_pop_if(&b, NULL);
+   if (pack == 1) {
+      b.cursor = nir_after_impl(impl);
+      nir_def *p = nir_load_var(&b, s.primitives);
+      nir_def *v = nir_bcsel(&b, nir_ine_imm(&b, p, 0),
+                             nir_load_var(&b, s.vertices), nir_imm_int(&b, 0));
+      nir_set_vertex_and_primitive_count(&b, v, p, nir_imm_int(&b, 0));
 
-   unsigned vertices = source->info.gs.vertices_out;
+      nir_cf_list body;
+      nir_cf_extract(&body, nir_before_impl(impl), nir_after_impl(impl));
+      b.cursor = nir_before_impl(impl);
+      nir_push_if(&b, nir_ieq_imm(&b, nir_load_local_invocation_index(&b), 0));
+      b.cursor = nir_cf_reinsert(&body, b.cursor);
+      nir_pop_if(&b, NULL);
+   } else {
+      /* Lanes 0..pack-1 run one GS invocation each, for consecutive input
+       * triangles, so publication order is API order. Each owns fixed
+       * slots; primitive slots its GS did not fill become degenerate
+       * triangles on its first vertex, and the group publishes every slot
+       * of its live lanes. */
+      nir_cf_list body;
+      nir_cf_extract(&body, after_setup, nir_after_impl(impl));
+      b.cursor = after_setup;
+      nir_def *vp = nir_load_vertex_param_buffer_poly(&b);
+      nir_def *verts = nir_load_global_constant(
+         &b, 1, 32,
+         nir_iadd_imm(&b, vp, offsetof(struct poly_vertex_params, grid[0])),
+         .align_mul = 4);
+      nir_def *triangles = nir_udiv_imm(&b, verts, 3);
+      nir_def *first = nir_imul_imm(&b, group, pack);
+      nir_def *live = nir_umin(&b, nir_usub_sat(&b, triangles, first),
+                               nir_imm_int(&b, pack));
+      nir_if *active = nir_push_if(&b, nir_ult(&b, lane, live));
+      active->control = nir_selection_control_dont_flatten;
+      b.cursor = nir_cf_reinsert(&body, b.cursor);
+      /* A lane whose GS emitted nothing still publishes its slots: give the
+       * degenerate fill a finite vertex. */
+      nir_push_if(&b, nir_ieq_imm(&b, nir_load_var(&b, s.vertices), 0));
+      nir_store_per_vertex_output(
+         &b, nir_imm_vec4(&b, 0, 0, 0, 1), s.vertex_base, nir_imm_int(&b, 0),
+         .write_mask = 15, .src_type = nir_type_float32,
+         .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+      nir_pop_if(&b, NULL);
+      nir_def *p = nir_load_var(&b, s.primitives);
+      for (unsigned i = 0; i < vertices - 2; ++i) {
+         nir_push_if(&b, nir_ule_imm(&b, p, i));
+         nir_store_per_primitive_output(
+            &b, nir_vec3(&b, s.vertex_base, s.vertex_base, s.vertex_base),
+            nir_iadd_imm(&b, s.primitive_base, i), nir_imm_int(&b, 0),
+            .write_mask = 7, .src_type = nir_type_uint32,
+            .io_semantics = {.location = VARYING_SLOT_PRIMITIVE_INDICES,
+                             .num_slots = 1});
+         nir_pop_if(&b, NULL);
+      }
+      nir_pop_if(&b, active);
+      nir_push_if(&b, nir_ieq_imm(&b, lane, 0));
+      nir_set_vertex_and_primitive_count(
+         &b, nir_imul_imm(&b, live, vertices),
+         nir_imul_imm(&b, live, vertices - 2), nir_imm_int(&b, 0));
+      nir_pop_if(&b, NULL);
+   }
+
    memset(&nir->info.mesh, 0, sizeof(nir->info.mesh));
    nir->info.stage = MESA_SHADER_MESH;
    nir->info.mesh.primitive_type = MESA_PRIM_TRIANGLES;
-   nir->info.mesh.max_vertices_out = vertices;
-   nir->info.mesh.max_primitives_out = vertices - 2;
-   nir->info.workgroup_size[0] = vertices <= 16 ? 16 : 32;
+   if (pack > 1) {
+      /* The qualified classes T32 V24/P17 and T32 V32/P16. */
+      nir->info.mesh.max_vertices_out = pack * vertices;
+      nir->info.mesh.max_primitives_out = vertices == 3 ? 17 : 16;
+      nir->info.workgroup_size[0] = 32;
+   } else {
+      nir->info.mesh.max_vertices_out = vertices;
+      nir->info.mesh.max_primitives_out = vertices - 2;
+      nir->info.workgroup_size[0] = vertices <= 16 ? 16 : 32;
+   }
    nir->info.workgroup_size[1] = nir->info.workgroup_size[2] = 1;
    nir_progress(true, impl, nir_metadata_none);
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);

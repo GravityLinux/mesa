@@ -173,7 +173,8 @@ record(struct hk_device *dev, const char *name, mesa_shader_stage producer,
       struct agx_apple9_mesh_body_info *body = &hk_native_producer_main(n)->info.apple9_native;
       FALLBACK(body->key.physical_threads, 64);
       FALLBACK(body->layout.max_vertices, 16);
-      FALLBACK(body->layout.max_primitives, 16);
+      /* No GS/TES class, packed (P16/P17) or not, publishes 15. */
+      FALLBACK(body->layout.max_primitives, 15);
 #undef FALLBACK
    }
    uint32_t words[256] = {0};
