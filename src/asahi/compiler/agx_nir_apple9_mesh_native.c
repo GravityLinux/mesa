@@ -383,21 +383,32 @@ move_cull_distance(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 /* Mirror each clip-distance store into the private slots, so the linked
  * varying and the rasterizer copy have separate planes and the mesh plane
  * count stays equal to the PPP output count. */
+struct clip_mirror {
+   unsigned distances;
+   bool failed;
+};
+
 static bool
 mirror_clip_distance(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
-   const unsigned *clip = data;
+   struct clip_mirror *clip = data;
    if (intr->intrinsic != nir_intrinsic_store_per_vertex_output)
       return false;
    nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
    if (sem.location != VARYING_SLOT_CLIP_DIST0 && sem.location != VARYING_SLOT_CLIP_DIST1)
       return false;
-   unsigned first = 4 * (sem.location - VARYING_SLOT_CLIP_DIST0 +
-                         nir_src_as_uint(intr->src[2])) + nir_intrinsic_component(intr);
+   /* This pass runs before the general output-IO validator. An unsupported
+    * indirect slot must decline the native path before reading an immediate. */
+   if (!nir_src_is_const(intr->src[2])) {
+      clip->failed = true;
+      return false;
+   }
+   uint64_t first = 4 * ((uint64_t)sem.location - VARYING_SLOT_CLIP_DIST0 +
+                        nir_src_as_uint(intr->src[2])) + nir_intrinsic_component(intr);
    b->cursor = nir_after_instr(&intr->instr);
    u_foreach_bit(c, nir_intrinsic_write_mask(intr)) {
-      unsigned d = first + c;
-      if (d >= *clip)
+      uint64_t d = first + c;
+      if (d >= clip->distances)
          continue;
       nir_io_semantics mirror = {
          .location = AGX_APPLE9_CLIP_MIRROR_SLOT + d / 4, .num_slots = 1,
@@ -505,10 +516,12 @@ agx_nir_lower_apple9_native_mesh(
       if (nir->info.outputs_written &
           BITFIELD64_RANGE(AGX_APPLE9_CLIP_MIRROR_SLOT, 2))
          return fail(reason, "native mesh clip mirror slots are already written");
-      unsigned clip = nir->info.clip_distance_array_size;
+      struct clip_mirror clip = {.distances = nir->info.clip_distance_array_size};
       nir_shader_intrinsics_pass(nir, mirror_clip_distance, nir_metadata_control_flow, &clip);
+      if (clip.failed)
+         return fail(reason, "native mesh linked clip distances require constant slot offsets");
       nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
-      nir->info.clip_distance_array_size = clip;
+      nir->info.clip_distance_array_size = clip.distances;
       nir->info.cull_distance_array_size = 0;
    }
 

@@ -13,6 +13,7 @@
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "%u: %s\n", __LINE__, #c); exit(1); } } while (0)
 
 static unsigned clip_distances, cull_distances;
+static bool dynamic_clip_offset;
 
 static nir_shader *
 source(unsigned logical, unsigned vertices, unsigned primitives, bool attributes,
@@ -47,9 +48,10 @@ source(unsigned logical, unsigned vertices, unsigned primitives, bool attributes
    }
    if (clip_distances + cull_distances) {
       nir_store_per_vertex_output(&b, nir_imm_vec4(&b, 1, -1, .5, 2), i,
-         nir_imm_int(&b, 0), .write_mask = BITFIELD_MASK(MIN2(clip_distances + cull_distances, 4)),
+         dynamic_clip_offset ? nir_iand_imm(&b, i, 1) : nir_imm_int(&b, 0), .write_mask = BITFIELD_MASK(MIN2(clip_distances + cull_distances, 4)),
          .src_type = nir_type_float32,
-         .io_semantics = {.location = VARYING_SLOT_CLIP_DIST0, .num_slots = 1});
+         .io_semantics = {.location = VARYING_SLOT_CLIP_DIST0,
+                          .num_slots = dynamic_clip_offset ? 2 : 1});
       if (clip_distances + cull_distances > 4)
          nir_store_per_vertex_output(&b, nir_imm_vec4(&b, 1, 1, 1, 1), i,
             nir_imm_int(&b, 0), .write_mask = BITFIELD_MASK(clip_distances + cull_distances - 4),
@@ -302,6 +304,19 @@ main(int argc, char **argv)
          free(part.binary);
          ralloc_free(nir);
       }
+      /* Capability probing must reject dynamic clip slots before the mirror
+       * pass reads an immediate. The ordinary IO validator handles this
+       * unsupported shape, but runs after mirror construction. */
+      clip_distances = 8;
+      dynamic_clip_offset = true;
+      nir_shader *nir = source(32, 64, 126, false, false);
+      struct hk_apple9_graphics_key key = {.fs_reads_clip_distance = true};
+      const char *why = NULL;
+      bool supported = true;
+      CHECK(hk_apple9_native_mesh_check(nir, &key, &supported, &why) == VK_SUCCESS);
+      CHECK(!supported && why && strstr(why, "constant"));
+      ralloc_free(nir);
+      dynamic_clip_offset = false;
       clip_distances = 0;
    }
    glsl_type_singleton_decref();
