@@ -56,6 +56,7 @@
 #include <time.h>
 
 #include "hk_device.h"
+#include "util/bitscan.h"
 #include "util/u_math.h"
 #include "vk_dispatch_table.h"
 
@@ -117,6 +118,10 @@ static _Atomic uint64_t hk_cpu_last_report;
 int hk_cpu_level;
 static _Atomic uint64_t hk_cpu_gs_draws[4], hk_cpu_gs_prims[4], hk_cpu_gs_slots[4];
 static _Atomic uint64_t hk_cpu_gs_indirect;
+static _Atomic uint64_t hk_cpu_ptgs[HK_CPU_PTGS_COUNT];
+static const char *hk_cpu_ptgs_name[HK_CPU_PTGS_COUNT] = {
+   "xfb", "pg_query", "stipple", "points", "cull_mask", "fs_copies",
+};
 static const char *hk_cpu_gs_shape_name[4] = {"dyn", "idx", "prim", "inst"};
 static _Atomic uint64_t hk_cpu_compile_wall[2], hk_cpu_compile_thread[2];
 static _Atomic uint64_t hk_cpu_compile_calls[2], hk_cpu_compile_max[2];
@@ -206,6 +211,10 @@ hk_cpu_report(bool force)
    if (n < (int)sizeof(line)) {
       n += snprintf(line + n, sizeof(line) - n, " gs_indirect_draws=%" PRIu64,
                     atomic_load(&hk_cpu_gs_indirect));
+   }
+   for (unsigned i = 0; i < HK_CPU_PTGS_COUNT && n < (int)sizeof(line); ++i) {
+      n += snprintf(line + n, sizeof(line) - n, " ptgs_%s=%" PRIu64,
+                    hk_cpu_ptgs_name[i], atomic_load(&hk_cpu_ptgs[i]));
    }
    for (unsigned i = 0; i < HK_CPU_SUB_COUNT && n < (int)sizeof(line); ++i) {
       n += snprintf(line + n, sizeof(line) - n,
@@ -474,6 +483,13 @@ hk_cpu_timing_note_gs_slow(unsigned shape, bool indirect, uint64_t prims,
                              memory_order_relaxed);
    atomic_fetch_add_explicit(&hk_cpu_gs_slots[shape], prims * max_indices,
                              memory_order_relaxed);
+}
+
+void
+hk_cpu_timing_note_ptgs_slow(unsigned reasons)
+{
+   u_foreach_bit(i, reasons)
+      atomic_fetch_add_explicit(&hk_cpu_ptgs[i], 1, memory_order_relaxed);
 }
 
 void

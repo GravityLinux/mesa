@@ -4866,11 +4866,15 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    polygon_points &= !xfb_outputs;
    /* A per-vertex cull mask is the primitive's only for points. */
    bool cull_mask = last_sw->info.cull_mask;
-   bool needs_gs = xfb_outputs || stipple_gs || polygon_points ||
-                   (cull_mask &&
-                    u_reduced_prim(hk_gs_in_prim(cmd)) != MESA_PRIM_POINTS);
+   /* Each reason for a passthrough GS, also counted under HK_CPU_TIMING. */
+   unsigned reasons = (xfb_outputs ? HK_CPU_PTGS_XFB : 0) |
+                      (stipple_gs ? HK_CPU_PTGS_STIPPLE : 0) |
+                      (polygon_points ? HK_CPU_PTGS_POINTS : 0) |
+                      (cull_mask &&
+                             u_reduced_prim(hk_gs_in_prim(cmd)) != MESA_PRIM_POINTS
+                          ? HK_CPU_PTGS_CULL_MASK : 0);
    for (unsigned i = 0; i < ARRAY_SIZE(gfx->pg_query); ++i)
-      needs_gs |= gfx->pg_query[i] != 0;
+      reasons |= gfx->pg_query[i] ? HK_CPU_PTGS_PG_QUERY : 0;
 
    /* ...or to give the fragment shader flat copies of per-vertex inputs */
    struct hk_api_shader *fs_api_copies = gfx->shaders[MESA_SHADER_FRAGMENT];
@@ -4878,14 +4882,15 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
       const struct hk_shader *fs_copies = hk_only_variant(fs_api_copies);
       /* The vertex shader writes the barycentric weights of non-indexed
        * triangle lists when there are no per-vertex inputs. */
-      needs_gs |= fs_copies->info.fs.per_vertex_copies ||
-                  ((fs_copies->info.fs.per_vertex_bary[0] ||
-                    fs_copies->info.fs.per_vertex_bary[1]) &&
-                   !weights_by_vs);
+      if (fs_copies->info.fs.per_vertex_copies ||
+          ((fs_copies->info.fs.per_vertex_bary[0] ||
+            fs_copies->info.fs.per_vertex_bary[1]) &&
+           !weights_by_vs))
+         reasons |= HK_CPU_PTGS_FS_COPIES;
    }
 
    /* If we don't need a GS but we do have a passthrough, unbind it */
-   if (!needs_gs) {
+   if (!reasons) {
       if (gs != NULL) {
          assert(gs->is_passthrough);
          hk_cmd_bind_graphics_shader(cmd, MESA_SHADER_GEOMETRY, NULL);
@@ -4894,6 +4899,7 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    }
 
    /* Else, we need to bind a passthrough GS */
+   hk_cpu_timing_note_ptgs(reasons);
    size_t key_size = poly_passthrough_gs_key_size(xfb_outputs);
    struct poly_passthrough_gs_key *key = alloca(key_size);
 
