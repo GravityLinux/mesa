@@ -155,9 +155,29 @@ gs_routes(struct hk_cmd_buffer *cmd)
       FALLBACK(draw.restart, true);
       FALLBACK(draw.start, 1);
       FALLBACK(draw.start_instance, 1);
-      FALLBACK(draw.b.count[0], 6);
-      FALLBACK(draw.b.count[1], 2);
+      /* Every triangle of a direct list and every instance is one group. */
+#define ADMITTED(field, value)                                                 \
+   do {                                                                        \
+      __typeof__(field) saved = field;                                         \
+      field = value;                                                           \
+      CHECK(hk_apple9_use_native_gs(cmd, draw));                                \
+      field = saved;                                                           \
+   } while (0)
+      ADMITTED(draw.b.count[0], 6);
+      ADMITTED(draw.b.count[0], 3 * HK_APPLE9_NATIVE_MAX_GROUP_COUNT);
+      ADMITTED(draw.b.count[1], 2);
+      ADMITTED(draw.b.count[1], HK_APPLE9_NATIVE_MAX_GROUP_COUNT);
+      FALLBACK(draw.b.count[0], 4);
+      FALLBACK(draw.b.count[0], 2);
+      FALLBACK(draw.b.count[0], 3 * (HK_APPLE9_NATIVE_MAX_GROUP_COUNT + 1));
+      FALLBACK(draw.b.count[1], 0);
+      FALLBACK(draw.b.count[1], HK_APPLE9_NATIVE_MAX_GROUP_COUNT + 1);
       FALLBACK(draw.b.count[2], 2);
+      /* The grid total is bounded separately from each axis. */
+      draw.b.count[0] = 3 * 1024;
+      FALLBACK(draw.b.count[1], 1024);
+      draw.b.count[0] = 3;
+#undef ADMITTED
       CHECK(!hk_apple9_use_native_gs(cmd, agx_draw_indirect(0x1000)));
       FALLBACK(dyn->ia.primitive_restart_enable, true);
       FALLBACK(dyn->ia.primitive_topology, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP);
