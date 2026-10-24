@@ -244,7 +244,7 @@ pipeline(struct hk_device *dev, mesa_shader_stage producer, unsigned vertices,
             if (negative == 3) nir->info.clip_distance_array_size = 1;
             if (negative == 4) nir->info.cull_distance_array_size = 1;
          }
-         if (negative == 9) nir->info.gs.invocations = 2;
+         if (negative == 9) nir->info.gs.invocations = 33; /* above the 32 runs per primitive */
          if (negative == 10) {
             nir_builder b = nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(nir)));
             nir_emit_vertex(&b, .stream_id=1);

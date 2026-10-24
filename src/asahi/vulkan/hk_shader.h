@@ -211,6 +211,9 @@ struct hk_shader_info {
    /* A complete compiler contract, qualified by the gated native uploader.
     * Kept with serialized shader metadata, never inferred from shader bytes. */
    uint8_t apple9_native_stage;
+   /* Native GS mesh bodies: GS invocations per input primitive. Each
+    * (primitive, invocation) is one logical GS run (hk_nir_gs_mesh). */
+   uint8_t apple9_gs_invocations;
    struct agx_apple9_mesh_body_info apple9_native;
 
    uint8_t apple9_render_targets;

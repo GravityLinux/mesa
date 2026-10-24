@@ -5675,6 +5675,9 @@ hk_apple9_launch_native_tess(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       hk_apple9_draw_native_mesh(cmd, draw_id, gfx->tess.out_draws);
 }
 
+static uint32_t hk_apple9_native_gs_groups(const struct hk_cmd_buffer *cmd,
+                                           struct agx_draw draw);
+
 bool
 hk_apple9_use_native_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 {
@@ -5712,14 +5715,17 @@ hk_apple9_use_native_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
              body->layout.max_vertices, body->layout.max_primitives)) &&
           hk_apple9_packed_mesh_class_selected(
              hk_apple9_native_mesh_packed_shapes(), body->key.physical_threads,
-             body->layout.max_vertices, body->layout.max_primitives);
+             body->layout.max_vertices, body->layout.max_primitives) &&
+          /* GS invocations multiply the groups beyond the draw-only bound. */
+          hk_apple9_native_mesh_grid_valid(
+             (const uint32_t[]){hk_apple9_native_gs_groups(cmd, draw), draw.b.count[1], 1});
 }
 
 DEBUG_GET_ONCE_BOOL_OPTION(gs_route_log, "HK_APPLE9_GS_ROUTE_LOG", false)
 
-/* Mesh groups per instance of a native GS draw: one per input triangle, or
- * one per HK_APPLE9_NATIVE_GS_PACK triangles for a packed body, recognised by
- * its exact class (hk_nir_gs_mesh). */
+/* Mesh groups per instance of a native GS draw: one per logical GS run
+ * (input triangle and invocation), or one per HK_APPLE9_NATIVE_GS_PACK runs
+ * for a packed body, recognised by its exact class (hk_nir_gs_mesh). */
 static uint32_t
 hk_apple9_native_gs_groups(const struct hk_cmd_buffer *cmd, struct agx_draw draw)
 {
@@ -5727,13 +5733,16 @@ hk_apple9_native_gs_groups(const struct hk_cmd_buffer *cmd, struct agx_draw draw
    const struct agx_apple9_mesh_body_info *body =
       &hk_native_producer_main(hk_api_shader_native(gfx->shaders[MESA_SHADER_GEOMETRY]))
           ->info.apple9_native;
-   const uint32_t triangles =
-      hk_apple9_native_gs_triangles(&cmd->vk.dynamic_graphics_state, draw);
+   /* One logical GS run per input triangle and GS invocation. */
+   const uint32_t runs =
+      hk_apple9_native_gs_triangles(&cmd->vk.dynamic_graphics_state, draw) *
+      MAX2(hk_native_producer_main(hk_api_shader_native(gfx->shaders[MESA_SHADER_GEOMETRY]))
+              ->info.apple9_gs_invocations, 1);
    bool packed = hk_apple9_native_gs_packed_class(
       body->key.physical_threads, body->layout.max_vertices, body->layout.max_primitives);
    /* Unpacked bodies publish V(n)/P(n-2) (T32 only for n > 16 on the
     * development route), never a packed class, so the class alone decides. */
-   return packed ? DIV_ROUND_UP(triangles, HK_APPLE9_NATIVE_GS_PACK) : triangles;
+   return packed ? DIV_ROUND_UP(runs, HK_APPLE9_NATIVE_GS_PACK) : runs;
 }
 
 static void
