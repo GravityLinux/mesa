@@ -3737,6 +3737,56 @@ hk_apple9_lower_image_barriers(nir_shader *nir)
    nir_progress(true, impl, nir_metadata_control_flow);
 }
 
+/* storageInputOutput16: 16-bit stage inputs and outputs are carried as 32-bit
+ * values at every interface, converting exactly at the access (f16 <-> f32,
+ * 16-bit integers truncated on load and extended on store), as both sides of an
+ * interface are widened alike. Slots and components are unchanged.
+ */
+static bool
+hk_lower_io_16bit_to_32bit(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   switch (intr->intrinsic) {
+   case nir_intrinsic_load_input:
+   case nir_intrinsic_load_per_vertex_input:
+   case nir_intrinsic_load_interpolated_input:
+   case nir_intrinsic_load_per_primitive_input:
+   case nir_intrinsic_load_input_vertex:
+   case nir_intrinsic_load_output:
+   case nir_intrinsic_load_per_vertex_output:
+   case nir_intrinsic_load_per_primitive_output: {
+      if (intr->def.bit_size != 16)
+         return false;
+      nir_alu_type type = nir_intrinsic_dest_type(intr);
+      intr->def.bit_size = 32;
+      nir_intrinsic_set_dest_type(intr, nir_alu_type_get_base_type(type) | 32);
+      b->cursor = nir_after_instr(&intr->instr);
+      nir_def *narrow = nir_alu_type_get_base_type(type) == nir_type_float
+                           ? nir_f2f16(b, &intr->def)
+                           : nir_u2u16(b, &intr->def);
+      nir_def_rewrite_uses_after(&intr->def, narrow);
+      return true;
+   }
+   case nir_intrinsic_store_output:
+   case nir_intrinsic_store_per_vertex_output:
+   case nir_intrinsic_store_per_primitive_output: {
+      nir_def *value = intr->src[0].ssa;
+      if (value->bit_size != 16)
+         return false;
+      nir_alu_type type = nir_intrinsic_src_type(intr);
+      nir_alu_type base = nir_alu_type_get_base_type(type);
+      b->cursor = nir_before_instr(&intr->instr);
+      nir_def *wide = base == nir_type_float ? nir_f2f32(b, value)
+                      : base == nir_type_int  ? nir_i2i32(b, value)
+                                              : nir_u2u32(b, value);
+      nir_src_rewrite(&intr->src[0], wide);
+      nir_intrinsic_set_src_type(intr, base | 32);
+      return true;
+   }
+   default:
+      return false;
+   }
+}
+
 /* Mesh primitives rasterize with their per-primitive builtins as flat varyings
  * of each vertex. User per-primitive varyings are read from the records.
  */
@@ -4092,6 +4142,9 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
             glsl_type_size,
             nir_lower_io_lower_64bit_to_32 |
                nir_lower_io_use_interpolated_input_intrinsics);
+   if (dev->dev.chip == AGX_CHIP_G16G)
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass, hk_lower_io_16bit_to_32bit,
+               nir_metadata_control_flow, NULL);
 
    /* The qualified index profile publishes Position only. It cannot consume
     * per-primitive fragment inputs, so keep their original early lowering.
