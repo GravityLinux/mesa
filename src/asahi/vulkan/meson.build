@@ -53,6 +53,8 @@ hk_files = files(
   'hk_query_pool.h',
   'hk_queue.c',
   'hk_queue.h',
+  'hk_queue_completion.c',
+  'hk_queue_completion.h',
   'hk_sampler.c',
   'hk_sampler.h',
   'hk_shader.c',
@@ -142,6 +144,16 @@ libvulkan_asahi = shared_library(
 )
 
 if with_tests
+  test('hk-queue-completion', executable('hk-queue-completion',
+    ['hk_queue_completion.c', 'tests/hk-queue-completion.c'],
+    include_directories : [inc_src],
+    dependencies : [idep_mesautil, dep_libdrm],
+    link_args : ['-Wl,--wrap=drmSyncobjCreate',
+                 '-Wl,--wrap=drmSyncobjDestroy',
+                 '-Wl,--wrap=drmSyncobjExportSyncFile',
+                 '-Wl,--wrap=poll', '-Wl,--wrap=ioctl', '-Wl,--wrap=close',
+                 '-Wl,--wrap=realloc', '-Wl,--wrap=calloc']),
+    suite : ['asahi', 'honeykrisp'])
   foreach t : ['hk-index-aperture', 'hk-index-memory', 'hk-variant-retry', 'hk-variant-cache', 'hk-texture-upload-failure', 'hk-line-stipple-limit']
     shader_test = executable(t, 'tests/' + t + '.c',
       include_directories : [inc_gallium, inc_gallium_aux, inc_include,
