@@ -151,6 +151,8 @@ if with_tests
     link_args : ['-Wl,--wrap=drmSyncobjCreate',
                  '-Wl,--wrap=drmSyncobjDestroy',
                  '-Wl,--wrap=drmSyncobjExportSyncFile',
+                 '-Wl,--wrap=drmSyncobjTransfer',
+                 '-Wl,--wrap=drmSyncobjWait',
                  '-Wl,--wrap=poll', '-Wl,--wrap=ioctl', '-Wl,--wrap=close',
                  '-Wl,--wrap=realloc', '-Wl,--wrap=calloc']),
     suite : ['asahi', 'honeykrisp'])
