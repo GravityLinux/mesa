@@ -578,6 +578,22 @@ hk_pack_zls_control(struct agx_zls_control_packed *packed,
    agx_pack_zls_control(packed, z_layout, s_layout, &zls);
 }
 
+/* Raw depth/stencil planes keep their compressed layout and metadata, which
+ * marks every tile uncompressed, but ZLS must neither decode nor re-encode
+ * them while the render may sample them.
+ */
+static void
+hk_zls_control_make_raw(struct agx_zls_control_packed *packed)
+{
+   struct agx_zls_control_packed compress;
+   agx_pack(&compress, ZLS_CONTROL, cfg) {
+      cfg.z_load_compress = cfg.z_store_compress = true;
+      cfg.s_load_compress = cfg.s_store_compress = true;
+   }
+   for (unsigned i = 0; i < ARRAY_SIZE(packed->opaque); ++i)
+      packed->opaque[i] &= ~compress.opaque[i];
+}
+
 /* HK_APPLE9_MERGE_RENDERS (default on; =0 disables): continue the hardware render of a
  * render pass in the next render pass when nothing but attachment barriers
  * separates them and both use the same colour attachments. The render covers
@@ -753,6 +769,7 @@ hk_render_suspend_keeps_open(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
       enabled = debug_get_bool_option("HK_APPLE9_MERGE_RESUME", true);
    const struct hk_rendering_state *render = &cmd->state.gfx.render;
    return enabled && cs && !render->feedback && !render->raw_color_mask &&
+          !render->raw_zs &&
           (render->flags & VK_RENDERING_SUSPENDING_BIT) &&
           hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G16G &&
           cmd->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY && !cmd->in_meta &&
@@ -767,7 +784,7 @@ hk_render_merge_end(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    struct hk_rendering_state *render = &cmd->state.gfx.render;
    struct hk_image_view *views[HK_MAX_RTS] = {NULL};
 
-   if (!cs || render->feedback || render->raw_color_mask ||
+   if (!cs || render->feedback || render->raw_color_mask || render->raw_zs ||
        !hk_render_merge_enabled(cmd) ||
        cmd->sync_fallback || cmd->current_cs.pre_gfx ||
        cmd->current_cs.post_gfx || cmd->tess_batch.draws ||
@@ -830,10 +847,12 @@ hk_feedback_color_mask(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
          continue;
       const struct hk_image_view *view = hk_image_view_from_handle(a->imageView);
       const struct hk_image *image = container_of(view->vk.image, struct hk_image, vk);
+      /* Decompression copies view depth/stencil planes as colour. */
+      const struct ail_layout *layout =
+         &image->planes[view->planes[0].image_plane].layout;
       if (!hk_feedback_can_compress(&dev->dev, image->vk.image_type,
                                     image->vk.format, image->vk.samples) ||
-          !ail_is_level_logically_compressed(&image->planes[0].layout,
-                                             view->vk.base_mip_level))
+          !ail_is_level_logically_compressed(layout, view->vk.base_mip_level))
          continue;
       if (cmd->feedback_decompress || hk_attachment_may_be_sampled(a) ||
           (cmd->vk.dynamic_graphics_state.feedback_loops & VK_IMAGE_ASPECT_COLOR_BIT))
@@ -842,28 +861,84 @@ hk_feedback_color_mask(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
    return mask;
 }
 
+/* The depth/stencil view whose compressed planes must be raw in this render,
+ * if any. Sampling either aspect in a feedback loop makes the whole image raw:
+ * its raw state is tracked per image, not per plane.
+ */
+static const struct hk_image_view *
+hk_feedback_zs_view(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   /* Meta renders inherit the application's dynamic feedback state. */
+   if (cmd->in_meta)
+      return NULL;
+   const VkRenderingAttachmentInfo *ds[2] = {info->pDepthAttachment,
+                                             info->pStencilAttachment};
+   const struct hk_image_view *view = NULL;
+   bool sampled = cmd->vk.dynamic_graphics_state.feedback_loops &
+                  (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
+   for (unsigned i = 0; i < ARRAY_SIZE(ds); ++i) {
+      if (ds[i] && ds[i]->imageView) {
+         view = hk_image_view_from_handle(ds[i]->imageView);
+         sampled |= hk_attachment_may_be_sampled(ds[i]);
+      }
+   }
+   if (!view || !sampled)
+      return NULL;
+   const struct hk_image *image = container_of(view->vk.image, struct hk_image, vk);
+   if (!hk_feedback_can_compress(&dev->dev, image->vk.image_type,
+                                 image->vk.format, image->vk.samples))
+      return NULL;
+   for (unsigned p = 0; p < image->plane_count; ++p) {
+      if (ail_is_level_logically_compressed(&image->planes[p].layout,
+                                            view->vk.base_mip_level))
+         return view;
+   }
+   return NULL;
+}
+
+static bool
+hk_feedback_decompress_layers(struct hk_cmd_buffer *cmd,
+                              const VkRenderingInfo *info,
+                              const struct hk_image_view *view)
+{
+   if (info->viewMask) {
+      u_foreach_bit(v, info->viewMask) {
+         if (!hk_meta_decompress_view(cmd, view, view->vk.base_array_layer + v))
+            return false;
+      }
+   } else {
+      for (unsigned v = 0; v < info->layerCount; v++) {
+         if (!hk_meta_decompress_view(cmd, view, view->vk.base_array_layer + v))
+            return false;
+      }
+   }
+   return true;
+}
+
 static bool
 hk_feedback_decompress(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
-                         uint8_t mask)
+                         uint8_t mask, const struct hk_image_view *zs)
 {
    if (cmd->feedback_decompress)
       return true;
    u_foreach_bit(i, mask) {
       const struct hk_image_view *view =
          hk_image_view_from_handle(info->pColorAttachments[i].imageView);
-      if (info->viewMask) {
-         u_foreach_bit(v, info->viewMask) {
-            if (!hk_meta_decompress_color(cmd, view, view->vk.base_array_layer + v))
-               return false;
-         }
-      } else {
-         for (unsigned v = 0; v < info->layerCount; v++) {
-            if (!hk_meta_decompress_color(cmd, view, view->vk.base_array_layer + v))
-               return false;
-         }
-      }
+      if (!hk_feedback_decompress_layers(cmd, info, view))
+         return false;
    }
-   return true;
+   return !zs || hk_feedback_decompress_layers(cmd, info, zs);
+}
+
+static void
+hk_feedback_make_zs_raw(struct hk_rendering_state *render)
+{
+   render->raw_zs = true;
+   hk_zls_control_make_raw(&render->cr.zls_control);
+   hk_zls_control_make_raw(&render->cr.zls_control_partial);
+   hk_zls_control_make_raw(&render->zls_last);
+   hk_zls_control_make_raw(&render->zls_partial_last);
 }
 
 /* Splitting a live render keeps the partial EOT's stores and the partial BG's
@@ -878,7 +953,7 @@ hk_feedback_prepare_draw(struct hk_cmd_buffer *cmd)
 
    struct hk_rendering_state *render = &cmd->state.gfx.render;
    if (!cmd->rendering || cmd->in_meta ||
-       !(cmd->vk.dynamic_graphics_state.feedback_loops & VK_IMAGE_ASPECT_COLOR_BIT))
+       !cmd->vk.dynamic_graphics_state.feedback_loops)
       return true;
    VkRenderingAttachmentInfo attachments[HK_MAX_RTS];
    for (unsigned i = 0; i < render->color_att_count; i++) {
@@ -891,6 +966,16 @@ hk_feedback_prepare_draw(struct hk_cmd_buffer *cmd)
                        ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE,
       };
    }
+   VkRenderingAttachmentInfo zs[2];
+   for (unsigned i = 0; i < 2; i++) {
+      zs[i] = (VkRenderingAttachmentInfo){
+         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+         .imageView = hk_image_view_to_handle(
+            i ? render->stencil_att.iview : render->depth_att.iview),
+         .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+         .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+      };
+   }
    const VkRenderingInfo info = {
       .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
       .renderArea = render->area,
@@ -898,20 +983,26 @@ hk_feedback_prepare_draw(struct hk_cmd_buffer *cmd)
       .viewMask = render->view_mask,
       .colorAttachmentCount = render->color_att_count,
       .pColorAttachments = attachments,
+      .pDepthAttachment = &zs[0],
+      .pStencilAttachment = &zs[1],
    };
    uint8_t mask = hk_feedback_color_mask(cmd, &info) & ~render->raw_color_mask;
-   if (!mask)
+   const struct hk_image_view *zs_view =
+      render->raw_zs ? NULL : hk_feedback_zs_view(cmd, &info);
+   if (!mask && !zs_view)
       return true;
 
    hk_cs_end_hint(cmd, HK_CS_END_RENDER_SPLIT);
    hk_cmd_buffer_end_graphics(cmd);
    struct hk_rendering_state saved = *render;
-   if (!hk_feedback_decompress(cmd, &info, mask))
+   if (!hk_feedback_decompress(cmd, &info, mask, zs_view))
       return false;
    *render = saved;
    cmd->rendering = true;
    render->feedback = true;
    render->raw_color_mask |= mask;
+   if (zs_view)
+      hk_feedback_make_zs_raw(render);
    render->cr.bg.main = render->cr.bg.partial;
    for (unsigned i = 0; i < render->color_att_count; i++)
       render->color_att[i].clear = false;
@@ -950,12 +1041,13 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       return;
 
    uint8_t raw_mask = hk_feedback_color_mask(cmd, pRenderingInfo);
-   if (raw_mask) {
+   const struct hk_image_view *raw_zs = hk_feedback_zs_view(cmd, pRenderingInfo);
+   if (raw_mask || raw_zs) {
       hk_cmd_render_merge_flush(cmd);
-      if (!hk_feedback_decompress(cmd, pRenderingInfo, raw_mask))
+      if (!hk_feedback_decompress(cmd, pRenderingInfo, raw_mask, raw_zs))
          return;
    }
-   if (!cmd->feedback_decompress && raw_mask)
+   if (!cmd->feedback_decompress && (raw_mask || raw_zs))
       cmd->sync_render_continuation = false;
    bool merge = false;
    /* The resuming render pass of a suspended one continues its render. */
@@ -981,7 +1073,8 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
    /* A continued render needs no dependency on itself. */
    cmd->sync_render_continuation =
-      (pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT) != 0 && !resume && !raw_mask;
+      (pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT) != 0 && !resume && !raw_mask &&
+      !raw_zs;
    cmd->sync_render_stages = cmd->sync_scope ?: HK_SYNC_GRAPHICS;
    cmd->state.gfx.render_gen++;
    struct hk_rendering_state *render = &cmd->state.gfx.render;
@@ -1021,6 +1114,11 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       if (!(raw_mask & BITFIELD_BIT(i)))
          hk_feedback_invalidate_view(cmd,
             hk_image_view_from_handle(pRenderingInfo->pColorAttachments[i].imageView));
+   }
+   /* Compressed ZLS stores re-encode the planes' tiles. */
+   for (unsigned i = 0; i < 2 && !raw_zs; i++) {
+      if (ds[i] && ds[i]->imageView)
+         hk_feedback_invalidate_view(cmd, hk_image_view_from_handle(ds[i]->imageView));
    }
    render->view_mask = pRenderingInfo->viewMask;
    render->layer_count = pRenderingInfo->layerCount;
@@ -1277,6 +1375,8 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    hk_pack_zls_control(&render->zls_partial_last, z_layout, s_layout, attach_z,
                        attach_s, incomplete_render_area, true, drop_stores,
                        (resume || merge) ? render->chain_load : NULL);
+   if (raw_zs)
+      hk_feedback_make_zs_raw(render);
 
    /* If multiview is disabled, always read 0. If multiview is enabled,
     * hk_set_view_index will dirty the root each draw.

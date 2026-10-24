@@ -43,12 +43,33 @@ hk_feedback_raw_format(VkFormat format)
    }
 }
 
+/* Depth and stencil planes compress with the colour scheme of their integer
+ * alias (Z32F as R32, Z16 as R16, S8 as R8). They decompress through raw
+ * colour stores of those aliases like colour, and feedback renders keep their
+ * ZLS stores raw.
+ */
+bool
+hk_feedback_is_zs_format(VkFormat format)
+{
+   switch (format) {
+   case VK_FORMAT_D16_UNORM:
+   case VK_FORMAT_D32_SFLOAT:
+   case VK_FORMAT_S8_UINT:
+   case VK_FORMAT_D32_SFLOAT_S8_UINT:
+      return true;
+   default:
+      return false;
+   }
+}
+
 bool
 hk_feedback_can_compress(const struct agx_device *dev, VkImageType type,
                          VkFormat format, unsigned samples)
 {
    return dev->chip == AGX_CHIP_G16G && type == VK_IMAGE_TYPE_2D &&
-          samples == 1 && hk_feedback_raw_format(format) != VK_FORMAT_UNDEFINED;
+          samples == 1 &&
+          (hk_feedback_is_zs_format(format) ||
+           hk_feedback_raw_format(format) != VK_FORMAT_UNDEFINED);
 }
 
 struct hk_feedback_raw {

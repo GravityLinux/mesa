@@ -6,9 +6,9 @@
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "%u: %s\n", __LINE__, #c); abort(); } } while (0)
 static unsigned attempts;
 
-bool __wrap_hk_meta_decompress_color(struct hk_cmd_buffer *, const struct hk_image_view *, unsigned);
+bool __wrap_hk_meta_decompress_view(struct hk_cmd_buffer *, const struct hk_image_view *, unsigned);
 bool
-__wrap_hk_meta_decompress_color(struct hk_cmd_buffer *cmd,
+__wrap_hk_meta_decompress_view(struct hk_cmd_buffer *cmd,
                                const struct hk_image_view *view, unsigned layer)
 {
    attempts++;

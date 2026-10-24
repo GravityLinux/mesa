@@ -261,8 +261,9 @@ hk_can_compress(const struct agx_device *dev, VkFormat format, unsigned plane,
     *
     * Feedback reads can race compressed block writeback even when the read
     * and write texels are disjoint. Keep the allocation ban unless image init
-    * qualified the single-sample G16 colour format for raw feedback stores.
-    * Depth, MSAA, and formats without a bit-preserving view remain banned.
+    * qualified the single-sample G16 colour or depth/stencil format for raw
+    * feedback stores. MSAA, and formats without a bit-preserving view, remain
+    * banned.
     */
    if (usage &
        (VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT | VK_IMAGE_USAGE_STORAGE_BIT |
@@ -799,9 +800,10 @@ hk_can_compress_create_info(struct hk_device *dev, unsigned plane,
    VkImageUsageFlags usage = info->usage;
    if (hk_feedback_can_compress(&dev->dev, info->imageType, info->format,
                                 info->samples)) {
-      /* The render boundary path decompresses these colour subresources and
-       * keeps feedback stores raw. Depth, MSAA, 3D and formats without a
-       * bit-preserving integer compression alias retain 0ac160e1c41's ban.
+      /* The render boundary path decompresses these subresources and keeps
+       * feedback stores raw: PBE stores for colour, ZLS stores for depth and
+       * stencil. MSAA, 3D and colour formats without a bit-preserving integer
+       * compression alias retain 0ac160e1c41's ban.
        */
       usage &= ~VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
    }

@@ -285,6 +285,8 @@ struct hk_rendering_state {
    bool linear_store;
    /* Feedback stores stay raw until the end of this render instance. */
    uint8_t raw_color_mask;
+   /* The depth/stencil planes are raw: ZLS loads and stores uncompressed. */
+   bool raw_zs;
 
    VkRenderingFlagBits flags;
 

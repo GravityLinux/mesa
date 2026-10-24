@@ -242,18 +242,13 @@ hk_meta_end(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
    cmd->merge_move_stage = 0;
 }
 
-/* Render tiles contain whole compression blocks. Every source texel in this
- * self-blit is read before its tile stores, and no tile reads a different tile.
- * Use integer channel aliases: no sRGB, SNORM or floating-point conversion.
- */
-bool
-hk_meta_decompress_color(struct hk_cmd_buffer *cmd,
-                          const struct hk_image_view *view, unsigned layer)
+static inline struct vk_meta_copy_image_properties
+hk_meta_copy_get_image_properties(struct hk_image *img);
+
+static bool
+hk_meta_decompress_hit(struct hk_cmd_buffer *cmd, const struct hk_image *image,
+                       unsigned level, unsigned layer)
 {
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   struct hk_image *image = container_of(view->vk.image, struct hk_image, vk);
-   struct ail_layout *layout = &image->planes[0].layout;
-   unsigned level = view->vk.base_mip_level;
    bool hit = hk_feedback_is_raw(cmd, image, level, layer);
    if (unlikely(hk_cpu_level)) {
       cmd->feedback_stats.calls++;
@@ -261,26 +256,30 @@ hk_meta_decompress_color(struct hk_cmd_buffer *cmd,
          cmd->feedback_stats.hits++;
       } else {
          cmd->feedback_stats.misses++;
-         cmd->feedback_stats.bytes +=
-            (uint64_t)u_minify(image->vk.extent.width, level) *
-            u_minify(image->vk.extent.height, level) *
-            vk_format_get_blocksize(image->vk.format);
+         for (unsigned p = 0; p < image->plane_count; ++p) {
+            cmd->feedback_stats.bytes +=
+               (uint64_t)u_minify(image->vk.extent.width, level) *
+               u_minify(image->vk.extent.height, level) *
+               util_format_get_blocksize(image->planes[p].layout.format);
+         }
       }
    }
-   if (hit)
-      return true;
+   return hit;
+}
 
-   VkFormat raw = hk_feedback_raw_format(image->vk.format);
-   assert(raw != VK_FORMAT_UNDEFINED);
-   const VkImageBlit2 region = {
-      .sType = VK_STRUCTURE_TYPE_IMAGE_BLIT_2,
-      .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, layer, 1},
-      .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, layer, 1},
-      .srcOffsets[1] = {u_minify(image->vk.extent.width, level),
-                        u_minify(image->vk.extent.height, level), 1},
-      .dstOffsets[1] = {u_minify(image->vk.extent.width, level),
-                        u_minify(image->vk.extent.height, level), 1},
-   };
+/* Render tiles contain whole compression blocks. Every source texel in this
+ * self-copy is read before its tile stores, and no tile reads a different
+ * tile. Integer channel aliases avoid sRGB, SNORM or floating-point
+ * conversion; depth and stencil planes are copied through their R32/R16/R8
+ * colour aliases, so all their stores go through the raw PBE path too.
+ */
+static bool
+hk_meta_decompress(struct hk_cmd_buffer *cmd, struct hk_image *image,
+                   unsigned level, unsigned layer)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   const VkExtent3D extent = {u_minify(image->vk.extent.width, level),
+                              u_minify(image->vk.extent.height, level), 1};
    hk_cmd_render_merge_flush(cmd);
    hk_cmd_sync_barrier(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
       VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
@@ -288,9 +287,40 @@ hk_meta_decompress_color(struct hk_cmd_buffer *cmd,
    struct hk_meta_save save;
    cmd->feedback_decompress = true;
    hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS);
-   vk_meta_blit_image(&cmd->vk, &dev->meta,
-      &image->vk, raw, VK_IMAGE_LAYOUT_GENERAL,
-      &image->vk, raw, VK_IMAGE_LAYOUT_GENERAL, 1, &region, VK_FILTER_NEAREST);
+   if (image->vk.aspects & VK_IMAGE_ASPECT_COLOR_BIT) {
+      VkFormat raw = hk_feedback_raw_format(image->vk.format);
+      assert(raw != VK_FORMAT_UNDEFINED);
+      const VkImageBlit2 region = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_BLIT_2,
+         .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, layer, 1},
+         .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, layer, 1},
+         .srcOffsets[1] = {extent.width, extent.height, 1},
+         .dstOffsets[1] = {extent.width, extent.height, 1},
+      };
+      vk_meta_blit_image(&cmd->vk, &dev->meta,
+         &image->vk, raw, VK_IMAGE_LAYOUT_GENERAL,
+         &image->vk, raw, VK_IMAGE_LAYOUT_GENERAL, 1, &region, VK_FILTER_NEAREST);
+   } else {
+      const VkImageCopy2 region = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_COPY_2,
+         .srcSubresource = {image->vk.aspects, level, layer, 1},
+         .dstSubresource = {image->vk.aspects, level, layer, 1},
+         .extent = extent,
+      };
+      const VkCopyImageInfo2 info = {
+         .sType = VK_STRUCTURE_TYPE_COPY_IMAGE_INFO_2,
+         .srcImage = hk_image_to_handle(image),
+         .srcImageLayout = VK_IMAGE_LAYOUT_GENERAL,
+         .dstImage = hk_image_to_handle(image),
+         .dstImageLayout = VK_IMAGE_LAYOUT_GENERAL,
+         .regionCount = 1,
+         .pRegions = &region,
+      };
+      struct vk_meta_copy_image_properties props =
+         hk_meta_copy_get_image_properties(image);
+      vk_meta_copy_image(&cmd->vk, &dev->meta, &info, &props, &props,
+                         VK_PIPELINE_BIND_POINT_GRAPHICS);
+   }
    hk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS);
    cmd->feedback_decompress = false;
    hk_cmd_buffer_end_graphics(cmd);
@@ -298,26 +328,46 @@ hk_meta_decompress_color(struct hk_cmd_buffer *cmd,
       return false;
 
    /* A raw PBE store leaves compression metadata untouched. Publish its new
-    * interpretation only once the blit completed, before any feedback read.
+    * interpretation only once the copy completed, before any feedback read.
     */
-   uint64_t start = layout->level_offsets_compressed_B[level];
-   uint64_t end = level + 1 < layout->levels &&
-                    ail_is_level_allocated_compressed(layout, level + 1)
-                     ? layout->level_offsets_compressed_B[level + 1]
-                     : layout->compression_layer_stride_B;
-   uint64_t mode = ail_tile_mode_uncompressed(layout->format);
-   uint64_t address = hk_image_base_address(image, 0) + layout->metadata_offset_B +
-                      layer * layout->compression_layer_stride_B + start;
-   assert(end >= start && (end - start) % 16 == 0);
-   assert(address % 16 == 0);
-   libagx_fill_uint4(cmd, agx_1d((end - start) / 16), AGX_BARRIER_ALL,
-                     address, 0, mode, mode >> 32, mode, mode >> 32);
+   for (unsigned p = 0; p < image->plane_count; ++p) {
+      struct ail_layout *layout = &image->planes[p].layout;
+      if (!ail_is_level_logically_compressed(layout, level))
+         continue;
+      uint64_t start = layout->level_offsets_compressed_B[level];
+      uint64_t end = level + 1 < layout->levels &&
+                       ail_is_level_allocated_compressed(layout, level + 1)
+                        ? layout->level_offsets_compressed_B[level + 1]
+                        : layout->compression_layer_stride_B;
+      uint64_t mode = ail_tile_mode_uncompressed(layout->format);
+      uint64_t address = hk_image_base_address(image, p) +
+                         layout->metadata_offset_B +
+                         layer * layout->compression_layer_stride_B + start;
+      assert(end >= start && (end - start) % 16 == 0);
+      assert(address % 16 == 0);
+      libagx_fill_uint4(cmd, agx_1d((end - start) / 16), AGX_BARRIER_ALL,
+                        address, 0, mode, mode >> 32, mode, mode >> 32);
+   }
    hk_cmd_buffer_end_compute(cmd);
    hk_cmd_sync_barrier(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
       VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
       VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
    return !vk_command_buffer_has_error(&cmd->vk) &&
           hk_feedback_mark_raw(cmd, image, level, layer);
+}
+
+/* Depth/stencil images decompress every compressed plane, so one raw entry
+ * covers both aspects whichever one the feedback render samples.
+ */
+bool
+hk_meta_decompress_view(struct hk_cmd_buffer *cmd,
+                        const struct hk_image_view *view, unsigned layer)
+{
+   struct hk_image *image = container_of(view->vk.image, struct hk_image, vk);
+   unsigned level = view->vk.base_mip_level;
+   if (hk_meta_decompress_hit(cmd, image, level, layer))
+      return true;
+   return hk_meta_decompress(cmd, image, level, layer);
 }
 
 #define BINDING_OUTPUT 0
