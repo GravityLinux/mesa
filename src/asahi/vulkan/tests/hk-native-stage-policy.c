@@ -142,8 +142,17 @@ record(struct hk_device *dev, const char *name, mesa_shader_stage producer,
    CHECK(!route(cmd, producer, draw)); field = saved; \
    CHECK(route(cmd, producer, draw)); } while (0)
       FALLBACK(draw.indexed, true);
-      FALLBACK(draw.b.count[0], draw.b.count[0] * 2);
-      FALLBACK(draw.b.count[1], 2);
+      if (producer == MESA_SHADER_GEOMETRY) {
+         /* Native GS admits every triangle and instance of a direct list. */
+         struct agx_draw wide = draw;
+         wide.b.count[0] *= 2;
+         wide.b.count[1] = 2;
+         CHECK(route(cmd, producer, wide));
+         FALLBACK(draw.b.count[0], draw.b.count[0] + 1);
+      } else {
+         FALLBACK(draw.b.count[0], draw.b.count[0] * 2);
+         FALLBACK(draw.b.count[1], 2);
+      }
       FALLBACK(draw.start, 1);
       FALLBACK(cmd->state.gfx.render.view_mask, 1);
       FALLBACK(cmd->state.gfx.render.layer_count, 2);

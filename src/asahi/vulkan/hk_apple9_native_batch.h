@@ -35,6 +35,13 @@
        ? HK_APPLE9_BATCH_BLOCK_MAX_B                                           \
        : HK_APPLE9_BATCH_ENSURE_B)
 
+/* Default bound on estimated binned primitives per native render. Calibrated
+ * on the Air (2026-10-24, native-mesh-scale-air-v2): a mesh-mode render of
+ * ~2.75M visible triangles reached the 2193-block TVB cap and lost work, so
+ * stay below it with margin. Estimates count every declared primitive, an
+ * upper bound on what is binned. */
+#define HK_APPLE9_NATIVE_RENDER_PRIMITIVES 1000000ull
+
 /* The paired decoder reads at most 1024 words through the terminator unless
  * the kernel profile says otherwise. */
 #define HK_APPLE9_NATIVE_DECODE_BYTES 4096
@@ -49,6 +56,11 @@ struct hk_apple9_native_profile {
    /* Words the kernel decodes through the terminator (the attribute's
     * words=); 0 means HK_APPLE9_NATIVE_DECODE_BYTES / 4. */
    unsigned words;
+   /* Most estimated binned primitives in one native render; 0 is unbounded.
+    * A mesh-mode render that reaches the TVB cap loses work (unlike an
+    * ordinary render, which recovers through a partial render), so batching
+    * must keep each native render's geometry below it. */
+   uint64_t max_render_primitives;
 };
 
 static inline size_t
@@ -65,6 +77,8 @@ struct hk_apple9_stream_summary {
     * hold without hk_ensure_cs_has_space linking (its padding and link
     * reservation already subtracted). */
    size_t bytes, capacity;
+   /* Estimated binned primitives already in the render. */
+   uint64_t primitives;
 };
 
 struct hk_apple9_draw_summary {
@@ -74,6 +88,8 @@ struct hk_apple9_draw_summary {
    bool mesh, gs, tess;
    /* Repeated-input mode only: the open stream's first programs. */
    bool same_shaders;
+   /* Estimated binned primitives of the draw (UINT64_MAX: unknown). */
+   uint64_t primitives;
 };
 
 static inline bool
@@ -91,6 +107,10 @@ hk_apple9_native_stream_admits(const struct hk_apple9_stream_summary *s,
    size_t decode = hk_apple9_native_decode_bytes(p);
    size_t limit = s->capacity < decode ? s->capacity : decode;
    if (d->xfb || s->bytes + HK_APPLE9_BATCH_RESERVE_B > limit)
+      return false;
+   if (p->max_render_primitives &&
+       (d->primitives > p->max_render_primitives ||
+        s->primitives > p->max_render_primitives - d->primitives))
       return false;
    if (!d->native)
       return p->mixed && !d->mesh && !d->gs && !d->tess;
@@ -113,5 +133,6 @@ hk_apple9_native_profile_from_kernel(const struct agx_native_blocks_support *b,
       .blocks = true,
       .mixed = b->mixed,
       .words = b->words,
+      .max_render_primitives = HK_APPLE9_NATIVE_RENDER_PRIMITIVES,
    };
 }

@@ -368,6 +368,19 @@ hk_apple9_draw_sample_positions(const struct vk_dynamic_graphics_state *dyn,
 DEBUG_GET_ONCE_BOOL_OPTION(native_blocks, "HK_APPLE9_NATIVE_BLOCKS", true)
 DEBUG_GET_ONCE_BOOL_OPTION(native_lanes, "HK_APPLE9_NATIVE_LANES", true)
 DEBUG_GET_ONCE_BOOL_OPTION(native_batch_log, "HK_APPLE9_NATIVE_BATCH_LOG", false)
+DEBUG_GET_ONCE_NUM_OPTION(native_render_primitives, "HK_APPLE9_NATIVE_RENDER_PRIMITIVES",
+                          HK_APPLE9_NATIVE_RENDER_PRIMITIVES)
+
+/* The bound on estimated binned primitives per native render, for batching
+ * and for single native draws (hk_apple9_use_native_mesh). A mesh-mode render
+ * that reaches the TVB cap loses work; HK_APPLE9_NATIVE_RENDER_PRIMITIVES
+ * overrides the calibrated default (research, e.g. a lowered tvb_max_blocks). */
+uint64_t
+hk_apple9_native_render_primitives(void)
+{
+   int64_t v = debug_get_option_native_render_primitives();
+   return v > 0 ? (uint64_t)v : HK_APPLE9_NATIVE_RENDER_PRIMITIVES;
+}
 
 /* The admission profile of this device's VM: its latched asahi_native_blocks
  * profile (sampled around VM_CREATE with asahi_native_mesh, at one
@@ -383,9 +396,12 @@ hk_apple9_native_profile(const struct hk_device *dev)
       return (struct hk_apple9_native_profile){.batch = 1};
    const struct hk_physical_device *pdev =
       hk_device_physical((struct hk_device *)dev);
-   return hk_apple9_native_profile_from_kernel(
+   struct hk_apple9_native_profile p = hk_apple9_native_profile_from_kernel(
       &dev->dev.native_blocks, dev->dev.native_mesh_qualified,
       !debug_get_option_native_blocks() || !pdev || pdev->disable_native_blocks);
+   if (p.max_render_primitives)
+      p.max_render_primitives = hk_apple9_native_render_primitives();
+   return p;
 }
 
 bool
@@ -439,6 +455,7 @@ hk_apple9_native_can_append(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                         cs->root_size < 0x800 + AGX_VDM_STREAM_LINK_LENGTH
                      ? 0
                      : cs->root_size - 0x800 - AGX_VDM_STREAM_LINK_LENGTH,
+      .primitives = cs->apple9_native_primitives,
    };
    struct hk_apple9_draw_summary draw = {
       .native = native,
@@ -451,6 +468,7 @@ hk_apple9_native_can_append(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       .gs = gfx->shaders[MESA_SHADER_GEOMETRY],
       .tess = gfx->shaders[MESA_SHADER_TESS_CTRL] ||
               gfx->shaders[MESA_SHADER_TESS_EVAL],
+      .primitives = cmd->apple9_draw_primitives,
    };
    for (unsigned s = 0; s < HK_APPLE9_GFX_STAGES; ++s)
       draw.writes_memory |= gfx->shaders[s] && gfx->shaders[s]->writes_memory;
@@ -764,6 +782,7 @@ hk_apple9_record_draw(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       cs->current += HK_APPLE9_MESH_COMMAND_BYTES - 4;
       cs->apple9_native_mesh = true;
       ++cs->apple9_native_dispatches;
+      cs->apple9_native_primitives += cmd->apple9_draw_primitives;
       if (!hk_apple9_check_native_block(cmd, cs, before))
          return false;
       if (debug_get_option_native_batch_log())
@@ -775,6 +794,8 @@ hk_apple9_record_draw(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       hk_apple9_emit_ordinary_draw(cs, pipeline, draw);
       if (!hk_apple9_check_native_block(cmd, cs, before))
          return false;
+      if (cs->apple9_native_mesh)
+         cs->apple9_native_primitives += cmd->apple9_draw_primitives;
    }
    return true;
 }
@@ -891,6 +912,8 @@ hk_apple9_try_cached_draw(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    hk_apple9_emit_ordinary_draw(cs, pipeline, draw);
    if (!hk_apple9_check_native_block(cmd, cs, before))
       return true;
+   if (cs->apple9_native_mesh)
+      cs->apple9_native_primitives += cmd->apple9_draw_primitives;
    hk_apple9_account_draw(cs, pipeline, draw, false,
                           cmd->apple9_draw_state.fragment);
    return true;
