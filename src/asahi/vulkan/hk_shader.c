@@ -1405,7 +1405,18 @@ hk_apple9_graphics_key(struct hk_apple9_graphics_key *key,
       blend->color_attachment_unused = blend->format == PIPE_FORMAT_NONE;
       blend->sample_mask_single_sample = true;
       blend->dynamic_sample_positions = true;
-      blend->clamp_early_depth = true;
+      /* A shader-triggered early test (memory writes, discard or depth/stencil
+       * writes with early fragment tests) tests the rasterizer's depth, which
+       * the hardware clamps to [0, 1]. Clipping keeps it within the viewport's
+       * depth range unless depth clamp is enabled, so only then is a clamped
+       * depth export needed. The export tests the shader's interpolated
+       * frag_coord.z, which differs from the rasterizer's depth by a few ULPs:
+       * an EQUAL pass after a depth prepass without such a shader would fail
+       * (Zink EEVEE's G-buffer pass). Draw-time variants see the current
+       * dynamic state; pipelines with dynamic depth clamp keep the export. */
+      blend->clamp_early_depth =
+         !state->rs || state->rs->depth_clamp_enable ||
+         BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_RS_DEPTH_CLAMP_ENABLE);
       blend->early_depth_clamp_ubo = 0;
       blend->early_depth_clamp_offset_B =
          hk_root_descriptor_offset(draw.depth_clamp);
