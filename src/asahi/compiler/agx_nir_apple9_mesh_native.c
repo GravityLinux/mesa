@@ -317,6 +317,114 @@ varying_layout(const struct agx_apple9_mesh_body_info *info,
    return true;
 }
 
+/* Per-vertex cull distances share CLIP_DIST0/1 with the clip distances,
+ * after them. They are not rasterizer outputs on the native path: move them
+ * into compiler-owned shared storage at state->base, one float per vertex
+ * and plane, so the output planes keep matching the PPP output count. */
+struct cull_storage {
+   unsigned clip, cull, base;
+   bool failed;
+};
+
+static bool
+move_cull_distance(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   struct cull_storage *st = data;
+   bool store = intr->intrinsic == nir_intrinsic_store_per_vertex_output;
+   if (!store && intr->intrinsic != nir_intrinsic_load_per_vertex_output &&
+       intr->intrinsic != nir_intrinsic_load_output &&
+       intr->intrinsic != nir_intrinsic_store_output)
+      return false;
+   unsigned location = nir_intrinsic_io_semantics(intr).location;
+   if (location != VARYING_SLOT_CLIP_DIST0 && location != VARYING_SLOT_CLIP_DIST1)
+      return false;
+   nir_src *offset_src = nir_get_io_offset_src(intr);
+   if (!nir_src_is_const(*offset_src)) {
+      st->failed = true;
+      return false;
+   }
+   unsigned first = 4 * (location - VARYING_SLOT_CLIP_DIST0 +
+                         nir_src_as_uint(*offset_src)) +
+                    nir_intrinsic_component(intr);
+   unsigned mask = store ? nir_intrinsic_write_mask(intr)
+                         : BITFIELD_MASK(intr->def.num_components);
+   unsigned cull_mask = 0;
+   u_foreach_bit(c, mask) {
+      if (first + c >= st->clip && first + c < st->clip + st->cull)
+         cull_mask |= BITFIELD_BIT(c);
+   }
+   if (!cull_mask)
+      return false;
+   /* Reading back a cull distance, or writing one from a non-vertex
+    * output, keeps the emulated path. */
+   if (!store) {
+      st->failed = true;
+      return false;
+   }
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *vertex = intr->src[1].ssa;
+   u_foreach_bit(c, cull_mask) {
+      unsigned plane = first + c - st->clip;
+      nir_def *offset = nir_imul_imm(b, nir_iadd_imm(b, nir_imul_imm(b, vertex, st->cull),
+                                                     plane), 4);
+      nir_store_shared(b, nir_channel(b, intr->src[0].ssa, c), offset,
+                       .base = st->base, .align_mul = 4);
+   }
+   if (mask & ~cull_mask)
+      nir_intrinsic_set_write_mask(intr, mask & ~cull_mask);
+   else
+      nir_instr_remove(&intr->instr);
+   return true;
+}
+
+/* A primitive is culled when, for some cull distance, all of its vertices
+ * are negative. Culled primitives become degenerate (i0, i0, i0) before the
+ * index words are published, so they cover no pixels. */
+static void
+cull_primitives(nir_builder *b, const struct agx_apple9_mesh_body_info *info,
+                nir_def *lane, nir_def *primitives, unsigned physical_threads)
+{
+   const struct agx_apple9_mesh_layout *l = &info->layout;
+   unsigned root = info->key.output_root;
+   unsigned cull_B = info->shared_offset_B + info->cull_B;
+   for (unsigned first = 0; first < l->max_primitives; first += physical_threads) {
+      nir_def *p = nir_iadd_imm(b, lane, first);
+      nir_push_if(b, nir_ult(b, p, primitives));
+      nir_def *byte = nir_imul_imm(b, p, 3);
+      nir_def *word = nir_iand_imm(b, byte, ~3);
+      nir_def *shift = nir_imul_imm(b, nir_iand_imm(b, byte, 3), 8);
+      nir_def *lo = nir_load_local_apple9_agx(b, word, .base = root);
+      nir_def *hi = nir_load_local_apple9_agx(b, nir_iadd_imm(b, word, 4), .base = root);
+      nir_def *packed = nir_bcsel(b, nir_ieq_imm(b, shift, 0), lo,
+         nir_ior(b, nir_ushr(b, lo, shift),
+                    nir_ishl(b, hi, nir_isub(b, nir_imm_int(b, 32), shift))));
+      nir_def *v[3];
+      for (unsigned i = 0; i < 3; ++i)
+         v[i] = nir_iand_imm(b, nir_ushr_imm(b, packed, 8 * i), 0xff);
+      nir_def *culled = nir_imm_false(b);
+      for (unsigned d = 0; d < info->cull_distances; ++d) {
+         nir_def *all = nir_imm_true(b);
+         for (unsigned i = 0; i < 3; ++i) {
+            nir_def *offset = nir_iadd_imm(b, nir_imul_imm(b, v[i], 4 * info->cull_distances),
+                                           cull_B + 4 * d);
+            nir_def *value = nir_load_local_apple9_agx(b, offset, .base = root);
+            all = nir_iand(b, all, nir_flt_imm(b, value, 0));
+         }
+         culled = nir_ior(b, culled, all);
+      }
+      nir_push_if(b, culled);
+      for (unsigned i = 1; i < 3; ++i)
+         nir_store_local_apple9_agx(b, v[0], nir_iadd_imm(b, byte, i), .base = root,
+                                    .bit_size = 8);
+      nir_pop_if(b, NULL);
+      nir_pop_if(b, NULL);
+   }
+   nir_barrier(b, .execution_scope = SCOPE_WORKGROUP,
+               .memory_scope = SCOPE_WORKGROUP,
+               .memory_semantics = NIR_MEMORY_ACQ_REL,
+               .memory_modes = nir_var_mem_shared);
+}
+
 bool
 agx_nir_lower_apple9_native_mesh(
    nir_shader *nir, bool enable_native_mesh,
@@ -343,6 +451,22 @@ agx_nir_lower_apple9_native_mesh(
                                     glsl_get_natural_size_align_bytes);
    nir_lower_explicit_io(nir, nir_var_mem_shared, nir_address_format_32bit_offset);
    nir_remove_dead_variables(nir, nir_var_mem_shared, NULL);
+
+   struct cull_storage cull = {
+      .clip = nir->info.clip_distance_array_size,
+      .cull = nir->info.cull_distance_array_size,
+      .base = ALIGN_POT(nir->info.shared_size, 4),
+   };
+   if (cull.cull) {
+      if (!packed_indices || nir->info.mesh.max_vertices_out * cull.cull * 4 >
+                                AGX_APPLE9_MAX_SHARED_BYTES - cull.base)
+         return fail(reason, "native mesh cull distances need packed indices and shared space");
+      nir_shader_intrinsics_pass(nir, move_cull_distance, nir_metadata_control_flow, &cull);
+      if (cull.failed)
+         return fail(reason, "native mesh cull distances must be constant-indexed per-vertex stores");
+      nir->info.shared_size = cull.base + nir->info.mesh.max_vertices_out * cull.cull * 4;
+      nir->info.cull_distance_array_size = 0;
+   }
 
    uint16_t logical_size[3];
    memcpy(logical_size, nir->info.workgroup_size, sizeof(logical_size));
@@ -387,8 +511,10 @@ agx_nir_lower_apple9_native_mesh(
    /* Every declared clip distance needs its plane; cull distances keep the
     * emulated path until native primitive culling covers them. */
    info->clip_distances = nir->info.clip_distance_array_size;
-   if (nir->info.cull_distance_array_size || info->clip_distances > 8)
-      return fail(reason, "native mesh supports up to eight clip and no cull distances");
+   info->cull_distances = cull.cull;
+   info->cull_B = cull.base;
+   if (info->clip_distances > 8 || info->clip_distances + info->cull_distances > 8)
+      return fail(reason, "native mesh supports eight clip plus cull distances");
    for (unsigned d = 0; d < info->clip_distances; ++d) {
       if (layout->vertex_component[VARYING_SLOT_CLIP_DIST0 + d / 4][d % 4] ==
           AGX_APPLE9_MESH_UNUSED)
@@ -484,6 +610,8 @@ agx_nir_lower_apple9_native_mesh(
                   .memory_semantics = NIR_MEMORY_ACQ_REL,
                   .memory_modes = nir_var_mem_shared);
    }
+   if (info->cull_distances)
+      cull_primitives(&b, info, lane, primitives, physical_threads);
    /* Publish the completed output memory before issuing mesh allocation.
     * U0 consumes the counts but does not write these global output planes.
     * Keeping this fence before U0 lets the first channel submit consume U0's

@@ -97,6 +97,9 @@ struct agx_apple9_mesh_body_info {
    bool publication_rounds;
    /* Rasterizer clip distances published after the user varyings. */
    unsigned clip_distances;
+   /* Cull distances evaluated at completion from compiler-owned shared
+    * storage at cull_B within the shared region; not published. */
+   unsigned cull_distances, cull_B;
    /* V3/P1 primitive outputs lowered to flat planes or a local cull flag. */
    uint64_t primitive_broadcast;
    unsigned argument_uniform_words;
