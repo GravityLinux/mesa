@@ -165,10 +165,7 @@ gs_routes(struct hk_cmd_buffer *cmd)
       FALLBACK(hk_native_producer_object(ng)->info.apple9_native_stage, HK_APPLE9_NATIVE_NONE);
       FALLBACK(main->info.apple9_native.key.physical_threads, 32);
       FALLBACK(main->info.apple9_native.layout.max_vertices, 5);
-      FALLBACK(draw.indexed, true);
       FALLBACK(draw.restart, true);
-      FALLBACK(draw.start, 1);
-      FALLBACK(draw.start_instance, 1);
       /* Every triangle of a direct list and every instance is one group. */
 #define ADMITTED(field, value)                                                 \
    do {                                                                        \
@@ -181,6 +178,11 @@ gs_routes(struct hk_cmd_buffer *cmd)
       ADMITTED(draw.b.count[0], 3 * HK_APPLE9_NATIVE_MAX_GROUP_COUNT);
       ADMITTED(draw.b.count[1], 2);
       ADMITTED(draw.b.count[1], HK_APPLE9_NATIVE_MAX_GROUP_COUNT);
+      /* The software VS applies indices, firstIndex/vertexOffset and
+       * firstInstance before the GS reads its corners. */
+      ADMITTED(draw.indexed, true);
+      ADMITTED(draw.start, 1);
+      ADMITTED(draw.start_instance, 1);
       FALLBACK(draw.b.count[0], 4);
       FALLBACK(draw.b.count[0], 2);
       FALLBACK(draw.b.count[0], 3 * (HK_APPLE9_NATIVE_MAX_GROUP_COUNT + 1));

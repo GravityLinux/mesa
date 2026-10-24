@@ -5505,10 +5505,13 @@ hk_apple9_resolve_shaders(struct hk_cmd_buffer *cmd, bool prefer_native)
 static struct agx_draw hk_apple9_predicate_draw(struct hk_cmd_buffer *cmd,
                                                 struct agx_draw draw);
 
-/* Direct triangle lists: one mesh group per input triangle and instance,
- * within one grid dimension each. Groups publish in index order, so API
- * primitive order holds. Multiple GS invocations, indexed draws and other
- * topologies need their own input mapping.
+/* Direct triangle lists, indexed or not: one mesh group per input triangle
+ * and instance, within one grid dimension each. The software VS runs once per
+ * index position (applying the index buffer, firstIndex, vertexOffset and
+ * firstInstance as for the fallback GS), so a list's triangle x reads VS
+ * outputs 3x..3x+2 either way. Groups publish in index order, so API
+ * primitive order holds. Multiple GS invocations, primitive restart and
+ * other topologies need their own input mapping.
  *
  * Native GS/TES draws are direct and exclude conditional rendering and
  * queries, so no GPU pass writes a native block's words, launch records or
@@ -5524,8 +5527,8 @@ hk_apple9_native_gs_state_eligible(struct hk_cmd_buffer *cmd,
    const struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
    if (!hk_apple9_native_stage_available_device(hk_cmd_buffer_device(cmd),
                                                 MESA_SHADER_GEOMETRY) || cmd->in_meta || agx_is_indirect(draw.b) ||
-       draw.indexed || draw.restart || draw.start || draw.start_instance ||
-       draw.b.count[0] < 3 || draw.b.count[0] % 3 || draw.b.count[2] != 1 ||
+       draw.restart || draw.b.count[0] < 3 || draw.b.count[0] % 3 ||
+       draw.b.count[2] != 1 ||
        !hk_apple9_native_mesh_grid_valid(
           (const uint32_t[]){draw.b.count[0] / 3, draw.b.count[1], 1}) ||
        dyn->ia.primitive_topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST ||
