@@ -74,7 +74,7 @@ source(unsigned max_v, unsigned max_p, unsigned logical)
    for (unsigned first = 0; first < max_p; first += logical) {
       nir_def *p = nir_iadd_imm(&b, lane, first);
       nir_push_if(&b, nir_ult(&b, p, primitives));
-      /* Exercise high vertex indices, odd values and word-straddling pairs. */
+      /* Exercise high vertex indices and partially occupied final words. */
       nir_def *i0 = nir_umod(&b, nir_imul_imm(&b, p, 3), vertices);
       nir_def *i1 = nir_isub(&b, nir_iadd_imm(&b, vertices, -1), i0);
       nir_store_per_primitive_output(&b, nir_vec2(&b, i0, i1), p,
