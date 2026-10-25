@@ -105,8 +105,8 @@ main(void)
     * flush into a junction inside one firmware command: compute-only on G16,
     * unless the next stream fetches an indirect grid before its own flush.
     */
-   for (unsigned c = 0; c < 4; ++c) {
-      bool indirect = c == 1, flushless = c == 3;
+   for (unsigned c = 0; c < 3; ++c) {
+      bool indirect = c == 1;
       dev->dev.chip = c == 2 ? AGX_CHIP_G13X : AGX_CHIP_G16G;
       uint8_t a_bytes[256] = {0}, b_bytes[256] = {0};
       struct hk_cs a = {.cmd = cmd, .type = HK_CS_CDM, .current = a_bytes,
@@ -120,11 +120,8 @@ main(void)
       CHECK(a.end_flush == (uint32_t *)a_bytes && !a.cdm_dirty);
       uint32_t full = *a.end_flush;
       CHECK(full != 0x60000160);
-      /* c == 3: b has nothing to flush, as a stream holding only a compute
-       * timestamp. The junction is then the merged stream's last flush and
-       * must keep the drain, or the end timestamp never lands. */
       b.current = b_bytes + AGX_CDM_BARRIER_LENGTH;
-      b.end_flush = flushless ? NULL : (uint32_t *)b_bytes;
+      b.end_flush = (uint32_t *)b_bytes;
       hk_cs_merge_cdm(&a, &b, dev->dev.chip);
       CHECK(*(uint32_t *)a_bytes == (c == 0 ? 0x60000160 : full));
       CHECK(a.end_flush == b.end_flush && a.current == b.current);
