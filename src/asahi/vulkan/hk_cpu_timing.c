@@ -21,7 +21,8 @@
  *
  * Once a second, the first present after the interval prints cumulative
  * counters to stderr, or to HK_CPU_TIMING_LOG if set, and device
- * destruction prints a final line:
+ * destruction prints a final line, as does unloading the driver or exiting
+ * the process (for processes that exit without destroying their device):
  *
  *   HK_CPU cpu_ns=<CLOCK_MONOTONIC> frames=N
  *          <cat>_wall_ns=... <cat>_cpu_ns=... <cat>_calls=... (per category)
@@ -40,7 +41,8 @@
  *
  * Shader compiles are timed where hk compiles, per kind (api = vkCreate*
  * pipelines and shader objects, draw = Apple9 variants resolved while
- * recording a draw):
+ * recording a draw, eager = Apple9 variants resolved at creation for
+ * deferred pipelines whose state is known, also inside their api time):
  *
  *   compile_<kind>_wall_ns=... compile_<kind>_cpu_ns=... compile_<kind>_calls=...
  *   compile_<kind>_max_ns=...  the longest single compile (a stutter bound)
@@ -123,9 +125,12 @@ static const char *hk_cpu_ptgs_name[HK_CPU_PTGS_COUNT] = {
    "xfb", "pg_query", "stipple", "points", "cull_mask", "fs_copies",
 };
 static const char *hk_cpu_gs_shape_name[4] = {"dyn", "idx", "prim", "inst"};
-static _Atomic uint64_t hk_cpu_compile_wall[2], hk_cpu_compile_thread[2];
-static _Atomic uint64_t hk_cpu_compile_calls[2], hk_cpu_compile_max[2];
-static const char *hk_cpu_compile_name[2] = {"api", "draw"};
+static _Atomic uint64_t hk_cpu_compile_wall[HK_CPU_COMPILE_KINDS];
+static _Atomic uint64_t hk_cpu_compile_thread[HK_CPU_COMPILE_KINDS];
+static _Atomic uint64_t hk_cpu_compile_calls[HK_CPU_COMPILE_KINDS];
+static _Atomic uint64_t hk_cpu_compile_max[HK_CPU_COMPILE_KINDS];
+static const char *hk_cpu_compile_name[HK_CPU_COMPILE_KINDS] = {"api", "draw",
+                                                                "eager"};
 static _Atomic uint64_t hk_cpu_sub_ns[HK_CPU_SUB_COUNT], hk_cpu_sub_n[HK_CPU_SUB_COUNT];
 static const char *hk_cpu_sub_name[HK_CPU_SUB_COUNT] = {
    "resolve", "resolve_slow", "tess", "gs", "robust_index", "a9draw",
@@ -222,7 +227,7 @@ hk_cpu_report(bool force)
                     hk_cpu_sub_name[i], atomic_load(&hk_cpu_sub_ns[i]),
                     hk_cpu_sub_name[i], atomic_load(&hk_cpu_sub_n[i]));
    }
-   for (unsigned i = 0; i < 2 && n < (int)sizeof(line); ++i) {
+   for (unsigned i = 0; i < HK_CPU_COMPILE_KINDS && n < (int)sizeof(line); ++i) {
       const char *k = hk_cpu_compile_name[i];
       n += snprintf(line + n, sizeof(line) - n,
                     " compile_%s_wall_ns=%" PRIu64 " compile_%s_cpu_ns=%" PRIu64
@@ -403,6 +408,17 @@ hk_cpu_QueuePresentKHR(VkQueue q, const VkPresentInfoKHR *i)
 }
 
 /* Device destruction prints the final counters. */
+/* A destructor rather than atexit: the loader may unload the driver before
+ * the process exits. */
+__attribute__((destructor)) static void
+hk_cpu_report_unload(void)
+{
+   if (hk_cpu_level && hk_cpu_out) {
+      hk_cpu_report(true);
+      fflush(hk_cpu_out);
+   }
+}
+
 static PFN_vkDestroyDevice hk_cpu_orig_DestroyDevice;
 static VKAPI_ATTR void VKAPI_CALL
 hk_cpu_DestroyDevice(VkDevice d, const VkAllocationCallbacks *a)
@@ -503,12 +519,13 @@ hk_cpu_timing_compile_begin(struct hk_cpu_compile_scope *s)
 }
 
 void
-hk_cpu_timing_compile_end(const struct hk_cpu_compile_scope *s, bool draw_time)
+hk_cpu_timing_compile_end(const struct hk_cpu_compile_scope *s,
+                          enum hk_cpu_compile_kind kind)
 {
    if (!s->active)
       return;
 
-   const unsigned k = draw_time;
+   const unsigned k = kind;
    const uint64_t wall = hk_cpu_clock(CLOCK_MONOTONIC) - s->wall;
    atomic_fetch_add_explicit(&hk_cpu_compile_wall[k], wall, memory_order_relaxed);
    atomic_fetch_add_explicit(&hk_cpu_compile_thread[k],
