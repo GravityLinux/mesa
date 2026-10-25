@@ -90,6 +90,8 @@ DEBUG_GET_ONCE_BOOL_OPTION(apple9_variant_cache_verify,
 
 /* Set while a pipeline-time eager variant compiles on this thread. */
 static _Thread_local bool hk_apple9_eager_compile;
+/* Resolve a variant into the pipeline cache only, see hk_apple9_eager_variant. */
+static _Thread_local bool hk_apple9_precompile;
 
 struct hk_fs_key {
    bool zs_self_dep;
@@ -8196,11 +8198,16 @@ static __thread bool hk_apple9_eager_busy;
  * offline replay that never draws reaches the backend. State the pipeline
  * leaves dynamic takes simple defaults, so that variant can differ from the
  * one a real draw selects.
+ *
+ * With precompile, the variant only goes to the disk cache: a pipeline an
+ * application creates but never draws costs no resident program or
+ * serialized copy, and its first draw loads instead of compiling.
  */
 static void
 hk_apple9_eager_variant(struct hk_device *dev, uint32_t count,
                         struct vk_shader *const *shaders,
-                        const struct vk_graphics_pipeline_state *pstate)
+                        const struct vk_graphics_pipeline_state *pstate,
+                        bool precompile)
 {
    struct hk_api_shader *api[HK_APPLE9_GFX_STAGES] = {NULL};
    if (hk_apple9_eager_busy)
@@ -8287,10 +8294,13 @@ hk_apple9_eager_variant(struct hk_device *dev, uint32_t count,
 
    struct hk_api_shader *variant[HK_APPLE9_GFX_STAGES];
    hk_apple9_eager_compile = true;
+   hk_apple9_precompile = precompile;
    /* Warm the variant draws use outside statistics queries. */
    if (hk_apple9_resolve_graphics(dev, api, &state, variant, true, false) !=
-       VK_SUCCESS)
+          VK_SUCCESS &&
+       !precompile)
       fprintf(stderr, "HK_APPLE9_EAGER_VARIANTS: variant compile failed\n");
+   hk_apple9_precompile = false;
    hk_apple9_eager_compile = false;
    if (stub)
       hk_api_shader_destroy(&dev->vk, &stub->vk, NULL);
@@ -8406,7 +8416,7 @@ hk_apple9_defer_graphics(struct hk_device *dev, uint32_t count,
       }
       memset(out, 0, count * sizeof(*out));
    } else if (debug_get_option_cached_hk_apple9_eager_variants()) {
-      hk_apple9_eager_variant(dev, count, out, state);
+      hk_apple9_eager_variant(dev, count, out, state, false);
    }
    return result;
 }
@@ -8646,6 +8656,18 @@ hk_apple9_resolve_graphics(
          search.key.blend[rt].color_attachment_unused = true;
    }
 
+   /* A precompile neither finds nor publishes a live variant: it compiles
+    * into the pipeline cache, which the first draw loads from. A draw that
+    * races it for the same key may compile the variant itself. */
+   struct hk_apple9_variant precompiled;
+   struct hk_apple9_variant *v;
+   if (hk_apple9_precompile) {
+      memset(&precompiled, 0, sizeof(precompiled));
+      memcpy(&precompiled, &search, offsetof(struct hk_apple9_variant, shaders));
+      v = &precompiled;
+      goto compile;
+   }
+
 retry:
    simple_mtx_lock(&dev->apple9_variants.lock);
    if (!dev->apple9_variants.ht) {
@@ -8673,7 +8695,6 @@ retry:
             entry = fallback;
       }
    }
-   struct hk_apple9_variant *v;
    if (entry) {
       v = entry->data;
       if (!util_queue_fence_is_signalled(&v->ready)) {
@@ -8726,6 +8747,9 @@ compile:;
       dev->vk.mem_cache &&
       hk_apple9_variant_cache_key(dev, api, &search.key, search.prefer_native,
                                     cache_key);
+   /* Without a disk cache, a draw could not load a precompiled variant. */
+   if (hk_apple9_precompile && (!cacheable || !dev->vk.physical->disk_cache))
+      return VK_SUCCESS;
    struct vk_shader *cached[HK_APPLE9_GFX_STAGES];
    unsigned cached_stages[HK_APPLE9_GFX_STAGES];
    unsigned cached_count = 0;
@@ -8755,6 +8779,13 @@ compile:;
             cache_object = NULL;
          }
       }
+   }
+   if (hk_apple9_precompile && cached_count) {
+      /* Already in the cache: nothing to resolve now. */
+      for (unsigned i = 0; i < cached_count; ++i)
+         hk_api_shader_destroy(&dev->vk, cached[i], NULL);
+      vk_pipeline_cache_object_unref(&dev->vk, cache_object);
+      return VK_SUCCESS;
    }
    if (cached_count && !verify) {
       for (unsigned i = 0; i < cached_count; ++i) {
@@ -8913,10 +8944,23 @@ compile:;
       cache_object = NULL;
    }
    v->cache_object = cache_object;
-   if (cache_object) {
+   if (cache_object && !hk_apple9_precompile) {
       for (unsigned s = 0; s < HK_APPLE9_GFX_STAGES; ++s)
          if (api[s])
             hk_apple9_remember_variant(dev, api[s], cache_object);
+   }
+   if (hk_apple9_precompile) {
+      /* The disk cache keeps the serialized variant: drop the compiled one,
+       * and the in-memory copy, until a draw loads it. A drawn variant is
+       * remembered for VkPipelineCache then. */
+      for (unsigned s = 0; s < HK_APPLE9_GFX_STAGES; ++s) {
+         if (v->shaders[s])
+            hk_api_shader_destroy(&dev->vk, &v->shaders[s]->vk, NULL);
+      }
+      if (cache_object)
+         vk_pipeline_cache_object_unref(&dev->vk, cache_object);
+      memset(out, 0, sizeof(v->shaders));
+      return result;
    }
    simple_mtx_lock(&dev->apple9_variants.lock);
    if (result == VK_SUCCESS && search.prefer_native &&
@@ -9026,7 +9070,8 @@ hk_compile_shaders_timed(struct vk_device *vk_dev, uint32_t shader_count,
           * stall the recording thread. */
          if (result == VK_SUCCESS && deferral == HK_APPLE9_DEFER_COMPLETE &&
              !debug_get_option_cached_hk_apple9_eager_variants())
-            hk_apple9_eager_variant(dev, shader_count, shaders_out, state);
+            hk_apple9_eager_variant(dev, shader_count, shaders_out, state,
+                                    true);
          return result;
       }
       return hk_apple9_compile_graphics(dev, shader_count, infos, state,
