@@ -8,6 +8,9 @@
 
 #include <string.h>
 
+/* First of the registers that receive the root words. */
+#define LAUNCH_PENDING_BASE 18
+
 static void
 write16(uint8_t *p, uint16_t value)
 {
@@ -33,8 +36,9 @@ agx_apple9_launch_call_offset(enum agx_apple9_launch_stage stage,
    if (stage != AGX_APPLE9_LAUNCH_COMPUTE || !resource_count ||
        resource_count > AGX_APPLE9_COMPUTE_DIRECT_MAX_RESOURCES)
       return 0;
-   unsigned roots = resource_count + AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE;
-   return 26 + 14 * ((roots + 1) / 2);
+   /* The table address literals, one literal per root word and the
+    * allocation, then the entry field inside the target. */
+   return 26 + 8 * agx_apple9_compute_root_words(resource_count);
 }
 
 static void
@@ -142,7 +146,7 @@ launch_build(uint8_t *out, size_t capacity, enum agx_apple9_launch_stage stage,
 
    /* Build privately so even an encoder failure cannot publish partial code. */
    uint8_t program[AGX_APPLE9_COMPUTE_LAUNCH_SIZE] = {0};
-   const unsigned root = 2, pending = 18;
+   const unsigned root = 2, pending = LAUNCH_PENDING_BASE;
    /* Table loads use a full address in a GPR pair. They have no compact
     * USC-relative pointer field or 512-MiB placement restriction. */
    agx_apple9_encode_literal32(program, root, params->resource_table);
@@ -154,11 +158,33 @@ launch_build(uint8_t *out, size_t capacity, enum agx_apple9_launch_stage stage,
                     : mesh ? AGX_APPLE9_MESH_ARGUMENT_WORDS
                            : AGX_APPLE9_GRAPHICS_ROOT_WORDS;
    unsigned roots = words / 2;
-   for (int i = (roots - 1) & ~1; i >= 0; i -= 2) {
-      if (!agx_apple9_encode_pointer_load(program + at, pending + 2 * i, root,
-                                          i, i + 2 <= roots ? 2 : 1))
+   if (compute) {
+      /* The root words are known when the launch is emitted: materialize
+       * them instead of loading them from the per-dispatch resource record,
+       * which would put a dependent memory round trip in front of every
+       * dispatch. Templates leave the slots for set_roots. */
+      static const uint32_t zero[2 * (AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE +
+                                      AGX_APPLE9_COMPUTE_DIRECT_MAX_RESOURCES)];
+      const uint32_t *values = params->root_words;
+      if (!values && !tmpl)
          return false;
-      at += 14;
+      if (tmpl) {
+         values = zero;
+         tmpl->roots_at = at;
+         tmpl->root_words = words;
+      }
+      for (unsigned i = 0; i < words; ++i) {
+         if (!agx_apple9_encode_literal32(program + at, pending + i, values[i]))
+            return false;
+         at += 8;
+      }
+   } else {
+      for (int i = (roots - 1) & ~1; i >= 0; i -= 2) {
+         if (!agx_apple9_encode_pointer_load(program + at, pending + 2 * i,
+                                             root, i, i + 2 <= roots ? 2 : 1))
+            return false;
+         at += 14;
+      }
    }
    encode_allocation(program + at, stage, params);
    at += 8;
@@ -169,9 +195,10 @@ launch_build(uint8_t *out, size_t capacity, enum agx_apple9_launch_stage stage,
    at += 10;
    encode_frame(program + at, params);
    at += 10;
+   /* Only loaded roots are pending on slot 2. */
    for (unsigned i = 0; i < words; ++i) {
       if (!agx_apple9_encode_argument_word(program + at, i, pending + i,
-                                           i == 0))
+                                           i == 0 && !compute))
          return false;
       at += 4;
    }
@@ -236,6 +263,21 @@ agx_apple9_launch_template_init(struct agx_apple9_launch_template *tmpl,
    tmpl->capacity = capacity;
    tmpl->stage = stage;
    tmpl->valid = true;
+   return true;
+}
+
+bool
+agx_apple9_launch_template_set_roots(
+   uint8_t *out, const struct agx_apple9_launch_template *tmpl,
+   const uint32_t *root_words)
+{
+   if (!tmpl->valid || !tmpl->root_words || !root_words)
+      return false;
+   for (unsigned i = 0; i < tmpl->root_words; ++i) {
+      if (!agx_apple9_encode_literal32(out + tmpl->roots_at + 8 * i,
+                                       LAUNCH_PENDING_BASE + i, root_words[i]))
+         return false;
+   }
    return true;
 }
 
