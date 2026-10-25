@@ -59,6 +59,9 @@ source(unsigned vertices, unsigned primitives, bool distance, bool boolean)
          nir_imm_int(&b, 0), .write_mask = 7, .src_type = nir_type_uint32,
          .io_semantics = {.location = VARYING_SLOT_PRIMITIVE_INDICES, .num_slots = 1});
       nir_def *culled = nir_ieq_imm(&b, nir_umod_imm(&b, p, 3), 1);
+      /* Leave some flags unwritten: poisoned LDS must still leave these
+       * primitives visible, while the other flags exercise last-write wins. */
+      nir_push_if(&b, nir_ine_imm(&b, nir_umod_imm(&b, p, 5), 2));
       /* Last write wins, including false overwriting true. */
       for (unsigned overwrite = 0; overwrite < 2; ++overwrite) {
          nir_def *flag = overwrite ? culled : nir_inot(&b, culled);
@@ -68,6 +71,7 @@ source(unsigned vertices, unsigned primitives, bool distance, bool boolean)
             .write_mask = 1, .src_type = boolean ? nir_type_bool1 : nir_type_uint32,
             .io_semantics = {.location = VARYING_SLOT_CULL_PRIMITIVE, .num_slots = 1});
       }
+      nir_pop_if(&b, NULL);
       nir_pop_if(&b, NULL);
    }
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
@@ -130,7 +134,12 @@ check(unsigned vertices, unsigned primitives, unsigned actual, bool distance,
          v[c] = (3 * p + c) % vertices;
          all_negative &= v[c] < vertices / 4;
       }
-      bool cull = p < actual && (p % 3 == 1 || (distance && all_negative));
+      bool flag = p % 3 == 1 && p % 5 != 2;
+      uint32_t stored_flag;
+      memcpy(&stored_flag, m.local + body.shared_offset_B +
+                          body.cull_primitive_B + 4 * p, sizeof(stored_flag));
+      CHECK(stored_flag == flag);
+      bool cull = p < actual && (flag || (distance && all_negative));
       for (unsigned c = 0; c < 3; ++c) {
          if (m.local[3 * p + c] != (cull ? v[0] : v[c]))
             fprintf(stderr, "V%u P%u actual%u d%u bool%u p%u c%u: %u != %u\n",

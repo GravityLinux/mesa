@@ -661,6 +661,28 @@ agx_nir_lower_apple9_native_mesh(
       nir_imm_int(&entry, layout->vertex_count_B),
       .base = key.output_root, .bit_size = 32);
    nir_pop_if(&entry, NULL);
+   if (info->cull_primitive) {
+      /* Unwritten flags are undefined by the API, but must not depend on a
+       * previous workgroup's LDS contents. Initialize every flag before the
+       * application mask, including flags owned by inactive logical lanes. */
+      nir_def *lane = nir_load_local_invocation_index(&entry);
+      for (unsigned first = 0; first < layout->max_primitives;
+           first += physical_threads) {
+         nir_def *primitive = nir_iadd_imm(&entry, lane, first);
+         nir_push_if(&entry, nir_ult_imm(&entry, primitive,
+                                       layout->max_primitives));
+         nir_store_local_apple9_agx(
+            &entry, nir_imm_int(&entry, 0),
+            nir_iadd_imm(&entry, nir_imul_imm(&entry, primitive, 4),
+                         info->shared_offset_B + info->cull_primitive_B),
+            .base = key.output_root, .bit_size = 32);
+         nir_pop_if(&entry, NULL);
+      }
+      nir_barrier(&entry, .execution_scope = SCOPE_WORKGROUP,
+                         .memory_scope = SCOPE_WORKGROUP,
+                         .memory_semantics = NIR_MEMORY_ACQ_REL,
+                         .memory_modes = nir_var_mem_shared);
+   }
    if (primitive_broadcast & VARYING_BIT_CULL_PRIMITIVE) {
       nir_push_if(&entry, nir_ieq_imm(&entry,
                                     nir_load_local_invocation_index(&entry), 0));
