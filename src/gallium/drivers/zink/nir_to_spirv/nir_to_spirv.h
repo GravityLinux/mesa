@@ -62,6 +62,10 @@ struct ntv_info {
    } float_controls;
    uint32_t spirv_version;
    unsigned bindless_set_idx;
+   /* Omit debug names: a GL program loaded from the shader cache has lost its
+    * variable names, and a driver keying its cache on the SPIR-V words would
+    * then miss everything the first run compiled. */
+   bool strip_names;
 };
 
 struct nir_shader;

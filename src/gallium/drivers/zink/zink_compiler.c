@@ -1446,6 +1446,8 @@ zink_screen_init_compiler(struct zink_screen *screen)
    screen->ntv_info.have_shader_viewport_index_layer = screen->info.have_EXT_shader_viewport_index_layer;
    screen->ntv_info.have_shader_output_layer = screen->info.feats12.shaderOutputLayer;
    screen->ntv_info.spirv_version = screen->spirv_version;
+   screen->ntv_info.strip_names =
+      !(zink_debug & (ZINK_DEBUG_NIR | ZINK_DEBUG_SPIRV | ZINK_DEBUG_TGSI));
    if (screen->info.have_KHR_shader_float_controls) {
       if (screen->info.props12.shaderDenormFlushToZeroFloat16)
          screen->ntv_info.float_controls.flush_denorms |= 0x1;
