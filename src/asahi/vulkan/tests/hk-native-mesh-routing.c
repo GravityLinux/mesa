@@ -102,6 +102,12 @@ routes(struct hk_cmd_buffer *cmd)
             VK_CONSERVATIVE_RASTERIZATION_MODE_OVERESTIMATE_EXT);
    gfx->shaders[MESA_SHADER_MESH] = mesh;
    gfx->shaders[MESA_SHADER_FRAGMENT] = fs;
+   nm->variants[HK_MESH_VARIANT_MAIN].info.apple9_native.cull_distances = 0;
+   nm->variants[HK_MESH_VARIANT_MAIN].info.apple9_native.cull_primitive = true;
+   FALLBACK(dyn->rs.conservative_mode,
+            VK_CONSERVATIVE_RASTERIZATION_MODE_OVERESTIMATE_EXT);
+   FALLBACK(dyn->rs.conservative_mode,
+            VK_CONSERVATIVE_RASTERIZATION_MODE_UNDERESTIMATE_EXT);
    gfx->shaders[MESA_SHADER_FRAGMENT] = NULL;
    CHECK(hk_apple9_use_native_mesh(cmd, direct, 0));
 #undef FALLBACK

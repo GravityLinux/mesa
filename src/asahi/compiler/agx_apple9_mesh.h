@@ -108,6 +108,10 @@ struct agx_apple9_mesh_body_info {
    /* Cull distances evaluated at completion from compiler-owned shared
     * storage at cull_B within the shared region; not published. */
    unsigned cull_distances, cull_B;
+   /* Multi-primitive CullPrimitive flags in compiler-owned shared storage,
+    * consumed before publication. They are not hardware cull records. */
+   bool cull_primitive;
+   unsigned cull_primitive_B;
    /* V3/P1 primitive outputs lowered to flat planes or a local cull flag. */
    uint64_t primitive_broadcast;
    unsigned argument_uniform_words;

@@ -304,7 +304,8 @@ hk_apple9_native_mesh_round_shape_eligible(const nir_shader *nir)
           !nir->info.workgroup_size_variable &&
           (!nir->info.api_subgroup_size || nir->info.api_subgroup_size == 32) &&
           nir->info.derivative_group == DERIVATIVE_GROUP_NONE &&
-          !(nir->info.per_primitive_outputs & ~VARYING_BIT_PRIMITIVE_INDICES) &&
+          !(nir->info.per_primitive_outputs &
+            ~(VARYING_BIT_PRIMITIVE_INDICES | VARYING_BIT_CULL_PRIMITIVE)) &&
           !nir->info.outputs_written_16bit &&
           hk_apple9_native_mesh_model_counts_eligible(
              nir->info.workgroup_size, nir->info.mesh.max_vertices_out,
@@ -446,6 +447,11 @@ hk_apple9_native_shader_valid(const struct agx_shader_info *code,
              body->logical_size[2] == 1 && !body->shared_size_B &&
              !body->layout.local_size_B && !code->local_size;
    const struct agx_apple9_mesh_layout *l = &body->layout;
+   if (body->cull_primitive &&
+       (!body->publication_rounds || (body->cull_primitive_B & 3) ||
+        body->cull_primitive_B > body->shared_size_B ||
+        l->max_primitives > (body->shared_size_B - body->cull_primitive_B) / 4))
+      return false;
    /* The lowering flag binds the binary to this path: a class binary with
     * stale metadata cannot pass as a masked T32 round binary, or vice versa. */
    if (body->publication_rounds

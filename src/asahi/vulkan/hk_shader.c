@@ -7802,6 +7802,7 @@ hk_apple9_identify_native_pair(uint32_t count, struct vk_shader **shaders,
          obj->apple9_native_cull_primitive =
             (hk_native_producer_main(obj)->info.apple9_native.primitive_broadcast &
              VARYING_BIT_CULL_PRIMITIVE) ||
+            hk_native_producer_main(obj)->info.apple9_native.cull_primitive ||
             hk_native_producer_main(obj)->info.apple9_native.cull_distances;
       }
    }

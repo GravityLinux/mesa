@@ -420,9 +420,46 @@ mirror_clip_distance(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    return true;
 }
 
-/* A primitive is culled when, for some cull distance, all of its vertices
- * are negative. Culled primitives become degenerate (i0, i0, i0) before the
- * index words are published, so they cover no pixels. */
+struct primitive_cull_storage {
+   unsigned base;
+   bool written, failed;
+};
+
+static bool
+move_primitive_cull(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   struct primitive_cull_storage *st = data;
+   bool store = intr->intrinsic == nir_intrinsic_store_per_primitive_output;
+   if ((!store && intr->intrinsic != nir_intrinsic_load_per_primitive_output) ||
+       nir_intrinsic_io_semantics(intr).location != VARYING_SLOT_CULL_PRIMITIVE)
+      return false;
+
+   /* EXT mesh output readback is not supported. Validate before reading an
+    * immediate so a capability probe rejects unsupported IO without asserting. */
+   if (!store || !nir_src_is_const(intr->src[2]) ||
+       nir_src_as_uint(intr->src[2]) || intr->num_components != 1 ||
+       nir_intrinsic_component(intr) || nir_intrinsic_write_mask(intr) != 1 ||
+       (nir_src_bit_size(intr->src[0]) != 1 &&
+        nir_src_bit_size(intr->src[0]) != 32)) {
+      st->failed = true;
+      return false;
+   }
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *value = intr->src[0].ssa;
+   if (value->bit_size == 1)
+      value = nir_b2i32(b, value);
+   nir_store_shared(b, value, nir_imul_imm(b, intr->src[1].ssa, 4),
+                    .base = st->base, .align_mul = 4, .write_mask = 1);
+   nir_instr_remove(&intr->instr);
+   st->written = true;
+   return true;
+}
+
+/* CullPrimitive and CullDistance are independent reasons to cull a triangle.
+ * Cull distances cull when all three vertices are negative for some plane.
+ * Culled primitives become degenerate (i0, i0, i0) before index publication.
+ * Draw admission restricts this software culling to filled triangles. */
 static void
 cull_primitives(nir_builder *b, const struct agx_apple9_mesh_body_info *info,
                 nir_def *lane, nir_def *primitives, unsigned physical_threads)
@@ -445,6 +482,13 @@ cull_primitives(nir_builder *b, const struct agx_apple9_mesh_body_info *info,
       for (unsigned i = 0; i < 3; ++i)
          v[i] = nir_iand_imm(b, nir_ushr_imm(b, packed, 8 * i), 0xff);
       nir_def *culled = nir_imm_false(b);
+      if (info->cull_primitive) {
+         nir_def *offset = nir_iadd_imm(
+            b, nir_imul_imm(b, p, 4),
+            info->shared_offset_B + info->cull_primitive_B);
+         culled = nir_ine_imm(
+            b, nir_load_local_apple9_agx(b, offset, .base = root), 0);
+      }
       for (unsigned d = 0; d < info->cull_distances; ++d) {
          nir_def *all = nir_imm_true(b);
          for (unsigned i = 0; i < 3; ++i) {
@@ -510,6 +554,20 @@ agx_nir_lower_apple9_native_mesh(
       nir->info.shared_size = cull.base + nir->info.mesh.max_vertices_out * cull.cull * 4;
       nir->info.cull_distance_array_size = 0;
    }
+   struct primitive_cull_storage primitive_cull = {
+      .base = ALIGN_POT(nir->info.shared_size, 4),
+   };
+   if (rounds) {
+      nir_shader_intrinsics_pass(nir, move_primitive_cull,
+                                 nir_metadata_control_flow, &primitive_cull);
+      if (primitive_cull.failed)
+         return fail(reason, "native mesh CullPrimitive requires scalar stores with zero slot offset");
+      if (primitive_cull.written) {
+         nir->info.shared_size = primitive_cull.base +
+                                nir->info.mesh.max_primitives_out * 4;
+         nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+      }
+   }
    bool clip_linked = options && options->link_clip_distances &&
                       nir->info.clip_distance_array_size;
    if (clip_linked) {
@@ -571,6 +629,8 @@ agx_nir_lower_apple9_native_mesh(
    info->clip_distances = nir->info.clip_distance_array_size;
    info->cull_distances = cull.cull;
    info->cull_B = cull.base;
+   info->cull_primitive = primitive_cull.written;
+   info->cull_primitive_B = primitive_cull.written ? primitive_cull.base : 0;
    if (info->clip_distances > 8 || info->clip_distances + info->cull_distances > 8)
       return fail(reason, "native mesh supports eight clip plus cull distances");
    for (unsigned d = 0; d < info->clip_distances; ++d) {
@@ -629,6 +689,10 @@ agx_nir_lower_apple9_native_mesh(
     * The qualified one-triangle class supplies actual vertex count to B. */
    nir_def *primitives = nir_load_local_apple9_agx(
       &b, nir_imm_int(&b, layout->primitive_count_B), .base = key.output_root);
+   /* The output ABI writes only the low halfword. Ignore the unrelated upper
+    * bytes before bounding cull loops and index publication by this count. */
+   if (key.primitive_count_bits == 16)
+      primitives = nir_iand_imm(&b, primitives, 0xffff);
    nir_def *vertices = nir_load_local_apple9_agx(
       &b, nir_imm_int(&b, layout->vertex_count_B), .base = key.output_root);
    nir_def *lane = nir_load_local_invocation_index(&b);
@@ -668,7 +732,7 @@ agx_nir_lower_apple9_native_mesh(
                   .memory_semantics = NIR_MEMORY_ACQ_REL,
                   .memory_modes = nir_var_mem_shared);
    }
-   if (info->cull_distances)
+   if (info->cull_distances || info->cull_primitive)
       cull_primitives(&b, info, lane, primitives, physical_threads);
    /* Publish the completed output memory before issuing mesh allocation.
     * U0 consumes the counts but does not write these global output planes.

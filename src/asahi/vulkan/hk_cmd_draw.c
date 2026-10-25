@@ -6259,7 +6259,8 @@ hk_apple9_use_native_mesh(struct hk_cmd_buffer *cmd, const uint32_t *direct,
       cmd, direct, count_addr,
       (main->info.apple9_native.primitive_broadcast &
          VARYING_BIT_CULL_PRIMITIVE) ||
-      main->info.apple9_native.cull_distances);
+      main->info.apple9_native.cull_distances ||
+      main->info.apple9_native.cull_primitive);
 }
 
 /* Mesh shader draws run the task and mesh workgroups as compute kernels, and
