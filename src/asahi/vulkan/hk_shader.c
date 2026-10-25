@@ -8068,37 +8068,57 @@ hk_apple9_compile_internal_gs(struct hk_device *dev, nir_shader *nir,
    return result;
 }
 
+/* Why an Apple9 graphics compile waits for draw-time state. */
+enum hk_apple9_deferral {
+   HK_APPLE9_COMPILE_NOW,
+   /* State that keys the compile is dynamic, belongs to another pipeline
+    * library, or is absent. */
+   HK_APPLE9_DEFER_STATE,
+   /* The pipeline's state is complete, but the compile still waits for the
+    * draw: the fragment stage is linked then (the null one for a depth-only
+    * pipeline, or one without blend state), or a render with unused
+    * attachments can lay its tiles out differently
+    * (hk_apple9_color_layout_varies). Its own variant is resolved at
+    * creation. */
+   HK_APPLE9_DEFER_COMPLETE,
+};
+
 /* Apple9 graphics shaders specialise on state that the common AGX path
  * handles with prologs and epilogs: vertex formats, blending, attachment
  * formats and multisampling. When that state is dynamic, belongs to another
  * pipeline library, or is absent for shader objects, compile at draw time.
  */
-static bool
+static enum hk_apple9_deferral
 hk_apple9_needs_deferral(uint32_t count,
                          const struct vk_shader_compile_info *infos,
                          const struct vk_graphics_pipeline_state *state,
                          const struct vk_features *features)
 {
    if (!state)
-      return true;
+      return HK_APPLE9_DEFER_STATE;
 
    /* Library stages link with stages compiled elsewhere, whose interfaces
     * and state are known only when the pipeline is bound. */
    if (state->pipeline_flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR)
-      return true;
+      return HK_APPLE9_DEFER_STATE;
 
    /* Stages compiled apart from the rest of their pipeline, as fast-linked
     * libraries are, cannot agree on the varying layout until they are
-    * linked. Pipelines without a fragment shader link the null one then. */
+    * linked. Pipelines without a fragment shader link the null one then;
+    * such a whole pipeline (a depth-only pass) has the rest of its state. */
    VkShaderStageFlags compiled = 0;
    for (uint32_t i = 0; i < count; ++i)
       compiled |= mesa_to_vk_shader_stage(infos[i].stage);
-   if (hk_apple9_partial_stages(compiled))
-      return true;
+   bool no_fragment = false;
+   if (hk_apple9_partial_stages(compiled)) {
+      if ((compiled & VK_SHADER_STAGE_FRAGMENT_BIT) || !state->rp || !state->ms)
+         return HK_APPLE9_DEFER_STATE;
+      no_fragment = true;
+   }
 
    for (unsigned i = 0; i < ARRAY_SIZE(hk_apple9_keyed_dynamic); ++i) {
       if (BITSET_TEST(state->dynamic, hk_apple9_keyed_dynamic[i]))
-         return true;
+         return HK_APPLE9_DEFER_STATE;
    }
 
    /* A depth/stencil feedback loop keys on whether the draw can write depth
@@ -8115,19 +8135,24 @@ hk_apple9_needs_deferral(uint32_t count,
       };
       for (unsigned i = 0; i < ARRAY_SIZE(ds_writes); ++i) {
          if (BITSET_TEST(state->dynamic, ds_writes[i]))
-            return true;
+            return HK_APPLE9_DEFER_STATE;
       }
    }
 
    for (uint32_t i = 0; i < count; ++i) {
       if (infos[i].stage == MESA_SHADER_VERTEX && !state->vi)
-         return true;
+         return HK_APPLE9_DEFER_STATE;
+      /* Without color attachments there is no blend state to key on. */
       if (infos[i].stage == MESA_SHADER_FRAGMENT &&
-          (!state->rp || !state->ms || !state->cb ||
-           hk_apple9_color_layout_varies(state, features)))
-         return true;
+          (!state->rp || !state->ms ||
+           (!state->cb && state->rp->color_attachment_count)))
+         return HK_APPLE9_DEFER_STATE;
    }
-   return false;
+   if (no_fragment || !state->cb)
+      return HK_APPLE9_DEFER_COMPLETE;
+   if (hk_apple9_color_layout_varies(state, features))
+      return HK_APPLE9_DEFER_COMPLETE;
+   return HK_APPLE9_COMPILE_NOW;
 }
 
 static VkResult
@@ -8165,10 +8190,12 @@ hk_apple9_stub_vs_nir(uint64_t inputs)
 
 static __thread bool hk_apple9_eager_busy;
 
-/* Debug only (HK_APPLE9_EAGER_VARIANTS): compile a deferred pipeline's
- * variant when it is created, as a draw would, so offline replay that never
- * draws reaches the backend. State the pipeline leaves dynamic takes simple
- * defaults, so the variant can differ from one a real draw selects.
+/* Compile a deferred pipeline's variant when it is created, as a draw would:
+ * for pipelines whose state is complete (HK_APPLE9_DEFER_COMPLETE), and,
+ * with HK_APPLE9_EAGER_VARIANTS for debugging, for every deferred pipeline, so
+ * offline replay that never draws reaches the backend. State the pipeline
+ * leaves dynamic takes simple defaults, so that variant can differ from the
+ * one a real draw selects.
  */
 static void
 hk_apple9_eager_variant(struct hk_device *dev, uint32_t count,
@@ -8246,6 +8273,8 @@ hk_apple9_eager_variant(struct hk_device *dev, uint32_t count,
       .ms = pstate && pstate->ms ? pstate->ms : &ms,
       .rp = pstate && pstate->rp ? pstate->rp : &rp,
       .cal = pstate && pstate->cal ? pstate->cal : &cal,
+      /* As draws resolve: rasterization state, but no depth/stencil state. */
+      .rs = pstate ? pstate->rs : NULL,
       .pipeline_flags = pstate ? pstate->pipeline_flags : 0,
    };
    if (pstate && pstate->cb) {
@@ -8986,9 +9015,20 @@ hk_compile_shaders_timed(struct vk_device *vk_dev, uint32_t shader_count,
 
    if (dev->dev.chip == AGX_CHIP_G16G && shader_count &&
        infos[0].stage != MESA_SHADER_COMPUTE) {
-      if (hk_apple9_needs_deferral(shader_count, infos, state, features))
-         return hk_apple9_defer_graphics(dev, shader_count, infos, state,
-                                         pAllocator, shaders_out);
+      enum hk_apple9_deferral deferral =
+         hk_apple9_needs_deferral(shader_count, infos, state, features);
+      if (deferral != HK_APPLE9_COMPILE_NOW) {
+         VkResult result = hk_apple9_defer_graphics(dev, shader_count, infos,
+                                                    state, pAllocator,
+                                                    shaders_out);
+         /* With complete state, the variant draws select is known: resolve
+          * it now, as RADV and ANV compile at creation, so that draws do not
+          * stall the recording thread. */
+         if (result == VK_SUCCESS && deferral == HK_APPLE9_DEFER_COMPLETE &&
+             !debug_get_option_cached_hk_apple9_eager_variants())
+            hk_apple9_eager_variant(dev, shader_count, shaders_out, state);
+         return result;
+      }
       return hk_apple9_compile_graphics(dev, shader_count, infos, state,
                                        NULL, NULL, pAllocator, shaders_out);
    }
