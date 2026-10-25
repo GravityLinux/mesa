@@ -8,8 +8,8 @@
 #include "hk_apple9_mesh.h"
 #include "hk_shader.h"
 
-/* First GS-to-mesh stage: one triangle-list input primitive, one GS
- * invocation, position-only triangle strips. This is a compiler contract;
+/* One triangle-class input primitive per GS invocation, with Position and
+ * generic per-vertex outputs. This is a compiler contract;
  * draw routing must independently establish topology, ordering and state.
  * The public helper clones its input and never changes the fallback shader.
  */
@@ -33,10 +33,12 @@ supported(const nir_shader *s, const char **reason)
 
    if (s->xfb_info || s->info.writes_memory ||
        s->info.clip_distance_array_size || s->info.cull_distance_array_size ||
-       s->info.outputs_written != VARYING_BIT_POS ||
-       (s->info.inputs_read & ~VARYING_BIT_POS))
+       !(s->info.outputs_written & VARYING_BIT_POS) ||
+       (s->info.outputs_written & ~HK_APPLE9_NATIVE_VERTEX_IO) ||
+       (s->info.inputs_read & ~HK_APPLE9_NATIVE_VERTEX_IO) ||
+       s->info.outputs_written_16bit || s->info.inputs_read_16bit)
       REJECT(
-         "GS mesh probe supports only Position I/O without XFB or side effects");
+         "GS mesh probe needs Position/generic I/O without XFB or side effects");
 
    unsigned implementations = 0;
    nir_foreach_function_impl(impl, s) {
@@ -51,8 +53,8 @@ supported(const nir_shader *s, const char **reason)
             nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
             switch (intr->intrinsic) {
             case nir_intrinsic_store_output:
-               if (nir_intrinsic_io_semantics(intr).location !=
-                      VARYING_SLOT_POS ||
+               if (!hk_apple9_native_vertex_slot(
+                      nir_intrinsic_io_semantics(intr).location) ||
                    !nir_src_is_const(intr->src[1]) ||
                    nir_src_as_uint(intr->src[1]) ||
                    intr->src[0].ssa->bit_size != 32 ||
@@ -62,8 +64,8 @@ supported(const nir_shader *s, const char **reason)
                   REJECT("unsupported GS output store");
                break;
             case nir_intrinsic_load_per_vertex_input:
-               if (nir_intrinsic_io_semantics(intr).location !=
-                      VARYING_SLOT_POS ||
+               if (!hk_apple9_native_vertex_slot(
+                      nir_intrinsic_io_semantics(intr).location) ||
                    !nir_src_is_const(intr->src[0]) ||
                    nir_src_as_uint(intr->src[0]) >= 3 ||
                    !nir_src_is_const(intr->src[1]) ||
@@ -111,7 +113,9 @@ struct gs_mesh_state {
    /* The draw's triangle-class topology (list, strip or fan) and provoking
     * mode, as the fallback GS's software input assembly sees them. */
    nir_def *topology, *flatshade_first;
-   nir_variable *position;
+   nir_variable *outputs[64];
+   uint8_t masks[64];
+   nir_alu_type types[64][4];
    nir_variable *vertices;
    nir_variable *primitives;
    nir_variable *strip;
@@ -153,7 +157,8 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       for (unsigned i = 0; i < intr->src[0].ssa->num_components; ++i)
          value = nir_vector_insert_imm(
             b, value, nir_channel(b, intr->src[0].ssa, i), component + i);
-      nir_store_var(b, s->position, value,
+      unsigned location = nir_intrinsic_io_semantics(intr).location;
+      nir_store_var(b, s->outputs[location], value,
                     nir_intrinsic_write_mask(intr) << component);
       break;
    }
@@ -166,18 +171,39 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       {
          nir_def *p = nir_load_var(b, s->primitives);
          nir_def *n = nir_load_var(b, s->strip);
-         nir_store_per_vertex_output(
-            b, nir_load_var(b, s->position), nir_iadd(b, s->vertex_base, v), nir_imm_int(b, 0),
-            .write_mask = 15, .src_type = nir_type_float32,
-            .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+         for (unsigned loc = 0; loc < ARRAY_SIZE(s->outputs); ++loc) {
+            if (!s->outputs[loc])
+               continue;
+            nir_def *value = nir_load_var(b, s->outputs[loc]);
+            if (loc == VARYING_SLOT_POS) {
+               nir_store_per_vertex_output(
+                  b, value, nir_iadd(b, s->vertex_base, v), nir_imm_int(b, 0),
+                  .write_mask = 15, .src_type = nir_type_float32,
+                  .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+               continue;
+            }
+            /* Keep each component's type: packed user locations may contain
+             * both integer and floating-point scalars. */
+            u_foreach_bit(c, s->masks[loc]) {
+               nir_store_per_vertex_output(
+                  b, nir_channel(b, value, c), nir_iadd(b, s->vertex_base, v),
+                  nir_imm_int(b, 0), .component = c, .write_mask = 1,
+                  .src_type = s->types[loc][c],
+                  .io_semantics = {.location = loc, .num_slots = 1});
+            }
+         }
          nir_push_if(b, nir_uge_imm(b, n, 2));
          {
-            /* Reset parity at EndPrimitive. A strip's second triangle reverses
-             * its first two corners; mesh output is an explicit triangle list. */
+            /* Reset parity at EndPrimitive. Reverse odd triangles while
+             * keeping the API's provoking corner in its list position. */
             nir_def *odd = nir_ine_imm(b, nir_iand_imm(b, n, 1), 0);
             nir_def *a = nir_iadd_imm(b, v, -2), *c = nir_iadd_imm(b, v, -1);
+            nir_def *first_odd = nir_iand(b, odd, s->flatshade_first);
+            nir_def *last_odd = nir_iand(b, odd, nir_inot(b, s->flatshade_first));
             nir_def *indices = nir_iadd(
-               b, nir_vec3(b, nir_bcsel(b, odd, c, a), nir_bcsel(b, odd, a, c), v),
+               b, nir_vec3(b, nir_bcsel(b, last_odd, c, a),
+                            nir_bcsel(b, first_odd, v, nir_bcsel(b, last_odd, a, c)),
+                            nir_bcsel(b, first_odd, c, v)),
                s->vertex_base);
             nir_store_per_primitive_output(
                b, indices, nir_iadd(b, s->primitive_base, p), nir_imm_int(b, 0),
@@ -191,7 +217,10 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          nir_store_var(b, s->vertices, nir_iadd_imm(b, v, 1), 1);
          nir_store_var(b, s->strip, nir_iadd_imm(b, n, 1), 1);
          /* GS outputs become undefined after EmitVertex. */
-         nir_store_var(b, s->position, nir_undef(b, 4, 32), 15);
+         for (unsigned loc = 0; loc < ARRAY_SIZE(s->outputs); ++loc) {
+            if (s->outputs[loc])
+               nir_store_var(b, s->outputs[loc], nir_undef(b, 4, 32), 15);
+         }
       }
       nir_pop_if(b, NULL);
       break;
@@ -273,8 +302,6 @@ hk_nir_gs_mesh(const nir_shader *source, const char **reason)
       .vertex_base = pack > 1 ? nir_imul_imm(&b, lane, vertices) : nir_imm_int(&b, 0),
       .primitive_base =
          pack > 1 ? nir_imul_imm(&b, lane, vertices - 2) : nir_imm_int(&b, 0),
-      .position =
-         nir_local_variable_create(impl, glsl_vec4_type(), "gs_position"),
       .vertices =
          nir_local_variable_create(impl, glsl_uint_type(), "gs_vertices"),
       .primitives =
@@ -282,7 +309,26 @@ hk_nir_gs_mesh(const nir_shader *source, const char **reason)
       .strip =
          nir_local_variable_create(impl, glsl_uint_type(), "gs_strip_vertices"),
    };
-   nir_store_var(&b, s.position, nir_undef(&b, 4, 32), 15);
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic != nir_intrinsic_store_output)
+            continue;
+         unsigned loc = nir_intrinsic_io_semantics(intr).location;
+         unsigned component = nir_intrinsic_component(intr);
+         s.masks[loc] |= nir_intrinsic_write_mask(intr) << component;
+         u_foreach_bit(c, nir_intrinsic_write_mask(intr))
+            s.types[loc][component + c] = nir_intrinsic_src_type(intr);
+      }
+   }
+   for (unsigned loc = 0; loc < ARRAY_SIZE(s.outputs); ++loc) {
+      if (!s.masks[loc])
+         continue;
+      s.outputs[loc] = nir_local_variable_create(impl, glsl_vec4_type(), "gs_output");
+      nir_store_var(&b, s.outputs[loc], nir_undef(&b, 4, 32), 15);
+   }
    nir_store_var(&b, s.vertices, nir_imm_int(&b, 0), 1);
    nir_store_var(&b, s.primitives, nir_imm_int(&b, 0), 1);
    nir_store_var(&b, s.strip, nir_imm_int(&b, 0), 1);

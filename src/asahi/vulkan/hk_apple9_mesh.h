@@ -24,6 +24,17 @@ bool hk_apple9_native_gs_enabled(void);
 bool hk_apple9_native_tess_enabled(void);
 bool hk_apple9_native_task_bridge_enabled(void);
 
+/* Generic 32-bit stage I/O shares the native mesh per-vertex layout. Builtins
+ * other than Position need their own stage/rasterization semantics. */
+#define HK_APPLE9_NATIVE_VERTEX_IO \
+   (VARYING_BIT_POS | (UINT64_MAX << VARYING_SLOT_VAR0))
+static inline bool
+hk_apple9_native_vertex_slot(unsigned location)
+{
+   return location == VARYING_SLOT_POS ||
+          (location >= VARYING_SLOT_VAR0 && location < VARYING_SLOT_VAR0 + 32);
+}
+
 /* Research (HK_APPLE9_NATIVE_GS_PACK, default off): native GS runs up to
  * HK_APPLE9_NATIVE_GS_PACK input triangles per T32 mesh group, one GS
  * invocation per lane, in fixed per-lane output slots (T32 V24/P17 for 3

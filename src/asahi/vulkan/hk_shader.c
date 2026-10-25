@@ -6852,6 +6852,21 @@ hk_apple9_compile_native_mesh_program(
       &options, out, info, reason);
 }
 
+/* Research varyings use the existing mesh publication model (T32 for shapes
+ * beyond V3/P1). Keep the stage's explicit declaration-class selection; this
+ * does not extend production Position-only qualification. */
+static bool
+hk_apple9_native_stage_varyings(const nir_shader *mesh, bool production)
+{
+   return !production && hk_apple9_native_mesh_enabled() &&
+          hk_apple9_native_mesh_attributes_enabled() &&
+          (mesh->info.outputs_written & (UINT64_MAX << VARYING_SLOT_VAR0)) &&
+          hk_apple9_packed_mesh_class_selected(
+             hk_apple9_native_mesh_packed_shapes(),
+             hk_apple9_native_mesh_threads(mesh->info.workgroup_size),
+             mesh->info.mesh.max_vertices_out, mesh->info.mesh.max_primitives_out);
+}
+
 /* GS capability is established on an immutable clone before normal
  * fallback lowering. Require an explicitly selected packed class even at P1;
  * enabling GS routing does not inherit old lane-0 qualification. */
@@ -6901,7 +6916,8 @@ hk_apple9_native_gs_check(const nir_shader *source,
       return VK_SUCCESS;
    }
    VkResult result = VK_SUCCESS;
-   if (hk_apple9_native_mesh_packed_shape_eligible(mesh) &&
+   if ((hk_apple9_native_mesh_packed_shape_eligible(mesh) ||
+        hk_apple9_native_stage_varyings(mesh, production)) &&
        (!production || hk_apple9_native_stage_class(
           source->info.stage, mesh->info.workgroup_size[0],
           mesh->info.mesh.max_vertices_out, mesh->info.mesh.max_primitives_out))) {
@@ -6960,7 +6976,8 @@ hk_apple9_native_tess_check(const nir_shader *source,
       return VK_SUCCESS;
    }
    VkResult result = VK_SUCCESS;
-   if (hk_apple9_native_mesh_packed_shape_eligible(mesh) &&
+   if ((hk_apple9_native_mesh_packed_shape_eligible(mesh) ||
+        hk_apple9_native_stage_varyings(mesh, production)) &&
        (!production || hk_apple9_native_stage_class(
           source->info.stage, mesh->info.workgroup_size[0],
           mesh->info.mesh.max_vertices_out, mesh->info.mesh.max_primitives_out))) {
@@ -7880,11 +7897,13 @@ hk_apple9_compile_graphics_mode(struct hk_device *dev, uint32_t count,
    if (mesh && (!task || key.native_task_bridge) &&
        !per_vertex && !key.polygon_points)
       result = hk_apple9_native_mesh_check(mesh, &key, &native, &reason);
-   else if (gs && !mesh && !task && !tess && !per_vertex && !fs_inputs &&
+   else if (gs && !mesh && !task && !tess && !per_vertex &&
+            (!fs_inputs || hk_apple9_native_gs_enabled()) &&
             !producer_effects &&
             !key.polygon_points && !key.line_stipple)
       result = hk_apple9_native_gs_check(gs, &key, &native, &reason);
-   else if (tes && tcs && !gs && !mesh && !task && !per_vertex && !fs_inputs &&
+   else if (tes && tcs && !gs && !mesh && !task && !per_vertex &&
+            (!fs_inputs || hk_apple9_native_tess_enabled()) &&
             !producer_effects &&
             !key.polygon_points && !key.line_stipple)
       result = hk_apple9_native_tess_check(tes, &key, &native, &reason);

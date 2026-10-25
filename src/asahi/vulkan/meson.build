@@ -446,6 +446,19 @@ if with_tests
            'HK_APPLE9_NATIVE_MESH_PRIMITIVE_LOWERING=1'],
     suite : ['asahi', 'honeykrisp'],
   )
+  native_stage_varyings = executable(
+    'hk-native-stage-varyings', 'tests/hk-native-stage-varyings.c',
+    include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                           inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+    dependencies : [hk_deps], link_with : [libhk],
+  )
+  foreach packed : ['0', '1']
+    test('hk-native-stage-varyings-pack-' + packed, native_stage_varyings,
+         env : ['HK_APPLE9_NATIVE_MESH=1', 'HK_APPLE9_NATIVE_GS_PACK=' + packed,
+                'HK_APPLE9_NATIVE_TES_PACK=' + packed,
+                'HK_APPLE9_NATIVE_MESH_PACKED_SHAPES=T16V3P1,T16V4P2,T32V24P17,T32V32P16'],
+         suite : ['asahi', 'honeykrisp'])
+  endforeach
   native_rounds_test = executable(
     'hk-native-mesh-rounds', 'tests/hk-native-mesh-rounds.c',
     include_directories : [inc_gallium, inc_gallium_aux, inc_include,

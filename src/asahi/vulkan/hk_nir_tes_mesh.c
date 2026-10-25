@@ -63,12 +63,13 @@ supported(const nir_shader *s, unsigned *vertices_in, const char **reason)
          "TES mesh probe needs triangle or quad domains without point mode");
    if (s->xfb_info || s->info.writes_memory ||
        s->info.clip_distance_array_size || s->info.cull_distance_array_size ||
-       s->info.outputs_written != VARYING_BIT_POS ||
-       (s->info.inputs_read & ~(VARYING_BIT_POS | VARYING_BIT_TESS_LEVEL_INNER |
+       !(s->info.outputs_written & VARYING_BIT_POS) ||
+       (s->info.outputs_written & ~HK_APPLE9_NATIVE_VERTEX_IO) ||
+       (s->info.inputs_read & ~(HK_APPLE9_NATIVE_VERTEX_IO | VARYING_BIT_TESS_LEVEL_INNER |
                                 VARYING_BIT_TESS_LEVEL_OUTER)) ||
-       s->info.patch_inputs_read)
+       s->info.outputs_written_16bit || s->info.inputs_read_16bit)
       REJECT(
-         "TES mesh probe supports Position I/O and tess levels without side effects");
+         "TES mesh probe needs Position/generic I/O without side effects");
 
    *vertices_in = 1;
    unsigned implementations = 0;
@@ -84,8 +85,8 @@ supported(const nir_shader *s, unsigned *vertices_in, const char **reason)
             nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
             switch (intr->intrinsic) {
             case nir_intrinsic_store_output:
-               if (nir_intrinsic_io_semantics(intr).location !=
-                      VARYING_SLOT_POS ||
+               if (!hk_apple9_native_vertex_slot(
+                      nir_intrinsic_io_semantics(intr).location) ||
                    !nir_src_is_const(intr->src[1]) ||
                    nir_src_as_uint(intr->src[1]) ||
                    intr->src[0].ssa->bit_size != 32 ||
@@ -97,9 +98,11 @@ supported(const nir_shader *s, unsigned *vertices_in, const char **reason)
             case nir_intrinsic_load_input: {
                unsigned loc = nir_intrinsic_io_semantics(intr).location;
                unsigned components =
-                  loc == VARYING_SLOT_TESS_LEVEL_OUTER ? 4 : 2;
+                  loc == VARYING_SLOT_TESS_LEVEL_INNER ? 2 : 4;
                if ((loc != VARYING_SLOT_TESS_LEVEL_OUTER &&
-                    loc != VARYING_SLOT_TESS_LEVEL_INNER) ||
+                    loc != VARYING_SLOT_TESS_LEVEL_INNER &&
+                    !(loc >= VARYING_SLOT_PATCH0 &&
+                      loc < VARYING_SLOT_PATCH0 + 32)) ||
                    !nir_src_is_const(intr->src[0]) ||
                    nir_src_as_uint(intr->src[0]) || intr->def.bit_size != 32 ||
                    nir_intrinsic_component(intr) + intr->def.num_components >
@@ -108,8 +111,8 @@ supported(const nir_shader *s, unsigned *vertices_in, const char **reason)
                break;
             }
             case nir_intrinsic_load_per_vertex_input:
-               if (nir_intrinsic_io_semantics(intr).location !=
-                      VARYING_SLOT_POS ||
+               if (!hk_apple9_native_vertex_slot(
+                      nir_intrinsic_io_semantics(intr).location) ||
                    !nir_src_is_const(intr->src[0]) ||
                    nir_src_as_uint(intr->src[0]) >= 32 ||
                    !nir_src_is_const(intr->src[1]) ||
