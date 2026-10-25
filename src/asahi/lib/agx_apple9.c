@@ -464,14 +464,14 @@ static bool apple9_build_body_entry(uint8_t *out, uint64_t entry,
 void
 agx_apple9_initialize_entries(struct agx_device *dev)
 {
-   uint8_t *header = dev->apple9_entry_map;
+   uint8_t header[AGX_APPLE9_ENTRY_HEADER_SIZE];
    memset(header, 0, AGX_APPLE9_ENTRY_HEADER_SIZE);
    apple9_put_u32(header, AGX_APPLE9_ENTRY_HEADER_SIZE);
    for (unsigned offset = 0x40; offset < AGX_APPLE9_ENTRY_HEADER_SIZE; offset += 2)
       apple9_put_u16(header + offset, 0x0006);
    apple9_fill_helper_table(header, 0x100, 10);
    apple9_fill_helper_table(header, 0x200, 10);
-   agx_bo_note_cpu_write(dev->apple9_entries, 0, AGX_APPLE9_ENTRY_HEADER_SIZE);
+   agx_apple9_entry_write(dev, 0, header, AGX_APPLE9_ENTRY_HEADER_SIZE);
 }
 
 /* The launch target addresses entries in a few megabytes, room for about
@@ -525,9 +525,15 @@ apple9_shader_entry(struct agx_device *dev, void *allocator,
                                      AGX_APPLE9_ENTRY_BLOCK_SIZE,
                                      AGX_APPLE9_ENTRY_ALIGNMENT);
       }
+      if (block &&
+          !agx_apple9_entry_back(dev, block + AGX_APPLE9_ENTRY_BLOCK_SIZE)) {
+         util_vma_heap_free(&dev->apple9_entry_heap, block,
+                            AGX_APPLE9_ENTRY_BLOCK_SIZE);
+         block = 0;
+      }
       if (block) {
          entry = block + AGX_APPLE9_ENTRY_CODE_OFFSET;
-         uint8_t *bytes = (uint8_t *)dev->apple9_entry_map + block;
+         uint8_t bytes[AGX_APPLE9_ENTRY_BLOCK_SIZE];
          memset(bytes, 0, AGX_APPLE9_ENTRY_BLOCK_SIZE);
          apple9_put_u32(bytes, AGX_APPLE9_ENTRY_BLOCK_SIZE);
          if (compute) {
@@ -537,8 +543,8 @@ apple9_shader_entry(struct agx_device *dev, void *allocator,
          }
          if (apple9_build_body_entry(bytes + AGX_APPLE9_ENTRY_CODE_OFFSET,
                                      dev->shader_base + entry, body->addr)) {
-            agx_bo_note_cpu_write(dev->apple9_entries, block,
-                                  AGX_APPLE9_ENTRY_BLOCK_SIZE);
+            agx_apple9_entry_write(dev, block, bytes,
+                                   AGX_APPLE9_ENTRY_BLOCK_SIZE);
             body->entry_offset = entry;
             list_addtail(&body->entry_link, &dev->apple9_entry_lru);
          } else {

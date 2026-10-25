@@ -4,6 +4,7 @@
  */
 
 #pragma once
+#include "agx_apple9_layout.h"
 #include "agx_native_mesh.h"
 
 #include <stdint.h>
@@ -128,6 +129,10 @@ struct agx_device {
    /* Set the expected class hash before opening the device. Qualification is
     * sampled around this VM's creation and never upgraded later. */
    const char *native_mesh_classes;
+
+   /* Opened only to query the device (a Vulkan physical device): no shader
+    * entries are allocated, so their 8 MiB arena is not created. */
+   bool probe_only;
    bool native_mesh_qualified;
    /* The VM's latched asahi_native_blocks profile; qualified only together
     * with native_mesh_qualified, at the same generation. */
@@ -185,9 +190,13 @@ struct agx_device {
    struct agx_bo *zero_bo, *scratch_bo;
 
    /* One stable, GPU-read-only entry arena shared by graphics and compute.
-    * Suballocations follow the lifetime of immutable shader bodies. */
-   struct agx_bo *apple9_entries;
-   void *apple9_entry_map;
+    * Suballocations follow the lifetime of immutable shader bodies. The arena
+    * is a fixed VA range at shader_base, backed from the start in
+    * AGX_APPLE9_ENTRY_CHUNK_SIZE chunks as entries reach them: an application
+    * with a few thousand shaders uses one chunk of the 8 MiB. The CPU writes
+    * entries through agx_apple9_entry_write, chunk by chunk. */
+   struct agx_va *apple9_entry_va;
+   struct agx_bo *apple9_entry_chunks[AGX_APPLE9_ENTRY_CHUNKS];
    struct util_vma_heap apple9_entry_heap;
    simple_mtx_t apple9_entry_lock;
    /* Bodies holding an entry, least recently pinned first. */
@@ -287,6 +296,13 @@ agx_rw_addr_to_ro(struct agx_device *dev, uint64_t addr)
 }
 
 void agx_bo_note_cpu_write(struct agx_bo *bo, uint64_t offset, uint64_t size);
+
+/* Back the shader entry arena up to end_B, with apple9_entry_lock held (or
+ * while opening the device). Returns false if a chunk cannot be allocated. */
+bool agx_apple9_entry_back(struct agx_device *dev, uint32_t end_B);
+/* Write size bytes at offset in the backed shader entry arena. */
+void agx_apple9_entry_write(struct agx_device *dev, uint32_t offset,
+                            const void *data, uint32_t size);
 bool agx_bo_sync_cpu_read(struct agx_bo *bo);
 
 /* A separate mapping of the first size bytes of a BO, at fixed_addr unless
