@@ -5647,7 +5647,10 @@ hk_apple9_use_native_tess(struct hk_cmd_buffer *cmd, struct agx_draw draw)
              MESA_SHADER_TESS_EVAL, body->key.physical_threads,
              body->layout.max_vertices, body->layout.max_primitives) &&
           hk_apple9_packed_mesh_class_selected(
-             hk_apple9_native_mesh_packed_shapes(), body->key.physical_threads,
+             hk_apple9_native_mesh_packed_shapes(),
+             hk_apple9_native_tess_enabled() && body->publication_rounds
+                ? hk_apple9_native_mesh_threads(body->logical_size)
+                : body->key.physical_threads,
              body->layout.max_vertices, body->layout.max_primitives);
 }
 
@@ -5711,7 +5714,10 @@ hk_apple9_use_native_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
              MESA_SHADER_GEOMETRY, body->key.physical_threads,
              body->layout.max_vertices, body->layout.max_primitives)) &&
           hk_apple9_packed_mesh_class_selected(
-             hk_apple9_native_mesh_packed_shapes(), body->key.physical_threads,
+             hk_apple9_native_mesh_packed_shapes(),
+             hk_apple9_native_gs_enabled() && body->publication_rounds
+                ? hk_apple9_native_mesh_threads(body->logical_size)
+                : body->key.physical_threads,
              body->layout.max_vertices, body->layout.max_primitives);
 }
 

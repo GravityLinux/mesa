@@ -367,13 +367,13 @@ rejections(void)
          src->info.writes_memory = true;
          break;
       case 4:
-         src->info.outputs_written |= BITFIELD64_BIT(VARYING_SLOT_VAR0);
+         src->info.outputs_written |= VARYING_BIT_LAYER;
          break;
       case 5:
-         src->info.inputs_read |= BITFIELD64_BIT(VARYING_SLOT_VAR0);
+         src->info.inputs_read |= VARYING_BIT_PSIZ;
          break;
       case 6:
-         src->info.patch_inputs_read = 1;
+         src->info.outputs_written_16bit = 1;
          break;
       case 7:
          src->info.clip_distance_array_size = 1;

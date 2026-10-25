@@ -225,7 +225,7 @@ main(void)
          src->info.gs.output_primitive = MESA_PRIM_POINTS;
          break;
       case 4:
-         src->info.outputs_written |= BITFIELD64_BIT(VARYING_SLOT_VAR0);
+         src->info.outputs_written |= VARYING_BIT_LAYER;
          break;
       case 5:
          src->info.writes_memory = true;
