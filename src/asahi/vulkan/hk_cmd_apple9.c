@@ -710,7 +710,7 @@ hk_apple9_set_index_fetch(struct agx_apple9_render_pipeline *pipeline,
          : MIN2(range - offset, (uint64_t)draw.b.count[0] * pipeline->index_size);
 }
 
-DEBUG_GET_ONCE_BOOL_OPTION(native_ppp_delta, "HK_APPLE9_NATIVE_PPP_DELTA", false)
+DEBUG_GET_ONCE_BOOL_OPTION(native_ppp_delta, "HK_APPLE9_NATIVE_PPP_DELTA", true)
 
 static void
 hk_apple9_emit_ordinary_draw(struct hk_cs *cs,
@@ -777,7 +777,8 @@ hk_apple9_record_draw(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       /* Each native block is complete: its own state words, launch records
        * and arguments, whether it leads the render or continues it. */
       /* A block continuing a native render may update only the PPP blocks
-       * that changed since the previous native block (research). */
+       * that changed since the previous native block (HK_APPLE9_NATIVE_PPP_DELTA=0
+       * restores full updates). */
       const bool delta = debug_get_option_native_ppp_delta() && cs->apple9_native_mesh &&
                          cs->apple9_ppp_valid && cs->apple9_ppp_size == record->ppp_size &&
                          cs->apple9_ppp_viewport_offset == pipeline->ppp_viewport_offset &&
