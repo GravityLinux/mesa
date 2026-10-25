@@ -2003,8 +2003,10 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
       goto fail_pdev_alloc;
    }
 
+   /* HK_EXPERIMENTAL_APPLE9=0 hides the device, e.g. to fall back to
+    * another Vulkan implementation. */
    if (pdev->dev.chip == AGX_CHIP_G16G &&
-       !debug_get_bool_option("HK_EXPERIMENTAL_APPLE9", false)) {
+       !debug_get_bool_option("HK_EXPERIMENTAL_APPLE9", true)) {
       result = VK_ERROR_INCOMPATIBLE_DRIVER;
       goto fail_agx_device;
    }
