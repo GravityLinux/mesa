@@ -1353,8 +1353,11 @@ hk_cmd_buffer_end_compute_internal(struct hk_cmd_buffer *cmd,
          hk_dispatch_imm_writes(cmd, cs);
       }
 
-      /* Availability at the stream boundary, including the last dispatch. */
-      if (cs->cdm_dirty) {
+      /* Availability at the stream boundary, including the last dispatch. A
+       * stream that only carries an end timestamp needs the full flush too:
+       * without the drain at its end, the timestamp never lands.
+       */
+      if (cs->cdm_dirty || cs->timestamp.end.handle) {
          cs->end_flush = (uint32_t *)cs->current;
          hk_cdm_cache_flush(hk_cmd_buffer_device(cmd), cs);
       }
