@@ -1,9 +1,11 @@
 # Experimental Apple9 Honeykrisp
 
 This is the experimental native Vulkan port for the T8132 M4 Mac mini
-(G16G B1). It is not a conformant Vulkan implementation. Device enumeration
-requires `HK_EXPERIMENTAL_APPLE9=1`, and the conformance version is zero.
-Older chips retain their existing behavior.
+(G16G B1). It is not a conformant Vulkan implementation: the conformance
+version is zero, and the driver prints a warning when it exposes the device.
+The device is enumerated by default and needs no environment variable;
+`HK_EXPERIMENTAL_APPLE9=0` hides it. Older chips retain their existing
+behavior.
 
 ## Status
 
@@ -223,8 +225,7 @@ Passing the selected cases below does not establish Vulkan conformance.
 native CTS runtime and supplies the unchanged, flattened `vk-main.txt` list.
 The candidate prefix must have `lib/libvulkan_asahi.so` and exactly one Asahi
 ICD manifest under `share/vulkan/icd.d`, naming that library by absolute path.
-Set `HK_EXPERIMENTAL_APPLE9=1` and `ASAHI_MESA_DEBUG=nocompress` in the launcher's
-configured environment. Use `--include-tests` while functionality is incomplete.
+Set `ASAHI_MESA_DEBUG=nocompress` in the launcher's configured environment. Use `--include-tests` while functionality is incomplete.
 The launcher verifies the Apple M4 renderer, hashes the driver and inputs, and
 retains upstream skips, flakes, single-thread restrictions and expected failures.
 
@@ -483,8 +484,7 @@ From the source root, with a GLSL-to-SPIR-V compiler and Vulkan loader installed
 ```sh
 glslangValidator -V src/asahi/vulkan/tests/apple9-compute.comp -o /tmp/apple9-compute.spv
 cc -Iinclude src/asahi/vulkan/tests/apple9-compute.c -o /tmp/apple9-compute -l:libvulkan.so.1
-VK_DRIVER_FILES=/absolute/path/to/candidate.json \
-  HK_EXPERIMENTAL_APPLE9=1 ASAHI_MESA_DEBUG=nocompress \
+VK_DRIVER_FILES=/absolute/path/to/candidate.json ASAHI_MESA_DEBUG=nocompress \
   /tmp/apple9-compute /tmp/apple9-compute.spv
 ```
 
@@ -569,8 +569,7 @@ The register-indexed texture encoding now preserves the coordinate-publication
 wait in bits 39-41, just as the immediate-table form does. The packer regression
 covers implicit LOD, explicit LOD and gradients, texture-only and combined
 register indices, and all six result completion tags. Run native checks with
-`HK_EXPERIMENTAL_APPLE9=1 ASAHI_MESA_DEBUG=nocompress` and the intended
-`VK_DRIVER_FILES`; the test prints the renderer and compares every pixel.
+`ASAHI_MESA_DEBUG=nocompress` and the intended `VK_DRIVER_FILES`; the test prints the renderer and compares every pixel.
 
 `tests/apple9-map-placed.c` maps allocations placed (`VK_EXT_map_memory_placed`)
 between guard pages, with and without `VK_MEMORY_UNMAP_RESERVE_BIT_EXT`,

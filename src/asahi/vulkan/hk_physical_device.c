@@ -2003,11 +2003,19 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
       goto fail_pdev_alloc;
    }
 
+   /* HK_EXPERIMENTAL_APPLE9=0 hides the device, e.g. to fall back to
+    * another Vulkan implementation. */
    if (pdev->dev.chip == AGX_CHIP_G16G &&
-       !debug_get_bool_option("HK_EXPERIMENTAL_APPLE9", false)) {
+       !debug_get_bool_option("HK_EXPERIMENTAL_APPLE9", true)) {
       result = VK_ERROR_INCOMPATIBLE_DRIVER;
       goto fail_agx_device;
    }
+
+   /* A private install prefix or a DRIRC_CONFIGDIR override loses the
+    * application options silently otherwise. */
+   if (pdev->dev.chip == AGX_CHIP_G16G && !instance->drirc.misc.defaults_loaded)
+      mesa_logw("hk: 00-hk-defaults.conf was not loaded; application "
+                "workarounds such as the D3D options are off");
 
    struct vk_physical_device_dispatch_table dispatch_table;
    vk_physical_device_dispatch_table_from_entrypoints(
