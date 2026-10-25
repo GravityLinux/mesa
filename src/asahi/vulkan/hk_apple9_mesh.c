@@ -304,8 +304,10 @@ hk_apple9_native_mesh_round_shape_eligible(const nir_shader *nir)
           !nir->info.workgroup_size_variable &&
           (!nir->info.api_subgroup_size || nir->info.api_subgroup_size == 32) &&
           nir->info.derivative_group == DERIVATIVE_GROUP_NONE &&
-          !(nir->info.per_primitive_outputs &
-            ~(VARYING_BIT_PRIMITIVE_INDICES | VARYING_BIT_CULL_PRIMITIVE)) &&
+          (!(nir->info.per_primitive_outputs &
+             ~(VARYING_BIT_PRIMITIVE_INDICES | VARYING_BIT_CULL_PRIMITIVE)) ||
+           (hk_apple9_native_mesh_primitive_lowering_enabled() &&
+            nir->info.mesh.max_vertices_out + nir->info.mesh.max_primitives_out <= 256)) &&
           !nir->info.outputs_written_16bit &&
           hk_apple9_native_mesh_model_counts_eligible(
              nir->info.workgroup_size, nir->info.mesh.max_vertices_out,
@@ -447,6 +449,22 @@ hk_apple9_native_shader_valid(const struct agx_shader_info *code,
              body->logical_size[2] == 1 && !body->shared_size_B &&
              !body->layout.local_size_B && !code->local_size;
    const struct agx_apple9_mesh_layout *l = &body->layout;
+   if (body->primitive_vertices) {
+      if (!body->publication_rounds || !body->original_max_vertices ||
+          body->original_max_vertices + l->max_primitives != l->max_vertices ||
+          body->primitive_broadcast ||
+          (body->primitive_vertices &
+           ~(VARYING_BIT_PRIMITIVE_ID | BITFIELD64_RANGE(VARYING_SLOT_VAR0, 32))))
+         return false;
+      u_foreach_bit64(slot, body->primitive_vertices) {
+         if (!code->apple9_varyings.mask[slot] ||
+             code->apple9_varyings.group[slot] !=
+                agx_apple9_varying_group(body->primitive_vertices, 0, slot))
+            return false;
+      }
+   } else if (body->original_max_vertices) {
+      return false;
+   }
    if (body->cull_primitive &&
        (!body->publication_rounds || (body->cull_primitive_B & 3) ||
         body->cull_primitive_B > body->shared_size_B ||
