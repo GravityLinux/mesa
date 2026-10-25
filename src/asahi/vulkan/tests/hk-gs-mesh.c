@@ -213,7 +213,8 @@ main(void)
       nir_shader *src = source(4, 0, false);
       switch (kind) {
       case 0:
-         src->info.gs.invocations = 2;
+         /* 1..32 invocations are logical GS runs; beyond that is rejected. */
+         src->info.gs.invocations = 33;
          break;
       case 1:
          src->info.gs.active_stream_mask = 3;
@@ -231,6 +232,19 @@ main(void)
          src->info.writes_memory = true;
          break;
       }
+      lower_immutable(src, false);
+      ralloc_free(src);
+   }
+   /* Invocation counts within 1..32 lower, without changing the source. */
+   for (unsigned invocations = 2; invocations <= 32; invocations += 30) {
+      nir_shader *src = source(4, 0, false);
+      src->info.gs.invocations = invocations;
+      ralloc_free(lower_immutable(src, true));
+      ralloc_free(src);
+   }
+   {
+      nir_shader *src = source(4, 0, false);
+      src->info.gs.invocations = 0;
       lower_immutable(src, false);
       ralloc_free(src);
    }
