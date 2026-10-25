@@ -177,7 +177,7 @@ static const char *const hk_ignored_env[] = {
    "HK_APPLE9_FRAGMENT_BARRIER",     "HK_APPLE9_NO_TILING_ELISION",
    "HK_APPLE9_MESH_ROUTE_LOG",       "HK_APPLE9_GS_ROUTE_LOG",
    "HK_APPLE9_TESS_ROUTE_LOG",       "HK_APPLE9_FOLD_EMPTY_CLEARS",
-   "HK_APPLE9_TESS_FOLD",            "HK_APPLE9_RESEARCH_TESS_FOLD_LOG",
+   "HK_APPLE9_TESS_FOLD",
    "HK_APPLE9_NATIVE_BLOCKS",        "HK_APPLE9_NATIVE_LANES",
    "HK_APPLE9_NATIVE_BATCH_LOG",     "HK_APPLE9_NATIVE_RENDER_PRIMITIVES",
    /* The parallel and serial allocations are identical; the others only

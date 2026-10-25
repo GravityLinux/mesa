@@ -774,12 +774,6 @@ hk_tess_fold_enabled(void)
    return debug_get_option_tess_fold();
 }
 
-/* HK_APPLE9_RESEARCH_TESS_FOLD_LOG=1 prints each lane flush, so device kits
- * can check what folded.
- */
-DEBUG_GET_ONCE_BOOL_OPTION(research_tess_fold_log,
-                           "HK_APPLE9_RESEARCH_TESS_FOLD_LOG", false)
-
 /* Record a libagx program's dispatch into a batch lane. Called while
  * flushing, so it bypasses hk_dispatch_precomp's stream selection.
  */
@@ -893,7 +887,6 @@ hk_tess_batch_flush(struct hk_cmd_buffer *cmd)
 
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_cs *cs = cmd->current_cs.pre_gfx;
-   unsigned draws = cmd->tess_batch.draws;
    cmd->tess_batch.draws = 0;
    if (!cs) {
       for (unsigned i = 0; i < HK_TESS_BATCH_LANES; ++i)
@@ -902,22 +895,7 @@ hk_tess_batch_flush(struct hk_cmd_buffer *cmd)
       return;
    }
 
-   unsigned folded = util_dynarray_num_elements(&cmd->tess_batch.fold,
-                                                struct hk_tess_fold);
    hk_tess_fold_flush(cmd, cs);
-   if (unlikely(debug_get_option_research_tess_fold_log())) {
-      unsigned records[HK_TESS_BATCH_LANES] = {0};
-      for (unsigned l = 0; l < HK_TESS_BATCH_LANES; ++l) {
-         struct util_dynarray *lane = &cmd->tess_batch.lane[l];
-         for (uint8_t *at = lane->data; at < (uint8_t *)lane->data + lane->size;
-              at += 1 + *at)
-            records[l]++;
-      }
-      fprintf(stderr,
-              "HK_TESS_FLUSH draws=%u folded=%u records=%u,%u,%u,%u,%u\n",
-              draws, folded, records[0], records[1], records[2], records[3],
-              records[4]);
-   }
 
    for (unsigned l = 0; l < HK_TESS_BATCH_LANES; ++l) {
       struct util_dynarray *lane = &cmd->tess_batch.lane[l];
