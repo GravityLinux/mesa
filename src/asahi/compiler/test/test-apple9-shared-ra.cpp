@@ -552,7 +552,7 @@ TEST(Apple9SharedRa, LoadWaitFoldsIntoConsumerAfterIndependentArithmetic)
    auto index = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IMM,
       AGX_APPLE9_ENC_MOV_IMM32, nullptr, 0, 0);
    const agx_apple9_device_load_contract contract = {
-      .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_DIRECT_GPR,
+      .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
       .flags = 0,
       .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
    };
@@ -1007,7 +1007,7 @@ TEST(Apple9SharedRa, SubgroupMaxWaitsForInputAndPreservesSource)
    auto index = agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_IMM,
       AGX_APPLE9_ENC_MOV_IMM32, nullptr, 0, 0);
    const agx_apple9_device_load_contract contract = {
-      .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_DIRECT_GPR,
+      .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
       .flags = 0,
       .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
    };

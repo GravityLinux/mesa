@@ -329,13 +329,6 @@ enum agx_apple9_device_load_index_kind {
    /* Pointer-pair loads without an index: byte 5 is zero and bit 53, set
     * by every indexed form, is clear (Metal's p[k] and struct-member loads). */
    AGX_APPLE9_DEVICE_LOAD_INDEX_NONE,
-
-   /* Compatibility spellings retained while the existing capture tiers are
-    * migrated.  They describe lifetime, not how the index was computed. */
-   AGX_APPLE9_DEVICE_LOAD_INDEX_DIRECT_GPR =
-      AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
-   AGX_APPLE9_DEVICE_LOAD_INDEX_COMPUTED_GPR =
-      AGX_APPLE9_DEVICE_LOAD_INDEX_LAST_USE_GPR,
 };
 
 /* Human-order names for the two raw bytes at instruction offsets 8 and 9.
