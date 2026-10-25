@@ -92,6 +92,8 @@ int main(int argc, char **argv)
    NIR_PASS(_, nir, nir_lower_variable_initializers, ~0);
    NIR_PASS(_, nir, nir_split_var_copies);
    NIR_PASS(_, nir, nir_split_per_member_structs);
+   NIR_PASS(_, nir, nir_remove_dead_variables,
+            nir_var_shader_in | nir_var_shader_out | nir_var_system_value, NULL);
    nir_gather_clip_cull_distance_sizes_from_vars(nir);
    NIR_PASS(_, nir, nir_merge_clip_cull_distance_vars);
    NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
