@@ -554,6 +554,46 @@ hk_apple9_mesh_command_build(void *out, size_t capacity,
                              const uint32_t groups[3],
                              const uint32_t object_local_size[3], bool enable)
 {
+   size_t bytes;
+   return hk_apple9_mesh_command_build_delta(out, capacity, p, state, groups,
+                                             object_local_size, enable, NULL,
+                                             NULL, &bytes) &&
+          bytes == HK_APPLE9_MESH_COMMAND_BYTES;
+}
+
+/* The PPP state blocks of a record, in update-chain order: byte offset and
+ * length in words. The viewport block may move and grow (several viewports). */
+static unsigned
+hk_apple9_ppp_blocks(const struct agx_apple9_render_pipeline *p,
+                     uint16_t offset[9], uint8_t words[9])
+{
+   static const uint16_t offsets[] = {0, 0x40, 0x5c, 0x70, 0x8c, 0xc0, 0xa0, 0xac, 0xf0};
+   static const uint8_t lengths[] = {5, 7, 5, 7, 5, 10, 3, 2, 2};
+   for (unsigned i = 0; i < 9; ++i) {
+      offset[i] = offsets[i];
+      words[i] = lengths[i];
+   }
+   if (p->ppp_viewport_words)
+      words[5] = p->ppp_viewport_words;
+   if (p->ppp_viewport_offset)
+      offset[5] = p->ppp_viewport_offset;
+   return 9;
+}
+
+/* As hk_apple9_mesh_command_build, but when the previous native block of the
+ * same render left PPP state `previous` (CPU bytes of its record), update only
+ * the blocks whose bytes changed, always including the first (its header):
+ * PPP state persists across a render's blocks, and Metal's second block of a
+ * render updates one block (Air D2 capture). *bytes is the block length. */
+bool
+hk_apple9_mesh_command_build_delta(void *out, size_t capacity,
+                                   const struct agx_apple9_render_pipeline *p,
+                                   const uint32_t state[AGX_APPLE9_MESH_STATE_WORDS],
+                                   const uint32_t groups[3],
+                                   const uint32_t object_local_size[3], bool enable,
+                                   const uint8_t *previous, const uint8_t *record,
+                                   size_t *bytes)
+{
    if (!enable || !out || !p || !state || !groups || !object_local_size ||
        capacity < HK_APPLE9_MESH_COMMAND_BYTES || groups[0] != 1 ||
        groups[1] != 1 || groups[2] != 1 ||
@@ -567,20 +607,17 @@ hk_apple9_mesh_command_build(void *out, size_t capacity,
    uint32_t words[HK_APPLE9_MESH_COMMAND_BYTES / 4];
    memcpy(words, state, AGX_APPLE9_MESH_STATE_WORDS * 4);
    unsigned at = AGX_APPLE9_MESH_STATE_WORDS;
-   words[at++] = 0x500;
-   static const uint16_t offsets[] = {0,    0x40, 0x5c, 0x70,
-                                      0x8c, 0xc0, 0xa0, 0xac};
-   static const uint16_t counts[] = {7, 5, 7, 5, 10, 3, 2, 2};
-   for (unsigned i = 0; i < ARRAY_SIZE(offsets); ++i) {
-      unsigned offset = offsets[i], count = counts[i];
-      if (offset == 0x8c && p->ppp_viewport_words)
-         count = p->ppp_viewport_words;
-      if (offset == 0xc0 && p->ppp_viewport_offset)
-         offset = p->ppp_viewport_offset;
-      words[at++] = p->ppp + offset;
-      words[at++] = count << 8;
+   /* Each update names a block; the word before it carries its length. */
+   uint16_t offset[9];
+   uint8_t length[9];
+   unsigned blocks = hk_apple9_ppp_blocks(p, offset, length);
+   for (unsigned i = 0; i < blocks; ++i) {
+      if (previous && record && i &&
+          !memcmp(previous + offset[i], record + offset[i], length[i] * 4u))
+         continue;
+      words[at++] = length[i] << 8;
+      words[at++] = p->ppp + offset[i];
    }
-   words[at++] = p->ppp + 0xf0;
    words[at++] = 0x70000000 | (p->primitive << 8);
    /* The dispatch tail carries total threads, then local threads. The mesh
     * state count is independent of object entry participation. Launch the
@@ -591,7 +628,8 @@ hk_apple9_mesh_command_build(void *out, size_t capacity,
    for (unsigned i = 0; i < 3; ++i)
       words[at++] = object_local_size[i];
    words[at++] = 0xc0000000;
-   assert(at == ARRAY_SIZE(words));
-   memcpy(out, words, sizeof(words));
+   assert(at <= ARRAY_SIZE(words));
+   memcpy(out, words, at * 4);
+   *bytes = at * 4;
    return true;
 }

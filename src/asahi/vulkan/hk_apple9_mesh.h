@@ -129,6 +129,11 @@ bool hk_apple9_native_launch_parameters(
    uint64_t code_address);
 
 #define HK_APPLE9_MESH_COMMAND_BYTES 160
+bool hk_apple9_mesh_command_build_delta(
+   void *out, size_t capacity, const struct agx_apple9_render_pipeline *p,
+   const uint32_t state[AGX_APPLE9_MESH_STATE_WORDS], const uint32_t groups[3],
+   const uint32_t object_local_size[3], bool enable, const uint8_t *previous,
+   const uint8_t *record, size_t *bytes);
 bool hk_apple9_mesh_command_build(
    void *out, size_t capacity,
    const struct agx_apple9_render_pipeline *pipeline,

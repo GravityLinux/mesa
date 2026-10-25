@@ -710,11 +710,15 @@ hk_apple9_set_index_fetch(struct agx_apple9_render_pipeline *pipeline,
          : MIN2(range - offset, (uint64_t)draw.b.count[0] * pipeline->index_size);
 }
 
+DEBUG_GET_ONCE_BOOL_OPTION(native_ppp_delta, "HK_APPLE9_NATIVE_PPP_DELTA", true)
+
 static void
 hk_apple9_emit_ordinary_draw(struct hk_cs *cs,
                              const struct agx_apple9_render_pipeline *pipeline,
                              struct agx_draw draw)
 {
+   /* Ordinary draws update the whole PPP state their own way. */
+   cs->apple9_ppp_valid = false;
    if (agx_is_indirect(draw.b))
       cs->current =
          agx_apple9_emit_indirect_draw(cs->current, pipeline, draw.b.ptr) - 4;
@@ -772,16 +776,31 @@ hk_apple9_record_draw(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       };
       /* Each native block is complete: its own state words, launch records
        * and arguments, whether it leads the render or continues it. */
+      /* A block continuing a native render may update only the PPP blocks
+       * that changed since the previous native block (HK_APPLE9_NATIVE_PPP_DELTA=0
+       * restores full updates). */
+      const bool delta = debug_get_option_native_ppp_delta() && cs->apple9_native_mesh &&
+                         cs->apple9_ppp_valid && cs->apple9_ppp_size == record->ppp_size &&
+                         cs->apple9_ppp_viewport_offset == pipeline->ppp_viewport_offset &&
+                         cs->apple9_ppp_viewport_words == pipeline->ppp_viewport_words;
+      size_t bytes;
       if ((cs->apple9_native_mesh && !hk_apple9_native_can_append(cmd, cs, true)) ||
           !hk_apple9_prepare_native_mesh(
              cmd, vertex, object, record, native_grid, state) ||
-          !hk_apple9_mesh_command_build(
+          !hk_apple9_mesh_command_build_delta(
              cs->current, HK_APPLE9_MESH_COMMAND_BYTES, pipeline, state,
              object_groups, object_local_size,
-             hk_apple9_native_mesh_available_device(dev)))
+             hk_apple9_native_mesh_available_device(dev),
+             delta ? cs->apple9_ppp_last : NULL, delta ? record->ppp_record : NULL,
+             &bytes))
          return false;
+      memcpy(cs->apple9_ppp_last, record->ppp_record, record->ppp_size);
+      cs->apple9_ppp_size = record->ppp_size;
+      cs->apple9_ppp_viewport_offset = pipeline->ppp_viewport_offset;
+      cs->apple9_ppp_viewport_words = pipeline->ppp_viewport_words;
+      cs->apple9_ppp_valid = true;
       const uint8_t *before = cs->current;
-      cs->current += HK_APPLE9_MESH_COMMAND_BYTES - 4;
+      cs->current += bytes - 4;
       cs->apple9_native_mesh = true;
       ++cs->apple9_native_dispatches;
       cs->apple9_native_primitives += cmd->apple9_draw_primitives;
