@@ -4588,8 +4588,13 @@ zink_flush(struct pipe_context *pctx,
       mfence->fence = &bs->fence;
       mfence->sem = export_sem;
       if (bs) {
-         mfence->submit_count = bs->usage.submit_count;
+         /* store the count from before this batch's submit so that
+          * a diff of 1 in zink_fence_finish always means 'submitted once'
+          */
+         mtx_lock(&bs->usage.mtx);
+         mfence->submit_count = bs->usage.submit_count - (bs->fence.submitted ? 1 : 0);
          util_dynarray_append(&bs->fence.mfences, mfence);
+         mtx_unlock(&bs->usage.mtx);
       }
       if (export_sem) {
          pipe_reference(NULL, &mfence->reference);
