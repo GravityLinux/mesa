@@ -350,7 +350,7 @@ if with_tests
     dependencies : [hk_deps], link_with : [libhk],
     link_args : ['-Wl,--wrap=agx_bo_create', '-Wl,--wrap=agx_bo_reference',
                  '-Wl,--wrap=agx_bo_unreference', '-Wl,--wrap=__vk_errorf',
-                 '-Wl,--wrap=agx_compile_apple9_native_mesh',
+                 '-Wl,--wrap=agx_compile_apple9_native_mesh_lowered',
                  '-Wl,--wrap=agx_compile_apple9_tiny',
                  '-Wl,--wrap=agx_compile_apple9_fragment_mrt'],
   )
@@ -361,7 +361,7 @@ if with_tests
     dependencies : [hk_deps], link_with : [libhk],
     link_args : ['-Wl,--wrap=agx_bo_create', '-Wl,--wrap=agx_bo_reference',
                  '-Wl,--wrap=agx_bo_unreference', '-Wl,--wrap=agx_bo_cache_evict_all',
-                 '-Wl,--wrap=__vk_errorf', '-Wl,--wrap=agx_compile_apple9_native_mesh',
+                 '-Wl,--wrap=__vk_errorf', '-Wl,--wrap=agx_compile_apple9_native_mesh_lowered',
                  '-Wl,--wrap=agx_compile_apple9_tiny',
                  '-Wl,--wrap=agx_compile_apple9_fragment_mrt'],
   )
@@ -383,7 +383,7 @@ if with_tests
     dependencies : [hk_deps], link_with : [libhk],
     link_args : ['-Wl,--wrap=agx_bo_create', '-Wl,--wrap=agx_bo_reference',
                  '-Wl,--wrap=agx_bo_unreference', '-Wl,--wrap=__vk_errorf',
-                 '-Wl,--wrap=agx_compile_apple9_native_mesh',
+                 '-Wl,--wrap=agx_compile_apple9_native_mesh_lowered',
                  '-Wl,--wrap=agx_compile_apple9_tiny',
                  '-Wl,--wrap=agx_compile_apple9_fragment_mrt'],
   )

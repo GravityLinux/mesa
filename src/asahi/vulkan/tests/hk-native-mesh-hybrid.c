@@ -11,19 +11,19 @@
 
 static unsigned allocations, live_bos, fail_allocation;
 static unsigned native_compiles, emulated_compiles, fragment_compiles;
-static bool reject_native;
+static bool reject_native, primitive_copies;
 
-bool __real_agx_compile_apple9_native_mesh(
-   nir_shader *, bool, const struct agx_apple9_native_mesh_options *,
-   struct agx_shader_part *, struct agx_apple9_mesh_body_info *, const char **);
-bool __wrap_agx_compile_apple9_native_mesh(
-   nir_shader *, bool, const struct agx_apple9_native_mesh_options *,
-   struct agx_shader_part *, struct agx_apple9_mesh_body_info *, const char **);
+bool __real_agx_compile_apple9_native_mesh_lowered(
+   nir_shader *, const struct agx_apple9_native_mesh_options *,
+   struct agx_shader_part *, const struct agx_apple9_mesh_body_info *, const char **);
+bool __wrap_agx_compile_apple9_native_mesh_lowered(
+   nir_shader *, const struct agx_apple9_native_mesh_options *,
+   struct agx_shader_part *, const struct agx_apple9_mesh_body_info *, const char **);
 bool
-__wrap_agx_compile_apple9_native_mesh(
-   nir_shader *nir, bool enable,
+__wrap_agx_compile_apple9_native_mesh_lowered(
+   nir_shader *nir,
    const struct agx_apple9_native_mesh_options *options,
-   struct agx_shader_part *out, struct agx_apple9_mesh_body_info *info,
+   struct agx_shader_part *out, const struct agx_apple9_mesh_body_info *info,
    const char **reason)
 {
    ++native_compiles;
@@ -32,8 +32,8 @@ __wrap_agx_compile_apple9_native_mesh(
       memset(out, 0, sizeof(*out));
       return false;
    }
-   return __real_agx_compile_apple9_native_mesh(nir, enable, options, out, info,
-                                                reason);
+   return __real_agx_compile_apple9_native_mesh_lowered(nir, options, out, info,
+                                                        reason);
 }
 
 bool __real_agx_compile_apple9_tiny(nir_shader *, struct agx_shader_part *,
@@ -229,6 +229,13 @@ check_programs(struct hk_api_shader *mesh, struct hk_api_shader *fs, bool native
       CHECK(nm->variants[HK_MESH_VARIANT_OBJECT].info.apple9_native_stage == HK_APPLE9_NATIVE_OBJECT);
       CHECK(nm->variants[HK_MESH_VARIANT_MAIN].b.info.apple9_varyings.mask[VARYING_SLOT_VAR0] == 15);
       CHECK(nf->variants[0].b.info.apple9_varyings.mask[VARYING_SLOT_VAR0] == 15);
+      if (primitive_copies) {
+         const struct agx_apple9_mesh_body_info *body =
+            &nm->variants[HK_MESH_VARIANT_MAIN].info.apple9_native;
+         CHECK(body->primitive_vertices == VARYING_BIT_VAR(0));
+         CHECK(body->original_max_vertices == 64 && body->layout.max_vertices == 188);
+         CHECK(nf->variants[0].b.info.apple9_varyings.group[VARYING_SLOT_VAR0] == 1);
+      }
       CHECK(nm->variants[HK_MESH_VARIANT_MAIN].data_size == mesh->variants[HK_MESH_VARIANT_MAIN].data_size);
       CHECK(!memcmp(nm->variants[HK_MESH_VARIANT_MAIN].data_ptr,
                      mesh->variants[HK_MESH_VARIANT_MAIN].data_ptr,
@@ -242,7 +249,9 @@ static unsigned
 compile(struct hk_device *dev, bool deferred, bool native, unsigned failure)
 {
    struct vk_shader_compile_info infos[] = {
-      {.stage = MESA_SHADER_MESH, .nir = source(false, native ? 3 : 96, native ? 1 : 32),
+      {.stage = MESA_SHADER_MESH,
+       .nir = source(false, native ? (primitive_copies ? 64 : 3) : 224,
+                            native ? (primitive_copies ? 124 : 1) : 64),
        .robustness = &vk_robustness_disabled},
       {.stage = MESA_SHADER_FRAGMENT, .nir = source(true, 0, 0),
        .robustness = &vk_robustness_disabled},
@@ -866,6 +875,10 @@ main(void)
    deferred_rejection(dev);
    for (unsigned i = 1; i <= count; ++i)
       compile(dev, false, true, i);
+   primitive_copies = true;
+   compile(dev, false, true, 0);
+   compile(dev, true, true, 0);
+   primitive_copies = false;
    count = compile_native_only(dev, false, 0);
    for (unsigned i = 1; i <= count; ++i)
       compile_native_only(dev, false, i);
