@@ -65,8 +65,8 @@ for name in ('HK_APPLE9_VARIANT_CACHE_VERIFY', 'HK_APPLE9_DUMP_FRAGMENT_DIR',
     for value in ('0', '1', '/tmp/trace-a', '/tmp/trace-b'):
         assert read(**{name: value}) == (base, 0), (name, value)
 # Code-generation controls continue to separate cache entries.
-for name in ('AGX_SPILL_COALESCE', 'AGX_APPLE9_HOIST_LOADS',
-             'AGX_APPLE9_SAFE_HOIST_STAGES', 'HK_APPLE9_NATIVE_MESH',
+for name in ('AGX_SPILL_COALESCE', 'AGX_APPLE9_NO_PROMOTE',
+             'AGX_APPLE9_NO_UNIFORM_MOVE', 'HK_APPLE9_NATIVE_MESH',
              'HK_APPLE9_TESS_NATIVE', 'HK_APPLE9_NATIVE_INDEX'):
     zero = read(**{name: '0'})[0]
     one = read(**{name: '1'})[0]
