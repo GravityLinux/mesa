@@ -1373,8 +1373,25 @@ hk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
       hk_cpu_timing_note_heap(total, true);
    }
 
+   /* Submissions using the geometry heap are serialized, so that one can
+    * grow the heap while no other is in flight. */
+   uint64_t heap_min_B = 0;
+   bool uses_heap = false;
+   for (unsigned i = 0; i < submit->command_buffer_count; ++i) {
+      struct hk_cmd_buffer *cmd =
+         container_of(submit->command_buffers[i], struct hk_cmd_buffer, vk);
+      uses_heap |= cmd->heap_renders != 0;
+      heap_min_B = MAX2(heap_min_B, cmd->heap_min_B);
+   }
+   if (uses_heap) {
+      simple_mtx_lock(&dev->heap_lock);
+      hk_heap_prepare_submit(dev, heap_min_B);
+   }
+
    hk_gpu_busy_sample(queue);
    VkResult result = queue_submit(dev, queue, submit);
+   if (uses_heap)
+      simple_mtx_unlock(&dev->heap_lock);
    if (result != VK_SUCCESS)
       result = vk_queue_set_lost(&queue->vk, "Submit failed");
 

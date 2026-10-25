@@ -1100,9 +1100,16 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
     * vertex, see hk_apple9_lower_line_stipple_fs. Nothing else observes the
     * change: such fragment shaders read no flat varyings, layer or viewport
     * index (primitive ID does not depend on the provoking vertex), and the
-    * root table keeps the API mode for transform feedback and adjacency. */
+    * root table keeps the API mode for transform feedback and adjacency.
+    * Fans that are not unrolled have no observable provoking vertex either,
+    * and native fans flat shade consistently only from their first vertex. */
+   const bool native_fan =
+      !mesh && !gs && !tes &&
+      dyn->ia.primitive_topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN &&
+      !gfx->apple9_fan_unrolled;
    pipeline.flatshade_first =
       dyn->rs.provoking_vertex != VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT ||
+      native_fan ||
       (!mesh && !gs && !adjacency && shaders[1]->info.apple9_line_stipple_first);
    if (draw.indexed) {
       pipeline.index_size = agx_index_size_to_B(draw.index_size);

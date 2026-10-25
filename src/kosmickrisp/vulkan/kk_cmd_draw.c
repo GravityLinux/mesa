@@ -977,7 +977,7 @@ kk_init_heap(const void *data)
    /* TODO_KOSMICKRISP Self-contained until we have rodata at the device. */
    *map = (struct poly_heap){
       .base = dev->heap->gpu + sizeof(struct poly_heap),
-      .size = size - sizeof(struct poly_heap),
+      .size = size - sizeof(struct poly_heap) - POLY_HEAP_SINK_B,
    };
 }
 

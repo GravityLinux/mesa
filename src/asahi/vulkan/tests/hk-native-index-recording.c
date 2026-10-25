@@ -149,6 +149,7 @@ main(int argc, char **argv)
       CHECK(!hk_apple9_prepare_native_mesh(cmd, main, object, &record, 0x8000, state));
    }
    hk_DestroyCommandPool(device, pool, NULL);
+   hk_cmd_bo_cache_finish(dev); /* idle command BOs belong to the device */
    CHECK(main->apple9_body->entry_pins == 0 && object->apple9_body->entry_pins == 0);
    CHECK(main->bo->refcnt == 1 && object->bo->refcnt == 1);
    agx_bo_unreference(&dev->dev, main->bo);

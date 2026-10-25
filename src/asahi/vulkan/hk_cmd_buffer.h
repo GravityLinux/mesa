@@ -979,6 +979,8 @@ struct hk_cmd_buffer {
    bool uses_heap;
    /* Diagnostic count of heap-using renders in this command buffer. */
    uint32_t heap_renders;
+   /* Geometry heap bytes the recorded work needs backed, see hk_heap. */
+   uint64_t heap_min_B;
    bool uses_mesh_heap;
 
    /* Query counter increments and availability writes (struct
@@ -1179,7 +1181,16 @@ hk_cmd_flush_empty_clears(struct hk_cmd_buffer *cmd)
 }
 
 
+/* Geometry heap sizes: the fixed VA range, at most, and the backing of
+ * geometry and tessellation, and of the other users, at least. */
+#define HK_HEAP_VA_MAX_B       (1024ull * 1024 * 1024)
+#define HK_HEAP_GEOMETRY_MIN_B (128ull * 1024 * 1024)
+#define HK_HEAP_MIN_B          (8ull * 1024 * 1024)
+/* Period over which a grown geometry heap may shrink back, see hk_heap_decay. */
+#define HK_HEAP_DECAY_NS       (10ull * 1000 * 1000 * 1000)
+
 uint64_t hk_heap(struct hk_cmd_buffer *cmd);
+void hk_heap_prepare_submit(struct hk_device *dev, uint64_t min_B);
 
 size_t hk_apple9_graphics_root_size(const struct hk_device *dev);
 

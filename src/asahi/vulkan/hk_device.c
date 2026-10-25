@@ -535,6 +535,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       goto fail_queues;
    }
 
+   simple_mtx_init(&dev->heap_lock, mtx_plain);
    simple_mtx_init(&dev->apple9_variants.lock, mtx_plain);
    simple_mtx_init(&dev->apple9_bodies.lock, mtx_plain);
    list_inithead(&dev->apple9_bodies.slabs);
@@ -590,6 +591,7 @@ fail_meta:
    hk_device_finish_meta(dev);
 fail_mem_cache:
    vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
+   hk_cmd_bo_cache_finish(dev);
    hk_apple9_variants_finish(dev);
    hk_apple9_bodies_finish(dev);
    hk_apple9_tile_helpers_finish(dev);
@@ -677,9 +679,18 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
       agx_bo_unreference(&dev->dev, dev->apple9_compute_sysvals);
    if (dev->apple9_resident)
       agx_bo_unreference(&dev->dev, dev->apple9_resident);
+   hk_cmd_bo_cache_finish(dev);
    hk_destroy_sampler_heap(dev, &dev->samplers);
    agx_bo_unreference(&dev->dev, dev->rodata.bo);
+   if (dev->heap_va) {
+      if (dev->heap_overflows) {
+         mesa_logw("hk: geometry heap overflowed %u times, up to %" PRIu64
+                   " MiB", dev->heap_overflows, dev->heap_reported_B >> 20);
+      }
+      agx_va_free(&dev->dev, dev->heap_va, true);
+   }
    agx_bo_unreference(&dev->dev, dev->heap);
+   simple_mtx_destroy(&dev->heap_lock);
    agx_bo_unreference(&dev->dev, dev->mesh_heap);
    agx_bg_eot_cleanup(&dev->bg_eot);
    hk_device_finish_usc_heap(dev);

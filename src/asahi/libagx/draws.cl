@@ -135,7 +135,13 @@ libagx_unroll_adjacency(global uint32_t *out_draw, global struct poly_heap *heap
 {
    bool indexed = index_size_B != 0;
    uint count = libagx_remap_adj_count(in_draw[0], prim);
-   uint offs_B = poly_heap_alloc_offs(heap, count * 4);
+   uint offs_B = 0;
+   if (!poly_heap_try_alloc_offs(heap, count * 4, &offs_B)) {
+      /* An exhausted heap draws nothing. */
+      for (uint i = 0; i < 5; ++i)
+         out_draw[i] = 0;
+      return;
+   }
    global uint32_t *out = (global uint32_t *)(heap->base + offs_B);
 
    uint64_t in_indices = 0;
@@ -178,7 +184,14 @@ libagx_robust_index_apple9(global uint32_t *out_draw,
 
    /* Zeroes past a few primitives only repeat the same degenerate one. */
    uint count = min(in_draw[0], range_el + 32);
-   uint offs_B = poly_heap_alloc_offs(heap, (count * index_size_B + 3) & ~3);
+   uint offs_B = 0;
+   if (!poly_heap_try_alloc_offs(heap, (count * index_size_B + 3) & ~3,
+                                 &offs_B)) {
+      /* An exhausted heap draws nothing. */
+      for (uint i = 0; i < 5; ++i)
+         out_draw[i] = 0;
+      return;
+   }
    uintptr_t out = (uintptr_t)heap->base + offs_B;
 
    for (uint i = 0; i < count; ++i) {
@@ -311,22 +324,31 @@ libagx_draw_robust_index(global uint32_t *vdm, global struct poly_heap *heap,
       /* Allocate memory for the shadow index buffer */
       global uchar *padded;
       if (first) {
-         padded = poly_heap_alloc(heap, out_size_B);
+         padded = poly_heap_try_alloc(heap, out_size_B);
       }
       padded = (global uchar *)sub_group_broadcast((uintptr_t)padded, 0);
 
-      draw.index_buffer = (uintptr_t)padded;
-      draw.index_buffer_range_B = out_size_B;
-      draw.start = 0;
+      if (padded) {
+         draw.index_buffer = (uintptr_t)padded;
+         draw.index_buffer_range_B = out_size_B;
+         draw.start = 0;
 
-      /* Clone the index buffer. The destination is aligned as a post-condition
-       * of poly_heap_alloc_nonatomic.
-       */
-      libagx_memcpy_to_aligned((global uint *)padded, in_buf, in_size_B, tid,
-                               32);
+         /* Clone the index buffer. The destination is aligned as a
+          * post-condition of poly_heap_try_alloc.
+          */
+         libagx_memcpy_to_aligned((global uint *)padded, in_buf, in_size_B,
+                                  tid, 32);
 
-      /* Extend with up to 32 zeroes with a small memset */
-      libagx_memset_small(padded + in_size_B, 0, out_size_B - in_size_B, tid);
+         /* Extend with up to 32 zeroes with a small memset */
+         libagx_memset_small(padded + in_size_B, 0, out_size_B - in_size_B,
+                             tid);
+      } else {
+         /* An exhausted heap draws nothing. */
+         draw.b.count[0] = 0;
+         draw.index_buffer = AGX_ZERO_PAGE_ADDRESS;
+         draw.index_buffer_range_B = 4;
+         draw.start = 0;
+      }
    }
 
    if (first) {

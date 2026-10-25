@@ -1731,6 +1731,46 @@ hk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
    }
 }
 
+/* The geometry heap's map in the read-only data. */
+static struct poly_heap *
+hk_heap_map(struct hk_device *dev)
+{
+   off_t off = dev->rodata.heap - dev->rodata.bo->va->addr;
+   return agx_bo_map(dev->rodata.bo) + off;
+}
+
+/* Back the geometry heap's VA range with a new BO of size_B bytes from its
+ * start, releasing the old backing. The heap must be idle. */
+static bool
+hk_heap_back(struct hk_device *dev, uint64_t size_B)
+{
+   struct agx_bo *bo =
+      agx_bo_create(&dev->dev, size_B, 0, 0, "Geometry heap");
+   if (!bo)
+      return false;
+
+   if (dev->heap) {
+      agx_bo_bind(&dev->dev, NULL, dev->heap_va->addr, dev->heap->size, 0,
+                  DRM_ASAHI_BIND_UNBIND);
+   }
+
+   if (agx_bo_bind(&dev->dev, bo, dev->heap_va->addr, size_B, 0,
+                   DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE)) {
+      agx_bo_unreference(&dev->dev, bo);
+      /* Keep the old backing mapped, if any. */
+      if (dev->heap)
+         agx_bo_bind(&dev->dev, dev->heap, dev->heap_va->addr,
+                     dev->heap->size, 0,
+                     DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE);
+      return false;
+   }
+
+   agx_bo_unreference(&dev->dev, dev->heap);
+   dev->heap = bo;
+   hk_heap_map(dev)->size = size_B - POLY_HEAP_SINK_B;
+   return true;
+}
+
 static void
 hk_init_heap(const void *data)
 {
@@ -1739,33 +1779,140 @@ hk_init_heap(const void *data)
 
    perf_debug(cmd, "Allocating heap");
 
-   size_t size = 128 * 1024 * 1024;
    /* Unrolled and geometry-generated index buffers are allocated from this
     * heap. Apple9 draws address index buffers through the USC aperture.
+    * Recorded draws address the heap by its VA range, so the range is fixed
+    * and its backing grows instead, see hk_heap_prepare_submit. The USC
+    * aperture is shared, so settle for a smaller range when it is crowded.
     */
-   enum agx_bo_flags flags =
-      dev->dev.chip == AGX_CHIP_G16G ? AGX_BO_LOW_VA : 0;
-   dev->heap = agx_bo_create(&dev->dev, size, 0, flags, "Geometry heap");
-
-   if (!dev->heap)
+   enum agx_va_flags flags = dev->dev.chip == AGX_CHIP_G16G ? AGX_VA_USC : 0;
+   for (uint64_t va_B = HK_HEAP_VA_MAX_B;
+        !dev->heap_va && va_B >= HK_HEAP_GEOMETRY_MIN_B; va_B /= 2) {
+      dev->heap_va = agx_va_alloc(&dev->dev, va_B, 65536, flags, 0);
+   }
+   if (!dev->heap_va)
       return;
 
    /* The geometry state buffer is initialized here and then is treated by
     * the CPU as rodata, even though the GPU uses it for scratch internally.
     */
-   off_t off = dev->rodata.heap - dev->rodata.bo->va->addr;
-   struct poly_heap *map = agx_bo_map(dev->rodata.bo) + off;
-
-   *map = (struct poly_heap){
-      .base = dev->heap->va->addr,
-      .size = size,
+   *hk_heap_map(dev) = (struct poly_heap){
+      .base = dev->heap_va->addr,
    };
+
+   if (!hk_heap_back(dev, MIN2(cmd->heap_min_B, dev->heap_va->size_B))) {
+      agx_va_free(&dev->dev, dev->heap_va, false);
+      dev->heap_va = NULL;
+   }
+}
+
+/* Whether every queue has finished its submissions, without waiting. */
+static bool
+hk_device_idle(struct hk_device *dev)
+{
+   vk_foreach_queue(iter, &dev->vk) {
+      struct hk_queue *queue = container_of(iter, struct hk_queue, vk);
+      uint64_t completed = 0;
+      if (drmSyncobjQuery(dev->dev.fd, &queue->drm.syncobj, &completed, 1) ||
+          completed < queue->drm.timeline_value)
+         return false;
+   }
+   return true;
+}
+
+/* Return a spike's memory. high_water only grows, so the heap's need is kept
+ * per period of HK_HEAP_DECAY_NS instead: when one has passed and the device is
+ * already idle (never wait for it), start a new period from a cleared
+ * high_water, and shrink the backing if it is more than twice what this
+ * submission and the period needed (at least HK_HEAP_MIN_B).
+ */
+static void
+hk_heap_decay(struct hk_device *dev, uint64_t min_B, uint64_t needed_B)
+{
+   dev->heap_period_need_B = MAX2(dev->heap_period_need_B, needed_B);
+
+   uint64_t now = os_time_get_nano();
+   if (now - dev->heap_period_start_ns < HK_HEAP_DECAY_NS ||
+       !hk_device_idle(dev))
+      return;
+
+   uint64_t target_B =
+      MAX3(min_B, HK_HEAP_MIN_B,
+           util_next_power_of_two64(dev->heap_period_need_B + POLY_HEAP_SINK_B));
+   if (dev->heap->size > 2 * target_B) {
+      perf_debug_dev(&dev->dev, "Shrinking the geometry heap to %" PRIu64
+                     " MiB", target_B >> 20);
+      if (hk_heap_back(dev, target_B))
+         dev->heap_reported_B = 0;
+   }
+
+   /* The heap is idle, so nothing races these writes. */
+   struct poly_heap *heap = hk_heap_map(dev);
+   heap->high_water = 0;
+   heap->bottom = 0;
+   dev->heap_period_need_B = 0;
+   dev->heap_period_start_ns = now;
+}
+
+/* Before a submission whose command buffers use the geometry heap, with the
+ * heap lock held: back at least min_B bytes, and what earlier submissions
+ * needed. Allocations that did not fit dropped their draws, and the heap grows
+ * past them at once, to the next power of two. Waits for the device to idle.
+ */
+void
+hk_heap_prepare_submit(struct hk_device *dev, uint64_t min_B)
+{
+   if (!dev->heap)
+      return;
+
+   const struct poly_heap *heap = hk_heap_map(dev);
+   uint64_t needed_B = poly_heap_needed_B(heap);
+   if (needed_B > heap->size && needed_B > dev->heap_reported_B) {
+      dev->heap_reported_B = needed_B;
+      dev->heap_overflows++;
+      mesa_logw_once("hk: geometry heap exhausted (needed %" PRIu64
+                     " MiB, had %u MiB): geometry or tessellation output was "
+                     "dropped",
+                     needed_B >> 20, heap->size >> 20);
+   }
+
+   uint64_t target_B =
+      MAX2(min_B, needed_B > heap->size
+                     ? util_next_power_of_two64(needed_B + POLY_HEAP_SINK_B)
+                     : 0);
+   target_B = MIN2(target_B, dev->heap_va->size_B);
+   if (target_B <= dev->heap->size) {
+      hk_heap_decay(dev, min_B, needed_B);
+      return;
+   }
+
+   /* Earlier submissions may still use the heap. */
+   vk_foreach_queue(iter, &dev->vk) {
+      struct hk_queue *queue = container_of(iter, struct hk_queue, vk);
+      drmSyncobjTimelineWait(dev->dev.fd, &queue->drm.syncobj,
+                             &queue->drm.timeline_value, 1, INT64_MAX,
+                             DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT, NULL);
+   }
+
+   perf_debug_dev(&dev->dev, "Growing the geometry heap to %" PRIu64 " MiB",
+                  target_B >> 20);
+   hk_heap_back(dev, target_B);
 }
 
 uint64_t
 hk_heap(struct hk_cmd_buffer *cmd)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+
+   /* Geometry and tessellation need the heap's historical size; the other
+    * users (unrolled fans, adjacency, robust index copies) start small, see
+    * hk_heap_prepare_submit. */
+   const struct hk_graphics_state *gfx = &cmd->state.gfx;
+   uint64_t min_B =
+      gfx->shaders[MESA_SHADER_GEOMETRY] || gfx->shaders[MESA_SHADER_TESS_EVAL]
+         ? HK_HEAP_GEOMETRY_MIN_B
+         : HK_HEAP_MIN_B;
+   cmd->heap_min_B = MAX2(cmd->heap_min_B, min_B);
 
    util_call_once_data(&dev->heap_init_once, hk_init_heap, cmd);
    if (!dev->heap) {
@@ -1785,31 +1932,31 @@ hk_heap(struct hk_cmd_buffer *cmd)
       cmd->heap_renders++;
       cmd->uses_heap = true;
 
-      libagx_write_u32(cmd, agx_1d(1), AGX_BARRIER_ALL | AGX_PREGFX,
-                       addr + offsetof(struct poly_heap, bottom), 0);
+      libagx_heap_reset(cmd, agx_1d(1), AGX_BARRIER_ALL | AGX_PREGFX, addr);
    }
 
    return dev->rodata.heap;
 }
 
-/* GPU-generated index/coordinate offsets use the single geometry heap. */
-static struct agx_bo *
-hk_geometry_heap_bo(struct hk_cmd_buffer *cmd)
+/* GPU-generated index/coordinate offsets use the single geometry heap, by its
+ * fixed VA range: its backing may grow before a later submission. */
+static struct agx_va *
+hk_geometry_heap_va(struct hk_cmd_buffer *cmd)
 {
    /* Recording can continue after OOM, but the command buffer cannot be
     * submitted. Keep address construction safe on those error paths. */
    if (!hk_heap(cmd))
       return NULL;
-   return hk_cmd_buffer_device(cmd)->heap;
+   return hk_cmd_buffer_device(cmd)->heap_va;
 }
 
 static struct agx_draw
 hk_heap_indexed_indirect(struct hk_cmd_buffer *cmd, uint64_t ptr,
                          enum agx_index_size index_size, bool restart)
 {
-   struct agx_bo *bo = hk_geometry_heap_bo(cmd);
-   return agx_draw_indexed_indirect(ptr, bo ? bo->va->addr : 0,
-                                   bo ? bo->size : 0, index_size, restart);
+   struct agx_va *va = hk_geometry_heap_va(cmd);
+   return agx_draw_indexed_indirect(ptr, va ? va->addr : 0,
+                                   va ? va->size_B : 0, index_size, restart);
 }
 
 static uint64_t
@@ -2013,9 +2160,9 @@ hk_upload_geometry_params(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 
    if (indirect) {
       if (gsi->shape == POLY_GS_SHAPE_DYNAMIC_INDEXED) {
-         struct agx_bo *bo = hk_geometry_heap_bo(cmd);
-         cmd->geom_index_buffer = bo ? bo->va->addr : 0;
-         cmd->geom_index_count = bo ? bo->size : 0;
+         struct agx_va *va = hk_geometry_heap_va(cmd);
+         cmd->geom_index_buffer = va ? va->addr : 0;
+         cmd->geom_index_count = va ? va->size_B : 0;
       } else {
          cmd->geom_index_count =
             poly_gs_rast_vertices(gsi->shape, gsi->max_indices, 1, 0);
@@ -2092,8 +2239,8 @@ hk_upload_tess_params_for_tcs(struct hk_cmd_buffer *cmd,
    size_t draw_stride_B = draw_stride_el * sizeof(uint32_t);
 
    /* heap is allocated by hk_heap */
-   struct agx_bo *bo = hk_geometry_heap_bo(cmd);
-   args.patch_coord_buffer = bo ? bo->va->addr : 0;
+   struct agx_va *va = hk_geometry_heap_va(cmd);
+   args.patch_coord_buffer = va ? va->addr : 0;
 
    if (!agx_is_indirect(draw.b)) {
       unsigned in_patches = draw.b.count[0] / args.input_patch_size;
@@ -2568,8 +2715,32 @@ hk_draw_without_restart(struct hk_cmd_buffer *cmd, struct agx_draw draw,
                                    false /* restart */);
 }
 
+/* Whether a vertex-shader pipeline exposes its provoking vertex: through a
+ * flat, per-vertex or barycentric fragment input, or a layer or viewport index
+ * written by the vertex shader. Primitive ID is not taken from a vertex, and a
+ * fragment shader's layer reads zero unless the vertex shader writes it. A
+ * vertex-written primitive shading rate would observe it too, once supported. */
+static bool
+hk_apple9_provoking_observed(struct hk_cmd_buffer *cmd)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+   struct hk_api_shader *vs = gfx->shaders[MESA_SHADER_VERTEX];
+   struct hk_api_shader *fs = gfx->shaders[MESA_SHADER_FRAGMENT];
+
+   if (vs && hk_any_variant(vs)->b.info.writes_layer_viewport)
+      return true;
+   if (!fs || fs == dev->null_fs)
+      return false;
+
+   const struct agx_shader_info *info = &hk_any_variant(fs)->b.info;
+   return info->apple9_flat_mask.lo || info->apple9_flat_mask.hi ||
+          info->apple9_barycentric_mask || info->apple9_per_vertex_count;
+}
+
 /* Native Apple9 fans flat shade consistently only from their first vertex.
- * Draw fans with the last provoking vertex as an unrolled triangle list. */
+ * Draw fans with an observable last provoking vertex as an unrolled triangle
+ * list. */
 static struct agx_draw
 hk_apple9_unroll_fan(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 {
@@ -5942,12 +6113,15 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
       hk_handle_passthrough_gs(cmd, draw_);
       if (!hk_sw_vs_outputs_fit(cmd, draw_))
          return;
-      /* Geometry and tessellation emulation decompose fans themselves. */
+      /* Geometry and tessellation emulation decompose fans themselves. When
+       * nothing observes the provoking vertex, the fan is drawn natively from
+       * its first vertex, see hk_apple9_draw_impl. */
       cmd->state.gfx.apple9_fan_unrolled =
          dyn->ia.primitive_topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN &&
          dyn->rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT &&
          !cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY] &&
-         !cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL];
+         !cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL] &&
+         hk_apple9_provoking_observed(cmd);
       if (cmd->state.gfx.apple9_fan_unrolled)
          draw_ = hk_apple9_unroll_fan(cmd, draw_);
       /* Software stages read the draw ID from the root table they upload,

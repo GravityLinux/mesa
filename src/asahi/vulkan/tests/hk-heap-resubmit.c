@@ -7,7 +7,7 @@
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "%s:%u: %s\n", \
                           __FILE__, __LINE__, #c); return 1; } } while (0)
 
-static struct libagx_write_u32_args reset;
+static struct libagx_heap_reset_args reset;
 static unsigned reset_count;
 static bool reset_valid;
 
@@ -19,13 +19,13 @@ __wrap_hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
                            enum agx_barrier barrier,
                            enum libagx_program idx, void *data, size_t size)
 {
-   reset_valid = idx == LIBAGX_WRITE_U32 && size == sizeof(reset) &&
+   reset_valid = idx == LIBAGX_HEAP_RESET && size == sizeof(reset) &&
                  barrier == (AGX_BARRIER_ALL | AGX_PREGFX) &&
                  grid.count[0] == 1 && grid.count[1] == 1 && grid.count[2] == 1;
    if (!reset_valid)
       return;
 
-   reset = *(struct libagx_write_u32_args *)data;
+   reset = *(struct libagx_heap_reset_args *)data;
    reset_count++;
    reset_valid = hk_cmd_buffer_get_cs_general(
       cmd, &cmd->current_cs.pre_gfx, true, HK_SYNC_ALL) != NULL;
@@ -44,6 +44,8 @@ record_and_replay(bool graphics)
    struct agx_bo bo = {.va = &va, .size = 128 * 1024 * 1024};
    dev->dev.chip = AGX_CHIP_G16G;
    dev->heap = &bo;
+   dev->heap_va = &va;
+   va.size_B = bo.size;
    dev->heap_init_once.called = true;
    struct poly_heap heap = {.base = va.addr, .size = bo.size};
    dev->rodata.heap = (uintptr_t)&heap;
@@ -71,8 +73,7 @@ record_and_replay(bool graphics)
    CHECK(cmd->sync_fallback == !graphics);
    CHECK(pre->sync_before_gfx == graphics);
    CHECK(reset_valid && reset_count == 1);
-   CHECK(reset.address == address + offsetof(struct poly_heap, bottom));
-   CHECK(reset.value == 0);
+   CHECK(reset.heap == address);
    if (graphics)
       CHECK(pre->node.next == &gfx.node);
    /* Record once, then replay N times with tessellation and geometry-sized
@@ -80,13 +81,17 @@ record_and_replay(bool graphics)
     * Without an execution-time reset these exceed 128 MiB by submission 6.
     * The Air Vulkan regression also runs actual tessellation allocations.
     */
+   const uint32_t mib = 1024 * 1024 / POLY_HEAP_UNIT_B;
    for (unsigned submit = 0; submit < 64; ++submit) {
-      *(uint32_t *)(uintptr_t)reset.address = reset.value;
-      CHECK(heap.bottom == 0);
-      heap.bottom += 8 * 1024 * 1024;
-      CHECK(heap.bottom < heap.size);
-      heap.bottom += 16 * 1024 * 1024;
-      CHECK(heap.bottom < heap.size);
+      /* libagx_heap_reset */
+      struct poly_heap *h = (struct poly_heap *)(uintptr_t)reset.heap;
+      h->high_water = MAX2(h->high_water, h->bottom);
+      h->bottom = 0;
+      CHECK(poly_heap_needed_B(&heap) == (submit ? 24ull << 20 : 0));
+      heap.bottom += 8 * mib;
+      CHECK(poly_heap_needed_B(&heap) < heap.size);
+      heap.bottom += 16 * mib;
+      CHECK(poly_heap_needed_B(&heap) < heap.size);
    }
    CHECK(cmd->heap_renders == 1);
 

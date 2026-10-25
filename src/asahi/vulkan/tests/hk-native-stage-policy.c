@@ -312,6 +312,7 @@ pipeline(struct hk_device *dev, mesa_shader_stage producer, unsigned vertices,
     * cache have gone away. Releasing the command pool releases the last pin. */
    if (body) CHECK(body->entry_pins == 1 && body->refcnt == 1 && body->bo->refcnt > 0);
    hk_DestroyCommandPool(hk_device_to_handle(dev),pool,NULL);
+   hk_cmd_bo_cache_trim(dev); /* idle command BOs belong to the device */
    test_reset_usc_heap(dev);
    CHECK(live_bos==0);
 }

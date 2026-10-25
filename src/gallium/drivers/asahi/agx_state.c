@@ -4972,7 +4972,7 @@ agx_batch_heap(struct agx_batch *batch)
 
       struct poly_heap heap = {
          .base = agx_resource(ctx->heap)->bo->va->addr,
-         .size = size,
+         .size = size - POLY_HEAP_SINK_B,
       };
 
       agx_batch_writes(batch, agx_resource(ctx->heap), 0);
