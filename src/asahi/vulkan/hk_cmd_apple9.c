@@ -779,7 +779,9 @@ hk_apple9_record_draw(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       /* A block continuing a native render may update only the PPP blocks
        * that changed since the previous native block (research). */
       const bool delta = debug_get_option_native_ppp_delta() && cs->apple9_native_mesh &&
-                         cs->apple9_ppp_valid && cs->apple9_ppp_size == record->ppp_size;
+                         cs->apple9_ppp_valid && cs->apple9_ppp_size == record->ppp_size &&
+                         cs->apple9_ppp_viewport_offset == pipeline->ppp_viewport_offset &&
+                         cs->apple9_ppp_viewport_words == pipeline->ppp_viewport_words;
       size_t bytes;
       if ((cs->apple9_native_mesh && !hk_apple9_native_can_append(cmd, cs, true)) ||
           !hk_apple9_prepare_native_mesh(
@@ -793,6 +795,8 @@ hk_apple9_record_draw(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          return false;
       memcpy(cs->apple9_ppp_last, record->ppp_record, record->ppp_size);
       cs->apple9_ppp_size = record->ppp_size;
+      cs->apple9_ppp_viewport_offset = pipeline->ppp_viewport_offset;
+      cs->apple9_ppp_viewport_words = pipeline->ppp_viewport_words;
       cs->apple9_ppp_valid = true;
       const uint8_t *before = cs->current;
       cs->current += bytes - 4;

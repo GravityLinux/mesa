@@ -308,6 +308,67 @@ check_child_grids(void)
       CHECK(!hk_apple9_native_mesh_grid_valid(invalid[i]));
 }
 
+/* A native block continuing a render updates the header block plus only the
+ * PPP blocks whose bytes changed; without a previous record it is the full
+ * chain, word for word. */
+static void
+check_ppp_delta(void)
+{
+   const struct agx_apple9_render_pipeline pipeline = {
+      .ppp = 0x4000, .primitive = AGX_PRIMITIVE_TRIANGLES,
+   };
+   const uint32_t groups[] = {1, 1, 1}, local[] = {16, 1, 1};
+   uint32_t state[AGX_APPLE9_MESH_STATE_WORDS] = {0x40000d2c};
+   uint32_t full[HK_APPLE9_MESH_COMMAND_BYTES / 4], delta[HK_APPLE9_MESH_COMMAND_BYTES / 4];
+   uint8_t previous[AGX_APPLE9_PPP_RECORD_MAX], record[AGX_APPLE9_PPP_RECORD_MAX];
+   for (unsigned i = 0; i < sizeof(previous); ++i)
+      previous[i] = i * 7;
+   memcpy(record, previous, sizeof(record));
+   size_t bytes;
+   CHECK(hk_apple9_mesh_command_build(full, sizeof(full), &pipeline, state, groups, local, true));
+   CHECK(hk_apple9_mesh_command_build_delta(delta, sizeof(delta), &pipeline, state, groups,
+                                            local, true, NULL, NULL, &bytes));
+   CHECK(bytes == sizeof(full) && !memcmp(full, delta, sizeof(full)));
+
+   /* Unchanged, or changed only outside the update blocks: the header alone. */
+   const unsigned tail = 8, s = AGX_APPLE9_MESH_STATE_WORDS;
+   for (unsigned pass = 0; pass < 2; ++pass) {
+      if (pass)
+         record[0x30] ^= 0xff;
+      CHECK(hk_apple9_mesh_command_build_delta(delta, sizeof(delta), &pipeline, state, groups,
+                                               local, true, previous, record, &bytes));
+      CHECK(bytes == (s + 2 + tail) * 4);
+      CHECK(!memcmp(delta, state, sizeof(state)));
+      CHECK(delta[s] == 0x500 && delta[s + 1] == 0x4000);
+      CHECK(!memcmp(delta + s + 2, full + s + 18, tail * 4));
+   }
+
+   /* The header changing is still one update; other blocks join when one of
+    * their bytes changes (the last byte of the 0x70 block, the viewport). */
+   record[0] ^= 1;
+   record[0x70 + 7 * 4 - 1] ^= 1;
+   record[0xc0] ^= 1;
+   CHECK(hk_apple9_mesh_command_build_delta(delta, sizeof(delta), &pipeline, state, groups,
+                                            local, true, previous, record, &bytes));
+   CHECK(bytes == (s + 6 + tail) * 4);
+   CHECK(delta[s] == 0x500 && delta[s + 1] == 0x4000);
+   CHECK(delta[s + 2] == 7 << 8 && delta[s + 3] == 0x4070);
+   CHECK(delta[s + 4] == 10 << 8 && delta[s + 5] == 0x40c0);
+   CHECK(!memcmp(delta + s + 6, full + s + 18, tail * 4));
+
+   /* A moved, larger viewport block is compared and named where it is. */
+   const struct agx_apple9_render_pipeline moved = {
+      .ppp = 0x4000, .primitive = AGX_PRIMITIVE_TRIANGLES,
+      .ppp_viewport_offset = 0x100, .ppp_viewport_words = 18,
+   };
+   memcpy(record, previous, sizeof(record));
+   record[0x100 + 18 * 4 - 1] ^= 1;
+   CHECK(hk_apple9_mesh_command_build_delta(delta, sizeof(delta), &moved, state, groups,
+                                            local, true, previous, record, &bytes));
+   CHECK(bytes == (s + 4 + tail) * 4);
+   CHECK(delta[s + 2] == 18 << 8 && delta[s + 3] == 0x4100);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -321,6 +382,7 @@ main(int argc, char **argv)
       return 0;
    }
    CHECK(argc == 1);
+   check_ppp_delta();
    check_child_grids();
    check_contract(false, 0);
    check_contract(false, 1);

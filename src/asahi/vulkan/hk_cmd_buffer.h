@@ -571,6 +571,9 @@ struct hk_cs {
     * only what changed (HK_APPLE9_NATIVE_PPP_DELTA). Any other draw clears it. */
    bool apple9_ppp_valid;
    uint16_t apple9_ppp_size;
+   /* Its viewport block's offset and words: records of the same size can
+    * place it differently. */
+   uint16_t apple9_ppp_viewport_offset, apple9_ppp_viewport_words;
    uint8_t apple9_ppp_last[AGX_APPLE9_PPP_RECORD_MAX];
 
    /* enum hk_cs_end, and whether an hk meta operation created the stream. */
