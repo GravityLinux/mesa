@@ -84,7 +84,6 @@ hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
    cs->stats.flushes++;
    cs->cdm_dirty = false;
    cs->cdm_compute_barrier = false;
-   cs->head_flushed = true;
 }
 
 void
@@ -97,8 +96,6 @@ hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
    if (!cs->cmd->api_dispatch && cs->cdm_dirty)
       hk_cdm_cache_flush(dev, cs);
    cs->stats.cmds++;
-   if (agx_is_indirect(grid))
-      hk_cs_note_indirect(cs);
 
    cs->current =
       agx_cdm_launch(cs->current, dev->dev.chip, grid, wg, launch, usc);
@@ -577,8 +574,6 @@ hk_apple9_dispatch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                          (flush_before ? AGX_CDM_BARRIER_LENGTH : 0));
    if (flush_before)
       hk_cdm_cache_flush(dev, cs);
-   if (agx_is_indirect(grid))
-      hk_cs_note_indirect(cs);
    bool ok = agx_is_indirect(grid)
       ? agx_apple9_emit_indirect_dispatch(cs->current, launch, grid.ptr,
                                          geometry.local, indirect_local, p, barrier)
@@ -910,8 +905,6 @@ hk_tess_batch_flush(struct hk_cmd_buffer *cmd)
          /* Whatever came before the batch must be complete. */
          if (first && cs->cdm_dirty && !cs->cdm_compute_barrier)
             hk_cdm_cache_flush(dev, cs);
-         /* Batched records may fetch indirect grids. */
-         hk_cs_note_indirect(cs);
          first = false;
          memcpy(cs->current, data, size);
          cs->current += size;
