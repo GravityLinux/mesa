@@ -191,12 +191,16 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          }
          nir_push_if(b, nir_uge_imm(b, n, 2));
          {
-            /* Reset parity at EndPrimitive. A strip's second triangle reverses
-             * its first two corners; mesh output is an explicit triangle list. */
+            /* Reset parity at EndPrimitive. Reverse odd triangles while
+             * keeping the API's provoking corner in its list position. */
             nir_def *odd = nir_ine_imm(b, nir_iand_imm(b, n, 1), 0);
             nir_def *a = nir_iadd_imm(b, v, -2), *c = nir_iadd_imm(b, v, -1);
+            nir_def *first_odd = nir_iand(b, odd, s->flatshade_first);
+            nir_def *last_odd = nir_iand(b, odd, nir_inot(b, s->flatshade_first));
             nir_def *indices = nir_iadd(
-               b, nir_vec3(b, nir_bcsel(b, odd, c, a), nir_bcsel(b, odd, a, c), v),
+               b, nir_vec3(b, nir_bcsel(b, last_odd, c, a),
+                            nir_bcsel(b, first_odd, v, nir_bcsel(b, last_odd, a, c)),
+                            nir_bcsel(b, first_odd, c, v)),
                s->vertex_base);
             nir_store_per_primitive_output(
                b, indices, nir_iadd(b, s->primitive_base, p), nir_imm_int(b, 0),

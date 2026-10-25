@@ -78,6 +78,7 @@ lower_immutable(nir_shader *src, bool accepted)
 
 struct constants {
    unsigned count, lane;
+   bool first;
 };
 
 static bool
@@ -85,18 +86,20 @@ specialize(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
    struct constants *c = data;
    if (intr->intrinsic != nir_intrinsic_load_ubo &&
-       intr->intrinsic != nir_intrinsic_load_local_invocation_index)
+       intr->intrinsic != nir_intrinsic_load_local_invocation_index &&
+       intr->intrinsic != nir_intrinsic_load_provoking_last)
       return false;
    b->cursor = nir_before_instr(&intr->instr);
    nir_def_replace(
       &intr->def,
       nir_imm_int(
-         b, intr->intrinsic == nir_intrinsic_load_ubo ? c->count : c->lane));
+         b, intr->intrinsic == nir_intrinsic_load_ubo ? c->count :
+            intr->intrinsic == nir_intrinsic_load_provoking_last ? !c->first : c->lane));
    return true;
 }
 
 static void
-emission(unsigned vertices, unsigned count, unsigned ends, unsigned lane)
+emission_mode(unsigned vertices, unsigned count, unsigned ends, unsigned lane, bool first)
 {
    nir_shader *src = source(MAX2(vertices, count), ends, false);
    src->info.gs.vertices_out = vertices;
@@ -104,7 +107,7 @@ emission(unsigned vertices, unsigned count, unsigned ends, unsigned lane)
    CHECK(mesh->info.mesh.max_vertices_out == vertices);
    CHECK(mesh->info.mesh.max_primitives_out == vertices - 2);
    CHECK(mesh->info.workgroup_size[0] == (vertices <= 16 ? 16 : 32));
-   struct constants c = {count, lane};
+   struct constants c = {count, lane, first};
    NIR_PASS(_, mesh, nir_shader_intrinsics_pass, specialize, nir_metadata_none,
             &c);
    bool progress;
@@ -124,9 +127,10 @@ emission(unsigned vertices, unsigned count, unsigned ends, unsigned lane)
    unsigned expected[32][3], prims = 0, strip = 0;
    for (unsigned i = 0; i < count; ++i) {
       if (strip >= 2) {
-         expected[prims][0] = i - 2 + (strip & 1);
-         expected[prims][1] = i - 1 - (strip & 1);
-         expected[prims++][2] = i;
+         bool odd = strip & 1;
+         expected[prims][0] = i - 2 + (odd && !first);
+         expected[prims][1] = odd ? (first ? i : i - 2) : i - 1;
+         expected[prims++][2] = odd && first ? i - 1 : i;
       }
       strip++;
       if (ends & BITFIELD_BIT(i))
@@ -171,6 +175,13 @@ emission(unsigned vertices, unsigned count, unsigned ends, unsigned lane)
    CHECK(seen_count == !lane);
    ralloc_free(mesh);
    ralloc_free(src);
+}
+
+static void
+emission(unsigned vertices, unsigned count, unsigned ends, unsigned lane)
+{
+   emission_mode(vertices, count, ends, lane, false);
+   emission_mode(vertices, count, ends, lane, true);
 }
 
 static void
@@ -240,6 +251,6 @@ main(void)
    compile(4, true);
    glsl_type_singleton_decref();
    puts(
-      "579 emission cases (including 129 over-emission cases), immutable rejection, dynamic counts and native compilation passed");
+      "emission cases in both provoking modes, immutable rejection, dynamic counts and native compilation passed");
    return 0;
 }
