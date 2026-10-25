@@ -723,13 +723,10 @@ hk_cs_merge_cdm(struct hk_cs *a, const struct hk_cs *b, enum agx_chip chip)
    /* On G16 the compute-only barrier orders every shader-to-shader dependency
     * and makes its writes visible, so a junction followed by compute in the
     * same firmware command needs no drain. Consumers outside it run in later
-    * commands, behind the merged stream's own final flush, so b must end in
-    * one: a stream with nothing to flush (e.g. holding only a compute
-    * timestamp) would leave the narrowed junction as the last flush, and
-    * without the drain the end timestamp never lands. The CDM fetches
+    * commands, behind the merged stream's own final flush. The CDM fetches
     * indirect grids itself; keep the full flush ahead of those.
     */
-   if (a->end_flush && b->end_flush &&
+   if (a->end_flush &&
        (uint8_t *)a->end_flush + AGX_CDM_BARRIER_LENGTH == a->current &&
        !b->head_indirect && chip == AGX_CHIP_G16G)
       *a->end_flush = 0x60000160;
