@@ -131,6 +131,29 @@ main(void)
    }
    dev->dev.chip = AGX_CHIP_G16G;
 
+   /* A compute stream that only carries an end timestamp (back-to-back
+    * vkCmdWriteTimestamp, or one around a render) has run no dispatch, yet
+    * must end in the full flush for the timestamp to land. One without a
+    * timestamp and without work still ends bare.
+    */
+   for (unsigned c = 0; c < 2; ++c) {
+      uint8_t t_bytes[256] = {0};
+      struct hk_cs t = {.cmd = cmd, .type = HK_CS_CDM, .current = t_bytes,
+                        .end = t_bytes + sizeof(t_bytes)};
+      if (c)
+         t.timestamp.end = (struct agx_timestamp_req){.handle = 0x11, .offset_B = 8};
+      cmd->current_cs.cs = &t;
+      hk_cmd_buffer_end_compute(cmd);
+      CHECK(cmd->current_cs.cs == NULL);
+      if (c) {
+         CHECK(t.end_flush == (uint32_t *)t_bytes);
+         CHECK(t.current == t_bytes + AGX_CDM_BARRIER_LENGTH);
+         CHECK(*t.end_flush != 0x60000160 && *t.end_flush != 0);
+      } else {
+         CHECK(t.end_flush == NULL && t.current == t_bytes);
+      }
+   }
+
    util_dynarray_fini(&cmd->sync_events);
    util_dynarray_fini(&cmd->sync_remap);
    util_dynarray_fini(&cmd->sync_first_event);
