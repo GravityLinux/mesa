@@ -243,6 +243,7 @@ hk_hash_apple9_native_mesh_abi(struct mesa_blake3 *ctx)
       hk_apple9_native_tess_enabled(),
       hk_apple9_native_gs_pack_enabled() ? HK_APPLE9_NATIVE_GS_PACK : 1,
       hk_apple9_native_tes_pack_enabled() ? HK_APPLE9_NATIVE_GS_PACK : 1,
+      1, /* Native GS runs every invocation of each input primitive. */
       1, /* P1 logical workgroups independent of physical output class. */
       2, /* Destination-addressed publication rounds beyond 32 entries. */
    };
@@ -6850,7 +6851,8 @@ hk_apple9_native_gs_check(const nir_shader *source,
    if (production &&
        (source->info.gs.input_primitive != MESA_PRIM_TRIANGLES ||
         source->info.gs.output_primitive != MESA_PRIM_TRIANGLE_STRIP ||
-        source->info.gs.invocations != 1 || source->info.gs.active_stream_mask != 1 ||
+        !source->info.gs.invocations || source->info.gs.invocations > 32 ||
+        source->info.gs.active_stream_mask != 1 ||
         source->info.gs.vertices_out < 3 || source->info.gs.vertices_out > 4 ||
         source->info.outputs_written != VARYING_BIT_POS ||
         (source->info.inputs_read & ~VARYING_BIT_POS) ||
@@ -7529,6 +7531,8 @@ hk_apple9_compile_graphics_path(struct hk_device *dev, uint32_t count,
                ralloc_free(mesh);
                if (result != VK_SUCCESS)
                   goto done;
+               hk_native_producer_main(obj)->info.apple9_gs_invocations =
+                  MAX2(nir->info.gs.invocations, 1);
                varyings = hk_native_producer_main(obj)->b.info.apple9_varyings;
                continue;
             }

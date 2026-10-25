@@ -189,6 +189,12 @@ gs_routes(struct hk_cmd_buffer *cmd)
       FALLBACK(draw.b.count[1], 0);
       FALLBACK(draw.b.count[1], HK_APPLE9_NATIVE_MAX_GROUP_COUNT + 1);
       FALLBACK(draw.b.count[2], 2);
+      /* GS invocations multiply the groups: 32 invocations of 1,024
+       * triangles fill 32,768 groups, of 2,048 triangles exceed the axis. */
+      main->info.apple9_gs_invocations = 32;
+      ADMITTED(draw.b.count[0], 3 * 1024);
+      FALLBACK(draw.b.count[0], 3 * 2048);
+      main->info.apple9_gs_invocations = 0;
       /* The grid total is bounded separately from each axis. */
       draw.b.count[0] = 3 * 1024;
       FALLBACK(draw.b.count[1], 1024);

@@ -25,7 +25,8 @@ supported(const nir_shader *s, const char **reason)
    if (s->info.stage != MESA_SHADER_GEOMETRY || !s->info.io_lowered ||
        s->info.gs.input_primitive != MESA_PRIM_TRIANGLES ||
        s->info.gs.output_primitive != MESA_PRIM_TRIANGLE_STRIP ||
-       s->info.gs.invocations != 1 || s->info.gs.active_stream_mask != 1 ||
+       !s->info.gs.invocations || s->info.gs.invocations > 32 ||
+       s->info.gs.active_stream_mask != 1 ||
        s->info.gs.vertices_out < 3 || s->info.gs.vertices_out > 32)
       REJECT(
          "GS mesh probe needs one triangle-list invocation and 3..32 output vertices");
@@ -101,6 +102,8 @@ supported(const nir_shader *s, const char **reason)
 
 struct gs_mesh_state {
    unsigned max_vertices;
+   /* GS invocation of this run (0 with one invocation). */
+   nir_def *invocation;
    /* Input triangle within the draw, and this invocation's first output
     * vertex and primitive slot: workgroup x and 0, 0 unpacked; with packing,
     * x * HK_APPLE9_NATIVE_GS_PACK + lane and the lane's fixed slots. */
@@ -213,7 +216,7 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       return true;
    }
    case nir_intrinsic_load_invocation_id:
-      nir_def_replace(&intr->def, nir_imm_int(b, 0));
+      nir_def_replace(&intr->def, s->invocation);
       return true;
    case nir_intrinsic_load_primitive_id:
       nir_def_replace(&intr->def, s->primitive);
@@ -257,11 +260,16 @@ hk_nir_gs_mesh(const nir_shader *source, const char **reason)
       nir_iadd_imm(&b, nir_load_geometry_param_buffer_poly(&b),
                    offsetof(struct poly_geometry_params, input_topology)),
       .align_mul = 4);
+   /* One logical GS run per (input triangle, invocation), invocations of a
+    * triangle consecutive, so output order is API order. */
+   const unsigned invocations = MAX2(source->info.gs.invocations, 1);
+   nir_def *run = pack > 1 ? nir_iadd(&b, nir_imul_imm(&b, group, pack), lane) : group;
    struct gs_mesh_state s = {
+      .invocation = invocations > 1 ? nir_umod_imm(&b, run, invocations) : nir_imm_int(&b, 0),
       .topology = topology,
       .flatshade_first = nir_ieq_imm(&b, nir_load_provoking_last(&b), 0),
       .max_vertices = vertices,
-      .primitive = pack > 1 ? nir_iadd(&b, nir_imul_imm(&b, group, pack), lane) : group,
+      .primitive = invocations > 1 ? nir_udiv_imm(&b, run, invocations) : run,
       .vertex_base = pack > 1 ? nir_imul_imm(&b, lane, vertices) : nir_imm_int(&b, 0),
       .primitive_base =
          pack > 1 ? nir_imul_imm(&b, lane, vertices - 2) : nir_imm_int(&b, 0),
@@ -312,7 +320,8 @@ hk_nir_gs_mesh(const nir_shader *source, const char **reason)
          &b, nir_ieq_imm(&b, topology, MESA_PRIM_TRIANGLES), nir_udiv_imm(&b, verts, 3),
          nir_usub_sat(&b, verts, nir_imm_int(&b, 2)));
       nir_def *first = nir_imul_imm(&b, group, pack);
-      nir_def *live = nir_umin(&b, nir_usub_sat(&b, triangles, first),
+      nir_def *runs = nir_imul_imm(&b, triangles, invocations);
+      nir_def *live = nir_umin(&b, nir_usub_sat(&b, runs, first),
                                nir_imm_int(&b, pack));
       nir_if *active = nir_push_if(&b, nir_ult(&b, lane, live));
       active->control = nir_selection_control_dont_flatten;
