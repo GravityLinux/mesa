@@ -15,7 +15,6 @@
 #include "hk_drirc.h"
 #include "util/mesa-blake3.h"
 #include "util/os_misc.h"
-#include "util/u_debug.h"
 
 VKAPI_ATTR VkResult VKAPI_CALL
 hk_EnumerateInstanceVersion(uint32_t *pApiVersion)
@@ -67,18 +66,6 @@ static const struct vk_instance_extension_table instance_extensions = {
    .EXT_debug_utils = true,
 };
 
-static struct vk_instance_extension_table
-hk_instance_extensions(void)
-{
-   struct vk_instance_extension_table extensions = instance_extensions;
-   /* This extension requires Vulkan 1.1, whereas the experimental Apple9
-    * physical device currently exposes Vulkan 1.0.
-    */
-   if (debug_get_bool_option("HK_EXPERIMENTAL_APPLE9", false))
-      extensions.KHR_surface_protected_capabilities = false;
-   return extensions;
-}
-
 VKAPI_ATTR VkResult VKAPI_CALL
 hk_EnumerateInstanceExtensionProperties(const char *pLayerName,
                                         uint32_t *pPropertyCount,
@@ -87,9 +74,8 @@ hk_EnumerateInstanceExtensionProperties(const char *pLayerName,
    if (pLayerName)
       return vk_error(NULL, VK_ERROR_LAYER_NOT_PRESENT);
 
-   struct vk_instance_extension_table extensions = hk_instance_extensions();
    return vk_enumerate_instance_extension_properties(
-      &extensions, pPropertyCount, pProperties);
+      &instance_extensions, pPropertyCount, pProperties);
 }
 
 static void
@@ -127,8 +113,7 @@ hk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
    vk_instance_dispatch_table_from_entrypoints(
       &dispatch_table, &wsi_instance_entrypoints, false);
 
-   struct vk_instance_extension_table extensions = hk_instance_extensions();
-   result = vk_instance_init(&instance->vk, &extensions,
+   result = vk_instance_init(&instance->vk, &instance_extensions,
                              &dispatch_table, pCreateInfo, pAllocator);
    if (result != VK_SUCCESS)
       goto fail_alloc;
