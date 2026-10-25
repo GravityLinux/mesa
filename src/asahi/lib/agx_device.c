@@ -820,20 +820,23 @@ agx_open_device(void *memctx, struct agx_device *dev)
    }
 
    /* Entry instructions are CPU-authored and GPU-read-only. The same mapping
-    * remains installed for every graphics and compute job. */
+    * remains installed for every graphics and compute job. Reserve the arena
+    * and back its first chunk, which holds the header; later chunks are backed
+    * as entries reach them. */
    if ((dev->chip == AGX_CHIP_G16G || dev->chip == AGX_CHIP_G17P) &&
        !dev->probe_only) {
-      dev->apple9_entries =
-         agx_bo_create(dev, AGX_APPLE9_ENTRY_ARENA_SIZE,
-                       AGX_APPLE9_ENTRY_ARENA_SIZE,
-                       AGX_BO_EXEC | AGX_BO_LOW_VA | AGX_BO_WRITEBACK |
-                          AGX_BO_READONLY, "Apple9 shader entries");
-      if (!dev->apple9_entries ||
-          dev->apple9_entries->va->addr != dev->shader_base) {
+      dev->apple9_entry_va =
+         agx_va_alloc(dev, AGX_APPLE9_ENTRY_ARENA_SIZE,
+                      AGX_APPLE9_ENTRY_ARENA_SIZE, AGX_VA_USC | AGX_VA_FIXED,
+                      dev->shader_base);
+      if (!dev->apple9_entry_va) {
          fprintf(stderr, "Failed to reserve compact Apple9 shader entries\n");
          return false;
       }
-      dev->apple9_entry_map = agx_bo_map(dev->apple9_entries);
+      if (!agx_apple9_entry_back(dev, AGX_APPLE9_ENTRY_HEADER_SIZE)) {
+         fprintf(stderr, "Failed to back compact Apple9 shader entries\n");
+         return false;
+      }
    }
 
    /* Bind read-only zero page at 2^32. This is in our reservation, and can be
@@ -890,10 +893,60 @@ agx_open_device(void *memctx, struct agx_device *dev)
    return true;
 }
 
+bool
+agx_apple9_entry_back(struct agx_device *dev, uint32_t end_B)
+{
+   assert(end_B <= AGX_APPLE9_ENTRY_ARENA_SIZE);
+   for (unsigned i = 0; i * AGX_APPLE9_ENTRY_CHUNK_SIZE < end_B; ++i) {
+      if (dev->apple9_entry_chunks[i])
+         continue;
+
+      struct agx_bo *bo =
+         agx_bo_create(dev, AGX_APPLE9_ENTRY_CHUNK_SIZE, 0,
+                       AGX_BO_EXEC | AGX_BO_WRITEBACK | AGX_BO_READONLY,
+                       "Apple9 shader entries");
+      if (!bo)
+         return false;
+
+      /* The chunk's place in the arena, read-only for the GPU. */
+      uint32_t offset = i * AGX_APPLE9_ENTRY_CHUNK_SIZE;
+      if (agx_bo_bind(dev, bo, dev->shader_base + offset,
+                      AGX_APPLE9_ENTRY_CHUNK_SIZE, 0, DRM_ASAHI_BIND_READ) ||
+          !agx_bo_map(bo)) {
+         agx_bo_unreference(dev, bo);
+         return false;
+      }
+
+      dev->apple9_entry_chunks[i] = bo;
+   }
+   return true;
+}
+
+void
+agx_apple9_entry_write(struct agx_device *dev, uint32_t offset,
+                       const void *data, uint32_t size)
+{
+   const uint8_t *src = data;
+   while (size) {
+      struct agx_bo *bo =
+         dev->apple9_entry_chunks[offset / AGX_APPLE9_ENTRY_CHUNK_SIZE];
+      uint32_t in_chunk = offset % AGX_APPLE9_ENTRY_CHUNK_SIZE;
+      uint32_t n = MIN2(size, AGX_APPLE9_ENTRY_CHUNK_SIZE - in_chunk);
+      memcpy((uint8_t *)agx_bo_map(bo) + in_chunk, src, n);
+      agx_bo_note_cpu_write(bo, in_chunk, n);
+      offset += n;
+      src += n;
+      size -= n;
+   }
+}
+
 static void
 agx_finish_device(struct agx_device *dev)
 {
-   agx_bo_unreference(dev, dev->apple9_entries);
+   for (unsigned i = 0; i < AGX_APPLE9_ENTRY_CHUNKS; ++i)
+      agx_bo_unreference(dev, dev->apple9_entry_chunks[i]);
+   if (dev->apple9_entry_va)
+      agx_va_free(dev, dev->apple9_entry_va, true);
    agx_bo_unreference(dev, dev->printf.bo);
    agx_bo_unreference(dev, dev->zero_bo);
    agx_bo_unreference(dev, dev->scratch_bo);

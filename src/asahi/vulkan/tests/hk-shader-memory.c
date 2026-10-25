@@ -192,8 +192,11 @@ check_slices_and_entries(struct hk_device *dev)
    util_vma_heap_init(&dev->dev.apple9_entry_heap, AGX_APPLE9_ENTRY_HEADER_SIZE,
                       2 * AGX_APPLE9_ENTRY_BLOCK_SIZE);
    dev->dev.apple9_entry_heap.alloc_high = false;
-   dev->dev.apple9_entry_map = calloc(1, 4096);
-   CHECK(dev->dev.apple9_entry_map);
+   /* The arena's first chunk is backed when the device opens. */
+   struct agx_bo entry_chunk = {.size = AGX_APPLE9_ENTRY_CHUNK_SIZE,
+                                ._map = calloc(1, 4096)};
+   CHECK(entry_chunk._map);
+   dev->dev.apple9_entry_chunks[0] = &entry_chunk;
    launch_body(dev, r, a);
    launch_body(dev, other, b);
    CHECK(a->entry_offset && b->entry_offset &&
@@ -223,8 +226,8 @@ check_slices_and_entries(struct hk_device *dev)
    CHECK(!live_bos && list_is_empty(&dev->dev.apple9_entry_lru));
    CHECK(list_is_empty(&dev->apple9_bodies.slabs));
    util_vma_heap_finish(&dev->dev.apple9_entry_heap);
-   free(dev->dev.apple9_entry_map);
-   dev->dev.apple9_entry_map = NULL;
+   free(entry_chunk._map);
+   dev->dev.apple9_entry_chunks[0] = NULL;
    _mesa_set_destroy(r->cmd.apple9_pinned, NULL);
    _mesa_set_destroy(other->cmd.apple9_pinned, NULL);
    free(r);

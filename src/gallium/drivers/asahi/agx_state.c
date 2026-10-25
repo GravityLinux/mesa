@@ -3992,6 +3992,17 @@ agx_apple9_indirect_local_groups(struct agx_batch *batch, uint64_t grid)
                                    groups.gpu, grid);
    return groups.gpu;
 }
+/* Every chunk of the shader entry arena backed so far: the batch's entries
+ * were allocated, and their chunks backed, before it is built. */
+static void
+agx_batch_add_apple9_entries(struct agx_batch *batch, struct agx_device *dev)
+{
+   for (unsigned i = 0; i < AGX_APPLE9_ENTRY_CHUNKS; ++i) {
+      if (dev->apple9_entry_chunks[i])
+         agx_batch_add_bo(batch, dev->apple9_entry_chunks[i]);
+   }
+}
+
 
 static void
 agx_apple9_launch_compute(struct agx_batch *batch, struct agx_grid grid,
@@ -4035,7 +4046,7 @@ agx_apple9_launch_compute(struct agx_batch *batch, struct agx_grid grid,
       abort();
    batch->cdm.current += size;
    agx_batch_add_bo(batch, bo);
-   agx_batch_add_bo(batch, dev->apple9_entries);
+   agx_batch_add_apple9_entries(batch, dev);
    batch->incoherent_writes = true;
 }
 
@@ -7324,7 +7335,7 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
        * A rasterized reload triangle would mark every tile as non-empty,
        * forcing attachment traffic even where the application draws nothing. */
       if (batch->apple9_preparing_tile_helper) {
-         agx_batch_add_bo(batch, dev->apple9_entries);
+         agx_batch_add_apple9_entries(batch, dev);
          agx_dirty_reset_graphics(ctx);
          return;
       }
@@ -7337,7 +7348,7 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
          agx_apple9_emit_direct_draw(
             batch->vdm.current, &pipeline, draws->count, info->instance_count,
             info->index_size ? draws->index_bias : draws->start)) - sizeof(uint32_t);
-      agx_batch_add_bo(batch, dev->apple9_entries);
+      agx_batch_add_apple9_entries(batch, dev);
       ++batch->apple9_vdm_draws;
    } else {
       out = agx_encode_state(batch, batch->vdm.current);
@@ -7904,7 +7915,7 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
       }
 
       agx_batch_add_bo(batch, cs->bo);
-      agx_batch_add_bo(batch, dev->apple9_entries);
+      agx_batch_add_apple9_entries(batch, dev);
       for (unsigned i = 0; i < resource_count; ++i) {
          if (!resources[i])
             continue;
