@@ -45,6 +45,11 @@ struct agx_apple9_launch_parameters {
     * Its BO has the same ownership/lifetime as the main shader. */
    uint64_t preamble_address;
    uint64_t launch_address;
+   /* Compute: the root words (agx_apple9_compute_root_words of them), which
+    * the launch materializes as literals instead of loading them from
+    * resource_table. Required for agx_apple9_launch_build; templates leave
+    * patchable slots instead (agx_apple9_launch_template_set_roots). */
+   const uint32_t *root_words;
 };
 
 /* Current T8132 execution evidence covers these allocation sizes. This does
@@ -78,6 +83,9 @@ struct agx_apple9_launch_template {
    uint16_t target_at;
    /* Offset of the preamble branch, or 0 without a preamble. */
    uint16_t branch_at;
+   /* Compute: offset and count of the root-word literal slots. */
+   uint16_t roots_at;
+   uint16_t root_words;
    enum agx_apple9_launch_stage stage;
    bool valid;
 };
@@ -96,6 +104,15 @@ bool agx_apple9_launch_template_init(struct agx_apple9_launch_template *tmpl,
 bool agx_apple9_launch_template_emit(
    uint8_t *out, const struct agx_apple9_launch_template *tmpl,
    uint64_t resource_table, uint32_t entry_offset, uint64_t launch_address);
+
+/* Write a compute launch's root words into the literal slots of a program
+ * emitted from tmpl. The words are frozen when the launch is built, where a
+ * load would read them at launch: the resource record is CPU-written once per
+ * dispatch, no GPU pass writes it, and the roots are addresses, so
+ * update-after-bind descriptor contents are unaffected. */
+bool agx_apple9_launch_template_set_roots(
+   uint8_t *out, const struct agx_apple9_launch_template *tmpl,
+   const uint32_t *root_words);
 
 #ifdef __cplusplus
 }
