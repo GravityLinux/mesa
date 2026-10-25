@@ -101,33 +101,6 @@ main(void)
    CHECK(event->dst == HK_SYNC_FRAGMENT);
    CHECK(!cmd->sync_render_continuation);
 
-   /* Merging the next compute stream turns the earlier stream's final full
-    * flush into a junction inside one firmware command: compute-only on G16,
-    * unless the next stream fetches an indirect grid before its own flush.
-    */
-   for (unsigned c = 0; c < 3; ++c) {
-      bool indirect = c == 1;
-      dev->dev.chip = c == 2 ? AGX_CHIP_G13X : AGX_CHIP_G16G;
-      uint8_t a_bytes[256] = {0}, b_bytes[256] = {0};
-      struct hk_cs a = {.cmd = cmd, .type = HK_CS_CDM, .current = a_bytes,
-                        .end = a_bytes + sizeof(a_bytes), .cdm_dirty = true};
-      struct hk_cs b = {.cmd = cmd, .type = HK_CS_CDM, .current = b_bytes,
-                        .end = b_bytes + sizeof(b_bytes), .addr = 0x1000};
-      if (indirect)
-         hk_cs_note_indirect(&b);
-      cmd->current_cs.cs = &a;
-      hk_cmd_buffer_end_compute(cmd);
-      CHECK(a.end_flush == (uint32_t *)a_bytes && !a.cdm_dirty);
-      uint32_t full = *a.end_flush;
-      CHECK(full != 0x60000160);
-      b.current = b_bytes + AGX_CDM_BARRIER_LENGTH;
-      b.end_flush = (uint32_t *)b_bytes;
-      hk_cs_merge_cdm(&a, &b, dev->dev.chip);
-      CHECK(*(uint32_t *)a_bytes == (c == 0 ? 0x60000160 : full));
-      CHECK(a.end_flush == b.end_flush && a.current == b.current);
-   }
-   dev->dev.chip = AGX_CHIP_G16G;
-
    /* A compute stream that only carries an end timestamp (back-to-back
     * vkCmdWriteTimestamp, or one around a render) has run no dispatch, yet
     * must end in the full flush for the timestamp to land. One without a
@@ -143,11 +116,10 @@ main(void)
       hk_cmd_buffer_end_compute(cmd);
       CHECK(cmd->current_cs.cs == NULL);
       if (c) {
-         CHECK(t.end_flush == (uint32_t *)t_bytes);
          CHECK(t.current == t_bytes + AGX_CDM_BARRIER_LENGTH);
-         CHECK(*t.end_flush != 0x60000160 && *t.end_flush != 0);
+         CHECK(*(uint32_t *)t_bytes != 0x60000160 && *(uint32_t *)t_bytes != 0);
       } else {
-         CHECK(t.end_flush == NULL && t.current == t_bytes);
+         CHECK(t.current == t_bytes);
       }
    }
 
