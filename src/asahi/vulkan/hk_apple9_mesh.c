@@ -284,23 +284,31 @@ hk_apple9_native_mesh_round_counts_eligible(const uint16_t size[3],
           (vertices > threads || DIV_ROUND_UP(3 * primitives, 4) > threads);
 }
 
+static bool
+model_counts_eligible(const uint16_t size[3], unsigned vertices,
+                      unsigned primitives)
+{
+   return hk_apple9_native_mesh_enabled() && hk_apple9_native_mesh_threads(size) &&
+          vertices && vertices <= 256 && primitives && primitives <= 256;
+}
+
 bool
 hk_apple9_native_mesh_model_counts_eligible(const uint16_t size[3],
-                                             unsigned vertices,
-                                             unsigned primitives)
+                                          unsigned vertices,
+                                          unsigned primitives)
 {
    /* Research: any T16/T32 declaration the publication model covers, launched
     * at T32. V3/P1 keeps the P1 path, which also lowers primitive outputs. */
-   return hk_apple9_native_mesh_enabled() && hk_apple9_native_mesh_threads(size) &&
-          vertices && vertices <= 256 && primitives && primitives <= 256 &&
+   return model_counts_eligible(size, vertices, primitives) &&
           !(vertices == 3 && primitives == 1);
 }
 
 bool
 hk_apple9_native_mesh_round_shape_eligible(const nir_shader *nir)
 {
+   bool lines = nir->info.mesh.primitive_type == MESA_PRIM_LINES;
    return nir->info.stage == MESA_SHADER_MESH && !nir->info.task_payload_size &&
-          nir->info.mesh.primitive_type == MESA_PRIM_TRIANGLES &&
+          (lines || nir->info.mesh.primitive_type == MESA_PRIM_TRIANGLES) &&
           !nir->info.workgroup_size_variable &&
           (!nir->info.api_subgroup_size || nir->info.api_subgroup_size == 32) &&
           nir->info.derivative_group == DERIVATIVE_GROUP_NONE &&
@@ -309,13 +317,15 @@ hk_apple9_native_mesh_round_shape_eligible(const nir_shader *nir)
            (hk_apple9_native_mesh_primitive_lowering_enabled() &&
             nir->info.mesh.max_vertices_out + nir->info.mesh.max_primitives_out <= 256)) &&
           !nir->info.outputs_written_16bit &&
-          hk_apple9_native_mesh_model_counts_eligible(
+          model_counts_eligible(
              nir->info.workgroup_size, nir->info.mesh.max_vertices_out,
              nir->info.mesh.max_primitives_out) &&
+          (lines || nir->info.mesh.max_vertices_out != 3 ||
+           nir->info.mesh.max_primitives_out != 1) &&
           /* Within one round, position-only shapes stay under the explicit
            * class list (T16V16P16 is deliberately excluded); the model takes
            * only the outputs that path cannot carry. */
-          (hk_apple9_native_mesh_round_counts_eligible(
+          (lines || hk_apple9_native_mesh_round_counts_eligible(
               nir->info.workgroup_size, nir->info.mesh.max_vertices_out,
               nir->info.mesh.max_primitives_out) ||
            (nir->info.outputs_written &
@@ -473,19 +483,23 @@ hk_apple9_native_shader_valid(const struct agx_shader_info *code,
    /* The lowering flag binds the binary to this path: a class binary with
     * stale metadata cannot pass as a masked T32 round binary, or vice versa. */
    if (body->publication_rounds
-          ? !hk_apple9_native_mesh_model_counts_eligible(body->logical_size,
-                                                          l->max_vertices,
-                                                          l->max_primitives)
+          ? !model_counts_eligible(body->logical_size, l->max_vertices,
+                                   l->max_primitives) ||
+               (l->indices_per_primitive == 3 &&
+                l->max_vertices == 3 && l->max_primitives == 1)
           : hk_apple9_native_mesh_round_counts_eligible(body->logical_size,
                                                          l->max_vertices,
                                                          l->max_primitives))
       return false;
    if (body->publication_rounds) {
-      unsigned count_B = ALIGN_POT(3 * l->max_primitives, 16);
+      unsigned count_B = ALIGN_POT(l->indices_per_primitive * l->max_primitives, 16);
       unsigned position_B = count_B + 16;
       unsigned pitch_B = ALIGN_POT(l->max_vertices, 4) * 4;
       return k->physical_threads == AGX_APPLE9_NATIVE_SERIAL_THREADS &&
-             !body->primitive_broadcast && l->indices_per_primitive == 3 &&
+             !body->primitive_broadcast &&
+             (l->indices_per_primitive == 3 ||
+              (l->indices_per_primitive == 2 && !body->cull_primitive &&
+               !body->cull_distances)) &&
              l->vertex_components >= 4 &&
              l->vertex_components <= 4 + AGX_APPLE9_MAX_VARYING_COMPONENTS &&
              code->apple9_varyings.count == l->vertex_components - 4 - body->clip_distances &&

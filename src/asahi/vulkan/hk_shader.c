@@ -6795,7 +6795,7 @@ hk_apple9_native_mesh_check(nir_shader *nir,
    *supported = false;
    if (reason)
       *reason = NULL;
-   if (!hk_apple9_native_mesh_enabled() && !key->native_index)
+   if ((!hk_apple9_native_mesh_enabled() && !key->native_index) || key->line_stipple)
       return VK_SUCCESS;
 
    nir_shader *probe = nir_shader_clone(NULL, nir);

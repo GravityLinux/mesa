@@ -12,6 +12,8 @@
 #define LANES 32
 #include "../../compiler/test/apple9-mesh-executor.h"
 
+static unsigned indices_per_primitive = 3;
+
 static nir_shader *
 source(unsigned max_v, unsigned max_p, unsigned logical, bool cull)
 {
@@ -23,7 +25,7 @@ source(unsigned max_v, unsigned max_p, unsigned logical, bool cull)
    nir->info.workgroup_size[1] = nir->info.workgroup_size[2] = 1;
    nir->info.mesh.max_vertices_out = max_v;
    nir->info.mesh.max_primitives_out = max_p;
-   nir->info.mesh.primitive_type = MESA_PRIM_TRIANGLES;
+   nir->info.mesh.primitive_type = indices_per_primitive == 2 ? MESA_PRIM_LINES : MESA_PRIM_TRIANGLES;
    nir_def *counts = nir_load_num_workgroups(&b);
    nir_def *vertices = nir_channel(&b, counts, 0);
    nir_def *primitives = nir_channel(&b, counts, 1);
@@ -53,10 +55,10 @@ source(unsigned max_v, unsigned max_p, unsigned logical, bool cull)
       nir_def *p = nir_iadd_imm(&b, lane, first);
       nir_push_if(&b, nir_ult(&b, p, primitives));
       nir_def *indices[3];
-      for (unsigned c = 0; c < 3; ++c)
+      for (unsigned c = 0; c < indices_per_primitive; ++c)
          indices[c] = nir_umod(&b, nir_iadd_imm(&b, nir_imul_imm(&b, p, 2), c), vertices);
-      nir_store_per_primitive_output(&b, nir_vec(&b, indices, 3), p, nir_imm_int(&b, 0),
-         .write_mask = 7, .src_type = nir_type_uint32,
+      nir_store_per_primitive_output(&b, nir_vec(&b, indices, indices_per_primitive), p, nir_imm_int(&b, 0),
+         .write_mask = BITFIELD_MASK(indices_per_primitive), .src_type = nir_type_uint32,
          .io_semantics = {.location = VARYING_SLOT_PRIMITIVE_INDICES, .num_slots = 1});
       /* An array slot offset and sparse components exercise normal IO mapping. */
       nir_store_per_primitive_output(&b, nir_vec2(&b, nir_iadd_imm(&b, p, 0x40000),
@@ -146,12 +148,15 @@ check(unsigned max_v, unsigned max_p, unsigned logical,
    CHECK(m.controls == ALL_LANES);
    for (unsigned p = 0; p < primitives; ++p) {
       bool culled = cull && p % 3 == 1;
-      unsigned provoking = (2 * p + (culled ? 0 : last ? 2 : 0)) % vertices;
+      unsigned corner = last ? indices_per_primitive - 1 : 0;
+      unsigned provoking = (2 * p + (culled ? 0 : corner)) % vertices;
       unsigned duplicate = vertices + p;
-      for (unsigned c = 0; c < 3; ++c) {
-         unsigned index = c == (last ? 2 : 0) ? duplicate
+      for (unsigned c = 0; c < indices_per_primitive; ++c) {
+         unsigned index = c == corner ? duplicate
                           : (2 * p + (culled ? 0 : c)) % vertices;
-         CHECK(m.local[3 * p + c] == index);
+         CHECK(m.local[indices_per_primitive * p + c] == index);
+      }
+      for (unsigned c = 0; c < 3; ++c) {
          CHECK(at(&m, &body, VARYING_SLOT_VAR0 + c, 2, duplicate) ==
                0x20000 + 256 * c + provoking);
       }
@@ -203,6 +208,13 @@ main(void)
          check(v, p, l, 0, 0, last, true);
       }
    }
+   indices_per_primitive = 2;
+   for (unsigned last = 0; last < 2; ++last) {
+      check(64, 124, 1, 64, 124, last, false);
+      check(64, 124, 1, 3, 65, last, false);
+      check(64, 124, 1, 0, 0, last, false);
+   }
+   indices_per_primitive = 3;
    /* A primitive slot cannot alias a vertex slot; indirect slot offsets and
     * narrow values must decline on an owned clone before reading immediates. */
    for (unsigned bad = 0; bad < 4; ++bad) {

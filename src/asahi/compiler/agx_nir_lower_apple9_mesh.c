@@ -132,11 +132,13 @@ validate(nir_shader *nir, const struct agx_apple9_mesh_key *key,
       layout->max_primitives = nir->info.mesh.max_primitives_out;
       if (!layout->max_vertices || layout->max_vertices > 256 ||
           !layout->max_primitives || layout->max_primitives > 512 ||
-          nir->info.mesh.primitive_type != MESA_PRIM_TRIANGLES)
+          (nir->info.mesh.primitive_type != MESA_PRIM_TRIANGLES &&
+           nir->info.mesh.primitive_type != MESA_PRIM_LINES))
          return fail(
             reason,
-            "Apple9 native body currently requires triangle output with u8 indices");
-      layout->indices_per_primitive = 3;
+            "Apple9 native body requires line or triangle output with u8 indices");
+      layout->indices_per_primitive =
+         nir->info.mesh.primitive_type == MESA_PRIM_LINES ? 2 : 3;
    }
 
    bool payload = false, local_output = false;
@@ -218,7 +220,7 @@ validate(nir_shader *nir, const struct agx_apple9_mesh_key *key,
                      reason,
                      "Apple9 native index/cull output loads are not implemented");
                if ((slot == VARYING_SLOT_PRIMITIVE_INDICES &&
-                    comp + components > 3) ||
+                    comp + components > layout->indices_per_primitive) ||
                    (slot == VARYING_SLOT_CULL_PRIMITIVE &&
                     (comp || components != 1)))
                   return fail(reason,
@@ -266,7 +268,8 @@ validate(nir_shader *nir, const struct agx_apple9_mesh_key *key,
     * The index area is padded to a 16-byte count/header region. Position
     * and user values are component planes, each rounded to four vertices.
     * Culling reserves one four-byte slot per primitive before positions. */
-   layout->primitive_count_B = ALIGN_POT(layout->max_primitives * 3, 16);
+   layout->primitive_count_B =
+      ALIGN_POT(layout->max_primitives * layout->indices_per_primitive, 16);
    layout->vertex_count_B = layout->primitive_count_B + 4;
    layout->cull_B = layout->primitive_count_B + 16;
    layout->position_B =

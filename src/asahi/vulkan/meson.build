@@ -463,6 +463,15 @@ if with_tests
   )
   test('hk-native-mesh-cull', native_cull_test,
     env : ['HK_APPLE9_NATIVE_MESH=1'], suite : ['asahi', 'honeykrisp'])
+  native_lines_test = executable(
+    'hk-native-mesh-lines', 'tests/hk-native-mesh-lines.c',
+    include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                           inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+    dependencies : [hk_deps], link_with : [libhk],
+  )
+  test('hk-native-mesh-lines', native_lines_test,
+    env : ['HK_APPLE9_NATIVE_MESH=1', 'HK_APPLE9_NATIVE_MESH_ATTRIBUTES=1'],
+    suite : ['asahi', 'honeykrisp'])
   native_primitive_test = executable(
     'hk-native-mesh-primitive', 'tests/hk-native-mesh-primitive.c',
     include_directories : [inc_gallium, inc_gallium_aux, inc_include,

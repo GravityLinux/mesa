@@ -39,6 +39,7 @@ struct machine {
    unsigned count_lanes, actual_vertices, actual_primitives;
    bool variable_counts;
    unsigned expected_vertices, expected_primitives;
+   bool (*handle_intrinsic)(struct machine *, nir_intrinsic_instr *, unsigned);
 };
 
 static void *
@@ -124,6 +125,8 @@ instruction(struct machine *m, nir_instr *i, unsigned lane)
    }
    case nir_instr_type_intrinsic: {
       nir_intrinsic_instr *n = nir_instr_as_intrinsic(i);
+      if (m->handle_intrinsic && m->handle_intrinsic(m, n, lane))
+         break;
       nir_const_value *out = m->value[n->def.index][lane];
       switch (n->intrinsic) {
       case nir_intrinsic_set_vertex_and_primitive_count: {

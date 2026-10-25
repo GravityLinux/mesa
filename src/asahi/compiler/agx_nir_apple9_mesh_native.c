@@ -31,12 +31,13 @@ eligible(nir_shader *nir, unsigned physical_threads, bool packed_indices,
        * AGX_APPLE9_PUBLICATION_ROUND entries, so the API maxima are covered,
        * subject to the local output allocation. */
       if (nir->info.stage != MESA_SHADER_MESH || nir->info.task_payload_size ||
-          nir->info.mesh.primitive_type != MESA_PRIM_TRIANGLES ||
+          (nir->info.mesh.primitive_type != MESA_PRIM_TRIANGLES &&
+           nir->info.mesh.primitive_type != MESA_PRIM_LINES) ||
           !nir->info.mesh.max_vertices_out ||
           nir->info.mesh.max_vertices_out > 256 ||
           !nir->info.mesh.max_primitives_out ||
           nir->info.mesh.max_primitives_out > 256)
-         return fail(reason, "packed index candidate requires V1..256 P1..256 triangles");
+         return fail(reason, "packed index candidate requires V1..256 P1..256 lines or triangles");
    } else if (!agx_apple9_native_mesh_shape_eligible(nir))
       return fail(reason,
                   "native mesh development class requires V3 P1 triangles without payload");
@@ -83,7 +84,7 @@ consume_count(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       nir_instr_remove(&intr->instr);
       return true;
    }
-   /* Point size does not participate in triangle rasterization. */
+   /* Point size does not participate in line or triangle rasterization. */
    if (intr->intrinsic == nir_intrinsic_store_per_vertex_output &&
        nir_intrinsic_io_semantics(intr).location == VARYING_SLOT_PSIZ) {
       nir_instr_remove(&intr->instr);
@@ -288,12 +289,13 @@ duplicate_primitive_vertices(nir_builder *b,
    const struct agx_apple9_mesh_layout *l = &info->layout;
    unsigned root = info->key.output_root;
    nir_def *corner = nir_bcsel(b, nir_ine_imm(b, nir_load_provoking_last(b), 0),
-                              nir_imm_int(b, 2), nir_imm_int(b, 0));
+                              nir_imm_int(b, l->indices_per_primitive - 1),
+                              nir_imm_int(b, 0));
    for (unsigned first = 0; first < l->max_primitives; first += threads) {
       nir_def *p = nir_iadd_imm(b, lane, first);
       nir_def *active = nir_ult(b, p, primitives);
       nir_def *dst = nir_iadd(b, vertices, p);
-      nir_def *byte = nir_iadd(b, nir_imul_imm(b, p, 3), corner);
+      nir_def *byte = nir_iadd(b, nir_imul_imm(b, p, l->indices_per_primitive), corner);
       nir_def *value[VARYING_SLOT_MAX][4] = {0};
       nir_def *undefined = nir_undef(b, 1, 32);
       nir_push_if(b, active);
@@ -650,6 +652,15 @@ agx_nir_lower_apple9_native_mesh(
    bool rounds = options && options->publication_rounds;
    if (rounds && (!packed_indices || physical_threads != AGX_APPLE9_NATIVE_SERIAL_THREADS))
       return fail(reason, "multi-round publication requires packed indices at T32");
+   if (nir->info.mesh.primitive_type == MESA_PRIM_LINES) {
+      if (!rounds)
+         return fail(reason, "native lines require publication rounds at T32");
+      /* A zero-length line can rasterize. The degenerate-triangle culling
+       * model cannot represent a culled line. Keep both cull forms emulated. */
+      if (nir->info.cull_distance_array_size ||
+          (nir->info.outputs_written & VARYING_BIT_CULL_PRIMITIVE))
+         return fail(reason, "native line culling is unsupported");
+   }
 
    nir_remove_dead_variables(nir, nir_var_mem_shared, NULL);
    nir_lower_vars_to_explicit_types(nir, nir_var_mem_shared,
