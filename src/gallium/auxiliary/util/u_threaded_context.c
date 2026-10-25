@@ -5498,6 +5498,16 @@ tc_destroy(struct pipe_context *_pipe)
 
       for (unsigned i = 0; i < TC_MAX_BATCHES; i++) {
          util_queue_fence_destroy(&tc->batch_slots[i].fence);
+         /* A merged resolve keeps its destination referenced until the info
+          * slot is reused; release the ones still held. */
+         struct tc_batch_rp_info *infos = tc->batch_slots[i].renderpass_infos.data;
+         /* Indices up to the capacity are used without a resize, and the
+          * unused entries are zeroed. */
+         unsigned n = tc->batch_slots[i].renderpass_infos.capacity / sizeof(*infos);
+         for (unsigned j = 0; j < n; j++) {
+            for (unsigned r = 0; r < ARRAY_SIZE(infos[j].info.resolve); r++)
+               pipe_resource_reference(&infos[j].info.resolve[r], NULL);
+         }
          util_dynarray_fini(&tc->batch_slots[i].renderpass_infos);
          assert(!tc->batch_slots[i].token);
       }
