@@ -19,7 +19,8 @@ agx_apple9_mesh_state_build(uint32_t out[AGX_APPLE9_MESH_STATE_WORDS],
       return false;
    unsigned n = l->vertex_components + (l->primitive_components != 0);
    if (!l->max_vertices || l->max_vertices > 256 || !l->max_primitives ||
-       l->max_primitives > 512 || l->indices_per_primitive != 3 ||
+       l->max_primitives > 512 ||
+       (l->indices_per_primitive != 2 && l->indices_per_primitive != 3) ||
        l->vertex_components < 4 || l->vertex_components > 253 || n > 254 ||
        l->primitive_components > 128 || !p->threads || p->threads > 256 ||
        l->local_size_B > AGX_APPLE9_MAX_SHARED_BYTES ||

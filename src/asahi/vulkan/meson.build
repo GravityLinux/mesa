@@ -365,7 +365,7 @@ if with_tests
     dependencies : [hk_deps], link_with : [libhk],
     link_args : ['-Wl,--wrap=agx_bo_create', '-Wl,--wrap=agx_bo_reference',
                  '-Wl,--wrap=agx_bo_unreference', '-Wl,--wrap=__vk_errorf',
-                 '-Wl,--wrap=agx_compile_apple9_native_mesh',
+                 '-Wl,--wrap=agx_compile_apple9_native_mesh_lowered',
                  '-Wl,--wrap=agx_compile_apple9_tiny',
                  '-Wl,--wrap=agx_compile_apple9_fragment_mrt'],
   )
@@ -376,7 +376,7 @@ if with_tests
     dependencies : [hk_deps], link_with : [libhk],
     link_args : ['-Wl,--wrap=agx_bo_create', '-Wl,--wrap=agx_bo_reference',
                  '-Wl,--wrap=agx_bo_unreference', '-Wl,--wrap=agx_bo_cache_evict_all',
-                 '-Wl,--wrap=__vk_errorf', '-Wl,--wrap=agx_compile_apple9_native_mesh',
+                 '-Wl,--wrap=__vk_errorf', '-Wl,--wrap=agx_compile_apple9_native_mesh_lowered',
                  '-Wl,--wrap=agx_compile_apple9_tiny',
                  '-Wl,--wrap=agx_compile_apple9_fragment_mrt'],
   )
@@ -398,7 +398,7 @@ if with_tests
     dependencies : [hk_deps], link_with : [libhk],
     link_args : ['-Wl,--wrap=agx_bo_create', '-Wl,--wrap=agx_bo_reference',
                  '-Wl,--wrap=agx_bo_unreference', '-Wl,--wrap=__vk_errorf',
-                 '-Wl,--wrap=agx_compile_apple9_native_mesh',
+                 '-Wl,--wrap=agx_compile_apple9_native_mesh_lowered',
                  '-Wl,--wrap=agx_compile_apple9_tiny',
                  '-Wl,--wrap=agx_compile_apple9_fragment_mrt'],
   )
@@ -469,6 +469,33 @@ if with_tests
     suite : ['asahi', 'honeykrisp'])
   test('hk-native-mesh-rounds-research', native_rounds_test, args : ['research'],
     env : ['HK_APPLE9_NATIVE_MESH=1'],
+    suite : ['asahi', 'honeykrisp'])
+  native_cull_test = executable(
+    'hk-native-mesh-cull', 'tests/hk-native-mesh-cull.c',
+    include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                           inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+    dependencies : [hk_deps], link_with : [libhk],
+  )
+  test('hk-native-mesh-cull', native_cull_test,
+    env : ['HK_APPLE9_NATIVE_MESH=1'], suite : ['asahi', 'honeykrisp'])
+  native_lines_test = executable(
+    'hk-native-mesh-lines', 'tests/hk-native-mesh-lines.c',
+    include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                           inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+    dependencies : [hk_deps], link_with : [libhk],
+  )
+  test('hk-native-mesh-lines', native_lines_test,
+    env : ['HK_APPLE9_NATIVE_MESH=1', 'HK_APPLE9_NATIVE_MESH_ATTRIBUTES=1'],
+    suite : ['asahi', 'honeykrisp'])
+  native_primitive_test = executable(
+    'hk-native-mesh-primitive', 'tests/hk-native-mesh-primitive.c',
+    include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                           inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+    dependencies : [hk_deps], link_with : [libhk],
+  )
+  test('hk-native-mesh-primitive', native_primitive_test,
+    env : ['HK_APPLE9_NATIVE_MESH=1', 'HK_APPLE9_NATIVE_MESH_ATTRIBUTES=1',
+           'HK_APPLE9_NATIVE_MESH_PRIMITIVE_LOWERING=1'],
     suite : ['asahi', 'honeykrisp'])
   packed_indices_test = executable(
     'hk-native-packed-indices', 'tests/hk-native-packed-indices.c',

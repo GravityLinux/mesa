@@ -6781,6 +6781,7 @@ hk_apple9_native_mesh_options(nir_shader *nir,
       .clip_halfz = key->clip_negative_one_to_one,
       .attributes = (rounds || !packed) && hk_apple9_native_mesh_attributes_enabled(),
       .primitive_broadcast = !rounds && !packed && hk_apple9_native_mesh_primitive_lowering_enabled(),
+      .primitive_vertices = rounds && hk_apple9_native_mesh_primitive_lowering_enabled(),
       .packed_index_publication = rounds || packed,
       .publication_rounds = rounds,
       .link_clip_distances = key->fs_reads_clip_distance,
@@ -6802,7 +6803,7 @@ hk_apple9_native_mesh_check(nir_shader *nir,
    *supported = false;
    if (reason)
       *reason = NULL;
-   if (!hk_apple9_native_mesh_enabled() && !key->native_index)
+   if ((!hk_apple9_native_mesh_enabled() && !key->native_index) || key->line_stipple)
       return VK_SUCCESS;
 
    nir_shader *probe = nir_shader_clone(NULL, nir);
@@ -6846,10 +6847,15 @@ hk_apple9_compile_native_mesh_program(
          *reason = "native mesh supports 1..128 logical invocations";
       return false;
    }
-   return agx_compile_apple9_native_mesh(
+   memset(out, 0, sizeof(*out));
+   if (!agx_nir_lower_apple9_native_mesh(
       nir, hk_apple9_native_mesh_enabled() ||
            (key->native_index && options.packed_index_publication),
-      &options, out, info, reason);
+      &options, info, reason))
+      return false;
+   if (info->primitive_vertices)
+      hk_apple9_lower_prerast_sysvals(nir, MESA_SHADER_COMPUTE);
+   return agx_compile_apple9_native_mesh_lowered(nir, &options, out, info, reason);
 }
 
 /* Research varyings use the existing mesh publication model (T32 for shapes
@@ -7813,6 +7819,7 @@ hk_apple9_identify_native_pair(uint32_t count, struct vk_shader **shaders,
          obj->apple9_native_cull_primitive =
             (hk_native_producer_main(obj)->info.apple9_native.primitive_broadcast &
              VARYING_BIT_CULL_PRIMITIVE) ||
+            hk_native_producer_main(obj)->info.apple9_native.cull_primitive ||
             hk_native_producer_main(obj)->info.apple9_native.cull_distances;
       }
    }

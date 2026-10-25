@@ -103,6 +103,17 @@ def check_program(rows, channels=None):
             if r["op"] == "SHARED_LOAD":
                 offset = 4 * value(r["src"][0], i)
                 return ("local", r["imm"], offset)
+            if r["op"] == "USHR":
+                # The primitive count occupies only the low halfword of the
+                # output header. Decode the unsigned bitfield extraction;
+                # neither stale upper bytes nor another width may reach U0.
+                word = int.from_bytes(r["code"], "little")
+                assert len(r["code"]) == 12 and r["code"][:3] == bytes([0xa7, 0, 0x54])
+                assert r["imm"] == 16 << 8 and len(r["src"]) == 1
+                assert (word >> 25) & 127 == int(reg[1:])
+                assert (word >> 42) & 127 == int(r["src"][0][1:])
+                assert (word >> 50) & 31 == 0 and (word >> 84) & 63 == 16
+                return ("low16", value(r["src"][0], i))
             raise AssertionError(("unmodelled input definition", r))
         raise AssertionError(("undefined allocated input", reg, before))
 
@@ -113,7 +124,7 @@ def check_program(rows, channels=None):
         assert not killed.intersection(r["src"]), ("post-U0 read", killed, r)
         killed.discard(r["dst"])
 
-    expected = [[("local", 6, 16), ("local", 6, 20)],
+    expected = [[("low16", ("local", 6, 16)), ("local", 6, 20)],
                 *channels, [("local", 6, 20), 0]]
     for i, want in zip(units, expected):
         got = [value(s, i) for s in decoded(i)]

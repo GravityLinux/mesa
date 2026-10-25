@@ -6382,6 +6382,7 @@ hk_apple9_native_mesh_state_eligible(struct hk_cmd_buffer *cmd,
        gfx->render.layer_count != 1 || hk_cond_render_applies(cmd) ||
        gfx->mesh_pg_query || gfx->descriptors.root.draw.pipeline_stats_flags ||
        gfx->occlusion.active_count || gfx->xfb_enabled ||
+       dyn->rs.line.stipple.enable ||
        dyn->rs.polygon_mode != VK_POLYGON_MODE_FILL ||
        MAX2(gfx->render.tilebuffer.nr_samples ?: dyn->ms.rasterization_samples,
             1) != 1)
@@ -6444,7 +6445,8 @@ hk_apple9_use_native_mesh(struct hk_cmd_buffer *cmd, const uint32_t *direct,
       cmd, direct, count_addr,
       (main->info.apple9_native.primitive_broadcast &
          VARYING_BIT_CULL_PRIMITIVE) ||
-      main->info.apple9_native.cull_distances);
+      main->info.apple9_native.cull_distances ||
+      main->info.apple9_native.cull_primitive);
 }
 
 /* Mesh shader draws run the task and mesh workgroups as compute kernels, and

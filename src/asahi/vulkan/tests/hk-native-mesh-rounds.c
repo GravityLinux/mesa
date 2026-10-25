@@ -170,7 +170,7 @@ check(unsigned logical, unsigned v, unsigned p, bool attributes, bool prim,
       CHECK(body.logical_size[0] == logical);
       CHECK(part.info.workgroup_size[0] == expected && !part.info.scratch_size);
       CHECK(hk_apple9_native_shader_valid(&part.info, &body, HK_APPLE9_NATIVE_MESH));
-      CHECK(body.layout.vertex_components == (attributes ? 7 : 4));
+      CHECK(body.layout.vertex_components == (attributes ? 7 : 4) + prim);
       /* Uploads cannot reinterpret the binary under another width or size. */
       struct agx_apple9_mesh_body_info stale = body;
       stale.key.physical_threads = expected == 16 ? 32 : 16;
@@ -188,7 +188,7 @@ check(unsigned logical, unsigned v, unsigned p, bool attributes, bool prim,
       CHECK(agx_apple9_mesh_state_build(words, &state));
       CHECK(words[10] == ((p - 1) | ((DIV_ROUND_UP(p, 16) - 1) << 16)));
       CHECK(words[11] == (0x400800 | expected));
-      CHECK(words[13] == 1 + DIV_ROUND_UP(v, 4) * body.layout.vertex_components);
+      CHECK(words[13] == 1 + DIV_ROUND_UP(v + (prim ? p : 0), 4) * body.layout.vertex_components);
       printf("L%u V%u P%u: T%u planes=%u bytes=%u gprs=%u\n", logical, v, p,
              expected, body.layout.vertex_components, part.info.binary_size,
              part.info.nr_gprs);
@@ -219,8 +219,8 @@ main(int argc, char **argv)
          check(logical, v, p, attributes, false, research ? physical : 0);
    }
    if (research) {
-      /* Shapes within one round keep the class path; out-of-range shapes and
-       * independent primitive records stay rejected. */
+      /* Shapes within one round keep the class path; independent primitive
+       * values need room for one private vertex per primitive. */
       uint16_t size[3] = {32, 1, 1};
       CHECK(!hk_apple9_native_mesh_round_counts_eligible(size, 32, 42));
       /* Single-round non-class shapes use the model too; V3/P1 does not. */
@@ -234,7 +234,8 @@ main(int argc, char **argv)
       CHECK(!hk_apple9_native_mesh_round_counts_eligible(size, 64, 257));
       size[0] = 129;
       CHECK(!hk_apple9_native_mesh_round_counts_eligible(size, 64, 126));
-      check(32, 64, 126, true, true, 0);
+      check(32, 64, 126, true, true, 32);
+      check(32, 128, 129, true, true, 0);
       /* ClipDistance: planes linked as varyings plus rasterizer channels
        * 4 + varyings + d in every round; PPP sees the count. */
       for (clip_distances = 1; clip_distances <= 8; clip_distances += 7) {

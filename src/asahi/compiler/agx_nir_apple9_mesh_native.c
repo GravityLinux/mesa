@@ -31,12 +31,13 @@ eligible(nir_shader *nir, unsigned physical_threads, bool packed_indices,
        * AGX_APPLE9_PUBLICATION_ROUND entries, so the API maxima are covered,
        * subject to the local output allocation. */
       if (nir->info.stage != MESA_SHADER_MESH || nir->info.task_payload_size ||
-          nir->info.mesh.primitive_type != MESA_PRIM_TRIANGLES ||
+          (nir->info.mesh.primitive_type != MESA_PRIM_TRIANGLES &&
+           nir->info.mesh.primitive_type != MESA_PRIM_LINES) ||
           !nir->info.mesh.max_vertices_out ||
           nir->info.mesh.max_vertices_out > 256 ||
           !nir->info.mesh.max_primitives_out ||
           nir->info.mesh.max_primitives_out > 256)
-         return fail(reason, "packed index candidate requires V1..256 P1..256 triangles");
+         return fail(reason, "packed index candidate requires V1..256 P1..256 lines or triangles");
    } else if (!agx_apple9_native_mesh_shape_eligible(nir))
       return fail(reason,
                   "native mesh development class requires V3 P1 triangles without payload");
@@ -83,7 +84,7 @@ consume_count(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       nir_instr_remove(&intr->instr);
       return true;
    }
-   /* Point size does not participate in triangle rasterization. */
+   /* Point size does not participate in line or triangle rasterization. */
    if (intr->intrinsic == nir_intrinsic_store_per_vertex_output &&
        nir_intrinsic_io_semantics(intr).location == VARYING_SLOT_PSIZ) {
       nir_instr_remove(&intr->instr);
@@ -119,6 +120,7 @@ device_fence(nir_builder *b)
 struct primitive_lower {
    uint64_t mask;
    unsigned root, cull_B;
+   unsigned vertex_base;
 };
 
 static bool
@@ -154,10 +156,13 @@ lower_primitive_output(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    }
    sem.location = slot;
    sem.num_slots = 1;
+   nir_def *vertex = lower->vertex_base
+      ? nir_iadd_imm(b, intr->src[store ? 1 : 0].ssa, lower->vertex_base)
+      : nir_imm_int(b, 0);
    if (store) {
       nir_def *value = intr->src[0].ssa;
       nir_store_per_vertex_output(
-         b, value, nir_imm_int(b, 0), nir_imm_int(b, 0),
+         b, value, vertex, nir_imm_int(b, 0),
          .base = nir_intrinsic_base(intr), .range = 1,
          .component = nir_intrinsic_component(intr),
          .write_mask = nir_intrinsic_write_mask(intr),
@@ -166,7 +171,7 @@ lower_primitive_output(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       nir_instr_remove(&intr->instr);
    } else {
       nir_def *value = nir_load_per_vertex_output(
-         b, intr->def.num_components, 32, nir_imm_int(b, 0), nir_imm_int(b, 0),
+         b, intr->def.num_components, 32, vertex, nir_imm_int(b, 0),
          .base = nir_intrinsic_base(intr), .range = 1,
          .component = nir_intrinsic_component(intr),
          .dest_type = nir_intrinsic_dest_type(intr), .io_semantics = sem);
@@ -177,11 +182,14 @@ lower_primitive_output(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 
 static bool
 primitive_outputs(nir_shader *nir, const struct agx_apple9_mesh_key *key,
-                  uint64_t *mask, const char **reason)
+                  bool duplicate, uint64_t *mask, const char **reason)
 {
-   if (nir->info.mesh.max_primitives_out != 1 ||
-       nir->info.mesh.max_vertices_out > 3)
+   if (!duplicate && (nir->info.mesh.max_primitives_out != 1 ||
+                      nir->info.mesh.max_vertices_out > 3))
       return fail(reason, "primitive broadcast requires P1 and at most V3");
+   if (duplicate && nir->info.mesh.max_vertices_out +
+                    nir->info.mesh.max_primitives_out > 256)
+      return fail(reason, "primitive vertex copies exceed 256 native vertices");
 
    uint64_t vertex = 0;
    *mask = 0;
@@ -191,6 +199,11 @@ primitive_outputs(nir_shader *nir, const struct agx_apple9_mesh_key *key,
             if (instr->type != nir_instr_type_intrinsic)
                continue;
             nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (duplicate &&
+                intr->intrinsic == nir_intrinsic_set_vertex_and_primitive_count &&
+                nir_src_is_const(intr->src[0]) &&
+                nir_src_as_uint(intr->src[0]) > nir->info.mesh.max_vertices_out)
+               return fail(reason, "primitive vertex counts exceed the original declaration");
             bool store = intr->intrinsic == nir_intrinsic_store_per_primitive_output ||
                          intr->intrinsic == nir_intrinsic_store_per_vertex_output;
             bool prim = intr->intrinsic == nir_intrinsic_store_per_primitive_output ||
@@ -212,6 +225,8 @@ primitive_outputs(nir_shader *nir, const struct agx_apple9_mesh_key *key,
                continue;
             bool user = slot >= VARYING_SLOT_VAR0 && slot <= VARYING_SLOT_VAR31;
             bool cull = slot == VARYING_SLOT_CULL_PRIMITIVE;
+            if (duplicate && cull)
+               return fail(reason, "primitive vertex copies require separately lowered culling");
             if (!user && !cull && slot != VARYING_SLOT_PRIMITIVE_ID)
                return fail(reason, "primitive broadcast builtin is unsupported");
             unsigned bits = store ? nir_src_bit_size(intr->src[0]) : intr->def.bit_size;
@@ -228,10 +243,115 @@ primitive_outputs(nir_shader *nir, const struct agx_apple9_mesh_key *key,
    struct primitive_lower lower = {
       .mask = *mask, .root = key->output_root,
       .cull_B = ALIGN_POT(nir->info.mesh.max_primitives_out * 3, 16) + 8,
+      .vertex_base = duplicate ? nir->info.mesh.max_vertices_out : 0,
    };
    nir_shader_intrinsics_pass(nir, lower_primitive_output, nir_metadata_none, &lower);
    nir->info.per_primitive_outputs &= ~*mask;
+   if (duplicate && *mask) {
+      /* Keep runtime count normalization bounded by the application's
+       * original declaration, before expanding the allocation. */
+      nir_foreach_function_impl(impl, nir) {
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr_safe(instr, block) {
+               if (instr->type != nir_instr_type_intrinsic)
+                  continue;
+               nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+               if (intr->intrinsic != nir_intrinsic_set_vertex_and_primitive_count)
+                  continue;
+               nir_builder b = nir_builder_at(nir_before_instr(instr));
+               nir_src_rewrite(&intr->src[0], nir_umin_imm(
+                  &b, intr->src[0].ssa, nir->info.mesh.max_vertices_out));
+            }
+         }
+      }
+      nir->info.mesh.max_vertices_out += nir->info.mesh.max_primitives_out;
+   }
    return true;
+}
+
+/* A flat per-primitive value can use the normal varying plane when the
+ * provoking vertex belongs only to that primitive. Preserve every original
+ * vertex component (including flat per-vertex attributes and clip mirrors),
+ * and change only that corner's index. Smooth interpolation is unchanged.
+ *
+ * Primitive body stores start at the declared vertex maximum. The compact
+ * destination starts at the actual vertex count, so it can overlap those
+ * stores. Read each round's primitive values before any lane overwrites them;
+ * ascending rounds cannot overwrite a later round's source. Original vertex
+ * rows always precede all destinations and need no temporary copy.
+ */
+static nir_def *
+duplicate_primitive_vertices(nir_builder *b,
+                             const struct agx_apple9_mesh_body_info *info,
+                             nir_def *lane, nir_def *vertices,
+                             nir_def *primitives, unsigned threads)
+{
+   const struct agx_apple9_mesh_layout *l = &info->layout;
+   unsigned root = info->key.output_root;
+   nir_def *corner = nir_bcsel(b, nir_ine_imm(b, nir_load_provoking_last(b), 0),
+                              nir_imm_int(b, l->indices_per_primitive - 1),
+                              nir_imm_int(b, 0));
+   for (unsigned first = 0; first < l->max_primitives; first += threads) {
+      nir_def *p = nir_iadd_imm(b, lane, first);
+      nir_def *active = nir_ult(b, p, primitives);
+      nir_def *dst = nir_iadd(b, vertices, p);
+      nir_def *byte = nir_iadd(b, nir_imul_imm(b, p, l->indices_per_primitive), corner);
+      nir_def *value[VARYING_SLOT_MAX][4] = {0};
+      nir_def *undefined = nir_undef(b, 1, 32);
+      nir_push_if(b, active);
+      nir_def *word = nir_load_local_apple9_agx(
+         b, nir_iand_imm(b, byte, ~3), .base = root);
+      nir_def *vertex = nir_iand_imm(b, nir_ushr(b, word,
+         nir_imul_imm(b, nir_iand_imm(b, byte, 3), 8)), 0xff);
+      for (unsigned slot = 0; slot < VARYING_SLOT_MAX; ++slot) {
+         bool primitive = slot < 64 && (info->primitive_vertices & BITFIELD64_BIT(slot));
+         for (unsigned c = 0; c < 4; ++c) {
+            unsigned component = l->vertex_component[slot][c];
+            if (component == AGX_APPLE9_MESH_UNUSED)
+               continue;
+            unsigned plane = l->position_B + l->vertex_pitch_B * component;
+            nir_def *src = primitive ? nir_iadd_imm(b, p, info->original_max_vertices)
+                                     : vertex;
+            nir_def *v = nir_load_local_apple9_agx(
+               b, nir_iadd_imm(b, nir_imul_imm(b, src, 4), plane), .base = root);
+            if (primitive)
+               value[slot][c] = v;
+            else
+               nir_store_local_apple9_agx(
+                  b, v, nir_iadd_imm(b, nir_imul_imm(b, dst, 4), plane),
+                  .base = root, .bit_size = 32);
+         }
+      }
+      nir_pop_if(b, NULL);
+      u_foreach_bit64(slot, info->primitive_vertices) {
+         for (unsigned c = 0; c < 4; ++c) {
+            if (value[slot][c])
+               value[slot][c] = nir_if_phi(b, value[slot][c], undefined);
+         }
+      }
+      nir_barrier(b, .execution_scope = SCOPE_WORKGROUP,
+                     .memory_scope = SCOPE_WORKGROUP,
+                     .memory_semantics = NIR_MEMORY_ACQ_REL,
+                     .memory_modes = nir_var_mem_shared);
+      nir_push_if(b, active);
+      u_foreach_bit64(slot, info->primitive_vertices) {
+         for (unsigned c = 0; c < 4; ++c) {
+            if (!value[slot][c])
+               continue;
+            unsigned plane = l->position_B + l->vertex_pitch_B * l->vertex_component[slot][c];
+            nir_store_local_apple9_agx(
+               b, value[slot][c], nir_iadd_imm(b, nir_imul_imm(b, dst, 4), plane),
+               .base = root, .bit_size = 32);
+         }
+      }
+      nir_store_local_apple9_agx(b, dst, byte, .base = root, .bit_size = 8);
+      nir_pop_if(b, NULL);
+   }
+   nir_barrier(b, .execution_scope = SCOPE_WORKGROUP,
+                  .memory_scope = SCOPE_WORKGROUP,
+                  .memory_semantics = NIR_MEMORY_ACQ_REL,
+                  .memory_modes = nir_var_mem_shared);
+   return nir_iadd(b, vertices, primitives);
 }
 
 static void
@@ -314,7 +434,7 @@ varying_layout(const struct agx_apple9_mesh_body_info *info,
       }
       if (slot < ARRAY_SIZE(varyings->mask) && varyings->mask[slot])
          varyings->group[slot] = agx_apple9_varying_group(
-            options->outputs_flat | info->primitive_broadcast,
+            options->outputs_flat | info->primitive_broadcast | info->primitive_vertices,
             options->outputs_linear, slot);
    }
    return true;
@@ -420,9 +540,46 @@ mirror_clip_distance(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    return true;
 }
 
-/* A primitive is culled when, for some cull distance, all of its vertices
- * are negative. Culled primitives become degenerate (i0, i0, i0) before the
- * index words are published, so they cover no pixels. */
+struct primitive_cull_storage {
+   unsigned base;
+   bool written, failed;
+};
+
+static bool
+move_primitive_cull(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   struct primitive_cull_storage *st = data;
+   bool store = intr->intrinsic == nir_intrinsic_store_per_primitive_output;
+   if ((!store && intr->intrinsic != nir_intrinsic_load_per_primitive_output) ||
+       nir_intrinsic_io_semantics(intr).location != VARYING_SLOT_CULL_PRIMITIVE)
+      return false;
+
+   /* EXT mesh output readback is not supported. Validate before reading an
+    * immediate so a capability probe rejects unsupported IO without asserting. */
+   if (!store || !nir_src_is_const(intr->src[2]) ||
+       nir_src_as_uint(intr->src[2]) || intr->num_components != 1 ||
+       nir_intrinsic_component(intr) || nir_intrinsic_write_mask(intr) != 1 ||
+       (nir_src_bit_size(intr->src[0]) != 1 &&
+        nir_src_bit_size(intr->src[0]) != 32)) {
+      st->failed = true;
+      return false;
+   }
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *value = intr->src[0].ssa;
+   if (value->bit_size == 1)
+      value = nir_b2i32(b, value);
+   nir_store_shared(b, value, nir_imul_imm(b, intr->src[1].ssa, 4),
+                    .base = st->base, .align_mul = 4, .write_mask = 1);
+   nir_instr_remove(&intr->instr);
+   st->written = true;
+   return true;
+}
+
+/* CullPrimitive and CullDistance are independent reasons to cull a triangle.
+ * Cull distances cull when all three vertices are negative for some plane.
+ * Culled primitives become degenerate (i0, i0, i0) before index publication.
+ * Draw admission restricts this software culling to filled triangles. */
 static void
 cull_primitives(nir_builder *b, const struct agx_apple9_mesh_body_info *info,
                 nir_def *lane, nir_def *primitives, unsigned physical_threads)
@@ -445,6 +602,13 @@ cull_primitives(nir_builder *b, const struct agx_apple9_mesh_body_info *info,
       for (unsigned i = 0; i < 3; ++i)
          v[i] = nir_iand_imm(b, nir_ushr_imm(b, packed, 8 * i), 0xff);
       nir_def *culled = nir_imm_false(b);
+      if (info->cull_primitive) {
+         nir_def *offset = nir_iadd_imm(
+            b, nir_imul_imm(b, p, 4),
+            info->shared_offset_B + info->cull_primitive_B);
+         culled = nir_ine_imm(
+            b, nir_load_local_apple9_agx(b, offset, .base = root), 0);
+      }
       for (unsigned d = 0; d < info->cull_distances; ++d) {
          nir_def *all = nir_imm_true(b);
          for (unsigned i = 0; i < 3; ++i) {
@@ -488,6 +652,15 @@ agx_nir_lower_apple9_native_mesh(
    bool rounds = options && options->publication_rounds;
    if (rounds && (!packed_indices || physical_threads != AGX_APPLE9_NATIVE_SERIAL_THREADS))
       return fail(reason, "multi-round publication requires packed indices at T32");
+   if (nir->info.mesh.primitive_type == MESA_PRIM_LINES) {
+      if (!rounds)
+         return fail(reason, "native lines require publication rounds at T32");
+      /* A zero-length line can rasterize. The degenerate-triangle culling
+       * model cannot represent a culled line. Keep both cull forms emulated. */
+      if (nir->info.cull_distance_array_size ||
+          (nir->info.outputs_written & VARYING_BIT_CULL_PRIMITIVE))
+         return fail(reason, "native line culling is unsupported");
+   }
 
    nir_remove_dead_variables(nir, nir_var_mem_shared, NULL);
    nir_lower_vars_to_explicit_types(nir, nir_var_mem_shared,
@@ -509,6 +682,20 @@ agx_nir_lower_apple9_native_mesh(
          return fail(reason, "native mesh cull distances must be constant-indexed per-vertex stores");
       nir->info.shared_size = cull.base + nir->info.mesh.max_vertices_out * cull.cull * 4;
       nir->info.cull_distance_array_size = 0;
+   }
+   struct primitive_cull_storage primitive_cull = {
+      .base = ALIGN_POT(nir->info.shared_size, 4),
+   };
+   if (rounds) {
+      nir_shader_intrinsics_pass(nir, move_primitive_cull,
+                                 nir_metadata_control_flow, &primitive_cull);
+      if (primitive_cull.failed)
+         return fail(reason, "native mesh CullPrimitive requires scalar stores with zero slot offset");
+      if (primitive_cull.written) {
+         nir->info.shared_size = primitive_cull.base +
+                                nir->info.mesh.max_primitives_out * 4;
+         nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+      }
    }
    bool clip_linked = options && options->link_clip_distances &&
                       nir->info.clip_distance_array_size;
@@ -551,8 +738,14 @@ agx_nir_lower_apple9_native_mesh(
 
    struct agx_apple9_mesh_key key = AGX_APPLE9_MESH_KEY;
    uint64_t primitive_broadcast = 0;
+   uint64_t primitive_vertices = 0;
+   unsigned original_max_vertices = nir->info.mesh.max_vertices_out;
    if (options && options->attributes && options->primitive_broadcast &&
-       !primitive_outputs(nir, &key, &primitive_broadcast, reason))
+       !primitive_outputs(nir, &key, false, &primitive_broadcast, reason))
+      return false;
+   if (rounds && options->attributes && options->primitive_vertices &&
+       (nir->info.per_primitive_outputs & ~VARYING_BIT_PRIMITIVE_INDICES) &&
+       !primitive_outputs(nir, &key, true, &primitive_vertices, reason))
       return false;
 
    key.physical_threads = physical_threads;
@@ -560,6 +753,8 @@ agx_nir_lower_apple9_native_mesh(
       return false;
    memcpy(info->logical_size, logical_size, sizeof(logical_size));
    info->primitive_broadcast = primitive_broadcast;
+   info->primitive_vertices = primitive_vertices;
+   info->original_max_vertices = primitive_vertices ? original_max_vertices : 0;
    info->publication_rounds = rounds;
    const struct agx_apple9_mesh_layout *layout = &info->layout;
    struct agx_apple9_varying_layout varyings;
@@ -571,6 +766,8 @@ agx_nir_lower_apple9_native_mesh(
    info->clip_distances = nir->info.clip_distance_array_size;
    info->cull_distances = cull.cull;
    info->cull_B = cull.base;
+   info->cull_primitive = primitive_cull.written;
+   info->cull_primitive_B = primitive_cull.written ? primitive_cull.base : 0;
    if (info->clip_distances > 8 || info->clip_distances + info->cull_distances > 8)
       return fail(reason, "native mesh supports eight clip plus cull distances");
    for (unsigned d = 0; d < info->clip_distances; ++d) {
@@ -601,6 +798,28 @@ agx_nir_lower_apple9_native_mesh(
       nir_imm_int(&entry, layout->vertex_count_B),
       .base = key.output_root, .bit_size = 32);
    nir_pop_if(&entry, NULL);
+   if (info->cull_primitive) {
+      /* Unwritten flags are undefined by the API, but must not depend on a
+       * previous workgroup's LDS contents. Initialize every flag before the
+       * application mask, including flags owned by inactive logical lanes. */
+      nir_def *lane = nir_load_local_invocation_index(&entry);
+      for (unsigned first = 0; first < layout->max_primitives;
+           first += physical_threads) {
+         nir_def *primitive = nir_iadd_imm(&entry, lane, first);
+         nir_push_if(&entry, nir_ult_imm(&entry, primitive,
+                                       layout->max_primitives));
+         nir_store_local_apple9_agx(
+            &entry, nir_imm_int(&entry, 0),
+            nir_iadd_imm(&entry, nir_imul_imm(&entry, primitive, 4),
+                         info->shared_offset_B + info->cull_primitive_B),
+            .base = key.output_root, .bit_size = 32);
+         nir_pop_if(&entry, NULL);
+      }
+      nir_barrier(&entry, .execution_scope = SCOPE_WORKGROUP,
+                         .memory_scope = SCOPE_WORKGROUP,
+                         .memory_semantics = NIR_MEMORY_ACQ_REL,
+                         .memory_modes = nir_var_mem_shared);
+   }
    if (primitive_broadcast & VARYING_BIT_CULL_PRIMITIVE) {
       nir_push_if(&entry, nir_ieq_imm(&entry,
                                     nir_load_local_invocation_index(&entry), 0));
@@ -629,11 +848,20 @@ agx_nir_lower_apple9_native_mesh(
     * The qualified one-triangle class supplies actual vertex count to B. */
    nir_def *primitives = nir_load_local_apple9_agx(
       &b, nir_imm_int(&b, layout->primitive_count_B), .base = key.output_root);
+   /* The output ABI writes only the low halfword. Ignore the unrelated upper
+    * bytes before bounding cull loops and index publication by this count. */
+   if (key.primitive_count_bits == 16)
+      primitives = nir_iand_imm(&b, primitives, 0xffff);
    nir_def *vertices = nir_load_local_apple9_agx(
       &b, nir_imm_int(&b, layout->vertex_count_B), .base = key.output_root);
    nir_def *lane = nir_load_local_invocation_index(&b);
    if (primitive_broadcast)
       broadcast_primitive(&b, info, lane, vertices);
+   if (info->cull_distances || info->cull_primitive)
+      cull_primitives(&b, info, lane, primitives, physical_threads);
+   if (primitive_vertices)
+      vertices = duplicate_primitive_vertices(&b, info, lane, vertices, primitives,
+                                               physical_threads);
    if (options && options->clip_halfz) {
       /* Convert the completed homogeneous position, after all body writes and
        * output reads. Doing this at publication also handles scalar/partial
@@ -668,8 +896,6 @@ agx_nir_lower_apple9_native_mesh(
                   .memory_semantics = NIR_MEMORY_ACQ_REL,
                   .memory_modes = nir_var_mem_shared);
    }
-   if (info->cull_distances)
-      cull_primitives(&b, info, lane, primitives, physical_threads);
    /* Publish the completed output memory before issuing mesh allocation.
     * U0 consumes the counts but does not write these global output planes.
     * Keeping this fence before U0 lets the first channel submit consume U0's
@@ -771,6 +997,16 @@ agx_compile_apple9_native_mesh(
    if (!agx_nir_lower_apple9_native_mesh(nir, enable_native_mesh, options,
                                          info, reason))
       return false;
+   return agx_compile_apple9_native_mesh_lowered(nir, options, out, info, reason);
+}
+
+bool
+agx_compile_apple9_native_mesh_lowered(
+   nir_shader *nir, const struct agx_apple9_native_mesh_options *options,
+   struct agx_shader_part *out, const struct agx_apple9_mesh_body_info *info,
+   const char **reason)
+{
+   memset(out, 0, sizeof(*out));
    if (!agx_compile_apple9_mesh_lowered(nir, &info->key, out, reason))
       return false;
    out->info.apple9_clip_distance_count = info->clip_distances;

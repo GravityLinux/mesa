@@ -108,8 +108,17 @@ struct agx_apple9_mesh_body_info {
    /* Cull distances evaluated at completion from compiler-owned shared
     * storage at cull_B within the shared region; not published. */
    unsigned cull_distances, cull_B;
+   /* Multi-primitive CullPrimitive flags in compiler-owned shared storage,
+    * consumed before publication. They are not hardware cull records. */
+   bool cull_primitive;
+   unsigned cull_primitive_B;
    /* V3/P1 primitive outputs lowered to flat planes or a local cull flag. */
    uint64_t primitive_broadcast;
+   /* Multi-primitive flat attributes use one private provoking vertex per
+    * primitive. Body stores occupy rows starting at original_max_vertices;
+    * completion compacts them after the actual application vertices. */
+   uint64_t primitive_vertices;
+   unsigned original_max_vertices;
    unsigned argument_uniform_words;
 };
 
@@ -210,6 +219,7 @@ struct agx_apple9_native_mesh_options {
    bool attributes;
    /* Exact single-primitive lowering; no native primitive-record ABI. */
    bool primitive_broadcast;
+   bool primitive_vertices;
    /* Provisional packed-index publication. Compiler-only opt-in until the
     * narrow declaration class and launch path receive device qualification. */
    bool packed_index_publication;
@@ -244,6 +254,12 @@ bool agx_compile_apple9_native_mesh(nir_shader *nir, bool enable_native_mesh,
                                     struct agx_shader_part *out,
                                     struct agx_apple9_mesh_body_info *info,
                                     const char **reason);
+/* Complete compilation after the driver lowers any sysvals introduced by
+ * native completion (notably the dynamic provoking vertex mode). */
+bool agx_compile_apple9_native_mesh_lowered(
+   nir_shader *nir, const struct agx_apple9_native_mesh_options *options,
+   struct agx_shader_part *out, const struct agx_apple9_mesh_body_info *info,
+   const char **reason);
 
 #ifdef __cplusplus
 }
