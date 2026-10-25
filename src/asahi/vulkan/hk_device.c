@@ -572,6 +572,9 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       }
    }
 
+   if (dev->dev.chip == AGX_CHIP_G16G)
+      hk_apple9_precompile_init(dev);
+
    *pDevice = hk_device_to_handle(dev);
 
    simple_mtx_init(&dev->scratch.lock, mtx_plain);
@@ -639,7 +642,7 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    if (!dev)
       return;
 
-
+   hk_apple9_precompile_finish(dev);
    hk_device_finish_meta(dev);
    hk_apple9_variants_finish(dev);
    hk_apple9_bodies_finish(dev);

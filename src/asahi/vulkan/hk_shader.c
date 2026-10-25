@@ -11,6 +11,7 @@
 
 #include "hk_shader.h"
 #include "hk_gpu_busy.h"
+#include "util/u_cpu_detect.h"
 #include "util/u_queue.h"
 
 #include "poly/nir/poly_nir.h"
@@ -5593,10 +5594,45 @@ struct hk_apple9_cached_variant {
    struct vk_pipeline_cache_object *object;
 };
 
+/* Serialized NIR after API lowering, before key-dependent compilation.
+ * Precompile jobs hold references, so a shader can be destroyed while its
+ * variants are still queued. */
+struct hk_apple9_nir {
+   uint32_t refs;
+   uint32_t size;
+   alignas(8) uint8_t data[];
+};
+
+static struct hk_apple9_nir *
+hk_apple9_nir_create(const void *data, size_t size)
+{
+   if (size > UINT32_MAX)
+      return NULL;
+   struct hk_apple9_nir *nir = malloc(sizeof(*nir) + MAX2(size, 1));
+   if (!nir)
+      return NULL;
+   nir->refs = 1;
+   nir->size = size;
+   memcpy(nir->data, data, size);
+   return nir;
+}
+
+static struct hk_apple9_nir *
+hk_apple9_nir_ref(struct hk_apple9_nir *nir)
+{
+   p_atomic_inc(&nir->refs);
+   return nir;
+}
+
+static void
+hk_apple9_nir_unref(struct hk_apple9_nir *nir)
+{
+   if (nir && p_atomic_dec_zero(&nir->refs))
+      free(nir);
+}
+
 struct hk_apple9_deferred {
-   /* Serialized NIR after API lowering, before key-dependent compilation. */
-   void *nir;
-   size_t nir_size;
+   struct hk_apple9_nir *nir;
    uint32_t next_stage_mask;
    uint32_t set_layout_count;
    /* Static pipeline sample shading, which has no dynamic state. */
@@ -5783,7 +5819,7 @@ hk_api_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
          v = next;
       }
       simple_mtx_destroy(&obj->apple9_deferred->variant_lock);
-      free(obj->apple9_deferred->nir);
+      hk_apple9_nir_unref(obj->apple9_deferred->nir);
       free(obj->apple9_deferred);
       vk_shader_free(&dev->vk, pAllocator, &obj->vk);
       return;
@@ -8199,9 +8235,10 @@ static __thread bool hk_apple9_eager_busy;
  * leaves dynamic takes simple defaults, so that variant can differ from the
  * one a real draw selects.
  *
- * With precompile, the variant only goes to the disk cache: a pipeline an
- * application creates but never draws costs no resident program or
- * serialized copy, and its first draw loads instead of compiling.
+ * With precompile, the variant is queued for a low-priority thread that
+ * compiles it into the disk cache only: pipeline creation does not wait, a
+ * pipeline an application creates but never draws costs no resident program
+ * or serialized copy, and its first draw loads instead of compiling.
  */
 static void
 hk_apple9_eager_variant(struct hk_device *dev, uint32_t count,
@@ -8222,7 +8259,7 @@ hk_apple9_eager_variant(struct hk_device *dev, uint32_t count,
        !(pstate && (pstate->pipeline_flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR))) {
       const struct hk_apple9_deferred *d = api[MESA_SHADER_FRAGMENT]->apple9_deferred;
       struct blob_reader reader;
-      blob_reader_init(&reader, d->nir, d->nir_size);
+      blob_reader_init(&reader, d->nir->data, d->nir->size);
       nir_shader *fs = nir_deserialize(NULL, &agx_nir_options, &reader);
       if (fs) {
          struct vk_shader_compile_info info = {
@@ -8367,7 +8404,14 @@ hk_apple9_defer_graphics(struct hk_device *dev, uint32_t count,
          result = vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
          break;
       }
-      blob_finish_get_buffer(&blob, &deferred->nir, &deferred->nir_size);
+      deferred->nir = hk_apple9_nir_create(blob.data, blob.size);
+      blob_finish(&blob);
+      if (!deferred->nir) {
+         vk_shader_free(&dev->vk, alloc, &obj->vk);
+         free(deferred);
+         result = vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+         break;
+      }
       deferred->next_stage_mask = infos[i].next_stage_mask;
       deferred->set_layout_count = infos[i].set_layout_count;
       deferred->cull_distance = infos[i].nir->info.cull_distance_array_size != 0;
@@ -8530,12 +8574,12 @@ hk_apple9_variant_cache_key(struct hk_device *dev,
       const struct hk_apple9_deferred *d = api[s]->apple9_deferred;
       if (!d)
          return false;
-      const uint64_t size = d->nir_size;
+      const uint64_t size = d->nir->size;
       const uint32_t fields[] = {d->next_stage_mask, d->set_layout_count,
                                  d->sample_shading, d->zs_self_dep,
                                  d->undefined_colors, d->cull_distance};
       _mesa_blake3_update(&ctx, &size, sizeof(size));
-      _mesa_blake3_update(&ctx, d->nir, d->nir_size);
+      _mesa_blake3_update(&ctx, d->nir->data, d->nir->size);
       _mesa_blake3_update(&ctx, fields, sizeof(fields));
    }
    _mesa_blake3_final(&ctx, out);
@@ -8625,6 +8669,240 @@ hk_apple9_variant_cache_load(struct hk_device *dev, const void *data,
    return 0;
 }
 
+/* What a draw-time variant compiles from, per stage: NULL nir for a stage the
+ * draw does not bind. */
+struct hk_apple9_variant_stage {
+   struct hk_apple9_nir *nir;
+   uint32_t next_stage_mask;
+   uint32_t set_layout_count;
+};
+
+/* Compile the programs of a variant. On success, compiled[i] holds the
+ * program of stages[i] for i < *count_out; on failure nothing is returned. */
+static VkResult
+hk_apple9_compile_variant(struct hk_device *dev,
+                          const struct hk_apple9_variant_stage src[HK_APPLE9_GFX_STAGES],
+                          const struct hk_apple9_graphics_key *key,
+                          bool prefer_native,
+                          struct vk_shader *compiled[HK_APPLE9_GFX_STAGES],
+                          unsigned stages[HK_APPLE9_GFX_STAGES],
+                          unsigned *count_out)
+{
+   struct vk_shader_compile_info infos[HK_APPLE9_GFX_STAGES];
+   unsigned count = 0;
+   VkResult result = VK_SUCCESS;
+   *count_out = 0;
+   for (unsigned s = 0; s < HK_APPLE9_GFX_STAGES; ++s) {
+      if (!src[s].nir)
+         continue;
+      struct blob_reader reader;
+      blob_reader_init(&reader, src[s].nir->data, src[s].nir->size);
+      nir_shader *nir = nir_deserialize(NULL, &agx_nir_options, &reader);
+      if (!nir) {
+         result = vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+         break;
+      }
+      infos[count] = (struct vk_shader_compile_info){
+         .stage = s,
+         .nir = nir,
+         .next_stage_mask = src[s].next_stage_mask,
+         .robustness = &vk_robustness_disabled,
+         .set_layout_count = src[s].set_layout_count,
+      };
+      stages[count++] = s;
+   }
+   const bool has_fs = src[MESA_SHADER_FRAGMENT].nir != NULL;
+
+   /* Without a fragment shader nothing reads the generic varyings of a
+    * vertex-only draw: drop them so their stores and the arithmetic feeding
+    * them die. The variant is keyed on the bound stages, so the fragment
+    * shader is known absent for every draw that uses it. Transform feedback
+    * still captures them. This runs before the cull-distance null program
+    * below is linked: it reads nothing, but as a consumer it would otherwise
+    * keep every generic output.
+    */
+   if (result == VK_SUCCESS && !has_fs && count == 1 &&
+       infos[0].stage == MESA_SHADER_VERTEX && !infos[0].nir->xfb_info) {
+      nir_shader *vs = infos[0].nir;
+      if (nir_shader_intrinsics_pass(vs, hk_apple9_remove_generic_output,
+                                     nir_metadata_control_flow, NULL)) {
+         NIR_PASS(_, vs, nir_opt_dce);
+         nir_shader_gather_info(vs, nir_shader_get_entrypoint(vs));
+      }
+   }
+
+   /* Cull distances are applied by the fragment program, so a draw without
+    * one links an empty program to the last pre-rasterization stage. */
+   if (result == VK_SUCCESS && !has_fs && count &&
+       infos[count - 1].nir->info.cull_distance_array_size) {
+      infos[count] = (struct vk_shader_compile_info){
+         .stage = MESA_SHADER_FRAGMENT,
+         .nir = hk_apple9_null_fs_nir(true),
+         .robustness = &vk_robustness_disabled,
+      };
+      stages[count++] = MESA_SHADER_FRAGMENT;
+   }
+
+   if (result != VK_SUCCESS) {
+      for (unsigned i = 0; i < count; ++i)
+         ralloc_free(infos[i].nir);
+      return result;
+   }
+
+   struct hk_cpu_compile_scope scope;
+   hk_cpu_timing_compile_begin(&scope);
+   /* A draw-time compile stalls the recording thread: let its register
+    * allocation use one helper thread. Precompiles run on low-priority
+    * threads and stay serial so bulk compiles don't oversubscribe the CPU. */
+   agx_apple9_set_parallel_ra(!hk_apple9_eager_compile);
+   /* Creation-time incompatibility is final. Dynamic state can narrow
+    * a candidate further, but cannot make an incompatible shader native. */
+   if (!prefer_native) {
+      result = hk_apple9_compile_graphics_path(
+         dev, count, infos, NULL, key, NULL, NULL, compiled, false, NULL);
+   } else {
+      result = hk_apple9_compile_graphics_mode(
+         dev, count, infos, NULL, key, NULL, NULL, compiled, true);
+   }
+   agx_apple9_set_parallel_ra(false);
+   hk_cpu_timing_compile_end(&scope, hk_apple9_eager_compile
+                                        ? HK_CPU_COMPILE_EAGER
+                                        : HK_CPU_COMPILE_DRAW);
+   if (result != VK_SUCCESS) {
+      for (unsigned i = 0; i < count; ++i) {
+         if (compiled[i])
+            hk_api_shader_destroy(&dev->vk, compiled[i], NULL);
+         compiled[i] = NULL;
+      }
+      return result;
+   }
+   *count_out = count;
+   return VK_SUCCESS;
+}
+
+/* A queued precompile holds its own references to the stage NIR, so the
+ * pipeline can be destroyed before the job runs. */
+struct hk_apple9_precompile_job {
+   struct hk_device *dev;
+   blake3_hash cache_key;
+   struct hk_apple9_graphics_key key;
+   bool prefer_native;
+   struct hk_apple9_variant_stage src[HK_APPLE9_GFX_STAGES];
+};
+
+static void
+hk_apple9_precompile_execute(void *data, void *gdata, int thread_index)
+{
+   struct hk_apple9_precompile_job *job = data;
+   struct hk_device *dev = job->dev;
+   if (p_atomic_read(&dev->apple9_precompile.abort))
+      return;
+
+   /* A draw, or an earlier run, may have compiled it already. */
+   struct vk_pipeline_cache_object *object = vk_pipeline_cache_lookup_object(
+      dev->vk.mem_cache, job->cache_key, sizeof(job->cache_key),
+      &vk_raw_data_cache_object_ops, NULL);
+   if (object) {
+      vk_pipeline_cache_object_unref(&dev->vk, object);
+      return;
+   }
+
+   struct vk_shader *compiled[HK_APPLE9_GFX_STAGES] = {NULL};
+   unsigned stages[HK_APPLE9_GFX_STAGES];
+   unsigned count;
+   hk_apple9_eager_compile = true;
+   VkResult result = hk_apple9_compile_variant(
+      dev, job->src, &job->key, job->prefer_native, compiled, stages, &count);
+   hk_apple9_eager_compile = false;
+   if (result != VK_SUCCESS)
+      return;
+
+   /* Only the disk cache keeps it: the first draw loads it from there. */
+   struct blob blob;
+   blob_init(&blob);
+   hk_apple9_variant_cache_store(dev, stages, count, compiled, &blob);
+   if (!blob.out_of_memory) {
+      object = vk_pipeline_cache_create_and_insert_object(
+         dev->vk.mem_cache, job->cache_key, sizeof(job->cache_key), blob.data,
+         blob.size, &vk_raw_data_cache_object_ops);
+      if (object)
+         vk_pipeline_cache_object_unref(&dev->vk, object);
+   }
+   blob_finish(&blob);
+   for (unsigned i = 0; i < count; ++i)
+      hk_api_shader_destroy(&dev->vk, compiled[i], NULL);
+}
+
+static void
+hk_apple9_precompile_cleanup(void *data, void *gdata, int thread_index)
+{
+   struct hk_apple9_precompile_job *job = data;
+   for (unsigned s = 0; s < HK_APPLE9_GFX_STAGES; ++s)
+      hk_apple9_nir_unref(job->src[s].nir);
+   free(job);
+}
+
+/* Compile a variant into the pipeline cache on a low-priority thread, so
+ * pipeline creation does not wait for it. A draw that needs the variant
+ * before the job runs compiles it itself, and the job then finds it cached. */
+static void
+hk_apple9_queue_precompile(struct hk_device *dev,
+                           const struct hk_apple9_variant *search)
+{
+   if (!dev->apple9_precompile.ready)
+      return;
+   struct hk_apple9_precompile_job *job = calloc(1, sizeof(*job));
+   if (!job)
+      return;
+   if (!hk_apple9_variant_cache_key(dev, search->api, &search->key,
+                                    search->prefer_native, job->cache_key)) {
+      free(job);
+      return;
+   }
+   job->dev = dev;
+   job->key = search->key;
+   job->prefer_native = search->prefer_native;
+   for (unsigned s = 0; s < HK_APPLE9_GFX_STAGES; ++s) {
+      const struct hk_api_shader *api = search->api[s];
+      if (!api)
+         continue;
+      const struct hk_apple9_deferred *d = api->apple9_deferred;
+      job->src[s] = (struct hk_apple9_variant_stage){
+         .nir = hk_apple9_nir_ref(d->nir),
+         .next_stage_mask = d->next_stage_mask,
+         .set_layout_count = d->set_layout_count,
+      };
+   }
+   util_queue_add_job(&dev->apple9_precompile.queue, job, NULL,
+                      hk_apple9_precompile_execute,
+                      hk_apple9_precompile_cleanup, 0);
+}
+
+void
+hk_apple9_precompile_init(struct hk_device *dev)
+{
+   /* Without a disk cache, a draw could not load a precompiled variant. */
+   if (!dev->vk.mem_cache || !dev->vk.physical->disk_cache)
+      return;
+   const unsigned threads = MAX2(1, util_get_cpu_caps()->nr_cpus / 4);
+   dev->apple9_precompile.ready = util_queue_init(
+      &dev->apple9_precompile.queue, "hk_precomp", 32, threads,
+      UTIL_QUEUE_INIT_RESIZE_IF_FULL | UTIL_QUEUE_INIT_USE_MINIMUM_PRIORITY,
+      NULL);
+}
+
+void
+hk_apple9_precompile_finish(struct hk_device *dev)
+{
+   if (!dev->apple9_precompile.ready)
+      return;
+   /* Queued jobs are dropped, not compiled: their cleanup still runs. */
+   p_atomic_set(&dev->apple9_precompile.abort, true);
+   util_queue_finish(&dev->apple9_precompile.queue);
+   util_queue_destroy(&dev->apple9_precompile.queue);
+   dev->apple9_precompile.ready = false;
+}
+
 VkResult
 hk_apple9_resolve_graphics(
    struct hk_device *dev, struct hk_api_shader *const api[HK_APPLE9_GFX_STAGES],
@@ -8656,17 +8934,14 @@ hk_apple9_resolve_graphics(
          search.key.blend[rt].color_attachment_unused = true;
    }
 
-   /* A precompile neither finds nor publishes a live variant: it compiles
-    * into the pipeline cache, which the first draw loads from. A draw that
-    * races it for the same key may compile the variant itself. */
-   struct hk_apple9_variant precompiled;
-   struct hk_apple9_variant *v;
+   /* A precompile neither finds nor publishes a live variant: it queues a
+    * compile into the pipeline cache, which the first draw loads from. */
    if (hk_apple9_precompile) {
-      memset(&precompiled, 0, sizeof(precompiled));
-      memcpy(&precompiled, &search, offsetof(struct hk_apple9_variant, shaders));
-      v = &precompiled;
-      goto compile;
+      hk_apple9_queue_precompile(dev, &search);
+      return VK_SUCCESS;
    }
+
+   struct hk_apple9_variant *v;
 
 retry:
    simple_mtx_lock(&dev->apple9_variants.lock);
@@ -8747,9 +9022,6 @@ compile:;
       dev->vk.mem_cache &&
       hk_apple9_variant_cache_key(dev, api, &search.key, search.prefer_native,
                                     cache_key);
-   /* Without a disk cache, a draw could not load a precompiled variant. */
-   if (hk_apple9_precompile && (!cacheable || !dev->vk.physical->disk_cache))
-      return VK_SUCCESS;
    struct vk_shader *cached[HK_APPLE9_GFX_STAGES];
    unsigned cached_stages[HK_APPLE9_GFX_STAGES];
    unsigned cached_count = 0;
@@ -8780,13 +9052,6 @@ compile:;
          }
       }
    }
-   if (hk_apple9_precompile && cached_count) {
-      /* Already in the cache: nothing to resolve now. */
-      for (unsigned i = 0; i < cached_count; ++i)
-         hk_api_shader_destroy(&dev->vk, cached[i], NULL);
-      vk_pipeline_cache_object_unref(&dev->vk, cache_object);
-      return VK_SUCCESS;
-   }
    if (cached_count && !verify) {
       for (unsigned i = 0; i < cached_count; ++i) {
          v->shaders[cached_stages[i]] =
@@ -8807,9 +9072,7 @@ compile:;
       return VK_SUCCESS;
    }
 
-   struct vk_shader_compile_info infos[HK_APPLE9_GFX_STAGES];
-   unsigned stages[HK_APPLE9_GFX_STAGES];
-   unsigned count = 0;
+   struct hk_apple9_variant_stage src[HK_APPLE9_GFX_STAGES] = {0};
    VkResult result = VK_SUCCESS;
    for (unsigned s = 0; s < HK_APPLE9_GFX_STAGES; ++s) {
       if (!api[s])
@@ -8821,88 +9084,25 @@ compile:;
                             "Apple9: deferred and precompiled stages mixed");
          break;
       }
-      struct blob_reader reader;
-      blob_reader_init(&reader, d->nir, d->nir_size);
-      nir_shader *nir = nir_deserialize(NULL, &agx_nir_options, &reader);
-      if (!nir) {
-         result = vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
-         break;
-      }
-      infos[count] = (struct vk_shader_compile_info){
-         .stage = s,
-         .nir = nir,
+      src[s] = (struct hk_apple9_variant_stage){
+         .nir = d->nir,
          .next_stage_mask = d->next_stage_mask,
-         .robustness = &vk_robustness_disabled,
          .set_layout_count = d->set_layout_count,
       };
-      stages[count++] = s;
-   }
-
-   /* Without a fragment shader nothing reads the generic varyings of a
-    * vertex-only draw: drop them so their stores and the arithmetic feeding
-    * them die. The variant is keyed on the bound stages, so the fragment
-    * shader is known absent for every draw that uses it. Transform feedback
-    * still captures them. This runs before the cull-distance null program
-    * below is linked: it reads nothing, but as a consumer it would otherwise
-    * keep every generic output.
-    */
-   if (result == VK_SUCCESS && !api[MESA_SHADER_FRAGMENT] && count == 1 &&
-       infos[0].stage == MESA_SHADER_VERTEX && !infos[0].nir->xfb_info) {
-      nir_shader *vs = infos[0].nir;
-      if (nir_shader_intrinsics_pass(vs, hk_apple9_remove_generic_output,
-                                     nir_metadata_control_flow, NULL)) {
-         NIR_PASS(_, vs, nir_opt_dce);
-         nir_shader_gather_info(vs, nir_shader_get_entrypoint(vs));
-      }
-   }
-
-   /* Cull distances are applied by the fragment program, so a draw without
-    * one links an empty program to the last pre-rasterization stage. */
-   if (result == VK_SUCCESS && !api[MESA_SHADER_FRAGMENT] && count &&
-       infos[count - 1].nir->info.cull_distance_array_size) {
-      infos[count] = (struct vk_shader_compile_info){
-         .stage = MESA_SHADER_FRAGMENT,
-         .nir = hk_apple9_null_fs_nir(true),
-         .robustness = &vk_robustness_disabled,
-      };
-      stages[count++] = MESA_SHADER_FRAGMENT;
    }
 
    struct vk_shader *compiled[HK_APPLE9_GFX_STAGES] = {NULL};
+   unsigned stages[HK_APPLE9_GFX_STAGES];
+   unsigned count = 0;
    if (result == VK_SUCCESS) {
-      struct hk_cpu_compile_scope scope;
-      hk_cpu_timing_compile_begin(&scope);
-      /* A draw-time compile stalls the recording thread: let its register
-       * allocation use one helper thread. Eager (pipeline-time) variants
-       * stay serial so bulk compiles don't oversubscribe the CPU. */
-      agx_apple9_set_parallel_ra(!hk_apple9_eager_compile);
-      /* Creation-time incompatibility is final. Dynamic state can narrow
-       * a candidate further, but cannot make an incompatible shader native. */
-      if (!search.prefer_native) {
-         result = hk_apple9_compile_graphics_path(
-            dev, count, infos, NULL, &search.key, NULL, NULL, compiled,
-            false, NULL);
-      } else {
-         result = hk_apple9_compile_graphics_mode(
-            dev, count, infos, NULL, &search.key, NULL, NULL, compiled, true);
-      }
-      agx_apple9_set_parallel_ra(false);
-      hk_cpu_timing_compile_end(&scope, hk_apple9_eager_compile
-                                           ? HK_CPU_COMPILE_EAGER
-                                           : HK_CPU_COMPILE_DRAW);
-   } else {
-      for (unsigned i = 0; i < count; ++i)
-         ralloc_free(infos[i].nir);
+      result = hk_apple9_compile_variant(dev, src, &search.key,
+                                         search.prefer_native, compiled,
+                                         stages, &count);
    }
 
    /* Keep permanent failures, but allow a later caller to retry an allocation
     * failure once temporary memory pressure has passed. */
-   if (result != VK_SUCCESS) {
-      for (unsigned i = 0; i < count; ++i) {
-         if (compiled[i])
-            hk_api_shader_destroy(&dev->vk, compiled[i], NULL);
-      }
-   } else {
+   if (result == VK_SUCCESS) {
       if (cacheable) {
          struct blob blob;
          blob_init(&blob);
@@ -8944,23 +9144,10 @@ compile:;
       cache_object = NULL;
    }
    v->cache_object = cache_object;
-   if (cache_object && !hk_apple9_precompile) {
+   if (cache_object) {
       for (unsigned s = 0; s < HK_APPLE9_GFX_STAGES; ++s)
          if (api[s])
             hk_apple9_remember_variant(dev, api[s], cache_object);
-   }
-   if (hk_apple9_precompile) {
-      /* The disk cache keeps the serialized variant: drop the compiled one,
-       * and the in-memory copy, until a draw loads it. A drawn variant is
-       * remembered for VkPipelineCache then. */
-      for (unsigned s = 0; s < HK_APPLE9_GFX_STAGES; ++s) {
-         if (v->shaders[s])
-            hk_api_shader_destroy(&dev->vk, &v->shaders[s]->vk, NULL);
-      }
-      if (cache_object)
-         vk_pipeline_cache_object_unref(&dev->vk, cache_object);
-      memset(out, 0, sizeof(v->shaders));
-      return result;
    }
    simple_mtx_lock(&dev->apple9_variants.lock);
    if (result == VK_SUCCESS && search.prefer_native &&
@@ -9252,15 +9439,14 @@ hk_deserialize_api_shader_inner(struct vk_device *vk_dev, struct blob_reader *bl
       obj->reads_draw_id = blob_read_uint8(blob);
       blob_copy_bytes(blob, &obj->push_constant_mask,
                       sizeof(obj->push_constant_mask));
-      d->nir_size = blob_read_uint32(blob);
-      const void *nir = blob_read_bytes(blob, d->nir_size);
-      d->nir = blob->overrun ? NULL : malloc(MAX2(d->nir_size, 1));
+      const uint32_t nir_size = blob_read_uint32(blob);
+      const void *nir = blob_read_bytes(blob, nir_size);
+      d->nir = blob->overrun ? NULL : hk_apple9_nir_create(nir, nir_size);
       if (!d->nir) {
          free(d);
          vk_shader_free(&dev->vk, pAllocator, &obj->vk);
          return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
       }
-      memcpy(d->nir, nir, d->nir_size);
       obj->apple9_deferred = d;
       simple_mtx_init(&d->variant_lock, mtx_plain);
       if (!hk_apple9_deserialize_variants(dev, obj, blob)) {
@@ -9370,8 +9556,8 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
       blob_write_uint8(blob, obj->reads_draw_id);
       blob_write_bytes(blob, &obj->push_constant_mask,
                        sizeof(obj->push_constant_mask));
-      blob_write_uint32(blob, d->nir_size);
-      blob_write_bytes(blob, d->nir, d->nir_size);
+      blob_write_uint32(blob, d->nir->size);
+      blob_write_bytes(blob, d->nir->data, d->nir->size);
       return hk_apple9_serialize_variants(d, blob);
    }
 

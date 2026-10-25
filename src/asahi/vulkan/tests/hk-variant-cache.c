@@ -275,8 +275,8 @@ key_tests(struct hk_device *dev, struct hk_api_shader **api)
    DIFFERENT(key.blend[0].clamp_early_depth = !key.blend[0].clamp_early_depth,
              key.blend[0].clamp_early_depth = !key.blend[0].clamp_early_depth);
    struct hk_apple9_deferred *d = api[MESA_SHADER_VERTEX]->apple9_deferred;
-   DIFFERENT(((uint8_t *)d->nir)[d->nir_size - 1] ^= 1,
-             ((uint8_t *)d->nir)[d->nir_size - 1] ^= 1);
+   DIFFERENT(d->nir->data[d->nir->size - 1] ^= 1,
+             d->nir->data[d->nir->size - 1] ^= 1);
    DIFFERENT(d->next_stage_mask ^= 1, d->next_stage_mask ^= 1);
    DIFFERENT(d->set_layout_count++, d->set_layout_count--);
    DIFFERENT(d->sample_shading = true, d->sample_shading = false);
