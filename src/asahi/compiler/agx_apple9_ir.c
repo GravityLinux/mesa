@@ -954,8 +954,8 @@ agx_apple9_vir_emit_device_load(
    const uint32_t *sources = &index;
    unsigned nr_srcs = 1;
    switch (contract->index_kind) {
-   case AGX_APPLE9_DEVICE_LOAD_INDEX_DIRECT_GPR:
-   case AGX_APPLE9_DEVICE_LOAD_INDEX_COMPUTED_GPR:
+   case AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR:
+   case AGX_APPLE9_DEVICE_LOAD_INDEX_LAST_USE_GPR:
       if (index >= program->value_count)
          return AGX_APPLE9_VREG_INVALID;
       break;
@@ -5246,7 +5246,7 @@ agx_apple9_pack_device_load_u32(unsigned dst, unsigned index, unsigned binding,
       return false;
 
    return agx_apple9_pack_device_load_u32_raw(
-      dst, index, binding, AGX_APPLE9_DEVICE_LOAD_INDEX_DIRECT_GPR, flags,
+      dst, index, binding, AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR, flags,
       AGX_APPLE9_SCOREBOARD_SLOT_NONE, raw_token, packed);
 }
 

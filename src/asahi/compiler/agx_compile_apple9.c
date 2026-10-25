@@ -29,12 +29,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_gated, "AGX_APPLE9_GATED", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_hoist_samples,
-                      "AGX_APPLE9_HOIST_SAMPLES", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_licm, "AGX_APPLE9_LICM", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_licm_speculate,
-                      "AGX_APPLE9_LICM_SPECULATE", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_descriptor_hoist,
                       "AGX_APPLE9_NO_DESCRIPTOR_HOIST", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_promote,
@@ -43,10 +37,7 @@ DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_sampler_hoist,
                       "AGX_APPLE9_NO_SAMPLER_HOIST", NULL)
 DEBUG_GET_ONCE_OPTION(cached_agx_apple9_no_uniform_move,
                       "AGX_APPLE9_NO_UNIFORM_MOVE", NULL)
-DEBUG_GET_ONCE_OPTION(cached_agx_apple9_safe_hoist_stages,
-                      "AGX_APPLE9_SAFE_HOIST_STAGES", NULL)
 
-DEBUG_GET_ONCE_NUM_OPTION(apple9_hoist_loads, "AGX_APPLE9_HOIST_LOADS", 0)
 
 /* Apple9 compute compilation uses one NIR-to-VIR-to-machine pipeline. */
 
@@ -5675,36 +5666,17 @@ apple9_prepare_dag(nir_shader *nir)
 }
 
 /* At most this many hoisted samples are unconsumed at once: eight
- * four-register coordinate tuples fill p0-p31. AGX_APPLE9_HOIST_SAMPLES=0
- * disables hoisting. */
-static unsigned
-apple9_hoist_limit(void)
-{
-   const char *env = debug_get_option_cached_agx_apple9_hoist_samples();
-   return env ? atoi(env) : 8;
-}
+ * four-register coordinate tuples fill p0-p31. */
+#define APPLE9_HOIST_SAMPLE_LIMIT 8
 
 /* Long-latency operations to issue early: samples that fetch from memory
- * (queries return without waiting). Buffer-load hoisting is opt-in with
- * AGX_APPLE9_HOIST_LOADS=1 until its register-pressure tradeoffs improve. */
+ * (queries return without waiting). Buffer loads stay in place: hoisting them
+ * raised register pressure more than it hid latency. */
 static bool
 apple9_hoist_sample(nir_instr *instr)
 {
-   if (instr->type == nir_instr_type_tex)
-      return !nir_tex_instr_is_query(nir_instr_as_tex(instr));
-   if (instr->type != nir_instr_type_intrinsic)
-      return false;
-   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-   switch (intr->intrinsic) {
-   case nir_intrinsic_load_ubo:
-   case nir_intrinsic_load_ssbo:
-   case nir_intrinsic_load_global_2x32: {
-      return debug_get_option_apple9_hoist_loads() &&
-             nir_intrinsic_can_reorder(intr);
-   }
-   default:
-      return false;
-   }
+   return instr->type == nir_instr_type_tex &&
+          !nir_tex_instr_is_query(nir_instr_as_tex(instr));
 }
 
 /* Instructions that may move up with a hoisted operation, as part of the
@@ -5908,8 +5880,7 @@ apple9_hoist_inflight(struct apple9_hoist_state *s, unsigned words)
 /* Issue texture samples early. Selection follows NIR order, so a sample
  * placed right before its first use waits for the whole fetch. Within each region between fences,
  * pull later samples forward, with the arithmetic computing their
- * coordinates, while fewer than AGX_APPLE9_HOIST_SAMPLES (default 8: eight
- * four-register coordinate tuples fill p0-p31) are unconsumed. Everything
+ * coordinates, while fewer than APPLE9_HOIST_SAMPLE_LIMIT are unconsumed. Everything
  * else keeps its order.
  */
 static bool apple9_has_samples(nir_shader *nir);
@@ -5917,7 +5888,7 @@ static bool apple9_has_samples(nir_shader *nir);
 bool
 agx_nir_hoist_apple9_samples(nir_shader *nir)
 {
-   unsigned limit = apple9_hoist_limit();
+   unsigned limit = APPLE9_HOIST_SAMPLE_LIMIT;
    /* How far ahead, in NIR instructions, to look for a sample to hoist: an
     * upper bound on how far one moves. */
    const unsigned horizon = 256;
@@ -7021,7 +6992,7 @@ apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
                        const char **reason)
 {
    nir_shader *plain = NULL;
-   if (preamble || agx_apple9_ra_is_probe() || !apple9_hoist_limit() ||
+   if (preamble || agx_apple9_ra_is_probe() ||
        !apple9_has_samples(nir) || !(plain = nir_shader_clone(NULL, nir)))
       return apple9_compile_dag_once(nir, out, profile, varyings, resources,
                                      constants, preamble, true, cost, reason);
@@ -7531,8 +7502,8 @@ apple9_is_bounds_limit(nir_instr *instr)
    return false;
 }
 
-/* Pressure gating (AGX_APPLE9_GATED) compiles with and without LICM and the
- * preamble-only reads; -1 defers to the environment. */
+/* A spilling preamble setup retries without the preamble-only reads
+ * (apple9_preamble_trial) by setting 0. */
 static _Thread_local int apple9_safe_reads_override = -1;
 
 /* Reads that are always safe once per dispatch at a uniform address, but
@@ -7639,19 +7610,11 @@ apple9_hoist_uniform_source(nir_src *src, void *data)
  * vertex preamble runs once per draw, so moving a guarded uniform read there
  * costs the draw a few instructions and saves each thread its load, address
  * and the registers holding them. A setup that spills retries without them
- * (apple9_preamble_trial). AGX_APPLE9_SAFE_HOIST_STAGES selects =all,
- * =compute or =none; hk chooses which reads qualify. */
+ * (apple9_preamble_trial); hk chooses which reads qualify. */
 static bool
-apple9_safe_reads_enabled(const nir_shader *nir)
+apple9_safe_reads_enabled(void)
 {
-   const char *env = debug_get_option_cached_agx_apple9_safe_hoist_stages();
-   const char *stages = apple9_safe_reads_override > 0 ? "all"
-                        : apple9_safe_reads_override == 0 ? NULL
-                        : env ? env : "all";
-   bool compute = nir->info.stage == MESA_SHADER_COMPUTE ||
-                  nir->info.stage == MESA_SHADER_KERNEL;
-   return stages && (!strcmp(stages, "all") ||
-                     (!strcmp(stages, "compute") && compute));
+   return apple9_safe_reads_override != 0;
 }
 
 static bool
@@ -7663,7 +7626,7 @@ apple9_hoist_uniform_reads(nir_shader *nir, struct hash_table *original_blocks,
    struct apple9_uniform_hoist s = {
       .entry = nir_start_block(impl),
       .original_blocks = original_blocks,
-      .safe_reads = apple9_safe_reads_enabled(nir),
+      .safe_reads = apple9_safe_reads_enabled(),
       /* Descriptor records read through handles (texture info, runtime
        * sampler state) are hoisted in every stage: unlike buffer reads,
        * leaving them in their branches did not save registers. */
@@ -7988,7 +7951,7 @@ apple9_preamble_trial(nir_shader *nir, struct agx_shader_part *out,
       }
       if (setup_spilled && setup_retried)
          *setup_retried = true;
-      if (setup_spilled && apple9_safe_reads_enabled(nir)) {
+      if (setup_spilled && apple9_safe_reads_enabled()) {
          if (agx_apple9_trace_enabled())
             fprintf(stderr, "APPLE9_PREAMBLE_RETRY setup spilled: safe reads dropped\n");
          apple9_safe_reads_override = 0;
@@ -8015,28 +7978,6 @@ apple9_preamble_trial(nir_shader *nir, struct agx_shader_part *out,
    if (stream)
       fclose(stream);
    return ok;
-}
-
-static bool
-apple9_licm_filter(nir_instr *instr, nir_loop *loop, bool dominates_exit)
-{
-   switch (instr->type) {
-   case nir_instr_type_alu:
-   case nir_instr_type_load_const:
-      return true;
-   case nir_instr_type_intrinsic:
-   case nir_instr_type_tex:
-      /* Hoisting memory or texture work out of a branch runs it on every
-       * iteration of every thread, which costs far more than it saves in
-       * per-pixel loops (Lethal Company lighting). Hoist only from blocks
-       * every iteration executes; AGX_APPLE9_LICM_SPECULATE allows leaving
-       * branches for speculatable accesses. */
-      return dominates_exit ||
-             (nir_instr_can_speculate(instr) &&
-              debug_get_option_cached_agx_apple9_licm_speculate());
-   default:
-      return false;
-   }
 }
 
 static bool
@@ -8085,65 +8026,6 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
       nir->options = saved;
    }
    apple9_prepare_dag(nir);
-   /* Loads and samples cost far more than the registers that hold their
-    * loop-invariant results. Hoist them, and their address math, out of
-    * loops before preamble selection, which can then also take uniform
-    * ones. */
-   /* LICM keeps hoisted values live across the whole loop. In shaders at
-    * the register limit that costs far more than it saves (Lethal Company's
-    * hot fragment shader quintupled its spills), so it is opt-in until it
-    * has a register-pressure model. AGX_APPLE9_LICM=1 enables it. */
-   if (debug_get_option_cached_agx_apple9_gated()) {
-      /* Compile the aggressive variant (LICM and preamble-only reads) and the
-       * plain one, and keep the cheaper allocation: both raise register
-       * pressure, which can spill shaders already at the limit. */
-      nir_shader *plain = nir_shader_clone(NULL, nir);
-      struct agx_shader_part aggressive_out = {0}, plain_out = {0};
-      struct agx_apple9_compute_profile aggressive_profile = {0}, plain_profile = {0};
-      struct apple9_dag_cost aggressive_cost = {0}, plain_cost = {0};
-      bool licm = nir_opt_licm(nir, apple9_licm_filter);
-      if (licm) {
-         nir_opt_cse(nir);
-         nir_opt_dce(nir);
-      }
-      apple9_safe_reads_override = 1;
-      bool aggressive_ok = apple9_compile_dag_tail(
-         nir, &aggressive_out, profile ? &aggressive_profile : NULL, varyings,
-         &aggressive_cost, native_key, reason);
-      apple9_safe_reads_override = 0;
-      bool plain_ok = apple9_compile_dag_tail(
-         plain, &plain_out, profile ? &plain_profile : NULL, varyings,
-         &plain_cost, native_key, reason);
-      apple9_safe_reads_override = -1;
-      ralloc_free(plain);
-      /* Loop-weighted spills decide: spills outside loops are cheaper than
-       * the loads and instructions hoisting removes inside them. */
-      bool use_plain = plain_ok &&
-         (!aggressive_ok || apple9_dag_cost_less(&plain_cost, &aggressive_cost));
-      if (agx_apple9_trace_enabled())
-         fprintf(stderr, "APPLE9_GATED chose=%s aggressive=%llu/%u plain=%llu/%u\n",
-                 use_plain ? "plain" : "aggressive",
-                 (unsigned long long)aggressive_cost.weighted_spills, aggressive_cost.spills,
-                 (unsigned long long)plain_cost.weighted_spills, plain_cost.spills);
-      if (use_plain) {
-         free(aggressive_out.binary);
-         *out = plain_out;
-         if (profile)
-            *profile = plain_profile;
-         return true;
-      }
-      free(plain_out.binary);
-      if (!aggressive_ok)
-         return false;
-      *out = aggressive_out;
-      if (profile)
-         *profile = aggressive_profile;
-      return true;
-   }
-   if (debug_get_option_cached_agx_apple9_licm() && nir_opt_licm(nir, apple9_licm_filter)) {
-      nir_opt_cse(nir);
-      nir_opt_dce(nir);
-   }
    struct apple9_dag_cost cost = {0};
    return apple9_compile_dag_tail(nir, out, profile, varyings, &cost,
                                   native_key, reason);
