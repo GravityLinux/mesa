@@ -246,6 +246,8 @@ hk_hash_apple9_native_mesh_abi(struct mesa_blake3 *ctx)
       1, /* Native GS runs every invocation of each input primitive. */
       1, /* P1 logical workgroups independent of physical output class. */
       2, /* Destination-addressed publication rounds beyond 32 entries. */
+      hk_apple9_native_task_bridge_enabled(),
+      1, /* Compute-task records and guarded native child grids. */
    };
    _mesa_blake3_update(ctx, abi, sizeof(abi));
 }
@@ -4130,6 +4132,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
        hk_apple9_native_mesh_available(hk_device_physical(dev)) &&
        ((hk_apple9_native_mesh_enabled() &&
          agx_apple9_native_mesh_shape_eligible(nir)) ||
+        (hk_apple9_native_task_bridge_enabled() &&
+         nir->info.stage == MESA_SHADER_MESH) ||
         hk_apple9_native_mesh_packed_shape_eligible(nir) ||
         hk_apple9_native_mesh_round_shape_eligible(nir)))
       lower_indirect_modes |= nir_var_shader_out;
@@ -6791,21 +6795,28 @@ hk_apple9_native_mesh_check(nir_shader *nir,
    *supported = false;
    if (reason)
       *reason = NULL;
-   if (!hk_apple9_native_mesh_enabled() &&
-       !(key->native_index && hk_apple9_native_mesh_packed_shape_eligible(nir)))
+   if (!hk_apple9_native_mesh_enabled() && !key->native_index)
       return VK_SUCCESS;
-
-   struct agx_apple9_native_mesh_options options =
-      hk_apple9_native_mesh_options(nir, key);
-   if (!options.physical_threads) {
-      if (reason)
-         *reason = "native mesh supports 1..128 logical invocations";
-      return VK_SUCCESS;
-   }
 
    nir_shader *probe = nir_shader_clone(NULL, nir);
    if (!probe)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
+   if (key->native_task_bridge)
+      hk_nir_lower_native_mesh_task(probe);
+   if (!hk_apple9_native_mesh_enabled() &&
+       !hk_apple9_native_mesh_packed_shape_eligible(probe)) {
+      ralloc_free(probe);
+      return VK_SUCCESS;
+   }
+
+   struct agx_apple9_native_mesh_options options =
+      hk_apple9_native_mesh_options(probe, key);
+   if (!options.physical_threads) {
+      if (reason)
+         *reason = "native mesh supports 1..128 logical invocations";
+      ralloc_free(probe);
+      return VK_SUCCESS;
+   }
    struct agx_apple9_mesh_body_info info;
    *supported = agx_nir_lower_apple9_native_mesh(probe, true, &options,
                                                 &info, reason);
@@ -6819,6 +6830,8 @@ hk_apple9_compile_native_mesh_program(
    struct agx_shader_part *out, struct agx_apple9_mesh_body_info *info,
    const char **reason)
 {
+   if (key->native_task_bridge)
+      hk_nir_lower_native_mesh_task(nir);
    const struct agx_apple9_native_mesh_options options =
       hk_apple9_native_mesh_options(nir, key);
    if (!options.physical_threads) {
@@ -6968,6 +6981,7 @@ hk_apple9_compile_native_mesh(struct hk_device *dev, nir_shader *nir,
    struct hk_shader *mesh = hk_native_producer_main(obj);
    struct hk_shader *object = hk_native_producer_object(obj);
    hk_mesh_gather_info(nir, &mesh->info.mesh);
+   mesh->info.mesh.native_task_bridge = key->native_task_bridge;
    /* The API object may be GS; this program executes at the mesh stage. */
    mesh->info.stage = MESA_SHADER_MESH;
    mesh->info.apple9_native_stage = HK_APPLE9_NATIVE_MESH;
@@ -7034,6 +7048,7 @@ hk_apple9_compile_task(struct hk_device *dev, nir_shader *nir,
                        struct hk_shader *shader, const char **reason)
 {
    shader->info.task.payload_B = nir->info.task_payload_size;
+   shader->info.task.max_mesh_groups = hk_nir_task_mesh_bound(nir);
    hk_nir_lower_task_main(nir);
    nir->info.stage = MESA_SHADER_COMPUTE;
    memset(&nir->info.cs, 0, sizeof(nir->info.cs));
@@ -7094,7 +7109,7 @@ hk_apple9_compile_graphics_path(struct hk_device *dev, uint32_t count,
       simple_mtx_lock(lock);
 
    memset(out, 0, count * sizeof(*out));
-   if (native_mesh) {
+   if (native_mesh && !key.native_task_bridge) {
       for (unsigned i = 0; i < count; ++i) {
          if (infos[i].stage == MESA_SHADER_TASK) {
             reason = "native mesh does not support API task shaders";
@@ -7854,7 +7869,9 @@ hk_apple9_compile_graphics_mode(struct hk_device *dev, uint32_t count,
    bool native = false;
    VkResult result = VK_SUCCESS;
    const char *reason = NULL;
-   if (mesh && !task && !per_vertex && !key.polygon_points)
+   key.native_task_bridge = mesh && task && hk_apple9_native_task_bridge_enabled();
+   if (mesh && (!task || key.native_task_bridge) &&
+       !per_vertex && !key.polygon_points)
       result = hk_apple9_native_mesh_check(mesh, &key, &native, &reason);
    else if (gs && !mesh && !task && !tess && !per_vertex && !fs_inputs &&
             !producer_effects &&
@@ -8239,6 +8256,8 @@ hk_apple9_defer_graphics(struct hk_device *dev, uint32_t count,
       if (infos[i].stage == MESA_SHADER_MESH) {
          struct hk_apple9_graphics_key key;
          hk_apple9_graphics_key_device(&key, state, hk_device_physical(dev));
+         key.native_task_bridge = hk_apple9_native_task_bridge_enabled() &&
+                                  infos[i].nir->info.task_payload_size;
          result = hk_apple9_native_mesh_check(infos[i].nir, &key,
                                                &native_candidate, NULL);
          if (result != VK_SUCCESS)
@@ -8552,6 +8571,8 @@ hk_apple9_resolve_graphics(
    memset(&search, 0, sizeof(search));
    memcpy(search.api, api, sizeof(search.api));
    hk_apple9_graphics_key_device(&search.key, state, hk_device_physical(dev));
+   search.key.native_task_bridge = api[MESA_SHADER_MESH] &&
+      api[MESA_SHADER_TASK] && hk_apple9_native_task_bridge_enabled();
    search.key.no_fs_statistics = !fs_statistics;
    const struct hk_api_shader *vs = api[MESA_SHADER_VERTEX];
    search.key.vertex.unbounded = vs && vs->apple9_deferred &&
@@ -8691,7 +8712,8 @@ compile:;
          if (api[s])
             hk_apple9_remember_variant(dev, api[s], cache_object);
       simple_mtx_lock(&dev->apple9_variants.lock);
-      if (search.prefer_native && !v->shaders[producer]->apple9_native_leaf)
+      if (search.prefer_native && !api[MESA_SHADER_TASK] &&
+          !v->shaders[producer]->apple9_native_leaf)
          p_atomic_set(&api[producer]->apple9_native_candidate, false);
       v->result = VK_SUCCESS;
       util_queue_fence_signal(&v->ready);
@@ -8841,7 +8863,7 @@ compile:;
    }
    simple_mtx_lock(&dev->apple9_variants.lock);
    if (result == VK_SUCCESS && search.prefer_native &&
-       !v->shaders[producer]->apple9_native_leaf)
+       !api[MESA_SHADER_TASK] && !v->shaders[producer]->apple9_native_leaf)
       p_atomic_set(&api[producer]->apple9_native_candidate, false);
    v->result = result;
    util_queue_fence_signal(&v->ready);

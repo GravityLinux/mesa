@@ -601,15 +601,17 @@ hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool reads_buffers,
    cs->merge_writes |= writes;
 
    /* What the draw's pre-rasterization work reads. hk-internal pre-raster
-    * work (tessellation, geometry, transform feedback) keeps the tiling
-    * wait. Meta draws compile their pipelines like applications', so their
+    * work (tessellation, geometry, transform feedback, native task bridge)
+    * keeps the tiling wait. Emulated task draws retain their existing read
+    * classification. Meta draws compile their pipelines like applications', so their
     * shaders carry a read class (vk_meta vertex shaders read push constants
     * and its own vertex data). */
    uint8_t reads = reads_buffers ? HK_READS_BUFFERS : 0;
    if (cmd->in_meta)
       reads |= HK_READS_META;
    if (gfx->xfb_enabled || gfx->shaders[MESA_SHADER_TESS_CTRL] ||
-       gfx->shaders[MESA_SHADER_TESS_EVAL] || gfx->shaders[MESA_SHADER_GEOMETRY])
+       gfx->shaders[MESA_SHADER_TESS_EVAL] || gfx->shaders[MESA_SHADER_GEOMETRY] ||
+       (native_mesh && gfx->shaders[MESA_SHADER_TASK]))
       reads |= HK_READS_INTERNAL;
    for (unsigned s = 0; s < ARRAY_SIZE(gfx->shaders); ++s) {
       if (s == MESA_SHADER_FRAGMENT || s == MESA_SHADER_COMPUTE || !gfx->shaders[s])
@@ -989,7 +991,11 @@ hk_apple9_draw_impl(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    shaders[1] = hk_any_variant(null_trivial ? dev->null_fs_trivial
                                            : fragment_api ?: dev->null_fs);
    if (native_grid &&
-       (!mesh || gfx->shaders[MESA_SHADER_TASK] || (tes && gs) ||
+       (!mesh ||
+        (gfx->shaders[MESA_SHADER_TASK] &&
+         (!hk_apple9_native_task_bridge_enabled() ||
+          mesh->vk.stage != MESA_SHADER_MESH ||
+          !shaders[0]->info.mesh.native_task_bridge)) || (tes && gs) ||
         shaders[0]->info.apple9_native_stage != HK_APPLE9_NATIVE_MESH ||
         dyn->rs.polygon_mode != VK_POLYGON_MODE_FILL || gfx->render.view_mask))
       UNSUPPORTED();

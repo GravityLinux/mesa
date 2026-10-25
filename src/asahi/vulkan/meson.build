@@ -276,6 +276,12 @@ if with_tests
                            inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
     dependencies : [hk_deps], link_with : [libhk],
   )
+  test('hk-native-task-bridge', executable(
+    'hk-native-task-bridge', 'tests/hk-native-task-bridge.c',
+    include_directories : [inc_gallium, inc_gallium_aux, inc_include,
+                           inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+    dependencies : [hk_deps], link_with : [libhk]),
+    suite : ['asahi', 'honeykrisp'])
   compiler_env_test = executable(
     'hk-compiler-env', 'tests/hk-compiler-env.c',
     include_directories : [inc_gallium, inc_gallium_aux, inc_include,
@@ -340,6 +346,9 @@ if with_tests
     link_args : ['-Wl,--wrap=__vk_errorf']),
     env : ['HK_APPLE9_NATIVE_MESH=1', 'HK_APPLE9_GS_NATIVE=1',
            'HK_APPLE9_NATIVE_MESH_PACKED_SHAPES=T16V3P1,T16V4P2'],
+    suite : ['asahi', 'honeykrisp'])
+  test('hk-native-task-routing', routing_test,
+    env : ['HK_APPLE9_NATIVE_MESH=1', 'HK_APPLE9_NATIVE_TASK_BRIDGE=1'],
     suite : ['asahi', 'honeykrisp'])
   test('hk-native-gs-routing', routing_test,
     env : ['HK_APPLE9_NATIVE_MESH=1', 'HK_APPLE9_GS_NATIVE=1',

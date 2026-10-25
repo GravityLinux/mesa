@@ -110,7 +110,9 @@ struct hk_mesh_info {
    /* The rasterizing vertex shader draws HK_PP_MAX_VERTICES points per
     * triangle for polygon mode POINT. */
    uint8_t polygon_points;
-   uint8_t _pad[6];
+   /* Native mesh consumes compute-task grids and per-parent payloads. */
+   bool native_task_bridge;
+   uint8_t _pad[5];
 };
 
 /* Fragment shaders read user per-primitive varyings from the output records,
@@ -165,6 +167,8 @@ hk_mesh_primitives_offset_B(const struct hk_mesh_info *info)
 void hk_mesh_gather_info(const nir_shader *nir, struct hk_mesh_info *info);
 void hk_nir_lower_mesh_main(nir_shader *nir, const struct hk_mesh_info *info);
 void hk_nir_lower_task_main(nir_shader *nir);
+void hk_nir_lower_native_mesh_task(nir_shader *nir);
+uint32_t hk_nir_task_mesh_bound(nir_shader *nir);
 #define HK_MAX_PER_VERTEX_COPIES 4
 
 /* Per-vertex fragment inputs read as flat copies: the VAR slot of each input,
@@ -268,6 +272,8 @@ struct hk_shader_info {
 
       struct {
          uint32_t payload_B;
+         /* Per task workgroup; UINT32_MAX means not statically bounded. */
+         uint32_t max_mesh_groups;
       } task;
 
       /* Used to initialize the union for other stages */
@@ -807,6 +813,8 @@ struct hk_apple9_graphics_key {
    bool fs_reads_clip_distance;
    /* Per-device policy; actual use still requires an exact qualified mesh. */
    bool native_index;
+   /* Immutable task records feed native mesh children. API task stays compute. */
+   bool native_task_bridge;
    /* Independently keyed stage admission; never implied by a native mesh. */
    uint8_t native_stages;
 };

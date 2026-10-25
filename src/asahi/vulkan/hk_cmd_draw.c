@@ -6369,7 +6369,9 @@ hk_apple9_native_mesh_state_eligible(struct hk_cmd_buffer *cmd,
    if (!hk_apple9_native_mesh_available_device(hk_cmd_buffer_device(cmd)) ||
        !direct || count_addr ||
        !hk_apple9_native_mesh_grid_valid(direct) ||
-       gfx->shaders[MESA_SHADER_TASK] || gfx->shaders[MESA_SHADER_GEOMETRY] ||
+       (gfx->shaders[MESA_SHADER_TASK] &&
+        !hk_apple9_native_task_bridge_enabled()) ||
+       gfx->shaders[MESA_SHADER_GEOMETRY] ||
        gfx->shaders[MESA_SHADER_TESS_EVAL] || gfx->render.view_mask ||
        gfx->render.layer_count != 1 || hk_cond_render_applies(cmd) ||
        gfx->mesh_pg_query || gfx->descriptors.root.draw.pipeline_stats_flags ||
@@ -6405,12 +6407,31 @@ hk_apple9_use_native_mesh(struct hk_cmd_buffer *cmd, const uint32_t *direct,
    const struct hk_shader *main = &mesh->variants[HK_MESH_VARIANT_MAIN];
    if (main->info.apple9_native_stage != HK_APPLE9_NATIVE_MESH)
       return false;
+   const struct hk_api_shader *task =
+      hk_api_shader_native(gfx->shaders[MESA_SHADER_TASK]);
+   if (main->info.mesh.native_task_bridge != !!gfx->shaders[MESA_SHADER_TASK])
+      return false;
+   uint64_t groups = direct ? (uint64_t)direct[0] * direct[1] * direct[2] : 0;
+   if (gfx->shaders[MESA_SHADER_TASK]) {
+      if (!task || !task->apple9_native_leaf || !mesh->apple9_native_leaf ||
+          memcmp(task->apple9_native_pair_id, mesh->apple9_native_pair_id,
+                 sizeof(mesh->apple9_native_pair_id)))
+         return false;
+      const struct hk_shader *t = &task->variants[0];
+      if (t->info.task.max_mesh_groups == UINT32_MAX ||
+          groups * ALIGN_POT(t->info.task.payload_B, 16) > UINT32_MAX ||
+          groups * 16 > UINT32_MAX)
+         return false;
+      groups *= t->info.task.max_mesh_groups;
+      /* This first bridge uses a single 1D child grid. The bound is proved
+       * before tasks execute; no GPU clamp or dropped task side effects. */
+      if (groups > UINT16_MAX)
+         return false;
+   }
    /* A single native draw whose declared geometry could reach the TVB cap
     * would lose work in its mesh-mode render; emulate it instead (ordinary
     * renders recover through a partial render). */
-   if (direct &&
-       (uint64_t)direct[0] * direct[1] * direct[2] *
-             main->info.apple9_native.layout.max_primitives >
+   if (direct && groups * main->info.apple9_native.layout.max_primitives >
           hk_apple9_native_render_primitives())
       return false;
    return hk_apple9_native_mesh_state_eligible(
@@ -6471,6 +6492,8 @@ hk_apple9_draw_mesh(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    }
    cmd->apple9_draw_primitives =
       native ? (uint64_t)direct[0] * direct[1] * direct[2] *
+                  (task ? hk_only_variant(hk_api_shader_native(task))
+                             ->info.task.max_mesh_groups : 1) *
                   hk_api_shader_native(mesh)->variants[HK_MESH_VARIANT_MAIN]
                      .info.apple9_native.layout.max_primitives
              : UINT64_MAX;
@@ -6484,6 +6507,48 @@ hk_apple9_draw_mesh(struct hk_cmd_buffer *cmd, uint32_t draw_id,
               main->info.mesh.max_vertices, main->info.mesh.max_primitives);
    }
    if (native) {
+      if (task) {
+         struct hk_shader *t = hk_only_variant(hk_api_shader_native(task));
+         uint32_t groups = (uint64_t)direct[0] * direct[1] * direct[2];
+         struct agx_ptr params = hk_pool_alloc(cmd, sizeof(struct libagx_mesh_params), 16);
+         if (!params.gpu)
+            return;
+         struct libagx_mesh_params *p = params.cpu;
+         *p = (struct libagx_mesh_params){
+            .task_count = groups,
+            .payload_stride_B = ALIGN_POT(t->info.task.payload_B, 16),
+         };
+         /* Separate allocations for every draw/parent, owned by the command
+          * buffer through native retirement. Native children never allocate
+          * emulated vertex/primitive records or reuse another parent's payload. */
+         if (p->payload_stride_B) {
+            p->payloads = hk_pool_alloc(cmd, groups * p->payload_stride_B, 16).gpu;
+            if (!p->payloads)
+               return;
+         }
+         p->task_grids = hk_pool_alloc(cmd, groups * 16, 16).gpu;
+         if (!p->task_grids)
+            return;
+         desc->root.draw.draw_id = draw_id;
+         desc->root.draw.mesh_params = params.gpu;
+         desc->root_dirty = true;
+         hk_cmd_buffer_flush_push_descriptors(cmd, desc);
+         gfx->root = hk_cmd_buffer_upload_root(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
+         if (!gfx->root)
+            return;
+         struct hk_apple9_prerast_bindings bindings = {0};
+         hk_apple9_dispatch_prerast(cmd, t,
+            agx_3d(direct[0] * t->info.apple9.local_size[0],
+                   direct[1] * t->info.apple9.local_size[1],
+                   direct[2] * t->info.apple9.local_size[2]), &bindings);
+         libagx_mesh_prefix_native(cmd, agx_1d(1024), AGX_BARRIER_ALL | AGX_PREGFX,
+                                    params.gpu);
+         /* HK_READS_INTERNAL retains task/prefix -> tiling ordering. The
+          * object consumes the GPU grid; the mesh consumes the same records. */
+         hk_apple9_draw_native_mesh(cmd, draw_id, params.gpu +
+            offsetof(struct libagx_mesh_params, mesh_dispatch));
+         return;
+      }
       /* One object workgroup publishes the nonempty direct child grid. */
       uint64_t grid = hk_pool_upload(cmd, direct, 3 * sizeof(uint32_t), 4);
       if (grid)

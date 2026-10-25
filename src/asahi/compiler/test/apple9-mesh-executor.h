@@ -31,6 +31,9 @@ struct machine {
    unsigned local_root, grid_fences, grid_exports;
    unsigned local_store_lanes, global_store_lanes, atomic_lanes, object_calls;
    uint32_t grid[3];
+   uint32_t group_id[3], num_groups[3];
+   uint64_t ubo_base;
+   unsigned break_lanes;
    uint64_t side_effect_address;
    unsigned check_zero_header;
    unsigned count_lanes, actual_vertices, actual_primitives;
@@ -203,6 +206,22 @@ instruction(struct machine *m, nir_instr *i, unsigned lane)
       case nir_intrinsic_load_local_invocation_index:
          out[0].u32 = lane;
          break;
+      case nir_intrinsic_load_workgroup_id:
+      case nir_intrinsic_load_num_workgroups:
+         for (unsigned c = 0; c < 3; ++c)
+            out[c].u32 = n->intrinsic == nir_intrinsic_load_workgroup_id
+                            ? m->group_id[c] : m->num_groups[c];
+         break;
+      case nir_intrinsic_load_ubo: {
+         CHECK(src(m, n->src[0], lane)[0].u32 == 0);
+         uint64_t address = m->ubo_base + src(m, n->src[1], lane)[0].u32;
+         unsigned bytes = n->def.bit_size / 8;
+         for (unsigned c = 0; c < n->def.num_components; ++c) {
+            out[c].u64 = 0;
+            memcpy(&out[c], memory(m, address + c * bytes, bytes, false), bytes);
+         }
+         break;
+      }
       case nir_intrinsic_load_native_pointer_apple9_agx: {
          unsigned base = nir_intrinsic_base(n);
          CHECK(base == AGX_APPLE9_MESH_DRAW_UNIFORM ||
@@ -318,9 +337,17 @@ static void
 execute(struct machine *m, struct exec_list *list, unsigned active)
 {
    foreach_list_typed(nir_cf_node, node, node, list) {
+      active &= ~m->break_lanes;
+      if (!active)
+         return;
       if (node->type == nir_cf_node_block) {
          nir_block *block = nir_cf_node_as_block(node);
          nir_foreach_instr(i, block) {
+            if (i->type == nir_instr_type_jump) {
+               CHECK(nir_instr_as_jump(i)->type == nir_jump_break);
+               m->break_lanes |= active;
+               continue;
+            }
             if (i->type == nir_instr_type_intrinsic) {
                nir_intrinsic_op op = nir_instr_as_intrinsic(i)->intrinsic;
                if (op == nir_intrinsic_begin_object_call_apple9_agx) {
@@ -427,6 +454,16 @@ execute(struct machine *m, struct exec_list *list, unsigned active)
             execute(m, &nif->then_list, yes);
          if (active & ~yes)
             execute(m, &nif->else_list, active & ~yes);
+      } else if (node->type == nir_cf_node_loop) {
+         nir_loop *loop = nir_cf_node_as_loop(node);
+         CHECK(exec_list_is_empty(&loop->continue_list));
+         unsigned outer_breaks = m->break_lanes, remaining = active;
+         for (unsigned iteration = 0; remaining; ++iteration) {
+            CHECK(iteration < 128);
+            execute(m, &loop->body, remaining);
+            remaining &= ~m->break_lanes;
+         }
+         m->break_lanes = outer_breaks;
       } else {
          CHECK(!"unsupported control flow");
       }

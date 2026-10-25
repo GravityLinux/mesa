@@ -39,6 +39,14 @@ hk_apple9_native_gs_packed_class(unsigned threads, unsigned vertices,
            (vertices == 4 * HK_APPLE9_NATIVE_GS_PACK && primitives == 16));
 }
 
+DEBUG_GET_ONCE_BOOL_OPTION(native_task_bridge, "HK_APPLE9_NATIVE_TASK_BRIDGE", false)
+
+bool
+hk_apple9_native_task_bridge_enabled(void)
+{
+   return debug_get_option_native_task_bridge();
+}
+
 bool
 hk_apple9_native_tess_enabled(void)
 {
