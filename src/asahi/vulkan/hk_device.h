@@ -275,9 +275,19 @@ struct hk_cpu_compile_scope {
    bool active;
    uint64_t wall, cpu;
 };
+/* Where a compile ran: at pipeline or shader creation, while recording a
+ * draw (stalling the recording thread), or as a variant resolved at
+ * creation for a deferred pipeline whose state is known (counted inside the
+ * enclosing creation's api time as well). */
+enum hk_cpu_compile_kind {
+   HK_CPU_COMPILE_API,
+   HK_CPU_COMPILE_DRAW,
+   HK_CPU_COMPILE_EAGER,
+   HK_CPU_COMPILE_KINDS,
+};
 void hk_cpu_timing_compile_begin(struct hk_cpu_compile_scope *s);
 void hk_cpu_timing_compile_end(const struct hk_cpu_compile_scope *s,
-                               bool draw_time);
+                               enum hk_cpu_compile_kind kind);
 /* Wall time of draw sub-steps; begin returns 0 when timing is off. */
 enum hk_cpu_sub {
    HK_CPU_SUB_RESOLVE,

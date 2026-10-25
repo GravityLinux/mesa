@@ -8827,7 +8827,9 @@ compile:;
             dev, count, infos, NULL, &search.key, NULL, NULL, compiled, true);
       }
       agx_apple9_set_parallel_ra(false);
-      hk_cpu_timing_compile_end(&scope, true);
+      hk_cpu_timing_compile_end(&scope, hk_apple9_eager_compile
+                                           ? HK_CPU_COMPILE_EAGER
+                                           : HK_CPU_COMPILE_DRAW);
    } else {
       for (unsigned i = 0; i < count; ++i)
          ralloc_free(infos[i].nir);
@@ -9027,7 +9029,7 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
    VkResult result = hk_compile_shaders_timed(vk_dev, shader_count, infos,
                                               state, features, pAllocator,
                                               shaders_out);
-   hk_cpu_timing_compile_end(&scope, false);
+   hk_cpu_timing_compile_end(&scope, HK_CPU_COMPILE_API);
    return result;
 }
 
