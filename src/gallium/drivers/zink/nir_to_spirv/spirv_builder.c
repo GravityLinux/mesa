@@ -201,6 +201,9 @@ void
 spirv_builder_emit_name(struct spirv_builder *b, SpvId target,
                         const char *name)
 {
+   if (b->strip_names)
+      return;
+
    size_t pos = b->debug_names.num_words;
    spirv_buffer_prepare(&b->debug_names, b->mem_ctx, 2);
    spirv_buffer_emit_word(&b->debug_names, SpvOpName);

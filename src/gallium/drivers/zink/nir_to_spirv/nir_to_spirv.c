@@ -5048,6 +5048,7 @@ nir_to_spirv(struct nir_shader *s, const struct ntv_info *sinfo)
    ctx.mem_ctx = ralloc_context(NULL);
    ctx.nir = s;
    ctx.builder.mem_ctx = ctx.mem_ctx;
+   ctx.builder.strip_names = sinfo->strip_names;
    assert(sinfo->spirv_version >= SPIRV_VERSION(1, 0));
    ctx.spirv_1_4_interfaces = sinfo->spirv_version >= SPIRV_VERSION(1, 4);
    ctx.have_spirv16 = sinfo->spirv_version >= SPIRV_VERSION(1, 6);

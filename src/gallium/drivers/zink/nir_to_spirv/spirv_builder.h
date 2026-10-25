@@ -60,6 +60,9 @@ struct spirv_builder {
    struct spirv_buffer instructions;
    SpvId prev_id;
    unsigned local_vars_begin;
+
+   /* Skip OpName, so the words depend only on what the shader does. */
+   bool strip_names;
 };
 
 struct spriv_tex_src {
