@@ -127,6 +127,46 @@ main(void)
    util_dynarray_fini(&cmd->sync_remap);
    util_dynarray_fini(&cmd->sync_first_event);
    free(cmd);
+
+   /* Record an actual new stream. Producer ordering alone does not make
+    * render writes visible to a subsequent Apple9 texture-reading dispatch.
+    * Keep this entry barrier across a second lookup, without duplicating it.
+    */
+   const enum agx_chip chips[] = {
+      AGX_CHIP_G13G, AGX_CHIP_G16G, AGX_CHIP_G16C, AGX_CHIP_G17P,
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(chips); ++i) {
+      cmd = calloc(1, sizeof(*cmd));
+      CHECK(cmd);
+      dev->dev.chip = chips[i];
+      cmd->vk.base.device = &dev->vk;
+      cmd->sync_events = UTIL_DYNARRAY_INIT;
+      cmd->sync_remap = UTIL_DYNARRAY_INIT;
+      list_inithead(&cmd->control_streams);
+      cmd->uploader[HK_CMD_POOL_MAIN].chunks[0].map = pool;
+      cmd->uploader[HK_CMD_POOL_MAIN].chunks[0].base = 0x2000000000ull;
+      struct hk_cs *cs = hk_cmd_buffer_get_cs(cmd, true);
+      CHECK(cs);
+      if (chips[i] == AGX_CHIP_G13G) {
+         CHECK(cs->current == cs->start && cs->stats.flushes == 0);
+      } else {
+         uint32_t expected;
+         agx_cdm_barrier(&expected, chips[i]);
+         CHECK(cs->current == cs->start + AGX_CDM_BARRIER_LENGTH);
+         CHECK(*(uint32_t *)cs->start == expected);
+         CHECK((expected & 0x20013) == 0x20013);
+         CHECK(cs->stats.flushes == 1 && !cs->cdm_dirty);
+      }
+      uint8_t *current = cs->current;
+      CHECK(hk_cmd_buffer_get_cs(cmd, true) == cs);
+      CHECK(cs->current == current);
+      list_del(&cs->node);
+      free(cs);
+      util_dynarray_fini(&cmd->sync_events);
+      util_dynarray_fini(&cmd->sync_remap);
+      free(cmd);
+   }
    free(dev);
+   puts("PASS actual CDM recording: G16G/G16C/G17P entry visibility, legacy unchanged, no duplicate entry barrier");
    return 0;
 }

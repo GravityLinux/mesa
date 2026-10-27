@@ -1238,8 +1238,16 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
 
       *ptr = cs;
 
-      if (!compute)
+      if (!compute) {
          hk_cs_init_graphics(cmd, cs);
+      } else if (agx_is_apple9(&hk_cmd_buffer_device(cmd)->dev)) {
+         /* Firmware dependencies order the producer, but do not invalidate
+          * the consumer's caches. In particular, compressed image readback
+          * after rendering needs visibility before its first texture fetch.
+          * A flush at the end of the preceding CDM stream happens too early.
+          */
+         hk_cdm_cache_flush(hk_cmd_buffer_device(cmd), cs);
+      }
 
       if (before_gfx && !hk_cmd_sync_before_gfx(cmd, cs))
          cmd->sync_fallback = true;

@@ -45,13 +45,29 @@ each, three 703-pixel draw/scissor/readback frames, and sixteen 1280x720
 bindless sampling draws. The graphics sequence uses the explicit diagnostic
 setting `ASAHI_MESA_DEBUG=nocompress`. Clean driver unbind also passes.
 
-Default compressed rendering remains unqualified: the second draw/readback
-frame produces an incorrect pixel on both the protected Neo kernel and the
-shared kernel. Cold compressed sampling after compute also failed on the
-shared kernel with a firmware type-4 report. These observations do not yet
-identify the compression defect or establish full Vulkan 1.4 conformance.
-Compression remains enabled by default; the diagnostic setting defines the
-currently verified Neo Vulkan control, not a completed graphics port.
+Default compressed draw/readback exposed a missing consumer cache barrier.
+The failing second frame reads magenta pixels even though GPU timestamps show
+its readback dispatch begins after the fragment producer finishes. Firmware
+dependencies supply execution ordering; a new Apple9 compute stream also
+needs the existing full CDM cache barrier before its first texture fetch.
+The constructor now emits that barrier once for G16G/G16C/G17P. It does not
+serialize submissions on the CPU or disable framebuffer compression.
+
+On the shared kernel (`ea8c2e772`, build #247), the production fix passes
+three compute/transfer submissions, three default compressed draw/scissor/
+readback frames, sixteen 1280x720 bindless sampling draws, three repeated
+draw/readback frames and clean unbind. All six CPUs remain enabled and no
+native-render warm-up is used. The actual recording regression passes with
+the fix and fails against the preceding constructor.
+
+A separate kernel correction is required for a large 1280x720 sampler workload
+as the first graphics submission after compute: the dormant render graph must
+select scratch backing for the incoming geometry when it is adopted. With
+that correction, the cold compute -> large sampler -> compressed draw ->
+repeated draw sequence passes on all six Neo CPUs, including clean unbind.
+The old shared kernel still fails the first large render under the same
+spin-table monitor, guest FDT placement and Mesa runtime. These focused tests
+do not establish full Vulkan 1.4 conformance.
 
 ## Status
 
