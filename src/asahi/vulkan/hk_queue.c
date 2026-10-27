@@ -21,6 +21,7 @@
 #include "agx_pack.h"
 #include "decode.h"
 #include "hk_cmd_buffer.h"
+#include "hk_apple9_msaa.h"
 #include "hk_device.h"
 #include "hk_image.h"
 #include "hk_physical_device.h"
@@ -115,12 +116,7 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
          .width_px = cs->cr.width,
          .height_px = cs->cr.height,
          .isp_bgobjvals = cs->cr.isp_bgobjvals,
-         .samples = 1,
          .layers = 1,
-         .utile_width_px = 32,
-         .utile_height_px = 32,
-         .sample_size_B = cs->tib.sample_size_B,
-         .ppp_multisamplectl = hk_default_sample_positions(1),
          .isp_merge_upper_x = fui(1.732051f / cs->cr.width),
          .isp_merge_upper_y = fui(1.732051f / cs->cr.height),
          .bg.usc = cs->cr.bg.main.usc,
@@ -132,6 +128,7 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
          .isp_oclqry_base = dev->occlusion_queries.bo->va->addr,
          .flags = DRM_ASAHI_RENDER_PROCESS_EMPTY_TILES,
       };
+      hk_apple9_set_sample_state(c, &cs->tib);
       c->isp_bgobjdepth = cs->cr.isp_bgobjdepth;
       memcpy(&c->zls_ctrl, &cs->cr.zls_control, sizeof(c->zls_ctrl));
       if (cs->cr.depth.buffer || cs->cr.stencil.buffer) {

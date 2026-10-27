@@ -13,6 +13,7 @@
 #include "hk_buffer.h"
 #include "hk_cmd_buffer.h"
 #include "hk_device.h"
+#include "hk_apple9_graphics.h"
 #include "asahi/lib/agx_apple9_compute.h"
 #include "hk_entrypoints.h"
 #include "hk_image.h"
@@ -1527,6 +1528,13 @@ hk_CmdResolveImage2(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (agx_apple9_compute_enabled(&dev->dev)) {
+      VK_FROM_HANDLE(hk_image, src, pResolveImageInfo->srcImage);
+      if (vk_format_is_depth_or_stencil(src->vk.format)) {
+         hk_apple9_graphics_reject(cmd, "depth-stencil-resolve");
+         return;
+      }
+   }
    perf_debug(cmd, "Resolve");
 
    struct hk_meta_save save;

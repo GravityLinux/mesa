@@ -1066,17 +1066,17 @@ hk_apple9_decode_texture(const struct agx_texture_packed *input,
           decoded->last_level >= decoded->first_level;
 }
 
-static bool
+bool
 hk_apple9_pack_texture(void *output,
-                       const struct hk_sampled_image_descriptor *input)
+                       const struct agx_texture_packed *input)
 {
    struct AGX_TEXTURE tex;
-   if (!hk_apple9_decode_texture(&input->tex, &tex))
+   if (!hk_apple9_decode_texture(input, &tex))
       A9FAIL();
 
    uint8_t *out = output;
    memset(out, 0, 32);
-   memcpy(out, &input->tex, 8);
+   memcpy(out, input, 8);
    uint32_t dimensions;
    memcpy(&dimensions, out + 4, sizeof(dimensions));
    dimensions &= 0x00ffffff;
@@ -1270,7 +1270,7 @@ hk_apple9_upload_textures(struct hk_cmd_buffer *cmd, struct hk_shader *shader,
             hk_apple9_descriptor_cpu(descriptors, entry->set,
                                      entry->offset, sizeof(*desc));
          if (!desc || !hk_apple9_pack_texture(
-                         (uint8_t *)table.cpu + slot * 32, desc))
+                          (uint8_t *)table.cpu + slot * 32, &desc->tex))
             A9FAIL();
          ++slot;
       }
@@ -1355,9 +1355,10 @@ hk_apple9_graphics_resources(struct hk_cmd_buffer *cmd, struct hk_shader *shader
              tex.buffer_offset_sw)
             A9FAIL();
       } else if ((tex.dimension != AGX_TEXTURE_DIMENSION_2D &&
-                  tex.dimension != AGX_TEXTURE_DIMENSION_2D_ARRAY) ||
-                 tex.first_level || tex.last_level || tex.depth != 1 ||
-                 tex.samples != 0) {
+                  tex.dimension != AGX_TEXTURE_DIMENSION_2D_ARRAY &&
+                  tex.dimension != AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED &&
+                  tex.dimension != AGX_TEXTURE_DIMENSION_2D_ARRAY_MULTISAMPLED) ||
+                 tex.first_level || tex.last_level || tex.depth != 1) {
          A9FAIL();
       }
    }

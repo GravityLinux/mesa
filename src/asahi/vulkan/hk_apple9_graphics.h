@@ -196,7 +196,7 @@ struct vk_color_blend_state;
 
 /* Fragment blending is specialized into the API main, as in Gallium. */
 bool hk_apple9_blend_state(const struct vk_color_blend_state *cb,
-                           VkFormat format,
+                           VkFormat format, unsigned samples,
                            struct agx_apple9_blend *out);
 
 void hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd,

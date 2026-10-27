@@ -9,6 +9,8 @@ hk_files = files(
   'hk_apple9_root.h',
   'hk_apple9_graphics.c',
   'hk_apple9_graphics.h',
+  'hk_apple9_msaa.c',
+  'hk_apple9_msaa.h',
   'hk_buffer.c',
   'hk_buffer.h',
   'hk_buffer_view.c',
@@ -193,6 +195,7 @@ if with_tests
   hk_apple9_tests = executable(
     'hk_apple9_tests',
     files('test/test-hk-apple9-descriptors.cpp',
+          'test/test-hk-apple9-msaa.cpp',
           'test/test-hk-apple9-spirv-scan.cpp',
           'hk_nir_lower_descriptors.c', 'hk_apple9_root.c', 'hk_apple9.c'),
     [hk_entrypoints, hk_drirc],

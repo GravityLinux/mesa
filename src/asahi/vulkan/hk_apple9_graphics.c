@@ -4,6 +4,7 @@
  */
 
 #include "hk_apple9_graphics.h"
+#include "hk_apple9_msaa.h"
 #include "asahi/lib/pool.h"
 #include "pipe/p_defines.h"
 #include "asahi/lib/agx_apple9_launch.h"
@@ -61,7 +62,7 @@ hk_apple9_tile_color_format(VkFormat format)
 
 bool
 hk_apple9_blend_state(const struct vk_color_blend_state *cb,
-                      VkFormat format,
+                      VkFormat format, unsigned samples,
                       struct agx_apple9_blend *out)
 {
    if (!cb || cb->attachment_count != 1 || cb->logic_op_enable)
@@ -72,7 +73,9 @@ hk_apple9_blend_state(const struct vk_color_blend_state *cb,
                  format == VK_FORMAT_B8G8R8A8_SRGB ||
                  format == VK_FORMAT_A8B8G8R8_SRGB_PACK32
       ? PIPE_FORMAT_R8G8B8A8_SRGB : hk_apple9_tile_color_format(format);
-   out->samples = 1;
+   if (samples != 1 && samples != 2 && samples != 4)
+      return false;
+   out->samples = samples;
    out->colormask = (cb->color_write_enables & 1) ? rt->write_mask : 0;
    out->rgb_src = out->alpha_src = PIPE_BLENDFACTOR_ONE;
    out->rgb_dst = out->alpha_dst = PIPE_BLENDFACTOR_ZERO;
@@ -158,72 +161,19 @@ hk_apple9_stage(struct hk_shader *shader, bool vertex)
  */
 static bool
 hk_apple9_tile_shader(struct hk_cmd_buffer *cmd, unsigned operation, bool srgb,
-                      enum pipe_format format,
+                      enum pipe_format format, unsigned samples,
                       const VkClearColorValue *clear, const VkRect2D *clear_area,
                       uint64_t textures, uint64_t samplers,
                       struct hk_bg_eot *out)
 {
-   nir_builder b = nir_builder_init_simple_shader(
-      MESA_SHADER_FRAGMENT, &agx_nir_options, "Honeykrisp Apple9 tile");
-   if (operation == 2) {
-      b.shader->info.num_images = 1;
-      nir_def *group = nir_load_workgroup_id(&b);
-      nir_def *xy = nir_imul_imm(&b, nir_trim_vector(&b, group, 2), 32);
-      nir_image_store_block_agx(&b, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
-         nir_pad_vec4(&b, xy), .format = format,
-         .image_dim = GLSL_SAMPLER_DIM_2D);
-   } else {
-      nir_def *color = NULL;
-      if (operation == 0) {
-         /* Preserve the union's bits, including integer values that happen
-          * to encode floating-point NaNs. Packing interprets the format.
-          */
-         color = nir_imm_ivec4(&b, clear->int32[0], clear->int32[1],
-                              clear->int32[2], clear->int32[3]);
-         if (srgb)
-            color = nir_vector_insert_imm(
-               &b, nir_format_linear_to_srgb(&b, color),
-               nir_channel(&b, color, 3), 3);
-      }
-      if (operation == 1 || clear_area) {
-         nir_def *xy = nir_u2u32(&b, nir_load_pixel_coord(&b));
-         nir_alu_type type = util_format_is_pure_uint(format) ? nir_type_uint32 :
-                             util_format_is_pure_sint(format) ? nir_type_int32 :
-                                                               nir_type_float32;
-         nir_def *loaded = nir_txf(&b, xy, .lod = nir_imm_int(&b, 0),
-            .texture_index = 0, .sampler_index = 0,
-            .dim = GLSL_SAMPLER_DIM_2D, .dest_type = type);
-         if (clear_area) {
-            /* EOT exports whole tiles. Reload outside the exact half-open
-             * clear rectangle, including the pixels in its boundary tiles.
-             * Bounds were validated against the full attachment extent.
-             */
-            nir_def *inside = nir_imm_true(&b);
-            for (unsigned c = 0; c < 2; ++c) {
-               unsigned lo = c ? clear_area->offset.y : clear_area->offset.x;
-               unsigned size = c ? clear_area->extent.height :
-                                   clear_area->extent.width;
-               nir_def *coord = nir_channel(&b, xy, c);
-               inside = nir_iand(&b, inside,
-                  nir_ult_imm(&b, nir_iadd_imm(&b, coord, -(int)lo), size));
-            }
-            color = nir_bcsel(&b, inside, color, loaded);
-         } else {
-            color = loaded;
-         }
-      }
-      unsigned words = agx_apple9_color_words(format);
-      nir_def *packed = nir_format_pack_rgba(&b, format, color);
-      nir_store_local_pixel_agx(&b, nir_u2u32(&b, packed),
-         nir_imm_intN_t(&b, 1, 16), nir_undef(&b, 2, 16),
-         .format = agx_apple9_color_raw_format(words),
-         .write_mask = BITFIELD_MASK(words));
-   }
-   nir_shader_gather_info(b.shader, b.impl);
+   nir_shader *nir = hk_apple9_tile_nir(operation, srgb, format, samples,
+                                      clear, clear_area);
    struct hk_shader shader = {0};
    const char *reason = NULL;
-   bool compiled = agx_compile_apple9_fragment(b.shader, &shader.b, &reason);
-   ralloc_free(b.shader);
+   const struct agx_apple9_blend blend = {.samples = samples};
+   bool compiled = agx_compile_apple9_fragment_blend(nir, NULL, &blend,
+                                                    &shader.b, &reason);
+   ralloc_free(nir);
    if (!compiled || shader.b.info.apple9_resource_count) {
       if (getenv("AGX_APPLE9_TRACE_REJECT"))
          fprintf(stderr, "APPLE9_TILE_COMPILE_FAIL op=%u reason=%s\n",
@@ -260,7 +210,7 @@ hk_apple9_tile_shader(struct hk_cmd_buffer *cmd, unsigned operation, bool srgb,
       .frame_extent_a = shader.b.info.scratch_size,
       .frame_extent_b = shader.b.info.scratch_size,
       .tile_bytes = 4 * agx_apple9_color_words(format),
-      .samples = 1,
+      .samples = samples,
       .preamble_address = shader.b.info.apple9_preamble_size
          ? shader.bo->va->addr + shader.b.info.apple9_preamble_offset : 0,
       .launch_address = state.gpu + 0x100,
@@ -284,7 +234,7 @@ static bool
 hk_apple9_zs_attachment(const struct hk_image_view *view,
                         const struct hk_image *image, unsigned plane,
                         const VkRenderingAttachmentInfo *att, unsigned width,
-                        unsigned height, uint64_t *base)
+                        unsigned height, unsigned samples, uint64_t *base)
 {
    const struct ail_layout *l = &image->planes[plane].layout;
    if ((view->vk.view_type != VK_IMAGE_VIEW_TYPE_2D &&
@@ -297,7 +247,7 @@ hk_apple9_zs_attachment(const struct hk_image_view *view,
         att->loadOp != VK_ATTACHMENT_LOAD_OP_DONT_CARE) ||
        (att->storeOp != VK_ATTACHMENT_STORE_OP_STORE &&
         att->storeOp != VK_ATTACHMENT_STORE_OP_DONT_CARE) ||
-       image->vk.samples != VK_SAMPLE_COUNT_1_BIT ||
+       image->vk.samples != samples ||
        image->vk.mip_levels != 1 || image->vk.array_layers != 1 ||
        image->vk.image_type != VK_IMAGE_TYPE_2D ||
        image->vk.extent.width != width || image->vk.extent.height != height ||
@@ -364,11 +314,11 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
         view->vk.view_type != VK_IMAGE_VIEW_TYPE_2D_ARRAY) ||
        view->vk.base_mip_level || view->vk.base_array_layer ||
        view->vk.level_count != 1 || view->vk.layer_count != 1 ||
-       att->resolveMode != VK_RESOLVE_MODE_NONE ||
        (att->loadOp != VK_ATTACHMENT_LOAD_OP_CLEAR &&
         att->loadOp != VK_ATTACHMENT_LOAD_OP_LOAD &&
         att->loadOp != VK_ATTACHMENT_LOAD_OP_DONT_CARE) ||
-       att->storeOp != VK_ATTACHMENT_STORE_OP_STORE) {
+       (att->storeOp != VK_ATTACHMENT_STORE_OP_STORE &&
+        att->storeOp != VK_ATTACHMENT_STORE_OP_DONT_CARE)) {
       if (getenv("AGX_APPLE9_TRACE_REJECT") && view)
          fprintf(stderr, "APPLE9_COLOR_INFO format=%u view_type=%u level=%u+%u layer=%u+%u resolve=%u load=%u store=%u\n",
                  view->vk.format, view->vk.view_type, view->vk.base_mip_level,
@@ -380,7 +330,10 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
    }
    struct hk_image *image = container_of(view->vk.image, struct hk_image, vk);
    struct ail_layout *layout = &image->planes[0].layout;
-   if (image->plane_count != 1 || image->vk.samples != VK_SAMPLE_COUNT_1_BIT ||
+   unsigned samples = image->vk.samples;
+   if (image->plane_count != 1 ||
+       (samples != 1 && samples != 2 && samples != 4) ||
+       (samples > 1 && layout->tiling == AIL_TILING_LINEAR) ||
        image->vk.mip_levels != 1 || image->vk.array_layers != 1 ||
        image->vk.image_type != VK_IMAGE_TYPE_2D || layout->compressed ||
        image->planes[0].sparse_map ||
@@ -388,6 +341,23 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
                                   VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT))) {
       hk_apple9_graphics_reject(cmd, "image-layout-or-msaa");
       return;
+   }
+   VK_FROM_HANDLE(hk_image_view, resolve, att->resolveImageView);
+   enum pipe_format format = hk_apple9_tile_color_format(view->vk.format);
+   struct agx_tilebuffer_layout tilebuffer;
+   if (!hk_apple9_tilebuffer(format, samples, &tilebuffer)) {
+      hk_apple9_graphics_reject(cmd, "msaa-tile-budget");
+      return;
+   }
+   if (att->resolveMode != VK_RESOLVE_MODE_NONE) {
+      bool integer = util_format_is_pure_integer(view_format);
+      if (samples == 1 || !resolve || resolve->vk.format != view->vk.format ||
+          resolve->vk.image->samples != VK_SAMPLE_COUNT_1_BIT ||
+          att->resolveMode != (integer ? VK_RESOLVE_MODE_SAMPLE_ZERO_BIT
+                                      : VK_RESOLVE_MODE_AVERAGE_BIT)) {
+         hk_apple9_graphics_reject(cmd, "color-resolve");
+         return;
+      }
    }
    unsigned width = image->vk.extent.width, height = image->vk.extent.height;
    const VkRect2D *area = &info->renderArea;
@@ -402,6 +372,12 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
    }
    bool partial = area->offset.x || area->offset.y ||
                   area->extent.width != width || area->extent.height != height;
+   /* As for Z/S below, a partial DONT_CARE color pass loads: pixels outside
+    * the render area must survive (meta resolves and blits rely on it).
+    */
+   const VkAttachmentLoadOp color_load =
+      partial && att->loadOp == VK_ATTACHMENT_LOAD_OP_DONT_CARE
+         ? VK_ATTACHMENT_LOAD_OP_LOAD : att->loadOp;
    /* ZLS fast clears cover the whole attachment. Until rectangular Z/S
     * clears are available, only reload Z/S for a partial color render.
     * Loading DONT_CARE contents is legal and preserves pixels outside it.
@@ -431,19 +407,19 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
    render->color_att_count = 1;
    render->color_att[0].iview = view;
    render->color_att[0].vk_format = view->vk.format;
+   render->color_att[0].resolve_mode = att->resolveMode;
+   render->color_att[0].resolve_iview =
+      att->resolveMode != VK_RESOLVE_MODE_NONE ? resolve : NULL;
    const VkClearColorValue clear =
       att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR
          ? att->clearValue.color : (VkClearColorValue){0};
-   render->color_att[0].clear = att->loadOp != VK_ATTACHMENT_LOAD_OP_LOAD;
+   render->color_att[0].clear = color_load != VK_ATTACHMENT_LOAD_OP_LOAD;
    memcpy(render->color_att[0].clear_colour, &clear, sizeof(clear));
-   enum pipe_format format = hk_apple9_tile_color_format(view->vk.format);
-   render->tilebuffer = agx_build_tilebuffer_layout(&format, 1, 1, false);
-   /* Native shaders use dword-packed color and launch allocations round to
-    * eight bytes. All admitted single-sample formats fit a 32x32 tile.
-    */
+   render->tilebuffer = tilebuffer;
+   /* Native shaders use dword-packed color and eight-byte sample strides. */
    assert(render->tilebuffer.sample_size_B ==
           ALIGN_POT(4 * agx_apple9_color_words(format), 8));
-   assert(render->tilebuffer.tile_size == 32 * 32);
+   assert(render->tilebuffer.tile_size == (samples == 4 ? 32 * 16 : 32 * 32));
    render->cr.width = width;
    render->cr.height = height;
    render->cr.layers = 1;
@@ -467,7 +443,7 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
           zl->format != PIPE_FORMAT_Z32_FLOAT ||
           !(depth->clearValue.depthStencil.depth >= 0.0f &&
             depth->clearValue.depthStencil.depth <= 1.0f) ||
-          !hk_apple9_zs_attachment(zv, zi, 0, depth, width, height, &zbase)) {
+          !hk_apple9_zs_attachment(zv, zi, 0, depth, width, height, samples, &zbase)) {
          hk_apple9_graphics_reject(cmd, "depth-view-layout-or-load-store");
          return;
       }
@@ -496,7 +472,7 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
       if ((sv->vk.format != VK_FORMAT_S8_UINT &&
            sv->vk.format != VK_FORMAT_D32_SFLOAT_S8_UINT) ||
           sl->format != PIPE_FORMAT_S8_UINT ||
-          !hk_apple9_zs_attachment(sv, si, plane, stencil, width, height, &sbase)) {
+          !hk_apple9_zs_attachment(sv, si, plane, stencil, width, height, samples, &sbase)) {
          hk_apple9_graphics_reject(cmd, "stencil-view-layout-or-load-store");
          return;
       }
@@ -538,12 +514,30 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
     * sRGB decode, and the tilebuffer must retain the encoded representation.
     */
    uint8_t descriptors[64] = {0};
-   memcpy(descriptors, &view->planes[0].sampled, 8);
-   uint32_t tex_header;
-   memcpy(&tex_header, descriptors + 4, 4);
-   tex_header &= 0x00ffffff;
-   memcpy(descriptors + 4, &tex_header, 4);
-   uint64_t texture_address = base >> 4;
+   uint64_t texture_address;
+   /* The reload fetches with 2D coordinates. Use the background descriptor,
+    * which is 2D (or 2D MS) whatever the view type: vk_meta blits and
+    * resolves render through 2D_ARRAY views, whose sampled descriptor made
+    * every reload read texel (0,0).
+    */
+   if (samples == 1) {
+      memcpy(descriptors, &view->planes[0].background, 8);
+      uint32_t tex_header;
+      memcpy(&tex_header, descriptors + 4, 4);
+      tex_header &= 0x00ffffff;
+      memcpy(descriptors + 4, &tex_header, 4);
+      texture_address = base >> 4;
+   } else {
+      if (!hk_apple9_pack_texture(descriptors, &view->planes[0].background)) {
+         hk_apple9_graphics_reject(cmd, "background-descriptor");
+         return;
+      }
+      memcpy(&texture_address, descriptors + 8, 8);
+      /* Native bit 56 selects 4x (2x is zero with an MS dimension).
+       * The translator sets address-word bit 44 to decode sRGB; reload
+       * must instead preserve the encoded tile bytes, so clear that bit. */
+      texture_address &= ~(UINT64_C(1) << 44);
+   }
    uint64_t pbe_address = base >> 4;
    if (layout->tiling == AIL_TILING_LINEAR) {
       unsigned stride = ail_get_linear_stride_B(layout, 0);
@@ -551,9 +545,10 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
          hk_apple9_graphics_reject(cmd, "linear-stride");
          return;
       }
-      texture_address |= ((uint64_t)(stride >> 4) - 1) << 46;
+      if (samples == 1)
+         texture_address |= ((uint64_t)(stride >> 4) - 1) << 46;
       pbe_address |= ((uint64_t)(stride >> 4) - 1) << 44;
-   } else if (layout->page_aligned_layers) {
+   } else if (samples == 1 && layout->page_aligned_layers) {
       texture_address |= UINT64_C(1) << 62;
    }
    memcpy(descriptors + 8, &texture_address, 8);
@@ -572,15 +567,15 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
    uint64_t samp = hk_pool_upload(cmd, sampler, sizeof(sampler), 64);
    if (!desc || !samp ||
        !hk_apple9_tile_shader(cmd,
-                              att->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD ? 1 : 0,
-                              util_format_is_srgb(view_format), format,
+                              color_load == VK_ATTACHMENT_LOAD_OP_LOAD ? 1 : 0,
+                              util_format_is_srgb(view_format), format, samples,
                               &clear,
-                              partial && att->loadOp != VK_ATTACHMENT_LOAD_OP_LOAD
+                              partial && color_load != VK_ATTACHMENT_LOAD_OP_LOAD
                                  ? area : NULL, desc, samp,
                               &render->cr.bg.main) ||
-       !hk_apple9_tile_shader(cmd, 1, false, format, NULL, NULL, desc, samp,
+       !hk_apple9_tile_shader(cmd, 1, false, format, samples, NULL, NULL, desc, samp,
                               &render->cr.bg.partial) ||
-       !hk_apple9_tile_shader(cmd, 2, false, format, NULL, NULL, desc + 32, 0,
+       !hk_apple9_tile_shader(cmd, 2, false, format, samples, NULL, NULL, desc + 32, 0,
                               &render->cr.eot.main)) {
       hk_apple9_graphics_reject(cmd, "tile-setup");
       return;
@@ -654,9 +649,11 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, struct agx_draw draw)
       hk_apple9_graphics_reject(cmd, "stages-transform-feedback-or-queries");
       return;
    }
-   if (dyn->ms.rasterization_samples != VK_SAMPLE_COUNT_1_BIT ||
+   unsigned samples = gfx->render.tilebuffer.nr_samples;
+   if (dyn->ms.rasterization_samples != samples ||
        dyn->ms.alpha_to_coverage_enable ||
-       dyn->ms.alpha_to_one_enable || !(dyn->ms.sample_mask & 1) ||
+       dyn->ms.alpha_to_one_enable ||
+       (dyn->ms.sample_mask & BITFIELD_MASK(samples)) != BITFIELD_MASK(samples) ||
        dyn->ms.sample_locations_enable ||
        dyn->ds.depth.bounds_test.enable) {
       hk_apple9_graphics_reject(cmd, "vertex-input-msaa-or-depth-stencil");
@@ -679,7 +676,8 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    struct hk_shader *vs = &gfx->shaders[MESA_SHADER_VERTEX]->variants[0];
    struct hk_shader *fs = &gfx->shaders[MESA_SHADER_FRAGMENT]->variants[0];
    struct agx_apple9_blend blend;
-   if (!hk_apple9_blend_state(&dyn->cb, gfx->render.color_att[0].vk_format, &blend) ||
+   if (!hk_apple9_blend_state(&dyn->cb, gfx->render.color_att[0].vk_format,
+                              samples, &blend) ||
        memcmp(&blend, &fs->apple9_blend, sizeof(blend))) {
       hk_apple9_graphics_reject(cmd, "unsupported-or-dynamic-blend-state");
       return;
@@ -708,7 +706,7 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, struct agx_draw draw)
       hk_apple9_graphics_reject(cmd, "shader-link");
       return;
    }
-   pipeline.samples = 1;
+   pipeline.samples = samples;
    pipeline.primitive = primitive == MESA_PRIM_TRIANGLE_FAN
       ? AGX_PRIMITIVE_TRIANGLE_FAN :
       primitive == MESA_PRIM_TRIANGLE_STRIP
@@ -896,6 +894,29 @@ hk_apple9_end_rendering(struct hk_cmd_buffer *cmd)
    }
    /* Keep the background/EOT for clear-only passes, including partial areas. */
    hk_cmd_buffer_end_graphics(cmd);
+   struct hk_rendering_state *render = &cmd->state.gfx.render;
+   const struct hk_attachment *color = &render->color_att[0];
+   if (color->resolve_mode != VK_RESOLVE_MODE_NONE) {
+      const VkRenderingAttachmentInfo att = {
+         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+         .imageView = hk_image_view_to_handle(color->iview),
+         .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+         .resolveMode = color->resolve_mode,
+         .resolveImageView = hk_image_view_to_handle(color->resolve_iview),
+         .resolveImageLayout = VK_IMAGE_LAYOUT_GENERAL,
+      };
+      const VkRenderingInfo info = {
+         .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+         .renderArea = render->area,
+         .layerCount = 1,
+         .colorAttachmentCount = 1,
+         .pColorAttachments = &att,
+      };
+      /* EOT stores every sample even for API DONT_CARE: the separate pass
+       * samples the intermediate. Drop state before meta begins rendering. */
+      memset(render, 0, sizeof(*render));
+      hk_meta_resolve_rendering(cmd, &info);
+   }
    if (getenv("AGX_APPLE9_TRACE_REJECT"))
       fprintf(stderr, "APPLE9_RENDER_END_OK\n");
 }

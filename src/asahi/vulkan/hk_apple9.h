@@ -54,6 +54,8 @@ extern "C" {
 bool hk_apple9_formatless_store_supported(enum pipe_format format);
 bool hk_apple9_decode_texture(const struct agx_texture_packed *input,
                              struct AGX_TEXTURE *decoded);
+bool hk_apple9_pack_texture(void *output,
+                            const struct agx_texture_packed *input);
 
 bool hk_nir_lower_apple9_descriptors(
    nir_shader *nir, uint32_t set_layout_count,

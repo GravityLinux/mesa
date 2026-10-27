@@ -357,6 +357,7 @@ hk_hash_graphics_state(struct vk_physical_device *device,
       bool supported = hk_apple9_blend_state(
          state && state->cb ? state->cb : &replace,
          state && state->rp ? state->rp->color_attachment_formats[0] : VK_FORMAT_UNDEFINED,
+         state && state->ms ? MAX2(state->ms->rasterization_samples, 1) : 1,
          &blend);
       _mesa_blake3_update(&blake3_ctx, &supported, sizeof(supported));
       if (supported)
@@ -1686,9 +1687,13 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
          }
       }
       if (!vertex && state && state->ms &&
-          (state->ms->rasterization_samples != VK_SAMPLE_COUNT_1_BIT ||
-           state->ms->sample_shading_enable))
-         reason = "sample-shading-or-msaa";
+          (state->ms->sample_shading_enable ||
+           state->ms->alpha_to_coverage_enable ||
+           state->ms->alpha_to_one_enable ||
+           (state->ms->sample_mask &
+            BITFIELD_MASK(MAX2(state->ms->rasterization_samples, 1))) !=
+            BITFIELD_MASK(MAX2(state->ms->rasterization_samples, 1))))
+         reason = "sample-shading-or-coverage";
       if (!vertex && nir->info.fs.uses_sample_shading)
          reason = "sample-shading-or-msaa";
       if (!vertex) {
@@ -1704,6 +1709,8 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
                                     state && state->rp
                                        ? state->rp->color_attachment_formats[0]
                                        : VK_FORMAT_UNDEFINED,
+                                    state && state->ms
+                                       ? MAX2(state->ms->rasterization_samples, 1) : 1,
                                     &shader->apple9_blend))
             reason = "unsupported-blend-state";
       }

@@ -32,6 +32,21 @@
 extern "C" {
 #endif
 
+struct vk_meta_blit_key {
+   enum vk_meta_object_key_type key_type;
+   enum glsl_sampler_dim dim;
+   VkSampleCountFlagBits src_samples;
+   VkResolveModeFlagBits resolve_mode;
+   VkResolveModeFlagBits stencil_resolve_mode;
+   bool stencil_as_discard;
+   VkFormat dst_format;
+   VkImageAspectFlags aspects;
+};
+
+/* Also used by driver CPU tests to compile the actual meta shader. */
+struct nir_shader *
+vk_meta_build_blit_shader(const struct vk_meta_blit_key *key);
+
 extern const VkPipelineVertexInputStateCreateInfo vk_meta_draw_rects_vi_state;
 extern const VkPipelineInputAssemblyStateCreateInfo vk_meta_draw_rects_ia_state;
 extern const VkPipelineViewportStateCreateInfo vk_meta_draw_rects_vs_state;
