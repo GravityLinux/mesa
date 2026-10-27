@@ -51,6 +51,8 @@ main(void)
    if (!dev)
       return 1;
    simple_mtx_init(&dev->apple9_variants.lock, mtx_plain);
+   static const uint8_t empty;
+   deferred.nir = hk_apple9_nir_create(&empty, 0);
    api.apple9_deferred = &deferred;
    struct thread_data t = {.dev = dev, .api = {[MESA_SHADER_VERTEX] = &api}};
    resolve(&t);
@@ -86,6 +88,7 @@ main(void)
    puts("permanent compile failure remains cached");
    hk_apple9_variants_finish(dev);
    simple_mtx_destroy(&dev->apple9_variants.lock);
+   hk_apple9_nir_unref(deferred.nir);
    free(dev);
    return failures != 0;
 }

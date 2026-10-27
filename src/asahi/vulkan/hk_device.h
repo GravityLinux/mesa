@@ -11,6 +11,7 @@
 #include "asahi/lib/agx_device.h"
 #include "util/rwlock.h"
 #include "util/simple_mtx.h"
+#include "util/u_queue.h"
 #include "util/u_dynarray.h"
 #include "agx_bg_eot.h"
 #include "agx_pack.h"
@@ -120,6 +121,14 @@ struct hk_device {
       simple_mtx_t lock;
       struct hash_table *ht;
    } apple9_variants;
+
+   /* Apple9 variants compiled into the pipeline cache in the background when
+    * a pipeline with complete state is created, see hk_apple9_precompile_init. */
+   struct {
+      struct util_queue queue;
+      bool ready;
+      uint32_t abort;
+   } apple9_precompile;
 
    /* Apple9 shader code slices shared by byte-identical bodies, see
     * hk_upload_shader. */

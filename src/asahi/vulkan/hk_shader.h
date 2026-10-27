@@ -588,6 +588,9 @@ VkResult hk_apple9_resolve_graphics(
    struct hk_api_shader *out[HK_APPLE9_GFX_STAGES], bool prefer_native,
    bool fs_statistics);
 
+void hk_apple9_precompile_init(struct hk_device *dev);
+void hk_apple9_precompile_finish(struct hk_device *dev);
+
 bool hk_apple9_deferred_sample_shading(const struct hk_api_shader *fs);
 bool hk_apple9_deferred_zs_self_dep(const struct hk_api_shader *fs);
 struct vk_depth_stencil_state;
