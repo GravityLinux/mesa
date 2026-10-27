@@ -617,6 +617,40 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
       fprintf(stderr, "APPLE9_RENDER_BEGIN_OK\n");
 }
 
+#define HK_APPLE9_MAX_RENDER_STREAM_B (8u << 20)
+
+/* Native stream links have not been ported, so a render's control stream must
+ * stay contiguous. Grow it by moving it into a larger allocation from the same
+ * pool: nothing recorded in the stream refers to its own address, and the
+ * queue reads cs->addr only at submit.
+ */
+static bool
+hk_apple9_reserve_render_stream(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+                                size_t space)
+{
+   if ((size_t)((uint8_t *)cs->end - (uint8_t *)cs->current) >= space)
+      return true;
+
+   size_t used = (uint8_t *)cs->current - (uint8_t *)cs->start;
+   size_t size = (uint8_t *)cs->end - (uint8_t *)cs->start;
+   while (size - used < space)
+      size *= 2;
+   if (size > HK_APPLE9_MAX_RENDER_STREAM_B)
+      return false;
+
+   struct agx_ptr chunk = agx_pool_alloc_aligned(&cmd->apple9_context, size, 1024);
+   if (!chunk.cpu)
+      return false;
+
+   memcpy(chunk.cpu, cs->start, used);
+   cs->addr = chunk.gpu;
+   cs->chunk = chunk;
+   cs->start = chunk.cpu;
+   cs->current = (uint8_t *)chunk.cpu + used;
+   cs->end = (uint8_t *)chunk.cpu + size;
+   return true;
+}
+
 void
 hk_apple9_draw(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 {
@@ -754,10 +788,9 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, struct agx_draw draw)
          pipeline.index_buffer = indices.gpu;
       }
    }
-   /* Native stream links have not been ported. Keep the measured fetch tail
-    * mapped, and fail recording instead of emitting an Apple8 stream link.
-    */
-   if (cs->end - cs->current < hk_apple9_direct_draw_size(&pipeline) + 0x800) {
+   /* Keep the measured fetch tail mapped past the draw. */
+   if (!hk_apple9_reserve_render_stream(cmd, cs,
+                                        hk_apple9_direct_draw_size(&pipeline) + 0x800)) {
       hk_apple9_graphics_reject(cmd, "render-stream-capacity");
       return;
    }
