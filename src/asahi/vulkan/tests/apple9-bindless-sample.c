@@ -11,7 +11,11 @@
  * HOSTWRITE (keep writing unused heap entries and spare sets from
  * the host while the GPU executes, as a late-bound heap does), NOISEIMM (noise
  * draws use a combined image sampler at a fixed binding, i.e. per-draw tables;
- * needs a third shader argument).
+ * needs a third shader argument). INSTANCES (instances per draw, default 1),
+ * GENERATIONS (fence-separated submissions of the same recorded command
+ * buffer, default 1), SECOND_GENERATION_FIFO (read '1' before each later
+ * generation), EVIDENCE_TAG (label for per-generation results). Later
+ * generations retain all resources and poison readback before submitting.
  */
 #include <stdbool.h>
 #include <stdint.h>
@@ -133,6 +137,14 @@ main(int argc, char **argv)
    uint32_t H = getenv("HEIGHT") ? atoi(getenv("HEIGHT")) : 720;
    uint32_t images = getenv("IMAGES") ? atoi(getenv("IMAGES")) : 1;
    uint32_t draws = getenv("DRAWS") ? atoi(getenv("DRAWS")) : 16;
+   uint32_t instances = getenv("INSTANCES") ? atoi(getenv("INSTANCES")) : 1;
+   uint32_t generations = getenv("GENERATIONS") ? atoi(getenv("GENERATIONS")) : 1;
+   const char *gate_path = getenv("SECOND_GENERATION_FIFO");
+   const char *tag = getenv("EVIDENCE_TAG") ? getenv("EVIDENCE_TAG") : "single";
+   if (!instances || !generations) {
+      fprintf(stderr, "INSTANCES and GENERATIONS must be positive\n");
+      return 1;
+   }
    uint32_t sampler_index = getenv("SAMPLER") ? atoi(getenv("SAMPLER")) : 5;
    uint32_t samplers = getenv("SAMPLERS") ? atoi(getenv("SAMPLERS")) : 8;
    uint32_t texsets = getenv("TEXSETS") ? atoi(getenv("TEXSETS")) : 1;
@@ -527,7 +539,7 @@ main(int argc, char **argv)
             uint32_t push[4] = {measured ? sampler_index : (d + n) % samplers, 0, 0, 0};
             vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, push);
          }
-         vkCmdDraw(cmd, 3, 1, 0, 0);
+         vkCmdDraw(cmd, 3, instances, 0, 0);
          vkCmdEndRendering(cmd);
          if (!measured) {
             image_barrier(cmd, image, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -556,73 +568,96 @@ main(int argc, char **argv)
    VkSubmitInfo submit = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                           .commandBufferCount = 1,
                           .pCommandBuffers = &cmd};
-   CHECK(vkQueueSubmit(queue, 1, &submit, fence));
-   uint64_t host_writes = 0;
-   if (hostwrite) {
-      /* Late-bound updates of entries no submitted work reads. */
-      while (vkGetFenceStatus(dev, fence) == VK_NOT_READY) {
-         uint32_t slot = samplers + host_writes % (heap_size - samplers);
-         VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                                   .dstSet = heap_set,
-                                   .dstBinding = 0,
-                                   .dstArrayElement = slot,
-                                   .descriptorCount = 1,
-                                   .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER,
-                                   .pImageInfo = &sampler_infos[host_writes % samplers]};
-         vkUpdateDescriptorSets(dev, 1, &w, 0, NULL);
-         VkWriteDescriptorSet w2 = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                                    .dstSet = tex_sets[texsets + noise + host_writes % spare_sets],
-                                    .dstBinding = 0,
-                                    .descriptorCount = 1,
-                                    .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-                                    .pImageInfo = &tex_info};
-         vkUpdateDescriptorSets(dev, 1, &w2, 0, NULL);
-         ++host_writes;
-      }
-   }
-   CHECK(vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_C(30000000000)));
-
-   /* Compare every draw against the pattern; report wrong pixels, zero pixels
-    * and whole 8x4 blocks (one wave each). */
-   uint64_t wrong = 0, zero = 0, blocks = 0, zero_blocks = 0;
-   uint32_t bad_draws = 0;
-   for (uint32_t d = 0; d < draws; ++d) {
-      const uint32_t *got = (const uint32_t *)(pixels + bytes * (images + d));
-      const uint32_t *expected = pattern + ((d % texsets) % images) * W * H;
-      uint64_t draw_wrong = 0;
-      for (uint32_t by = 0; by < H / 4; ++by) {
-         for (uint32_t bx = 0; bx < W / 8; ++bx) {
-            unsigned bad = 0, zeros = 0;
-            for (uint32_t y = by * 4; y < by * 4 + 4; ++y) {
-               for (uint32_t x = bx * 8; x < bx * 8 + 8; ++x) {
-                  uint32_t g = got[y * W + x];
-                  if (g != expected[y * W + x]) {
-                     ++bad;
-                     zeros += g == 0;
-                  }
-               }
+   for (uint32_t generation = 0; generation < generations; ++generation) {
+      if (generation) {
+         if (gate_path) {
+            printf("APPLE9_RETAINED_READY tag=%s generation=%u\n", tag, generation + 1);
+            fflush(stdout);
+            FILE *gate = fopen(gate_path, "r");
+            if (!gate || fgetc(gate) != '1') {
+               fprintf(stderr, "failed to read retained submission gate\n");
+               return 1;
             }
-            draw_wrong += bad;
-            zero += zeros;
-            blocks += bad == 32;
-            zero_blocks += zeros == 32;
-            if (bad && bad < 32 && blocks + bad_draws < 4)
-               fprintf(stderr, "draw %u partial block at (%u,%u): %u wrong, got %08x want %08x\n",
-                       d, bx * 8, by * 4, bad, got[by * 4 * W + bx * 8],
-                       expected[by * 4 * W + bx * 8]);
+            fclose(gate);
+         }
+         CHECK(vkResetFences(dev, 1, &fence));
+         /* All previous GPU use retired. Require a fresh readback from this
+          * submission while retaining the same device, queue and resources. */
+         memset(pixels + bytes * images, 0xa5, bytes * draws);
+      }
+      CHECK(vkQueueSubmit(queue, 1, &submit, fence));
+      uint64_t host_writes = 0;
+      if (hostwrite) {
+         /* Late-bound updates of entries no submitted work reads. */
+         while (vkGetFenceStatus(dev, fence) == VK_NOT_READY) {
+            uint32_t slot = samplers + host_writes % (heap_size - samplers);
+            VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                      .dstSet = heap_set,
+                                      .dstBinding = 0,
+                                      .dstArrayElement = slot,
+                                      .descriptorCount = 1,
+                                      .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER,
+                                      .pImageInfo = &sampler_infos[host_writes % samplers]};
+            vkUpdateDescriptorSets(dev, 1, &w, 0, NULL);
+            VkWriteDescriptorSet w2 = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                       .dstSet = tex_sets[texsets + noise + host_writes % spare_sets],
+                                       .dstBinding = 0,
+                                       .descriptorCount = 1,
+                                       .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                                       .pImageInfo = &tex_info};
+            vkUpdateDescriptorSets(dev, 1, &w2, 0, NULL);
+            ++host_writes;
          }
       }
-      if (draw_wrong)
-         fprintf(stderr, "draw %u image %u: %llu wrong pixels\n", d,
-                 (d % texsets) % images, (unsigned long long)draw_wrong);
-      wrong += draw_wrong;
-      bad_draws += draw_wrong != 0;
+      CHECK(vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_C(30000000000)));
+
+      /* Compare every draw against the pattern; report wrong pixels, zero pixels
+       * and whole 8x4 blocks (one wave each). */
+      uint64_t wrong = 0, zero = 0, blocks = 0, zero_blocks = 0;
+      uint32_t bad_draws = 0;
+      for (uint32_t d = 0; d < draws; ++d) {
+         const uint32_t *got = (const uint32_t *)(pixels + bytes * (images + d));
+         const uint32_t *expected = pattern + ((d % texsets) % images) * W * H;
+         uint64_t draw_wrong = 0;
+         for (uint32_t by = 0; by < H / 4; ++by) {
+            for (uint32_t bx = 0; bx < W / 8; ++bx) {
+               unsigned bad = 0, zeros = 0;
+               for (uint32_t y = by * 4; y < by * 4 + 4; ++y) {
+                  for (uint32_t x = bx * 8; x < bx * 8 + 8; ++x) {
+                     uint32_t g = got[y * W + x];
+                     if (g != expected[y * W + x]) {
+                        ++bad;
+                        zeros += g == 0;
+                     }
+                  }
+               }
+               draw_wrong += bad;
+               zero += zeros;
+               blocks += bad == 32;
+               zero_blocks += zeros == 32;
+               if (bad && bad < 32 && blocks + bad_draws < 4)
+                  fprintf(stderr, "draw %u partial block at (%u,%u): %u wrong, got %08x want %08x\n",
+                          d, bx * 8, by * 4, bad, got[by * 4 * W + bx * 8],
+                          expected[by * 4 * W + bx * 8]);
+            }
+         }
+         if (draw_wrong)
+            fprintf(stderr, "draw %u image %u: %llu wrong pixels\n", d,
+                    (d % texsets) % images, (unsigned long long)draw_wrong);
+         wrong += draw_wrong;
+         bad_draws += draw_wrong != 0;
+      }
+      printf("%ux%u draws=%u sampler=%u/%u texsets=%u noise=%u pools=%u hostwrites=%llu: "
+             "wrong=%llu zero=%llu blocks=%llu zero_blocks=%llu bad_draws=%u %s\n",
+             W, H, draws, sampler_index, samplers, texsets, noise, pools,
+             (unsigned long long)host_writes, (unsigned long long)wrong,
+             (unsigned long long)zero, (unsigned long long)blocks,
+             (unsigned long long)zero_blocks, bad_draws, wrong ? "FAIL" : "PASS");
+      if (wrong)
+         return 1;
+      printf("APPLE9_RETAINED_RESULT tag=%s generation=%u instances=%u checked_pixels=%llu PASS\n",
+             tag, generation + 1, instances, (unsigned long long)W * H * draws);
+      fflush(stdout);
    }
-   printf("%ux%u draws=%u sampler=%u/%u texsets=%u noise=%u pools=%u hostwrites=%llu: "
-          "wrong=%llu zero=%llu blocks=%llu zero_blocks=%llu bad_draws=%u %s\n",
-          W, H, draws, sampler_index, samplers, texsets, noise, pools,
-          (unsigned long long)host_writes, (unsigned long long)wrong,
-          (unsigned long long)zero, (unsigned long long)blocks,
-          (unsigned long long)zero_blocks, bad_draws, wrong ? "FAIL" : "PASS");
-   return wrong ? 1 : 0;
+   return 0;
 }
