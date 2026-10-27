@@ -152,6 +152,10 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
          c->stencil.comp_base = cs->cr.stencil.meta;
          c->stencil.comp_stride = cs->cr.stencil.meta_stride;
       }
+      if (cs->timestamp.end.handle) {
+         c->ts_frag.end.handle = cs->timestamp.end.handle;
+         c->ts_frag.end.offset = cs->timestamp.end.offset_B;
+      }
       if (getenv("AGX_APPLE9_TRACE_REJECT"))
          fprintf(stderr, "APPLE9_RENDER_JOB_READY\n");
       return;

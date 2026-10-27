@@ -671,6 +671,8 @@ apple9_instruction_is_in_subset(nir_instr *instr, bool graphics)
       case nir_op_vec3:
       case nir_op_vec4:
       case nir_op_b2b1:
+      case nir_op_b2i8:
+      case nir_op_b2i16:
       case nir_op_b2i32:
       case nir_op_b2f32:
       case nir_op_bcsel:
@@ -2275,7 +2277,9 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                      lower, zero, condition, if_true, if_false,
                      AGX_APPLE9_SELECT_ULT);
             }
-         } else if (op == nir_op_b2i32) {
+         } else if (op == nir_op_b2i8 || op == nir_op_b2i16 ||
+                    op == nir_op_b2i32) {
+            /* 0/1 in a 32-bit register; narrow consumers use the low bits. */
             value = apple9_lower_bool_scalar(
                lower, nir_scalar_chase_alu_src(scalar, 0));
          } else if (op == nir_op_b2f32) {

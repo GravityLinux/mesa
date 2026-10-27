@@ -242,9 +242,11 @@ hk_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
    VK_FROM_HANDLE(hk_device, dev, device);
    struct hk_query_pool *pool;
 
-   if (agx_apple9_compute_enabled(&dev->dev)) {
+   if (agx_apple9_compute_enabled(&dev->dev) &&
+       pCreateInfo->queryType != VK_QUERY_TYPE_TIMESTAMP) {
       if (getenv("AGX_APPLE9_TRACE_REJECT"))
-         fprintf(stderr, "APPLE9_RENDER_REJECT reason=queries\n");
+         fprintf(stderr, "APPLE9_RENDER_REJECT reason=queries type=%d count=%u\n",
+                 pCreateInfo->queryType, pCreateInfo->queryCount);
       return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
    }
 
