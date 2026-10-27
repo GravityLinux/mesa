@@ -11,7 +11,6 @@
 
 #include "hk_shader.h"
 #include "hk_gpu_busy.h"
-#include "util/u_cpu_detect.h"
 #include "util/u_queue.h"
 
 #include "poly/nir/poly_nir.h"
@@ -8891,7 +8890,13 @@ hk_apple9_precompile_init(struct hk_device *dev)
    /* Without a disk cache, a draw could not load a precompiled variant. */
    if (!dev->vk.mem_cache || !dev->vk.physical->disk_cache)
       return;
-   const unsigned threads = MAX2(1, util_get_cpu_caps()->nr_cpus / 4);
+   /* One thread: each precompile thread compiles in its own glibc malloc
+    * arena, which keeps its freed pages for the life of the process (two
+    * threads left a cold ER replay 43 MiB larger on the mini), and trimming
+    * them takes the application's arena lock too (14-16 ms against a game's
+    * heap). One thread drains ER's 3,009 precompiles (32 s of CPU) well within
+    * its two-minute load; a draw that outruns the queue compiles itself. */
+   const unsigned threads = 1;
    dev->apple9_precompile.ready = util_queue_init(
       &dev->apple9_precompile.queue, "hk_precomp", 32, threads,
       UTIL_QUEUE_INIT_RESIZE_IF_FULL | UTIL_QUEUE_INIT_USE_MINIMUM_PRIORITY,
