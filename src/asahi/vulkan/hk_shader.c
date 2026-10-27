@@ -1727,9 +1727,7 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
       const char *interface_reason =
          ci->apple9_image_mask ? "interface-image"
          : ci->apple9_reads_z ? "interface-reads-z"
-         : ci->apple9_reads_point_coord ? "interface-point-coord"
          : ci->apple9_reads_primitive_id ? "interface-primitive-id"
-         : ci->apple9_writes_point_size ? "interface-point-size"
          : ci->apple9_clip_distance_count ? "interface-clip-distance"
          : NULL;
       if (compiled && interface_reason) {

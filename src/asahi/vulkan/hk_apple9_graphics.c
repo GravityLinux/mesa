@@ -148,6 +148,8 @@ hk_apple9_stage(struct hk_shader *shader, bool vertex)
       .apple9_linear_mask = info->apple9_linear_mask,
       .apple9_flat_mask = info->apple9_flat_mask,
       .writes_layer_viewport = vertex && info->writes_layer_viewport,
+      .writes_point_size = vertex && info->apple9_writes_point_size,
+      .reads_point_coord = !vertex && info->apple9_reads_point_coord,
       .render_targets = vertex ? 0 : 1,
    };
    memcpy(stage.resource_binding, info->apple9_resource_binding,
@@ -665,7 +667,7 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    if (!cs || !cs->apple9_render ||
        agx_is_indirect(draw.b) ||
        (primitive != MESA_PRIM_TRIANGLES && primitive != MESA_PRIM_TRIANGLE_FAN &&
-        primitive != MESA_PRIM_TRIANGLE_STRIP) ||
+        primitive != MESA_PRIM_TRIANGLE_STRIP && primitive != MESA_PRIM_POINTS) ||
        dyn->ia.primitive_restart_enable) {
       if (getenv("AGX_APPLE9_TRACE_REJECT"))
          fprintf(stderr, "APPLE9_DRAW_INFO indirect=%u first_instance=%u topology=%u restart=%u indexed=%u\n",
@@ -741,7 +743,9 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, struct agx_draw draw)
       return;
    }
    pipeline.samples = samples;
-   pipeline.primitive = primitive == MESA_PRIM_TRIANGLE_FAN
+   pipeline.primitive = primitive == MESA_PRIM_POINTS
+      ? AGX_PRIMITIVE_POINTS :
+      primitive == MESA_PRIM_TRIANGLE_FAN
       ? AGX_PRIMITIVE_TRIANGLE_FAN :
       primitive == MESA_PRIM_TRIANGLE_STRIP
       ? AGX_PRIMITIVE_TRIANGLE_STRIP : AGX_PRIMITIVE_TRIANGLES;
@@ -822,7 +826,9 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, struct agx_draw draw)
          ((dyn->rs.cull_mode & VK_CULL_MODE_FRONT_BIT) ? 1 : 0) |
          ((dyn->rs.cull_mode & VK_CULL_MODE_BACK_BIT) ? 2 : 0) |
          (dyn->rs.front_face == VK_FRONT_FACE_COUNTER_CLOCKWISE ? 1u << 16 : 0),
-      .object_type = AGX_OBJECT_TYPE_TRIANGLE,
+      /* As on Apple8: Vulkan point coordinates have an upper-left origin. */
+      .object_type = primitive == MESA_PRIM_POINTS
+         ? AGX_OBJECT_TYPE_POINT_SPRITE_UV01 : AGX_OBJECT_TYPE_TRIANGLE,
       .flatshade_first = pipeline.flatshade_first,
       .scissor_index = cs->scissor.size / AGX_SCISSOR_LENGTH,
       .disable_tri_merging = pipeline.fragment.disable_tri_merging,
