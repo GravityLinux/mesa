@@ -527,6 +527,16 @@ zink_draw(struct pipe_context *pctx,
 
    struct zink_context *ctx = zink_context(pctx);
    struct zink_screen *screen = zink_screen(pctx->screen);
+   /* Honeykrisp's native M4 path has no restart-index draws. Split direct
+    * indexed restart draws on the CPU, keeping GL's restart semantics.
+    */
+   if (dinfo->primitive_restart && dinfo->index_size && !dindirect &&
+       zink_driverid(screen) == VK_DRIVER_ID_MESA_HONEYKRISP) {
+      for (unsigned i = 0; i < num_draws; i++)
+         util_draw_vbo_without_prim_restart(pctx, dinfo, drawid_offset + i,
+                                            NULL, &draws[i]);
+      return;
+   }
    struct zink_rasterizer_state *rast_state = ctx->rast_state;
    struct zink_batch_state *bs = ctx->bs;
    struct zink_so_target *so_target =
