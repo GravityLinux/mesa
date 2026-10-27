@@ -620,10 +620,13 @@ agx_resource_create_with_modifiers(struct pipe_screen *screen,
       create_flags |= AGX_BO_LOW_VA;
 
    /* Default to write-combine resources, but use writeback if that is expected
-    * to be beneficial.
+    * to be beneficial. Scanout buffers are included: with a CPU-copy display
+    * (simpledrm on the boot framebuffer) the kernel reads every presented
+    * frame, and uncached reads of it are about ten times slower.
     */
    if (nresource->base.usage == PIPE_USAGE_STAGING ||
-       (nresource->base.flags & PIPE_RESOURCE_FLAG_MAP_COHERENT)) {
+       (nresource->base.flags & PIPE_RESOURCE_FLAG_MAP_COHERENT) ||
+       (bind & PIPE_BIND_SCANOUT)) {
 
       create_flags |= AGX_BO_WRITEBACK;
    }

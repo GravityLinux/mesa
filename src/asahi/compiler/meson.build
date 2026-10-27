@@ -9,6 +9,7 @@ libasahi_agx_files = files(
   'agx_apple9_opt.c',
   'agx_apple9_ra.c',
   'agx_compile_apple9.c',
+  '../lib/agx_apple9_launch.c',
   'agx_nir_lower_apple9_texture.c',
   'agx_nir_lower_apple9_math.c',
   'agx_dce.c',

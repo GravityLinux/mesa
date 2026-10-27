@@ -219,11 +219,15 @@ holes and temporary texture operands. It is not the number of user varyings.
 Unused low bits of the publication word are zero. Graphics requires compiler
 publication metadata; there is no external prolog or library-default fallback.
 
-The allocation interface currently accepts zero or the four threadgroup-memory
-sizes with execution evidence: 128, 256, 512, and 1024 bytes. Zero emits the
+The allocation interface accepts zero or power-of-two threadgroup-memory sizes
+from 128 through 8192 bytes. The 2048-, 4096-, and 8192-byte allocations pass
+T8132 tests with 512-thread workgroups, cross-thread reads, barriers, and full
+CPU readback. Zero emits the
 source-generated zero-size allocation form. The compiler lowers aligned 32-bit
 shared accesses and workgroup barriers, rounding the shader's allocation to
-one of those sizes. A shared resource occupies its own argument root with value
+one of those sizes. The 8192-byte ceiling is the largest power of two fitting
+the existing 16-bit `(bytes << 2) | 0x80` allocation word. A shared resource
+occupies its own argument root with value
 `0x80000000`; it has no external-buffer read/write hazard. Native probes cover
 multiple arrays, one through three buffer bindings, and partial workgroups.
 
@@ -297,7 +301,7 @@ compiler's fragment completion model, including discard with spills.
   independent zero/one controls; the combined source encoding leaves them zero.
 - The names of individual allocation-mode bits are unresolved. The supported
   tile/sample combinations and compute allocation sizes are empirical bounds.
-  Larger allocations and shared operations beyond aligned 32-bit loads/stores
+  Allocations above 8192 bytes and shared operations beyond aligned 32-bit loads/stores
   and workgroup barriers remain unsupported.
 - Direct entry using roots, loads, frame, transfers and a branch alone timed
   out. The successful setup protocol is consistent with deferred stage

@@ -6,7 +6,7 @@
 #include "gtest/gtest.h"
 
 extern "C" {
-#include "agx_apple9_launch.h"
+#include "asahi/lib/agx_apple9_launch.h"
 #include "asahi/compiler/agx_apple9_profile.h"
 }
 
@@ -160,7 +160,7 @@ TEST(Apple9Launcher, InvalidParametersCannotPublishPartialCode)
       reject(bad);
    }
    bad = p;
-   for (unsigned bytes : {1u, 64u, 129u, 384u, 2048u, UINT32_MAX}) {
+   for (unsigned bytes : {1u, 64u, 129u, 384u, 8193u, 16384u, UINT32_MAX}) {
       bad.threadgroup_memory_bytes = bytes;
       reject(bad);
    }
@@ -215,6 +215,28 @@ TEST(Apple9Launcher, ThreadgroupAllocationDoesNotChangeEntryOrFrame)
    }
 }
 
+TEST(Apple9Launcher, LargerThreadgroupAllocationsFitTheAllocationWord)
+{
+   auto p = parameters();
+   const unsigned sizes[] = {2048, 4096, 8192};
+   const unsigned words[] = {0x2080, 0x4080, 0x8080};
+   std::array<uint8_t, 1024> initial, out;
+   ASSERT_TRUE(agx_apple9_launch_build(initial.data(), initial.size(),
+                                     AGX_APPLE9_LAUNCH_COMPUTE, &p));
+   unsigned call = agx_apple9_launch_call_offset(AGX_APPLE9_LAUNCH_COMPUTE,
+                                                p.resource_count);
+   for (unsigned i = 0; i < 3; ++i) {
+      SCOPED_TRACE(sizes[i]);
+      p.threadgroup_memory_bytes = sizes[i];
+      ASSERT_TRUE(agx_apple9_launch_build(out.data(), out.size(),
+                                        AGX_APPLE9_LAUNCH_COMPUTE, &p));
+      EXPECT_EQ(read16(out.data() + call - 6), words[i]);
+      out[call - 6] = initial[call - 6];
+      out[call - 5] = initial[call - 5];
+      EXPECT_EQ(out, initial);
+   }
+}
+
 TEST(Apple9Launcher, TileModesDoNotChangeEntryOrResources)
 {
    auto p = parameters();
@@ -223,7 +245,8 @@ TEST(Apple9Launcher, TileModesDoNotChangeEntryOrResources)
                                        AGX_APPLE9_LAUNCH_FRAGMENT, &p));
    struct {
       unsigned samples, bytes, mode, low;
-   } cases[] = {{1, 8, 0x4b, 0x43}, {2, 24, 0x4b, 0x46}, {4, 64, 0x43, 16},
+   } cases[] = {{1, 4, 0x4b, 0x43}, {1, 8, 0x4b, 0x43},
+               {1, 16, 0x4b, 0x45}, {2, 24, 0x4b, 0x46}, {4, 64, 0x43, 16},
                {1, 128, 0x4b, 0x61}, {1, 0, 0x4b, 0x41},
                {2, 0, 0x4b, 0x40}, {4, 0, 0x43, 0}};
    for (auto c : cases) {
@@ -284,4 +307,173 @@ TEST(Apple9Launcher, PreambleBoundsRejectWithoutWriting)
    auto before = out;
    EXPECT_FALSE(agx_apple9_launch_build(out.data(), out.size(), AGX_APPLE9_LAUNCH_COMPUTE, &p));
    EXPECT_EQ(out, before);
+}
+
+/* Production goldens: the 8-byte allocation record and an FNV-1a hash of the
+ * whole 1024-byte buffer, captured from the encoder before the experiment
+ * state existed. They use parameters() above. */
+static uint64_t
+fnv1a(const uint8_t *bytes, size_t count)
+{
+   uint64_t hash = 0xcbf29ce484222325ull;
+   for (size_t i = 0; i < count; ++i) {
+      hash ^= bytes[i];
+      hash *= 0x100000001b3ull;
+   }
+   return hash;
+}
+
+/* Every test restores the production defaults, success or failure. */
+struct ExperimentGuard {
+   ExperimentGuard(uint32_t ceiling, uint8_t encoding)
+   {
+      agx_apple9_experiments e = {ceiling, encoding};
+      agx_apple9_experiments_set(&e);
+   }
+   ~ExperimentGuard()
+   {
+      agx_apple9_experiments e = {AGX_APPLE9_MAX_THREADGROUP_MEMORY_BYTES,
+                                  AGX_APPLE9_TG_ENC_PRODUCTION};
+      agx_apple9_experiments_set(&e);
+   }
+};
+
+struct Golden {
+   agx_apple9_launch_stage stage;
+   unsigned samples, tile_bytes, threadgroup;
+   uint8_t alloc[8];
+   uint64_t hash;
+};
+
+static const Golden goldens[] = {
+   {AGX_APPLE9_LAUNCH_VERTEX, 1, 24, 0, {0x77,0x00,0x2a,0x41,0,0,0,0}, 0x598081d0090e4fefull},
+   {AGX_APPLE9_LAUNCH_FRAGMENT, 1, 24, 0, {0x77,0x00,0x2a,0x47,0x4b,0,0,0}, 0x28a72854c5d9c1faull},
+   {AGX_APPLE9_LAUNCH_FRAGMENT, 2, 24, 0, {0x77,0x00,0x2a,0x46,0x4b,0,0,0}, 0x1ce71feccc82dc89ull},
+   {AGX_APPLE9_LAUNCH_FRAGMENT, 4, 16, 0, {0x77,0x00,0xaa,0x04,0x43,0,0,0}, 0x9cf46aa6080effefull},
+   {AGX_APPLE9_LAUNCH_COMPUTE, 1, 24, 0, {0x77,0x00,0x2a,0x41,0,0,0,0}, 0x2850ccf67788c2a9ull},
+   {AGX_APPLE9_LAUNCH_COMPUTE, 1, 24, 128, {0x77,0x00,0x2a,0x41,0x80,0x02,0,0}, 0x16cc7d7858ba5de3ull},
+   {AGX_APPLE9_LAUNCH_COMPUTE, 1, 24, 256, {0x77,0x00,0x2a,0x41,0x80,0x04,0,0}, 0x113e865f4d67221dull},
+   {AGX_APPLE9_LAUNCH_COMPUTE, 1, 24, 512, {0x77,0x00,0x2a,0x41,0x80,0x08,0,0}, 0x53701eaaa210ff21ull},
+   {AGX_APPLE9_LAUNCH_COMPUTE, 1, 24, 1024, {0x77,0x00,0x2a,0x41,0x80,0x10,0,0}, 0xb9e585df6df7ffb9ull},
+   {AGX_APPLE9_LAUNCH_COMPUTE, 1, 24, 2048, {0x77,0x00,0x2a,0x41,0x80,0x20,0,0}, 0x0ecddc0478d65089ull},
+   {AGX_APPLE9_LAUNCH_COMPUTE, 1, 24, 4096, {0x77,0x00,0x2a,0x41,0x80,0x40,0,0}, 0xb192abf38027f569ull},
+   {AGX_APPLE9_LAUNCH_COMPUTE, 1, 24, 8192, {0x77,0x00,0x2a,0x41,0x80,0x80,0,0}, 0xae6bd399ee4b57a9ull},
+};
+
+static void
+check_goldens()
+{
+   for (const Golden &g : goldens) {
+      SCOPED_TRACE(g.threadgroup);
+      auto p = parameters();
+      p.samples = g.samples;
+      p.tile_bytes = g.tile_bytes;
+      p.threadgroup_memory_bytes = g.threadgroup;
+      std::array<uint8_t, 1024> out;
+      out.fill(0xa5);
+      ASSERT_TRUE(agx_apple9_launch_build(out.data(), out.size(), g.stage, &p));
+      unsigned call = agx_apple9_launch_call_offset(g.stage, p.resource_count);
+      EXPECT_EQ(0, memcmp(out.data() + call - 10, g.alloc, 8));
+      EXPECT_EQ(fnv1a(out.data(), out.size()), g.hash);
+   }
+}
+
+TEST(Apple9LauncherGolden, ProductionEncodingIsUnchangedByDefault)
+{
+   check_goldens();
+}
+
+TEST(Apple9LauncherGolden, Wide32DoesNotChangeProductionSizes)
+{
+   ExperimentGuard guard(32768, AGX_APPLE9_TG_ENC_WIDE32);
+   check_goldens();
+}
+
+TEST(Apple9LauncherGolden, ProductionRejectsAllocationsAbove8192)
+{
+   auto p = parameters();
+   for (unsigned bytes : {16384u, 32768u}) {
+      p.threadgroup_memory_bytes = bytes;
+      std::array<uint8_t, 1024> out;
+      out.fill(0xa5);
+      auto before = out;
+      EXPECT_FALSE(agx_apple9_launch_threadgroup_memory_supported(bytes));
+      EXPECT_FALSE(agx_apple9_launch_build(out.data(), out.size(),
+                                           AGX_APPLE9_LAUNCH_COMPUTE, &p));
+      EXPECT_EQ(out, before);
+   }
+   /* A raised ceiling alone never selects the candidate encoding. */
+   ExperimentGuard guard(32768, AGX_APPLE9_TG_ENC_PRODUCTION);
+   p.threadgroup_memory_bytes = 16384;
+   std::array<uint8_t, 1024> out;
+   EXPECT_FALSE(agx_apple9_launch_build(out.data(), out.size(),
+                                        AGX_APPLE9_LAUNCH_COMPUTE, &p));
+}
+
+TEST(Apple9LauncherGolden, Wide32WritesAThirtyTwoBitAllocationWord)
+{
+   ExperimentGuard guard(32768, AGX_APPLE9_TG_ENC_WIDE32);
+   auto p = parameters();
+   std::array<uint8_t, 1024> base, out;
+   ASSERT_TRUE(agx_apple9_launch_build(base.data(), base.size(),
+                                       AGX_APPLE9_LAUNCH_COMPUTE, &p));
+   unsigned call = agx_apple9_launch_call_offset(AGX_APPLE9_LAUNCH_COMPUTE,
+                                                 p.resource_count);
+   const struct {
+      unsigned bytes;
+      uint8_t word[4];
+   } cases[] = {
+      {16384, {0x80, 0x00, 0x01, 0x00}},
+      {32768, {0x80, 0x00, 0x02, 0x00}},
+   };
+   for (const auto &c : cases) {
+      SCOPED_TRACE(c.bytes);
+      p.threadgroup_memory_bytes = c.bytes;
+      ASSERT_TRUE(agx_apple9_launch_build(out.data(), out.size(),
+                                          AGX_APPLE9_LAUNCH_COMPUTE, &p));
+      EXPECT_EQ(0, memcmp(out.data() + call - 6, c.word, 4));
+      /* Only allocation bytes 4..7 differ from the unallocated launch. */
+      memcpy(out.data() + call - 6, base.data() + call - 6, 4);
+      EXPECT_EQ(out, base);
+   }
+   /* Beyond the experiment ceiling and non powers of two stay rejected. */
+   for (unsigned bytes : {65536u, 24576u}) {
+      p.threadgroup_memory_bytes = bytes;
+      EXPECT_FALSE(agx_apple9_launch_build(out.data(), out.size(),
+                                           AGX_APPLE9_LAUNCH_COMPUTE, &p));
+   }
+}
+
+TEST(Apple9LauncherGolden, CallOffsetIsIndependentOfTheEncoding)
+{
+   auto p = parameters();
+   unsigned production[3], wide[3];
+   const agx_apple9_launch_stage stages[] = {
+      AGX_APPLE9_LAUNCH_VERTEX, AGX_APPLE9_LAUNCH_FRAGMENT,
+      AGX_APPLE9_LAUNCH_COMPUTE};
+   for (unsigned i = 0; i < 3; ++i)
+      production[i] = agx_apple9_launch_call_offset(stages[i], p.resource_count);
+   ExperimentGuard guard(32768, AGX_APPLE9_TG_ENC_WIDE32);
+   for (unsigned i = 0; i < 3; ++i)
+      wide[i] = agx_apple9_launch_call_offset(stages[i], p.resource_count);
+   for (unsigned i = 0; i < 3; ++i)
+      EXPECT_EQ(production[i], wide[i]);
+   EXPECT_EQ(wide[2], 96u);
+}
+
+TEST(Apple9LauncherGolden, ExperimentStateIsAValueSnapshot)
+{
+   agx_apple9_experiments initial = agx_apple9_experiments_get();
+   EXPECT_EQ(initial.threadgroup_memory_ceiling, 8192u);
+   EXPECT_EQ(initial.threadgroup_encoding, AGX_APPLE9_TG_ENC_PRODUCTION);
+   {
+      ExperimentGuard guard(16384, AGX_APPLE9_TG_ENC_WIDE32);
+      agx_apple9_experiments set = agx_apple9_experiments_get();
+      EXPECT_EQ(set.threadgroup_memory_ceiling, 16384u);
+      EXPECT_EQ(set.threadgroup_encoding, AGX_APPLE9_TG_ENC_WIDE32);
+      EXPECT_EQ(initial.threadgroup_memory_ceiling, 8192u);
+   }
+   agx_apple9_experiments restored = agx_apple9_experiments_get();
+   EXPECT_EQ(restored.threadgroup_memory_ceiling, 8192u);
+   EXPECT_EQ(restored.threadgroup_encoding, AGX_APPLE9_TG_ENC_PRODUCTION);
 }

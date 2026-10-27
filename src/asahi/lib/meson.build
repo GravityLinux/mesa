@@ -4,6 +4,8 @@
 # SPDX-License-Identifier: MIT
 
 libasahi_lib_files = files(
+  'agx_apple9_compute.c',
+  'agx_apple9_geometry.c',
   'agx_bo.c',
   'agx_border.c',
   'agx_device.c',
