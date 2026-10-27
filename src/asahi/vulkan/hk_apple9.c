@@ -1137,13 +1137,23 @@ hk_apple9_upload_sysvals(struct hk_cmd_buffer *cmd, struct hk_shader *shader,
       memcpy(table.cpu, cmd->state.gfx.apple9_draw_params,
              sizeof(cmd->state.gfx.apple9_draw_params));
 
-   u_foreach_bit(binding, shader->b.info.apple9_texture_mask) {
+   /* Size and level queries read this table without a hardware texture
+    * slot, so a stage may query a texture it never samples (WebRender takes
+    * textureSize in the vertex stage and samples in the fragment stage).
+    * Fill every mapped texture; only sampled ones must decode.
+    */
+   uint32_t sampled = shader->b.info.apple9_texture_mask;
+   u_foreach_bit(binding,
+                 sampled | BITFIELD_MASK(shader->apple9_mapping.texture_count)) {
       struct hk_apple9_descriptor *entry = &shader->apple9_mapping.textures[binding];
       const struct hk_sampled_image_descriptor *desc = hk_apple9_descriptor_cpu(
          descriptors, entry->set, entry->offset, sizeof(*desc));
       struct AGX_TEXTURE tex;
-      if (!desc || !hk_apple9_decode_texture(&desc->tex, &tex))
-         return 0;
+      if (!desc || !hk_apple9_decode_texture(&desc->tex, &tex)) {
+         if (sampled & BITFIELD_BIT(binding))
+            return 0;
+         continue;
+      }
 
       uint32_t *info = (uint32_t *)((uint8_t *)table.cpu +
          AGX_APPLE9_TEXTURE_INFO_OFFSET + binding * AGX_APPLE9_TEXTURE_INFO_STRIDE);
