@@ -1337,8 +1337,10 @@ hk_apple9_graphics_resources(struct hk_cmd_buffer *cmd, struct hk_shader *shader
          A9FAIL();
    }
 
-   /* Retain the narrow sampled-image contract. Uniform texel buffers use
-    * the linear 2D representation produced by hk_CreateBufferView.
+   /* Retain the narrow sampled-image contract, except that mipmapped views
+    * are allowed: hk_apple9_pack_texture carries the level range. Uniform
+    * texel buffers use the linear 2D representation produced by
+    * hk_CreateBufferView.
     */
    u_foreach_bit(binding, info->apple9_texture_mask) {
       const struct hk_apple9_descriptor *entry =
@@ -1358,7 +1360,7 @@ hk_apple9_graphics_resources(struct hk_cmd_buffer *cmd, struct hk_shader *shader
                   tex.dimension != AGX_TEXTURE_DIMENSION_2D_ARRAY &&
                   tex.dimension != AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED &&
                   tex.dimension != AGX_TEXTURE_DIMENSION_2D_ARRAY_MULTISAMPLED) ||
-                 tex.first_level || tex.last_level || tex.depth != 1) {
+                 tex.depth != 1) {
          A9FAIL();
       }
    }
