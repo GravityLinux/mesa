@@ -5,10 +5,13 @@
  * SPDX-License-Identifier: MIT
  */
 #include "util/format/u_formats.h"
+#include <stdio.h>
 #include "util/macros.h"
 #include "util/u_math.h"
 #include "vulkan/vulkan_core.h"
 #include "hk_cmd_buffer.h"
+#include "hk_apple9_trace.h"
+#include "asahi/lib/agx_apple9_compute.h"
 #include "layout.h"
 
 #include "hk_device.h"
@@ -25,6 +28,14 @@ hk_clear_image(struct hk_cmd_buffer *cmd, struct hk_image *image,
                enum pipe_format view_format, const uint32_t *clear_value,
                const VkImageSubresourceRange *range, bool whole_3d)
 {
+   if (agx_apple9_compute_enabled(&hk_cmd_buffer_device(cmd)->dev) &&
+       hk_apple9_trace(HK_APPLE9_TRACE_META)) {
+      fprintf(stderr,
+              "APPLE9_META op=clear-image cmd=%p aspect=0x%x level=%u+%u layer=%u+%u\n",
+              (void *)cmd, range->aspectMask, range->baseMipLevel, range->levelCount,
+              range->baseArrayLayer, range->layerCount);
+      hk_apple9_trace_image("dst", hk_image_to_handle(image));
+   }
    const uint32_t level_count =
       vk_image_subresource_level_count(&image->vk, range);
 

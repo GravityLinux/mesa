@@ -5,6 +5,7 @@
 #include "hk_apple9.h"
 #include "hk_cmd_buffer.h"
 #include "hk_apple9_graphics.h"
+#include "hk_apple9_trace.h"
 
 #include "asahi/lib/agx_apple9_compute.h"
 #include "asahi/lib/agx_abi.h"
@@ -25,7 +26,7 @@
 #include <stdlib.h>
 #define HK_APPLE9_BUFFER_ADDRESSES_OFFSET \
    ALIGN_POT(HK_APPLE9_BUFFER_SIZES_OFFSET + 64 * sizeof(uint32_t), 8)
-#define A9FAIL() do { if (getenv("AGX_APPLE9_TRACE_REJECT")) fprintf(stderr, "APPLE9_DISPATCH_FAIL %s:%d\n", __func__, __LINE__); return false; } while (0)
+#define A9FAIL() do { if (hk_apple9_trace(HK_APPLE9_TRACE_REJECT)) fprintf(stderr, "APPLE9_DISPATCH_FAIL %s:%d\n", __func__, __LINE__); return false; } while (0)
 
 struct hk_apple9_nir_context {
    struct vk_descriptor_set_layout *const *set_layouts;
@@ -151,7 +152,7 @@ hk_apple9_resolve_binding(struct hk_apple9_nir_context *ctx, nir_def *def,
       nir_src src = { .ssa = cursor };
       nir_intrinsic_instr *intr = nir_src_as_intrinsic(src);
       if (!intr) {
-         if (getenv("AGX_APPLE9_TRACE_REJECT")) {
+         if (hk_apple9_trace(HK_APPLE9_TRACE_DRAW)) {
             fprintf(stderr, "APPLE9_DESCRIPTOR_REJECT io_only=%u count=%u constant=%u\n",
                     ctx->io_only,
                     kind == HK_APPLE9_MAP_UBO ? ctx->mapping->ubo_count : ctx->mapping->ssbo_count,
@@ -1361,6 +1362,11 @@ hk_apple9_graphics_resources(struct hk_cmd_buffer *cmd, struct hk_shader *shader
                   tex.dimension != AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED &&
                   tex.dimension != AGX_TEXTURE_DIMENSION_2D_ARRAY_MULTISAMPLED) ||
                  tex.depth != 1) {
+         if (hk_apple9_trace(HK_APPLE9_TRACE_REJECT))
+            fprintf(stderr, "APPLE9_TEXTURE_REJECT binding=%u type=%u dimension=%u "
+                    "levels=%u..%u depth=%u layout=%u\n", binding, entry->type,
+                    tex.dimension, tex.first_level, tex.last_level, tex.depth,
+                    tex.layout);
          A9FAIL();
       }
    }

@@ -21,6 +21,7 @@
 #include "agx_pack.h"
 #include "decode.h"
 #include "hk_cmd_buffer.h"
+#include "hk_apple9_trace.h"
 #include "hk_apple9_msaa.h"
 #include "hk_device.h"
 #include "hk_image.h"
@@ -153,8 +154,15 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
          c->ts_frag.end.handle = cs->timestamp.end.handle;
          c->ts_frag.end.offset = cs->timestamp.end.offset_B;
       }
-      if (getenv("AGX_APPLE9_TRACE_REJECT"))
-         fprintf(stderr, "APPLE9_RENDER_JOB_READY\n");
+      if (hk_apple9_trace(HK_APPLE9_TRACE_SUBMIT))
+         fprintf(stderr,
+                 "APPLE9_RENDER_JOB_READY samples=%u utile=%ux%u sample_bytes=%u "
+                 "tile_bytes=%u positions=0x%llx color_size=%llu\n",
+                 c->samples, c->utile_width_px, c->utile_height_px,
+                 c->sample_size_B,
+                 c->sample_size_B * c->samples * c->utile_width_px * c->utile_height_px,
+                 (unsigned long long)c->ppp_multisamplectl,
+                 (unsigned long long)cs->apple9_attachment.size);
       return;
    }
 
@@ -327,7 +335,7 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
    /* XXX: don't trap */
    if (ret) {
       if (agx_apple9_compute_enabled(&dev->dev)) {
-         if (getenv("AGX_APPLE9_TRACE_REJECT"))
+         if (hk_apple9_trace(HK_APPLE9_TRACE_SUBMIT))
             fprintf(stderr, "APPLE9_SUBMIT_FAIL errno=%d\n", errno);
          return vk_error(dev, VK_ERROR_DEVICE_LOST);
       }
@@ -336,7 +344,7 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
    }
 
    if (!ret && agx_apple9_compute_enabled(&dev->dev) &&
-       getenv("AGX_APPLE9_TRACE_REJECT")) {
+       hk_apple9_trace(HK_APPLE9_TRACE_SUBMIT)) {
       const uint8_t *payload = (void *)(uintptr_t)submit->cmdbuf;
       for (size_t offset = 0; offset < submit->cmdbuf_size;) {
          const struct drm_asahi_cmd_header *header = (void *)(payload + offset);
@@ -906,7 +914,7 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
                 !cs->cr.bg.main.usc || !cs->cr.bg.partial.usc ||
                 !cs->cr.eot.main.usc || !cs->apple9_attachment.pointer ||
                 !cs->uploaded_scissor || !cs->uploaded_zbias) {
-               if (getenv("AGX_APPLE9_TRACE_REJECT"))
+               if (hk_apple9_trace(HK_APPLE9_TRACE_SUBMIT))
                   fprintf(stderr, "APPLE9_RENDER_REJECT reason=incomplete-job\n");
                util_dynarray_fini(&payload);
                return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);

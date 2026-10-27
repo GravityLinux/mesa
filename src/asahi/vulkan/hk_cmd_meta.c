@@ -14,6 +14,7 @@
 #include "hk_cmd_buffer.h"
 #include "hk_device.h"
 #include "hk_apple9_graphics.h"
+#include "hk_apple9_trace.h"
 #include "asahi/lib/agx_apple9_compute.h"
 #include "hk_entrypoints.h"
 #include "hk_image.h"
@@ -1100,7 +1101,7 @@ hk_meta_copy_buffer_image_apple9(struct vk_command_buffer *cmd,
    return;
 
 reject:
-   if (getenv("AGX_APPLE9_TRACE_REJECT") != NULL)
+   if (hk_apple9_trace(HK_APPLE9_TRACE_META))
       fprintf(stderr, "APPLE9_META_TRANSFER_REJECT direction=%s reason=%s\n",
               readback ? "image-to-buffer" : "buffer-to-image", reason);
    vk_command_buffer_set_error(cmd, VK_ERROR_FORMAT_NOT_SUPPORTED);
@@ -1514,6 +1515,28 @@ hk_CmdBlitImage2(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (agx_apple9_compute_enabled(&dev->dev) &&
+       hk_apple9_trace(HK_APPLE9_TRACE_META)) {
+      fprintf(stderr, "APPLE9_META op=blit cmd=%p regions=%u filter=%u\n",
+              (void *)cmd, pBlitImageInfo->regionCount, pBlitImageInfo->filter);
+      hk_apple9_trace_image("src", pBlitImageInfo->srcImage);
+      hk_apple9_trace_image("dst", pBlitImageInfo->dstImage);
+      for (unsigned i = 0; i < MIN2(pBlitImageInfo->regionCount, 64); ++i) {
+         const VkImageBlit2 *r = &pBlitImageInfo->pRegions[i];
+         fprintf(stderr,
+                 "APPLE9_BLIT_REGION aspect=0x%x dst_aspect=0x%x "
+                 "src_level=%u src_layer=%u+%u dst_level=%u dst_layer=%u+%u "
+                 "src=%d,%d,%d:%d,%d,%d dst=%d,%d,%d:%d,%d,%d\n",
+                 r->srcSubresource.aspectMask, r->dstSubresource.aspectMask,
+                 r->srcSubresource.mipLevel, r->srcSubresource.baseArrayLayer,
+                 r->srcSubresource.layerCount, r->dstSubresource.mipLevel,
+                 r->dstSubresource.baseArrayLayer, r->dstSubresource.layerCount,
+                 r->srcOffsets[0].x, r->srcOffsets[0].y, r->srcOffsets[0].z,
+                 r->srcOffsets[1].x, r->srcOffsets[1].y, r->srcOffsets[1].z,
+                 r->dstOffsets[0].x, r->dstOffsets[0].y, r->dstOffsets[0].z,
+                 r->dstOffsets[1].x, r->dstOffsets[1].y, r->dstOffsets[1].z);
+      }
+   }
    perf_debug(cmd, "Blit image");
 
    struct hk_meta_save save;
@@ -1529,6 +1552,26 @@ hk_CmdResolveImage2(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    if (agx_apple9_compute_enabled(&dev->dev)) {
+      if (hk_apple9_trace(HK_APPLE9_TRACE_META)) {
+         fprintf(stderr, "APPLE9_META op=resolve-image cmd=%p regions=%u\n",
+                 (void *)cmd, pResolveImageInfo->regionCount);
+         hk_apple9_trace_image("src", pResolveImageInfo->srcImage);
+         hk_apple9_trace_image("dst", pResolveImageInfo->dstImage);
+         for (unsigned i = 0; i < MIN2(pResolveImageInfo->regionCount, 64); ++i) {
+            const VkImageResolve2 *r = &pResolveImageInfo->pRegions[i];
+            fprintf(stderr,
+                    "APPLE9_RESOLVE_REGION aspect=0x%x dst_aspect=0x%x "
+                    "src=%d,%d,%d dst=%d,%d,%d extent=%ux%ux%u "
+                    "src_level=%u src_layer=%u+%u dst_level=%u dst_layer=%u+%u\n",
+                    r->srcSubresource.aspectMask, r->dstSubresource.aspectMask,
+                    r->srcOffset.x, r->srcOffset.y, r->srcOffset.z,
+                    r->dstOffset.x, r->dstOffset.y, r->dstOffset.z,
+                    r->extent.width, r->extent.height, r->extent.depth,
+                    r->srcSubresource.mipLevel, r->srcSubresource.baseArrayLayer,
+                    r->srcSubresource.layerCount, r->dstSubresource.mipLevel,
+                    r->dstSubresource.baseArrayLayer, r->dstSubresource.layerCount);
+         }
+      }
       VK_FROM_HANDLE(hk_image, src, pResolveImageInfo->srcImage);
       if (vk_format_is_depth_or_stencil(src->vk.format)) {
          hk_apple9_graphics_reject(cmd, "depth-stencil-resolve");
@@ -1548,6 +1591,8 @@ hk_meta_resolve_rendering(struct hk_cmd_buffer *cmd,
                           const VkRenderingInfo *pRenderingInfo)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (agx_apple9_compute_enabled(&dev->dev))
+      hk_apple9_trace_rendering(cmd, pRenderingInfo, true);
 
    struct hk_meta_save save;
    hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS);
@@ -1624,6 +1669,12 @@ hk_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(hk_image, dst_image, pCopyBufferToImageInfo->dstImage);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (agx_apple9_compute_enabled(&dev->dev) &&
+       hk_apple9_trace(HK_APPLE9_TRACE_META)) {
+      fprintf(stderr, "APPLE9_META op=copy-buffer-image cmd=%p regions=%u\n",
+              (void *)cmd, pCopyBufferToImageInfo->regionCount);
+      hk_apple9_trace_image("dst", pCopyBufferToImageInfo->dstImage);
+   }
 
    bool gfx = hk_copy_requires_gfx(dst_image);
    VkPipelineBindPoint bind_point = hk_bind_point(gfx);
@@ -1651,6 +1702,12 @@ hk_CmdCopyImageToBuffer2(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (agx_apple9_compute_enabled(&dev->dev) &&
+       hk_apple9_trace(HK_APPLE9_TRACE_META)) {
+      fprintf(stderr, "APPLE9_META op=copy-image-buffer cmd=%p regions=%u\n",
+              (void *)cmd, pCopyImageToBufferInfo->regionCount);
+      hk_apple9_trace_image("src", pCopyImageToBufferInfo->srcImage);
+   }
 
    struct hk_meta_save save;
    hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
@@ -1666,6 +1723,13 @@ hk_CmdCopyImage2(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(hk_image, src_image, pCopyImageInfo->srcImage);
    VK_FROM_HANDLE(hk_image, dst_image, pCopyImageInfo->dstImage);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (agx_apple9_compute_enabled(&dev->dev) &&
+       hk_apple9_trace(HK_APPLE9_TRACE_META)) {
+      fprintf(stderr, "APPLE9_META op=copy-image cmd=%p regions=%u\n",
+              (void *)cmd, pCopyImageInfo->regionCount);
+      hk_apple9_trace_image("src", pCopyImageInfo->srcImage);
+      hk_apple9_trace_image("dst", pCopyImageInfo->dstImage);
+   }
    bool gfx = hk_copy_requires_gfx(dst_image);
    VkPipelineBindPoint bind_point = hk_bind_point(gfx);
 
@@ -1742,6 +1806,19 @@ hk_CmdClearAttachments(VkCommandBuffer commandBuffer, uint32_t attachmentCount,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (agx_apple9_compute_enabled(&dev->dev) &&
+       hk_apple9_trace(HK_APPLE9_TRACE_META)) {
+      fprintf(stderr, "APPLE9_META op=clear-attachments cmd=%p attachments=%u rects=%u\n",
+              (void *)cmd, attachmentCount, rectCount);
+      for (unsigned i = 0; i < MIN2(attachmentCount, 64); ++i)
+         fprintf(stderr, "APPLE9_CLEAR aspect=0x%x color=%u\n",
+                 pAttachments[i].aspectMask, pAttachments[i].colorAttachment);
+      for (unsigned i = 0; i < MIN2(rectCount, 64); ++i)
+         fprintf(stderr, "APPLE9_CLEAR_RECT area=%d,%d+%ux%u layer=%u+%u\n",
+                 pRects[i].rect.offset.x, pRects[i].rect.offset.y,
+                 pRects[i].rect.extent.width, pRects[i].rect.extent.height,
+                 pRects[i].baseArrayLayer, pRects[i].layerCount);
+   }
 
    struct vk_meta_rendering_info render_info;
    hk_meta_init_render(cmd, &render_info);

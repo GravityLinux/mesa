@@ -11,6 +11,7 @@
 #include "hk_apple9_root.h"
 #include "hk_apple9_coopmat.h"
 #include "hk_apple9_graphics.h"
+#include "hk_apple9_trace.h"
 #include "asahi/lib/agx_apple9_compute.h"
 
 #include "poly/nir/poly_nir.h"
@@ -1376,7 +1377,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
       const char *reason = NULL;
       if (!agx_compile_apple9_tiny(nir, &shader->b,
                                    &shader->apple9_profile, &reason)) {
-         if (getenv("AGX_APPLE9_TRACE_REJECT") != NULL)
+         if (hk_apple9_trace(HK_APPLE9_TRACE_SHADER))
             fprintf(stderr, "APPLE9_COMPILE_FAILED shared=%u: %s\n",
                     nir->info.shared_size, reason ?: "unknown reason");
          if (getenv("AGX_APPLE9_DUMP_NIR") != NULL)
@@ -1393,7 +1394,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
           * Our NIR lowering should have converted all image_deref_* to global
           * memory ops, so this indicates an unlowered tile operation.
           */
-         if (getenv("AGX_APPLE9_TRACE_REJECT"))
+         if (hk_apple9_trace(HK_APPLE9_TRACE_SHADER))
             fprintf(stderr, "APPLE9_IMAGE_MASK reject mask=0x%x\n",
                     shader->b.info.apple9_image_mask);
          if (lock)
@@ -1686,6 +1687,31 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
             }
          }
       }
+      if (!vertex && hk_apple9_trace(HK_APPLE9_TRACE_SHADER))
+         fprintf(stderr,
+                 "APPLE9_FS_MS_INFO samples=%u sample_shading=%u "
+                 "uses_sample_shading=%u reads_sample_id=%u "
+                 "reads_sample_mask=%u writes_sample_mask=%u "
+                 "format=%u depth_format=%u stencil_format=%u min_shading=%f "
+                 "mask=0x%x alpha_coverage=%u alpha_one=%u dynamic_samples=%u\n",
+                 state && state->ms ? state->ms->rasterization_samples : 0,
+                 state && state->ms ? state->ms->sample_shading_enable : 0,
+                 nir->info.fs.uses_sample_shading,
+                 BITSET_TEST(nir->info.system_values_read,
+                             SYSTEM_VALUE_SAMPLE_ID),
+                 BITSET_TEST(nir->info.system_values_read,
+                             SYSTEM_VALUE_SAMPLE_MASK_IN),
+                 !!(nir->info.outputs_written &
+                    BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK)),
+                 state && state->rp ? state->rp->color_attachment_formats[0] : 0,
+                 state && state->rp ? state->rp->depth_attachment_format : 0,
+                 state && state->rp ? state->rp->stencil_attachment_format : 0,
+                 state && state->ms ? state->ms->min_sample_shading : 0,
+                 state && state->ms ? state->ms->sample_mask : 0,
+                 state && state->ms ? state->ms->alpha_to_coverage_enable : 0,
+                 state && state->ms ? state->ms->alpha_to_one_enable : 0,
+                 state && BITSET_TEST(state->dynamic,
+                                      MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES));
       if (!vertex && state && state->ms &&
           (state->ms->sample_shading_enable ||
            state->ms->alpha_to_coverage_enable ||

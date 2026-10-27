@@ -5,6 +5,7 @@
 
 #include "hk_apple9_graphics.h"
 #include "hk_apple9_msaa.h"
+#include "hk_apple9_trace.h"
 #include "asahi/lib/pool.h"
 #include "pipe/p_defines.h"
 #include "asahi/lib/agx_apple9_launch.h"
@@ -110,7 +111,7 @@ hk_apple9_blend_state(const struct vk_color_blend_state *cb,
 VkResult
 hk_apple9_graphics_reject(struct hk_cmd_buffer *cmd, const char *reason)
 {
-   if (getenv("AGX_APPLE9_TRACE_REJECT"))
+   if (hk_apple9_trace(HK_APPLE9_TRACE_REJECT))
       fprintf(stderr, "APPLE9_RENDER_REJECT reason=%s\n", reason);
    vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
    /* Keep allocations on control_streams for reset, but never run the stock
@@ -177,7 +178,7 @@ hk_apple9_tile_shader(struct hk_cmd_buffer *cmd, unsigned operation, bool srgb,
                                                     &shader.b, &reason);
    ralloc_free(nir);
    if (!compiled || shader.b.info.apple9_resource_count) {
-      if (getenv("AGX_APPLE9_TRACE_REJECT"))
+      if (hk_apple9_trace(HK_APPLE9_TRACE_REJECT))
          fprintf(stderr, "APPLE9_TILE_COMPILE_FAIL op=%u reason=%s\n",
                  operation, reason ?: "buffer-resource");
       free(shader.b.binary);
@@ -273,6 +274,7 @@ hk_apple9_zs_attachment(const struct hk_image_view *view,
 void
 hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
 {
+   hk_apple9_trace_rendering(cmd, info, false);
    if (vk_command_buffer_get_record_result(&cmd->vk) != VK_SUCCESS)
       return;
    if (cmd->current_cs.gfx) {
@@ -287,7 +289,7 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
       VK_RENDERING_CONTENTS_INLINE_BIT_KHR;
    if ((info->flags & ~allowed_flags) || info->viewMask || info->layerCount != 1 ||
        info->colorAttachmentCount != 1) {
-      if (getenv("AGX_APPLE9_TRACE_REJECT"))
+      if (hk_apple9_trace(HK_APPLE9_TRACE_REJECT))
          fprintf(stderr, "APPLE9_RENDER_INFO flags=0x%x viewMask=%u layers=%u colors=%u depth=%u stencil=%u\n",
                  info->flags, info->viewMask, info->layerCount,
                  info->colorAttachmentCount,
@@ -321,7 +323,7 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
         att->loadOp != VK_ATTACHMENT_LOAD_OP_DONT_CARE) ||
        (att->storeOp != VK_ATTACHMENT_STORE_OP_STORE &&
         att->storeOp != VK_ATTACHMENT_STORE_OP_DONT_CARE)) {
-      if (getenv("AGX_APPLE9_TRACE_REJECT") && view)
+      if (hk_apple9_trace(HK_APPLE9_TRACE_REJECT) && view)
          fprintf(stderr, "APPLE9_COLOR_INFO format=%u view_type=%u level=%u+%u layer=%u+%u resolve=%u load=%u store=%u\n",
                  view->vk.format, view->vk.view_type, view->vk.base_mip_level,
                  view->vk.level_count, view->vk.base_array_layer,
@@ -341,6 +343,24 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
        image->planes[0].sparse_map ||
        (image->vk.create_flags & (VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
                                   VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT))) {
+      if (hk_apple9_trace(HK_APPLE9_TRACE_REJECT)) {
+         const VkRenderingAttachmentInfo *z = info->pDepthAttachment;
+         const VkRenderingAttachmentInfo *s = info->pStencilAttachment;
+         VK_FROM_HANDLE(hk_image_view, zv, z ? z->imageView : VK_NULL_HANDLE);
+         VK_FROM_HANDLE(hk_image_view, sv, s ? s->imageView : VK_NULL_HANDLE);
+         fprintf(stderr,
+                 "APPLE9_MSAA_INFO samples=%u format=%u extent=%ux%u usage=0x%llx "
+                 "load=%u store=%u depth_format=%u depth_samples=%u "
+                 "depth_load=%u depth_store=%u stencil_format=%u "
+                 "stencil_load=%u stencil_store=%u\n",
+                 image->vk.samples, view->vk.format, image->vk.extent.width,
+                 image->vk.extent.height,
+                 (unsigned long long)image->vk.usage, att->loadOp,
+                 att->storeOp, zv ? zv->vk.format : 0,
+                 zv ? zv->vk.image->samples : 0, z ? z->loadOp : 0,
+                 z ? z->storeOp : 0, sv ? sv->vk.format : 0,
+                 s ? s->loadOp : 0, s ? s->storeOp : 0);
+      }
       hk_apple9_graphics_reject(cmd, "image-layout-or-msaa");
       return;
    }
@@ -615,7 +635,7 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
    util_dynarray_append(&cs->scissor, scissor);
    struct agx_depth_bias_packed bias = {0};
    util_dynarray_append(&cs->depth_bias, bias);
-   if (getenv("AGX_APPLE9_TRACE_REJECT"))
+   if (hk_apple9_trace(HK_APPLE9_TRACE_DRAW))
       fprintf(stderr, "APPLE9_RENDER_BEGIN_OK\n");
 }
 
@@ -669,7 +689,7 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, struct agx_draw draw)
        (primitive != MESA_PRIM_TRIANGLES && primitive != MESA_PRIM_TRIANGLE_FAN &&
         primitive != MESA_PRIM_TRIANGLE_STRIP && primitive != MESA_PRIM_POINTS) ||
        dyn->ia.primitive_restart_enable) {
-      if (getenv("AGX_APPLE9_TRACE_REJECT"))
+      if (hk_apple9_trace(HK_APPLE9_TRACE_DRAW))
          fprintf(stderr, "APPLE9_DRAW_INFO indirect=%u first_instance=%u topology=%u restart=%u indexed=%u\n",
                  agx_is_indirect(draw.b), draw.start_instance,
                  dyn->ia.primitive_topology, dyn->ia.primitive_restart_enable,
@@ -692,6 +712,13 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, struct agx_draw draw)
        (dyn->ms.sample_mask & BITFIELD_MASK(samples)) != BITFIELD_MASK(samples) ||
        dyn->ms.sample_locations_enable ||
        dyn->ds.depth.bounds_test.enable) {
+      if (hk_apple9_trace(HK_APPLE9_TRACE_DRAW))
+         fprintf(stderr,
+                 "APPLE9_DRAW_MS_REJECT cmd=%p raster_samples=%u attachment_samples=%u "
+                 "mask=0x%x alpha_coverage=%u alpha_one=%u locations=%u\n",
+                 (void *)cmd, dyn->ms.rasterization_samples, samples,
+                 dyn->ms.sample_mask, dyn->ms.alpha_to_coverage_enable,
+                 dyn->ms.alpha_to_one_enable, dyn->ms.sample_locations_enable);
       hk_apple9_graphics_reject(cmd, "vertex-input-msaa-or-depth-stencil");
       return;
    }
@@ -917,7 +944,7 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    util_dynarray_append(&cmd->large_bos, vs->bo);
    agx_bo_reference(fs->bo);
    util_dynarray_append(&cmd->large_bos, fs->bo);
-   if (getenv("AGX_APPLE9_TRACE_REJECT"))
+   if (hk_apple9_trace(HK_APPLE9_TRACE_DRAW))
       fprintf(stderr, "APPLE9_RENDER_DRAW_OK\n");
 }
 
@@ -956,7 +983,7 @@ hk_apple9_end_rendering(struct hk_cmd_buffer *cmd)
       memset(render, 0, sizeof(*render));
       hk_meta_resolve_rendering(cmd, &info);
    }
-   if (getenv("AGX_APPLE9_TRACE_REJECT"))
+   if (hk_apple9_trace(HK_APPLE9_TRACE_DRAW))
       fprintf(stderr, "APPLE9_RENDER_END_OK\n");
 }
 
@@ -1128,7 +1155,7 @@ hk_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
       tile_bytes += 4 * agx_apple9_color_words(pipeline->color_formats[rt]);
    unsigned samples = MAX2(pipeline->samples, 1);
    if (tile_bytes > (samples == 1 ? 128 : 64)) {
-      if (getenv("AGX_APPLE9_TRACE_REJECT"))
+      if (hk_apple9_trace(HK_APPLE9_TRACE_DRAW))
          fprintf(stderr, "APPLE9_DRAW_STATE_FAIL reason=tile-allocation bytes=%u samples=%u\n",
               tile_bytes, samples);
       return false;
@@ -1138,7 +1165,7 @@ hk_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
    for (unsigned stage = 0; stage < 2; stage++) {
       const struct hk_apple9_render_stage *shader = stages[stage];
       if (!shader->bo || !shader->publication_count_valid) {
-         if (getenv("AGX_APPLE9_TRACE_REJECT"))
+         if (hk_apple9_trace(HK_APPLE9_TRACE_DRAW))
             fprintf(stderr, "APPLE9_DRAW_STATE_FAIL reason=missing-stage stage=%u\n",
                  stage);
          return false;
@@ -1150,7 +1177,7 @@ hk_apple9_prepare_draw(struct agx_device *dev, struct agx_pool *usc_pool,
    for (unsigned stage = 0; stage < 2; stage++) {
       offsets[stage] = agx_apple9_shader_entry(dev, stages[stage]->bo, false);
       if (!offsets[stage]) {
-         if (getenv("AGX_APPLE9_TRACE_REJECT"))
+         if (hk_apple9_trace(HK_APPLE9_TRACE_DRAW))
             fprintf(stderr, "APPLE9_DRAW_STATE_FAIL reason=entry-allocation stage=%u code=0x%llx\n",
                  stage, (unsigned long long)draw->code[stage]);
          return false;

@@ -11,6 +11,8 @@ hk_files = files(
   'hk_apple9_graphics.h',
   'hk_apple9_msaa.c',
   'hk_apple9_msaa.h',
+  'hk_apple9_trace.c',
+  'hk_apple9_trace.h',
   'hk_buffer.c',
   'hk_buffer.h',
   'hk_buffer_view.c',
