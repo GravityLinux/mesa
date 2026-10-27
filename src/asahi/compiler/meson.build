@@ -12,6 +12,7 @@ libasahi_agx_files = files(
   '../lib/agx_apple9_launch.c',
   'agx_nir_lower_apple9_texture.c',
   'agx_nir_lower_apple9_math.c',
+  'agx_nir_lower_apple9_cooperative_matrix.c',
   'agx_dce.c',
   'agx_liveness.c',
   'agx_insert_waits.c',
@@ -122,6 +123,17 @@ if with_tests or with_tools.contains('drm-shim')
 endif
 
 if with_tests
+  apple9_cooperative_matrix_tests = executable(
+    'agx_apple9_cooperative_matrix_tests',
+    files('test/test-apple9-cooperative-matrix.cpp',
+          'agx_nir_lower_apple9_cooperative_matrix.c'),
+    c_args : [no_override_init_args],
+    dependencies : [idep_vtn, idep_nir, idep_mesautil],
+    gnu_symbol_visibility : 'hidden',
+  )
+  test('agx_apple9_cooperative_matrix_tests', apple9_cooperative_matrix_tests,
+       suite : ['asahi'])
+
   test(
     'agx_tests',
     executable(
@@ -138,10 +150,13 @@ if with_tests
          'test/test-lower-parallel-copy.cpp',
          'test/test-lower-spill.cpp',
          'test/test-repair-ssa.cpp',
+         'test/test-apple9-tg-experiment.cpp',
+         'test/test-apple9-fp64.cpp',
+         '../layout/layout.c',
       ),
       c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',
-      dependencies: [idep_gtest, idep_nir, idep_agx_opcodes_h, idep_agx_builder_h, idep_mesautil],
+      dependencies: [idep_gtest, idep_nir, idep_agx_opcodes_h, idep_agx_builder_h, idep_mesautil, idep_libagx],
       link_with : [libasahi_compiler],
     ),
     suite : ['asahi'],

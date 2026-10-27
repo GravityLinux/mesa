@@ -532,7 +532,7 @@ __roundAndPackFloat64(uint zSign,
          zFrac0, zFrac1, zFrac2, -zExp, zFrac0, zFrac1, zFrac2);
       zExp = 0;
       if (roundNearestEven) {
-         increment = zFrac2 < 0u;
+         increment = int(zFrac2) < 0;
       } else {
          if (zSign != 0u) {
             increment = (FLOAT_ROUNDING_MODE == FLOAT_ROUND_DOWN) &&
@@ -546,7 +546,7 @@ __roundAndPackFloat64(uint zSign,
 
    if (increment) {
       __add64(zFrac0, zFrac1, 0u, 1u, zFrac0, zFrac1);
-      zFrac1 &= ~((zFrac2 + uint(zFrac2 == 0u)) & uint(roundNearestEven));
+      zFrac1 &= ~uint(roundNearestEven && zFrac2 == 0x80000000u);
    } else {
       zExp = mix(zExp, 0, (zFrac0 | zFrac1) == 0u);
    }
@@ -675,7 +675,7 @@ __propagateFloat64NaN(uint64_t __a, uint64_t __b)
    uvec2 a = unpackUint2x32(__a);
    uvec2 b = unpackUint2x32(__b);
 
-   return packUint2x32(uvec2(a.x | b.x, a.y | b.y));
+   return packUint2x32(uvec2(a.x | b.x, a.y | b.y | 0x00080000u));
 #else
    bool aIsNaN = __is_nan(__a);
    bool bIsNaN = __is_nan(__b);
@@ -921,7 +921,7 @@ __fmul64(uint64_t a, uint64_t b)
       /* a cannot be NaN, but is b NaN? */
       if ((bFracHi | bFracLo) != 0u)
 #if defined RELAXED_NAN_PROPAGATION
-         return b;
+         return b | 0x0008000000000000ul;
 #else
          return __propagateFloat64NaN(a, b);
 #endif
@@ -958,6 +958,271 @@ uint64_t
 __fmad64(uint64_t a, uint64_t b, uint64_t c)
 {
    return __fadd64(__fmul64(a, b), c);
+}
+
+/* The most significant word is x. Preserve whether ANY discarded bit is set,
+ * including at whole-word boundaries and shifts beyond the entire value.
+ */
+uvec4
+__shift128RightJamming(uvec4 a, int count)
+{
+   if (count >= 128)
+      return uvec4(0u, 0u, 0u, uint((a.x | a.y | a.z | a.w) != 0u));
+
+   uint sticky = 0u;
+   if (count >= 64) {
+      sticky = a.z | a.w;
+      a = uvec4(0u, 0u, a.x, a.y);
+      count -= 64;
+   }
+   if (count >= 32) {
+      sticky |= a.w;
+      a = uvec4(0u, a.x, a.y, a.z);
+      count -= 32;
+   }
+   if (count != 0) {
+      sticky |= a.w << (32 - count);
+      a = (a >> count) | (uvec4(0u, a.x, a.y, a.z) << (32 - count));
+   }
+   a.w |= uint(sticky != 0u);
+   return a;
+}
+
+/* Fused multiply-add: retain the full 106-bit product, add before rounding,
+ * and round once at the final (possibly subnormal) destination precision.
+ */
+uint64_t
+__ffma64(uint64_t a, uint64_t b, uint64_t c)
+{
+   uint aHi = __extractFloat64FracHi(a);
+   uint aLo = __extractFloat64FracLo(a);
+   uint bHi = __extractFloat64FracHi(b);
+   uint bLo = __extractFloat64FracLo(b);
+   uint cHi = __extractFloat64FracHi(c);
+   uint cLo = __extractFloat64FracLo(c);
+   int aExp = __extractFloat64Exp(a);
+   int bExp = __extractFloat64Exp(b);
+   int cExp = __extractFloat64Exp(c);
+   uint pSign = __extractFloat64Sign(a) ^ __extractFloat64Sign(b);
+   uint cSign = __extractFloat64Sign(c);
+   bool aZero = (uint(aExp) | aHi | aLo) == 0u;
+   bool bZero = (uint(bExp) | bHi | bLo) == 0u;
+   bool cZero = (uint(cExp) | cHi | cLo) == 0u;
+   uint zeroSign = uint(FLOAT_ROUNDING_MODE == FLOAT_ROUND_DOWN) << 31;
+
+   if (__is_nan(a) || __is_nan(b))
+      return __propagateFloat64NaN(__propagateFloat64NaN(a, b), c) |
+         0x0008000000000000ul;
+   if (__is_nan(c))
+      return c | 0x0008000000000000ul;
+   if ((aExp == 0x7FF) || (bExp == 0x7FF)) {
+      if (aZero || bZero || ((cExp == 0x7FF) && (pSign != cSign)))
+         return 0xFFFFFFFFFFFFFFFFul;
+      return __packFloat64(pSign, 0x7FF, 0u, 0u);
+   }
+   if (cExp == 0x7FF)
+      return c;
+   if (aZero || bZero) {
+      if (cZero && (pSign != cSign))
+         return __packFloat64(zeroSign, 0, 0u, 0u);
+      return c;
+   }
+
+   if (aExp == 0)
+      __normalizeFloat64Subnormal(aHi, aLo, aExp, aHi, aLo);
+   if (bExp == 0)
+      __normalizeFloat64Subnormal(bHi, bLo, bExp, bHi, bLo);
+   aHi |= 0x00100000u;
+   bHi |= 0x00100000u;
+
+   /* Shift each 53-bit significand by 11 before the exact 64x64 multiply.
+    * The product's leading bit is 126 or 127; its low 22 bits are zero.
+    * Normalize to bit 126 without losing any product bits.
+    */
+   __shortShift64Left(aHi, aLo, 11, aHi, aLo);
+   __shortShift64Left(bHi, bLo, 11, bHi, bLo);
+   uvec4 p;
+   __mul64To128(aHi, aLo, bHi, bLo, p.x, p.y, p.z, p.w);
+   int pExp = aExp + bExp - 0x3FF;
+   if ((p.x & 0x80000000u) != 0u) {
+      p = __shift128RightJamming(p, 1);
+      ++pExp;
+   }
+
+   uvec4 addend = uvec4(0u);
+   if (!cZero) {
+      if (cExp == 0)
+         __normalizeFloat64Subnormal(cHi, cLo, cExp, cHi, cLo);
+      __shortShift64Left(cHi | 0x00100000u, cLo, 10, addend.x, addend.y);
+   } else {
+      cExp = pExp;
+   }
+   int zExp = max(pExp, cExp);
+   p = __shift128RightJamming(p, zExp - pExp);
+   addend = __shift128RightJamming(addend, zExp - cExp);
+
+   /* Alignment is exact whenever cancellation can expose low product bits:
+    * p has at least 21 trailing zeros, addend has 74. If alignment loses
+    * bits, the exponent gap is at least 22, so subtraction can lose at most
+    * one leading bit. The jammed odd low word then preserves the side of
+    * every possible rounding boundary, far above bit zero.
+    */
+   uvec4 z;
+   uint zSign = pSign;
+   if (pSign == cSign) {
+      __add64(p.z, p.w, addend.z, addend.w, z.z, z.w);
+      uint carry = uint((z.z < p.z) || ((z.z == p.z) && (z.w < p.w)));
+      __add64(p.x, p.y, addend.x, addend.y, z.x, z.y);
+      __add64(z.x, z.y, 0u, carry, z.x, z.y);
+   } else {
+      bool less = (p.x < addend.x) ||
+         ((p.x == addend.x) && ((p.y < addend.y) ||
+         ((p.y == addend.y) && ((p.z < addend.z) ||
+         ((p.z == addend.z) && (p.w < addend.w))))));
+      if (less) {
+         uvec4 tmp = p;
+         p = addend;
+         addend = tmp;
+         zSign = cSign;
+      }
+      uint borrow = uint((p.z < addend.z) ||
+         ((p.z == addend.z) && (p.w < addend.w)));
+      __sub64(p.z, p.w, addend.z, addend.w, z.z, z.w);
+      __sub64(p.x, p.y, addend.x, addend.y, z.x, z.y);
+      __sub64(z.x, z.y, 0u, borrow, z.x, z.y);
+      if ((z.x | z.y | z.z | z.w) == 0u)
+         return __packFloat64(zeroSign, 0, 0u, 0u);
+   }
+
+   /* Normalize the signed sum, not the rounded product. Whole-word shifts
+    * retain exact cancellation residuals down to the lowest product bit.
+    */
+   while (z.x == 0u) {
+      z = uvec4(z.y, z.z, z.w, 0u);
+      zExp -= 32;
+   }
+   int shift = __countLeadingZeros32(z.x) - 1;
+   if (shift < 0) {
+      z = __shift128RightJamming(z, 1);
+   } else if (shift != 0) {
+      z = (z << shift) | (uvec4(z.y, z.z, z.w, 0u) >> (32 - shift));
+   }
+   zExp -= shift;
+
+   bool roundAway = (zSign != 0u) ?
+      (FLOAT_ROUNDING_MODE == FLOAT_ROUND_DOWN) :
+      (FLOAT_ROUNDING_MODE == FLOAT_ROUND_UP);
+   if (zExp > 0x7FE) {
+      if ((FLOAT_ROUNDING_MODE == FLOAT_ROUND_NEAREST_EVEN) || roundAway)
+         return __packFloat64(zSign, 0x7FF, 0u, 0u);
+      return __packFloat64(zSign, 0x7FE, 0x000FFFFFu, 0xFFFFFFFFu);
+   }
+   if (zExp <= 0) {
+      z = __shift128RightJamming(z, 1 - zExp);
+      zExp = 1;
+   }
+   uint zHi = z.x >> 10;
+   uint zLo = (z.x << 22) | (z.y >> 10);
+   bool guard = (z.y & 0x200u) != 0u;
+   bool sticky = ((z.y & 0x1FFu) | z.z | z.w) != 0u;
+   bool increment = (FLOAT_ROUNDING_MODE == FLOAT_ROUND_NEAREST_EVEN) ?
+      (guard && (sticky || ((zLo & 1u) != 0u))) :
+      (roundAway && (guard || sticky));
+   if (increment)
+      __add64(zHi, zLo, 0u, 1u, zHi, zLo);
+   return __packFloat64(zSign, zExp - 1, zHi, zLo);
+}
+
+/* Divide using an exact restoring quotient, with no floating-point reciprocal.
+ * Round once at the destination precision, including for subnormal results.
+ */
+uint64_t
+__fdiv64(uint64_t a, uint64_t b)
+{
+   uint aFracHi = __extractFloat64FracHi(a);
+   uint aFracLo = __extractFloat64FracLo(a);
+   uint bFracHi = __extractFloat64FracHi(b);
+   uint bFracLo = __extractFloat64FracLo(b);
+   int aExp = __extractFloat64Exp(a);
+   int bExp = __extractFloat64Exp(b);
+   uint zSign = __extractFloat64Sign(a) ^ __extractFloat64Sign(b);
+
+   if (__is_nan(a) || __is_nan(b))
+      return __propagateFloat64NaN(a, b) | 0x0008000000000000ul;
+   if (aExp == 0x7FF) {
+      if (bExp == 0x7FF)
+         return 0xFFFFFFFFFFFFFFFFul;
+      return __packFloat64(zSign, 0x7FF, 0u, 0u);
+   }
+   if (bExp == 0x7FF)
+      return __packFloat64(zSign, 0, 0u, 0u);
+   if ((uint(bExp) | bFracHi | bFracLo) == 0u) {
+      if ((uint(aExp) | aFracHi | aFracLo) == 0u)
+         return 0xFFFFFFFFFFFFFFFFul;
+      return __packFloat64(zSign, 0x7FF, 0u, 0u);
+   }
+   if ((uint(aExp) | aFracHi | aFracLo) == 0u)
+      return __packFloat64(zSign, 0, 0u, 0u);
+
+   if (aExp == 0)
+      __normalizeFloat64Subnormal(aFracHi, aFracLo, aExp, aFracHi, aFracLo);
+   if (bExp == 0)
+      __normalizeFloat64Subnormal(bFracHi, bFracLo, bExp, bFracHi, bFracLo);
+   aFracHi |= 0x00100000u;
+   bFracHi |= 0x00100000u;
+   int zExp = aExp - bExp + 0x3FF;
+   if ((aFracHi < bFracHi) ||
+       ((aFracHi == bFracHi) && (aFracLo < bFracLo))) {
+      __shortShift64Left(aFracHi, aFracLo, 1, aFracHi, aFracLo);
+      --zExp;
+   }
+
+   bool roundAway = (zSign != 0u) ?
+      (FLOAT_ROUNDING_MODE == FLOAT_ROUND_DOWN) :
+      (FLOAT_ROUNDING_MODE == FLOAT_ROUND_UP);
+   if (zExp > 0x7FE) {
+      if ((FLOAT_ROUNDING_MODE == FLOAT_ROUND_NEAREST_EVEN) || roundAway)
+         return __packFloat64(zSign, 0x7FF, 0u, 0u);
+      return __packFloat64(zSign, 0x7FE, 0x000FFFFFu, 0xFFFFFFFFu);
+   }
+   /* Below half the least subnormal, only directed rounding can give nonzero. */
+   if (zExp < -52)
+      return __packFloat64(zSign, 0, 0u, uint(roundAway));
+
+   /* A/B is now in [1,2). At each step 0 <= remainder < 2*B < 2^54;
+    * subtracting B if needed emits one exact quotient bit, then doubling the
+    * remainder establishes the invariant for the next step. All arithmetic
+    * fits in two 32-bit words. Retain 53 bits for a normal, or zExp+52 bits
+    * in units of the least subnormal (zero bits at the half-minimum boundary).
+    */
+   uint zFracHi = 0u;
+   uint zFracLo = 0u;
+   int bits = min(53, zExp + 52);
+   for (int i = 0; i < bits; ++i) {
+      bool bit = (bFracHi < aFracHi) ||
+         ((bFracHi == aFracHi) && (bFracLo <= aFracLo));
+      if (bit)
+         __sub64(aFracHi, aFracLo, bFracHi, bFracLo, aFracHi, aFracLo);
+      __shortShift64Left(zFracHi, zFracLo, 1, zFracHi, zFracLo);
+      zFracLo |= uint(bit);
+      __shortShift64Left(aFracHi, aFracLo, 1, aFracHi, aFracLo);
+   }
+
+   bool guard = (bFracHi < aFracHi) ||
+      ((bFracHi == aFracHi) && (bFracLo <= aFracLo));
+   if (guard)
+      __sub64(aFracHi, aFracLo, bFracHi, bFracLo, aFracHi, aFracLo);
+   bool sticky = (aFracHi | aFracLo) != 0u;
+   bool increment = (FLOAT_ROUNDING_MODE == FLOAT_ROUND_NEAREST_EVEN) ?
+      (guard && (sticky || ((zFracLo & 1u) != 0u))) :
+      (roundAway && (guard || sticky));
+   if (increment)
+      __add64(zFracHi, zFracLo, 0u, 1u, zFracHi, zFracLo);
+
+   /* Packing adds the implicit bit into the exponent. A rounding carry also
+    * handles the subnormal/normal boundary and finite/infinity boundary.
+    */
+   return __packFloat64(zSign, max(zExp - 1, 0), zFracHi, zFracLo);
 }
 
 /* Shifts the 64-bit value formed by concatenating `a0' and `a1' right by the

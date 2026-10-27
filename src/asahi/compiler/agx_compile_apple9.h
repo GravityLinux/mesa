@@ -33,6 +33,11 @@ unsigned agx_apple9_alu_width(const nir_instr *instr, void *data);
  * register allocator. Arithmetic, memory operations, and structured control
  * flow share the same lowering used by graphics shaders. Unsupported NIR or
  * resource requirements return a diagnostic; no shader replay is substituted.
+ * GL's st_glsl_to_nir lowers doubles with ctx->SoftFP64 (float64.glsl) before
+ * reaching these compile entries. Other callers must likewise inline their
+ * softfp64 library with nir_lower_doubles before compilation. This backend
+ * legalizes the resulting integer helpers with full nir_lower_int64; it does
+ * not construct a GL context or accept unlowered floating-point 64-bit ALU.
  *
  * On failure, *reason points at a static diagnostic string when reason is
  * non-NULL. On success, out owns a malloc-backed main/preamble binary and may
@@ -202,6 +207,9 @@ agx_apple9_color_is_wide(enum pipe_format format)
 static inline bool
 agx_apple9_color_is_packed(enum pipe_format format)
 {
+   /* X2 retains its own NIR format: RGB bits match A2, but destination alpha
+    * must unpack as one regardless of the unused memory bits. Reload and PBE
+    * export use the same packed word and memory channel order. */
    switch (format) {
    case PIPE_FORMAT_R5G6B5_UNORM:
    case PIPE_FORMAT_B5G6R5_UNORM:
@@ -211,6 +219,8 @@ agx_apple9_color_is_packed(enum pipe_format format)
    case PIPE_FORMAT_B4G4R4A4_UNORM:
    case PIPE_FORMAT_R10G10B10A2_UNORM:
    case PIPE_FORMAT_B10G10R10A2_UNORM:
+   case PIPE_FORMAT_R10G10B10X2_UNORM:
+   case PIPE_FORMAT_B10G10R10X2_UNORM:
    case PIPE_FORMAT_R10G10B10A2_UINT:
    case PIPE_FORMAT_R11G11B10_FLOAT:
       return true;
@@ -228,6 +238,8 @@ agx_apple9_block_export_format(enum pipe_format format)
    const struct util_format_description *desc = util_format_description(format);
    if (format == PIPE_FORMAT_R10G10B10A2_UNORM ||
        format == PIPE_FORMAT_B10G10R10A2_UNORM ||
+       format == PIPE_FORMAT_R10G10B10X2_UNORM ||
+       format == PIPE_FORMAT_B10G10R10X2_UNORM ||
        format == PIPE_FORMAT_R11G11B10_FLOAT)
       return 7;
    if (!desc->channel[0].pure_integer && desc->channel[0].size == 8)
@@ -292,12 +304,24 @@ bool agx_apple9_vertex_format_supported(enum pipe_format format);
 /* Vertex pulling uses ordinary typed buffer loads in the API main. Buffer
  * addresses remain draw state; format, stride and attribute offset specialize
  * the fetch. Multiple attributes sharing a binding use one resource argument. */
-/* Private bindings for the software transform-feedback vertex job. Public
- * Apple9 vertex shaders do not expose SSBOs; these use the normal resource ABI.
+/* Private bindings for the software transform-feedback vertex job.
+ * These share the normal buffer-resource ABI.
  */
 #define AGX_APPLE9_XFB_PARAMS      26
 #define AGX_APPLE9_XFB_BUFFER_BASE 27
 #define AGX_APPLE9_XFB_INDICES     31
+
+/* Opt-in vertex ranges use the ordinary buffer-address table, not a binding
+ * bitmask. Binding 67 contains 32 records indexed by vertex_layout.buffer[].
+ * base is the bound range's first byte; size is its accessible byte count.
+ * The caller must supply the entire table, including zero-sized unbound slots.
+ */
+#define AGX_APPLE9_VERTEX_RANGES_BINDING 67
+
+struct agx_apple9_vertex_range {
+   uint64_t base;
+   uint64_t size;
+};
 
 struct agx_apple9_xfb_params {
    uint32_t first_vertex, index_bias, base_instance, draw_id;
@@ -305,6 +329,7 @@ struct agx_apple9_xfb_params {
 };
 
 struct agx_apple9_vertex_layout {
+   bool robust; /* Fetch through AGX_APPLE9_VERTEX_RANGES_BINDING. */
    uint64_t outputs_flat, outputs_linear;
    uint32_t stride[16];
    uint32_t divisor[16]; /* Zero selects the per-vertex stream. */

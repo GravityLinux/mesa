@@ -22,6 +22,13 @@ bool agx_nir_fence_images(struct nir_shader *shader);
 bool agx_nir_lower_layer(struct nir_shader *s);
 bool agx_nir_lower_clip_distance(struct nir_shader *s);
 bool agx_nir_lower_subgroups(struct nir_shader *s);
+/* Success, not progress. Failure leaves NIR unchanged; reason is a static string.
+ * Call after inlining, before generic variable/IO/subgroup lowering. Requires
+ * full subgroup32 execution; does not validate SPIR-V or enable capabilities.
+ */
+bool agx_nir_lower_apple9_cooperative_matrix(struct nir_shader *s,
+                                           unsigned subgroup_size,
+                                           const char **reason);
 bool agx_nir_lower_fminmax(struct nir_shader *s);
 bool agx_nir_lower_accurate_frcp(struct nir_shader *s);
 
