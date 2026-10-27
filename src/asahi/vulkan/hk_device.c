@@ -408,7 +408,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    /* Apple9 does not advertise custom border colours. */
    if (instance->drirc.misc.disable_border_emulation ||
-       agx_is_g16(&dev->dev)) {
+       agx_is_apple9(&dev->dev)) {
       dev->perftest |= HK_PERF_NOBORDER;
    }
 
@@ -438,7 +438,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    hk_device_init_usc_heap(dev);
 
-   if (agx_is_g16(&dev->dev))
+   if (agx_is_apple9(&dev->dev))
       agx_apple9_initialize_entries(&dev->dev);
 
    vk_device_set_drm_fd(&dev->vk, dev->dev.fd);
@@ -458,7 +458,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    if (result != VK_SUCCESS)
       goto fail_dev;
 
-   if (agx_is_g16(&dev->dev)) {
+   if (agx_is_apple9(&dev->dev)) {
       dev->apple9_fetch_sampler =
          agx_bo_create(&dev->dev, 64 + AGX_APPLE9_SAMPLER_TABLE_STRIDE, 0,
                        AGX_BO_LOW_VA, "Apple9 immutable samplers");
@@ -549,7 +549,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
     * null fragment shaders. We do this at device-time to make binds cheap.
     * Regardless, compiling this shader should be fast.
     */
-   if (agx_is_g16(&dev->dev)) {
+   if (agx_is_apple9(&dev->dev)) {
       result = hk_apple9_create_null_fs(dev, pAllocator, true, &dev->null_fs);
       if (result != VK_SUCCESS)
          goto fail_meta;
@@ -572,7 +572,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       }
    }
 
-   if (agx_is_g16(&dev->dev))
+   if (agx_is_apple9(&dev->dev))
       hk_apple9_precompile_init(dev);
 
    *pDevice = hk_device_to_handle(dev);

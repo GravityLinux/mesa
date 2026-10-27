@@ -305,7 +305,7 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_rendering_state *render = &cmd->state.gfx.render;
 
-   if (agx_is_g16(&dev->dev))
+   if (agx_is_apple9(&dev->dev))
       return hk_apple9_build_bg_eot(cmd, info, store, partial_render,
                                    incomplete_render_area);
 
@@ -633,7 +633,7 @@ hk_render_merge_enabled(struct hk_cmd_buffer *cmd)
    if (enabled < 0)
       enabled = debug_get_bool_option("HK_APPLE9_MERGE_RENDERS", true);
 
-   return enabled && agx_is_g16(&hk_cmd_buffer_device(cmd)->dev) &&
+   return enabled && agx_is_apple9(&hk_cmd_buffer_device(cmd)->dev) &&
           cmd->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY && !cmd->in_meta;
 }
 
@@ -772,7 +772,7 @@ hk_render_suspend_keeps_open(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    return enabled && cs && !render->feedback && !render->raw_color_mask &&
           !render->raw_zs &&
           (render->flags & VK_RENDERING_SUSPENDING_BIT) &&
-          agx_is_g16(&hk_cmd_buffer_device(cmd)->dev) &&
+          agx_is_apple9(&hk_cmd_buffer_device(cmd)->dev) &&
           cmd->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY && !cmd->in_meta &&
           !cmd->sync_fallback && !cmd->current_cs.pre_gfx &&
           !cmd->current_cs.post_gfx && !cmd->tess_batch.draws;
@@ -1029,7 +1029,7 @@ hk_CmdSetAttachmentFeedbackLoopEnableEXT(VkCommandBuffer commandBuffer,
    }
    if (cmd->rendering && aspectMask)
       cmd->state.gfx.render.feedback = true;
-   if (agx_is_g16(&hk_cmd_buffer_device(cmd)->dev))
+   if (agx_is_apple9(&hk_cmd_buffer_device(cmd)->dev))
       hk_feedback_prepare_draw(cmd);
 }
 
@@ -1182,7 +1182,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    render->tilebuffer = agx_build_tilebuffer_layout(
       formats, render->color_att_count, render->tilebuffer.nr_samples, true);
 
-   if (agx_is_g16(&hk_cmd_buffer_device(cmd)->dev)) {
+   if (agx_is_apple9(&hk_cmd_buffer_device(cmd)->dev)) {
       unsigned bytes = 0;
       for (unsigned rt = 0; rt < render->color_att_count; ++rt) {
          render->tilebuffer._offset_B[rt] = bytes;
@@ -1357,7 +1357,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
                        NULL);
 
    const bool drop_stores =
-      agx_is_g16(&hk_cmd_buffer_device(cmd)->dev) &&
+      agx_is_apple9(&hk_cmd_buffer_device(cmd)->dev) &&
       !(render->flags & VK_RENDERING_SUSPENDING_BIT);
    /* The first render pass of a chain decides its loads. */
    if (!resume && !merge) {
@@ -1785,7 +1785,7 @@ hk_init_heap(const void *data)
     * and its backing grows instead, see hk_heap_prepare_submit. The USC
     * aperture is shared, so settle for a smaller range when it is crowded.
     */
-   enum agx_va_flags flags = agx_is_g16(&dev->dev) ? AGX_VA_USC : 0;
+   enum agx_va_flags flags = agx_is_apple9(&dev->dev) ? AGX_VA_USC : 0;
    for (uint64_t va_B = HK_HEAP_VA_MAX_B;
         !dev->heap_va && va_B >= HK_HEAP_GEOMETRY_MIN_B; va_B /= 2) {
       dev->heap_va = agx_va_alloc(&dev->dev, va_B, 65536, flags, 0);
@@ -2075,7 +2075,7 @@ hk_rast_prim(struct hk_cmd_buffer *cmd)
 static struct agx_ptr
 hk_geom_index_alloc(struct hk_cmd_buffer *cmd, uint32_t size)
 {
-   if (agx_is_g16(&hk_cmd_buffer_device(cmd)->dev))
+   if (agx_is_apple9(&hk_cmd_buffer_device(cmd)->dev))
       return hk_pool_usc_alloc(cmd, size, 4);
    else
       return hk_pool_alloc(cmd, size, 4);
@@ -5099,7 +5099,7 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
       dyn->ia.primitive_topology ==
          VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY;
    bool stipple_gs =
-      agx_is_g16(&hk_cmd_buffer_device(cmd)->dev) && fs_stipple &&
+      agx_is_apple9(&hk_cmd_buffer_device(cmd)->dev) && fs_stipple &&
       !gfx->shaders[MESA_SHADER_TESS_EVAL] &&
       fs_stipple->info.fs.line_stipple_start && dyn->rs.line.stipple.enable &&
       (stipple_strip ||
@@ -5109,7 +5109,7 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    /* Polygon mode POINT on triangles draws real points from a software
     * polygon stage, see hk_apple9_polygon_point_gs. */
    bool polygon_points =
-      agx_is_g16(&hk_cmd_buffer_device(cmd)->dev) && fs_stipple &&
+      agx_is_apple9(&hk_cmd_buffer_device(cmd)->dev) && fs_stipple &&
       fs_stipple->info.fs.polygon_points &&
       dyn->rs.polygon_mode == VK_POLYGON_MODE_POINT &&
       u_reduced_prim(hk_gs_in_prim(cmd)) == MESA_PRIM_TRIANGLES;
@@ -5149,7 +5149,7 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 
    /* ...or to give the fragment shader flat copies of per-vertex inputs */
    struct hk_api_shader *fs_api_copies = gfx->shaders[MESA_SHADER_FRAGMENT];
-   if (agx_is_g16(&hk_cmd_buffer_device(cmd)->dev) && fs_api_copies) {
+   if (agx_is_apple9(&hk_cmd_buffer_device(cmd)->dev) && fs_api_copies) {
       const struct hk_shader *fs_copies = hk_only_variant(fs_api_copies);
       /* The vertex shader writes the barycentric weights of non-indexed
        * triangle lists when there are no per-vertex inputs. */
@@ -5211,7 +5211,7 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    perf_debug(cmd, "Binding passthrough GS for%s\n", xfb_outputs ? " XFB" : "");
 
-   if (agx_is_g16(&dev->dev)) {
+   if (agx_is_apple9(&dev->dev)) {
       struct hk_api_shader *fs_api = gfx->shaders[MESA_SHADER_FRAGMENT];
       struct hk_shader *fs = fs_api ? hk_only_variant(fs_api) : NULL;
       struct hk_apple9_passthrough_suffix suffix = {
@@ -5369,7 +5369,7 @@ hk_CmdBindIndexBuffer2KHR(VkCommandBuffer commandBuffer, VkBuffer _buffer,
    /* TODO: check if necessary, blob does this. G16G bounds the fetch by the
     * exact extent; rounding would expose an out-of-range narrow index.
     */
-   if (!agx_is_g16(&hk_cmd_buffer_device(cmd)->dev)) {
+   if (!agx_is_apple9(&hk_cmd_buffer_device(cmd)->dev)) {
       cmd->state.gfx.index.buffer.range =
          align(cmd->state.gfx.index.buffer.range, 4);
    }
@@ -6001,7 +6001,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
        (draw_.b.count[0] == 0 || draw_.b.count[1] == 0))
       return;
 
-   if (agx_is_g16(&hk_cmd_buffer_device(cmd)->dev)) {
+   if (agx_is_apple9(&hk_cmd_buffer_device(cmd)->dev)) {
       draw_ = hk_draw_complete_from_state(cmd, draw_);
       if (!hk_feedback_prepare_draw(cmd))
          return;

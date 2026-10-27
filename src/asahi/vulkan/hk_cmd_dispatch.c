@@ -606,7 +606,7 @@ dispatch(struct hk_cmd_buffer *cmd, struct agx_grid grid)
    struct hk_shader *s = hk_only_variant(cmd->state.cs.shader);
    if (agx_is_shader_empty(&s->b))
       return;
-   if (agx_is_g16(&hk_cmd_buffer_device(cmd)->dev)) {
+   if (agx_is_apple9(&hk_cmd_buffer_device(cmd)->dev)) {
       if (!agx_is_indirect(grid) &&
           (!grid.count[0] || !grid.count[1] || !grid.count[2]))
          return;

@@ -792,7 +792,7 @@ build_image_copy_shader(const struct vk_meta_image_copy_key *key)
 static bool
 hk_meta_apple9(struct vk_device *device)
 {
-   return agx_is_g16(&container_of(device, struct hk_device, vk)->dev);
+   return agx_is_apple9(&container_of(device, struct hk_device, vk)->dev);
 }
 
 static VkResult
@@ -1677,7 +1677,7 @@ static bool
 hk_copy_requires_gfx(struct hk_image *img)
 {
    struct hk_device *dev = container_of(img->vk.base.device, struct hk_device, vk);
-   return (img->vk.samples > 1 || agx_is_g16(&dev->dev)) &&
+   return (img->vk.samples > 1 || agx_is_apple9(&dev->dev)) &&
           img->planes[0].layout.compressed;
 }
 
@@ -1732,7 +1732,7 @@ hk_CmdCopyImageToBuffer2(VkCommandBuffer commandBuffer,
 
    struct hk_meta_save save;
    hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
-   if (agx_is_g16(&dev->dev) && src_image->planes[0].layout.compressed) {
+   if (agx_is_apple9(&dev->dev) && src_image->planes[0].layout.compressed) {
       struct vk_meta_copy_image_properties props =
          hk_meta_copy_get_image_properties(src_image);
       vk_meta_copy_image_to_buffer(&cmd->vk, &dev->meta,
@@ -1754,7 +1754,7 @@ hk_CmdCopyImage2(VkCommandBuffer commandBuffer,
    hk_cmd_use_implicit_sync(cmd, src_image->implicit_sync_res);
    hk_cmd_use_implicit_sync(cmd, dst_image->implicit_sync_res);
    bool gfx = hk_copy_requires_gfx(dst_image);
-   bool sampled_copy = agx_is_g16(&dev->dev) &&
+   bool sampled_copy = agx_is_apple9(&dev->dev) &&
                        src_image->planes[0].layout.compressed;
    VkPipelineBindPoint bind_point = hk_bind_point(gfx);
 

@@ -374,7 +374,7 @@ hk_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
        * does not snoop CPU caches. Keep the CPU view uncached too, so reset
        * values cannot linger in a cache line over the firmware's write.
        */
-      if (timestamp && agx_is_g16(&dev->dev))
+      if (timestamp && agx_is_apple9(&dev->dev))
          flags &= ~AGX_BO_WRITEBACK;
 
       pool->bo = agx_bo_create(&dev->dev, bo_size, 0, flags, "Query pool");

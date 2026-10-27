@@ -48,7 +48,7 @@ hk_get_buffer_format_features(struct hk_physical_device *pdev,
          features |= VK_FORMAT_FEATURE_2_STORAGE_TEXEL_BUFFER_ATOMIC_BIT;
    }
 
-   if (agx_is_g16(&pdev->dev)) {
+   if (agx_is_apple9(&pdev->dev)) {
       /* Storage descriptors carry the texel layout for access without a
        * shader format. */
       if (features & VK_FORMAT_FEATURE_2_STORAGE_TEXEL_BUFFER_BIT)
@@ -180,7 +180,7 @@ hk_pack_texel_buffer(struct hk_device *dev, enum pipe_format format,
    assert(tail_offset_el * util_format_get_blocksize(format) == tail_offset_B &&
           "must be texel aligned");
 
-   const bool apple9 = agx_is_g16(&dev->dev);
+   const bool apple9 = agx_is_apple9(&dev->dev);
    struct AGX_TEXTURE texture = {AGX_TEXTURE_header};
    texture.dimension = AGX_TEXTURE_DIMENSION_2D;
    texture.layout = AGX_LAYOUT_LINEAR;
@@ -276,7 +276,7 @@ hk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
                         hk_buffer_address_ro(buffer, view->vk.offset),
                         hk_buffer_address_rw(buffer, view->vk.offset),
                         view->vk.elements,
-                        agx_is_g16(&device->dev)
+                        agx_is_apple9(&device->dev)
                            ? hk_buffer_apple9_residency(buffer) : 0,
                         &view->tex, &view->pbe, &view->apple9,
                         view->apple9_texture);

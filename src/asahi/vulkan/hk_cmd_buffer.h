@@ -1076,7 +1076,7 @@ static inline struct agx_ptr
 hk_pool_cs_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment,
                  bool compute)
 {
-   return !compute && agx_is_g16(&hk_cmd_buffer_device(cmd)->dev)
+   return !compute && agx_is_apple9(&hk_cmd_buffer_device(cmd)->dev)
              ? hk_pool_context_alloc(cmd, size, alignment)
              : hk_pool_alloc(cmd, size, alignment);
 }

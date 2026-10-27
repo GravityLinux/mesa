@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <vulkan/vulkan.h>
+#include "apple9-test-device.h"
 #ifndef APPLE9_PROBE_COUNT
 #define APPLE9_PROBE_COUNT 257
 #endif
@@ -54,8 +55,8 @@ main(int argc, char **argv)
    printf("device: %s vendor=%04x device=%04x API=%u.%u\n", prop.deviceName,
           prop.vendorID, prop.deviceID, VK_VERSION_MAJOR(prop.apiVersion),
           VK_VERSION_MINOR(prop.apiVersion));
-   if (!strstr(prop.deviceName, "Apple M4")) {
-      fprintf(stderr, "Expected native Apple M4 renderer\n");
+   if (!apple9_test_native_device(&prop)) {
+      fprintf(stderr, "Expected native G16G/G16C/G17P renderer\n");
       return 1;
    }
    uint32_t nq = 0;

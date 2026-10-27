@@ -14,8 +14,8 @@ and G17P; userspace launch support is qualified separately for each device.
 This candidate adds explicit `AGX_CHIP_G16C` selection and uses the shared
 G16 launch, descriptor, graphics and capability paths for G16G and G16C.
 The kernel-private window remains inside the compact render-context aperture.
-G16G behavior and existing chip enum values are preserved. G17P selection
-is unchanged. Native Max qualification on 2026-10-22 passed the authored live Vulkan
+G16G behavior and existing chip enum values are preserved. Native Max
+qualification on 2026-10-22 passed the authored live Vulkan
 compute and offscreen draw tests through the shared Rust DRM driver. Compute
 checks 257 output words and 63 guards on each of three submissions, including
 indirect dispatch with changing inputs. Drawing checks all 703 pixels of each
@@ -29,6 +29,29 @@ tools from this branch. Zink execution, Rusticl, browser integration and
 presentation are not yet qualified here. These small tests establish a live
 integration baseline; they do not establish Vulkan conformance or broad Max
 application correctness.
+
+## G17P Neo control
+
+G17P uses the same native Apple9 shader, resource, graphics and compute paths
+as G16G/G16C. The legacy USC uniform packet cannot encode shader data in the
+fixed 1-TiB USC aperture. Its caller render-state arena begins at context
+offset 128 MiB, above the Neo kernel's initial tiler-growth reservation at
+offsets 32–82 MiB. G16's arena still begins at offset 64 MiB.
+
+The protected Neo kernel (`neo-known-good-2026-10-21`, `a6883c3c6e5a`) passes
+the native 32-render control and a cold Vulkan sequence with no native-render
+warm-up: three compute/transfer submissions with 257 outputs and 63 guards
+each, three 703-pixel draw/scissor/readback frames, and sixteen 1280x720
+bindless sampling draws. The graphics sequence uses the explicit diagnostic
+setting `ASAHI_MESA_DEBUG=nocompress`. Clean driver unbind also passes.
+
+Default compressed rendering remains unqualified: the second draw/readback
+frame produces an incorrect pixel on both the protected Neo kernel and the
+shared kernel. Cold compressed sampling after compute also failed on the
+shared kernel with a firmware type-4 report. These observations do not yet
+identify the compression defect or establish full Vulkan 1.4 conformance.
+Compression remains enabled by default; the diagnostic setting defines the
+currently verified Neo Vulkan control, not a completed graphics port.
 
 ## Status
 

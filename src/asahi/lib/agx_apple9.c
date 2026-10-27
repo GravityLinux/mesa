@@ -677,10 +677,9 @@ agx_apple9_prepare_compute_dispatch(
 bool
 agx_apple9_compute_enabled(const struct agx_device *dev)
 {
-   /* These generated launch and resource encodings have been exercised on
-    * T8132 and the source-built G16C submission tests. Live Honeykrisp on
-    * G16C is qualified separately. Shared ISA alone does not validate G17P. */
-   return agx_is_g16(dev);
+   /* G16G/G16C/G17P use the native Apple9 launch and resource encodings.
+    * Never send a fixed-aperture shader through the legacy USC packet path. */
+   return agx_is_apple9(dev);
 }
 
 void
