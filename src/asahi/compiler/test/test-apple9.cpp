@@ -11,9 +11,224 @@
 #include "compiler/nir/nir_xfb_info.h"
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <vector>
 #include "gallium/include/pipe/p_defines.h"
+#include "asahi/layout/layout.h"
+#include "asahi/vulkan/hk_meta_upload.h"
+
+TEST(Apple9Compiler, SubgroupFloatReductionsCompileWithActiveMasks)
+{
+   for (nir_op op : {nir_op_fadd, nir_op_fmax}) {
+      for (unsigned cluster : {0u, 8u}) {
+         for (bool masked : {false, true}) {
+            nir_builder b = nir_builder_init_simple_shader(
+               MESA_SHADER_COMPUTE, &agx_nir_options, "masked reduction");
+            b.shader->info.workgroup_size[0] = 32;
+            b.shader->info.workgroup_size[1] = 1;
+            b.shader->info.workgroup_size[2] = 1;
+            nir_def *lane = nir_load_subgroup_invocation(&b);
+            if (masked)
+               nir_push_if(&b, nir_ieq_imm(&b, nir_iand_imm(&b, lane, 3), 0));
+            nir_def *sum = nir_reduce(&b, nir_u2f32(&b, lane),
+                                     .reduction_op = op, .cluster_size = cluster);
+            nir_store_ssbo(&b, sum, nir_imm_int(&b, 0),
+                           nir_imul_imm(&b, lane, 4), .write_mask = 1,
+                           .align_mul = 4);
+            if (masked)
+               nir_pop_if(&b, NULL);
+            agx_shader_part compiled = {};
+            agx_apple9_compute_profile profile = {};
+            const char *reason = nullptr;
+            ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason))
+               << (reason ?: "no diagnostic");
+            EXPECT_NE(profile.resource_write_mask & 1u, 0u);
+            free(compiled.binary);
+            ralloc_free(b.shader);
+         }
+      }
+   }
+}
+
+TEST(Apple9Compiler, MetaUploadGlobalStores)
+{
+   nir_shader *shader = hk_meta_upload_shader();
+   /* Meta NIR receives compiler options from Vulkan's shader preprocessing.
+    * This test enters the native compiler directly instead.
+    */
+   shader->options = &agx_nir_options;
+   nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+   nir_builder b = nir_builder_create(impl);
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr_safe(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         auto *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic != nir_intrinsic_load_push_constant)
+            continue;
+         b.cursor = nir_before_instr(instr);
+         nir_def *value = nir_load_ubo(
+            &b, 1, intr->def.bit_size, nir_imm_int(&b, 0), intr->src[0].ssa,
+            .align_mul = unsigned(intr->def.bit_size) / 8,
+            .range = sizeof(hk_meta_upload_push));
+         nir_def_rewrite_uses(&intr->def, value);
+         nir_instr_remove(instr);
+      }
+   }
+   agx_shader_part compiled = {};
+   agx_apple9_compute_profile profile = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_tiny(shader, &compiled, &profile, &reason))
+      << (reason ? reason : "no diagnostic");
+   EXPECT_TRUE(profile.writes_global);
+   EXPECT_EQ(profile.resource_binding_count, 1);
+   free(compiled.binary);
+   ralloc_free(shader);
+}
+
+static void
+fold_upload(nir_shader *shader)
+{
+   bool progress;
+   do {
+      progress = nir_opt_constant_folding(shader);
+      progress |= nir_opt_copy_prop(shader);
+      progress |= nir_opt_dce(shader);
+      progress |= nir_opt_if(shader, nir_opt_if_optimize_phi_true_false);
+      progress |= nir_opt_dead_cf(shader);
+   } while (progress);
+}
+
+TEST(Apple9Compiler, MetaUploadPaddedAddressing)
+{
+   /* Cross several tiles in both axes, including rectangular mip-tail tiles.
+    * Compare the shared GPU formula against the independent CPU tiler's
+    * bit-by-bit Morton definition. No host texture upload is used by the driver.
+    */
+   const struct ail_tile tiles[] = {{16, 16}, {32, 32}, {64, 64}, {16, 8}};
+   for (auto tile : tiles) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "upload addresses");
+      const unsigned stride = ALIGN_POT(80, tile.width_el);
+      std::vector<uint32_t> expected;
+      for (unsigned y = 0; y < 35; ++y) {
+         for (unsigned x = 0; x < 67; ++x) {
+            unsigned dx = x + 7, dy = y + 11;
+            nir_def *offset = hk_meta_upload_offset(
+               &b, nir_imm_ivec2(&b, dx, dy), nir_imm_int(&b, stride),
+               nir_imm_int(&b, tile.width_el),
+               nir_imm_int(&b, tile.height_el));
+            nir_store_ssbo(&b, offset, nir_imm_int(&b, 0),
+                           nir_imm_int(&b, expected.size() * 8),
+                           .write_mask = 1, .align_mul = 8);
+            expected.push_back(4 * ((dy & ~(tile.height_el - 1)) * stride +
+               (dx & ~(tile.width_el - 1)) * tile.height_el +
+               ail_space_bits(dx & (tile.width_el - 1)) +
+               2 * ail_space_bits(dy & (tile.height_el - 1))));
+         }
+      }
+      /* Exercise Apple9's lowering, not just NIR's interleave constant folder. */
+      agx_nir_lower_apple9_math(b.shader);
+      fold_upload(b.shader);
+      unsigned index = 0;
+      nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            auto *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_store_ssbo)
+               continue;
+            ASSERT_LT(index, expected.size());
+            ASSERT_TRUE(nir_src_is_const(intr->src[0]));
+            EXPECT_EQ(nir_src_as_uint(intr->src[0]), expected[index++]);
+         }
+      }
+      EXPECT_EQ(index, expected.size());
+      ralloc_free(b.shader);
+   }
+}
+
+TEST(Apple9Compiler, MetaUploadStridesOffsetsAndBounds)
+{
+   for (bool linear : {false, true}) {
+      /* The source includes byte offset 16, rowLength 72, imageHeight 38.
+       * Destination includes a nonzero mip/base-layer address and XY offset.
+       */
+      hk_meta_upload_push push = {
+         .src = 0x100000010ull, .dst = 0x200004000ull,
+         .src_row_B = 72 * 4, .src_layer_B = 72 * 38 * 4,
+         .dst_layer_B = 0x10000, .dst_stride = linear ? 384u : 96u,
+         .tile_width = linear ? 0u : 32u, .tile_height = linear ? 0u : 32u,
+         .dst_x = 7, .dst_y = 11, .width = 67, .height = 35, .layers = 2,
+      };
+      for (auto coord : {std::array<unsigned, 3>{0, 0, 0},
+                        {66, 34, 0}, {31, 21, 1}, {32, 22, 1},
+                        {67, 0, 0}, {0, 35, 0}, {0, 0, 2}}) {
+         nir_shader *shader = hk_meta_upload_shader();
+         nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+         nir_builder b = nir_builder_create(impl);
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr_safe(instr, block) {
+               if (instr->type != nir_instr_type_intrinsic)
+                  continue;
+               auto *intr = nir_instr_as_intrinsic(instr);
+               b.cursor = nir_before_instr(instr);
+               nir_def *value = nullptr;
+               if (intr->intrinsic == nir_intrinsic_load_push_constant) {
+                  uint64_t raw = 0;
+                  memcpy(&raw, reinterpret_cast<const char *>(&push) +
+                            nir_src_as_uint(intr->src[0]),
+                         intr->def.bit_size / 8);
+                  value = nir_imm_intN_t(&b, raw, intr->def.bit_size);
+               } else if (intr->intrinsic == nir_intrinsic_load_global_invocation_id) {
+                  value = nir_imm_ivec3(&b, coord[0], coord[1], coord[2]);
+               }
+               if (value) {
+                  nir_def_rewrite_uses(&intr->def, value);
+                  nir_instr_remove(instr);
+               }
+            }
+         }
+         agx_nir_lower_apple9_math(shader);
+         fold_upload(shader);
+         unsigned loads = 0, stores = 0;
+         nir_def *loaded = nullptr;
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type != nir_instr_type_intrinsic)
+                  continue;
+               auto *intr = nir_instr_as_intrinsic(instr);
+               unsigned x = coord[0], y = coord[1], z = coord[2];
+               if (intr->intrinsic == nir_intrinsic_load_global) {
+                  ++loads;
+                  loaded = &intr->def;
+                  ASSERT_TRUE(nir_src_is_const(intr->src[0]));
+                  EXPECT_EQ(nir_src_as_uint(intr->src[0]),
+                            push.src + x * 4 + y * push.src_row_B +
+                            z * push.src_layer_B);
+               } else if (intr->intrinsic == nir_intrinsic_store_global) {
+                  ++stores;
+                  unsigned dx = x + push.dst_x, dy = y + push.dst_y;
+                  uint64_t offset = linear ? dy * push.dst_stride + dx * 4 :
+                     4 * ((dy & ~31u) * push.dst_stride + (dx & ~31u) * 32 +
+                          ail_space_bits(dx & 31) + 2 * ail_space_bits(dy & 31));
+                  ASSERT_TRUE(nir_src_is_const(intr->src[1]));
+                  EXPECT_EQ(nir_src_as_uint(intr->src[1]),
+                            push.dst + offset + z * push.dst_layer_B);
+                  /* The exact raw 32-bit load reaches memory without format
+                   * conversion, preserving NaNs and arbitrary RGBA8 bits. */
+                  EXPECT_EQ(intr->src[0].ssa, loaded);
+               }
+            }
+         }
+         unsigned count = coord[0] < 67 && coord[1] < 35 && coord[2] < 2;
+         EXPECT_EQ(loads, count);
+         EXPECT_EQ(stores, count);
+         ralloc_free(shader);
+      }
+   }
+}
 
 TEST(Apple9Compiler, GlobalPointerLoadsAndStores)
 {
@@ -5597,6 +5812,64 @@ TEST(Apple9Compiler, NativeNarrowLoadsExtendAndStoresTruncate)
    }
 }
 
+TEST(Apple9Compiler, NarrowIntegerComparisonsUseDefinedWideOperands)
+{
+   for (unsigned bits : {8u, 16u}) {
+      for (nir_op op : {nir_op_ieq, nir_op_ine, nir_op_ilt, nir_op_ige,
+                        nir_op_ult, nir_op_uge}) {
+         SCOPED_TRACE(testing::Message()
+                      << "bits=" << bits << " op=" << nir_op_infos[op].name);
+         nir_builder b = apple9_compute_builder("narrow vector comparison");
+         b.shader->info.num_ssbos = 2;
+         nir_def *input =
+            nir_load_ssbo(&b, 2, bits, nir_imm_int(&b, 1), nir_imm_int(&b, 0),
+                          .access = ACCESS_NON_WRITEABLE, .align_mul = 4);
+         nir_def *first = nir_build_alu2(
+            &b, op, nir_channel(&b, input, 0), nir_imm_intN_t(&b, 3, bits));
+         nir_def *second = nir_build_alu2(
+            &b, op, nir_channel(&b, input, 1), nir_imm_intN_t(&b, -1, bits));
+         nir_push_if(&b, nir_iand(&b, first, second));
+         nir_store_ssbo(&b, nir_imm_int(&b, 1), nir_imm_int(&b, 0),
+                        nir_imm_int(&b, 0), .write_mask = 1, .align_mul = 4);
+         nir_pop_if(&b, NULL);
+         nir_validate_shader(b.shader, "narrow comparison input");
+
+         agx_shader_part compiled = {};
+         const char *reason = nullptr;
+         ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, nullptr, &reason))
+            << (reason ? reason : "no diagnostic");
+         unsigned comparisons = 0;
+         nir_foreach_function_impl(impl, b.shader) {
+            nir_foreach_block(block, impl) {
+               nir_foreach_instr(instr, block) {
+                  if (instr->type != nir_instr_type_alu)
+                     continue;
+                  nir_alu_instr *alu = nir_instr_as_alu(instr);
+                  switch (alu->op) {
+                  case nir_op_ieq:
+                  case nir_op_ine:
+                  case nir_op_ilt:
+                  case nir_op_ige:
+                  case nir_op_ult:
+                  case nir_op_uge:
+                     ++comparisons;
+                     EXPECT_EQ(alu->src[0].src.ssa->bit_size, 32u);
+                     EXPECT_EQ(alu->src[1].src.ssa->bit_size, 32u);
+                     break;
+                  default:
+                     break;
+                  }
+               }
+            }
+         }
+         EXPECT_GT(comparisons, 0u);
+         EXPECT_GT(compiled.info.binary_size, 0u);
+         free(compiled.binary);
+         ralloc_free(b.shader);
+      }
+   }
+}
+
 TEST(Apple9Compiler, UboLoadsUseTypedNativeResourceArguments)
 {
    nir_shader *nir = apple9_ubo_load_shader();
@@ -5754,6 +6027,57 @@ TEST(Apple9Compiler, SharedMemoryHasAnAllocatedRootAndBarrier)
    EXPECT_EQ(compiled.info.local_size, 160u);
    free(compiled.binary);
    ralloc_free(b.shader);
+}
+
+TEST(Apple9Compiler, LargerSharedMemoryRoundsWithinAllocationWord)
+{
+   const unsigned sizes[] = {1025, 2048, 2049, 4096, 4097, 8192};
+   const unsigned allocations[] = {2048, 2048, 4096, 4096, 8192, 8192};
+   for (unsigned i = 0; i < 6; ++i) {
+      SCOPED_TRACE(sizes[i]);
+      nir_builder b = apple9_compute_builder("apple9_larger_shared_memory");
+      b.shader->info.shared_size = sizes[i];
+      nir_def *id = apple9_global_id_x(&b);
+      nir_def *offset = nir_iadd_imm(&b,
+         nir_imul_imm(&b, nir_load_subgroup_invocation(&b), 4),
+         (sizes[i] & ~3u) - 64);
+      nir_store_shared(&b, id, offset, .write_mask = 1, .align_mul = 4);
+      nir_barrier(&b, .execution_scope = SCOPE_WORKGROUP,
+                  .memory_scope = SCOPE_WORKGROUP,
+                  .memory_semantics = nir_memory_semantics(NIR_MEMORY_ACQUIRE | NIR_MEMORY_RELEASE),
+                  .memory_modes = nir_var_mem_shared);
+      nir_def *read = nir_load_shared(&b, 1, 32, offset, .align_mul = 4);
+      apple9_store_output(&b, id, read);
+      struct agx_shader_part compiled = {};
+      struct agx_apple9_compute_profile profile = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason))
+         << (reason ? reason : "no diagnostic");
+      EXPECT_EQ(profile.required_threadgroup_memory_bytes, allocations[i]);
+      EXPECT_EQ(compiled.info.local_size, sizes[i]);
+      EXPECT_EQ(profile.resource_kind[1], AGX_APPLE9_COMPUTE_RESOURCE_SHARED);
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
+}
+
+TEST(Apple9Compiler, SharedMemoryRejectsAllocationWordOverflow)
+{
+   for (unsigned bytes : {8193u, 16384u, UINT32_MAX}) {
+      SCOPED_TRACE(bytes);
+      nir_builder b = apple9_compute_builder("apple9_shared_memory_overflow");
+      b.shader->info.shared_size = bytes;
+      nir_def *id = apple9_global_id_x(&b);
+      nir_store_shared(&b, id, nir_imm_int(&b, 0),
+                       .write_mask = 1, .align_mul = 4);
+      apple9_store_output(&b, id,
+         nir_load_shared(&b, 1, 32, nir_imm_int(&b, 0), .align_mul = 4));
+      struct agx_shader_part compiled = {};
+      const char *reason = nullptr;
+      EXPECT_FALSE(agx_compile_apple9_tiny(b.shader, &compiled, nullptr, &reason));
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
 }
 
 TEST(Apple9Compiler, BallotAndSubgroupCount)

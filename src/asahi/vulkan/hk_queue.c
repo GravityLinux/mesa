@@ -276,6 +276,11 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
 
    /* XXX: don't trap */
    if (ret) {
+      if (agx_apple9_compute_enabled(&dev->dev)) {
+         if (getenv("AGX_APPLE9_TRACE_REJECT"))
+            fprintf(stderr, "APPLE9_SUBMIT_FAIL errno=%d\n", errno);
+         return vk_error(dev, VK_ERROR_DEVICE_LOST);
+      }
       fprintf(stderr, "DRM_IOCTL_ASAHI_SUBMIT failed: %m\n");
       assert(0);
    }
@@ -752,6 +757,10 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
    for (unsigned i = 0; i < submit->command_buffer_count; ++i) {
       struct hk_cmd_buffer *cmdbuf =
          (struct hk_cmd_buffer *)submit->command_buffers[i];
+
+      VkResult recorded = vk_command_buffer_get_record_result(&cmdbuf->vk);
+      if (recorded != VK_SUCCESS)
+         return recorded;
 
       command_count += list_length(&cmdbuf->control_streams);
    }

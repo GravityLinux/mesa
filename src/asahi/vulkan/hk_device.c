@@ -7,6 +7,9 @@
 #include "hk_device.h"
 
 #include "agx_bg_eot.h"
+#include "asahi/compiler/agx_apple9_profile.h"
+#include "asahi/lib/agx_apple9_compute.h"
+#include "asahi/lib/agx_apple9_launch.h"
 #include "agx_helpers.h"
 #include "agx_scratch.h"
 #include "hk_cmd_buffer.h"
@@ -35,6 +38,8 @@
 #include "vk_shader.h"
 
 #include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <xf86drm.h>
 
 /* clang-format off */
@@ -262,6 +267,39 @@ hk_get_timestamp(struct vk_device *device, uint64_t *timestamp)
    return VK_SUCCESS;
 }
 
+/* AGX_APPLE9_EXPERIMENT_TG_ALLOC=<ceiling>:<encoding>. Absent or malformed
+ * values keep the production defaults. The advertised limit never changes. */
+static void
+hk_apple9_threadgroup_experiment_from_env(void)
+{
+   const char *env = getenv("AGX_APPLE9_EXPERIMENT_TG_ALLOC");
+   char *end = NULL;
+   unsigned long ceiling = 0, encoding = 0;
+   bool valid = false;
+   struct agx_apple9_experiments experiments = {
+      .threadgroup_memory_ceiling = AGX_APPLE9_MAX_THREADGROUP_MEMORY_BYTES,
+      .threadgroup_encoding = AGX_APPLE9_TG_ENC_PRODUCTION,
+   };
+
+   if (env && *env >= '0' && *env <= '9') {
+      ceiling = strtoul(env, &end, 10);
+      if (*end == ':' && end[1] >= '0' && end[1] <= '9') {
+         encoding = strtoul(end + 1, &end, 10);
+         valid = !*end && ceiling >= 128 && ceiling <= (1ul << 29) &&
+                 !(ceiling & (ceiling - 1)) &&
+                 encoding <= AGX_APPLE9_TG_ENC_WIDE32;
+      }
+   }
+
+   if (valid) {
+      experiments.threadgroup_memory_ceiling = ceiling;
+      experiments.threadgroup_encoding = encoding;
+   } else if (getenv("AGX_APPLE9_TRACE_REJECT")) {
+      fprintf(stderr, "APPLE9_EXPERIMENT_IGNORED\n");
+   }
+   agx_apple9_experiments_set(&experiments);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 hk_CreateDevice(VkPhysicalDevice physicalDevice,
                 const VkDeviceCreateInfo *pCreateInfo,
@@ -305,6 +343,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       goto fail_alloc;
 
    dev->vk.shader_ops = &hk_device_shader_ops;
+   hk_apple9_softfp64_init(&dev->softfp64);
    dev->vk.command_dispatch_table = &dev->cmd_dispatch;
 
    drmDevicePtr drm_device = NULL;
@@ -323,6 +362,8 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
                          "failed to open device %s", path);
       goto fail_init;
    }
+
+   hk_apple9_threadgroup_experiment_from_env();
 
    dev->perftest = debug_get_flags_option("HK_PERFTEST", hk_perf_options, 0);
 
@@ -345,6 +386,10 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
                          "Failed to get DRM device: %m");
       goto fail_fd;
    }
+
+   if (agx_apple9_compute_enabled(&dev->dev) ||
+       agx_apple9_direct_render_enabled(&dev->dev))
+      agx_apple9_initialize_entries(&dev->dev);
 
    vk_device_set_drm_fd(&dev->vk, dev->dev.fd);
    dev->vk.command_buffer_ops = &hk_cmd_buffer_ops;
@@ -421,7 +466,8 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       .robustness = &vk_robustness_disabled,
       .stage = MESA_SHADER_FRAGMENT,
    };
-   hk_compile_shader(dev, &info, NULL, NULL, pAllocator, &dev->null_fs);
+   hk_compile_shader(dev, &info, NULL, NULL, pAllocator, &dev->null_fs,
+                      NULL);
    if (!dev->null_fs) {
       result = VK_ERROR_OUT_OF_HOST_MEMORY;
       goto fail_meta;
@@ -465,6 +511,7 @@ fail_dev:
 fail_fd:
    close(dev->dev.fd);
 fail_init:
+   hk_apple9_softfp64_finish(&dev->softfp64);
    vk_device_finish(&dev->vk);
 fail_alloc:
    vk_free(&dev->vk.alloc, dev);
@@ -479,6 +526,7 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    if (!dev)
       return;
 
+   hk_apple9_softfp64_finish(&dev->softfp64);
    util_dynarray_fini(&dev->external_bos.counts);
    util_dynarray_fini(&dev->external_bos.list);
    u_rwlock_destroy(&dev->external_bos.lock);

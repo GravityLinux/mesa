@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_physical_device.h"
+#include "asahi/lib/agx_apple9_compute.h"
 
 #include "asahi/compiler/agx_nir_texture.h"
 #include "asahi/lib/agx_device.h"
@@ -653,6 +654,61 @@ hk_get_device_features(
       .presentAtAbsoluteTime = true,
 #endif
    };
+
+   if (agx_apple9_compute_enabled(dev)) {
+      /* The native sampler path does not lower custom-border queries. */
+      features->customBorderColors = false;
+      features->customBorderColorWithoutFormat = false;
+      /* The native sampler packet has no non-seamless cube-map mode. */
+      features->nonSeamlessCubeMap = false;
+      features->robustBufferAccess = true;
+      features->robustImageAccess = true;
+      features->pipelineRobustness = false;
+      features->robustBufferAccess2 = false;
+      features->robustImageAccess2 = false;
+      /* nullDescriptor: The snapshot model reads descriptors at record
+       * time — null descriptors yield zero addresses. Image lowering
+       * handles null via AGX_ZERO_PAGE_ADDRESS checks (libagx_txs
+       * returns 0). Buffer accesses to address 0 hit the GPU zero page. */
+      // features->nullDescriptor = false;  /* re-enabled for Zink */
+      features->descriptorIndexing = false;
+      features->shaderStorageImageReadWithoutFormat = false;
+      features->shaderStorageImageWriteWithoutFormat = true;
+      /* re-enabled: mature buffer descriptor path handles these */
+      // features->shaderUniformBufferArrayDynamicIndexing = false;
+      features->shaderSampledImageArrayDynamicIndexing = false;
+      // features->shaderStorageBufferArrayDynamicIndexing = false;
+      features->shaderStorageImageArrayDynamicIndexing = false;
+      features->shaderInputAttachmentArrayDynamicIndexing = false;
+      features->shaderUniformTexelBufferArrayDynamicIndexing = false;
+      features->shaderStorageTexelBufferArrayDynamicIndexing = false;
+      // features->shaderUniformBufferArrayNonUniformIndexing = false;
+      features->shaderSampledImageArrayNonUniformIndexing = false;
+      // features->shaderStorageBufferArrayNonUniformIndexing = false;
+      features->shaderStorageImageArrayNonUniformIndexing = false;
+      features->shaderInputAttachmentArrayNonUniformIndexing = false;
+      features->shaderUniformTexelBufferArrayNonUniformIndexing = false;
+      features->shaderStorageTexelBufferArrayNonUniformIndexing = false;
+      // features->descriptorBindingUniformBufferUpdateAfterBind = false;
+      features->descriptorBindingSampledImageUpdateAfterBind = false;
+      features->descriptorBindingStorageImageUpdateAfterBind = false;
+      // features->descriptorBindingStorageBufferUpdateAfterBind = false;
+      features->descriptorBindingUniformTexelBufferUpdateAfterBind = false;
+      features->descriptorBindingStorageTexelBufferUpdateAfterBind = false;
+      features->descriptorBindingInlineUniformBlockUpdateAfterBind = false;
+      // features->descriptorBindingUpdateUnusedWhilePending = false;
+      // features->descriptorBindingPartiallyBound = false;
+      // features->descriptorBindingVariableDescriptorCount = false;
+      // features->runtimeDescriptorArray = false;
+      /* re-enabled: mature buffer descriptor path handles variable pointers.
+       * These are pointer computations in SSBO/BDA space. */
+      // features->variablePointersStorageBuffer = false;
+      // features->variablePointers = false;
+      /* re-enabled: Apple9 compiler handles nir_load_global/nir_store_global
+       * (proven via image lowering). BDA just needs global memory access. */
+      // features->bufferDeviceAddress = false;
+      // features->bufferDeviceAddressCaptureReplay = false;
+   }
 }
 
 static void
@@ -1012,7 +1068,7 @@ hk_get_device_properties(const struct agx_device *dev,
       .variableSampleLocations = false,
 
       /* VK_EXT_shader_object */
-      .shaderBinaryVersion = 0,
+      .shaderBinaryVersion = 1,
 
       /* VK_EXT_transform_feedback */
       .maxTransformFeedbackStreams = 4,
@@ -1041,6 +1097,25 @@ hk_get_device_properties(const struct agx_device *dev,
       .advancedBlendCorrelatedOverlap = true,
       .advancedBlendAllOperations = true,
    };
+
+   if (agx_apple9_compute_enabled(dev)) {
+      /* The launch word stores (bytes << 2) in 16 bits, so 8 KiB is the
+       * largest supported power-of-two allocation. Advertising the generic
+       * 32 KiB limit makes compute clients select shaders this GPU rejects.
+       */
+      properties->maxComputeSharedMemorySize =
+         AGX_APPLE9_MAX_THREADGROUP_MEMORY_BYTES;
+      /* agx_apple9_compute_grid_supported rejects more than 65535 groups on
+       * any axis, so do not advertise a larger X count.
+       */
+      properties->maxComputeWorkGroupCount[0] = 65535;
+      /* Subgroup reductions do not compile yet. Advertising arithmetic makes
+       * ggml select those shaders instead of the supported scalar matvec.
+       */
+      properties->subgroupSupportedOperations &=
+         ~(VK_SUBGROUP_FEATURE_ARITHMETIC_BIT |
+           VK_SUBGROUP_FEATURE_CLUSTERED_BIT);
+   }
 
    snprintf(properties->deviceName, sizeof(properties->deviceName), "%s",
             (strlen(instance->drirc.debug.force_vk_devicename) > 0) ?
@@ -1266,6 +1341,8 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
 
    struct vk_device_extension_table supported_extensions;
    hk_get_device_extensions(instance, &supported_extensions);
+   if (agx_apple9_compute_enabled(&pdev->dev))
+      supported_extensions.EXT_non_seamless_cube_map = false;
 
    struct vk_features supported_features;
    hk_get_device_features(&pdev->dev, instance, &supported_extensions,

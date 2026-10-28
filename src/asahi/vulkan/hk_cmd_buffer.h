@@ -27,6 +27,7 @@
 #include "hk_descriptor_set.h"
 
 #include "asahi/lib/agx_nir_lower_vbo.h"
+#include "asahi/lib/agx_apple9_compute.h"
 #include "util/u_dynarray.h"
 #include "vulkan/vulkan_core.h"
 
@@ -472,6 +473,9 @@ struct hk_cmd_buffer {
       struct hk_uploader main, usc;
    } uploader;
 
+   /* Native Apple9 launch/resource records, owned like the command buffer. */
+   struct agx_pool apple9_compute;
+
    /* List of all recorded control streams */
    struct list_head control_streams;
 
@@ -829,6 +833,10 @@ void hk_usc_upload_spilled_rt_descs(struct agx_usc_builder *b,
 
 void hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs);
 
+bool hk_apple9_dispatch_shader(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+                               struct hk_shader *s, struct agx_grid grid,
+                               struct agx_workgroup local_size);
+
 void hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
                                  struct agx_cdm_launch_word_0_packed launch,
                                  uint32_t usc, struct agx_grid grid,
@@ -848,6 +856,12 @@ hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       return;
 
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (s->apple9) {
+      if (!hk_apple9_dispatch_shader(cmd, cs, s, grid, local_size))
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_INITIALIZATION_FAILED);
+      return;
+   }
+
    uint32_t usc = hk_upload_usc_words(cmd, s, s->only_linked);
 
    hk_reserve_scratch(cmd, cs, s);

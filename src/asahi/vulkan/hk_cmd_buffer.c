@@ -7,6 +7,7 @@
 #include "hk_cmd_buffer.h"
 
 #include "agx_abi.h"
+#include "hk_apple9.h"
 #include "agx_bo.h"
 #include "agx_device.h"
 #include "agx_linker.h"
@@ -52,6 +53,10 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd)
 {
    struct hk_cmd_pool *pool = hk_cmd_buffer_pool(cmd);
    struct hk_device *dev = hk_cmd_pool_device(pool);
+
+   if (agx_apple9_compute_enabled(&dev->dev)) {
+      agx_pool_cleanup(&cmd->apple9_compute);
+   }
 
    hk_descriptor_state_fini(cmd, &cmd->state.gfx.descriptors);
    hk_descriptor_state_fini(cmd, &cmd->state.cs.descriptors);
@@ -120,6 +125,10 @@ hk_create_cmd_buffer(struct vk_command_pool *vk_pool,
    list_inithead(&cmd->uploader.main.bos);
    list_inithead(&cmd->uploader.usc.bos);
    list_inithead(&cmd->control_streams);
+   if (agx_apple9_compute_enabled(&dev->dev))
+      agx_pool_init(&cmd->apple9_compute, &dev->dev,
+                    "Honeykrisp Apple9 compute",
+                    AGX_BO_LOW_VA | AGX_BO_WRITEBACK, true);
 
    *cmd_buffer_out = &cmd->vk;
 
@@ -132,9 +141,14 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
 {
    struct hk_cmd_buffer *cmd =
       container_of(vk_cmd_buffer, struct hk_cmd_buffer, vk);
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
    vk_command_buffer_reset(&cmd->vk);
    hk_free_resettable_cmd_buffer(cmd);
+   if (agx_apple9_compute_enabled(&dev->dev))
+      agx_pool_init(&cmd->apple9_compute, &dev->dev,
+                    "Honeykrisp Apple9 compute",
+                    AGX_BO_LOW_VA | AGX_BO_WRITEBACK, true);
 
    cmd->uploader.main.map = NULL;
    cmd->uploader.main.base = 0;
@@ -298,6 +312,12 @@ VKAPI_ATTR VkResult VKAPI_CALL
 hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+
+   if (agx_apple9_compute_enabled(&hk_cmd_buffer_device(cmd)->dev)) {
+      VkResult result = vk_command_buffer_get_record_result(&cmd->vk);
+      if (result != VK_SUCCESS)
+         return result;
+   }
 
    assert(cmd->current_cs.gfx == NULL && cmd->current_cs.pre_gfx == NULL &&
           "must end rendering before ending the command buffer");
@@ -767,6 +787,18 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
    struct hk_cs *cs = hk_cmd_buffer_get_cs_general(cmd, target, true);
    if (!cs)
       return;
+
+   if (prog->apple9) {
+      if (!hk_apple9_dispatch_precompiled(cmd, cs, grid, prog,
+                                          data, data_size)) {
+         if (getenv("AGX_APPLE9_TRACE_REJECT") != NULL)
+            fprintf(stderr, "APPLE9_PRECOMP_DISPATCH_FAILED data_size=%zu\n",
+                    (size_t)data_size);
+         vk_command_buffer_set_error(&cmd->vk,
+                                     VK_ERROR_INITIALIZATION_FAILED);
+      }
+      return;
+   }
 
    struct agx_ptr t = hk_pool_usc_alloc(cmd, agx_usc_size(15), 64);
    uint64_t uploaded_data = hk_pool_upload(cmd, data, data_size, 4);

@@ -19,6 +19,7 @@
 #include "vk_dispatch_table.h"
 
 #include "hk_private.h"
+#include "hk_apple9_softfp64.h"
 
 #include "hk_descriptor_table.h"
 #include "hk_queue.h"
@@ -80,6 +81,7 @@ struct hk_device {
    struct hk_internal_shaders prolog_epilog;
    struct hk_internal_shaders kernels;
    struct hk_api_shader *null_fs;
+   struct hk_apple9_softfp64 softfp64;
 
    /* Indirected for common secondary emulation */
    struct vk_device_dispatch_table cmd_dispatch;

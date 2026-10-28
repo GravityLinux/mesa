@@ -7,6 +7,10 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_shader.h"
+#include "hk_apple9.h"
+#include "hk_apple9_root.h"
+#include "hk_apple9_coopmat.h"
+#include "asahi/lib/agx_apple9_compute.h"
 
 #include "poly/nir/poly_nir.h"
 #include "agx_debug.h"
@@ -96,11 +100,22 @@ shared_var_info(const struct glsl_type *type, unsigned *size, unsigned *align)
    *size = comp_size * length, *align = comp_size;
 }
 
+static bool
+hk_apple9_descriptor_snapshot(void)
+{
+   const char *snapshot = getenv("AGX_APPLE9_DESCRIPTOR_SNAPSHOT");
+   return snapshot && strcmp(snapshot, "1") == 0;
+}
+
 uint64_t
 hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
 {
-   /* This could be optimized but it doesn't matter */
-   return pdev->dev.debug;
+   /* Version both serialized mappings, and separate the two descriptor ABIs. */
+   return pdev->dev.debug |
+      (agx_apple9_compute_enabled(&pdev->dev)
+          ? (UINT64_C(15) << 60) | (UINT64_C(1) << 58) |
+            (!hk_apple9_descriptor_snapshot() ? (UINT64_C(1) << 59) : 0)
+          : 0);
 }
 
 const nir_shader_compiler_options *
@@ -112,14 +127,22 @@ hk_get_nir_options(struct vk_physical_device *vk_pdev, mesa_shader_stage stage,
 
 static struct spirv_to_nir_options
 hk_get_spirv_options(struct vk_physical_device *vk_pdev,
-                     UNUSED mesa_shader_stage stage,
+                     mesa_shader_stage stage,
                      const struct vk_pipeline_robustness_state *rs)
 {
+   struct hk_physical_device *pdev =
+      container_of(vk_pdev, struct hk_physical_device, vk);
+   bool snapshot = agx_apple9_compute_enabled(&pdev->dev) &&
+                   hk_apple9_descriptor_snapshot();
    return (struct spirv_to_nir_options){
-      .ssbo_addr_format = hk_buffer_addr_format(rs->storage_buffers),
+      .ssbo_addr_format = snapshot ? nir_address_format_32bit_index_offset
+                                  : hk_buffer_addr_format(rs->storage_buffers),
       .phys_ssbo_addr_format = nir_address_format_64bit_global,
-      .ubo_addr_format = hk_buffer_addr_format(rs->uniform_buffers),
+      .ubo_addr_format = snapshot ? nir_address_format_32bit_index_offset
+                                 : hk_buffer_addr_format(rs->uniform_buffers),
       .shared_addr_format = nir_address_format_32bit_offset,
+      .require_cmat_memory_access_none_or_aligned =
+         agx_apple9_compute_enabled(&pdev->dev),
       .min_ssbo_alignment = HK_MIN_SSBO_ALIGNMENT,
       .min_ubo_alignment = HK_MIN_UBO_ALIGNMENT,
    };
@@ -185,6 +208,25 @@ static void
 hk_preprocess_nir(struct vk_physical_device *vk_pdev, nir_shader *nir,
                   UNUSED const struct vk_pipeline_robustness_state *rs)
 {
+   struct hk_physical_device *pdev =
+      container_of(vk_pdev, struct hk_physical_device, vk);
+   if (agx_apple9_compute_enabled(&pdev->dev) &&
+       nir->info.stage == MESA_SHADER_COMPUTE &&
+       nir->info.cs.has_cooperative_matrix) {
+      const char *reason = NULL;
+      /* Success, not NIR progress. On failure NIR remains unchanged, and
+       * generic preprocessing's vars-to-scratch cannot size matrix types.
+       */
+      if (!agx_nir_lower_apple9_cooperative_matrix(nir, 32, &reason))
+         return;
+   }
+   /* Generic algebraic preprocessing can split ffma64 and fdiv64 according
+    * to the hardware options. Defer it until the fallible library pass has
+    * either replaced the original doubles or rejected their exact opcode. */
+   if (agx_apple9_compute_enabled(&pdev->dev) &&
+       hk_apple9_nir_uses_double(nir))
+      return;
+
    hk_preprocess_nir_internal(vk_pdev, nir);
    nir_lower_compute_system_values_options csv_options = {
       .has_base_workgroup_id = true,
@@ -496,6 +538,14 @@ lower_load_global_constant_offset_instr(nir_builder *b,
    return true;
 }
 
+bool
+hk_nir_lower_global_constant_offsets(nir_shader *nir, bool soft_fault)
+{
+   return nir_shader_intrinsics_pass(
+      nir, lower_load_global_constant_offset_instr, nir_metadata_none,
+      &soft_fault);
+}
+
 struct lower_ycbcr_state {
    uint32_t set_layout_count;
    struct vk_descriptor_set_layout *const *set_layouts;
@@ -780,15 +830,43 @@ should_lower_robust(const nir_intrinsic_instr *intr, const void *_)
           intr->intrinsic == nir_intrinsic_image_deref_atomic_swap;
 }
 
-static void
+static bool
+hk_apple9_prepare_softfp64(struct hk_device *dev, nir_shader *nir,
+                          const char **reason)
+{
+   bool deferred = hk_apple9_nir_uses_double(nir);
+   if (!hk_apple9_lower_softfp64(&dev->softfp64, nir, reason))
+      return false;
+   if (deferred)
+      hk_preprocess_nir(dev->vk.physical, nir, NULL);
+   return true;
+}
+
+static bool
 hk_lower_nir(struct hk_device *dev, nir_shader *nir,
              const struct vk_pipeline_robustness_state *rs, bool is_multiview,
              uint32_t set_layout_count,
              struct vk_descriptor_set_layout *const *set_layouts,
-             enum hk_feature_key features)
+             enum hk_feature_key features,
+             struct hk_apple9_shader_mapping *apple9_mapping,
+             const char **apple9_reason)
 {
    if (HK_PERF(dev, NOROBUST)) {
       rs = &vk_robustness_disabled;
+   }
+
+   bool apple9_compute = apple9_mapping != NULL;
+   if (apple9_compute &&
+       !hk_apple9_prepare_softfp64(dev, nir, apple9_reason))
+      return false;
+
+   bool snapshot = apple9_compute && hk_apple9_descriptor_snapshot();
+   if (snapshot &&
+       (rs->storage_buffers != VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT ||
+        rs->uniform_buffers != VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT ||
+        rs->images != VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DISABLED_EXT)) {
+      *apple9_reason = "Apple9 snapshot robust descriptor access is unsupported";
+      return false;
    }
 
    const nir_opt_access_options access_options = {
@@ -852,14 +930,37 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       NIR_PASS(_, nir, agx_nir_lower_custom_border);
    }
 
-   NIR_PASS(_, nir, hk_nir_lower_descriptors, rs, set_layout_count,
-            set_layouts);
+   if (snapshot) {
+      if (!hk_nir_lower_apple9_descriptors(
+             nir, set_layout_count, set_layouts, apple9_mapping,
+             apple9_reason))
+         return false;
+   } else if (apple9_compute) {
+      NIR_PASS(_, nir, hk_nir_lower_buffer_descriptors, rs, set_layout_count,
+               set_layouts);
+      if (!hk_nir_lower_apple9_textures(
+             nir, set_layout_count, set_layouts, apple9_mapping, apple9_reason))
+         return false;
+   } else {
+      NIR_PASS(_, nir, hk_nir_lower_descriptors, rs, set_layout_count,
+               set_layouts);
+   }
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_global,
             nir_address_format_64bit_global);
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ssbo,
-            hk_buffer_addr_format(rs->storage_buffers));
+            snapshot ? nir_address_format_32bit_index_offset
+                     : hk_buffer_addr_format(rs->storage_buffers));
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo,
-            hk_buffer_addr_format(rs->uniform_buffers));
+            snapshot ? nir_address_format_32bit_index_offset
+                     : hk_buffer_addr_format(rs->uniform_buffers));
+   if (apple9_compute) {
+      NIR_PASS(_, nir, nir_opt_constant_folding);
+      NIR_PASS(_, nir, nir_opt_copy_prop);
+   }
+   if (snapshot &&
+       !hk_nir_lower_apple9_io(nir, set_layout_count, set_layouts,
+                               apple9_mapping, apple9_reason))
+      return false;
 
    /* Before inserting bounds checks, we want to do a fair bit of optimization.
     * lower_load_global_constant_offset_instr has special optimizations for
@@ -879,28 +980,30 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    NIR_PASS(progress, nir, nir_opt_move, opts);
 
    bool soft_fault = agx_has_soft_fault(&dev->dev);
-   NIR_PASS(_, nir, nir_shader_intrinsics_pass,
-            lower_load_global_constant_offset_instr, nir_metadata_none,
-            &soft_fault);
+   NIR_PASS(_, nir, hk_nir_lower_global_constant_offsets, soft_fault);
+   if (apple9_compute && !snapshot)
+      NIR_PASS(_, nir, hk_nir_lower_apple9_root);
 
-   assert(nir->info.shared_size == 0);
+   if (!apple9_compute) {
+      assert(nir->info.shared_size == 0);
 
-   NIR_PASS(_, nir, nir_lower_vars_to_explicit_types, nir_var_mem_shared,
-            shared_var_info);
-   NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_shared,
-            nir_address_format_32bit_offset);
+      NIR_PASS(_, nir, nir_lower_vars_to_explicit_types, nir_var_mem_shared,
+               shared_var_info);
+      NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_shared,
+               nir_address_format_32bit_offset);
 
-   if (nir->info.zero_initialize_shared_memory && nir->info.shared_size > 0) {
-      /* Align everything up to 16B so we can write whole vec4s. */
-      nir->info.shared_size = align(nir->info.shared_size, 16);
-      NIR_PASS(_, nir, nir_zero_initialize_shared_memory, nir->info.shared_size,
-               16);
+      if (nir->info.zero_initialize_shared_memory && nir->info.shared_size > 0) {
+         /* Align everything up to 16B so we can write whole vec4s. */
+         nir->info.shared_size = align(nir->info.shared_size, 16);
+         NIR_PASS(_, nir, nir_zero_initialize_shared_memory, nir->info.shared_size,
+                  16);
 
-      /* We need to call lower_compute_system_values again because
-       * nir_zero_initialize_shared_memory generates load_invocation_id which
-       * has to be lowered to load_invocation_index.
-       */
-      NIR_PASS(_, nir, nir_lower_compute_system_values, NULL);
+         /* We need to call lower_compute_system_values again because
+          * nir_zero_initialize_shared_memory generates load_invocation_id which
+          * has to be lowered to load_invocation_index.
+          */
+         NIR_PASS(_, nir, nir_lower_compute_system_values, NULL);
+      }
    }
 
    /* TODO: we can do indirect VS output */
@@ -923,8 +1026,10 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
                nir_metadata_control_flow, NULL);
    }
 
-   NIR_PASS(_, nir, agx_nir_lower_texture);
-   NIR_PASS(_, nir, agx_nir_lower_multisampled_image_store);
+   if (!apple9_compute) {
+      NIR_PASS(_, nir, agx_nir_lower_texture);
+      NIR_PASS(_, nir, agx_nir_lower_multisampled_image_store);
+   }
 
    agx_preprocess_nir(nir);
 
@@ -935,11 +1040,29 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    NIR_PASS(_, nir, nir_opt_peephole_select, &peephole_select_options);
    NIR_PASS(_, nir, nir_opt_if,
             nir_opt_if_optimize_phi_true_false | nir_opt_if_avoid_64bit_phis);
+   return true;
 }
 
 static void
 hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
 {
+   if (shader->apple9) {
+      size_t size = shader->b.info.binary_size;
+      assert(size > 0);
+      shader->bo = agx_bo_create(&dev->dev, size, 0,
+                                 AGX_BO_EXEC | AGX_BO_LOW_VA |
+                                    AGX_BO_WRITEBACK,
+                                 "Honeykrisp Apple9 shader body");
+      if (!shader->bo)
+         return;
+      memcpy(agx_bo_map(shader->bo), shader->code_ptr, size);
+      agx_bo_note_cpu_write(shader->bo, 0, size);
+      shader->preamble_addr = shader->apple9_profile.preamble_size
+         ? shader->bo->va->addr + shader->apple9_profile.preamble_offset : 0;
+      shader->only_linked = rzalloc(NULL, struct hk_linked_shader);
+      return;
+   }
+
    if (shader->b.info.has_preamble || shader->b.info.rodata.size_16) {
       /* TODO: Do we wnat to compact? Revisit when we rework prolog/epilogs. */
       size_t size = shader->b.info.binary_size;
@@ -1190,8 +1313,50 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    if (lock)
       simple_mtx_lock(lock);
 
-   assert(nir->info.io_lowered);
-   agx_compile_shader_nir(nir, &backend_key, &shader->b);
+   if (nir->info.stage == MESA_SHADER_COMPUTE &&
+       agx_apple9_compute_enabled(&dev->dev)) {
+      if (!shader->apple9) {
+         if (lock)
+            simple_mtx_unlock(lock);
+         ralloc_free(nir);
+         return vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
+                          "Apple9 software-stage compute is unsupported");
+      }
+
+      const char *reason = NULL;
+      if (!agx_compile_apple9_tiny(nir, &shader->b,
+                                   &shader->apple9_profile, &reason)) {
+         if (getenv("AGX_APPLE9_TRACE_REJECT") != NULL)
+            fprintf(stderr, "APPLE9_COMPILE_FAILED shared=%u: %s\n",
+                    nir->info.shared_size, reason ?: "unknown reason");
+         if (getenv("AGX_APPLE9_DUMP_NIR") != NULL)
+            nir_print_shader(nir, stderr);
+         if (lock)
+            simple_mtx_unlock(lock);
+         ralloc_free(nir);
+         return vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
+                          "Apple9 compute compilation failed: %s",
+                          reason ?: "unknown reason");
+      }
+      if (shader->b.info.apple9_image_mask) {
+         /* image_store_block_agx (tile PBE) survived into the compute compiler.
+          * Our NIR lowering should have converted all image_deref_* to global
+          * memory ops, so this indicates an unlowered tile operation.
+          */
+         if (getenv("AGX_APPLE9_TRACE_REJECT"))
+            fprintf(stderr, "APPLE9_IMAGE_MASK reject mask=0x%x\n",
+                    shader->b.info.apple9_image_mask);
+         if (lock)
+            simple_mtx_unlock(lock);
+         ralloc_free(nir);
+         return vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
+                          "Apple9 unlowered tile image operations (mask=0x%x)",
+                          shader->b.info.apple9_image_mask);
+      }
+   } else {
+      assert(nir->info.io_lowered);
+      agx_compile_shader_nir(nir, &backend_key, &shader->b);
+   }
 
    if (lock)
       simple_mtx_unlock(lock);
@@ -1291,13 +1456,36 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
                   const struct vk_graphics_pipeline_state *state,
                   const struct vk_features *vk_features,
                   const VkAllocationCallbacks *pAllocator,
-                  struct hk_api_shader **shader_out)
+                  struct hk_api_shader **shader_out,
+                  struct hk_apple9_shader_mapping *apple9_mapping)
 {
    VkResult result;
    enum hk_feature_key features = hk_make_feature_key(vk_features);
 
    /* We consume the NIR, regardless of success or failure */
    nir_shader *nir = info->nir;
+
+   /* The bulk path has already lowered this NIR. Internal/cached callers may
+    * reach this entry directly; keep both paths fallible and idempotent. */
+   if (agx_apple9_compute_enabled(&dev->dev)) {
+      const char *reason = NULL;
+      if (!hk_apple9_prepare_softfp64(dev, nir, &reason)) {
+         ralloc_free(nir);
+         return vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
+                          "Apple9 software double lowering failed: %s", reason);
+      }
+   }
+
+   if (agx_apple9_compute_enabled(&dev->dev)) {
+      const char *reason = hk_apple9_coopmat_rejection(nir);
+      if (reason) {
+         if (getenv("AGX_APPLE9_TRACE_REJECT"))
+            fprintf(stderr, "APPLE9_COOPMAT_REJECT reason=%s\n", reason);
+         ralloc_free(nir);
+         return vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
+                          "Apple9 cooperative matrix: %s", reason);
+      }
+   }
 
    size_t size = sizeof(struct hk_api_shader) +
                  sizeof(struct hk_shader) * hk_num_variants(info->stage);
@@ -1309,12 +1497,30 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
    }
 
-   if (!nir->info.io_lowered) {
-      hk_lower_nir(dev, nir, info->robustness, false, info->set_layout_count,
-                   info->set_layouts, features);
-   }
-
    mesa_shader_stage sw_stage = nir->info.stage;
+   bool apple9_compute = sw_stage == MESA_SHADER_COMPUTE &&
+                         agx_apple9_compute_enabled(&dev->dev);
+   if (apple9_compute) {
+      struct hk_shader *shader = hk_only_variant(obj);
+      if (apple9_mapping) {
+         shader->apple9_mapping = *apple9_mapping;
+      } else {
+         const char *reason = NULL;
+         if (!hk_lower_nir(dev, nir, info->robustness, false,
+                           info->set_layout_count, info->set_layouts, features,
+                           &shader->apple9_mapping, &reason)) {
+            hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
+            ralloc_free(nir);
+            return vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
+                             "Apple9 descriptor lowering failed: %s",
+                             reason ?: "unknown reason");
+         }
+      }
+      shader->apple9 = true;
+   } else if (!nir->info.io_lowered) {
+      hk_lower_nir(dev, nir, info->robustness, false, info->set_layout_count,
+                   info->set_layouts, features, NULL, NULL);
+   }
 
    union hk_key key_tmp, *key = NULL;
    if (sw_stage == MESA_SHADER_FRAGMENT) {
@@ -1541,6 +1747,8 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
 {
    struct hk_device *dev = container_of(vk_dev, struct hk_device, vk);
    nir_shader *shaders[shader_count];
+   struct hk_apple9_shader_mapping apple9_mappings[shader_count];
+   memset(apple9_mappings, 0, sizeof(apple9_mappings));
 
    /* Lower shaders, notably lowering I/O. This is a prerequisite for
     * intershader optimization.
@@ -1552,8 +1760,35 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
       enum hk_feature_key hk_features = hk_make_feature_key(features);
       nir_shader *nir = info->nir;
 
-      hk_lower_nir(dev, nir, info->robustness, is_multiview,
-                   info->set_layout_count, info->set_layouts, hk_features);
+      bool apple9_compute = nir->info.stage == MESA_SHADER_COMPUTE &&
+                            agx_apple9_compute_enabled(&dev->dev);
+      if (apple9_compute) {
+         const char *cmat_reason = hk_apple9_coopmat_rejection(nir);
+         if (cmat_reason) {
+            if (getenv("AGX_APPLE9_TRACE_REJECT"))
+               fprintf(stderr, "APPLE9_COOPMAT_REJECT reason=%s\n", cmat_reason);
+            for (uint32_t j = 0; j < shader_count; j++)
+               ralloc_free(infos[j].nir);
+            memset(shaders_out, 0, shader_count * sizeof(*shaders_out));
+            return vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
+                             "Apple9 cooperative matrix: %s", cmat_reason);
+         }
+         const char *reason = NULL;
+         if (!hk_lower_nir(dev, nir, info->robustness, is_multiview,
+                           info->set_layout_count, info->set_layouts,
+                           hk_features, &apple9_mappings[i], &reason)) {
+            for (uint32_t j = 0; j < shader_count; j++)
+               ralloc_free(infos[j].nir);
+            memset(shaders_out, 0, shader_count * sizeof(*shaders_out));
+            return vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
+                             "Apple9 descriptor lowering failed: %s",
+                             reason ?: "unknown reason");
+         }
+      } else {
+         hk_lower_nir(dev, nir, info->robustness, is_multiview,
+                      info->set_layout_count, info->set_layouts, hk_features,
+                      NULL, NULL);
+      }
 
       if (nir->xfb_info) {
          /* Fold constant offset srcs for IO. */
@@ -1571,7 +1806,8 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
    for (uint32_t i = 0; i < shader_count; i++) {
       VkResult result =
          hk_compile_shader(dev, &infos[i], state, features, pAllocator,
-                           (struct hk_api_shader **)&shaders_out[i]);
+                           (struct hk_api_shader **)&shaders_out[i],
+                           &apple9_mappings[i]);
       if (result != VK_SUCCESS) {
          /* Clean up all the shaders before this point */
          for (uint32_t j = 0; j < i; j++)
@@ -1600,6 +1836,17 @@ hk_deserialize_shader(struct hk_device *dev, struct blob_reader *blob,
 
    struct agx_shader_info b_info;
    blob_copy_bytes(blob, &b_info, sizeof(b_info));
+
+   uint8_t apple9 = blob_read_uint8(blob);
+   if (apple9 > 1)
+      return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
+   shader->apple9 = apple9;
+   if (shader->apple9) {
+      blob_copy_bytes(blob, &shader->apple9_profile,
+                      sizeof(shader->apple9_profile));
+      blob_copy_bytes(blob, &shader->apple9_mapping,
+                      sizeof(shader->apple9_mapping));
+   }
 
    const uint32_t code_size = blob_read_uint32(blob);
    const uint32_t data_size = blob_read_uint32(blob);
@@ -1644,6 +1891,9 @@ hk_deserialize_api_shader(struct vk_device *vk_dev, struct blob_reader *blob,
 {
    struct hk_device *dev = container_of(vk_dev, struct hk_device, vk);
 
+   if (binary_version != 1)
+      return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
+
    mesa_shader_stage stage = blob_read_uint8(blob);
    if (blob->overrun)
       return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
@@ -1676,6 +1926,13 @@ hk_shader_serialize(struct vk_device *vk_dev, const struct hk_shader *shader,
 {
    blob_write_bytes(blob, &shader->info, sizeof(shader->info));
    blob_write_bytes(blob, &shader->b.info, sizeof(shader->b.info));
+   blob_write_uint8(blob, shader->apple9);
+   if (shader->apple9) {
+      blob_write_bytes(blob, &shader->apple9_profile,
+                       sizeof(shader->apple9_profile));
+      blob_write_bytes(blob, &shader->apple9_mapping,
+                       sizeof(shader->apple9_mapping));
+   }
 
    blob_write_uint32(blob, shader->code_size);
    blob_write_uint32(blob, shader->data_size);

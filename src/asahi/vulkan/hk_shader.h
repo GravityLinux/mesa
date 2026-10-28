@@ -7,7 +7,9 @@
 
 #pragma once
 
+#include "hk_apple9.h"
 #include "asahi/compiler/agx_compile.h"
+#include "asahi/compiler/agx_compile_apple9.h"
 #include "poly/nir/poly_nir.h"
 #include "util/macros.h"
 #include "agx_linker.h"
@@ -133,6 +135,10 @@ struct hk_fast_link_key_fs {
 
 struct hk_shader {
    struct agx_shader_part b;
+
+   bool apple9;
+   struct agx_apple9_compute_profile apple9_profile;
+   struct hk_apple9_shader_mapping apple9_mapping;
 
    struct hk_shader_info info;
    struct agx_fragment_face_2_packed frag_face;
@@ -355,7 +361,8 @@ VkResult hk_compile_shader(struct hk_device *dev,
                            const struct vk_graphics_pipeline_state *state,
                            const struct vk_features *features,
                            const VkAllocationCallbacks *pAllocator,
-                           struct hk_api_shader **shader_out);
+                           struct hk_api_shader **shader_out,
+                           struct hk_apple9_shader_mapping *apple9_mapping);
 
 void hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev,
                                 nir_shader *nir);

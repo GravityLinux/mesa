@@ -1,6 +1,12 @@
 # Copyright © 2022 Collabora Ltd. and Red Hat Inc.
 # SPDX-License-Identifier: MIT
 hk_files = files(
+  'hk_apple9_softfp64.c',
+  'hk_apple9_softfp64.h',
+  'hk_apple9.c',
+  'hk_apple9.h',
+  'hk_apple9_root.c',
+  'hk_apple9_root.h',
   'hk_buffer.c',
   'hk_buffer.h',
   'hk_buffer_view.c',
@@ -75,6 +81,7 @@ hk_entrypoints = custom_target(
 hk_deps = [
   dep_libdrm,
   idep_nir,
+  idep_vtn,
   idep_vulkan_runtime,
   idep_vulkan_util,
   idep_vulkan_wsi,
@@ -84,12 +91,25 @@ hk_deps = [
   idep_libagx_shaders_h,
 ]
 
+hk_float64_spv = custom_target(
+  'hk_float64_spv.h',
+  input : [glsl2spirv, float64_glsl_file],
+  output : 'hk_float64_spv.h',
+  command : [
+    prog_python, '@INPUT@', '@OUTPUT@', prog_glslang,
+    '--vn', 'hk_float64_spv', '--glsl-version', '450', '-Olib',
+    glslang_depfile,
+  ],
+  depfile : 'hk_float64_spv.h.d',
+)
+
 libhk = static_library(
   'hk',
   [
     hk_entrypoints,
     hk_drirc,
     hk_files,
+    hk_float64_spv,
     sha1_h,
   ],
   include_directories : [
@@ -150,3 +170,37 @@ _dev_icd = custom_target(
 )
 
 devenv.append('VK_DRIVER_FILES', _dev_icd.full_path())
+
+if with_tests
+  hk_apple9_softfp64_tests = executable(
+    'hk_apple9_softfp64_tests',
+    files('test/test-hk-apple9-softfp64.cpp'),
+    [hk_entrypoints, hk_drirc],
+    include_directories : [
+      inc_gallium, inc_gallium_aux, inc_include, inc_src, inc_asahi,
+      inc_virtio_gpu, inc_virtio_vdrm,
+    ],
+    dependencies : [hk_deps, idep_gtest],
+    link_with : [libhk, libasahi_lib, libasahi_layout, libasahi_compiler],
+    gnu_symbol_visibility : 'hidden',
+  )
+  test('hk_apple9_softfp64_tests', hk_apple9_softfp64_tests,
+       # Executes over 57000 production-NIR numerical comparisons in debug builds.
+       suite : ['asahi'], protocol : 'gtest', timeout : 120)
+
+  hk_apple9_tests = executable(
+    'hk_apple9_tests',
+    files('test/test-hk-apple9-descriptors.cpp',
+          'test/test-hk-apple9-spirv-scan.cpp',
+          'hk_nir_lower_descriptors.c', 'hk_apple9_root.c', 'hk_apple9.c'),
+    [hk_entrypoints, hk_drirc],
+    include_directories : [
+      inc_gallium, inc_gallium_aux, inc_include, inc_src, inc_asahi,
+      inc_virtio_gpu, inc_virtio_vdrm,
+    ],
+    dependencies : [hk_deps, idep_gtest, idep_vtn],
+    link_with : [libhk, libasahi_lib, libasahi_layout, libasahi_compiler],
+    gnu_symbol_visibility : 'hidden',
+  )
+  test('hk_apple9_tests', hk_apple9_tests, suite : ['asahi'], protocol : 'gtest')
+endif
