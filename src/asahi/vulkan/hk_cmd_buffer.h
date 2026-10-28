@@ -228,6 +228,9 @@ struct hk_graphics_state {
    uint64_t draw_params;
    uint64_t draw_id_ptr;
 
+   /* Apple9 sysval words 0/1: first vertex (or vertex offset), first instance. */
+   uint32_t apple9_draw_params[2];
+
    uint32_t shaders_dirty;
    struct hk_api_shader *shaders[MESA_SHADER_MESH + 1];
 
@@ -410,6 +413,9 @@ struct hk_cs {
 
    struct hk_render_registers cr;
 
+   bool apple9_render;
+   struct drm_asahi_attachment apple9_attachment;
+
    /* Active restart index if one is set. Zero if there is no restart index set
     * yet, since Vulkan does not allow zero restart indices (unlike OpenGL).
     * This is used in place of dirty tracking, because dirty tracking
@@ -475,6 +481,7 @@ struct hk_cmd_buffer {
 
    /* Native Apple9 launch/resource records, owned like the command buffer. */
    struct agx_pool apple9_compute;
+   struct agx_pool apple9_context;
 
    /* List of all recorded control streams */
    struct list_head control_streams;
@@ -598,7 +605,11 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
    if ((*ptr) == NULL) {
       /* Allocate root control stream */
       size_t initial_size = 65536;
-      struct agx_ptr root = hk_pool_alloc(cmd, initial_size, 1024);
+      bool native = !compute &&
+         agx_apple9_compute_enabled(&hk_cmd_pool_device(hk_cmd_buffer_pool(cmd))->dev);
+      struct agx_ptr root = native
+         ? agx_pool_alloc_aligned(&cmd->apple9_context, initial_size, 1024)
+         : hk_pool_alloc(cmd, initial_size, 1024);
       if (!root.cpu)
          return NULL;
 
@@ -733,7 +744,10 @@ hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
          hk_pool_upload(cmd, cs->depth_bias.data, cs->depth_bias.size, 64);
 
       /* TODO: maybe free scissor/depth_bias now? */
-      cs->current = agx_vdm_terminate(cs->current);
+      if (cs->apple9_render)
+         cs->current += sizeof(uint32_t); /* Already ends in native STOP. */
+      else
+         cs->current = agx_vdm_terminate(cs->current);
    }
 
    cmd->current_cs.gfx = NULL;

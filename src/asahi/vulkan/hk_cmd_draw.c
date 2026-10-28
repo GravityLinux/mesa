@@ -19,6 +19,7 @@
 #include "agx_usc.h"
 #include "agx_uvs.h"
 #include "hk_buffer.h"
+#include "hk_apple9_graphics.h"
 #include "hk_cmd_buffer.h"
 #include "hk_device.h"
 #include "hk_entrypoints.h"
@@ -538,6 +539,10 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
                      const VkRenderingInfo *pRenderingInfo)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   if (agx_apple9_compute_enabled(&hk_cmd_buffer_device(cmd)->dev)) {
+      hk_apple9_begin_rendering(cmd, pRenderingInfo);
+      return;
+   }
    struct hk_rendering_state *render = &cmd->state.gfx.render;
 
    memset(render, 0, sizeof(*render));
@@ -905,6 +910,10 @@ VKAPI_ATTR void VKAPI_CALL
 hk_CmdEndRendering(VkCommandBuffer commandBuffer)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   if (agx_apple9_compute_enabled(&hk_cmd_buffer_device(cmd)->dev)) {
+      hk_apple9_end_rendering(cmd);
+      return;
+   }
    struct hk_rendering_state *render = &cmd->state.gfx.render;
 
    /* The last control stream of the render pass is special since it gets its
@@ -3389,8 +3398,9 @@ hk_CmdBindIndexBuffer2KHR(VkCommandBuffer commandBuffer, VkBuffer _buffer,
    };
 
    /* TODO: check if necessary, blob does this */
-   cmd->state.gfx.index.buffer.range =
-      align(cmd->state.gfx.index.buffer.range, 4);
+   if (!agx_apple9_compute_enabled(&hk_cmd_buffer_device(cmd)->dev))
+      cmd->state.gfx.index.buffer.range =
+         align(cmd->state.gfx.index.buffer.range, 4);
 }
 
 void
@@ -3497,6 +3507,13 @@ hk_ia_update(struct hk_cmd_buffer *cmd, struct agx_draw draw,
 static void
 hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
 {
+   if (agx_apple9_compute_enabled(&hk_cmd_buffer_device(cmd)->dev)) {
+      if (!agx_is_indirect(draw_.b) &&
+          (!draw_.b.count[0] || !draw_.b.count[1]))
+         return;
+      hk_apple9_draw(cmd, draw_);
+      return;
+   }
    const struct vk_dynamic_graphics_state *dyn =
       &cmd->vk.dynamic_graphics_state;
 

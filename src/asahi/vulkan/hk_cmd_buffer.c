@@ -56,6 +56,7 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd)
 
    if (agx_apple9_compute_enabled(&dev->dev)) {
       agx_pool_cleanup(&cmd->apple9_compute);
+      agx_pool_cleanup(&cmd->apple9_context);
    }
 
    hk_descriptor_state_fini(cmd, &cmd->state.gfx.descriptors);
@@ -129,6 +130,10 @@ hk_create_cmd_buffer(struct vk_command_pool *vk_pool,
       agx_pool_init(&cmd->apple9_compute, &dev->dev,
                     "Honeykrisp Apple9 compute",
                     AGX_BO_LOW_VA | AGX_BO_WRITEBACK, true);
+   if (agx_apple9_compute_enabled(&dev->dev))
+      agx_pool_init(&cmd->apple9_context, &dev->dev,
+                    "Honeykrisp Apple9 render context",
+                    AGX_BO_CONTEXT | AGX_BO_WRITEBACK, false);
 
    *cmd_buffer_out = &cmd->vk;
 
@@ -149,6 +154,10 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
       agx_pool_init(&cmd->apple9_compute, &dev->dev,
                     "Honeykrisp Apple9 compute",
                     AGX_BO_LOW_VA | AGX_BO_WRITEBACK, true);
+   if (agx_apple9_compute_enabled(&dev->dev))
+      agx_pool_init(&cmd->apple9_context, &dev->dev,
+                    "Honeykrisp Apple9 render context",
+                    AGX_BO_CONTEXT | AGX_BO_WRITEBACK, false);
 
    cmd->uploader.main.map = NULL;
    cmd->uploader.main.base = 0;
@@ -815,6 +824,18 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
 {
    struct hk_rendering_state *render = &cmd->state.gfx.render;
    uint8_t *map = cs->current;
+
+   if (agx_apple9_compute_enabled(&hk_cmd_buffer_device(cmd)->dev)) {
+      cs->apple9_render = true;
+      cs->tib = render->tilebuffer;
+      cs->cr = render->cr;
+      cs->scissor = UTIL_DYNARRAY_INIT;
+      cs->depth_bias = UTIL_DYNARRAY_INIT;
+      const uint32_t barrier = 0x20000013;
+      memcpy(map, &barrier, sizeof(barrier));
+      cs->current = map + sizeof(barrier);
+      return;
+   }
 
    cs->tib = render->tilebuffer;
 

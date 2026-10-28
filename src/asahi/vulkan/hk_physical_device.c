@@ -656,13 +656,18 @@ hk_get_device_features(
    };
 
    if (agx_apple9_compute_enabled(dev)) {
+      /* Native vertex fetch is specialized from the pipeline's static layout. */
+      features->vertexInputDynamicState = false;
+      features->extendedDynamicState = false;
       /* The native sampler path does not lower custom-border queries. */
       features->customBorderColors = false;
       features->customBorderColorWithoutFormat = false;
       /* The native sampler packet has no non-seamless cube-map mode. */
       features->nonSeamlessCubeMap = false;
+      /* Native vertex fetch uses the per-binding bounds table. */
       features->robustBufferAccess = true;
       features->robustImageAccess = true;
+      features->vertexPipelineStoresAndAtomics = true;
       features->pipelineRobustness = false;
       features->robustBufferAccess2 = false;
       features->robustImageAccess2 = false;

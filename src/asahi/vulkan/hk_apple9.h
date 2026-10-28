@@ -40,6 +40,10 @@ struct hk_apple9_shader_mapping {
    struct hk_apple9_descriptor storage_images[32];
    uint8_t ubo_count, ssbo_count, texture_count, sampler_count;
    uint8_t storage_image_count;
+   struct agx_apple9_vertex_layout vertex;
+   uint32_t attributes;
+   bool has_producer;
+   struct agx_apple9_varying_layout producer;
    bool descriptor_snapshot;
 };
 
@@ -70,6 +74,11 @@ bool hk_apple9_dispatch_precompiled(struct hk_cmd_buffer *cmd,
                                     struct hk_cs *cs, struct agx_grid grid,
                                     struct agx_precompiled_shader *prog,
                                     const void *data, size_t data_size);
+
+struct hk_apple9_uniform_draw;
+bool hk_apple9_graphics_resources(struct hk_cmd_buffer *cmd,
+                                  struct hk_shader *shader, unsigned stage,
+                                  struct hk_apple9_uniform_draw *draw);
 
 #ifdef __cplusplus
 }

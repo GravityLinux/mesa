@@ -10,6 +10,7 @@
 #include "hk_apple9.h"
 #include "hk_apple9_root.h"
 #include "hk_apple9_coopmat.h"
+#include "hk_apple9_graphics.h"
 #include "asahi/lib/agx_apple9_compute.h"
 
 #include "poly/nir/poly_nir.h"
@@ -301,6 +302,21 @@ enum hk_feature_key {
    HK_FEAT_CUSTOM_BORDER = BITFIELD_BIT(0),
 };
 
+static uint8_t
+hk_active_color_mask(const struct vk_graphics_pipeline_state *state)
+{
+   if (!state || !state->rp ||
+       !vk_render_pass_state_has_attachment_info(state->rp))
+      return 0xff;
+
+   uint8_t mask = 0;
+   for (unsigned i = 0; i < state->rp->color_attachment_count; ++i) {
+      if (state->rp->color_attachment_formats[i] != VK_FORMAT_UNDEFINED)
+         mask |= BITFIELD_BIT(i);
+   }
+   return mask;
+}
+
 static enum hk_feature_key
 hk_make_feature_key(const struct vk_features *feats)
 {
@@ -323,6 +339,30 @@ hk_hash_graphics_state(struct vk_physical_device *device,
       struct hk_fs_key key;
       hk_populate_fs_key(&key, state);
       _mesa_blake3_update(&blake3_ctx, &key, sizeof(key));
+   }
+
+   struct hk_physical_device *pdev =
+      container_of(device, struct hk_physical_device, vk);
+   if (agx_apple9_compute_enabled(&pdev->dev) &&
+       (stages & VK_SHADER_STAGE_FRAGMENT_BIT)) {
+      /* Native blending is part of the fragment body, not dynamic tile state.
+       * Pipeline cache reuse must distinguish its canonical specialization.
+       */
+      const struct vk_color_blend_state replace = {
+         .attachment_count = 1,
+         .color_write_enables = 1,
+         .attachments = {{.write_mask = 15}},
+      };
+      struct agx_apple9_blend blend;
+      bool supported = hk_apple9_blend_state(
+         state && state->cb ? state->cb : &replace,
+         state && state->rp ? state->rp->color_attachment_formats[0] : VK_FORMAT_UNDEFINED,
+         &blend);
+      _mesa_blake3_update(&blake3_ctx, &supported, sizeof(supported));
+      if (supported)
+         _mesa_blake3_update(&blake3_ctx, &blend, sizeof(blend));
+      const uint8_t color_mask = hk_active_color_mask(state);
+      _mesa_blake3_update(&blake3_ctx, &color_mask, sizeof(color_mask));
    }
 
    if (state &&
@@ -917,7 +957,11 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    /* We must do early lowering before hk_nir_lower_descriptors, since this will
     * create lod_bias instructions.
     */
-   NIR_PASS(_, nir, agx_nir_lower_texture_early, true /* support_lod_bias */);
+   /* Native graphics inserts sampler bias itself. Do not add a second bias
+    * query here; keep the existing compute path unchanged.
+    */
+   bool native_graphics = apple9_compute && nir->info.stage != MESA_SHADER_COMPUTE;
+   NIR_PASS(_, nir, agx_nir_lower_texture_early, !native_graphics);
 
    struct hk_instance *instance = hk_physical_device_instance(
       (struct hk_physical_device *)dev->vk.physical);
@@ -1057,8 +1101,13 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
          return;
       memcpy(agx_bo_map(shader->bo), shader->code_ptr, size);
       agx_bo_note_cpu_write(shader->bo, 0, size);
-      shader->preamble_addr = shader->apple9_profile.preamble_size
-         ? shader->bo->va->addr + shader->apple9_profile.preamble_offset : 0;
+      if (shader->b.info.stage == MESA_SHADER_COMPUTE) {
+         shader->preamble_addr = shader->apple9_profile.preamble_size
+            ? shader->bo->va->addr + shader->apple9_profile.preamble_offset : 0;
+      } else {
+         shader->preamble_addr = shader->b.info.apple9_preamble_size
+            ? shader->bo->va->addr + shader->b.info.apple9_preamble_offset : 0;
+      }
       shader->only_linked = rzalloc(NULL, struct hk_linked_shader);
       return;
    }
@@ -1451,6 +1500,33 @@ hk_api_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
    vk_shader_free(&dev->vk, pAllocator, &obj->vk);
 }
 
+/* Native Apple9 draws publish first vertex and first instance in sysval
+ * words 0 and 1, the same words instance-rate fetches already read.
+ */
+static bool
+hk_apple9_lower_draw_params(nir_builder *b, nir_intrinsic_instr *intr,
+                            void *data)
+{
+   unsigned offset;
+   switch (intr->intrinsic) {
+   case nir_intrinsic_load_first_vertex:
+   case nir_intrinsic_load_base_vertex:
+      offset = 0;
+      break;
+   case nir_intrinsic_load_base_instance:
+      offset = 4;
+      break;
+   default:
+      return false;
+   }
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def_replace(&intr->def,
+      nir_load_ubo(b, 1, 32, nir_imm_int(b, AGX_APPLE9_GRAPHICS_SYSVAL_BINDING),
+                   nir_imm_int(b, offset), .align_mul = 4,
+                   .range_base = offset, .range = 4));
+   return true;
+}
+
 VkResult
 hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
                   const struct vk_graphics_pipeline_state *state,
@@ -1487,6 +1563,16 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
       }
    }
 
+   if (agx_apple9_compute_enabled(&dev->dev) &&
+       info->stage != MESA_SHADER_COMPUTE &&
+       info->stage != MESA_SHADER_VERTEX && info->stage != MESA_SHADER_FRAGMENT) {
+      if (getenv("AGX_APPLE9_TRACE_REJECT"))
+         fprintf(stderr, "APPLE9_GRAPHICS_COMPILE_FAIL stage=%u reason=shader-stage\n",
+                 info->stage);
+      ralloc_free(nir);
+      return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
+   }
+
    size_t size = sizeof(struct hk_api_shader) +
                  sizeof(struct hk_shader) * hk_num_variants(info->stage);
    struct hk_api_shader *obj =
@@ -1495,6 +1581,187 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
    if (obj == NULL) {
       ralloc_free(nir);
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+   }
+
+   if (agx_apple9_compute_enabled(&dev->dev) &&
+       (info->stage == MESA_SHADER_VERTEX ||
+        info->stage == MESA_SHADER_FRAGMENT)) {
+      struct hk_shader *shader = &obj->variants[0];
+      const bool vertex = info->stage == MESA_SHADER_VERTEX;
+      const char *reason = NULL;
+      if (!vertex) {
+         const uint64_t unused =
+            (uint64_t)(uint8_t)~hk_active_color_mask(state) << FRAG_RESULT_DATA0;
+         nir_foreach_block(block, nir_shader_get_entrypoint(nir)) {
+            nir_foreach_instr_safe(instr, block) {
+               if (instr->type != nir_instr_type_intrinsic)
+                  continue;
+               nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+               if (intr->intrinsic == nir_intrinsic_store_output &&
+                   (unused & BITFIELD64_BIT(
+                      nir_intrinsic_io_semantics(intr).location)))
+                  nir_instr_remove(instr);
+            }
+         }
+         nir->info.outputs_written &= ~unused;
+      }
+      /* Resources use the same descriptor lowering as native compute, while
+       * stage IO stays semantic for the native compiler (no Apple8 prologs).
+       */
+      if (apple9_mapping) {
+         shader->apple9_mapping = *apple9_mapping;
+      } else if (!hk_lower_nir(dev, nir, info->robustness, false,
+                               info->set_layout_count, info->set_layouts,
+                               features, &shader->apple9_mapping, &reason)) {
+         reason = reason ?: "descriptor-lowering";
+      }
+      if (nir->info.num_images || nir->xfb_info ||
+          (shader->apple9_mapping.descriptor_snapshot &&
+           (shader->apple9_mapping.ubo_count > 32 ||
+            shader->apple9_mapping.ssbo_count > 32)) ||
+          (!vertex && (nir->info.outputs_written &
+                       ~(BITFIELD64_BIT(FRAG_RESULT_DATA0) |
+                         BITFIELD64_BIT(FRAG_RESULT_COLOR))))) {
+         reason = "resources-or-shader-interface";
+      }
+      if (vertex)
+         nir_shader_intrinsics_pass(nir, hk_apple9_lower_draw_params,
+                                    nir_metadata_control_flow, NULL);
+      if (vertex && nir->info.inputs_read) {
+         if (!state || !state->vi || (state->vi->attributes_valid & ~0xffffu) ||
+             BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_VI) ||
+             BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_VI_BINDINGS_VALID) ||
+             BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_VI_BINDING_STRIDES) ||
+             (info->robustness->vertex_inputs !=
+                 VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT &&
+              info->robustness->vertex_inputs !=
+                 VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_EXT)) {
+            reason = "vertex-input-layout";
+         } else {
+            struct agx_apple9_vertex_layout *layout =
+               &shader->apple9_mapping.vertex;
+            layout->draw_params_ubo = AGX_APPLE9_GRAPHICS_SYSVAL_BINDING;
+            layout->robust =
+               info->robustness->vertex_inputs ==
+               VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_EXT;
+            shader->apple9_mapping.attributes = state->vi->attributes_valid;
+            u_foreach_bit(a, state->vi->attributes_valid) {
+               const struct vk_vertex_attribute_state *attr = &state->vi->attributes[a];
+               if (attr->binding >= 32 ||
+                   !(state->vi->bindings_valid & BITFIELD_BIT(attr->binding))) {
+                  reason = "vertex-input-binding";
+                  break;
+               }
+               const struct vk_vertex_binding_state *binding =
+                  &state->vi->bindings[attr->binding];
+               layout->format[a] = vk_format_to_pipe_format(attr->format);
+               layout->buffer[a] = attr->binding;
+               layout->offset[a] = attr->offset;
+               layout->stride[a] = binding->stride;
+               if (binding->input_rate == VK_VERTEX_INPUT_RATE_INSTANCE &&
+                   binding->divisor)
+                  layout->divisor[a] = binding->divisor;
+               else if (binding->input_rate != VK_VERTEX_INPUT_RATE_VERTEX)
+                  reason = "instanced-vertex-input";
+            }
+            /* Vulkan locations are not Gallium's compact element indices. */
+            nir_foreach_block(block, nir_shader_get_entrypoint(nir)) {
+               nir_foreach_instr(instr, block) {
+                  if (instr->type != nir_instr_type_intrinsic)
+                     continue;
+                  nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+                  if (intr->intrinsic != nir_intrinsic_load_input)
+                     continue;
+                  unsigned location = nir_intrinsic_io_semantics(intr).location;
+                  if (location < VERT_ATTRIB_GENERIC0 ||
+                      location >= VERT_ATTRIB_GENERIC0 + 16 ||
+                      !(state->vi->attributes_valid &
+                        BITFIELD_BIT(location - VERT_ATTRIB_GENERIC0))) {
+                     reason = "vertex-input-location";
+                     continue;
+                  }
+                  nir_intrinsic_set_base(intr, location - VERT_ATTRIB_GENERIC0);
+               }
+            }
+         }
+      }
+      if (!vertex && state && state->ms &&
+          (state->ms->rasterization_samples != VK_SAMPLE_COUNT_1_BIT ||
+           state->ms->sample_shading_enable))
+         reason = "sample-shading-or-msaa";
+      if (!vertex && nir->info.fs.uses_sample_shading)
+         reason = "sample-shading-or-msaa";
+      if (!vertex) {
+         /* Independently compiled shader objects retain the previous replace
+          * body. Draw-time comparison only admits that exact canonical state.
+          */
+         const struct vk_color_blend_state replace = {
+            .attachment_count = 1,
+            .color_write_enables = 1,
+            .attachments = {{.write_mask = 15}},
+         };
+         if (!hk_apple9_blend_state(state && state->cb ? state->cb : &replace,
+                                    state && state->rp
+                                       ? state->rp->color_attachment_formats[0]
+                                       : VK_FORMAT_UNDEFINED,
+                                    &shader->apple9_blend))
+            reason = "unsupported-blend-state";
+      }
+      bool compiled = !reason &&
+         (vertex ? agx_compile_apple9_vertex_inputs(
+                      nir, &shader->apple9_mapping.vertex, &shader->b, &reason)
+                 : agx_compile_apple9_fragment_blend(
+                      nir, shader->apple9_mapping.has_producer
+                         ? &shader->apple9_mapping.producer : NULL,
+                      &shader->apple9_blend,
+                      &shader->b, &reason));
+      /* Discard is carried to the draw's punch-through state. */
+      const struct agx_shader_info *ci = &shader->b.info;
+      const char *interface_reason =
+         ci->apple9_image_mask ? "interface-image"
+         : ci->apple9_reads_z ? "interface-reads-z"
+         : ci->apple9_reads_point_coord ? "interface-point-coord"
+         : ci->apple9_reads_primitive_id ? "interface-primitive-id"
+         : ci->apple9_writes_point_size ? "interface-point-size"
+         : ci->apple9_clip_distance_count ? "interface-clip-distance"
+         : NULL;
+      if (compiled && interface_reason) {
+         compiled = false;
+         reason = interface_reason;
+      }
+      ralloc_free(nir);
+      if (!compiled) {
+         if (getenv("AGX_APPLE9_TRACE_REJECT"))
+            fprintf(stderr, "APPLE9_GRAPHICS_COMPILE_FAIL stage=%s reason=%s\n",
+                    vertex ? "VS" : "FS", reason ?: "unknown");
+         free(shader->b.binary);
+         vk_shader_free(&dev->vk, pAllocator, &obj->vk);
+         return vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
+                          "Apple9 graphics compilation failed: %s",
+                          reason ?: "unknown");
+      }
+      shader->apple9 = true;
+      shader->info.stage = info->stage;
+      shader->code_ptr = shader->b.binary;
+      shader->code_size = shader->b.info.binary_size;
+      result = hk_init_link_ht(shader, info->stage);
+      if (result != VK_SUCCESS) {
+         hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
+         return result;
+      }
+      hk_upload_shader(dev, shader);
+      if (!shader->bo || !shader->only_linked) {
+         if (getenv("AGX_APPLE9_TRACE_REJECT"))
+            fprintf(stderr, "APPLE9_GRAPHICS_COMPILE_FAIL stage=%s reason=shader-allocation\n",
+                    vertex ? "VS" : "FS");
+         hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
+         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      }
+      if (getenv("AGX_APPLE9_TRACE_REJECT"))
+         fprintf(stderr, "APPLE9_GRAPHICS_COMPILE_OK stage=%s\n",
+                 vertex ? "VS" : "FS");
+      *shader_out = obj;
+      return VK_SUCCESS;
    }
 
    mesa_shader_stage sw_stage = nir->info.stage;
@@ -1760,8 +2027,7 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
       enum hk_feature_key hk_features = hk_make_feature_key(features);
       nir_shader *nir = info->nir;
 
-      bool apple9_compute = nir->info.stage == MESA_SHADER_COMPUTE &&
-                            agx_apple9_compute_enabled(&dev->dev);
+      bool apple9_compute = agx_apple9_compute_enabled(&dev->dev);
       if (apple9_compute) {
          const char *cmat_reason = hk_apple9_coopmat_rejection(nir);
          if (cmat_reason) {
@@ -1800,28 +2066,81 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
       shaders[i] = nir;
    }
 
-   nir_opt_varyings_bulk(shaders, shader_count, true, UINT32_MAX, UINT32_MAX,
-                         nir_opts, NULL);
+   if (!agx_apple9_compute_enabled(&dev->dev) ||
+       infos[0].stage == MESA_SHADER_COMPUTE)
+      nir_opt_varyings_bulk(shaders, shader_count, true, UINT32_MAX, UINT32_MAX,
+                            nir_opts, NULL);
 
-   for (uint32_t i = 0; i < shader_count; i++) {
+   uint32_t order[shader_count];
+   for (uint32_t i = 0; i < shader_count; ++i)
+      order[i] = i;
+   if (agx_apple9_compute_enabled(&dev->dev)) {
+      /* Fragment coefficients must use the actual producer's scalar layout,
+       * including outputs that the fragment shader does not consume.
+       */
+      for (uint32_t i = 0; i < shader_count; ++i) {
+         if (infos[i].stage != MESA_SHADER_VERTEX)
+            continue;
+         order[i] = order[0];
+         order[0] = i;
+         for (uint32_t j = 0; j < shader_count; ++j) {
+            if (infos[j].stage != MESA_SHADER_FRAGMENT)
+               continue;
+            nir_foreach_block(block, nir_shader_get_entrypoint(shaders[j])) {
+               nir_foreach_instr(instr, block) {
+                  if (instr->type != nir_instr_type_intrinsic)
+                     continue;
+                  nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+                  if (intr->intrinsic != nir_intrinsic_load_input &&
+                      intr->intrinsic != nir_intrinsic_load_interpolated_input)
+                     continue;
+                  nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+                  unsigned location = sem.location;
+                  if (location >= 64)
+                     continue;
+                  uint64_t slots = BITFIELD64_MASK(
+                     MIN2(MAX2(sem.num_slots, 1), 64 - location)) << location;
+                  if (intr->intrinsic == nir_intrinsic_load_input)
+                     apple9_mappings[i].vertex.outputs_flat |= slots;
+                  else if (nir_def_instr(intr->src[0].ssa)->type == nir_instr_type_intrinsic &&
+                           nir_intrinsic_interp_mode(nir_instr_as_intrinsic(
+                              nir_def_instr(intr->src[0].ssa))) ==
+                              INTERP_MODE_NOPERSPECTIVE)
+                     apple9_mappings[i].vertex.outputs_linear |= slots;
+               }
+            }
+         }
+         break;
+      }
+   }
+   struct hk_shader *producer = NULL;
+   for (uint32_t n = 0; n < shader_count; n++) {
+      uint32_t i = order[n];
+      if (producer && infos[i].stage == MESA_SHADER_FRAGMENT) {
+         apple9_mappings[i].has_producer = true;
+         apple9_mappings[i].producer = producer->b.info.apple9_varyings;
+      }
       VkResult result =
          hk_compile_shader(dev, &infos[i], state, features, pAllocator,
                            (struct hk_api_shader **)&shaders_out[i],
                            &apple9_mappings[i]);
       if (result != VK_SUCCESS) {
          /* Clean up all the shaders before this point */
-         for (uint32_t j = 0; j < i; j++)
-            hk_api_shader_destroy(&dev->vk, shaders_out[j], pAllocator);
+         for (uint32_t j = 0; j < n; j++)
+            hk_api_shader_destroy(&dev->vk, shaders_out[order[j]], pAllocator);
 
          /* Clean up all the NIR after this point */
-         for (uint32_t j = i + 1; j < shader_count; j++)
-            ralloc_free(infos[j].nir);
+         for (uint32_t j = n + 1; j < shader_count; j++)
+            ralloc_free(infos[order[j]].nir);
 
          /* Memset the output array */
          memset(shaders_out, 0, shader_count * sizeof(*shaders_out));
 
          return result;
       }
+      if (agx_apple9_compute_enabled(&dev->dev) &&
+          infos[i].stage == MESA_SHADER_VERTEX)
+         producer = &container_of(shaders_out[i], struct hk_api_shader, vk)->variants[0];
    }
 
    return VK_SUCCESS;
@@ -1846,6 +2165,8 @@ hk_deserialize_shader(struct hk_device *dev, struct blob_reader *blob,
                       sizeof(shader->apple9_profile));
       blob_copy_bytes(blob, &shader->apple9_mapping,
                       sizeof(shader->apple9_mapping));
+      blob_copy_bytes(blob, &shader->apple9_blend,
+                      sizeof(shader->apple9_blend));
    }
 
    const uint32_t code_size = blob_read_uint32(blob);
@@ -1864,6 +2185,10 @@ hk_deserialize_shader(struct hk_device *dev, struct blob_reader *blob,
    shader->code_size = code_size;
    shader->data_size = data_size;
    shader->b.info.binary_size = code_size;
+
+   /* An unused software VS variant has no executable. Never fast-link it. */
+   if (code_size == 0 && data_size == 0)
+      return VK_SUCCESS;
 
    shader->code_ptr = malloc(code_size);
    if (shader->code_ptr == NULL)
@@ -1932,6 +2257,8 @@ hk_shader_serialize(struct vk_device *vk_dev, const struct hk_shader *shader,
                        sizeof(shader->apple9_profile));
       blob_write_bytes(blob, &shader->apple9_mapping,
                        sizeof(shader->apple9_mapping));
+      blob_write_bytes(blob, &shader->apple9_blend,
+                       sizeof(shader->apple9_blend));
    }
 
    blob_write_uint32(blob, shader->code_size);

@@ -139,6 +139,7 @@ struct hk_shader {
    bool apple9;
    struct agx_apple9_compute_profile apple9_profile;
    struct hk_apple9_shader_mapping apple9_mapping;
+   struct agx_apple9_blend apple9_blend;
 
    struct hk_shader_info info;
    struct agx_fragment_face_2_packed frag_face;

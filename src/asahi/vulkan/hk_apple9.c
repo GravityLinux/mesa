@@ -4,6 +4,7 @@
 
 #include "hk_apple9.h"
 #include "hk_cmd_buffer.h"
+#include "hk_apple9_graphics.h"
 
 #include "asahi/lib/agx_apple9_compute.h"
 #include "asahi/lib/agx_abi.h"
@@ -1126,6 +1127,16 @@ hk_apple9_upload_sysvals(struct hk_cmd_buffer *cmd, struct hk_shader *shader,
    if (!table.cpu)
       return 0;
    memset(table.cpu, 0, AGX_APPLE9_GRAPHICS_SYSVAL_SIZE);
+   /* Only vertex fetch reads the draw parameters; fragment blend lowering
+    * reads the blend constant from the same words.
+    */
+   if (shader->info.stage == MESA_SHADER_FRAGMENT)
+      memcpy(table.cpu, cmd->vk.dynamic_graphics_state.cb.blend_constants,
+             sizeof(cmd->vk.dynamic_graphics_state.cb.blend_constants));
+   else
+      memcpy(table.cpu, cmd->state.gfx.apple9_draw_params,
+             sizeof(cmd->state.gfx.apple9_draw_params));
+
    u_foreach_bit(binding, shader->b.info.apple9_texture_mask) {
       struct hk_apple9_descriptor *entry = &shader->apple9_mapping.textures[binding];
       const struct hk_sampled_image_descriptor *desc = hk_apple9_descriptor_cpu(
@@ -1296,6 +1307,108 @@ hk_apple9_upload_textures(struct hk_cmd_buffer *cmd, struct hk_shader *shader,
       *samplers = table.gpu;
    }
    return true;
+}
+
+bool
+hk_apple9_graphics_resources(struct hk_cmd_buffer *cmd, struct hk_shader *shader,
+                             unsigned stage, struct hk_apple9_uniform_draw *draw)
+{
+   struct hk_descriptor_state *desc = &cmd->state.gfx.descriptors;
+   const struct agx_shader_info *info = &shader->b.info;
+   hk_cmd_buffer_flush_push_descriptors(cmd, desc);
+
+   uint32_t sizes[64] = {0};
+   uint64_t buffer_addresses[64] = {0};
+   bool snapshot = shader->apple9_mapping.descriptor_snapshot;
+   for (unsigned i = 0; snapshot && i < shader->apple9_mapping.ssbo_count; ++i) {
+      if (!hk_apple9_resolve_buffer(desc, &shader->apple9_mapping,
+                                    AGX_APPLE9_COMPUTE_RESOURCE_SSBO, i,
+                                    &buffer_addresses[i], &sizes[i]))
+         A9FAIL();
+   }
+
+   /* Retain the narrow sampled-image contract. Uniform texel buffers use
+    * the linear 2D representation produced by hk_CreateBufferView.
+    */
+   u_foreach_bit(binding, info->apple9_texture_mask) {
+      const struct hk_apple9_descriptor *entry =
+         &shader->apple9_mapping.textures[binding];
+      const struct hk_sampled_image_descriptor *image = hk_apple9_descriptor_cpu(
+         desc, entry->set, entry->offset, sizeof(*image));
+      struct AGX_TEXTURE tex;
+      if (!image || !hk_apple9_decode_texture(&image->tex, &tex))
+         A9FAIL();
+      if (entry->type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER) {
+         if (tex.layout != AGX_LAYOUT_LINEAR ||
+             tex.dimension != AGX_TEXTURE_DIMENSION_2D ||
+             tex.channels == AGX_CHANNELS_R32G32B32_EMULATED ||
+             tex.buffer_offset_sw)
+            A9FAIL();
+      } else if ((tex.dimension != AGX_TEXTURE_DIMENSION_2D &&
+                  tex.dimension != AGX_TEXTURE_DIMENSION_2D_ARRAY) ||
+                 tex.first_level || tex.last_level || tex.depth != 1 ||
+                 tex.samples != 0) {
+         A9FAIL();
+      }
+   }
+
+   uint64_t root = 0, sysvals = 0;
+   draw->buffer_count[stage] = info->apple9_resource_count;
+   for (unsigned i = 0; i < info->apple9_resource_count; ++i) {
+      unsigned binding = info->apple9_resource_binding[i];
+      bool ssbo = info->apple9_resource_ssbo_mask & BITFIELD_BIT(i);
+      uint64_t *address = &draw->buffers[stage][i];
+      if (!ssbo && binding == HK_APPLE9_ROOT_BINDING) {
+         if (!root)
+            root = hk_apple9_upload_root(cmd, desc, snapshot ? sizes : NULL,
+                                         snapshot ? buffer_addresses : NULL);
+         *address = root;
+      } else if (!ssbo && binding == AGX_APPLE9_GRAPHICS_SYSVAL_BINDING) {
+         if (!sysvals)
+            sysvals = hk_apple9_upload_sysvals(cmd, shader, desc);
+         *address = sysvals;
+      } else if (!ssbo && binding == AGX_APPLE9_VERTEX_RANGES_BINDING) {
+         if (stage || !shader->apple9_mapping.vertex.robust)
+            A9FAIL();
+         struct agx_apple9_vertex_range ranges[32] = {0};
+         for (unsigned j = 0; j < ARRAY_SIZE(cmd->state.gfx.vb); ++j) {
+            ranges[j].base = cmd->state.gfx.vb[j].addr;
+            ranges[j].size = cmd->state.gfx.vb[j].range;
+         }
+         *address = hk_pool_upload(cmd, ranges, sizeof(ranges), 64);
+      } else if (!ssbo && binding >= 32 && binding < 64) {
+         const struct hk_addr_range *vb = &cmd->state.gfx.vb[binding - 32];
+         if (stage || !vb->range || !vb->addr)
+            A9FAIL();
+         *address = vb->addr;
+      } else {
+         if (!snapshot)
+            A9FAIL();
+         unsigned count = ssbo ? shader->apple9_mapping.ssbo_count
+                               : shader->apple9_mapping.ubo_count;
+         if (binding >= count ||
+             !hk_apple9_resolve_buffer(
+                desc, &shader->apple9_mapping,
+                ssbo ? AGX_APPLE9_COMPUTE_RESOURCE_SSBO
+                     : AGX_APPLE9_COMPUTE_RESOURCE_UBO,
+                binding, address, NULL))
+            A9FAIL();
+      }
+      if (!*address)
+         A9FAIL();
+   }
+   uint64_t table = info->apple9_resource_count
+      ? hk_pool_upload(cmd, draw->buffers[stage],
+                       info->apple9_resource_count * sizeof(uint64_t), 64) : 0;
+   if (info->apple9_resource_count && !table)
+      A9FAIL();
+   if (stage)
+      draw->fragment_table = table;
+   else
+      draw->vertex_table = table;
+   return hk_apple9_upload_textures(cmd, shader, desc,
+                                    &draw->texture_table[stage],
+                                    &draw->sampler_table[stage]);
 }
 
 static bool

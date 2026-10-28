@@ -147,3 +147,34 @@ TEST_F(Apple9RootCompiler, FortyBindingsUseOneVisibleRoot)
    output(sum);
    compile();
 }
+
+TEST(Apple9RootGraphicsCompiler, RootInGraphicsResourceMap)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_VERTEX, &agx_nir_options, "root_graphics_resource_map");
+   nir_def *root = nir_load_ubo(
+      &b, 1, 64, nir_imm_int(&b, HK_APPLE9_ROOT_BINDING),
+      nir_imm_int(&b, 0), .align_mul = 8, .range = 8);
+   nir_def *set = nir_load_global_constant(
+      &b, 1, 64, nir_iadd_imm(&b, root, 8), .align_mul = 8);
+   nir_def *desc = nir_load_global_constant(&b, 4, 32, set, .align_mul = 16);
+   nir_def *address = nir_pack_64_2x32(&b, nir_trim_vector(&b, desc, 2));
+   nir_def *position = nir_load_global_constant(
+      &b, 4, 32, address, .align_mul = 16);
+   nir_store_output(
+      &b, position, nir_imm_int(&b, 0), .write_mask = 15,
+      .src_type = nir_type_float32, .io_semantics = {.location = VARYING_SLOT_POS});
+   b.shader->info.io_lowered = true;
+   agx_shader_part compiled = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_vertex(b.shader, &compiled, &reason))
+      << (reason ? reason : "no diagnostic");
+   EXPECT_EQ(reason, nullptr);
+   EXPECT_NE(compiled.binary, nullptr);
+   EXPECT_GT(compiled.info.binary_size, 0u);
+   ASSERT_EQ(compiled.info.apple9_resource_count, 1);
+   EXPECT_EQ(compiled.info.apple9_resource_binding[0], HK_APPLE9_ROOT_BINDING);
+   EXPECT_EQ(compiled.info.apple9_resource_ssbo_mask, 0u);
+   free(compiled.binary);
+   ralloc_free(b.shader);
+}

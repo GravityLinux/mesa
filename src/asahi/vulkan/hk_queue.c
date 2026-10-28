@@ -108,6 +108,55 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
 {
    memset(c, 0, sizeof(*c));
 
+   if (cs->apple9_render) {
+      *c = (struct drm_asahi_cmd_render){
+         .vdm_ctrl_stream_base = cs->addr,
+         .ppp_ctrl = 0x202,
+         .width_px = cs->cr.width,
+         .height_px = cs->cr.height,
+         .isp_bgobjvals = cs->cr.isp_bgobjvals,
+         .samples = 1,
+         .layers = 1,
+         .utile_width_px = 32,
+         .utile_height_px = 32,
+         .sample_size_B = cs->tib.sample_size_B,
+         .ppp_multisamplectl = hk_default_sample_positions(1),
+         .isp_merge_upper_x = fui(1.732051f / cs->cr.width),
+         .isp_merge_upper_y = fui(1.732051f / cs->cr.height),
+         .bg.usc = cs->cr.bg.main.usc,
+         .partial_bg.usc = cs->cr.bg.partial.usc,
+         .eot.usc = cs->cr.eot.main.usc,
+         .partial_eot.usc = cs->cr.eot.partial.usc,
+         .isp_scissor_base = cs->uploaded_scissor,
+         .isp_dbias_base = cs->uploaded_zbias,
+         .isp_oclqry_base = dev->occlusion_queries.bo->va->addr,
+         .flags = DRM_ASAHI_RENDER_PROCESS_EMPTY_TILES,
+      };
+      c->isp_bgobjdepth = cs->cr.isp_bgobjdepth;
+      memcpy(&c->zls_ctrl, &cs->cr.zls_control, sizeof(c->zls_ctrl));
+      if (cs->cr.depth.buffer || cs->cr.stencil.buffer) {
+         agx_pack(&c->isp_zls_pixels, CR_ISP_ZLS_PIXELS, cfg) {
+            cfg.x = cs->cr.zls_width;
+            cfg.y = cs->cr.zls_height;
+         }
+      }
+      if (cs->cr.depth.buffer) {
+         c->depth.base = cs->cr.depth.buffer;
+         c->depth.stride = cs->cr.depth.stride;
+         c->depth.comp_base = cs->cr.depth.meta;
+         c->depth.comp_stride = cs->cr.depth.meta_stride;
+      }
+      if (cs->cr.stencil.buffer) {
+         c->stencil.base = cs->cr.stencil.buffer;
+         c->stencil.stride = cs->cr.stencil.stride;
+         c->stencil.comp_base = cs->cr.stencil.meta;
+         c->stencil.comp_stride = cs->cr.stencil.meta_stride;
+      }
+      if (getenv("AGX_APPLE9_TRACE_REJECT"))
+         fprintf(stderr, "APPLE9_RENDER_JOB_READY\n");
+      return;
+   }
+
    c->vdm_ctrl_stream_base = cs->addr;
 
    agx_pack(&c->ppp_ctrl, CR_PPP_CONTROL, cfg) {
@@ -285,6 +334,17 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
       assert(0);
    }
 
+   if (!ret && agx_apple9_compute_enabled(&dev->dev) &&
+       getenv("AGX_APPLE9_TRACE_REJECT")) {
+      const uint8_t *payload = (void *)(uintptr_t)submit->cmdbuf;
+      for (size_t offset = 0; offset < submit->cmdbuf_size;) {
+         const struct drm_asahi_cmd_header *header = (void *)(payload + offset);
+         if (header->cmd_type == DRM_ASAHI_CMD_RENDER)
+            fprintf(stderr, "APPLE9_RENDER_SUBMIT_OK\n");
+         offset += sizeof(*header) + header->size;
+      }
+   }
+
    return VK_SUCCESS;
 }
 
@@ -320,10 +380,16 @@ queue_submit_looped(struct hk_device *dev, struct drm_asahi_submit *submit,
       unsigned cdm_count = 0, vdm_count = 0;
 
       /* We need to fix up the barriers since barriers are ioctl-relative */
-      for (unsigned i = 0; i < count; ++i) {
+      for (unsigned i = 0; i < count;) {
          struct drm_asahi_cmd_header *cmd = (void *)(cmdbuf + offs);
          offs += sizeof(*cmd) + cmd->size;
 
+         /* Attachment state must accompany its render command in the same
+          * ioctl. It is not a work command and has no barrier ordinal.
+          */
+         if (cmd->cmd_type == DRM_ASAHI_SET_FRAGMENT_ATTACHMENTS)
+            continue;
+         ++i;
          if (cmd->cmd_type == DRM_ASAHI_CMD_RENDER)
             vdm_count++;
          else if (cmd->cmd_type == DRM_ASAHI_CMD_COMPUTE)
@@ -347,6 +413,8 @@ queue_submit_looped(struct hk_device *dev, struct drm_asahi_submit *submit,
        */
       if (last && !first) {
          struct drm_asahi_cmd_header *cmd = (void *)(cmdbuf + base_offs);
+         if (cmd->cmd_type == DRM_ASAHI_SET_FRAGMENT_ATTACHMENTS)
+            cmd = (void *)((uint8_t *)cmd + sizeof(*cmd) + cmd->size);
 
          if (cmd->vdm_barrier == DRM_ASAHI_BARRIER_NONE)
             cmd->vdm_barrier = 0;
@@ -830,6 +898,51 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
          /* Barrier on previous command */
          struct drm_asahi_cmd_header header =
             agx_cmd_header(cs->type == HK_CS_CDM, nr_vdm, nr_cdm);
+
+         if (cs->type == HK_CS_VDM &&
+             agx_apple9_compute_enabled(&dev->dev)) {
+            if (!cs->apple9_render || !cs->stats.cmds ||
+                !cs->cr.bg.main.usc || !cs->cr.bg.partial.usc ||
+                !cs->cr.eot.main.usc || !cs->apple9_attachment.pointer ||
+                !cs->uploaded_scissor || !cs->uploaded_zbias) {
+               if (getenv("AGX_APPLE9_TRACE_REJECT"))
+                  fprintf(stderr, "APPLE9_RENDER_REJECT reason=incomplete-job\n");
+               util_dynarray_fini(&payload);
+               return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
+            }
+            struct drm_asahi_cmd_header attachments = {
+               .cmd_type = DRM_ASAHI_SET_FRAGMENT_ATTACHMENTS,
+               .size = sizeof(cs->apple9_attachment) *
+                       (1 + !!cs->cr.depth.buffer + !!cs->cr.stencil.buffer),
+               .cdm_barrier = DRM_ASAHI_BARRIER_NONE,
+               .vdm_barrier = DRM_ASAHI_BARRIER_NONE,
+            };
+            util_dynarray_append(&payload, attachments);
+            util_dynarray_append(&payload, cs->apple9_attachment);
+            /* Bounded single-layer Z/S allocations use page-aligned strides.
+             * Include compression metadata in the registered range too.
+             */
+            const struct agx_zls_surface {
+               uint64_t buffer, stride, meta, meta_stride;
+            } zs[2] = {
+               {cs->cr.depth.buffer, cs->cr.depth.stride,
+                cs->cr.depth.meta, cs->cr.depth.meta_stride},
+               {cs->cr.stencil.buffer, cs->cr.stencil.stride,
+                cs->cr.stencil.meta, cs->cr.stencil.meta_stride},
+            };
+            for (unsigned s = 0; s < 2; ++s) {
+               if (!zs[s].buffer)
+                  continue;
+               uint64_t size = ((zs[s].stride >> 14) + 1) * AIL_PAGESIZE;
+               if (zs[s].meta)
+                  size = MAX2(size, zs[s].meta - zs[s].buffer +
+                     ((zs[s].meta_stride >> 14) + 1) * AIL_CACHELINE);
+               struct drm_asahi_attachment att = {
+                  .pointer = zs[s].buffer, .size = size,
+               };
+               util_dynarray_append(&payload, att);
+            }
+         }
 
          util_dynarray_append(&payload, header);
 

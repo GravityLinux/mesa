@@ -7,6 +7,8 @@ hk_files = files(
   'hk_apple9.h',
   'hk_apple9_root.c',
   'hk_apple9_root.h',
+  'hk_apple9_graphics.c',
+  'hk_apple9_graphics.h',
   'hk_buffer.c',
   'hk_buffer.h',
   'hk_buffer_view.c',
