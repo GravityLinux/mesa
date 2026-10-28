@@ -4143,15 +4143,24 @@ apple9_lower_global_address_pair(nir_builder *b, nir_intrinsic_instr *intr,
    return true;
 }
 
-/* Keep native binary16 arithmetic, comparisons and special functions.
- * Remaining composite math keeps the common FP32 expansion. */
-static unsigned
-apple9_float_alu_width(const nir_instr *instr, void *data)
+/* Keep native binary16 arithmetic and special functions. Remaining composite
+ * math keeps the common FP32 expansion. Narrow integer predicates and math use
+ * 32-bit ports: narrow values may retain undefined upper GPR bits. */
+unsigned
+agx_apple9_alu_width(const nir_instr *instr, void *data)
 {
    if (instr->type != nir_instr_type_alu)
       return 0;
    const nir_alu_instr *alu = nir_instr_as_alu(instr);
    switch (alu->op) {
+   case nir_op_ieq:
+   case nir_op_ine:
+   case nir_op_ilt:
+   case nir_op_ige:
+   case nir_op_ult:
+   case nir_op_uge:
+      return (alu->src[0].src.ssa->bit_size == 8 ||
+              alu->src[0].src.ssa->bit_size == 16) ? 32 : 0;
    case nir_op_fadd:
    case nir_op_fsub:
    case nir_op_fmul:
@@ -4172,9 +4181,23 @@ apple9_float_alu_width(const nir_instr *instr, void *data)
    case nir_op_fabs:
    case nir_op_fneg:
       return 0;
-   default:
-      return alu->def.bit_size == 16 &&
-             nir_op_infos[alu->op].output_type == nir_type_float ? 32 : 0;
+   default: {
+      const nir_op_info *info = &nir_op_infos[alu->op];
+      if (alu->def.bit_size == 16 && info->output_type == nir_type_float)
+         return 32;
+      /* The same undefined upper bits break every narrow integer operation
+       * that reads past the low bits (right shifts, min/max, the high half
+       * of a product from constant division), so evaluate narrow integer
+       * math at 32 bits. Conversions, moves and selects carry the value.
+       */
+      if ((alu->def.bit_size == 8 || alu->def.bit_size == 16) &&
+          !info->is_conversion && !nir_op_is_vec_or_mov(alu->op) &&
+          alu->op != nir_op_bcsel &&
+          (info->output_type == nir_type_int ||
+           info->output_type == nir_type_uint))
+         return 32;
+      return 0;
+   }
    }
 }
 
@@ -4196,7 +4219,7 @@ apple9_legalize_buffer_accesses(nir_shader *nir)
 {
    nir_shader_alu_pass(nir, apple9_lower_half_conversion,
                        nir_metadata_control_flow, NULL);
-   nir_lower_bit_size(nir, apple9_float_alu_width, NULL);
+   nir_lower_bit_size(nir, agx_apple9_alu_width, NULL);
    /* The shared zero/scratch-page ABI also applies to software geometry.
     * Resolve its pointer intrinsics before splitting 64-bit addresses. */
    agx_nir_lower_sink_address(nir);
@@ -4249,6 +4272,9 @@ apple9_legalize_buffer_accesses(nir_shader *nir)
       progress |= nir_opt_cse(nir);
       progress |= nir_opt_dce(nir);
    } while (progress);
+   /* Algebraic cleanup can fold widening back into a narrow comparison.
+    * Reestablish the native predicate width after its last such pass. */
+   nir_lower_bit_size(nir, agx_apple9_alu_width, NULL);
    nir->options = saved_options;
 }
 
@@ -4297,7 +4323,23 @@ apple9_prepare_dag(nir_shader *nir)
       progress |= nir_opt_cse(nir);
       progress |= nir_opt_dce(nir);
    } while (progress);
+   nir_lower_bit_size(nir, agx_apple9_alu_width, NULL);
+}
 
+/* A narrow integer keeps only its low bits in a 32-bit GPR, so selection
+ * needs every narrow integer ALU op widened (see agx_apple9_alu_width). */
+static bool
+apple9_has_narrow_integer_alu(nir_shader *nir)
+{
+   nir_foreach_block(block, nir_shader_get_entrypoint(nir)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_alu &&
+             nir_op_infos[nir_instr_as_alu(instr)->op].output_type != nir_type_float &&
+             agx_apple9_alu_width(instr, NULL))
+            return true;
+      }
+   }
+   return false;
 }
 
 static bool
@@ -4307,6 +4349,11 @@ apple9_compile_dag_body(nir_shader *nir, struct agx_shader_part *out,
                        const struct apple9_buffer_map *resources,
                        bool preamble, const char **reason)
 {
+   if (apple9_has_narrow_integer_alu(nir)) {
+      *reason = "Apple9 narrow integer ALU reached instruction selection";
+      return false;
+   }
+
    /* Selection follows NIR order, so shorten live ranges after lowering and
     * before collecting loads or assigning virtual registers. Use the same
     * movement options as the Apple8 backend; NIR checks load reorderability.

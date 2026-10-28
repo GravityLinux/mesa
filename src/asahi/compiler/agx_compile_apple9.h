@@ -24,6 +24,10 @@ bool agx_nir_lower_apple9_math(nir_shader *shader);
  * word rather than the original floating-point LOD or integer fetch level. */
 bool agx_nir_lower_apple9_texture_lod(nir_shader *shader);
 
+/* Bit size at which nir_lower_bit_size should evaluate an instruction, or 0 to
+ * keep it. Narrow integer math and predicates are evaluated at 32 bits. */
+unsigned agx_apple9_alu_width(const nir_instr *instr, void *data);
+
 /*
  * Compile compute NIR through Apple9's semantic instruction selection and
  * register allocator. Arithmetic, memory operations, and structured control

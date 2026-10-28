@@ -233,7 +233,21 @@ update_gfx_pipeline(struct zink_context *ctx, struct zink_batch_state *bs, enum 
          pipeline = zink_get_gfx_pipeline<DYNAMIC_STATE, true, false>(ctx, ctx->curr_program, &ctx->gfx_pipeline_state, mode);
       else
          pipeline = zink_get_gfx_pipeline<DYNAMIC_STATE, false, false>(ctx, ctx->curr_program, &ctx->gfx_pipeline_state, mode);
-      assert(pipeline);
+      if (unlikely(!pipeline)) {
+         /* Pipeline creation can fail (out of memory, or a driver that cannot
+          * express the state); drop the draw rather than bind VK_NULL_HANDLE.
+          * The dirty state is consumed, so look the pipeline up again and drop
+          * every draw until that succeeds. The previously bound pipeline stays
+          * bound and tracked.
+          */
+         static bool warned;
+         if (!warned) {
+            mesa_loge("ZINK: failed to create a graphics pipeline, skipping draws");
+            warned = true;
+         }
+         ctx->gfx_pipeline_failed = true;
+         return false;
+      }
       pipeline_changed = prev_pipeline != pipeline || ctx->shobj_draw;
       if (BATCH_CHANGED || pipeline_changed)
          VKCTX(CmdBindPipeline)(bs->cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -265,6 +279,7 @@ update_gfx_pipeline(struct zink_context *ctx, struct zink_batch_state *bs, enum 
       }
       ctx->shobj_draw = true;
    }
+   ctx->gfx_pipeline_failed = false;
    return pipeline_changed;
 }
 
@@ -695,9 +710,23 @@ zink_draw(struct pipe_context *pctx,
    if (have_streamout && ctx->dirty_so_targets)
       zink_emit_stream_output_targets(pctx);
 
-   bool pipeline_changed = ctx->gfx_pipeline_state.dirty || rp_state != ctx->gfx_pipeline_state.rp_state || ctx->gfx_dirty || ctx->dirty_gfx_stages || prim_changed || BATCH_CHANGED ?
+   bool pipeline_changed = ctx->gfx_pipeline_failed || ctx->gfx_pipeline_state.dirty || rp_state != ctx->gfx_pipeline_state.rp_state || ctx->gfx_dirty || ctx->dirty_gfx_stages || prim_changed ||
+                           /* Without dynamic topology it is baked into each pipeline, so a
+                            * topology change alone must select a pipeline again.
+                            */
+                           (DYNAMIC_STATE < ZINK_DYNAMIC_STATE && mode_changed) || BATCH_CHANGED ?
                            update_gfx_pipeline<DYNAMIC_STATE, BATCH_CHANGED>(ctx, bs, mode) :
                            false;
+   if (unlikely(ctx->gfx_pipeline_failed)) {
+      /* The dropped draw may have consumed state changes it never emitted,
+       * like a dynamic topology: re-emit all state on the next draw.
+       */
+      if (!ctx->pipeline_changed[ZINK_PIPELINE_GFX]) {
+         ctx->pipeline_changed[ZINK_PIPELINE_GFX] = true;
+         zink_select_draw_vbo(ctx);
+      }
+      return;
+   }
 
    emit_dynamic_state<DYNAMIC_STATE, BATCH_CHANGED>(ctx, pipeline_changed, ctx->vp_state.num_viewports, ctx->curr_program->base.uses_shobj);
 

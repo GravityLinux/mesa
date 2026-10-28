@@ -11087,3 +11087,92 @@ TEST(Apple9Compiler, CustomBordersPreserveIntegerBitsAndArrayCoordinates)
       }
    }
 }
+
+TEST(Apple9Compiler, NarrowIntegerMathIsEvaluatedAt32Bits)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "narrow integer math");
+   nir_def *lane = nir_load_subgroup_invocation(&b);
+   nir_def *x = nir_u2u16(&b, lane);
+   nir_def *y = nir_u2u16(&b, nir_iadd_imm(&b, lane, 3));
+   nir_def *cond = nir_ine_imm(&b, lane, 0);
+
+   struct Case {
+      nir_def *def;
+      unsigned expected;
+   };
+   const Case cases[] = {
+      {nir_iadd(&b, x, y), 32},
+      {nir_imin(&b, x, y), 32},
+      {nir_umax(&b, x, y), 32},
+      {nir_ishr_imm(&b, x, 3), 32},
+      {nir_ushr_imm(&b, x, 3), 32},
+      {nir_imul_high(&b, x, y), 32},
+      {nir_umul_high(&b, x, y), 32},
+      {nir_ilt(&b, x, y), 32},
+      {nir_uge(&b, x, y), 32},
+      {nir_ieq(&b, x, y), 32},
+      {nir_bcsel(&b, cond, x, y), 0},
+      {nir_u2u32(&b, x), 0},
+      {nir_i2i32(&b, y), 0},
+      {nir_u2u16(&b, lane), 0},
+      {nir_iadd(&b, lane, lane), 0},
+   };
+   for (const Case &c : cases) {
+      EXPECT_EQ(agx_apple9_alu_width(nir_def_instr(c.def), NULL), c.expected)
+         << nir_op_infos[nir_instr_as_alu(nir_def_instr(c.def))->op].name;
+   }
+   ralloc_free(b.shader);
+}
+
+static const char *const narrow_integer_op_names[] = {
+   "ilt", "ieq", "clamp", "imin", "umax", "ishr", "ushr", "iadd", "imul",
+};
+
+static nir_def *
+narrow_integer_op(nir_builder *b, unsigned op, nir_def *x, nir_def *y)
+{
+   nir_def *last = nir_iadd_imm(b, y, -1);
+   switch (op) {
+   case 0: return nir_b2i32(b, nir_ilt(b, x, y));
+   case 1: return nir_b2i32(b, nir_ieq(b, x, y));
+   case 2: return nir_u2u32(b, nir_bcsel(b, nir_ilt(b, last, x), last, x));
+   case 3: return nir_u2u32(b, nir_imin(b, x, y));
+   case 4: return nir_u2u32(b, nir_umax(b, x, y));
+   case 5: return nir_u2u32(b, nir_ishr_imm(b, x, 2));
+   case 6: return nir_u2u32(b, nir_ushr_imm(b, x, 3));
+   case 7: return nir_u2u32(b, nir_iadd(b, x, y));
+   default: return nir_u2u32(b, nir_imul(b, x, y));
+   }
+}
+
+/* Algebraic passes after the first widening fold some of these back to 16 bits
+ * (the clamp becomes a narrow imin), and selection rejects narrow integer ALU,
+ * so each shader compiles only if widening also runs after those passes.
+ */
+TEST(Apple9Compiler, NarrowIntegerShadersReachSelectionWidened)
+{
+   for (unsigned op = 0; op < ARRAY_SIZE(narrow_integer_op_names); ++op) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "narrow integer selection");
+      b.shader->info.workgroup_size[0] = 32;
+      b.shader->info.workgroup_size[1] = 1;
+      b.shader->info.workgroup_size[2] = 1;
+      nir_def *lane = nir_load_subgroup_invocation(&b);
+      nir_def *offset = nir_imul_imm(&b, lane, 4);
+      nir_def *x = nir_u2u16(&b, nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 0), offset,
+                                                .align_mul = 4));
+      nir_def *y = nir_u2u16(&b, nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 0),
+                                                nir_iadd_imm(&b, offset, 128),
+                                                .align_mul = 4));
+      nir_store_ssbo(&b, narrow_integer_op(&b, op, x, y), nir_imm_int(&b, 0),
+                     nir_iadd_imm(&b, offset, 256), .write_mask = 1, .align_mul = 4);
+      agx_shader_part compiled = {};
+      agx_apple9_compute_profile profile = {};
+      const char *reason = nullptr;
+      EXPECT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason))
+         << narrow_integer_op_names[op] << ": " << (reason ?: "no diagnostic");
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
+}
