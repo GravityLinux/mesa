@@ -4199,9 +4199,9 @@ apple9_lower_global_address_pair(nir_builder *b, nir_intrinsic_instr *intr,
    return true;
 }
 
-/* Keep native binary16 arithmetic and special functions. Remaining composite
- * math keeps the common FP32 expansion. Narrow integer predicates and math use
- * 32-bit ports: narrow values may retain undefined upper GPR bits. */
+/* Keep native binary16 arithmetic, comparisons and special functions.
+ * Integer predicates use 32-bit ports: narrow values may retain undefined
+ * upper GPR bits after packed memory accesses. */
 unsigned
 agx_apple9_alu_width(const nir_instr *instr, void *data)
 {
