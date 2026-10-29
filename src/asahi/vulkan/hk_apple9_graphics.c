@@ -874,9 +874,21 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, struct agx_draw draw)
       hk_apple9_graphics_reject(cmd, "depth-compare-op");
       return;
    }
+   /* NEVER can eliminate the shader even with late coverage feedback.
+    * Execute the body with depth writes disabled, apply the original Z-fail
+    * stencil operation as the pass operation, and preserve the tile color.
+    * The late feedback still performs stencil tests after memory side effects.
+    */
+   bool force_never = depth_enabled &&
+                      dyn->ds.depth.compare_op == VK_COMPARE_OP_NEVER &&
+                      fs->info.fs.writes_memory &&
+                      !fs->info.fs.early_fragment_tests;
+   gfx->descriptors.root.draw.force_never_in_shader = force_never;
    uint32_t depth_face = 0xf00 |
-      ((depth_enabled ? dyn->ds.depth.compare_op : VK_COMPARE_OP_ALWAYS) << 24) |
-      ((depth_enabled && dyn->ds.depth.write_enable) ? 0 : (1u << 21));
+      ((depth_enabled && !force_never
+           ? dyn->ds.depth.compare_op : VK_COMPARE_OP_ALWAYS) << 24) |
+      ((depth_enabled && !force_never && dyn->ds.depth.write_enable)
+           ? 0 : (1u << 21));
    record.depth_face[0] = record.depth_face[1] = depth_face;
    /* Vulkan stencil ops and compare ops match the native encodings. An
     * absent stencil attachment behaves as a disabled test.
@@ -898,7 +910,8 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, struct agx_draw draw)
          record.depth_face[f] |= s->reference & 0xff;
          record.stencil[f] = (s->write_mask & 0xff) |
                              ((s->compare_mask & 0xff) << 8) |
-                             ((uint32_t)s->op.pass << 16) |
+                             ((uint32_t)(force_never
+                                ? s->op.depth_fail : s->op.pass) << 16) |
                              ((uint32_t)s->op.depth_fail << 19) |
                              ((uint32_t)s->op.fail << 22) |
                              ((uint32_t)s->op.compare << 25);

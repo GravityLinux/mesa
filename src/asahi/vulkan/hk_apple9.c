@@ -1137,6 +1137,9 @@ hk_apple9_upload_sysvals(struct hk_cmd_buffer *cmd, struct hk_shader *shader,
    else
       memcpy(table.cpu, cmd->state.gfx.apple9_draw_params,
              sizeof(cmd->state.gfx.apple9_draw_params));
+   uint32_t force_never = descriptors->root.draw.force_never_in_shader;
+   memcpy((uint8_t *)table.cpu + AGX_APPLE9_DEPTH_NEVER_OFFSET,
+          &force_never, sizeof(force_never));
 
    /* Size and level queries read this table without a hardware texture
     * slot, so a stage may query a texture it never samples (WebRender takes

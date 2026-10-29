@@ -116,6 +116,7 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
    return pdev->dev.debug |
       (agx_apple9_compute_enabled(&pdev->dev)
           ? (UINT64_C(15) << 60) | (UINT64_C(1) << 58) |
+            (UINT64_C(1) << 57) | (UINT64_C(1) << 56) |
             (!hk_apple9_descriptor_snapshot() ? (UINT64_C(1) << 59) : 0)
           : 0);
 }
@@ -200,7 +201,13 @@ hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
    NIR_PASS(_, nir, nir_split_struct_vars, nir_var_function_temp);
 
    /* Optimize but allow copies because we haven't lowered them yet */
-   agx_preprocess_nir(nir);
+   /* Standalone compiler tests also preprocess without a physical device. */
+   struct hk_physical_device *pdev =
+      vk_pdev ? container_of(vk_pdev, struct hk_physical_device, vk) : NULL;
+   if (pdev && agx_apple9_compute_enabled(&pdev->dev))
+      agx_preprocess_nir_apple9(nir);
+   else
+      agx_preprocess_nir(nir);
 
    NIR_PASS(_, nir, nir_lower_load_const_to_scalar);
    NIR_PASS(_, nir, nir_lower_var_copies);
@@ -1077,7 +1084,10 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       NIR_PASS(_, nir, agx_nir_lower_multisampled_image_store);
    }
 
-   agx_preprocess_nir(nir);
+   if (apple9_compute)
+      agx_preprocess_nir_apple9(nir);
+   else
+      agx_preprocess_nir(nir);
 
    nir_opt_peephole_select_options peephole_select_options = {
       .limit = 0,
@@ -1759,6 +1769,10 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
       if (compiled && interface_reason) {
          compiled = false;
          reason = interface_reason;
+      }
+      if (!vertex) {
+         shader->info.fs.writes_memory = nir->info.writes_memory;
+         shader->info.fs.early_fragment_tests = nir->info.fs.early_fragment_tests;
       }
       ralloc_free(nir);
       if (!compiled) {

@@ -3610,8 +3610,8 @@ agx_nir_lower_accurate_frcp(nir_shader *nir)
 }
 
 /* Preprocess NIR independent of shader state */
-void
-agx_preprocess_nir(nir_shader *nir)
+static void
+agx_preprocess_nir_impl(nir_shader *nir, bool legacy_frag_sidefx)
 {
    if (!nir)
       return;
@@ -3627,7 +3627,7 @@ agx_preprocess_nir(nir_shader *nir)
    NIR_PASS(_, nir, nir_lower_global_vars_to_local);
    NIR_PASS(_, nir, nir_lower_var_copies);
 
-   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+   if (nir->info.stage == MESA_SHADER_FRAGMENT && legacy_frag_sidefx) {
       NIR_PASS(_, nir, agx_nir_lower_frag_sidefx);
       NIR_PASS(_, nir, nir_lower_is_helper_invocation);
    }
@@ -3682,6 +3682,21 @@ agx_preprocess_nir(nir_shader *nir)
    NIR_PASS(_, nir, nir_opt_sink, move_all);
    NIR_PASS(_, nir, nir_opt_move, move_all);
    NIR_PASS(_, nir, agx_nir_lower_shared_bitsize);
+}
+
+void
+agx_preprocess_nir(nir_shader *nir)
+{
+   agx_preprocess_nir_impl(nir, true);
+}
+
+void
+agx_preprocess_nir_apple9(nir_shader *nir)
+{
+   /* Native monolithic compilation owns helper and test feedback lowering.
+    * In particular, neither preprocessing invocation may synthesize depth.
+    */
+   agx_preprocess_nir_impl(nir, false);
 }
 
 static bool

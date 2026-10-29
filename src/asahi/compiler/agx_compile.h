@@ -419,7 +419,14 @@ struct agx_shader_key {
 
 uint64_t agx_gather_texcoords(nir_shader *nir);
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 void agx_preprocess_nir(nir_shader *nir);
+void agx_preprocess_nir_apple9(nir_shader *nir);
+#ifdef __cplusplus
+}
+#endif
 bool agx_nir_lower_printf_buffer(nir_shader *nir);
 bool agx_nir_lower_discard_zs_emit(nir_shader *s);
 bool agx_nir_lower_sample_mask(nir_shader *s);

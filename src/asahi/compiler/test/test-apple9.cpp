@@ -9224,6 +9224,187 @@ TEST(Apple9Compiler, RepeatedDemotionReusesCoveragePublication)
    ralloc_free(b.shader);
 }
 
+class Apple9FragmentSideEffects : public ::testing::Test {
+protected:
+   nir_shader *shader(bool early, bool color_first, bool demote, bool depth,
+                      unsigned bits = 32, bool color = true)
+   {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "fragment_side_effects");
+      b.shader->info.fs.early_fragment_tests = early;
+      b.shader->info.num_ssbos = 1;
+      b.shader->info.num_ubos = 1;
+      nir_def *x = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0),
+         nir_imm_int(&b, 0), .align_mul = 4, .range = 4);
+      auto output = [&]() {
+         nir_store_output(&b, nir_imm_vec4(&b, .25, .5, .75, 1),
+            nir_imm_int(&b, 0), .write_mask = 15, .src_type = nir_type_float32,
+            .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+      };
+      if (color && color_first)
+         output();
+      nir_store_ssbo(&b, nir_u2uN(&b, x, bits), nir_imm_int(&b, 0),
+         nir_imm_int(&b, 0), .write_mask = 1, .align_mul = bits / 8);
+      if (demote)
+         nir_demote_if(&b, nir_ieq_imm(&b, x, 0));
+      nir_ssbo_atomic(&b, 32, nir_imm_int(&b, 0), nir_imm_int(&b, 4),
+         nir_imm_int(&b, 1), .atomic_op = nir_atomic_op_iadd);
+      if (depth)
+         nir_store_output(&b, nir_imm_float(&b, .5), nir_imm_int(&b, 0),
+            .write_mask = 1, .src_type = nir_type_float32,
+            .io_semantics = {.location = FRAG_RESULT_DEPTH, .num_slots = 1});
+      if (color && !color_first)
+         output();
+      nir_shader_gather_info(b.shader, nir_shader_get_entrypoint(b.shader));
+      return b.shader;
+   }
+
+   unsigned count(nir_shader *nir, nir_intrinsic_op op)
+   {
+      unsigned result = 0;
+      nir_foreach_block(block, nir_shader_get_entrypoint(nir)) {
+         nir_foreach_instr(instr, block)
+            result += instr->type == nir_instr_type_intrinsic &&
+                      nir_instr_as_intrinsic(instr)->intrinsic == op;
+      }
+      return result;
+   }
+};
+
+TEST_F(Apple9FragmentSideEffects, PreprocessingTwicePreservesNativeAndLegacyContracts)
+{
+   for (bool native : {false, true}) {
+      for (bool early : {false, true}) {
+         for (bool depth : {false, true}) {
+            nir_shader *nir = shader(early, true, false, depth);
+            for (unsigned i = 0; i < 2; ++i) {
+               if (native)
+                  agx_preprocess_nir_apple9(nir);
+               else
+                  agx_preprocess_nir(nir);
+               nir_validate_shader(nir, "side effect preprocessing");
+               EXPECT_TRUE(nir->info.writes_memory);
+               EXPECT_EQ(nir->info.fs.early_fragment_tests, early);
+               EXPECT_EQ(!!(nir->info.outputs_written &
+                            BITFIELD64_BIT(FRAG_RESULT_DEPTH)),
+                         depth || (!native && !early));
+               EXPECT_EQ(count(nir, nir_intrinsic_load_depth_never_agx),
+                         !native && !early && !depth ? 1u : 0u);
+               EXPECT_EQ(count(nir, nir_intrinsic_sample_mask_agx), 0u);
+            }
+            ralloc_free(nir);
+         }
+      }
+   }
+}
+
+TEST_F(Apple9FragmentSideEffects, FeedbackOrdersMemoryAndColorWithoutDummyDepth)
+{
+   for (bool early : {false, true}) {
+      for (bool color_first : {false, true}) {
+         for (bool demote : {false, true}) {
+            for (unsigned bits : {16u, 32u}) {
+               nir_shader *nir = shader(early, color_first, demote, false, bits);
+               agx_preprocess_nir_apple9(nir);
+               agx_preprocess_nir_apple9(nir);
+               agx_shader_part part = {};
+               const char *reason = nullptr;
+               ASSERT_TRUE(agx_compile_apple9_fragment(nir, &part, &reason)) << reason;
+               nir_validate_shader(nir, "native side effect compilation");
+               EXPECT_TRUE(nir->info.writes_memory);
+               EXPECT_EQ(nir->info.fs.early_fragment_tests, early);
+               EXPECT_EQ(part.info.depth_layout, FRAG_DEPTH_LAYOUT_UNCHANGED);
+               EXPECT_FALSE(part.info.apple9_reads_z);
+               EXPECT_TRUE(part.info.apple9_uses_discard);
+               EXPECT_EQ(count(nir, nir_intrinsic_store_zs_agx), 0u);
+               EXPECT_EQ(count(nir, nir_intrinsic_load_depth_never_agx), 0u);
+               EXPECT_EQ(count(nir, nir_intrinsic_load_helper_invocation), 0u);
+               EXPECT_EQ(count(nir, nir_intrinsic_is_helper_invocation), 0u);
+               EXPECT_GT(count(nir, nir_intrinsic_load_sample_mask_in), 0u);
+
+               unsigned index = 0, feedback = 0, tests = 0, kills = 0;
+               std::vector<unsigned> memory, colors;
+               nir_foreach_block(block, nir_shader_get_entrypoint(nir)) {
+                  nir_foreach_instr(instr, block) {
+                     ++index;
+                     if (instr->type != nir_instr_type_intrinsic)
+                        continue;
+                     nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+                     if (intr->intrinsic == nir_intrinsic_store_ssbo ||
+                         intr->intrinsic == nir_intrinsic_ssbo_atomic) {
+                        memory.push_back(index);
+                        /* Both plain stores and atomics must be guarded. */
+                        EXPECT_EQ(block->cf_node.parent->type, nir_cf_node_if);
+                     } else if (intr->intrinsic == nir_intrinsic_sample_mask_agx) {
+                        if (nir_src_is_const(intr->src[1]) &&
+                            nir_src_as_uint(intr->src[1]) == 0)
+                           ++kills;
+                        else {
+                           feedback = index;
+                           ++tests;
+                        }
+                     } else if (intr->intrinsic == nir_intrinsic_store_local_pixel_agx) {
+                        colors.push_back(index);
+                        if (early && demote) {
+                           EXPECT_FALSE(nir_src_is_const(intr->src[1]));
+                        }
+                     }
+                  }
+               }
+               ASSERT_EQ(memory.size(), 2u);
+               ASSERT_FALSE(colors.empty());
+               if (!early) {
+                  EXPECT_GT(count(nir, nir_intrinsic_load_local_pixel_agx), 0u);
+                  bool has_depth_control = false;
+                  for (unsigned r = 0; r < part.info.apple9_resource_count; ++r)
+                     has_depth_control |= part.info.apple9_resource_binding[r] ==
+                                          AGX_APPLE9_GRAPHICS_SYSVAL_BINDING;
+                  EXPECT_TRUE(has_depth_control);
+               }
+               EXPECT_EQ(tests, 1u);
+               EXPECT_EQ(kills, demote && !early ? 1u : 0u);
+               for (unsigned m : memory) {
+                  if (early)
+                     EXPECT_LT(feedback, m);
+                  else
+                     EXPECT_GT(feedback, m);
+               }
+               for (unsigned c : colors)
+                  EXPECT_LT(feedback, c);
+               const uint8_t acquire[] = {0x87, 2, 0x54, 1, 0, 0};
+               const uint8_t release[] = {0x07, 2, 0x54, 1, 0, 0};
+               EXPECT_EQ(apple9_binary_count_sequence(&part, acquire, sizeof(acquire)), 1u);
+               EXPECT_EQ(apple9_binary_count_sequence(&part, release, sizeof(release)), 1u);
+               free(part.binary);
+               ralloc_free(nir);
+            }
+         }
+      }
+   }
+}
+
+TEST_F(Apple9FragmentSideEffects, AuthoredDepthAndColorlessSideEffects)
+{
+   for (bool early : {false, true}) {
+      for (bool depth : {false, true}) {
+         nir_shader *nir = shader(early, false, false, depth, 32, false);
+         agx_preprocess_nir_apple9(nir);
+         agx_preprocess_nir_apple9(nir);
+         agx_shader_part part = {};
+         const char *reason = nullptr;
+         ASSERT_TRUE(agx_compile_apple9_fragment(nir, &part, &reason)) << reason;
+         nir_validate_shader(nir, "colorless side effects");
+         EXPECT_EQ(count(nir, nir_intrinsic_store_local_pixel_agx), 0u);
+         EXPECT_EQ(count(nir, nir_intrinsic_store_zs_agx), depth && !early ? 1u : 0u);
+         EXPECT_EQ(count(nir, nir_intrinsic_sample_mask_agx), depth && !early ? 0u : 1u);
+         EXPECT_EQ(part.info.depth_layout, depth && !early
+                   ? FRAG_DEPTH_LAYOUT_ANY : FRAG_DEPTH_LAYOUT_UNCHANGED);
+         free(part.binary);
+         ralloc_free(nir);
+      }
+   }
+}
+
 TEST(Apple9Compiler, DepthWritesInitializeCoverageWithoutDiscard)
 {
    nir_builder b = nir_builder_init_simple_shader(

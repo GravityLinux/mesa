@@ -5952,7 +5952,7 @@ apple9_blend_factor_supported(unsigned factor)
  * so register allocation and numerical behavior do not depend on a captured
  * native color-pack sequence. */
 static void
-apple9_collect_color(nir_shader *nir)
+apple9_collect_color(nir_shader *nir, bool native_sidefx)
 {
    /* Output assignments are ordinary mutable shader state. Collect them
     * before packing or blending so component writes and branch-local writes
@@ -6014,6 +6014,19 @@ apple9_collect_color(nir_shader *nir)
                        nir_intrinsic_write_mask(intr) << component);
          nir_instr_remove(instr);
       }
+   }
+   if (native_sidefx && nir->info.writes_memory &&
+       !nir->info.fs.early_fragment_tests &&
+       !(nir->info.outputs_written &
+         (BITFIELD64_BIT(FRAG_RESULT_DEPTH) |
+          BITFIELD64_BIT(FRAG_RESULT_STENCIL)))) {
+      /* A zero kill at the end of the body makes the common sample-mask pass
+       * test AFTER every memory side effect, even if the last real demote (or
+       * the original color assignment) preceded a store. Color exports below
+       * remain after feedback. This also works without a color output.
+       */
+      b.cursor = nir_after_impl(impl);
+      nir_demote_samples(&b, nir_imm_intN_t(&b, 0, 16));
    }
    if (sample_mask) {
       b.cursor = nir_after_impl(impl);
@@ -6925,6 +6938,70 @@ apple9_lower_textures(nir_shader *nir)
 }
 
 static bool
+apple9_lower_helper(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_helper_invocation)
+      return false;
+
+   /* Do this after single-sample lowering, which would turn SampleMaskIn
+    * back into a helper query. The coverage word has control fields above bit 3.
+    * Demoted helpers are tracked separately by nir_lower_is_helper_invocation.
+    * Reading after early feedback also excludes samples rejected by the
+    * depth/stencil tests.
+    */
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *coverage = nir_iand_imm(b, nir_load_sample_mask_in(b), 0xf);
+   nir_def_replace(&intr->def, nir_ieq_imm(b, coverage, 0));
+   return true;
+}
+
+static bool
+apple9_mask_early_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   nir_variable *mask = data;
+   b->cursor = nir_before_instr(&intr->instr);
+   if (intr->intrinsic == nir_intrinsic_demote_samples) {
+      /* Early tests already updated Z/S. Later demotion only masks color;
+       * publishing another sample kill would violate the feedback contract.
+       */
+      nir_store_var(b, mask,
+         nir_iand(b, nir_load_var(b, mask),
+                  nir_inot(b, nir_u2u16(b, intr->src[0].ssa))), 1);
+      nir_instr_remove(&intr->instr);
+      return true;
+   }
+   if (intr->intrinsic == nir_intrinsic_store_local_pixel_agx) {
+      nir_src_rewrite(&intr->src[1],
+         nir_iand(b, intr->src[1].ssa,
+                  nir_u2uN(b, nir_load_var(b, mask), intr->src[1].ssa->bit_size)));
+      return true;
+   }
+   return false;
+}
+
+static bool
+apple9_preserve_never_color(nir_builder *b, nir_intrinsic_instr *intr,
+                            UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_store_local_pixel_agx)
+      return false;
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *never = nir_load_ubo(
+      b, 1, 32, nir_imm_int(b, AGX_APPLE9_GRAPHICS_SYSVAL_BINDING),
+      nir_imm_int(b, AGX_APPLE9_DEPTH_NEVER_OFFSET),
+      .align_mul = 4, .range_base = AGX_APPLE9_DEPTH_NEVER_OFFSET, .range = 4);
+   nir_def *color = intr->src[0].ssa;
+   nir_push_if(b, nir_ine_imm(b, never, 0));
+   nir_def *old = nir_load_local_pixel_agx(
+      b, intr->num_components, 32, intr->src[1].ssa,
+      .base = nir_intrinsic_base(intr), .format = nir_intrinsic_format(intr));
+   nir_push_else(b, NULL);
+   nir_pop_if(b, NULL);
+   nir_src_rewrite(&intr->src[0], nir_if_phi(b, old, color));
+   return true;
+}
+
+static bool
 apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
                         const struct agx_apple9_vertex_layout *layout,
                         const struct agx_apple9_varying_layout *producer,
@@ -7006,8 +7083,18 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
    /* Use the same structured mask/loop model as compute. Continuations become
     * masked regions with one backedge before instruction selection. */
    nir_lower_continue_constructs(nir);
+   bool native_sidefx = nir->info.stage == MESA_SHADER_FRAGMENT;
+   if (native_sidefx) {
+      nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+      /* Unlike legacy hardware-predicated stores, guard all native writes.
+       * Run once here, not in either invocation of generic preprocessing.
+       */
+      if (nir->info.writes_memory)
+         nir_lower_helper_writes(nir, true);
+      nir_lower_is_helper_invocation(nir);
+   }
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
-      apple9_collect_color(nir);
+      apple9_collect_color(nir, native_sidefx);
    /* As on Apple8, promote direct accesses to SSA, keep small arrays in
     * registers, and lower larger dynamically indexed arrays to scratch. */
    nir_lower_array_deref_of_vec(nir, nir_var_function_temp, NULL,
@@ -7059,7 +7146,25 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
       }
       nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
       agx_nir_lower_discard_zs_emit(nir);
+      if (native_sidefx && nir->info.fs.early_fragment_tests &&
+          nir->info.fs.uses_discard) {
+         nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+         nir_builder b = nir_builder_at(nir_before_impl(impl));
+         nir_variable *mask =
+            nir_local_variable_create(impl, glsl_uint16_t_type(), "early color mask");
+         nir_store_var(&b, mask, nir_imm_intN_t(&b, 0xff, 16), 1);
+         nir_shader_intrinsics_pass(nir, apple9_mask_early_color,
+                                    nir_metadata_control_flow, mask);
+      }
       agx_nir_lower_monolithic_msaa(nir, samples);
+      if (native_sidefx && nir->info.writes_memory &&
+          !nir->info.fs.early_fragment_tests) {
+         nir_shader_intrinsics_pass(
+            nir, apple9_preserve_never_color, nir_metadata_none, NULL);
+      }
+      if (native_sidefx)
+         nir_shader_intrinsics_pass(nir, apple9_lower_helper,
+                                    nir_metadata_control_flow, NULL);
       nir_lower_vars_to_ssa(nir);
       nir_lower_all_phis_to_scalar(nir);
       nir_shader_intrinsics_pass(nir, apple9_lower_coverage_sysval,
