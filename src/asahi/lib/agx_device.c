@@ -564,8 +564,10 @@ agx_open_device(void *memctx, struct agx_device *dev)
       break;
    case 16:
       assert(dev->params.gpu_variant == 'G' ||
+             dev->params.gpu_variant == 'S' ||
              dev->params.gpu_variant == 'C');
-      dev->chip = dev->params.gpu_variant == 'C' ? AGX_CHIP_G16C
+      /* Pro shares the multi-cluster Max graphics path and ISA. */
+      dev->chip = dev->params.gpu_variant != 'G' ? AGX_CHIP_G16C
                                                : AGX_CHIP_G16G;
       break;
    case 17:
@@ -675,7 +677,8 @@ agx_open_device(void *memctx, struct agx_device *dev)
    uint64_t kernel_size = MAX2(dev->params.vm_kernel_min_size, 32ull << 30);
    struct drm_asahi_vm_create vm_create = {0};
    if (dev->params.gpu_generation == 16 &&
-       (dev->params.gpu_variant == 'G' || dev->params.gpu_variant == 'C')) {
+       (dev->params.gpu_variant == 'G' || dev->params.gpu_variant == 'S' ||
+        dev->params.gpu_variant == 'C')) {
       kernel_size = dev->params.vm_kernel_min_size;
       vm_create.kernel_end =
          AGX_APPLE9_RENDER_CONTEXT_BASE + (1ull << 32);
