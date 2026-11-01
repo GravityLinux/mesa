@@ -131,6 +131,7 @@ main(void)
    /* Record an actual new stream. Producer ordering alone does not make
     * render writes visible to a subsequent Apple9 texture-reading dispatch.
     * Keep this entry barrier across a second lookup, without duplicating it.
+    * Only G17P needs it; G13G and G16 start streams without one.
     */
    const enum agx_chip chips[] = {
       AGX_CHIP_G13G, AGX_CHIP_G16G, AGX_CHIP_G16C, AGX_CHIP_G17P,
@@ -147,7 +148,7 @@ main(void)
       cmd->uploader[HK_CMD_POOL_MAIN].chunks[0].base = 0x2000000000ull;
       struct hk_cs *cs = hk_cmd_buffer_get_cs(cmd, true);
       CHECK(cs);
-      if (chips[i] == AGX_CHIP_G13G) {
+      if (chips[i] != AGX_CHIP_G17P) {
          CHECK(cs->current == cs->start && cs->stats.flushes == 0);
       } else {
          uint32_t expected;
@@ -167,6 +168,6 @@ main(void)
       free(cmd);
    }
    free(dev);
-   puts("PASS actual CDM recording: G16G/G16C/G17P entry visibility, legacy unchanged, no duplicate entry barrier");
+   puts("PASS actual CDM recording: G17P entry visibility, G13G/G16 unchanged, no duplicate entry barrier");
    return 0;
 }

@@ -1240,11 +1240,15 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
 
       if (!compute) {
          hk_cs_init_graphics(cmd, cs);
-      } else if (agx_is_apple9(&hk_cmd_buffer_device(cmd)->dev)) {
+      } else if (hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G17P) {
          /* Firmware dependencies order the producer, but do not invalidate
           * the consumer's caches. In particular, compressed image readback
           * after rendering needs visibility before its first texture fetch.
           * A flush at the end of the preceding CDM stream happens too early.
+          *
+          * This was only observed on G17P. G16 is not known to need it, and
+          * the full barrier includes the costly drain, so G16 streams start
+          * without one.
           */
          hk_cdm_cache_flush(hk_cmd_buffer_device(cmd), cs);
       }
