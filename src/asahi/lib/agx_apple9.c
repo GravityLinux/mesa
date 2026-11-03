@@ -309,7 +309,7 @@ apple9_compute_launch_params(struct agx_apple9_launch_parameters *out,
 static bool
 apple9_build_compute_launch(uint8_t *out, uint64_t usc_exec_base,
                             uint64_t launch_address, uint64_t resource_address,
-                            uint32_t main_offset,
+                            const uint32_t *root_words, uint32_t main_offset,
                             const struct agx_apple9_compute_profile *profile,
                             uint64_t preamble_address)
 {
@@ -321,6 +321,7 @@ apple9_build_compute_launch(uint8_t *out, uint64_t usc_exec_base,
    params.entry_offset = main_offset;
    params.resource_table = resource_address;
    params.launch_address = launch_address;
+   params.root_words = root_words;
    return agx_apple9_launch_build(
       out, agx_apple9_compute_launch_size(profile), AGX_APPLE9_LAUNCH_COMPUTE, &params);
 }
@@ -597,6 +598,12 @@ agx_apple9_prepare_compute_dispatch_alloc_tmpl(
       return false;
 
    size_t record_size = apple9_compute_resource_record_size_for_abi(abi);
+   /* The launch materializes its root words from the record's head. */
+   struct agx_apple9_launch_parameters lp;
+   if (!apple9_compute_launch_params(&lp, dev->shader_base, profile,
+                                     preamble_address) ||
+       4 * agx_apple9_compute_root_words(lp.resource_count) > record_size)
+      return false;
    struct agx_ptr record = alloc(allocator, record_size, 64);
    if (!record.cpu)
       return false;
@@ -632,22 +639,23 @@ agx_apple9_prepare_compute_dispatch_alloc_tmpl(
              tmpl->shader_base == dev->shader_base);
       if (entry < AGX_APPLE9_ENTRY_HEADER_SIZE + AGX_APPLE9_ENTRY_CODE_OFFSET ||
           !agx_apple9_launch_template_emit(launch.cpu, tmpl, record.gpu, entry,
-                                           launch.gpu))
+                                           launch.gpu) ||
+          !agx_apple9_launch_template_set_roots(launch.cpu, tmpl, record.cpu))
          return false;
       if (agx_apple9_debug_enabled(AGX_A9_DBG_LAUNCH_CHECK)) {
          uint8_t ref[AGX_APPLE9_COMPUTE_LAUNCH_SIZE];
          size_t size = agx_apple9_compute_launch_size(profile);
          if (!apple9_build_compute_launch(ref, dev->shader_base, launch.gpu,
-                                          record.gpu, entry, profile,
-                                          preamble_address) ||
+                                          record.gpu, record.cpu, entry,
+                                          profile, preamble_address) ||
              memcmp(ref, launch.cpu, size)) {
             fprintf(stderr, "HK_APPLE9_LAUNCH_CHECK: template launch differs\n");
             abort();
          }
       }
    } else if (!apple9_build_compute_launch(launch.cpu, dev->shader_base,
-                                           launch.gpu, record.gpu, entry,
-                                           profile, preamble_address)) {
+                                           launch.gpu, record.gpu, record.cpu,
+                                           entry, profile, preamble_address)) {
       return false;
    }
    *launch_address = launch.gpu;

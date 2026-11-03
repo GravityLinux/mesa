@@ -23,6 +23,10 @@ parameters()
    p.tile_bytes = 24;
    p.samples = 1;
    p.resource_count = 8;
+   /* Compute launches materialize their root words. */
+   static uint32_t roots[2 * (AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE +
+                              AGX_APPLE9_COMPUTE_DIRECT_MAX_RESOURCES)];
+   p.root_words = roots;
    return p;
 }
 
@@ -96,7 +100,8 @@ TEST(Apple9Launcher, ResourceCountsRespectAllocationBounds)
          EXPECT_EQ(transfer[0] & 0xf, 0xbu);
          EXPECT_EQ((transfer[0] >> 4) | ((transfer[2] >> 6) << 4), word);
          EXPECT_EQ(transfer[1] >> 1, 18 + word);
-         EXPECT_EQ(transfer[3] & 0x40, word == 0 ? 0x40 : 0);
+         /* Literal roots leave nothing pending on slot 2. */
+         EXPECT_EQ(transfer[3] & 0x40, 0);
       }
       EXPECT_EQ(read16(out + arguments + 4 * words), 0xeu);
       for (unsigned i = arguments + 4 * words + 4; i < 1024; ++i)

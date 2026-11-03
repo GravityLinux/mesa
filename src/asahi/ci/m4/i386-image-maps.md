@@ -9,7 +9,7 @@ cc -m32 -O2 -Wall -Wextra -Werror i386-image-maps.c -o i386-image-maps -lvulkan
 Run with the i686 hk ICD on native FEX on the 4K-process-enabled kernel:
 
 ```
-HK_EXPERIMENTAL_APPLE9=1 VK_DRIVER_FILES=/path/to/i686-hk.json \
+VK_DRIVER_FILES=/path/to/i686-hk.json \
   exec-4k FEXInterpreter ./i386-image-maps 150 3072
 ```
 

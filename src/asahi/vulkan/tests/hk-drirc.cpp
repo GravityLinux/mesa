@@ -106,3 +106,22 @@ TEST(HkDrirc, NativeStageKillSwitch)
    driDestroyOptionCache(&drirc.options);
    driDestroyOptionInfo(&drirc.available_options);
 }
+
+TEST(HkDrirc, DefaultsLoadedForEveryApplication)
+{
+   const char *devices[] = {nullptr, "G13", "G16"};
+   const char *engines[] = {nullptr, "mesa zink", "vkd3d", "other"};
+   for (const char *device : devices) {
+      for (const char *engine : engines) {
+         struct hk_drirc drirc;
+         driConfigFileParseParams params = {};
+         params.driverName = "hk";
+         params.deviceName = device;
+         params.engineName = engine;
+         hk_parse_dri_options(&drirc, &params);
+         EXPECT_TRUE(drirc.misc.defaults_loaded);
+         driDestroyOptionCache(&drirc.options);
+         driDestroyOptionInfo(&drirc.available_options);
+      }
+   }
+}

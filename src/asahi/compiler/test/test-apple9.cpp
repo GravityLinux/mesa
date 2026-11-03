@@ -1165,7 +1165,7 @@ TEST(Apple9Packer, RawLoadTokensPackIndependentlyOfIndexAndSequenceFlags)
    for (const auto &test : cases) {
       agx_apple9_packed_instruction packed = {};
       ASSERT_TRUE(agx_apple9_pack_device_load_u32_raw(
-         2, 1, 3, AGX_APPLE9_DEVICE_LOAD_INDEX_DIRECT_GPR,
+         2, 1, 3, AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
          AGX_APPLE9_DEVICE_LOAD_HAS_NEXT, AGX_APPLE9_SCOREBOARD_SLOT_NONE, test.token, &packed));
       static const uint8_t fixed[] = {
          0x67, 0x00, 0x54, 0x04, 0x03, 0x01, 0x20,
@@ -1180,9 +1180,9 @@ TEST(Apple9Packer, RawLoadTokensPackIndependentlyOfIndexAndSequenceFlags)
 
    agx_apple9_packed_instruction packed = {};
    EXPECT_FALSE(agx_apple9_pack_device_load_u32_raw(
-      2, AGX_APPLE9_GPR_COUNT, 0, AGX_APPLE9_DEVICE_LOAD_INDEX_DIRECT_GPR, 0, AGX_APPLE9_SCOREBOARD_SLOT_NONE, AGX_APPLE9_DEVICE_LOAD_TOKEN_5101, &packed));
+      2, AGX_APPLE9_GPR_COUNT, 0, AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR, 0, AGX_APPLE9_SCOREBOARD_SLOT_NONE, AGX_APPLE9_DEVICE_LOAD_TOKEN_5101, &packed));
    EXPECT_FALSE(agx_apple9_pack_device_load_u32_raw(
-      2, 1, 0, AGX_APPLE9_DEVICE_LOAD_INDEX_DIRECT_GPR, 0, AGX_APPLE9_SCOREBOARD_SLOT_NONE, 0x7100,
+      2, 1, 0, AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR, 0, AGX_APPLE9_SCOREBOARD_SLOT_NONE, 0x7100,
       &packed));
 }
 
@@ -1192,7 +1192,7 @@ TEST(Apple9Vir, DeviceLoadDirectIndexIsAnSsaSource)
    agx_apple9_vir_init(&program);
    uint32_t index = agx_apple9_vir_input(&program, 1);
    const agx_apple9_device_load_contract contract = {
-      .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_DIRECT_GPR,
+      .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
       .flags = 0,
       .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
    };
@@ -1236,7 +1236,7 @@ TEST(Apple9Vir, DeviceLoadComputedIndexIsIndependentOfDestination)
    agx_apple9_vir_init(&program);
    uint32_t index = agx_apple9_vir_input(&program, 2);
    const agx_apple9_device_load_contract contract = {
-      .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_COMPUTED_GPR,
+      .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_LAST_USE_GPR,
       .flags = 0,
       .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
    };
@@ -3090,7 +3090,7 @@ TEST(Apple9Vir, RawLoadTokenDefinesProducerScoreboardSlot)
    uint32_t index = agx_apple9_vir_input(&program, 1);
    uint32_t alu = agx_apple9_vir_input(&program, 2);
    const agx_apple9_device_load_contract contract = {
-      .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_DIRECT_GPR,
+      .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
       .flags = 0,
       .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_9100,
    };
