@@ -316,7 +316,7 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
         view_format != PIPE_FORMAT_R32G32B32A32_SINT) ||
        (view->vk.view_type != VK_IMAGE_VIEW_TYPE_2D &&
         view->vk.view_type != VK_IMAGE_VIEW_TYPE_2D_ARRAY) ||
-       view->vk.base_mip_level || view->vk.base_array_layer ||
+       view->vk.base_array_layer ||
        view->vk.level_count != 1 || view->vk.layer_count != 1 ||
        (att->loadOp != VK_ATTACHMENT_LOAD_OP_CLEAR &&
         att->loadOp != VK_ATTACHMENT_LOAD_OP_LOAD &&
@@ -338,7 +338,7 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
    if (image->plane_count != 1 ||
        (samples != 1 && samples != 2 && samples != 4) ||
        (samples > 1 && layout->tiling == AIL_TILING_LINEAR) ||
-       image->vk.mip_levels != 1 || image->vk.array_layers != 1 ||
+       image->vk.array_layers != 1 ||
        image->vk.image_type != VK_IMAGE_TYPE_2D || layout->compressed ||
        image->planes[0].sparse_map ||
        (image->vk.create_flags & (VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
@@ -381,7 +381,9 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
          return;
       }
    }
-   unsigned width = image->vk.extent.width, height = image->vk.extent.height;
+   unsigned level = view->vk.base_mip_level;
+   unsigned width = u_minify(image->vk.extent.width, level);
+   unsigned height = u_minify(image->vk.extent.height, level);
    const VkRect2D *area = &info->renderArea;
    if (!width || !height || width > 16384 || height > 16384 ||
        area->offset.x < 0 || area->offset.y < 0 ||
@@ -412,7 +414,7 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
       hk_apple9_graphics_reject(cmd, "partial-depth-stencil-clear");
       return;
    }
-   uint64_t base = hk_image_base_address(image, 0) + layout->level_offsets_B[0];
+   uint64_t base = hk_image_base_address(image, 0) + layout->level_offsets_B[level];
    if (!base || (base & 15) ||
        (layout->tiling != AIL_TILING_GPU &&
         layout->tiling != AIL_TILING_TWIDDLED &&
@@ -543,7 +545,22 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
     * every reload read texel (0,0).
     */
    if (samples == 1) {
-      memcpy(descriptors, &view->planes[0].background, 8);
+      /* Bind the selected mip as a standalone image. Its AIL tile shape is
+       * determined by the minified dimensions, including the mip tail.
+       */
+      struct AGX_TEXTURE texture;
+      if (!hk_apple9_decode_texture(&view->planes[0].background, &texture)) {
+         hk_apple9_graphics_reject(cmd, "background-descriptor");
+         return;
+      }
+      texture.width = width;
+      texture.height = height;
+      texture.first_level = texture.last_level = 0;
+      struct agx_texture_packed background;
+      agx_pack(&background, TEXTURE, cfg) {
+         cfg = texture;
+      }
+      memcpy(descriptors, &background, 8);
       uint32_t tex_header;
       memcpy(&tex_header, descriptors + 4, 4);
       tex_header &= 0x00ffffff;
@@ -570,8 +587,6 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
       if (samples == 1)
          texture_address |= ((uint64_t)(stride >> 4) - 1) << 46;
       pbe_address |= ((uint64_t)(stride >> 4) - 1) << 44;
-   } else if (samples == 1 && layout->page_aligned_layers) {
-      texture_address |= UINT64_C(1) << 62;
    }
    memcpy(descriptors + 8, &texture_address, 8);
    memcpy(descriptors + 32, &view->planes[0].eot, 8);
@@ -609,7 +624,7 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
       return;
    }
    cs->apple9_attachment = (struct drm_asahi_attachment){
-      .pointer = base, .size = layout->size_B - layout->level_offsets_B[0],
+      .pointer = base, .size = layout->size_B - layout->level_offsets_B[level],
    };
    /* The initial stream clears Z; subsequent partial renders must reload it. */
    cs->cr.zls_control = render->cr.zls_control;
