@@ -580,6 +580,7 @@ agx_apple9_pack_sampler(void *out, bool min_linear, bool mag_linear,
 void
 agx_apple9_pack_nearest_sampler(void *out)
 {
-   agx_apple9_pack_sampler(out, false, false, 0, 0, 14,
+   /* Native mip-filter code 1 is nearest; the pipe enum uses zero. */
+   agx_apple9_pack_sampler(out, false, false, 1, 0, 14,
                             PIPE_TEX_WRAP_CLAMP_TO_EDGE, PIPE_TEX_WRAP_CLAMP_TO_EDGE, 1);
 }

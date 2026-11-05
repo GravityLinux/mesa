@@ -1296,7 +1296,9 @@ hk_apple9_upload_textures(struct hk_cmd_buffer *cmd, struct hk_shader *shader,
             A9FAIL();
          if (sampler.minify > AGX_FILTER_LINEAR || sampler.magnify > AGX_FILTER_LINEAR ||
              sampler.compare_enable || sampler.pixel_coordinates ||
-             sampler.seamful_cube_maps || desc->clamp_0_sampler_index_or_negative >= 0)
+             sampler.seamful_cube_maps || desc->clamp_0_sampler_index_or_negative >= 0 ||
+             sampler.wrap_r > AGX_WRAP_MIRRORED_CLAMP_TO_EDGE ||
+             sampler.border_colour == AGX_BORDER_COLOUR_CUSTOM)
             A9FAIL();
          /* Map AGX wrap modes to pipe wrap modes for the native packer */
          static const unsigned agx_to_pipe_wrap[] = {
@@ -1310,11 +1312,19 @@ hk_apple9_upload_textures(struct hk_cmd_buffer *cmd, struct hk_shader *shader,
             agx_to_pipe_wrap[sampler.wrap_s] : PIPE_TEX_WRAP_CLAMP_TO_EDGE;
          unsigned pipe_wrap_t = sampler.wrap_t < ARRAY_SIZE(agx_to_pipe_wrap) ?
             agx_to_pipe_wrap[sampler.wrap_t] : PIPE_TEX_WRAP_CLAMP_TO_EDGE;
-         agx_apple9_pack_sampler((uint8_t *)table.cpu + slot++ * 32,
+         uint8_t *native = (uint8_t *)table.cpu + slot++ * 32;
+         agx_apple9_pack_sampler(native,
             sampler.minify == AGX_FILTER_LINEAR, sampler.magnify == AGX_FILTER_LINEAR,
             sampler.mip_filter, sampler.minimum_lod, sampler.maximum_lod,
             pipe_wrap_s, pipe_wrap_t,
             sampler.maximum_anisotropy);
+         /* Like the native Gallium uploader, retain R in bits 35..37.
+          * Even depth-one 3D filtering can touch the border along Z.
+          * Fixed border presets move from bits 55..56 to 61..62. */
+         uint32_t modes;
+         memcpy(&modes, native + 4, sizeof(modes));
+         modes |= (sampler.wrap_r << 3) | (sampler.border_colour << 29);
+         memcpy(native + 4, &modes, sizeof(modes));
       }
       if (info->apple9_uses_texel_fetch)
          agx_apple9_pack_nearest_sampler((uint8_t *)table.cpu + slot * 32);
@@ -1344,7 +1354,9 @@ hk_apple9_graphics_resources(struct hk_cmd_buffer *cmd, struct hk_shader *shader
    /* Retain the narrow sampled-image contract, except that mipmapped views
     * are allowed: hk_apple9_pack_texture carries the level range. Uniform
     * texel buffers use the linear 2D representation produced by
-    * hk_CreateBufferView.
+    * hk_CreateBufferView. Single-slice GPU-layout 3D images use the same
+    * miptree addressing; keep the base depth check even for mip views so
+    * this does not admit the depth-one tail of a multi-slice image.
     */
    u_foreach_bit(binding, info->apple9_texture_mask) {
       const struct hk_apple9_descriptor *entry =
@@ -1363,8 +1375,11 @@ hk_apple9_graphics_resources(struct hk_cmd_buffer *cmd, struct hk_shader *shader
       } else if ((tex.dimension != AGX_TEXTURE_DIMENSION_2D &&
                   tex.dimension != AGX_TEXTURE_DIMENSION_2D_ARRAY &&
                   tex.dimension != AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED &&
-                  tex.dimension != AGX_TEXTURE_DIMENSION_2D_ARRAY_MULTISAMPLED) ||
-                 tex.depth != 1) {
+                  tex.dimension != AGX_TEXTURE_DIMENSION_2D_ARRAY_MULTISAMPLED &&
+                  tex.dimension != AGX_TEXTURE_DIMENSION_3D) ||
+                 tex.depth != 1 ||
+                 (tex.dimension == AGX_TEXTURE_DIMENSION_3D &&
+                  tex.layout != AGX_LAYOUT_GPU)) {
          if (hk_apple9_trace(HK_APPLE9_TRACE_REJECT))
             fprintf(stderr, "APPLE9_TEXTURE_REJECT binding=%u type=%u dimension=%u "
                     "levels=%u..%u depth=%u layout=%u\n", binding, entry->type,
