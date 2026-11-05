@@ -45,6 +45,8 @@ hk_apple9_tile_color_format(VkFormat format)
    switch (format) {
    case VK_FORMAT_R16G16B16A16_SFLOAT:
       return PIPE_FORMAT_R16G16B16A16_FLOAT;
+   case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
+      return PIPE_FORMAT_R11G11B10_FLOAT;
    case VK_FORMAT_R8_UNORM:
       return PIPE_FORMAT_R8_UNORM;
    case VK_FORMAT_R32G32B32A32_SFLOAT:
@@ -386,6 +388,7 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
         view_format != PIPE_FORMAT_R10G10B10A2_UNORM &&
         view_format != PIPE_FORMAT_B10G10R10A2_UNORM &&
         view_format != PIPE_FORMAT_R16G16B16A16_FLOAT &&
+        view_format != PIPE_FORMAT_R11G11B10_FLOAT &&
         view_format != PIPE_FORMAT_R8_UNORM &&
         view_format != PIPE_FORMAT_R32G32B32A32_FLOAT &&
         view_format != PIPE_FORMAT_R32G32B32A32_UINT &&

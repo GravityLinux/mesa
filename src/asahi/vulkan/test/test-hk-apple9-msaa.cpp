@@ -95,6 +95,7 @@ TEST_F(Apple9MSAA, NativeShapesRejectOverBudgetWithoutChangingSingleSample)
       PIPE_FORMAT_R8G8B8A8_SRGB, PIPE_FORMAT_B8G8R8A8_SRGB,
       PIPE_FORMAT_R10G10B10A2_UNORM, PIPE_FORMAT_B10G10R10A2_UNORM,
       PIPE_FORMAT_R16G16B16A16_FLOAT, PIPE_FORMAT_R8_UNORM,
+      PIPE_FORMAT_R11G11B10_FLOAT,
       PIPE_FORMAT_R32G32B32A32_FLOAT, PIPE_FORMAT_R32G32B32A32_UINT,
       PIPE_FORMAT_R32G32B32A32_SINT,
    };
@@ -180,10 +181,11 @@ TEST_F(Apple9MSAA, TileHelpersCompileForEveryAdmittedColorFormat)
       PIPE_FORMAT_NONE,
       PIPE_FORMAT_R8G8B8A8_UNORM, PIPE_FORMAT_R10G10B10A2_UNORM,
       PIPE_FORMAT_R16G16B16A16_FLOAT, PIPE_FORMAT_R8_UNORM,
+      PIPE_FORMAT_R11G11B10_FLOAT,
       PIPE_FORMAT_R32G32B32A32_FLOAT, PIPE_FORMAT_R32G32B32A32_UINT,
       PIPE_FORMAT_R32G32B32A32_SINT,
    };
-   const VkClearColorValue clear = {{0.25f, 0.5f, 0.75f, 1.0f}};
+   const VkClearColorValue clear = {{1.5f, 0.328125f, 19.5f, 0.0f}};
    const VkRect2D area = {{1, 2}, {29, 13}};
    for (auto format : formats)
    for (unsigned samples : {1u, 2u, 4u})
@@ -226,6 +228,20 @@ TEST_F(Apple9MSAA, TileHelpersCompileForEveryAdmittedColorFormat)
       const char *reason = nullptr;
       ASSERT_TRUE(agx_compile_apple9_fragment_blend(
          nir, nullptr, &blend, &compiled, &reason)) << (reason ? reason : "");
+      if (format == PIPE_FORMAT_R11G11B10_FLOAT && op == 0) {
+         nir_foreach_block(block, nir_shader_get_entrypoint(nir)) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type != nir_instr_type_intrinsic)
+                  continue;
+               auto *intr = nir_instr_as_intrinsic(instr);
+               if (intr->intrinsic != nir_intrinsic_store_local_pixel_agx)
+                  continue;
+               ASSERT_TRUE(nir_src_is_const(intr->src[0]));
+               EXPECT_EQ(nir_src_as_uint(intr->src[0]),
+                         0x3e0u | (0x354u << 11) | (0x267u << 22));
+            }
+         }
+      }
       EXPECT_EQ(compiled.info.apple9_resource_count, 0);
       EXPECT_EQ(compiled.info.apple9_image_mask,
                 format != PIPE_FORMAT_NONE && op == 2 ? 1u : 0u);
@@ -242,6 +258,7 @@ TEST_F(Apple9MSAA, ActualRuntimeColorResolveCompilesWithNativeDescriptors)
       VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_B8G8R8A8_SRGB,
       VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_FORMAT_A2R10G10B10_UNORM_PACK32,
       VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R8_UNORM,
+      VK_FORMAT_B10G11R11_UFLOAT_PACK32,
       VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32A32_UINT,
       VK_FORMAT_R32G32B32A32_SINT,
    };
@@ -305,5 +322,99 @@ TEST_F(Apple9MSAA, ActualRuntimeColorResolveCompilesWithNativeDescriptors)
       free(compiled.binary);
       free(layout);
       ralloc_free(nir);
+   }
+}
+
+TEST_F(Apple9MSAA, PackedFloatAttachmentPreservesRangeAndOpaqueDestinationAlpha)
+{
+   /* These exactly representable UFLOAT values have independent bit oracles:
+    * five exponent bits (bias 15), six R/G or five B fraction bits. Alpha is
+    * absent, so DST_ALPHA must multiply RGB by one even when source alpha is 0.
+    */
+   const struct {
+      float color[4];
+      uint32_t expected;
+   } cases[] = {
+      {{1.5f, 0.328125f, 19.5f, 0.0f},
+       (15u * 64 + 32) | ((13u * 64 + 20) << 11) | ((19u * 32 + 7) << 22)},
+      {{65024.0f, 0x1p-20f, 64512.0f, 0.0f},
+       (30u * 64 + 63) | (1u << 11) | ((30u * 32 + 31) << 22)},
+   };
+   for (const auto &test : cases)
+   for (unsigned samples : {1u, 2u, 4u})
+   for (bool destination_alpha : {false, true}) {
+      vk_color_blend_state cb = {};
+      cb.attachment_count = 1;
+      cb.color_write_enables = 1;
+      auto &rt = cb.attachments[0];
+      rt.write_mask = 15;
+      rt.blend_enable = destination_alpha;
+      rt.src_color_blend_factor = VK_BLEND_FACTOR_DST_ALPHA;
+      rt.dst_color_blend_factor = VK_BLEND_FACTOR_ZERO;
+      rt.src_alpha_blend_factor = VK_BLEND_FACTOR_ONE;
+      rt.dst_alpha_blend_factor = VK_BLEND_FACTOR_ZERO;
+      agx_apple9_blend blend = {};
+      ASSERT_TRUE(hk_apple9_blend_state(&cb, VK_FORMAT_B10G11R11_UFLOAT_PACK32,
+                                       samples, &blend));
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "packed float attachment");
+      nir_store_output(&b, nir_imm_vec4(&b, test.color[0], test.color[1],
+                                        test.color[2], test.color[3]),
+         nir_imm_int(&b, 0), .write_mask = 15, .src_type = nir_type_float32,
+         .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+      b.shader->info.io_lowered = true;
+      agx_shader_part compiled = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_fragment_blend(
+         b.shader, nullptr, &blend, &compiled, &reason)) << (reason ? reason : "");
+      unsigned stores = 0;
+      nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            auto *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_store_local_pixel_agx)
+               continue;
+            ++stores;
+            ASSERT_TRUE(nir_src_is_const(intr->src[0]));
+            EXPECT_EQ(nir_src_as_uint(intr->src[0]), test.expected);
+            EXPECT_EQ(nir_intrinsic_format(intr), PIPE_FORMAT_R32_UINT);
+         }
+      }
+      EXPECT_EQ(stores, 1u);
+      free(compiled.binary);
+      ralloc_free(b.shader);
+   }
+}
+
+TEST_F(Apple9MSAA, PackedFloatBlendAndMaskCompileWithDestinationReads)
+{
+   for (unsigned samples : {1u, 2u, 4u})
+   for (unsigned mask : {5u, 15u}) {
+      vk_color_blend_state cb = {};
+      cb.attachment_count = 1;
+      cb.color_write_enables = 1;
+      auto &rt = cb.attachments[0];
+      rt.write_mask = mask;
+      rt.blend_enable = true;
+      rt.src_color_blend_factor = rt.dst_color_blend_factor = VK_BLEND_FACTOR_ONE;
+      rt.src_alpha_blend_factor = rt.dst_alpha_blend_factor = VK_BLEND_FACTOR_ONE;
+      agx_apple9_blend blend = {};
+      ASSERT_TRUE(hk_apple9_blend_state(&cb, VK_FORMAT_B10G11R11_UFLOAT_PACK32,
+                                       samples, &blend));
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "packed float blend");
+      nir_store_output(&b, nir_load_frag_coord(&b), nir_imm_int(&b, 0),
+         .write_mask = 15, .src_type = nir_type_float32,
+         .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+      b.shader->info.io_lowered = true;
+      agx_shader_part compiled = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_fragment_blend(
+         b.shader, nullptr, &blend, &compiled, &reason)) << (reason ? reason : "");
+      EXPECT_TRUE(compiled.info.apple9_reads_tile);
+      EXPECT_GT(compiled.info.binary_size, 0u);
+      free(compiled.binary);
+      ralloc_free(b.shader);
    }
 }
