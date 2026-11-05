@@ -84,7 +84,15 @@ agx_encoder_allocate(struct agx_device *dev, bool vdm)
    unsigned flags = vdm && agx_apple9_direct_render_enabled(dev)
                        ? AGX_BO_CONTEXT | AGX_BO_WRITEBACK
                        : 0;
-   struct agx_bo *bo = agx_bo_create(dev, 0x80000, 0, flags, "Encoder");
+
+   /* VDM streams link to continuation buffers when they fill up (see
+    * agx_ensure_cmdbuf_has_space), so start them small: most render passes
+    * encode well under a kilobyte, and every batch keeps its encoder until it
+    * is reaped. CDM streams cannot link yet and flush the batch when full, so
+    * they keep the full size.
+    */
+   size_t size = vdm ? AGX_VDM_ENCODER_SIZE : AGX_CDM_ENCODER_SIZE;
+   struct agx_bo *bo = agx_bo_create(dev, size, 0, flags, "Encoder");
    uint8_t *map = agx_bo_map(bo);
    return (struct agx_encoder){
       .bo = bo,
@@ -1153,9 +1161,13 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
    if (ctx->batch == batch)
       ctx->batch = NULL;
 
-   /* Try to clean up up to two batches, to keep memory usage down */
-   if (agx_cleanup_batches(ctx) >= 0)
-      agx_cleanup_batches(ctx);
+   /* Reap every batch that has completed, to keep memory usage down. Each
+    * submitted batch holds its encoders, pools and resource references until
+    * it is reaped, and new batches take unused slots first, so batches left
+    * here would only be reclaimed once all AGX_MAX_BATCHES slots are in use.
+    */
+   while (agx_cleanup_batches(ctx) >= 0)
+      ;
 }
 
 void

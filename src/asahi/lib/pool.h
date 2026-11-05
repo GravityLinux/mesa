@@ -29,6 +29,11 @@ struct agx_pool {
    /* Within the topmost transient BO, how much has been used? */
    unsigned transient_offset;
 
+   /* Size of the next slab. Slabs start small and double up to a cap, so a
+    * pool that holds a few kilobytes does not pin a full slab.
+    */
+   unsigned slab_size;
+
    /* BO flags to use in the pool */
    unsigned create_flags;
 
