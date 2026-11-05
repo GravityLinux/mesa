@@ -969,6 +969,7 @@ hk_meta_copy_buffer_image_apple9(struct vk_command_buffer *cmd,
 {
    const struct ail_layout *layout = &image->planes[0].layout;
    enum pipe_format format = hk_format_to_pipe_format(image->vk.format);
+   const bool depth = image->vk.format == VK_FORMAT_D32_SFLOAT;
    struct vk_device *device = cmd->base.device;
    const struct vk_device_dispatch_table *disp = &device->dispatch_table;
    unsigned texel_B = util_format_get_blocksize(format);
@@ -991,7 +992,7 @@ hk_meta_copy_buffer_image_apple9(struct vk_command_buffer *cmd,
       reason = "sparse";
    else if (layout->compressed || util_format_is_compressed(format))
       reason = "compressed";
-   else if (util_format_is_depth_or_stencil(format))
+   else if (util_format_is_depth_or_stencil(format) && !depth)
       reason = "depth/stencil";
    else if (util_format_get_blockwidth(format) != 1 ||
             util_format_get_blockheight(format) != 1 ||
@@ -1049,8 +1050,9 @@ hk_meta_copy_buffer_image_apple9(struct vk_command_buffer *cmd,
          region->bufferImageHeight : region->imageExtent.height;
 
       unsigned max_depth = vk_image_mip_level_extent(&image->vk, level).depth;
-      if (region->imageSubresource.aspectMask != VK_IMAGE_ASPECT_COLOR_BIT)
-         reason = "non-color aspect";
+      if (region->imageSubresource.aspectMask !=
+          (depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT))
+         reason = "unsupported aspect";
       else if (level >= layout->levels)
          reason = "mip level outside layout";
       else if (!is_3d && (region->imageOffset.z != 0 || region->imageExtent.depth != 1))
@@ -1101,9 +1103,11 @@ hk_meta_copy_buffer_image_apple9(struct vk_command_buffer *cmd,
    return;
 
 reject:
-   if (hk_apple9_trace(HK_APPLE9_TRACE_META))
-      fprintf(stderr, "APPLE9_META_TRANSFER_REJECT direction=%s reason=%s\n",
-              readback ? "image-to-buffer" : "buffer-to-image", reason);
+   if (hk_apple9_trace(HK_APPLE9_TRACE_REJECT))
+      fprintf(stderr, "APPLE9_META_TRANSFER_REJECT direction=%s reason=%s "
+              "format=%u samples=%u tiling=%u regions=%u\n",
+              readback ? "image-to-buffer" : "buffer-to-image", reason,
+              image->vk.format, image->vk.samples, layout->tiling, region_count);
    vk_command_buffer_set_error(cmd, VK_ERROR_FORMAT_NOT_SUPPORTED);
 }
 
