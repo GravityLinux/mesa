@@ -364,7 +364,8 @@ hk_hash_graphics_state(struct vk_physical_device *device,
       struct agx_apple9_blend blend;
       bool supported = hk_apple9_blend_state(
          state && state->cb ? state->cb : &replace,
-         state && state->rp ? state->rp->color_attachment_formats[0] : VK_FORMAT_UNDEFINED,
+         state && state->rp ? state->rp->color_attachment_formats[0]
+                            : VK_FORMAT_R8G8B8A8_UNORM,
          state && state->ms ? MAX2(state->ms->rasterization_samples, 1) : 1,
          &blend);
       _mesa_blake3_update(&blake3_ctx, &supported, sizeof(supported));
@@ -1744,7 +1745,7 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
          if (!hk_apple9_blend_state(state && state->cb ? state->cb : &replace,
                                     state && state->rp
                                        ? state->rp->color_attachment_formats[0]
-                                       : VK_FORMAT_UNDEFINED,
+                                       : VK_FORMAT_R8G8B8A8_UNORM,
                                     state && state->ms
                                        ? MAX2(state->ms->rasterization_samples, 1) : 1,
                                     &shader->apple9_blend))

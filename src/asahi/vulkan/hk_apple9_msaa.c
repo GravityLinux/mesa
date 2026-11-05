@@ -45,6 +45,13 @@ hk_apple9_tile_nir(unsigned operation, bool srgb, enum pipe_format format,
    assert(samples == 1 || samples == 2 || samples == 4);
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_FRAGMENT, &agx_nir_options, "Honeykrisp Apple9 tile");
+   /* Empty background/EOT programs still provide native launch entries.
+    * They have no color tile transaction to load, clear or export.
+    */
+   if (format == PIPE_FORMAT_NONE) {
+      nir_shader_gather_info(b.shader, b.impl);
+      return b.shader;
+   }
    if (operation == 2) {
       b.shader->info.num_images = 1;
       nir_def *group = nir_load_workgroup_id(&b);

@@ -66,17 +66,21 @@ hk_apple9_blend_state(const struct vk_color_blend_state *cb,
                       VkFormat format, unsigned samples,
                       struct agx_apple9_blend *out)
 {
-   if (!cb || cb->attachment_count != 1 || cb->logic_op_enable)
+   if (!cb || cb->attachment_count > 1 || cb->logic_op_enable ||
+       (format != VK_FORMAT_UNDEFINED && cb->attachment_count != 1))
       return false;
-   const struct vk_color_blend_attachment_state *rt = &cb->attachments[0];
    memset(out, 0, sizeof(*out));
+   if (samples != 1 && samples != 2 && samples != 4)
+      return false;
+   out->samples = samples;
+   /* No attachment consumes color, even if the shader declares an output. */
+   if (format == VK_FORMAT_UNDEFINED)
+      return true;
+   const struct vk_color_blend_attachment_state *rt = &cb->attachments[0];
    out->format = format == VK_FORMAT_R8G8B8A8_SRGB ||
                  format == VK_FORMAT_B8G8R8A8_SRGB ||
                  format == VK_FORMAT_A8B8G8R8_SRGB_PACK32
       ? PIPE_FORMAT_R8G8B8A8_SRGB : hk_apple9_tile_color_format(format);
-   if (samples != 1 && samples != 2 && samples != 4)
-      return false;
-   out->samples = samples;
    out->colormask = (cb->color_write_enables & 1) ? rt->write_mask : 0;
    out->rgb_src = out->alpha_src = PIPE_BLENDFACTOR_ONE;
    out->rgb_dst = out->alpha_dst = PIPE_BLENDFACTOR_ZERO;
@@ -271,6 +275,74 @@ hk_apple9_zs_attachment(const struct hk_image_view *view,
    return *base && util_is_aligned(*base, AIL_PAGESIZE);
 }
 
+/* Like Gallium's zero-mask color helpers, these dispatch empty tile programs.
+ * The application fragment shader still runs normally, with helper writes
+ * masked by the compiler. No PBE export or backing image is needed.
+ */
+static bool
+hk_apple9_attachmentless_samples(struct hk_cmd_buffer *cmd, unsigned samples)
+{
+   struct hk_rendering_state *render = &cmd->state.gfx.render;
+   if (!hk_apple9_tilebuffer(PIPE_FORMAT_NONE, samples, &render->tilebuffer) ||
+       !hk_apple9_tile_shader(cmd, 0, false, PIPE_FORMAT_NONE, samples,
+                             NULL, NULL, 0, 0, &render->cr.bg.main))
+      return false;
+   render->cr.bg.partial = render->cr.bg.main;
+   render->cr.eot.main = render->cr.bg.main;
+   render->cr.eot.partial = render->cr.bg.main;
+   return true;
+}
+
+static void
+hk_apple9_begin_attachmentless(struct hk_cmd_buffer *cmd,
+                               const VkRenderingInfo *info)
+{
+   const VkRect2D *area = &info->renderArea;
+   if ((info->pDepthAttachment && info->pDepthAttachment->imageView) ||
+       (info->pStencilAttachment && info->pStencilAttachment->imageView) ||
+       area->offset.x < 0 || area->offset.y < 0 ||
+       !area->extent.width || !area->extent.height ||
+       area->extent.width > 16384 || area->extent.height > 16384 ||
+       (unsigned)area->offset.x > 16384 - area->extent.width ||
+       (unsigned)area->offset.y > 16384 - area->extent.height) {
+      hk_apple9_graphics_reject(cmd, "attachmentless-area-or-depth-stencil");
+      return;
+   }
+   hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.post_gfx);
+   hk_cmd_buffer_end_compute(cmd);
+   struct hk_rendering_state *render = &cmd->state.gfx.render;
+   memset(render, 0, sizeof(*render));
+   render->area = *area;
+   render->layer_count = 1;
+   render->cr.width = area->offset.x + area->extent.width;
+   render->cr.height = area->offset.y + area->extent.height;
+   render->cr.layers = 1;
+   render->cr.isp_bgobjvals = 0x300;
+   if (!hk_apple9_attachmentless_samples(cmd, 1))
+      return;
+   struct hk_cs *cs = hk_cmd_buffer_get_cs(cmd, false);
+   if (!cs) {
+      hk_apple9_graphics_reject(cmd, "render-stream-allocation");
+      return;
+   }
+   const uint32_t stop = 0xc0000000;
+   memcpy(cs->current, &stop, sizeof(stop));
+   /* Keep a valid empty job too; draws select the actual sample count. */
+   cs->stats.cmds++;
+   struct agx_scissor_packed scissor;
+   agx_pack(&scissor, SCISSOR, cfg) {
+      cfg.min_x = area->offset.x;
+      cfg.min_y = area->offset.y;
+      cfg.max_x = render->cr.width;
+      cfg.max_y = render->cr.height;
+      cfg.min_z = 0.0f;
+      cfg.max_z = 1.0f;
+   }
+   util_dynarray_append(&cs->scissor, scissor);
+   struct agx_depth_bias_packed bias = {0};
+   util_dynarray_append(&cs->depth_bias, bias);
+}
+
 void
 hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
 {
@@ -288,7 +360,7 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
       VK_RENDERING_LOCAL_READ_CONCURRENT_ACCESS_CONTROL_BIT_KHR |
       VK_RENDERING_CONTENTS_INLINE_BIT_KHR;
    if ((info->flags & ~allowed_flags) || info->viewMask || info->layerCount != 1 ||
-       info->colorAttachmentCount != 1) {
+       info->colorAttachmentCount > 1) {
       if (hk_apple9_trace(HK_APPLE9_TRACE_REJECT))
          fprintf(stderr, "APPLE9_RENDER_INFO flags=0x%x viewMask=%u layers=%u colors=%u depth=%u stencil=%u\n",
                  info->flags, info->viewMask, info->layerCount,
@@ -296,6 +368,10 @@ hk_apple9_begin_rendering(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info
                  !!(info->pDepthAttachment && info->pDepthAttachment->imageView),
                  !!(info->pStencilAttachment && info->pStencilAttachment->imageView));
       hk_apple9_graphics_reject(cmd, "attachment-count-layers-or-depth-stencil");
+      return;
+   }
+   if (info->colorAttachmentCount == 0) {
+      hk_apple9_begin_attachmentless(cmd, info);
       return;
    }
    const VkRenderingAttachmentInfo *att = info->pColorAttachments;
@@ -720,6 +796,20 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, struct agx_draw draw)
       hk_apple9_graphics_reject(cmd, "stages-transform-feedback-or-queries");
       return;
    }
+   /* variableMultisampleRate is false: all draws in this attachmentless
+    * rendering instance use the first draw's rasterizationSamples.
+    */
+   if (!gfx->render.color_att_count && !cs->stats.calls &&
+       dyn->ms.rasterization_samples != gfx->render.tilebuffer.nr_samples) {
+      unsigned samples = dyn->ms.rasterization_samples;
+      if ((samples != 1 && samples != 2 && samples != 4) ||
+          !hk_apple9_attachmentless_samples(cmd, samples)) {
+         hk_apple9_graphics_reject(cmd, "attachmentless-samples");
+         return;
+      }
+      cs->tib = gfx->render.tilebuffer;
+      cs->cr = gfx->render.cr;
+   }
    unsigned samples = gfx->render.tilebuffer.nr_samples;
    if (dyn->ms.rasterization_samples != samples ||
        dyn->ms.alpha_to_coverage_enable ||
@@ -791,8 +881,9 @@ hk_apple9_draw(struct hk_cmd_buffer *cmd, struct agx_draw draw)
       ? AGX_PRIMITIVE_TRIANGLE_FAN :
       primitive == MESA_PRIM_TRIANGLE_STRIP
       ? AGX_PRIMITIVE_TRIANGLE_STRIP : AGX_PRIMITIVE_TRIANGLES;
-   pipeline.color_formats[0] =
-      hk_apple9_tile_color_format(gfx->render.color_att[0].vk_format);
+   pipeline.color_formats[0] = gfx->render.color_att_count
+      ? hk_apple9_tile_color_format(gfx->render.color_att[0].vk_format)
+      : PIPE_FORMAT_NONE;
    pipeline.flatshade_first =
       dyn->rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT;
    if (draw.indexed) {

@@ -138,6 +138,23 @@ TEST_F(Apple9MSAA, BlendSpecializationsDistinguishSampleCounts)
    }
 }
 
+TEST_F(Apple9MSAA, AbsentColorAttachmentDiscardsDeclaredColor)
+{
+   for (unsigned count : {0u, 1u})
+   for (unsigned samples : {1u, 2u, 4u}) {
+      vk_color_blend_state cb = {};
+      cb.attachment_count = count;
+      cb.color_write_enables = 1;
+      cb.attachments[0].write_mask = 15;
+      agx_apple9_blend blend = {};
+      ASSERT_TRUE(hk_apple9_blend_state(&cb, VK_FORMAT_UNDEFINED,
+                                       samples, &blend));
+      EXPECT_EQ(blend.format, PIPE_FORMAT_NONE);
+      EXPECT_EQ(blend.colormask, 0);
+      EXPECT_EQ(blend.samples, samples);
+   }
+}
+
 TEST_F(Apple9MSAA, ActualRuntimeResolveVertexCompiles)
 {
    nir_shader *nir = vk_meta_draw_rects_vs_nir(nullptr, false);
@@ -160,6 +177,7 @@ TEST_F(Apple9MSAA, ActualRuntimeResolveVertexCompiles)
 TEST_F(Apple9MSAA, TileHelpersCompileForEveryAdmittedColorFormat)
 {
    const pipe_format formats[] = {
+      PIPE_FORMAT_NONE,
       PIPE_FORMAT_R8G8B8A8_UNORM, PIPE_FORMAT_R10G10B10A2_UNORM,
       PIPE_FORMAT_R16G16B16A16_FLOAT, PIPE_FORMAT_R8_UNORM,
       PIPE_FORMAT_R32G32B32A32_FLOAT, PIPE_FORMAT_R32G32B32A32_UINT,
@@ -196,9 +214,9 @@ TEST_F(Apple9MSAA, TileHelpersCompileForEveryAdmittedColorFormat)
             }
          }
       }
-      EXPECT_EQ(exports, op == 2 ? 1u : 0u);
-      EXPECT_EQ(fetches, op == 1 || op == 3 ? samples : 0u);
-      EXPECT_EQ(stores, op == 2 ? 0u : op == 0 ? 1u : samples);
+      EXPECT_EQ(exports, format != PIPE_FORMAT_NONE && op == 2 ? 1u : 0u);
+      EXPECT_EQ(fetches, format != PIPE_FORMAT_NONE && (op == 1 || op == 3) ? samples : 0u);
+      EXPECT_EQ(stores, format == PIPE_FORMAT_NONE || op == 2 ? 0u : op == 0 ? 1u : samples);
       if (stores) {
          EXPECT_EQ(masks, BITFIELD_MASK(samples));
       }
@@ -209,7 +227,8 @@ TEST_F(Apple9MSAA, TileHelpersCompileForEveryAdmittedColorFormat)
       ASSERT_TRUE(agx_compile_apple9_fragment_blend(
          nir, nullptr, &blend, &compiled, &reason)) << (reason ? reason : "");
       EXPECT_EQ(compiled.info.apple9_resource_count, 0);
-      EXPECT_EQ(compiled.info.apple9_image_mask, op == 2 ? 1u : 0u);
+      EXPECT_EQ(compiled.info.apple9_image_mask,
+                format != PIPE_FORMAT_NONE && op == 2 ? 1u : 0u);
       EXPECT_GT(compiled.info.binary_size, 0u);
       free(compiled.binary);
       ralloc_free(nir);

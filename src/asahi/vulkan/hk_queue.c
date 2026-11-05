@@ -912,7 +912,9 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
              agx_apple9_compute_enabled(&dev->dev)) {
             if (!cs->apple9_render || !cs->stats.cmds ||
                 !cs->cr.bg.main.usc || !cs->cr.bg.partial.usc ||
-                !cs->cr.eot.main.usc || !cs->apple9_attachment.pointer ||
+                !cs->cr.eot.main.usc ||
+                (cs->tib.logical_format[0] != PIPE_FORMAT_NONE &&
+                 !cs->apple9_attachment.pointer) ||
                 !cs->uploaded_scissor || !cs->uploaded_zbias) {
                if (hk_apple9_trace(HK_APPLE9_TRACE_SUBMIT))
                   fprintf(stderr, "APPLE9_RENDER_REJECT reason=incomplete-job\n");
@@ -922,12 +924,15 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
             struct drm_asahi_cmd_header attachments = {
                .cmd_type = DRM_ASAHI_SET_FRAGMENT_ATTACHMENTS,
                .size = sizeof(cs->apple9_attachment) *
-                       (1 + !!cs->cr.depth.buffer + !!cs->cr.stencil.buffer),
+                       (!!cs->apple9_attachment.pointer +
+                        !!cs->cr.depth.buffer + !!cs->cr.stencil.buffer),
                .cdm_barrier = DRM_ASAHI_BARRIER_NONE,
                .vdm_barrier = DRM_ASAHI_BARRIER_NONE,
             };
-            util_dynarray_append(&payload, attachments);
-            util_dynarray_append(&payload, cs->apple9_attachment);
+            if (attachments.size)
+               util_dynarray_append(&payload, attachments);
+            if (cs->apple9_attachment.pointer)
+               util_dynarray_append(&payload, cs->apple9_attachment);
             /* Bounded single-layer Z/S allocations use page-aligned strides.
              * Include compression metadata in the registered range too.
              */
