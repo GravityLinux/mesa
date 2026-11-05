@@ -27,6 +27,7 @@
 #include "hk_descriptor_set.h"
 
 #include "asahi/lib/agx_nir_lower_vbo.h"
+#include "asahi/lib/agx_apple9_compute.h"
 #include "util/u_dynarray.h"
 #include "vulkan/vulkan_core.h"
 
@@ -227,6 +228,9 @@ struct hk_graphics_state {
    uint64_t draw_params;
    uint64_t draw_id_ptr;
 
+   /* Apple9 sysval words 0/1: first vertex (or vertex offset), first instance. */
+   uint32_t apple9_draw_params[2];
+
    uint32_t shaders_dirty;
    struct hk_api_shader *shaders[MESA_SHADER_MESH + 1];
 
@@ -409,6 +413,9 @@ struct hk_cs {
 
    struct hk_render_registers cr;
 
+   bool apple9_render;
+   struct drm_asahi_attachment apple9_attachment;
+
    /* Active restart index if one is set. Zero if there is no restart index set
     * yet, since Vulkan does not allow zero restart indices (unlike OpenGL).
     * This is used in place of dirty tracking, because dirty tracking
@@ -471,6 +478,10 @@ struct hk_cmd_buffer {
    struct {
       struct hk_uploader main, usc;
    } uploader;
+
+   /* Native Apple9 launch/resource records, owned like the command buffer. */
+   struct agx_pool apple9_compute;
+   struct agx_pool apple9_context;
 
    /* List of all recorded control streams */
    struct list_head control_streams;
@@ -594,7 +605,11 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
    if ((*ptr) == NULL) {
       /* Allocate root control stream */
       size_t initial_size = 65536;
-      struct agx_ptr root = hk_pool_alloc(cmd, initial_size, 1024);
+      bool native = !compute &&
+         agx_apple9_compute_enabled(&hk_cmd_pool_device(hk_cmd_buffer_pool(cmd))->dev);
+      struct agx_ptr root = native
+         ? agx_pool_alloc_aligned(&cmd->apple9_context, initial_size, 1024)
+         : hk_pool_alloc(cmd, initial_size, 1024);
       if (!root.cpu)
          return NULL;
 
@@ -729,7 +744,10 @@ hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
          hk_pool_upload(cmd, cs->depth_bias.data, cs->depth_bias.size, 64);
 
       /* TODO: maybe free scissor/depth_bias now? */
-      cs->current = agx_vdm_terminate(cs->current);
+      if (cs->apple9_render)
+         cs->current += sizeof(uint32_t); /* Already ends in native STOP. */
+      else
+         cs->current = agx_vdm_terminate(cs->current);
    }
 
    cmd->current_cs.gfx = NULL;
@@ -829,6 +847,10 @@ void hk_usc_upload_spilled_rt_descs(struct agx_usc_builder *b,
 
 void hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs);
 
+bool hk_apple9_dispatch_shader(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+                               struct hk_shader *s, struct agx_grid grid,
+                               struct agx_workgroup local_size);
+
 void hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
                                  struct agx_cdm_launch_word_0_packed launch,
                                  uint32_t usc, struct agx_grid grid,
@@ -848,6 +870,12 @@ hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       return;
 
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (s->apple9) {
+      if (!hk_apple9_dispatch_shader(cmd, cs, s, grid, local_size))
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_INITIALIZATION_FAILED);
+      return;
+   }
+
    uint32_t usc = hk_upload_usc_words(cmd, s, s->only_linked);
 
    hk_reserve_scratch(cmd, cs, s);

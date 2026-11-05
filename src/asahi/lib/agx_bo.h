@@ -89,6 +89,11 @@ struct agx_bo {
    /* Mapping */
    struct agx_va *va;
 
+   /* Vulkan's read-only shadow follows the BO, including cache reuse.
+    * Protected by dev->bo_map_lock. GEM close removes the mapping.
+    */
+   bool sparse_ro_mapped;
+
    /* Suffixed to force agx_bo_map access */
    uint64_t *shim_cpu_epoch; /* Optional shim-owned CPU-write generation. */
    void *_map;

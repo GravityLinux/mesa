@@ -804,6 +804,10 @@ static void
 fb_clears_apply_or_discard_internal(struct zink_context *ctx, struct pipe_resource *pres, struct u_rect region, bool discard_only, bool invert, bool depth_fills, int i)
 {
    struct zink_framebuffer_clear *fb_clear = &ctx->fb_clears[i];
+   const struct u_rect access = {
+      MIN2(region.x0, region.x1), MAX2(region.x0, region.x1),
+      MIN2(region.y0, region.y1), MAX2(region.y0, region.y1),
+   };
    if (zink_fb_clear_enabled(ctx, i)) {
       if (zink_blit_region_fills(region, pres->width0, pres->height0) && depth_fills) {
          if (invert)
@@ -817,8 +821,12 @@ fb_clears_apply_or_discard_internal(struct zink_context *ctx, struct pipe_resour
          struct zink_framebuffer_clear_data *clear = zink_fb_clear_element(fb_clear, j);
          struct u_rect scissor = {clear->scissor.minx, clear->scissor.maxx,
                                   clear->scissor.miny, clear->scissor.maxy};
-         if (!clear->has_scissor || zink_blit_region_covers(region, scissor) || !depth_fills) {
-            /* this is a clear that isn't fully covered by our pending write */
+         /* Reads need any overlap. Writes may discard a clear only when
+          * they contain its entire scissor.
+          */
+         if (!clear->has_scissor || !depth_fills ||
+             (invert ? u_rect_test_intersection(&access, &scissor) :
+                       !zink_blit_region_covers(scissor, access))) {
             if (!discard_only)
                fb_clears_apply_internal(ctx, pres, i);
             return;

@@ -153,19 +153,55 @@ math_filter(const nir_instr *instr, UNUSED const void *data)
    const nir_alu_instr *alu = nir_instr_as_alu(instr);
    return alu->def.bit_size == 32 &&
           (alu->op == nir_op_iabs || alu->op == nir_op_fsin || alu->op == nir_op_fcos ||
-           alu->op == nir_op_fcanonicalize);
+           alu->op == nir_op_fsin_agx || alu->op == nir_op_fcanonicalize ||
+           alu->op == nir_op_interleave);
+}
+
+static nir_def *
+spread_bits(nir_builder *b, nir_def *x)
+{
+   x = nir_iand_imm(b, nir_u2u32(b, x), 0xffff);
+   x = nir_iand_imm(b, nir_ior(b, x, nir_ishl_imm(b, x, 8)), 0x00ff00ff);
+   x = nir_iand_imm(b, nir_ior(b, x, nir_ishl_imm(b, x, 4)), 0x0f0f0f0f);
+   x = nir_iand_imm(b, nir_ior(b, x, nir_ishl_imm(b, x, 2)), 0x33333333);
+   return nir_iand_imm(b, nir_ior(b, x, nir_ishl_imm(b, x, 1)), 0x55555555);
+}
+
+/* fsin_agx consumes a quadrant angle in [0, 4), already reduced by the AGX
+ * sincos lowering. Fold it into the [-1, 1] domain of fsin_factor_agx.
+ */
+static nir_def *
+lower_fsin_agx(nir_builder *b, nir_def *q)
+{
+   nir_def *folded = nir_bcsel(
+      b, nir_flt_imm(b, q, 1.0f), q,
+      nir_bcsel(b, nir_flt_imm(b, q, 3.0f),
+                nir_fsub(b, nir_imm_float(b, 2.0f), q),
+                nir_fadd_imm(b, q, -4.0f)));
+   return nir_fmul(b, folded, nir_fsin_factor_agx(b, folded));
 }
 
 static nir_def *
 lower_math(nir_builder *b, nir_instr *instr, UNUSED void *data)
 {
    nir_alu_instr *alu = nir_instr_as_alu(instr);
+   if (alu->op == nir_op_interleave) {
+      /* Used by libagx_twiddle_coordinates. Apple9 has no modeled native
+       * interleave instruction; preserve all sixteen bits of each input.
+       */
+      nir_def *x = nir_mov_alu(b, alu->src[0], alu->def.num_components);
+      nir_def *y = nir_mov_alu(b, alu->src[1], alu->def.num_components);
+      return nir_ior(b, spread_bits(b, x),
+                     nir_ishl_imm(b, spread_bits(b, y), 1));
+   }
    nir_def *source = nir_mov_alu(b, alu->src[0], alu->def.num_components);
    nir_def *components[NIR_MAX_VEC_COMPONENTS];
    for (unsigned i = 0; i < alu->def.num_components; ++i) {
       nir_def *x = nir_channel(b, source, i);
       if (alu->op == nir_op_iabs) {
          components[i] = nir_imax(b, x, nir_ineg(b, x));
+      } else if (alu->op == nir_op_fsin_agx) {
+         components[i] = lower_fsin_agx(b, x);
       } else if (alu->op == nir_op_fcanonicalize) {
          components[i] = nir_fmul_imm(b, x, 1.0f);
       } else if (b->shader->info.stage == MESA_SHADER_VERTEX ||

@@ -755,7 +755,11 @@ zink_init_screen_caps(struct zink_screen *screen)
    }
    {
       uint32_t modes = BITFIELD_MASK(MESA_PRIM_COUNT);
-      if (!screen->have_triangle_fans || !screen->info.feats.features.geometryShader)
+      /* Honeykrisp's native M4 path has no geometry stage, so let Gallium
+       * convert quads to triangles instead of using a GS emulation.
+       */
+      if (!screen->have_triangle_fans || !screen->info.feats.features.geometryShader ||
+          zink_driverid(screen) == VK_DRIVER_ID_MESA_HONEYKRISP)
          modes &= ~BITFIELD_BIT(MESA_PRIM_QUADS);
       modes &= ~BITFIELD_BIT(MESA_PRIM_QUAD_STRIP);
       modes &= ~BITFIELD_BIT(MESA_PRIM_POLYGON);
@@ -3135,7 +3139,6 @@ init_driver_workarounds(struct zink_screen *screen)
    case VK_DRIVER_ID_QUALCOMM_PROPRIETARY:
    case VK_DRIVER_ID_BROADCOM_PROPRIETARY:
    case VK_DRIVER_ID_ARM_PROPRIETARY:
-   case VK_DRIVER_ID_MESA_HONEYKRISP:
    case VK_DRIVER_ID_MESA_KOSMICKRISP:
       screen->driver_workarounds.track_renderpasses = true; //screen->info.primgen_feats.primitivesGeneratedQueryWithRasterizerDiscard
       break;

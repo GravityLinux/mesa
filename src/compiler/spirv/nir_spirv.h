@@ -62,6 +62,13 @@ struct spirv_to_nir_options {
     */
    bool mediump_16bit_derivatives;
 
+   /* Bounded native cmat lowering cannot preserve memory access qualifiers.
+    * Restrict explicit operands to None/Aligned and reject volatile, coherent
+    * or non-temporal pointers before conversion to unqualified cmat intrinsics.
+    * Zero preserves the existing frontend semantics for other drivers.
+    */
+   bool require_cmat_memory_access_none_or_aligned;
+
    /* These really early AMD extensions don't have capabilities */
    bool amd_gcn_shader;
    bool amd_shader_ballot;

@@ -39,8 +39,12 @@ struct agx_apple9_launch_parameters {
    uint64_t launch_address;
 };
 
-/* Current T8132 execution evidence covers these allocation sizes. This does
- * not imply that the compiler implements shared load/store/barrier lowering. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Nonzero allocations are powers of two, bounded by the selected profile.
+ * Production uses only the proven 16-bit allocation word. */
 bool agx_apple9_launch_threadgroup_memory_supported(uint32_t bytes);
 
 /* Offset of the encoded entry field, for diagnostics and frame inspection. */
@@ -53,5 +57,9 @@ size_t agx_apple9_launch_call_offset(enum agx_apple9_launch_stage stage,
 bool agx_apple9_launch_build(uint8_t *out, size_t capacity,
                              enum agx_apple9_launch_stage stage,
                              const struct agx_apple9_launch_parameters *params);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

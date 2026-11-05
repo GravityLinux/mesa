@@ -7565,6 +7565,10 @@ vtn_create_builder(const uint32_t *words, size_t word_count,
    b->entry_point_stage = stage;
    b->entry_point_name = entry_point_name;
 
+   /* Header errors use the caller's diagnostic callback before lin_ctx exists. */
+   b->options = ralloc(b, struct spirv_to_nir_options);
+   *b->options = *options;
+
    /*
     * Handle the SPIR-V header (first 5 dwords).
     * Can't use vtx_assert() as the setjmp(3) target isn't initialized yet.
@@ -7605,11 +7609,6 @@ vtn_create_builder(const uint32_t *words, size_t word_count,
    };
    b->lin_ctx = linear_context_with_opts(b, &lin_opts);
 
-   struct spirv_to_nir_options *dup_options =
-      vtn_alloc(b, struct spirv_to_nir_options);
-   *dup_options = *options;
-
-   b->options = dup_options;
    b->values = vtn_zalloc_array(b, struct vtn_value, value_id_bound);
 
    if (b->options->capabilities != NULL)

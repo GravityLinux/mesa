@@ -42,7 +42,33 @@ enum agx_apple9_compute_abi {
 #define AGX_APPLE9_COMPUTE_SHARED_ARGUMENT 4
 /* Conservative per-invocation limit exercised on T8132 in all three stages. */
 #define AGX_APPLE9_MAX_SCRATCH_BYTES 32768
+/* Largest power of two whose byte count fits the allocation word after << 2. */
+#define AGX_APPLE9_MAX_THREADGROUP_MEMORY_BYTES 8192
 #define AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE 1
+
+/* Experimental, separately gated threadgroup-allocation state. Production
+ * defaults are {AGX_APPLE9_MAX_THREADGROUP_MEMORY_BYTES, PRODUCTION} and only
+ * change when agx_apple9_experiments_set() is called. The advertised device
+ * limit never follows this state. */
+enum {
+   AGX_APPLE9_TG_ENC_PRODUCTION = 0,
+   AGX_APPLE9_TG_ENC_WIDE32 = 1,
+};
+
+struct agx_apple9_experiments {
+   uint32_t threadgroup_memory_ceiling; /* 8192 production */
+   uint8_t threadgroup_encoding;
+};
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* Value snapshot of the process-wide state; safe against concurrent set. */
+struct agx_apple9_experiments agx_apple9_experiments_get(void);
+void agx_apple9_experiments_set(const struct agx_apple9_experiments *);
+#ifdef __cplusplus
+}
+#endif
 /* The threadgroup address space is selected by a tagged argument root. */
 #define AGX_APPLE9_COMPUTE_SHARED_ROOT UINT64_C(0x80000000)
 

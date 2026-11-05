@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include "layout.h"
+#include "util/format/u_format.h"
 
 TEST(Cubemap, Nonmipmapped)
 {
@@ -63,6 +64,37 @@ TEST(Linear, SmokeTestBuffer)
    ail_make_miptree(&layout);
 
    EXPECT_EQ(layout.size_B, ALIGN_POT(81946, AIL_CACHELINE));
+}
+
+TEST(Linear, TwoLayerRawTransferFootprints)
+{
+   for (pipe_format format : {PIPE_FORMAT_R8_UNORM, PIPE_FORMAT_R8G8_UNORM,
+                              PIPE_FORMAT_R32_FLOAT,
+                              PIPE_FORMAT_R16G16B16A16_FLOAT,
+                              PIPE_FORMAT_R32G32B32A32_FLOAT}) {
+      SCOPED_TRACE(util_format_name(format));
+      ail_layout layout = {
+         .width_px = 80,
+         .height_px = 52,
+         .depth_px = 2,
+         .sample_count_sa = 1,
+         .levels = 1,
+         .tiling = AIL_TILING_LINEAR,
+         .format = format,
+      };
+      ail_make_miptree(&layout);
+      const unsigned texel_B = util_format_get_blocksize(format);
+      EXPECT_GE(layout.linear_stride_B, 80u * texel_B);
+      EXPECT_EQ(layout.layer_stride_B,
+                ALIGN_POT(uint64_t(layout.linear_stride_B) * 52, AIL_CACHELINE));
+      EXPECT_EQ(layout.size_B, 2 * layout.layer_stride_B);
+      EXPECT_EQ(ail_get_linear_pixel_B(&layout, 0, 0, 0, 1),
+                layout.layer_stride_B);
+      EXPECT_LE(ail_get_linear_pixel_B(&layout, 0, 79, 51, 0) + texel_B,
+                layout.layer_stride_B);
+      EXPECT_LE(ail_get_linear_pixel_B(&layout, 0, 79, 51, 1) + texel_B,
+                layout.size_B);
+   }
 }
 
 TEST(Miptree, AllMipLevels)

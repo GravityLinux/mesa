@@ -31,17 +31,6 @@
 
 #include "nir_builder.h"
 
-struct vk_meta_blit_key {
-   enum vk_meta_object_key_type key_type;
-   enum glsl_sampler_dim dim;
-   VkSampleCountFlagBits src_samples;
-   VkResolveModeFlagBits resolve_mode;
-   VkResolveModeFlagBits stencil_resolve_mode;
-   bool stencil_as_discard;
-   VkFormat dst_format;
-   VkImageAspectFlags aspects;
-};
-
 static enum glsl_sampler_dim
 vk_image_sampler_dim(const struct vk_image *image)
 {
@@ -193,8 +182,8 @@ build_tex_resolve(nir_builder *b, nir_deref_instr *t,
    return accum;
 }
 
-static nir_shader *
-build_blit_shader(const struct vk_meta_blit_key *key)
+nir_shader *
+vk_meta_build_blit_shader(const struct vk_meta_blit_key *key)
 {
    nir_builder build;
    if (key->resolve_mode || key->stencil_resolve_mode) {
@@ -401,7 +390,7 @@ get_blit_pipeline(struct vk_device *device,
 
    const VkPipelineShaderStageNirCreateInfoMESA fs_nir_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_NIR_CREATE_INFO_MESA,
-      .nir = build_blit_shader(key),
+      .nir = vk_meta_build_blit_shader(key),
    };
    const VkPipelineShaderStageCreateInfo fs_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,

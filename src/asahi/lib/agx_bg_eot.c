@@ -249,6 +249,22 @@ agx_apple9_lower_kernel_input(nir_builder *b, nir_intrinsic_instr *intr,
    return true;
 }
 
+/* libagx marks the timestamp source volatile only to bypass caches; Apple9
+ * rejects volatile, so keep that intent as coherent.
+ */
+static bool
+agx_apple9_volatile_to_coherent(nir_builder *b, nir_intrinsic_instr *intr,
+                                UNUSED void *data)
+{
+   if (!nir_intrinsic_has_access(intr) ||
+       !(nir_intrinsic_access(intr) & ACCESS_VOLATILE))
+      return false;
+
+   nir_intrinsic_set_access(intr, (nir_intrinsic_access(intr) &
+                                   ~ACCESS_VOLATILE) | ACCESS_COHERENT);
+   return true;
+}
+
 static void
 agx_compile_apple9_precompiled(struct agx_bg_eot_cache *cache,
                              struct agx_precompiled_shader *p, unsigned program)
@@ -259,6 +275,8 @@ agx_compile_apple9_precompiled(struct agx_bg_eot_cache *cache,
    nir_shader *nir = nir_deserialize(NULL, &agx_nir_options, &reader);
    nir_shader_intrinsics_pass(nir, agx_apple9_lower_kernel_input,
                              nir_metadata_control_flow, NULL);
+   nir_shader_intrinsics_pass(nir, agx_apple9_volatile_to_coherent,
+                             nir_metadata_all, NULL);
 
    struct agx_shader_part part = {0};
    const char *reason = NULL;

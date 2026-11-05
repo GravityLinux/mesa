@@ -181,3 +181,23 @@ TEST(Tilebuffer, Layouts)
       }
    }
 }
+
+TEST(Tilebuffer, SingleColorNativeApple9Formats)
+{
+   for (enum pipe_format format : {PIPE_FORMAT_R8_UNORM,
+                                   PIPE_FORMAT_R16G16B16A16_FLOAT,
+                                   PIPE_FORMAT_R32G32B32A32_FLOAT,
+                                   PIPE_FORMAT_R32G32B32A32_UINT,
+                                   PIPE_FORMAT_R32G32B32A32_SINT}) {
+      SCOPED_TRACE(util_format_name(format));
+      struct agx_tilebuffer_layout actual =
+         agx_build_tilebuffer_layout(&format, 1, 1, false);
+      unsigned bytes = format == PIPE_FORMAT_R8_UNORM ||
+                       format == PIPE_FORMAT_R16G16B16A16_FLOAT ? 8 : 16;
+      EXPECT_EQ(actual.sample_size_B, bytes);
+      EXPECT_EQ(actual.tile_size, 32 * 32);
+      EXPECT_EQ(actual._offset_B[0], 0u);
+      EXPECT_FALSE(actual.spilled[0]);
+      EXPECT_EQ(agx_tilebuffer_total_size(&actual), bytes * 32 * 32);
+   }
+}

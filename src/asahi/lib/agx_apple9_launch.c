@@ -6,7 +6,34 @@
 #include "asahi/compiler/agx_apple9_encoding.h"
 #include "asahi/compiler/agx_apple9_profile.h"
 
+#include <stdatomic.h>
 #include <string.h>
+
+/* Process-wide experiment state packed as ceiling | encoding << 32 so a
+ * reader always sees one consistent snapshot. */
+static _Atomic uint64_t experiments_state =
+   AGX_APPLE9_MAX_THREADGROUP_MEMORY_BYTES;
+
+struct agx_apple9_experiments
+agx_apple9_experiments_get(void)
+{
+   uint64_t packed = atomic_load_explicit(&experiments_state,
+                                          memory_order_acquire);
+   return (struct agx_apple9_experiments){
+      .threadgroup_memory_ceiling = (uint32_t)packed,
+      .threadgroup_encoding = (uint8_t)(packed >> 32),
+   };
+}
+
+void
+agx_apple9_experiments_set(const struct agx_apple9_experiments *experiments)
+{
+   atomic_store_explicit(
+      &experiments_state,
+      (uint64_t)experiments->threadgroup_memory_ceiling |
+         ((uint64_t)experiments->threadgroup_encoding << 32),
+      memory_order_release);
+}
 
 static void
 write16(uint8_t *p, uint16_t value)
@@ -15,11 +42,27 @@ write16(uint8_t *p, uint16_t value)
    p[1] = value >> 8;
 }
 
+static void
+write32(uint8_t *p, uint32_t value)
+{
+   write16(p, value);
+   write16(p + 2, value >> 16);
+}
+
+static bool
+threadgroup_memory_supported(uint32_t bytes,
+                             struct agx_apple9_experiments experiments)
+{
+   return bytes == 0 ||
+          (bytes >= 128 &&
+           bytes <= experiments.threadgroup_memory_ceiling &&
+           !(bytes & (bytes - 1)));
+}
+
 bool
 agx_apple9_launch_threadgroup_memory_supported(uint32_t bytes)
 {
-   return bytes == 0 ||
-          (bytes >= 128 && bytes <= 1024 && !(bytes & (bytes - 1)));
+   return threadgroup_memory_supported(bytes, agx_apple9_experiments_get());
 }
 
 size_t
@@ -39,11 +82,18 @@ static void
 encode_allocation(uint8_t out[8], enum agx_apple9_launch_stage stage,
                   const struct agx_apple9_launch_parameters *params)
 {
+   /* WIDE32 only differs from the production word above 8 KiB, where the
+    * 16-bit word overflows; build() rejects those sizes otherwise. */
    memset(out, 0, 8);
    out[0] = 0x77;
    out[2] = 0x2a;
    out[3] = 0x41;
-   if (stage == AGX_APPLE9_LAUNCH_COMPUTE && params->threadgroup_memory_bytes) {
+   if (stage == AGX_APPLE9_LAUNCH_COMPUTE &&
+       params->threadgroup_memory_bytes >
+          AGX_APPLE9_MAX_THREADGROUP_MEMORY_BYTES) {
+      write32(out + 4, (params->threadgroup_memory_bytes << 2) | 0x80);
+   } else if (stage == AGX_APPLE9_LAUNCH_COMPUTE &&
+              params->threadgroup_memory_bytes) {
       write16(out + 4, (params->threadgroup_memory_bytes << 2) | 0x80);
    } else if (stage == AGX_APPLE9_LAUNCH_FRAGMENT) {
       unsigned units = (params->tile_bytes + 7) / 8;
@@ -97,14 +147,23 @@ agx_apple9_launch_build(uint8_t *out, size_t capacity,
 {
    if (!out || !params || (unsigned)stage > AGX_APPLE9_LAUNCH_COMPUTE)
       return false;
+   struct agx_apple9_experiments experiments = agx_apple9_experiments_get();
    bool compute = stage == AGX_APPLE9_LAUNCH_COMPUTE;
    size_t size = compute ? AGX_APPLE9_COMPUTE_LAUNCH_SIZE
                          : AGX_APPLE9_GRAPHICS_LAUNCH_SIZE;
+   /* Sizes above the production word need the explicit WIDE32 candidate;
+    * the shift must also fit 32 bits. */
+   if (params->threadgroup_memory_bytes >
+          AGX_APPLE9_MAX_THREADGROUP_MEMORY_BYTES &&
+       (experiments.threadgroup_encoding !=
+           AGX_APPLE9_TG_ENC_WIDE32 ||
+        params->threadgroup_memory_bytes > (1u << 29)))
+      return false;
    if (capacity < size || params->entry_offset > AGX_APPLE9_ENTRY_MAX_OFFSET ||
        (params->entry_offset & 1) || params->publication_count > 1022 ||
        (params->threadgroup_memory_bytes &&
-        (!compute || !agx_apple9_launch_threadgroup_memory_supported(
-                        params->threadgroup_memory_bytes))) ||
+        (!compute || !threadgroup_memory_supported(
+                        params->threadgroup_memory_bytes, experiments))) ||
        (compute && !agx_apple9_launch_call_offset(stage, params->resource_count)) ||
        (stage == AGX_APPLE9_LAUNCH_FRAGMENT &&
         (params->tile_bytes > (params->samples == 1 ? 128 : 64) ||

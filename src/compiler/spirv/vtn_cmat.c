@@ -108,6 +108,26 @@ desc_type_is_signed(const struct glsl_type *type)
    return false;
 }
 
+static void
+vtn_check_native_cmat_memory_access(struct vtn_builder *b,
+                                  struct vtn_pointer *ptr,
+                                  const uint32_t *w, unsigned count,
+                                  unsigned access_idx)
+{
+   if (!b->options->require_cmat_memory_access_none_or_aligned)
+      return;
+
+   vtn_fail_if(count > access_idx &&
+               (w[access_idx] & ~SpvMemoryAccessAlignedMask),
+               "Native cooperative matrix memory access requires None or Aligned");
+   enum gl_access_qualifier access = ptr->access;
+   if (ptr->type->pointed)
+      access |= ptr->type->pointed->access;
+   vtn_fail_if(access &
+                  (ACCESS_VOLATILE | ACCESS_COHERENT | ACCESS_NON_TEMPORAL),
+               "Native cooperative matrix memory pointer has unsupported access qualifiers");
+}
+
 void
 vtn_handle_cooperative_instruction(struct vtn_builder *b, SpvOp opcode,
                                    const uint32_t *w, unsigned count)
@@ -117,6 +137,8 @@ vtn_handle_cooperative_instruction(struct vtn_builder *b, SpvOp opcode,
       struct vtn_value *src_val = vtn_value(b, w[3], vtn_value_type_pointer);
       struct vtn_pointer *src = vtn_value_to_pointer(b, src_val);
       struct vtn_type *dst_type = vtn_get_type(b, w[1]);
+
+      vtn_check_native_cmat_memory_access(b, src, w, count, 6);
 
       /* Untyped pointers are effectively used as byte pointers. */
       if (!src->type->pointed)
@@ -143,6 +165,8 @@ vtn_handle_cooperative_instruction(struct vtn_builder *b, SpvOp opcode,
    case SpvOpCooperativeMatrixStoreKHR: {
       struct vtn_value *dest_val = vtn_value(b, w[1], vtn_value_type_pointer);
       struct vtn_pointer *dest = vtn_value_to_pointer(b, dest_val);
+
+      vtn_check_native_cmat_memory_access(b, dest, w, count, 5);
 
       /* Untyped pointers are effectively used as byte pointers. */
       if (!dest->type->pointed)

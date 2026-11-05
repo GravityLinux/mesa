@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "agx_apple9.h"
+#include "agx_apple9_compute.h"
 
 #include <limits.h>
 #include <string.h>

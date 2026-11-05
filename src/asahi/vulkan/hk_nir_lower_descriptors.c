@@ -12,6 +12,7 @@
 #include "hk_descriptor_set.h"
 #include "hk_descriptor_set_layout.h"
 #include "hk_shader.h"
+#include "hk_apple9_root.h"
 
 #include "nir.h"
 #include "nir_builder.h"
@@ -25,6 +26,7 @@ struct lower_descriptors_ctx {
    const struct hk_descriptor_set_layout *set_layouts[HK_MAX_SETS];
 
    bool clamp_desc_array_bounds;
+   bool apple9_buffers_only;
    nir_address_format ubo_addr_format;
    nir_address_format ssbo_addr_format;
 };
@@ -556,6 +558,8 @@ try_lower_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
 {
    switch (intrin->intrinsic) {
    case nir_intrinsic_load_constant:
+      if (ctx->apple9_buffers_only)
+         return false;
       return lower_load_constant(b, intrin, ctx);
 
    case nir_intrinsic_load_vulkan_descriptor:
@@ -581,6 +585,8 @@ try_lower_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
    case nir_intrinsic_image_deref_size:
    case nir_intrinsic_image_deref_samples:
    case nir_intrinsic_image_deref_store_block_agx:
+      if (ctx->apple9_buffers_only)
+         return false;
       return lower_image_intrin(b, intrin, ctx);
 
    case nir_intrinsic_load_num_workgroups: {
@@ -738,6 +744,8 @@ try_lower_descriptors_instr(nir_builder *b, nir_instr *instr, void *_data)
 
    switch (instr->type) {
    case nir_instr_type_tex:
+      if (ctx->apple9_buffers_only)
+         return false;
       return lower_tex(b, nir_instr_as_tex(instr), ctx);
    case nir_instr_type_intrinsic:
       return try_lower_intrin(b, nir_instr_as_intrinsic(instr), ctx);
@@ -903,13 +911,15 @@ lower_ssbo_descriptor(nir_builder *b, nir_intrinsic_instr *intr, void *_data)
    }
 }
 
-bool
-hk_nir_lower_descriptors(nir_shader *nir,
-                         const struct vk_pipeline_robustness_state *rs,
-                         uint32_t set_layout_count,
-                         struct vk_descriptor_set_layout *const *set_layouts)
+static bool
+lower_descriptors(nir_shader *nir,
+                  const struct vk_pipeline_robustness_state *rs,
+                  uint32_t set_layout_count,
+                  struct vk_descriptor_set_layout *const *set_layouts,
+                  bool apple9_buffers_only)
 {
    struct lower_descriptors_ctx ctx = {
+      .apple9_buffers_only = apple9_buffers_only,
       .clamp_desc_array_bounds =
          rs->storage_buffers !=
             VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT ||
@@ -941,4 +951,22 @@ hk_nir_lower_descriptors(nir_shader *nir,
       nir, lower_ssbo_descriptor, nir_metadata_control_flow, &ctx);
 
    return pass_lower_descriptors || pass_lower_ssbo;
+}
+
+bool
+hk_nir_lower_descriptors(nir_shader *nir,
+                        const struct vk_pipeline_robustness_state *rs,
+                        uint32_t set_layout_count,
+                        struct vk_descriptor_set_layout *const *set_layouts)
+{
+   return lower_descriptors(nir, rs, set_layout_count, set_layouts, false);
+}
+
+bool
+hk_nir_lower_buffer_descriptors(
+   nir_shader *nir, const struct vk_pipeline_robustness_state *rs,
+   uint32_t set_layout_count,
+   struct vk_descriptor_set_layout *const *set_layouts)
+{
+   return lower_descriptors(nir, rs, set_layout_count, set_layouts, true);
 }

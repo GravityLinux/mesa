@@ -1990,6 +1990,7 @@ struct zink_context {
    bool mesh_dirty;
 
    bool shobj_draw : 1; //using shader objects for draw
+   bool gfx_pipeline_failed : 1; //last graphics pipeline lookup failed: retry and drop draws
    bool is_device_lost;
    bool primitive_restart;
    bool blitting : 1;

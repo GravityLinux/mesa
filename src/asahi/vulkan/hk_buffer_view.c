@@ -15,6 +15,7 @@
 #include "agx_nir_texture.h"
 #include "agx_pack.h"
 #include "hk_buffer.h"
+#include "hk_apple9.h"
 #include "hk_device.h"
 #include "hk_entrypoints.h"
 #include "hk_image.h"
@@ -39,7 +40,9 @@ hk_get_buffer_format_features(struct hk_physical_device *pdev,
       features |= VK_FORMAT_FEATURE_2_UNIFORM_TEXEL_BUFFER_BIT;
 
       /* RGB32 specially supported for uniform texel buffers only. */
-      if (util_is_power_of_two_nonzero(util_format_get_blocksize(p_format))) {
+      if (util_is_power_of_two_nonzero(util_format_get_blocksize(p_format)) &&
+          (!agx_apple9_compute_enabled(&pdev->dev) ||
+           hk_apple9_formatless_store_supported(p_format))) {
          features |= VK_FORMAT_FEATURE_2_STORAGE_TEXEL_BUFFER_BIT |
                      VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT;
       }

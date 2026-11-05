@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_image.h"
+#include "asahi/lib/agx_apple9_compute.h"
 #include "asahi/layout/layout.h"
 #include "drm-uapi/drm_fourcc.h"
 #include "util/bitscan.h"
@@ -16,6 +17,7 @@
 
 #include "agx_bo.h"
 #include "hk_buffer.h"
+#include "hk_apple9.h"
 #include "hk_device.h"
 #include "hk_device_memory.h"
 #include "hk_entrypoints.h"
@@ -103,6 +105,15 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
       features |= VK_FORMAT_FEATURE_2_STORAGE_IMAGE_ATOMIC_BIT;
    }
 
+   if (agx_apple9_compute_enabled(&pdev->dev)) {
+      features &= ~VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT;
+      if (!hk_apple9_formatless_store_supported(p_format)) {
+         features &= ~(VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT |
+                       VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT |
+                       VK_FORMAT_FEATURE_2_STORAGE_IMAGE_ATOMIC_BIT);
+      }
+   }
+
    if (features != 0) {
       features |= VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT;
       features |= VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT;
@@ -173,6 +184,11 @@ hk_get_image_format_features(struct hk_physical_device *pdev,
    if (cosited_chroma)
       features |= VK_FORMAT_FEATURE_COSITED_CHROMA_SAMPLES_BIT;
 
+   if (agx_apple9_compute_enabled(&pdev->dev)) {
+      features &= ~(VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT |
+                    VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT);
+   }
+
    return features;
 }
 
@@ -219,6 +235,12 @@ hk_can_compress(const struct agx_device *dev, VkFormat format, unsigned plane,
 
    /* Allow disabling compression for debugging */
    if (dev->debug & AGX_DBG_NOCOMPRESS)
+      return false;
+
+   /* Apple9 compute reads images as plain textures and cannot decode
+    * compressed layouts, so copies and sampling of compressed images fail.
+    */
+   if (agx_apple9_compute_enabled(dev))
       return false;
 
    /* TODO: Handle compression with sparse. This should be doable but it's a bit
@@ -438,8 +460,20 @@ hk_GetPhysicalDeviceImageFormatProperties2(
    default:
       UNREACHABLE("Invalid image type");
    }
-   if (pImageFormatInfo->tiling == VK_IMAGE_TILING_LINEAR)
+   if (pImageFormatInfo->tiling == VK_IMAGE_TILING_LINEAR) {
       maxArraySize = 1;
+      const VkImageUsageFlags transfer =
+         VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+      /* Native raw copies rebase each layer against AIL's allocated linear
+       * layer stride. Qualify two layers for that path only; sampler/PBE,
+       * external and flagged images keep their existing admission. */
+      if (agx_apple9_compute_enabled(&pdev->dev) &&
+          ycbcr_info == NULL && external_info == NULL &&
+          pImageFormatInfo->flags == 0 &&
+          !(pImageFormatInfo->usage & ~transfer) &&
+          vk_format_get_blocksize(pImageFormatInfo->format) <= 16)
+         maxArraySize = 2;
+   }
 
    assert(util_is_power_of_two_nonzero(max_dim));
    uint32_t maxMipLevels = util_logbase2(max_dim) + 1;

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "gallium/drivers/asahi/agx_apple9.h"
+#include "asahi/lib/agx_apple9_compute.h"
 
 #include <gtest/gtest.h>
 #include <cstring>

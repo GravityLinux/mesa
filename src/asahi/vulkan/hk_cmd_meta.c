@@ -13,8 +13,12 @@
 #include "hk_buffer.h"
 #include "hk_cmd_buffer.h"
 #include "hk_device.h"
+#include "hk_apple9_graphics.h"
+#include "hk_apple9_trace.h"
+#include "asahi/lib/agx_apple9_compute.h"
 #include "hk_entrypoints.h"
 #include "hk_image.h"
+#include "hk_meta_upload.h"
 #include "hk_physical_device.h"
 
 #include "layout.h"
@@ -383,12 +387,13 @@ is_format_native(enum pipe_format format)
 
 static nir_def *
 load_store_formatted(nir_builder *b, nir_def *base, nir_def *index,
-                     nir_def *value, enum pipe_format format)
+                     nir_def *value, enum pipe_format format,
+                     bool force_global)
 {
    if (util_format_is_depth_or_stencil(format))
       format = canonical_format_pipe(format);
 
-   if (is_format_native(format)) {
+   if (!force_global && is_format_native(format)) {
       enum pipe_format isa = ail_pixel_format[format].renderable;
       unsigned isa_size = util_format_get_blocksize(isa);
       unsigned isa_components = util_format_get_blocksize(format) / isa_size;
@@ -430,8 +435,12 @@ load_store_formatted(nir_builder *b, nir_def *base, nir_def *index,
 }
 
 static nir_shader *
-build_image_copy_shader(const struct vk_meta_image_copy_key *key)
+build_image_copy_shader(const struct vk_meta_image_copy_key *key,
+                        bool force_global)
 {
+   if (force_global && key->type != IMG2IMG)
+      return hk_meta_upload_shader_sized(key->block_size, key->type == IMG2BUF);
+
    nir_builder build =
       nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, NULL, "hk-meta-copy");
 
@@ -539,7 +548,7 @@ build_image_copy_shader(const struct vk_meta_image_copy_key *key)
 
          if (src_is_buf) {
             value1 = load_store_formatted(b, get_push(b, buffer), src_coord,
-                                          NULL, key->dst_format);
+                                          NULL, key->dst_format, force_global);
          } else {
             value1 = nir_txf(b, src_coord, .texture_deref = deref,
                              .ms_index = msaa ? ms_index : NULL);
@@ -556,7 +565,7 @@ build_image_copy_shader(const struct vk_meta_image_copy_key *key)
 
          if (dst_is_buf) {
             load_store_formatted(b, get_push(b, buffer), dst_coord, value1,
-                                 key->dst_format);
+                                 key->dst_format, force_global);
          } else if (!key->block_based) {
             nir_image_deref_store(b, image_deref, nir_pad_vec4(b, dst_coord),
                                   ms_index, value1, nir_imm_int(b, 0),
@@ -632,7 +641,9 @@ get_image_copy_descriptor_set_layout(struct vk_device *device,
       },
       {
          .binding = BINDING_INPUT,
-         .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
+         .descriptorType = type == BUF2IMG
+                              ? VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER
+                              : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
          .descriptorCount = 1,
          .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
       },
@@ -678,7 +689,8 @@ get_image_copy_pipeline_layout(struct vk_device *device,
    const VkPushConstantRange push_range = {
       .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
       .offset = 0,
-      .size = sizeof(struct vk_meta_push_data),
+      .size = MAX2(sizeof(struct vk_meta_push_data),
+                   sizeof(struct hk_meta_upload_push)),
    };
 
    info.pushConstantRangeCount = 1;
@@ -699,9 +711,11 @@ get_image_copy_pipeline(struct vk_device *device, struct vk_meta_device *meta,
       return VK_SUCCESS;
    }
 
+   struct hk_device *dev = container_of(device, struct hk_device, vk);
+   bool force_global = agx_apple9_compute_enabled(&dev->dev);
    const VkPipelineShaderStageNirCreateInfoMESA nir_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_NIR_CREATE_INFO_MESA,
-      .nir = build_image_copy_shader(key),
+      .nir = build_image_copy_shader(key, force_global),
    };
    const VkPipelineShaderStageCreateInfo cs_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -724,10 +738,27 @@ get_image_copy_pipeline(struct vk_device *device, struct vk_meta_device *meta,
 }
 
 static void
+hk_meta_copy_buffer_image_apple9(struct vk_command_buffer *cmd,
+                                struct vk_meta_device *meta,
+                                struct hk_image *image,
+                                struct hk_buffer *buffer, unsigned region_count,
+                                const VkBufferImageCopy2 *regions, bool readback);
+
+static void
 hk_meta_copy_image_to_buffer2(struct vk_command_buffer *cmd,
                               struct vk_meta_device *meta,
                               const VkCopyImageToBufferInfo2 *pCopyBufferInfo)
 {
+   struct hk_device *dev = container_of(cmd->base.device, struct hk_device, vk);
+   if (agx_apple9_compute_enabled(&dev->dev)) {
+      VK_FROM_HANDLE(hk_image, image, pCopyBufferInfo->srcImage);
+      VK_FROM_HANDLE(hk_buffer, buffer, pCopyBufferInfo->dstBuffer);
+      hk_meta_copy_buffer_image_apple9(cmd, meta, image, buffer,
+                                      pCopyBufferInfo->regionCount,
+                                      pCopyBufferInfo->pRegions, true);
+      return;
+   }
+
    VK_FROM_HANDLE(vk_image, image, pCopyBufferInfo->srcImage);
    VK_FROM_HANDLE(vk_image, src_image, pCopyBufferInfo->srcImage);
    VK_FROM_HANDLE(hk_buffer, buffer, pCopyBufferInfo->dstBuffer);
@@ -793,7 +824,7 @@ hk_meta_copy_image_to_buffer2(struct vk_command_buffer *cmd,
 
          VkPipelineLayout pipeline_layout;
          result = get_image_copy_pipeline_layout(device, meta, &key, set_layout,
-                                                 &pipeline_layout, false);
+                                                 &pipeline_layout, IMG2BUF);
          if (unlikely(result != VK_SUCCESS)) {
             vk_command_buffer_set_error(cmd, result);
             return;
@@ -930,10 +961,171 @@ hk_meta_dispatch_to_image(struct vk_command_buffer *cmd,
 }
 
 static void
+hk_meta_copy_buffer_image_apple9(struct vk_command_buffer *cmd,
+                                struct vk_meta_device *meta,
+                                struct hk_image *image,
+                                struct hk_buffer *buffer, unsigned region_count,
+                                const VkBufferImageCopy2 *regions, bool readback)
+{
+   const struct ail_layout *layout = &image->planes[0].layout;
+   enum pipe_format format = hk_format_to_pipe_format(image->vk.format);
+   const bool depth = image->vk.format == VK_FORMAT_D32_SFLOAT;
+   struct vk_device *device = cmd->base.device;
+   const struct vk_device_dispatch_table *disp = &device->dispatch_table;
+   unsigned texel_B = util_format_get_blocksize(format);
+   const char *reason = NULL;
+
+   /* No PBE descriptor is involved. In particular, compressed and sparse
+    * images must never be interpreted as ordinary writable GPU addresses.
+    */
+   if (image->vk.image_type != VK_IMAGE_TYPE_2D &&
+       image->vk.image_type != VK_IMAGE_TYPE_1D &&
+       image->vk.image_type != VK_IMAGE_TYPE_3D)
+      reason = "image type (only 1D/2D/3D)";
+   else if (image->vk.samples != VK_SAMPLE_COUNT_1_BIT)
+      reason = "multisample";
+   else if (image->plane_count != 1)
+      reason = "multiplanar";
+   else if (image->vk.create_flags & (VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
+                                     VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT |
+                                     VK_IMAGE_CREATE_SPARSE_ALIASED_BIT))
+      reason = "sparse";
+   else if (layout->compressed || util_format_is_compressed(format))
+      reason = "compressed";
+   else if (util_format_is_depth_or_stencil(format) && !depth)
+      reason = "depth/stencil";
+   else if (util_format_get_blockwidth(format) != 1 ||
+            util_format_get_blockheight(format) != 1 ||
+            util_format_get_blockdepth(format) != 1)
+      reason = "block dimensions";
+   else if (texel_B != 1 && texel_B != 2 && texel_B != 4 &&
+            texel_B != 8 && texel_B != 16)
+      reason = "texel size (only 1/2/4/8/16 bytes)";
+   else if (layout->width_px > 16384 || layout->height_px > 16384)
+      reason = "coordinate domain exceeds 16384";
+   else if (layout->tiling != AIL_TILING_GPU &&
+            layout->tiling != AIL_TILING_LINEAR)
+      reason = "tiling (only GPU or linear)";
+   if (reason)
+      goto reject;
+
+   enum copy_type type = readback ? IMG2BUF : BUF2IMG;
+
+   struct vk_meta_image_copy_key key = {
+      .key_type = VK_META_OBJECT_KEY_COPY_IMAGE_TO_BUFFER,
+      .type = type,
+      .block_size = texel_B,
+      .nr_samples = 1,
+   };
+   VkDescriptorSetLayout set_layout;
+   VkPipelineLayout pipeline_layout;
+   VkPipeline pipeline;
+   VkResult result =
+      get_image_copy_descriptor_set_layout(device, meta, &set_layout, type);
+   if (result == VK_SUCCESS)
+      result = get_image_copy_pipeline_layout(device, meta, &key, set_layout,
+                                              &pipeline_layout, type);
+   if (result == VK_SUCCESS)
+      result = get_image_copy_pipeline(device, meta, &key, pipeline_layout,
+                                       &pipeline);
+   if (result != VK_SUCCESS) {
+      vk_command_buffer_set_error(cmd, result);
+      return;
+   }
+
+   disp->CmdBindPipeline(vk_command_buffer_to_handle(cmd),
+                         VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+
+   for (unsigned r = 0; r < region_count; ++r) {
+      const VkBufferImageCopy2 *region = &regions[r];
+      unsigned level = region->imageSubresource.mipLevel;
+      bool is_3d = image->vk.image_type == VK_IMAGE_TYPE_3D;
+      unsigned base_layer = is_3d ? region->imageOffset.z :
+                                   region->imageSubresource.baseArrayLayer;
+      unsigned layers = is_3d ? region->imageExtent.depth :
+                               vk_image_subresource_layer_count(&image->vk, &region->imageSubresource);
+      uint64_t row_B = (uint64_t)(region->bufferRowLength ?
+         region->bufferRowLength : region->imageExtent.width) * texel_B;
+      uint32_t rows = region->bufferImageHeight ?
+         region->bufferImageHeight : region->imageExtent.height;
+
+      unsigned max_depth = vk_image_mip_level_extent(&image->vk, level).depth;
+      if (region->imageSubresource.aspectMask !=
+          (depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT))
+         reason = "unsupported aspect";
+      else if (level >= layout->levels)
+         reason = "mip level outside layout";
+      else if (!is_3d && (region->imageOffset.z != 0 || region->imageExtent.depth != 1))
+         reason = "Z offset or non-unit depth";
+      else if (is_3d && (region->imageOffset.z + region->imageExtent.depth > max_depth))
+         reason = "Z extent outside layout";
+      else if (row_B > UINT64_MAX / MAX2(rows, 1))
+         reason = "buffer layer stride overflow";
+      else if (layout->tiling == AIL_TILING_LINEAR && (level != 0 || is_3d))
+         reason = "linear mip level or 3D linear";
+      if (reason)
+         goto reject;
+
+      struct hk_meta_upload_push push = {
+         .src = readback ? hk_buffer_address_rw(buffer, region->bufferOffset) :
+                          hk_buffer_address_ro(buffer, region->bufferOffset),
+         .dst = hk_image_base_address(image, 0) +
+                layout->level_offsets_B[level] +
+                (uint64_t)base_layer * layout->layer_stride_B,
+         .src_row_B = row_B,
+         .src_layer_B = row_B * rows,
+         .dst_layer_B = layout->layer_stride_B,
+         .dst_stride = layout->tiling == AIL_TILING_LINEAR ?
+            layout->linear_stride_B : layout->stride_el[level],
+         .tile_width = layout->tiling == AIL_TILING_LINEAR ?
+            0 : layout->tilesize_el[level].width_el,
+         .tile_height = layout->tiling == AIL_TILING_LINEAR ?
+            0 : layout->tilesize_el[level].height_el,
+         .dst_x = region->imageOffset.x,
+         .dst_y = region->imageOffset.y,
+         .width = region->imageExtent.width,
+         .height = region->imageExtent.height,
+         .layers = 1,
+      };
+      /* XY is bounded by the admitted 16384 domain (at most 512 groups).
+       * Rebase each layer, like the bounded buffer-copy loop below: no large
+       * array is ever passed through the native Z group count.
+       */
+      for (unsigned layer = 0; layer < layers; ++layer) {
+         disp->CmdPushConstants(vk_command_buffer_to_handle(cmd), pipeline_layout,
+                                VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+         disp->CmdDispatch(vk_command_buffer_to_handle(cmd),
+                           DIV_ROUND_UP(push.width, 32),
+                           DIV_ROUND_UP(push.height, 32), 1);
+         hk_meta_upload_next_layer(&push);
+      }
+   }
+   return;
+
+reject:
+   if (hk_apple9_trace(HK_APPLE9_TRACE_REJECT))
+      fprintf(stderr, "APPLE9_META_TRANSFER_REJECT direction=%s reason=%s "
+              "format=%u samples=%u tiling=%u regions=%u\n",
+              readback ? "image-to-buffer" : "buffer-to-image", reason,
+              image->vk.format, image->vk.samples, layout->tiling, region_count);
+   vk_command_buffer_set_error(cmd, VK_ERROR_FORMAT_NOT_SUPPORTED);
+}
+
+static void
 hk_meta_copy_buffer_to_image2(struct vk_command_buffer *cmd,
                               struct vk_meta_device *meta,
                               const struct VkCopyBufferToImageInfo2 *info)
 {
+   struct hk_device *dev =
+      container_of(cmd->base.device, struct hk_device, vk);
+   if (agx_apple9_compute_enabled(&dev->dev)) {
+      VK_FROM_HANDLE(hk_image, image, info->dstImage);
+      VK_FROM_HANDLE(hk_buffer, buffer, info->srcBuffer);
+      hk_meta_copy_buffer_image_apple9(cmd, meta, image, buffer,
+                                      info->regionCount, info->pRegions, false);
+      return;
+   }
+
    VK_FROM_HANDLE(vk_image, image, info->dstImage);
    VK_FROM_HANDLE(hk_buffer, buffer, info->srcBuffer);
 
@@ -983,7 +1175,7 @@ hk_meta_copy_buffer_to_image2(struct vk_command_buffer *cmd,
 
          VkPipelineLayout pipeline_layout;
          result = get_image_copy_pipeline_layout(device, meta, &key, set_layout,
-                                                 &pipeline_layout, true);
+                                                 &pipeline_layout, BUF2IMG);
          if (unlikely(result != VK_SUCCESS)) {
             vk_command_buffer_set_error(cmd, result);
             return;
@@ -1086,11 +1278,12 @@ hk_meta_copy_image2(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
    VK_FROM_HANDLE(vk_image, dst_image, info->dstImage);
 
    struct vk_device *device = cmd->base.device;
+   struct hk_device *dev = container_of(device, struct hk_device, vk);
    const struct vk_device_dispatch_table *disp = &device->dispatch_table;
 
    VkDescriptorSetLayout set_layout;
    VkResult result =
-      get_image_copy_descriptor_set_layout(device, meta, &set_layout, BUF2IMG);
+      get_image_copy_descriptor_set_layout(device, meta, &set_layout, IMG2IMG);
    if (unlikely(result != VK_SUCCESS)) {
       vk_command_buffer_set_error(cmd, result);
       return;
@@ -1139,7 +1332,8 @@ hk_meta_copy_image2(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
                   aspect_format(dst_image->format, dst_aspect_mask))),
 
                /* TODO: MSAA path */
-               .block_based = (dst_image->image_type != VK_IMAGE_TYPE_1D) &&
+               .block_based = !agx_apple9_compute_enabled(&dev->dev) &&
+                              (dst_image->image_type != VK_IMAGE_TYPE_1D) &&
                               dst_image->samples == 1,
             };
 
@@ -1147,7 +1341,7 @@ hk_meta_copy_image2(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
 
             VkPipelineLayout pipeline_layout;
             result = get_image_copy_pipeline_layout(
-               device, meta, &key, set_layout, &pipeline_layout, true);
+               device, meta, &key, set_layout, &pipeline_layout, IMG2IMG);
             if (unlikely(result != VK_SUCCESS)) {
                vk_command_buffer_set_error(cmd, result);
                return;
@@ -1325,6 +1519,28 @@ hk_CmdBlitImage2(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (agx_apple9_compute_enabled(&dev->dev) &&
+       hk_apple9_trace(HK_APPLE9_TRACE_META)) {
+      fprintf(stderr, "APPLE9_META op=blit cmd=%p regions=%u filter=%u\n",
+              (void *)cmd, pBlitImageInfo->regionCount, pBlitImageInfo->filter);
+      hk_apple9_trace_image("src", pBlitImageInfo->srcImage);
+      hk_apple9_trace_image("dst", pBlitImageInfo->dstImage);
+      for (unsigned i = 0; i < MIN2(pBlitImageInfo->regionCount, 64); ++i) {
+         const VkImageBlit2 *r = &pBlitImageInfo->pRegions[i];
+         fprintf(stderr,
+                 "APPLE9_BLIT_REGION aspect=0x%x dst_aspect=0x%x "
+                 "src_level=%u src_layer=%u+%u dst_level=%u dst_layer=%u+%u "
+                 "src=%d,%d,%d:%d,%d,%d dst=%d,%d,%d:%d,%d,%d\n",
+                 r->srcSubresource.aspectMask, r->dstSubresource.aspectMask,
+                 r->srcSubresource.mipLevel, r->srcSubresource.baseArrayLayer,
+                 r->srcSubresource.layerCount, r->dstSubresource.mipLevel,
+                 r->dstSubresource.baseArrayLayer, r->dstSubresource.layerCount,
+                 r->srcOffsets[0].x, r->srcOffsets[0].y, r->srcOffsets[0].z,
+                 r->srcOffsets[1].x, r->srcOffsets[1].y, r->srcOffsets[1].z,
+                 r->dstOffsets[0].x, r->dstOffsets[0].y, r->dstOffsets[0].z,
+                 r->dstOffsets[1].x, r->dstOffsets[1].y, r->dstOffsets[1].z);
+      }
+   }
    perf_debug(cmd, "Blit image");
 
    struct hk_meta_save save;
@@ -1339,6 +1555,33 @@ hk_CmdResolveImage2(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (agx_apple9_compute_enabled(&dev->dev)) {
+      if (hk_apple9_trace(HK_APPLE9_TRACE_META)) {
+         fprintf(stderr, "APPLE9_META op=resolve-image cmd=%p regions=%u\n",
+                 (void *)cmd, pResolveImageInfo->regionCount);
+         hk_apple9_trace_image("src", pResolveImageInfo->srcImage);
+         hk_apple9_trace_image("dst", pResolveImageInfo->dstImage);
+         for (unsigned i = 0; i < MIN2(pResolveImageInfo->regionCount, 64); ++i) {
+            const VkImageResolve2 *r = &pResolveImageInfo->pRegions[i];
+            fprintf(stderr,
+                    "APPLE9_RESOLVE_REGION aspect=0x%x dst_aspect=0x%x "
+                    "src=%d,%d,%d dst=%d,%d,%d extent=%ux%ux%u "
+                    "src_level=%u src_layer=%u+%u dst_level=%u dst_layer=%u+%u\n",
+                    r->srcSubresource.aspectMask, r->dstSubresource.aspectMask,
+                    r->srcOffset.x, r->srcOffset.y, r->srcOffset.z,
+                    r->dstOffset.x, r->dstOffset.y, r->dstOffset.z,
+                    r->extent.width, r->extent.height, r->extent.depth,
+                    r->srcSubresource.mipLevel, r->srcSubresource.baseArrayLayer,
+                    r->srcSubresource.layerCount, r->dstSubresource.mipLevel,
+                    r->dstSubresource.baseArrayLayer, r->dstSubresource.layerCount);
+         }
+      }
+      VK_FROM_HANDLE(hk_image, src, pResolveImageInfo->srcImage);
+      if (vk_format_is_depth_or_stencil(src->vk.format)) {
+         hk_apple9_graphics_reject(cmd, "depth-stencil-resolve");
+         return;
+      }
+   }
    perf_debug(cmd, "Resolve");
 
    struct hk_meta_save save;
@@ -1352,6 +1595,8 @@ hk_meta_resolve_rendering(struct hk_cmd_buffer *cmd,
                           const VkRenderingInfo *pRenderingInfo)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (agx_apple9_compute_enabled(&dev->dev))
+      hk_apple9_trace_rendering(cmd, pRenderingInfo, true);
 
    struct hk_meta_save save;
    hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS);
@@ -1362,13 +1607,18 @@ hk_meta_resolve_rendering(struct hk_cmd_buffer *cmd,
 static void
 hk_cmd_copy(struct hk_cmd_buffer *cmd, uint64_t dst, uint64_t src, size_t size)
 {
+   bool apple9 = agx_apple9_compute_enabled(&hk_cmd_buffer_device(cmd)->dev);
    /* Use vectorized copies for as much of the buffer as possible. This requires
     * that dst, src, and size are all properly aligned. Failing to check for
     * alignment on the buffers causes subtle and hard-to-debug issues!
     */
-   if (size >= 16 && (dst & 0xf) == 0 && (src & 0xf) == 0) {
-      unsigned uint4s = size / 16;
-      unsigned bytes = uint4s * 16;
+   while (size >= 16 && (dst & 0xf) == 0 && (src & 0xf) == 0) {
+      /* copy.cl uses 32 threads per group and indexes from the supplied
+       * pointers. Rebase both pointers for each bounded native dispatch.
+       */
+      unsigned uint4s = apple9 ? hk_meta_upload_copy_count(size, 16, 32) :
+                                MIN2(size / 16, UINT32_MAX);
+      size_t bytes = (size_t)uint4s * 16;
 
       libagx_copy_uint4(cmd, agx_1d(uint4s), AGX_BARRIER_ALL, dst, src);
 
@@ -1377,8 +1627,13 @@ hk_cmd_copy(struct hk_cmd_buffer *cmd, uint64_t dst, uint64_t src, size_t size)
       size -= bytes;
    }
 
-   if (size) {
-      libagx_copy_uchar(cmd, agx_1d(size), AGX_BARRIER_ALL, dst, src);
+   while (size) {
+      unsigned bytes = apple9 ? hk_meta_upload_copy_count(size, 1, 16) :
+                               MIN2(size, UINT32_MAX);
+      libagx_copy_uchar(cmd, agx_1d(bytes), AGX_BARRIER_ALL, dst, src);
+      dst += bytes;
+      src += bytes;
+      size -= bytes;
    }
 }
 
@@ -1418,6 +1673,12 @@ hk_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(hk_image, dst_image, pCopyBufferToImageInfo->dstImage);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (agx_apple9_compute_enabled(&dev->dev) &&
+       hk_apple9_trace(HK_APPLE9_TRACE_META)) {
+      fprintf(stderr, "APPLE9_META op=copy-buffer-image cmd=%p regions=%u\n",
+              (void *)cmd, pCopyBufferToImageInfo->regionCount);
+      hk_apple9_trace_image("dst", pCopyBufferToImageInfo->dstImage);
+   }
 
    bool gfx = hk_copy_requires_gfx(dst_image);
    VkPipelineBindPoint bind_point = hk_bind_point(gfx);
@@ -1445,6 +1706,12 @@ hk_CmdCopyImageToBuffer2(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (agx_apple9_compute_enabled(&dev->dev) &&
+       hk_apple9_trace(HK_APPLE9_TRACE_META)) {
+      fprintf(stderr, "APPLE9_META op=copy-image-buffer cmd=%p regions=%u\n",
+              (void *)cmd, pCopyImageToBufferInfo->regionCount);
+      hk_apple9_trace_image("src", pCopyImageToBufferInfo->srcImage);
+   }
 
    struct hk_meta_save save;
    hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
@@ -1460,6 +1727,13 @@ hk_CmdCopyImage2(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(hk_image, src_image, pCopyImageInfo->srcImage);
    VK_FROM_HANDLE(hk_image, dst_image, pCopyImageInfo->dstImage);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (agx_apple9_compute_enabled(&dev->dev) &&
+       hk_apple9_trace(HK_APPLE9_TRACE_META)) {
+      fprintf(stderr, "APPLE9_META op=copy-image cmd=%p regions=%u\n",
+              (void *)cmd, pCopyImageInfo->regionCount);
+      hk_apple9_trace_image("src", pCopyImageInfo->srcImage);
+      hk_apple9_trace_image("dst", pCopyImageInfo->dstImage);
+   }
    bool gfx = hk_copy_requires_gfx(dst_image);
    VkPipelineBindPoint bind_point = hk_bind_point(gfx);
 
@@ -1493,11 +1767,24 @@ hk_CmdFillBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer,
    uint64_t addr =
       vk_meta_buffer_address(&dev->vk, dstBuffer, dstOffset, dstRange);
 
+   bool apple9 = agx_apple9_compute_enabled(&dev->dev);
    if (util_is_aligned(addr, 16) && util_is_aligned(range, 16)) {
-      libagx_fill_uint4(cmd, agx_2d(range / 16, 1), AGX_BARRIER_ALL,
-                        addr, 0, data, data, data, data);
+      while (range) {
+         unsigned count = MIN2(range / 16, apple9 ? 32u * 65535u : UINT32_MAX);
+         libagx_fill_uint4(cmd, agx_2d(count, 1), AGX_BARRIER_ALL,
+                           addr, 0, data, data, data, data);
+         size_t bytes = (size_t)count * 16;
+         addr += bytes;
+         range -= bytes;
+      }
    } else {
-      libagx_fill(cmd, agx_1d(range / 4), AGX_BARRIER_ALL, addr, data);
+      while (range) {
+         unsigned count = MIN2(range / 4, apple9 ? 32u * 65535u : UINT32_MAX);
+         libagx_fill(cmd, agx_1d(count), AGX_BARRIER_ALL, addr, data);
+         size_t bytes = (size_t)count * 4;
+         addr += bytes;
+         range -= bytes;
+      }
    }
 }
 
@@ -1523,6 +1810,19 @@ hk_CmdClearAttachments(VkCommandBuffer commandBuffer, uint32_t attachmentCount,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (agx_apple9_compute_enabled(&dev->dev) &&
+       hk_apple9_trace(HK_APPLE9_TRACE_META)) {
+      fprintf(stderr, "APPLE9_META op=clear-attachments cmd=%p attachments=%u rects=%u\n",
+              (void *)cmd, attachmentCount, rectCount);
+      for (unsigned i = 0; i < MIN2(attachmentCount, 64); ++i)
+         fprintf(stderr, "APPLE9_CLEAR aspect=0x%x color=%u\n",
+                 pAttachments[i].aspectMask, pAttachments[i].colorAttachment);
+      for (unsigned i = 0; i < MIN2(rectCount, 64); ++i)
+         fprintf(stderr, "APPLE9_CLEAR_RECT area=%d,%d+%ux%u layer=%u+%u\n",
+                 pRects[i].rect.offset.x, pRects[i].rect.offset.y,
+                 pRects[i].rect.extent.width, pRects[i].rect.extent.height,
+                 pRects[i].baseArrayLayer, pRects[i].layerCount);
+   }
 
    struct vk_meta_rendering_info render_info;
    hk_meta_init_render(cmd, &render_info);
