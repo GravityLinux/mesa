@@ -8,7 +8,9 @@
 #include <errno.h>
 #include <dlfcn.h>
 #include <stdio.h>
+#include <unistd.h>
 #include <xf86drm.h>
+#include "drm-uapi/dma-buf.h"
 #include "asahi/compiler/agx_compile.h"
 #include "asahi/layout/layout.h"
 #include "asahi/lib/decode.h"
@@ -30,6 +32,7 @@
 #include "util/format/u_format.h"
 #include "util/format/u_formats.h"
 #include "util/half_float.h"
+#include "util/libsync.h"
 #include "util/macros.h"
 #include "util/os_misc.h"
 #include "util/os_mman.h"
@@ -812,6 +815,33 @@ agx_shadow(struct agx_context *ctx, struct agx_resource *rsrc, bool needs_copy)
 }
 
 /*
+ * Wait for the dma-buf fences of a shared BO before the CPU touches it. Batch
+ * tracking only knows this context's work: what other processes or devices
+ * submit against an imported or exported buffer (for example a compositor
+ * rendering the screencast frame that we are about to read back) is ordered
+ * only by these implicit fences. A read waits for writers; a write also waits
+ * for readers.
+ */
+static void
+agx_wait_shared_bo_fences(struct agx_bo *bo, bool write)
+{
+   if (bo->prime_fd < 0)
+      return;
+
+   struct dma_buf_export_sync_file export = {
+      .flags = write ? DMA_BUF_SYNC_RW : DMA_BUF_SYNC_READ,
+      .fd = -1,
+   };
+
+   if (drmIoctl(bo->prime_fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &export) ||
+       export.fd < 0)
+      return;
+
+   sync_wait(export.fd, -1);
+   close(export.fd);
+}
+
+/*
  * Perform the required synchronization before a transfer_map operation can
  * complete. This may require syncing batches.
  */
@@ -868,6 +898,10 @@ agx_prepare_for_map(struct agx_context *ctx, struct agx_resource *rsrc,
 
    /* Reading or writing from the CPU requires syncing writers. */
    agx_sync_writer(ctx, rsrc, "Unsynchronized CPU transfer");
+
+   /* Including writers outside this context, and readers before a write */
+   if (rsrc->bo->flags & AGX_BO_SHARED)
+      agx_wait_shared_bo_fences(rsrc->bo, usage & PIPE_MAP_WRITE);
 
    /* Additionally, writing needs readers synced. */
    if (!(usage & PIPE_MAP_WRITE))
