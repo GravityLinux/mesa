@@ -407,6 +407,10 @@ uint16_t agx_sampler_heap_add(struct agx_device *dev,
  */
 #define AGX_ENCODER_PADDING 0x800
 
+/* Initial encoder sizes. VDM streams grow by linking to continuations. */
+#define AGX_VDM_ENCODER_SIZE (16 * 1024)
+#define AGX_CDM_ENCODER_SIZE 0x80000
+
 struct agx_encoder {
    struct agx_bo *bo;
    uint8_t *current;

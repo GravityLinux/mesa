@@ -11,13 +11,25 @@
 
 /* Transient command stream pooling: command stream uploads try to simply copy
  * into wherever we left off. If there isn't space, we allocate a new entry
- * into the pool and copy there */
+ * into the pool and copy there.
+ *
+ * Slabs grow geometrically from one page to POOL_SLAB_MAX, like turnip's and
+ * freedreno's growable command streams. A pool is often owned by a batch, and
+ * a context keeps every batch until it completes and is reaped (up to
+ * AGX_MAX_BATCHES of them). Most batches use a few kilobytes, so a fixed
+ * 256 KiB slab per pool pinned most of a context's memory. Pools that do fill
+ * up reach full-size slabs after a few allocations.
+ */
 
-#define POOL_SLAB_SIZE (256 * 1024)
+#define POOL_SLAB_MIN (16 * 1024)
+#define POOL_SLAB_MAX (256 * 1024)
 
 static struct agx_bo *
-agx_pool_alloc_backing(struct agx_pool *pool, size_t bo_sz)
+agx_pool_alloc_backing(struct agx_pool *pool, size_t sz)
 {
+   size_t bo_sz = ALIGN_POT(MAX2(pool->slab_size, sz), POOL_SLAB_MIN);
+   pool->slab_size = MIN2(pool->slab_size * 2, POOL_SLAB_MAX);
+
    struct agx_bo *bo =
       agx_bo_create(pool->dev, bo_sz, 0, pool->create_flags, pool->label);
 
@@ -37,9 +49,10 @@ agx_pool_init(struct agx_pool *pool, struct agx_device *dev, const char *label,
    pool->create_flags = create_flags;
    pool->label = label;
    pool->bos = UTIL_DYNARRAY_INIT;
+   pool->slab_size = POOL_SLAB_MIN;
 
    if (prealloc)
-      agx_pool_alloc_backing(pool, POOL_SLAB_SIZE);
+      agx_pool_alloc_backing(pool, 0);
 }
 
 void
@@ -63,9 +76,8 @@ agx_pool_alloc_aligned_with_bo(struct agx_pool *pool, size_t sz,
    unsigned offset = ALIGN_POT(pool->transient_offset, alignment);
 
    /* If we don't fit, allocate a new backing */
-   if (unlikely(bo == NULL || (offset + sz) >= POOL_SLAB_SIZE)) {
-      bo = agx_pool_alloc_backing(pool,
-                                  ALIGN_POT(MAX2(POOL_SLAB_SIZE, sz), 16384));
+   if (unlikely(bo == NULL || (offset + sz) >= bo->size)) {
+      bo = agx_pool_alloc_backing(pool, sz);
       offset = 0;
    }
 
