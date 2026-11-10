@@ -63,6 +63,14 @@ Select a candidate prefix using `LD_LIBRARY_PATH` and `LIBGL_DRIVERS_PATH` as
 usual. This standalone own-source reproducer complements the routine CTS
 blend profile; it does not replace the suite runner.
 
+## Vertex-stage store ordering regression
+
+`vertex-store-order.c` checks that a vertex shader store waits for an earlier
+render's fragment reads when a `FRAGMENT_SHADER -> VERTEX_SHADER` barrier
+orders them (write-after-read across renders). Each of the 20 rounds uses a
+fresh device. It needs `vertexPipelineStoresAndAtomics`; the build commands are
+in the file header. Exit status 0 is a pass, 1 a failure, 77 unsupported.
+
 ## Upstream expectations and Piglit
 
 The launcher supplies the existing `all`, `asahi`, and `asahi-agx2` skip, flake,
