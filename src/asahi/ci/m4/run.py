@@ -70,7 +70,7 @@ def main():
             inputs[name] = digest(name)
     expectations = []
     for kind, option in [("skips", "--skips"), ("flakes", "--flakes"), ("single-thread", "--single-thread")]:
-        for prefix in ["all", "asahi", "asahi-agx2"]:
+        for prefix in ["all", "asahi", "asahi-agx2", "asahi-m4"]:
             path = ci / f"{prefix}-{kind}.txt"
             if path.is_file():
                 inputs[str(path)] = digest(path)
@@ -83,7 +83,7 @@ def main():
     (output / "suite.toml").write_text(suite)
     baseline = output / "baseline.csv"
     baseline.write_text("".join((ci / f"{prefix}-fails.txt").read_text() + "\n"
-                              for prefix in ["all", "asahi", "asahi-agx2"]
+                              for prefix in ["all", "asahi", "asahi-m4"]
                               if (ci / f"{prefix}-fails.txt").is_file()))
     inputs[str(baseline)] = digest(baseline)
 

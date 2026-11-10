@@ -73,9 +73,11 @@ in the file header. Exit status 0 is a pass, 1 a failure, 77 unsupported.
 
 ## Upstream expectations and Piglit
 
-The launcher supplies the existing `all`, `asahi`, and `asahi-agx2` skip, flake,
-single-thread, and expected-failure files, as applicable. It does not create
-new expected failures from local test results. The global skip list includes
+The launcher supplies the existing `all`, `asahi`, and `asahi-agx2` skip, flake
+and single-thread files, as applicable. Expected failures come from `all`,
+`asahi` and `asahi-m4-fails.txt`; upstream's `asahi-agx2-fails.txt` describes
+M1-class hardware and is not used. It does not create new expected failures
+from local test results. The global skip list includes
 `streaming-texture-leak`, so routine runs exclude that workload. Direct test
 executables remain useful for intentional, focused debugging.
 
