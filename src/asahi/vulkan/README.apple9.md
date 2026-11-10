@@ -2,7 +2,7 @@
 
 This is the experimental native Vulkan port for the T8132 M4 Mac mini
 (G16G B1). It is not a conformant Vulkan implementation: the conformance
-version is zero, and the driver prints a warning when it exposes the device.
+version is zero.
 The device is enumerated by default and needs no environment variable;
 `HK_EXPERIMENTAL_APPLE9=0` hides it. Older chips retain their existing
 behavior.

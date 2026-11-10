@@ -1927,9 +1927,6 @@ hk_apple9_restrict_caps(struct vk_device_extension_table *ext,
     */
    props->maxColorAttachments = 8;
    props->maxFragmentOutputAttachments = 8;
-
-
-   fprintf(stderr, "WARNING: experimental Apple9 Honeykrisp; not conformant\n");
 }
 
 uint64_t hk_process_heap_used[VK_MAX_MEMORY_HEAPS];
