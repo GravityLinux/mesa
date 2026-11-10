@@ -974,14 +974,18 @@ DEBUG_GET_ONCE_BOOL_OPTION(hk_apple9_fragment_barrier,
 
 /* A barrier into pre-rasterization stages (as applications commonly write
  * for render targets read by "any shader") orders the render's tiling after
- * earlier renders. That order is observable only through memory the tiling
- * work reads; vertex pipelines do not store (vertexPipelineStoresAndAtomics
- * is false). Earlier renders write their attachments, which only image reads
- * can observe, and memory only when they store, run atomics or capture
- * transform feedback. So when the render's pre-rasterization work reads no
- * images, and reads no buffers while such a writer may still be running, the
- * tiling wait for earlier renders is moot. Index fetch and indirect
- * arguments count as buffer reads.
+ * earlier renders, including their fragment work. Without that wait the
+ * tiling work may run while earlier fragment work still reads or writes
+ * memory. If the pre-rasterization stages write memory (stores or atomics,
+ * with vertexPipelineStoresAndAtomics, or transform feedback), that breaks
+ * write-after-read and write-after-write ordering, so such renders always
+ * keep the wait. Otherwise the order is observable only through memory the
+ * tiling work reads. Earlier renders write their attachments, which only
+ * image reads can observe, and memory only when they store, run atomics or
+ * capture transform feedback. So when the render's pre-rasterization work
+ * writes no memory, reads no images, and reads no buffers while such a
+ * writer may still be running, the tiling wait for earlier renders is moot.
+ * Index fetch and indirect arguments count as buffer reads.
  *
  * A buffer aliasing an attachment's memory observes the render's writes
  * only for linear attachments (an optimally tiled image's contents are
@@ -1001,6 +1005,7 @@ enum hk_tiling_class {
    HK_TILING_UNKNOWN,       /* kept: unclassified pre-rasterization shader */
    HK_TILING_INTERNAL,      /* kept: meta, XFB, tessellation or geometry */
    HK_TILING_WRITER,        /* kept: reads buffers while a writer may run */
+   HK_TILING_STORES,        /* kept: pre-rasterization writes memory */
    HK_TILING_OFF,           /* kept: elision disabled */
    HK_TILING_CLASSES,
 };
@@ -1021,12 +1026,13 @@ hk_tiling_stat(enum hk_tiling_class cls, bool meta)
    if (++total % 4096 == 0)
       fprintf(stderr, "HK_TILING renders=%" PRIu64 " fragment_only=%" PRIu64
               " elided=%" PRIu64 " images=%" PRIu64 " unknown=%" PRIu64
-              " internal=%" PRIu64 " writer=%" PRIu64 " off=%" PRIu64
-              " meta_elided=%" PRIu64 " meta_kept=%" PRIu64 "\n", total,
+              " internal=%" PRIu64 " writer=%" PRIu64 " stores=%" PRIu64
+              " off=%" PRIu64 " meta_elided=%" PRIu64 " meta_kept=%" PRIu64
+              "\n", total,
               counts[HK_TILING_FRAGMENT_ONLY], counts[HK_TILING_ELIDED],
               counts[HK_TILING_IMAGES], counts[HK_TILING_UNKNOWN],
-              counts[HK_TILING_INTERNAL],
-              counts[HK_TILING_WRITER], counts[HK_TILING_OFF], meta_elided,
+              counts[HK_TILING_INTERNAL], counts[HK_TILING_WRITER],
+              counts[HK_TILING_STORES], counts[HK_TILING_OFF], meta_elided,
               meta_kept);
 }
 
@@ -1043,6 +1049,7 @@ hk_defer_render_wait(struct hk_device *dev, struct hk_queue *queue,
       : debug_get_option_hk_apple9_no_tiling_elision()     ? HK_TILING_OFF
       : (cs->pre_raster_reads & HK_READS_INTERNAL)         ? HK_TILING_INTERNAL
       : (cs->pre_raster_reads & HK_READS_UNKNOWN)          ? HK_TILING_UNKNOWN
+      : (cs->pre_raster_reads & HK_READS_WRITES)           ? HK_TILING_STORES
       : (cs->pre_raster_reads & HK_READS_IMAGES)           ? HK_TILING_IMAGES
       : ((cs->pre_raster_reads & HK_READS_BUFFERS) &&
          queue->render_writer_pending)                     ? HK_TILING_WRITER

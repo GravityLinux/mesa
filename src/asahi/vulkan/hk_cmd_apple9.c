@@ -617,6 +617,8 @@ hk_apple9_prepare_draw(struct hk_cmd_buffer *cmd, bool reads_buffers,
       if (s == MESA_SHADER_FRAGMENT || s == MESA_SHADER_COMPUTE || !gfx->shaders[s])
          continue;
       reads |= gfx->shaders[s]->pre_raster_reads;
+      if (gfx->shaders[s]->writes_memory)
+         reads |= HK_READS_WRITES;
    }
    cs->pre_raster_reads |= reads;
    cs->linear_store |= gfx->render.linear_store;
