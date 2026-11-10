@@ -21,8 +21,8 @@ progress object to 1. Queue teardown performs a final non-waiting collection.
 If submissions stop entirely, another sample appears on the next submission or
 queue teardown; this does not add a periodic GPU-waking background thread.
 
-Output defaults to `/tmp/hk-gpu-busy-PID.log`. Override with `HK_GPU_BUSY_FILE`;
-`%p` expands to the process ID. Each file contains:
+Collection is off at run time unless `HK_GPU_BUSY_FILE` names the output
+file; `%p` expands to the process ID. Each file contains:
 
 * `GPU_BUSY_CONFIG`: GPU timestamp frequency and a GPU-clock/CPU-monotonic and realtime
   anchors bounded by the two CPU readings around `GET_TIME`. GPU command
