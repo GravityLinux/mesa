@@ -12239,6 +12239,79 @@ protected:
    }
 };
 
+/* Publication completion belongs to a different namespace from a GPR
+ * result. Reusing its borrowed input is an ordering hazard, not a read of
+ * that publication through the overwriter's GPR dependency field. Keep the
+ * physical allocation fixed so rescheduling cannot hide the hazard. */
+TEST_F(Apple9Completion, PublicationInputReuseNeedsStandaloneWait)
+{
+   for (bool logic : {false, true}) {
+      for (bool memory : {false, true}) {
+         for (unsigned count = 1; count <= 6; ++count) {
+            SCOPED_TRACE(::testing::Message() << logic << ":" << memory << ":" << count);
+            TearDown();
+            SetUp();
+            constexpr unsigned pub_base = AGX_APPLE9_GPR_COUNT;
+            for (unsigned r = 0; r < pub_base; ++r)
+               agx_apple9_vir_input(&p, r);
+            uint32_t source[] = {13, 14};
+            for (unsigned n = 0; n < count; ++n) {
+               auto value = agx_apple9_vir_emit(&p,
+                  logic ? AGX_APPLE9_VIR_IOR : AGX_APPLE9_VIR_FMUL,
+                  logic ? AGX_APPLE9_ENC_LOGIC_EXPORT : AGX_APPLE9_ENC_FLOAT2_EXPORT,
+                  source, 2, 0);
+               ASSERT_NE(value, AGX_APPLE9_VREG_INVALID);
+               auto *publication = p.instructions[p.instruction_count - 1];
+               publication->dest = pub_base + n;
+               publication->live_after_mask = n + 1 < count ? 3 : 0;
+            }
+            uint32_t independent[] = {8, 9};
+            if (memory) {
+               const agx_apple9_device_load_contract contract = {
+                  .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_LAST_USE_GPR,
+                  .flags = 0, .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
+               };
+               ASSERT_NE(agx_apple9_vir_emit_device_load(&p, 0, 8, &contract),
+                         AGX_APPLE9_VREG_INVALID);
+            } else {
+               ASSERT_NE(agx_apple9_vir_emit(&p, AGX_APPLE9_VIR_FMUL,
+                  AGX_APPLE9_ENC_FLOAT2_COMPACT, independent, 2, 0),
+                         AGX_APPLE9_VREG_INVALID);
+            }
+            p.instructions[p.instruction_count - 1]->dest = 13;
+            for (unsigned n = 0; n < count; ++n) {
+               uint32_t publication = pub_base + n;
+               ASSERT_TRUE(agx_apple9_vir_emit_side_effect(&p,
+                  AGX_APPLE9_VIR_VARY_STORE, AGX_APPLE9_ENC_VARY_STORE,
+                  &publication, 1, n));
+            }
+            const char *reason = nullptr;
+            ASSERT_TRUE(agx_apple9_schedule_physical(&p, &reason)) << reason;
+            unsigned pending = 0, publications = 0, overwrites = 0;
+            for (unsigned i = 0; i < p.instruction_count; ++i) {
+               const auto *ins = p.instructions[i];
+               if (ins->encoding == AGX_APPLE9_ENC_FLOAT2_EXPORT ||
+                   ins->encoding == AGX_APPLE9_ENC_LOGIC_EXPORT) {
+                  ASSERT_NE(ins->producer_scoreboard_slot, 0u);
+                  pending |= 1u << (ins->producer_scoreboard_slot - 1);
+                  ++publications;
+               } else if (ins->op == AGX_APPLE9_VIR_WAIT) {
+                  pending &= ~ins->immediate;
+               } else if (ins->dest == 13) {
+                  EXPECT_EQ(pending, 0u) << "publication input overwritten before completion";
+                  EXPECT_EQ(ins->scoreboard_slot, 0u) << "GPR field cannot consume a publication";
+                  ++overwrites;
+               }
+               agx_apple9_packed_instruction packed = {};
+               ASSERT_TRUE(agx_apple9_pack_vir_instruction(ins, p.phys, &packed, &reason)) << reason;
+            }
+            EXPECT_EQ(publications, count);
+            EXPECT_EQ(overwrites, 1u);
+         }
+      }
+   }
+}
+
 /* With every slot occupied, a load joins the slot needed last instead of
  * retiring one: its consumers wait for it no earlier than their own need. */
 TEST_F(Apple9Completion, FullScoreboardJoinsTheLastNeededSlot)

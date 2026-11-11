@@ -882,6 +882,11 @@ bool agx_apple9_vir_add_live_out(struct agx_apple9_vir_program *program,
 struct nir_shader;
 bool agx_apple9_allocate_shared(struct agx_apple9_vir_program *program,
                                  struct nir_shader *nir, const char **reason);
+/* Assign completion dependencies to canonical physical VIR (GPRs followed
+ * by the publication namespace), after register allocation. */
+bool agx_apple9_schedule_physical(struct agx_apple9_vir_program *program,
+                                   const char **reason);
+
 bool agx_apple9_allocate_publications(struct agx_apple9_vir_program *program,
                                       const char **reason);
 

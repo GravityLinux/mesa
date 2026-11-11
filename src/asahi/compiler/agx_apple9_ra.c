@@ -1142,6 +1142,15 @@ apple9_can_fold_wait(const struct agx_apple9_vir_instr *ins,
       return false;
    if (producer->op == AGX_APPLE9_VIR_SPILL_STORE)
       return true;
+   /* Publication completion is consumed in its own namespace. In
+    * particular, overwriting a publication's borrowed GPR input must wait
+    * separately: a GPR dependency field cannot consume that publication.
+    * Check this before the generic ordering-only case below. */
+   if (apple9_scalar_publication(producer))
+      return (ins->op == AGX_APPLE9_VIR_VARY_STORE ||
+              ins->op == AGX_APPLE9_VIR_OBJECT_GRID_EXPORT ||
+              ins->op == AGX_APPLE9_VIR_COVERAGE) &&
+             ins->src[0] == producer->dest;
    bool reads = false;
    for (unsigned s = 0; s < ins->nr_srcs; ++s)
       reads |= apple9_producer_result(producer, ins->src[s]);
@@ -1151,13 +1160,6 @@ apple9_can_fold_wait(const struct agx_apple9_vir_instr *ins,
     * would. Atomics' dependency field gates their inputs (EXP-M4-50). */
    if (!reads)
       return ins->op != AGX_APPLE9_VIR_DEVICE_ATOMIC;
-   /* Publication readers wait through their input mask (EXP-M4-61);
-    * native coverage instructions wait for their publication the same way. */
-   if (apple9_scalar_publication(producer))
-      return (ins->op == AGX_APPLE9_VIR_VARY_STORE ||
-              ins->op == AGX_APPLE9_VIR_OBJECT_GRID_EXPORT ||
-              ins->op == AGX_APPLE9_VIR_COVERAGE) &&
-             ins->src[0] == producer->dest;
    if (ins->op == AGX_APPLE9_VIR_DEVICE_ATOMIC &&
        (ins->atomic_discard || ins->atomic_op == AGX_APPLE9_ATOMIC_CMPXCHG ||
         producer->op != AGX_APPLE9_VIR_DEVICE_LOAD ||
@@ -1690,8 +1692,8 @@ apple9_select_compact_alu(struct agx_apple9_vir_instr *I)
  * jumps, as native Metal code keeps them; each successor starts from the
  * union of its predecessors' pending producers. Loop control, back edges and
  * entry to a loop header wait for everything outstanding. */
-static bool
-apple9_schedule_physical(struct agx_apple9_vir_program *program,
+bool
+agx_apple9_schedule_physical(struct agx_apple9_vir_program *program,
                           const char **reason)
 {
    struct agx_apple9_vir_program out;
@@ -2488,7 +2490,7 @@ apple9_allocate_candidate(struct agx_apple9_vir_program *program,
       *reason = "out of memory removing empty Apple9 else arms";
       goto cleanup;
    }
-   if (!apple9_schedule_physical(&out, reason))
+   if (!agx_apple9_schedule_physical(&out, reason))
       goto cleanup;
    unsigned spill_bytes = ALIGN_POT(ra.ctx->scratch_size_B, 16);
    out.private_size = program->private_size;
