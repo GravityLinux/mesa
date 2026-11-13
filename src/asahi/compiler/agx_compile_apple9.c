@@ -11141,6 +11141,27 @@ apple9_is_clip_dist_store(const nir_intrinsic_instr *intr,
           location == VARYING_SLOT_CLIP_DIST1;
 }
 
+/* Vertex inputs are numbered by vertex element, and the second half of a
+ * 64-bit dvec3/dvec4 attribute is the next element (Gallium splits dual-slot
+ * elements). IO lowering addresses that half, and matrix columns, at a
+ * constant slot offset from the attribute; make it the input's base.
+ */
+static bool
+apple9_fold_input_offset(nir_builder *b, nir_intrinsic_instr *intr,
+                         UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_input)
+      return false;
+   nir_src *offset = nir_get_io_offset_src(intr);
+   if (!nir_src_is_const(*offset) || nir_src_as_uint(*offset) == 0)
+      return false;
+   nir_intrinsic_set_base(intr, nir_intrinsic_base(intr) +
+                                   nir_src_as_uint(*offset));
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_src_rewrite(offset, nir_imm_int(b, 0));
+   return true;
+}
+
 static bool
 apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
                         const struct agx_apple9_vertex_layout *layout,
@@ -11168,8 +11189,15 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
    nir_lower_global_vars_to_local(nir);
    nir_split_var_copies(nir);
    nir_lower_var_copies(nir);
+   /* 64-bit IO is carried as pairs of 32-bit slots. */
    nir_lower_io(nir, nir_var_shader_in | nir_var_shader_out, apple9_io_size,
-                nir_lower_io_use_interpolated_input_intrinsics);
+                nir_lower_io_use_interpolated_input_intrinsics |
+                   nir_lower_io_lower_64bit_to_32);
+   if (nir->info.stage == MESA_SHADER_VERTEX) {
+      nir_opt_constant_folding(nir);
+      nir_shader_intrinsics_pass(nir, apple9_fold_input_offset,
+                                 nir_metadata_control_flow, NULL);
+   }
    if (nir->info.stage == MESA_SHADER_VERTEX &&
        nir->info.cull_distance_array_size) {
       nir_lower_io_to_scalar(nir, nir_var_shader_out,

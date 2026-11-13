@@ -3390,9 +3390,12 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
     * path uses or serializes the shader.
     */
    if (nir->info.stage == MESA_SHADER_VERTEX && !nir->info.io_lowered) {
+      /* Dual-slot (dvec3/dvec4) attributes become two elements. */
       nir_foreach_shader_in_variable(var, nir) {
-         var->data.driver_location = util_bitcount64(
-            nir->info.inputs_read & BITFIELD64_MASK(var->data.location));
+         uint64_t below = BITFIELD64_MASK(var->data.location);
+         var->data.driver_location =
+            util_bitcount64(nir->info.inputs_read & below) +
+            util_bitcount64(nir->info.dual_slot_inputs & below);
       }
    }
 
