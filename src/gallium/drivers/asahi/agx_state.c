@@ -2110,6 +2110,9 @@ agx_apple9_lower_compute_image(nir_builder *b, nir_intrinsic_instr *intr,
       return false;
 
    enum glsl_sampler_dim dim = nir_intrinsic_image_dim(intr);
+   /* Rectangle images are addressed and sized like 2D images. */
+   if (dim == GLSL_SAMPLER_DIM_RECT)
+      dim = GLSL_SAMPLER_DIM_2D;
    bool array = nir_intrinsic_image_array(intr);
    bool cube = dim == GLSL_SAMPLER_DIM_CUBE;
    bool buffer = dim == GLSL_SAMPLER_DIM_BUF;
