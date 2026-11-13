@@ -1886,6 +1886,17 @@ agx_apple9_lower_ssbo_size(nir_builder *b, nir_intrinsic_instr *intr,
    return true;
 }
 
+/* GL leaves accesses to unbound SSBOs undefined. Apple9 points them at the
+ * device scratch page, with a size of zero, instead of dropping the draw or
+ * dispatch. */
+static bool
+agx_apple9_ssbo_bound(const struct agx_stage *stage, unsigned binding)
+{
+   return binding < PIPE_MAX_SHADER_BUFFERS &&
+          (stage->ssbo_mask & BITFIELD_BIT(binding)) &&
+          stage->ssbo[binding].buffer && stage->ssbo[binding].buffer_size;
+}
+
 static uint64_t
 agx_apple9_upload_ssbo_sizes(struct agx_batch *batch,
                              const struct agx_stage *stage)
@@ -1894,8 +1905,7 @@ agx_apple9_upload_ssbo_sizes(struct agx_batch *batch,
       &batch->pool, PIPE_MAX_SHADER_BUFFERS * sizeof(uint32_t), 16);
    uint32_t *sizes = table.cpu;
    for (unsigned i = 0; i < PIPE_MAX_SHADER_BUFFERS; ++i) {
-      bool bound = (stage->ssbo_mask & BITFIELD_BIT(i)) && stage->ssbo[i].buffer;
-      sizes[i] = bound ? stage->ssbo[i].buffer_size : 0;
+      sizes[i] = agx_apple9_ssbo_bound(stage, i) ? stage->ssbo[i].buffer_size : 0;
    }
    return table.gpu;
 }
@@ -2479,6 +2489,8 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       nir_shader *apple9_nir =
          nir_deserialize(NULL, &agx_nir_options, &apple9_reader);
       bool fragment = so->type == MESA_SHADER_FRAGMENT;
+      NIR_PASS(_, apple9_nir, nir_shader_intrinsics_pass,
+               agx_apple9_lower_ssbo_size, nir_metadata_control_flow, NULL);
       if (fragment) {
          agx_apple9_lower_fs_layer_input(apple9_nir);
          if (key_->fs.apple9_flatshade) {
@@ -6642,14 +6654,14 @@ agx_apple9_validate_resources(struct agx_context *ctx)
          unsigned binding = rs->resource_binding[slot];
          if (!(rs->resource_ssbo_mask & BITFIELD_BIT(slot)) &&
              (binding == AGX_APPLE9_GRAPHICS_SYSVAL_BINDING ||
+              binding == AGX_APPLE9_SSBO_SIZE_BINDING ||
               (binding >= AGX_APPLE9_SYSVAL_UBO_BASE &&
                binding < AGX_APPLE9_SYSVAL_UBO_BASE + AGX_NUM_SYSVAL_TABLES)))
             continue;
          bool valid;
          if (rs->resource_ssbo_mask & BITFIELD_BIT(slot)) {
-            valid = binding < ARRAY_SIZE(stage->ssbo) &&
-                    stage->ssbo[binding].buffer &&
-                    stage->ssbo[binding].buffer_size;
+            /* Unbound SSBOs use the scratch page (agx_apple9_ssbo_address). */
+            valid = binding < ARRAY_SIZE(stage->ssbo);
          } else if (binding >= 32) {
             unsigned vb = binding - 32;
             valid = !i && vb < ARRAY_SIZE(ctx->vertex_buffers) &&
@@ -7731,22 +7743,33 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
                const struct pipe_shader_buffer *ssbo =
                   &ctx->stage[shader].ssbo[binding];
                struct agx_resource *resource = agx_resource(ssbo->buffer);
-               if ((rs->resource_write_mask & BITFIELD_BIT(slot)) && stage)
-                  agx_batch_writes_fragment_range(batch, resource, ssbo->buffer_offset,
-                                                  ssbo->buffer_size);
-               else if (rs->resource_write_mask & BITFIELD_BIT(slot))
-                  agx_batch_writes_range(batch, resource, ssbo->buffer_offset,
-                                         ssbo->buffer_size);
-               else if (stage)
-                  agx_batch_reads_fragment(batch, resource);
-               else
-                  agx_batch_reads(batch, resource);
-               address = agx_map_gpu(resource) + ssbo->buffer_offset;
+               bool writes = rs->resource_write_mask & BITFIELD_BIT(slot);
+               if (!agx_apple9_ssbo_bound(&ctx->stage[shader], binding)) {
+                  address = AGX_SCRATCH_PAGE_ADDRESS;
+               } else {
+                  /* glMemoryBarrier flushes batches with such writes. */
+                  batch->incoherent_writes |= writes;
+                  if (writes && stage)
+                     agx_batch_writes_fragment_range(batch, resource,
+                                                     ssbo->buffer_offset,
+                                                     ssbo->buffer_size);
+                  else if (writes)
+                     agx_batch_writes_range(batch, resource, ssbo->buffer_offset,
+                                            ssbo->buffer_size);
+                  else if (stage)
+                     agx_batch_reads_fragment(batch, resource);
+                  else
+                     agx_batch_reads(batch, resource);
+                  address = agx_map_gpu(resource) + ssbo->buffer_offset;
+               }
             } else if (binding == AGX_APPLE9_GRAPHICS_SYSVAL_BINDING) {
                address = agx_apple9_upload_graphics_sysvals(
                   batch, &ctx->stage[shader], &rs->texture_mapping,
                   info->mode == MESA_PRIM_TRIANGLE_FAN && !ctx->gs &&
                      ctx->rast->base.flatshade_first);
+            } else if (binding == AGX_APPLE9_SSBO_SIZE_BINDING) {
+               address =
+                  agx_apple9_upload_ssbo_sizes(batch, &ctx->stage[shader]);
             } else if (binding >= AGX_APPLE9_SYSVAL_UBO_BASE &&
                        binding < AGX_APPLE9_SYSVAL_UBO_BASE + AGX_NUM_SYSVAL_TABLES) {
                address = batch->uniforms.tables[binding - AGX_APPLE9_SYSVAL_UBO_BASE];
@@ -8327,13 +8350,10 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
             continue;
          }
          if (kind == AGX_APPLE9_COMPUTE_RESOURCE_SSBO) {
-            if (binding >= PIPE_MAX_SHADER_BUFFERS ||
-                !(stage->ssbo_mask & BITFIELD_BIT(binding)) ||
-                !stage->ssbo[binding].buffer) {
-               fprintf(stderr,
-                       "Apple9 compute ABI requires SSBO binding %u\n",
-                       binding);
-               return;
+            if (!agx_apple9_ssbo_bound(stage, binding)) {
+               resources[i] = NULL;
+               resource_addresses[i] = AGX_SCRATCH_PAGE_ADDRESS;
+               continue;
             }
             resources[i] = agx_resource(stage->ssbo[binding].buffer);
             resource_offsets[i] = stage->ssbo[binding].buffer_offset;
