@@ -1633,6 +1633,47 @@ agx_apple9_default_position(nir_shader *nir)
    nir_shader_gather_info(nir, impl);
 }
 
+/* With early_fragment_tests, depth/stencil tests run before the shader and
+ * the depth and stencil values it computes are ignored, so drop them.
+ * Exporting them would test late with the shader's values instead. */
+static bool
+agx_apple9_drop_zs_store(nir_builder *b, nir_intrinsic_instr *intr,
+                         UNUSED void *data)
+{
+   unsigned location;
+   if (intr->intrinsic == nir_intrinsic_store_deref) {
+      nir_variable *var = nir_intrinsic_get_var(intr, 0);
+      if (!var || var->data.mode != nir_var_shader_out)
+         return false;
+      location = var->data.location;
+   } else if (intr->intrinsic == nir_intrinsic_store_output) {
+      location = nir_intrinsic_io_semantics(intr).location;
+   } else {
+      return false;
+   }
+   if (location != FRAG_RESULT_DEPTH && location != FRAG_RESULT_STENCIL)
+      return false;
+   nir_instr_remove(&intr->instr);
+   return true;
+}
+
+static void
+agx_apple9_fs_early_tests(nir_shader *nir)
+{
+   if (!nir->info.fs.early_fragment_tests ||
+       !(nir->info.outputs_written & (BITFIELD64_BIT(FRAG_RESULT_DEPTH) |
+                                      BITFIELD64_BIT(FRAG_RESULT_STENCIL))))
+      return;
+
+   NIR_PASS(_, nir, nir_shader_intrinsics_pass, agx_apple9_drop_zs_store,
+            nir_metadata_control_flow, NULL);
+   NIR_PASS(_, nir, nir_opt_dce);
+   NIR_PASS(_, nir, nir_remove_dead_derefs);
+   nir_remove_dead_variables_options opts = {0};
+   NIR_PASS(_, nir, nir_remove_dead_variables, nir_var_shader_out, &opts);
+   nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+}
+
 /* Fragment shaders with memory side effects, as in agx_nir_lower_frag_sidefx:
  * without early_fragment_tests the depth/stencil test follows the shader, so
  * it runs (and writes) even for fragments that then fail. The hardware tests
@@ -2608,6 +2649,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       if (fragment)
          agx_apple9_fs_side_effects(apple9_nir);
       if (fragment) {
+         agx_apple9_fs_early_tests(apple9_nir);
          agx_apple9_lower_fs_layer_input(apple9_nir);
          if (key_->fs.apple9_flatshade) {
             if (apple9_nir->info.io_lowered) {
