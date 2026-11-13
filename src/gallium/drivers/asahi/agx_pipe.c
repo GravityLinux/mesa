@@ -2654,7 +2654,9 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
       caps->essl_feature_level = 310;
       /* Point size is carried by the vertex output interface. */
       caps->point_size_fixed = PIPE_POINT_SIZE_LOWER_ALWAYS;
-      caps->robust_buffer_access_behavior = false;
+      /* Robust contexts bound UBO, SSBO and vertex buffer accesses
+       * (agx_apple9_lower_robustness). */
+      caps->robust_buffer_access_behavior = true;
       /* Lost-context reporting (EGL_EXT_create_context_robustness, reset
        * status queries) works: failed work and rejected submissions mark the
        * context lost instead of aborting. Robust buffer access stays off. */

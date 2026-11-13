@@ -330,6 +330,9 @@ struct agx_uncompiled_shader {
    /* Image slots stored to without a format qualifier. Apple9 takes the
     * bound views' formats from the shader key. */
    uint64_t apple9_formatless_images;
+   /* Created in a robust-access context: Apple9 bounds-checks buffer
+    * accesses (agx_apple9_lower_robustness). */
+   bool apple9_robust;
    bool is_xfb_passthrough;
    /* Internal passthrough GS that also forwards line stipple state */
    bool is_line_stipple_passthrough;
@@ -1193,6 +1196,9 @@ bool agx_nir_lower_sysvals(nir_shader *shader, mesa_shader_stage desc_stage,
 
 /* Private bindings for the same sysval tables used by the Gallium ABI. */
 #define AGX_APPLE9_SYSVAL_UBO_BASE 240
+/* Robust contexts: {uint64_t address, uint64_t size} per vertex buffer, for
+ * the bounded vertex fetch of agx_apple9_vertex_layout::buffer_descriptor_ubo. */
+#define AGX_APPLE9_VERTEX_BUFFER_TABLE_BINDING 68
 bool agx_nir_lower_apple9_sysvals(nir_shader *shader,
                                 mesa_shader_stage desc_stage);
 
