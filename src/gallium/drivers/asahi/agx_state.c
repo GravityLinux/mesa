@@ -1795,6 +1795,40 @@ fail:
    return NULL;
 }
 
+/* Apple9 compute resources carry only base addresses, so GL's unsized-array
+ * length query reads the bound range size from a per-dispatch table instead
+ * (agx_apple9_upload_ssbo_sizes).
+ */
+static bool
+agx_apple9_lower_ssbo_size(nir_builder *b, nir_intrinsic_instr *intr,
+                           UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_get_ssbo_size)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *offset = nir_imul_imm(b, nir_u2u32(b, intr->src[0].ssa), 4);
+   nir_def *size = nir_load_ubo(
+      b, 1, 32, nir_imm_int(b, AGX_APPLE9_SSBO_SIZE_BINDING), offset,
+      .align_mul = 4, .range_base = 0, .range = PIPE_MAX_SHADER_BUFFERS * 4);
+   nir_def_replace(&intr->def, nir_u2uN(b, size, intr->def.bit_size));
+   return true;
+}
+
+static uint64_t
+agx_apple9_upload_ssbo_sizes(struct agx_batch *batch,
+                             const struct agx_stage *stage)
+{
+   struct agx_ptr table = agx_pool_alloc_aligned(
+      &batch->pool, PIPE_MAX_SHADER_BUFFERS * sizeof(uint32_t), 16);
+   uint32_t *sizes = table.cpu;
+   for (unsigned i = 0; i < PIPE_MAX_SHADER_BUFFERS; ++i) {
+      bool bound = (stage->ssbo_mask & BITFIELD_BIT(i)) && stage->ssbo[i].buffer;
+      sizes[i] = bound ? stage->ssbo[i].buffer_size : 0;
+   }
+   return table.gpu;
+}
+
 /* Does not take ownership of key. Clones if necessary. */
 static struct agx_compiled_shader *
 agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
@@ -1842,6 +1876,8 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       const char *reason = NULL;
       compiled->apple9_compute_textures.runtime_samplers =
          agx_nir_apple9_offset_samplers(early);
+      NIR_PASS(_, early, nir_shader_intrinsics_pass, agx_apple9_lower_ssbo_size,
+               nir_metadata_control_flow, NULL);
 
       if (!agx_compile_apple9_tiny(
              early, &compiled->b, &compiled->apple9_compute_profile, &reason)) {
@@ -7846,6 +7882,10 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
             if (binding == AGX_APPLE9_GRAPHICS_SYSVAL_BINDING) {
                resource_addresses[i] = agx_apple9_upload_graphics_sysvals(
                   batch, stage, &cs->apple9_compute_textures, false);
+               continue;
+            }
+            if (binding == AGX_APPLE9_SSBO_SIZE_BINDING) {
+               resource_addresses[i] = agx_apple9_upload_ssbo_sizes(batch, stage);
                continue;
             }
             if (binding >= PIPE_MAX_CONSTANT_BUFFERS ||
