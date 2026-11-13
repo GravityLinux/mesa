@@ -2662,7 +2662,8 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
       /* The fragment compiler exports stencil with the depth publication,
        * as Honeykrisp's shaderStencilExport does. */
       caps->shader_stencil_export = true;
-      caps->framebuffer_no_attachment = false;
+      /* Zero-attachment renders take the empty-tile path (README.apple9-es3.md). */
+      caps->framebuffer_no_attachment = true;
       /* Native sampler address mode 5 (agx_apple9_pack_sampler). */
       caps->texture_mirror_clamp_to_edge = true;
       caps->texture_buffer_objects = true;
