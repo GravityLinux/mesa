@@ -7451,6 +7451,13 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
          info_gs.instance_count = poly_gs_rast_instances(
             gsi->shape, gsi->max_indices, prims, info->instance_count);
 
+         /* The geometry shader has already run for transform feedback and
+          * queries. If it can emit nothing (max_vertices = 0, or too few
+          * input vertices for one primitive) there is nothing to rasterize,
+          * and Apple9 cannot encode an empty draw. */
+         if (draw_gs.count == 0 || info_gs.instance_count == 0)
+            return;
+
          draws = &draw_gs;
       }
 
