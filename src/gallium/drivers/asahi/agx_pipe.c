@@ -2352,6 +2352,13 @@ agx_init_shader_caps(struct pipe_screen *pscreen)
          caps->max_shader_buffers = caps->max_shader_images = 0;
          caps->max_texture_samplers = caps->max_sampler_views = 16;
       }
+
+      /* Geometry shaders run through the emulated compute path, but storage
+       * resources there are not wired up on Apple9 (atomic counters return
+       * wrong values). Report none, as for vertex and fragment shaders. */
+      if (agx_apple9_direct_render_enabled(agx_device(pscreen)) &&
+          i == MESA_SHADER_GEOMETRY)
+         caps->max_shader_buffers = caps->max_shader_images = 0;
    }
 
    /* Apple9 has no native launch path for the tessellation control stage or
