@@ -2647,7 +2647,7 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
        * harnesses, not in capabilities presented to applications. */
       /* Public contexts expose the current graphics frontend contract.
        * Internal NIR compute remains available for resource copies. */
-      caps->glsl_feature_level = caps->glsl_feature_level_compatibility = 330;
+      caps->glsl_feature_level = caps->glsl_feature_level_compatibility = 400;
       /* ES shader support is independent of the desktop GLSL level. ES 3.1
        * needs storage resources only in compute shaders, which the Apple9
        * compute backend provides; graphics stages report none. */
@@ -2695,7 +2695,9 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
       /* Gathers use the native gather sample, including constant offsets. */
       caps->max_texture_gather_components = 4;
       caps->max_varyings = AGX_APPLE9_MAX_VARYING_COMPONENTS / 4;
-      caps->doubles = false;
+      /* fp64 uses Mesa's software implementation (lower_doubles_options in
+       * agx_nir_options), which the state tracker links at GLSL 4.00. */
+      caps->doubles = true;
    }
 }
 
