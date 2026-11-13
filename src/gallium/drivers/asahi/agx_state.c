@@ -71,6 +71,7 @@ static _Atomic uint64_t apple9_program_serial;
 #include "libagx_shaders.h"
 #include "nir_builder.h"
 #include "nir_builder_opcodes.h"
+#include "nir_format_convert.h"
 #include "nir_intrinsics.h"
 #include "nir_intrinsics_indices.h"
 #include "nir_xfb_info.h"
@@ -115,13 +116,20 @@ agx_set_shader_images(struct pipe_context *pctx, mesa_shader_stage shader,
     * We do this upfront because agx_decompress and agx_legalize_compression can
     * call set_shader_images internall.
     */
+   /* Apple9 accesses storage images through global memory with software
+    * texel addressing, which does not decode compression, so reads need an
+    * uncompressed layout too.
+    */
+   bool apple9 = agx_apple9_compute_enabled(agx_device(pctx->screen));
+
    for (int i = 0; i < count; i++) {
       const struct pipe_image_view *image = &iviews[i];
       struct agx_resource *rsrc = agx_resource(image->resource);
 
       if (rsrc && !(image->access & PIPE_IMAGE_ACCESS_DRIVER_INTERNAL)) {
          if (!rsrc->layout.writeable_image &&
-             (image->shader_access & PIPE_IMAGE_ACCESS_WRITE)) {
+             ((image->shader_access & PIPE_IMAGE_ACCESS_WRITE) ||
+              (apple9 && rsrc->layout.compressed))) {
 
             agx_decompress(ctx, rsrc, "Shader image");
          }
@@ -1795,6 +1803,397 @@ fail:
    return NULL;
 }
 
+/* Apple9 compute resources carry only base addresses, so GL's unsized-array
+ * length query reads the bound range size from a per-dispatch table instead
+ * (agx_apple9_upload_ssbo_sizes).
+ */
+static bool
+agx_apple9_lower_ssbo_size(nir_builder *b, nir_intrinsic_instr *intr,
+                           UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_get_ssbo_size)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *offset = nir_imul_imm(b, nir_u2u32(b, intr->src[0].ssa), 4);
+   nir_def *size = nir_load_ubo(
+      b, 1, 32, nir_imm_int(b, AGX_APPLE9_SSBO_SIZE_BINDING), offset,
+      .align_mul = 4, .range_base = 0, .range = PIPE_MAX_SHADER_BUFFERS * 4);
+   nir_def_replace(&intr->def, nir_u2uN(b, size, intr->def.bit_size));
+   return true;
+}
+
+static uint64_t
+agx_apple9_upload_ssbo_sizes(struct agx_batch *batch,
+                             const struct agx_stage *stage)
+{
+   struct agx_ptr table = agx_pool_alloc_aligned(
+      &batch->pool, PIPE_MAX_SHADER_BUFFERS * sizeof(uint32_t), 16);
+   uint32_t *sizes = table.cpu;
+   for (unsigned i = 0; i < PIPE_MAX_SHADER_BUFFERS; ++i) {
+      bool bound = (stage->ssbo_mask & BITFIELD_BIT(i)) && stage->ssbo[i].buffer;
+      sizes[i] = bound ? stage->ssbo[i].buffer_size : 0;
+   }
+   return table.gpu;
+}
+
+/* Apple9 GL compute storage images.
+ *
+ * As Honeykrisp does (hk_apple9_lower_storage_image), access storage images
+ * through global memory: libagx computes texel addresses from a legacy PBE
+ * descriptor, and bounds come from the matching texture descriptor. The
+ * dispatch uploads one (texture, PBE) pair per API image slot and publishes
+ * the array's address through AGX_APPLE9_IMAGE_TABLE_BINDING. Bounds checks
+ * precede every access: out-of-bounds loads return zero (one in missing
+ * alpha), stores are dropped, and atomics return zero.
+ */
+static void agx_apple9_add_compute_attachment(struct agx_batch *batch,
+                                              struct agx_resource *resource);
+
+/* Each API image slot: legacy texture and PBE descriptors, then a buffer
+ * record. Apple9 buffers live in the USC aperture (see agx_resource_create),
+ * beyond the legacy descriptors' 40-bit address field, so buffer images use
+ * the record instead: a 64-bit address of the first element and a 32-bit
+ * element count. Unused parts of a slot are null, so a binding of the wrong
+ * kind fails the bounds check instead of reaching memory.
+ */
+#define AGX_APPLE9_IMAGE_DESC_PBE    AGX_TEXTURE_LENGTH
+#define AGX_APPLE9_IMAGE_DESC_BUFFER (AGX_TEXTURE_LENGTH + AGX_PBE_LENGTH)
+#define AGX_APPLE9_IMAGE_DESC_STRIDE 64
+#define AGX_APPLE9_IMAGE_TABLE_HEADER 16
+
+struct agx_apple9_image_buffer_record {
+   uint64_t address;
+   uint32_t size_el;
+   uint32_t pad;
+};
+static_assert(AGX_APPLE9_IMAGE_DESC_BUFFER +
+                    sizeof(struct agx_apple9_image_buffer_record) <=
+                 AGX_APPLE9_IMAGE_DESC_STRIDE,
+              "image slot layout");
+
+struct agx_apple9_image_lowering {
+   unsigned count;
+};
+
+static nir_def *
+agx_apple9_image_descriptor(nir_builder *b, nir_def *index, unsigned count,
+                            unsigned part)
+{
+   nir_def *table = nir_load_ubo(
+      b, 1, 64, nir_imm_int(b, AGX_APPLE9_IMAGE_TABLE_BINDING),
+      nir_imm_int(b, 0), .align_mul = 8, .range_base = 0, .range = 8);
+
+   /* The table holds exactly count slots. GL leaves out-of-range image
+    * indexing undefined, but it must not read outside the table. */
+   index = nir_umin(b, nir_u2u32(b, index), nir_imm_int(b, count - 1));
+   nir_def *offset = nir_iadd_imm(
+      b, nir_imul_imm(b, index, AGX_APPLE9_IMAGE_DESC_STRIDE), part);
+   return nir_iadd(b, table, nir_u2u64(b, offset));
+}
+
+static nir_def *
+agx_apple9_image_txs(nir_builder *b, nir_def *tex, enum glsl_sampler_dim dim,
+                     bool array, unsigned comps)
+{
+   return libagx_txs(b, tex, nir_imm_intN_t(b, 0, 16), nir_imm_int(b, comps),
+                     nir_imm_bool(b, dim == GLSL_SAMPLER_DIM_BUF),
+                     nir_imm_bool(b, dim == GLSL_SAMPLER_DIM_1D),
+                     nir_imm_bool(b, dim == GLSL_SAMPLER_DIM_2D),
+                     nir_imm_bool(b, dim == GLSL_SAMPLER_DIM_CUBE),
+                     nir_imm_bool(b, array));
+}
+
+/* R11G11B10F with NaNs preserved as NaNs, as hk_apple9_pack_float11. */
+static nir_def *
+agx_apple9_pack_float11(nir_builder *b, nir_def *rgb)
+{
+   nir_def *packed = nir_format_pack_11f11f10f(b, rgb);
+   const unsigned shifts[] = {0, 11, 22};
+   const uint32_t masks[] = {0x7ff, 0x7ff, 0x3ff};
+   const uint32_t nans[] = {0x7e0, 0x7e0, 0x3f0};
+   for (unsigned c = 0; c < 3; ++c) {
+      nir_def *is_nan = nir_ult(b, nir_imm_int(b, 0x7f800000),
+                                nir_iand_imm(b, nir_channel(b, rgb, c), 0x7fffffff));
+      nir_def *repaired =
+         nir_ior_imm(b, nir_iand_imm(b, packed, ~(masks[c] << shifts[c])),
+                     nans[c] << shifts[c]);
+      packed = nir_bcsel(b, is_nan, repaired, packed);
+   }
+   return packed;
+}
+
+static bool
+agx_apple9_lower_compute_image(nir_builder *b, nir_intrinsic_instr *intr,
+                               void *data)
+{
+   const struct agx_apple9_image_lowering *lower = data;
+   bool load = intr->intrinsic == nir_intrinsic_image_load;
+   bool store = intr->intrinsic == nir_intrinsic_image_store;
+   bool swap = intr->intrinsic == nir_intrinsic_image_atomic_swap;
+   bool atomic = swap || intr->intrinsic == nir_intrinsic_image_atomic;
+   bool size = intr->intrinsic == nir_intrinsic_image_size;
+   bool samples = intr->intrinsic == nir_intrinsic_image_samples;
+   if (!load && !store && !atomic && !size && !samples)
+      return false;
+
+   enum glsl_sampler_dim dim = nir_intrinsic_image_dim(intr);
+   bool array = nir_intrinsic_image_array(intr);
+   bool cube = dim == GLSL_SAMPLER_DIM_CUBE;
+   bool buffer = dim == GLSL_SAMPLER_DIM_BUF;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *tex =
+      agx_apple9_image_descriptor(b, intr->src[0].ssa, lower->count, 0);
+   nir_def *record = NULL, *buffer_size_el = NULL;
+   if (buffer) {
+      record = agx_apple9_image_descriptor(b, intr->src[0].ssa, lower->count,
+                                           AGX_APPLE9_IMAGE_DESC_BUFFER);
+      buffer_size_el = nir_load_global_constant(
+         b, 1, 32, nir_iadd_imm(b, record, 8), .align_mul = 4);
+   }
+
+   if (size && buffer) {
+      nir_def_replace(&intr->def, nir_u2uN(b, nir_pad_vector_imm_int(
+                                                  b, buffer_size_el, 0,
+                                                  intr->def.num_components),
+                                           intr->def.bit_size));
+      return true;
+   }
+
+   if (size) {
+      /* Cube descriptors are 2D arrays of faces, as in agx_upload_textures,
+       * so a cube array's layer count is divided back into cubes. */
+      unsigned comps = intr->def.num_components;
+      nir_def *res = agx_apple9_image_txs(b, tex, dim, array, comps);
+      if (cube && comps > 2)
+         res = nir_vector_insert_imm(
+            b, res, nir_udiv_imm(b, nir_channel(b, res, 2), 6), 2);
+      nir_def_replace(&intr->def, nir_u2uN(b, nir_trim_vector(b, res, comps),
+                                           intr->def.bit_size));
+      return true;
+   }
+
+   if (samples) {
+      nir_def_replace(&intr->def, nir_u2uN(b, libagx_texture_samples(b, tex),
+                                           intr->def.bit_size));
+      return true;
+   }
+
+   enum pipe_format format = nir_intrinsic_format(intr);
+   if (format == PIPE_FORMAT_NONE)
+      return false;
+   const struct util_format_description *desc = util_format_description(format);
+   unsigned size_B = util_format_get_blocksize(format);
+   if ((desc->layout != UTIL_FORMAT_LAYOUT_PLAIN &&
+        format != PIPE_FORMAT_R11G11B10_FLOAT &&
+        format != PIPE_FORMAT_R9G9B9E5_FLOAT) ||
+       !util_is_power_of_two_nonzero(size_B) || size_B > 16 ||
+       util_format_is_depth_or_stencil(format))
+      return false;
+
+   unsigned dimensions;
+   switch (dim) {
+   case GLSL_SAMPLER_DIM_BUF: dimensions = 1; break;
+   case GLSL_SAMPLER_DIM_1D: dimensions = 1 + array; break;
+   case GLSL_SAMPLER_DIM_2D:
+   case GLSL_SAMPLER_DIM_MS: dimensions = 2 + array; break;
+   case GLSL_SAMPLER_DIM_3D:
+   case GLSL_SAMPLER_DIM_CUBE: dimensions = 3; break;
+   default: return false;
+   }
+
+   /* Query cubes as arrays of faces to bounds-check the face coordinate
+    * without cube scaling. */
+   nir_def *extent =
+      buffer ? buffer_size_el
+             : agx_apple9_image_txs(b, tex, cube ? GLSL_SAMPLER_DIM_2D : dim,
+                                    cube || array, dimensions);
+   nir_def *coord = nir_pad_vector_imm_int(b, nir_u2u32(b, intr->src[1].ssa),
+                                           0, 4);
+   nir_def *sample = nir_u2u32(b, intr->src[2].ssa);
+   nir_def *inside = nir_imm_true(b);
+   for (unsigned d = 0; d < dimensions; ++d)
+      inside = nir_iand(b, inside, nir_ult(b, nir_channel(b, coord, d),
+                                           nir_channel(b, extent, d)));
+   if (dim == GLSL_SAMPLER_DIM_MS)
+      inside = nir_iand(b, inside,
+                        nir_ult(b, sample, libagx_texture_samples(b, tex)));
+
+   /* Address ahead of the check: it only reads descriptors. */
+   nir_def *addr;
+   if (buffer) {
+      nir_def *base =
+         nir_load_global_constant(b, 1, 64, record, .align_mul = 8);
+      addr = nir_iadd(b, base,
+                      nir_imul_imm(b, nir_u2u64(b, nir_channel(b, coord, 0)),
+                                   size_B));
+   } else {
+      nir_def *pbe = agx_apple9_image_descriptor(
+         b, intr->src[0].ssa, lower->count, AGX_APPLE9_IMAGE_DESC_PBE);
+      bool layered = array || cube || dim == GLSL_SAMPLER_DIM_3D;
+      addr = libagx_image_texel_address(
+         b, pbe, coord, sample, nir_imm_int(b, size_B),
+         nir_imm_bool(b, dim == GLSL_SAMPLER_DIM_1D),
+         nir_imm_bool(b, dim == GLSL_SAMPLER_DIM_MS), nir_imm_bool(b, layered),
+         nir_imm_bool(b, false));
+   }
+   enum gl_access_qualifier access = nir_intrinsic_access(intr);
+
+   nir_push_if(b, inside);
+   nir_def *result = NULL;
+   if (load) {
+      nir_def *raw =
+         nir_load_global(b, DIV_ROUND_UP(size_B, 4), MIN2(32, size_B * 8),
+                         addr, .align_mul = size_B, .access = access);
+      result = nir_format_unpack_rgba(b, raw, format);
+   } else if (store) {
+      nir_alu_type src_type = nir_intrinsic_src_type(intr);
+      nir_def *value = intr->src[3].ssa;
+      if (value->bit_size != 32)
+         value = nir_type_convert(
+            b, value, src_type,
+            nir_alu_type_get_base_type(src_type) | 32,
+            nir_rounding_mode_undef);
+      nir_def *raw =
+         format == PIPE_FORMAT_R11G11B10_FLOAT
+            ? agx_apple9_pack_float11(b, nir_trim_vector(b, value, 3))
+            : nir_format_pack_rgba(b, format, value);
+      raw = size_B <= 4 ? nir_u2uN(b, nir_channel(b, raw, 0), size_B * 8)
+                        : nir_trim_vector(b, raw, size_B / 4);
+      nir_store_global(b, raw, addr, .align_mul = size_B,
+                       .write_mask = BITFIELD_MASK(raw->num_components),
+                       .access = access);
+   } else if (swap) {
+      result = nir_global_atomic_swap(b, intr->def.bit_size, addr,
+                                      intr->src[3].ssa, intr->src[4].ssa,
+                                      .atomic_op = nir_intrinsic_atomic_op(intr));
+   } else {
+      result = nir_global_atomic(b, intr->def.bit_size, addr, intr->src[3].ssa,
+                                 .atomic_op = nir_intrinsic_atomic_op(intr));
+   }
+
+   nir_def *fallback = NULL;
+   if (load) {
+      nir_push_else(b, NULL);
+      nir_alu_type type = nir_intrinsic_dest_type(intr);
+      bool has_alpha = desc->swizzle[3] <= PIPE_SWIZZLE_W;
+      nir_def *one = nir_alu_type_get_base_type(type) == nir_type_float
+                        ? nir_imm_float(b, 1.0) : nir_imm_int(b, 1);
+      nir_def *zero = nir_imm_int(b, 0);
+      fallback = nir_vec4(b, zero, zero, zero, has_alpha ? zero : one);
+   } else if (atomic) {
+      nir_push_else(b, NULL);
+      fallback = nir_imm_intN_t(b, 0, intr->def.bit_size);
+   }
+   nir_pop_if(b, NULL);
+
+   if (load) {
+      nir_def *value = nir_if_phi(b, result, fallback);
+      value = nir_trim_vector(b, value, intr->def.num_components);
+      if (intr->def.bit_size != 32) {
+         nir_alu_type type = nir_intrinsic_dest_type(intr);
+         value = nir_type_convert(
+            b, value, nir_alu_type_get_base_type(type) | 32,
+            nir_alu_type_get_base_type(type) | intr->def.bit_size,
+            nir_rounding_mode_undef);
+      }
+      nir_def_replace(&intr->def, value);
+   } else if (atomic) {
+      nir_def_replace(&intr->def, nir_if_phi(b, result, fallback));
+   } else {
+      nir_instr_remove(&intr->instr);
+   }
+   return true;
+}
+
+/* Once storage images are global memory, image barriers order that memory,
+ * as hk_apple9_lower_image_barriers does. */
+static bool
+agx_apple9_lower_image_barrier(nir_builder *b, nir_intrinsic_instr *intr,
+                               UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_barrier)
+      return false;
+   unsigned modes = nir_intrinsic_memory_modes(intr);
+   if (!(modes & nir_var_image))
+      return false;
+   nir_intrinsic_set_memory_modes(intr,
+                                  (modes & ~nir_var_image) | nir_var_mem_global);
+   return true;
+}
+
+static bool
+agx_apple9_lower_compute_images(nir_shader *nir, unsigned count)
+{
+   struct agx_apple9_image_lowering lower = {.count = count};
+   bool progress = false;
+   NIR_PASS(progress, nir, nir_shader_intrinsics_pass,
+            agx_apple9_lower_compute_image, nir_metadata_none, &lower);
+   NIR_PASS(progress, nir, nir_shader_intrinsics_pass,
+            agx_apple9_lower_image_barrier, nir_metadata_all, NULL);
+   return progress;
+}
+
+static uint64_t
+agx_apple9_upload_compute_images(struct agx_batch *batch,
+                                 const struct agx_compiled_shader *cs)
+{
+   struct agx_stage *stage = &batch->ctx->stage[MESA_SHADER_COMPUTE];
+   unsigned count = MAX2(cs->apple9_image_count, 1);
+   struct agx_ptr table = agx_pool_alloc_aligned(
+      &batch->pool,
+      AGX_APPLE9_IMAGE_TABLE_HEADER + count * AGX_APPLE9_IMAGE_DESC_STRIDE, 64);
+   uint64_t descriptors = table.gpu + AGX_APPLE9_IMAGE_TABLE_HEADER;
+   memcpy(table.cpu, &descriptors, sizeof(descriptors));
+
+   for (unsigned i = 0; i < count; ++i) {
+      uint8_t *pair = (uint8_t *)table.cpu + AGX_APPLE9_IMAGE_TABLE_HEADER +
+                      i * AGX_APPLE9_IMAGE_DESC_STRIDE;
+      struct agx_texture_packed *texture = (struct agx_texture_packed *)pair;
+      struct agx_pbe_packed *pbe =
+         (struct agx_pbe_packed *)(pair + AGX_APPLE9_IMAGE_DESC_PBE);
+      struct agx_apple9_image_buffer_record *record =
+         (struct agx_apple9_image_buffer_record *)(pair +
+                                                   AGX_APPLE9_IMAGE_DESC_BUFFER);
+      memset(pair + AGX_APPLE9_IMAGE_DESC_BUFFER, 0,
+             AGX_APPLE9_IMAGE_DESC_STRIDE - AGX_APPLE9_IMAGE_DESC_BUFFER);
+
+      if (!(stage->image_mask & BITFIELD64_BIT(i)) ||
+          !stage->images[i].resource) {
+         agx_set_null_texture(texture);
+         agx_set_null_pbe(pbe);
+         continue;
+      }
+
+      struct pipe_image_view *view = &stage->images[i];
+      struct agx_resource *rsrc = agx_resource(view->resource);
+      agx_batch_track_image(batch, view, MESA_SHADER_COMPUTE);
+      if (view->shader_access & PIPE_IMAGE_ACCESS_WRITE)
+         agx_apple9_add_compute_attachment(batch, rsrc);
+
+      if (rsrc->base.target == PIPE_BUFFER) {
+         agx_set_null_texture(texture);
+         agx_set_null_pbe(pbe);
+         record->address = agx_map_gpu(rsrc) + view->u.buf.offset;
+         record->size_el =
+            view->u.buf.size / util_format_get_blocksize(view->format);
+         continue;
+      }
+
+      /* Lower cubes to 2D arrays of faces, matching the lowering above and
+       * agx_upload_textures. */
+      struct pipe_sampler_view sampler_view = util_image_to_sampler_view(view);
+      if (target_is_cube(sampler_view.target))
+         sampler_view.target = PIPE_TEXTURE_2D_ARRAY;
+
+      agx_pack_texture(texture, rsrc, view->format, &sampler_view);
+      agx_batch_upload_pbe(batch, pbe, view, false, false, false, false);
+   }
+
+   return table.gpu;
+}
+
 /* Does not take ownership of key. Clones if necessary. */
 static struct agx_compiled_shader *
 agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
@@ -1842,9 +2241,28 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       const char *reason = NULL;
       compiled->apple9_compute_textures.runtime_samplers =
          agx_nir_apple9_offset_samplers(early);
+      NIR_PASS(_, early, nir_shader_intrinsics_pass, agx_apple9_lower_ssbo_size,
+               nir_metadata_control_flow, NULL);
+      compiled->apple9_image_count =
+         MAX2(BITSET_LAST_BIT(early->info.images_used), early->info.num_images);
+      if (compiled->apple9_image_count)
+         agx_apple9_lower_compute_images(early, compiled->apple9_image_count);
 
-      if (!agx_compile_apple9_tiny(
-             early, &compiled->b, &compiled->apple9_compute_profile, &reason)) {
+      bool compiled_ok = agx_compile_apple9_tiny(
+         early, &compiled->b, &compiled->apple9_compute_profile, &reason);
+      if (!compiled_ok && reason == agx_apple9_compute_without_effects) {
+         /* Nothing observable to run, as in Honeykrisp: an empty shader that
+          * agx_launch_grid skips. */
+         memset(&compiled->b, 0, sizeof(compiled->b));
+         memset(&compiled->apple9_compute_profile, 0,
+                sizeof(compiled->apple9_compute_profile));
+         compiled->b.info.stats.instrs = 1;
+         compiled->apple9_tiny = true;
+         compiled->stage = MESA_SHADER_COMPUTE;
+         compiled->so = so;
+         ralloc_free(early);
+         return compiled;
+      } else if (!compiled_ok) {
          fprintf(stderr,
                  "Apple9 compute shader is outside the bounded NIR "
                  "compiler: %s\n",
@@ -7681,6 +8099,11 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
    }
    struct agx_compiled_shader *cs = variant->data;
 
+   /* An Apple9 compute shader without observable effects compiled to
+    * nothing (see agx_compile_variant): the dispatch is a no-op. */
+   if (cs->apple9_tiny && agx_is_shader_empty(&cs->b))
+      return;
+
    if (cs->apple9_tiny && is_indirect &&
        !agx_apple9_compute_indirect_dispatch_supported(
           &cs->apple9_compute_profile)) {
@@ -7846,6 +8269,14 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
             if (binding == AGX_APPLE9_GRAPHICS_SYSVAL_BINDING) {
                resource_addresses[i] = agx_apple9_upload_graphics_sysvals(
                   batch, stage, &cs->apple9_compute_textures, false);
+               continue;
+            }
+            if (binding == AGX_APPLE9_SSBO_SIZE_BINDING) {
+               resource_addresses[i] = agx_apple9_upload_ssbo_sizes(batch, stage);
+               continue;
+            }
+            if (binding == AGX_APPLE9_IMAGE_TABLE_BINDING) {
+               resource_addresses[i] = agx_apple9_upload_compute_images(batch, cs);
                continue;
             }
             if (binding >= PIPE_MAX_CONSTANT_BUFFERS ||

@@ -236,6 +236,9 @@ struct agx_compiled_shader {
     * allocation.  Apple9 package validation still constrains the resulting
     * static-plus-dynamic total to the exact capture-backed ABI size. */
    bool apple9_has_variable_shared_mem;
+   /* API image slots addressed by an Apple9 compute shader; the dispatch
+    * uploads this many descriptor pairs (agx_apple9_upload_compute_images). */
+   unsigned apple9_image_count;
    struct agx_apple9_compute_profile apple9_compute_profile;
    struct agx_apple9_texture_mapping apple9_compute_textures;
 
