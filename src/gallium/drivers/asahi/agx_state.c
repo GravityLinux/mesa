@@ -8182,48 +8182,76 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
       agx_batch_add_bo(batch, pipeline.vertex->bo);
       agx_batch_add_bo(batch, pipeline.fragment->bo);
       record->flatshade_first = ctx->rast->base.flatshade_first;
-      memcpy(record->viewport_translate, ctx->viewport[0].translate,
-             sizeof(record->viewport_translate));
-      memcpy(record->viewport_scale, ctx->viewport[0].scale,
-             sizeof(record->viewport_scale));
-      /* The Apple9 vertex path already lowers clip Z to [0, W]. */
-      if (!agx_clip_halfz(ctx)) {
-         record->viewport_translate[2] -= record->viewport_scale[2];
-         record->viewport_scale[2] *= 2.0f;
+      /* A vertex program writing the viewport index selects among all the
+       * viewports, each with its own consecutive scissor; the tile-granular
+       * region clip is their union (as hk_apple9 records do). */
+      unsigned viewports = pipeline.vertex->writes_layer_viewport
+         ? MIN2(AGX_APPLE9_MAX_VIEWPORTS, ARRAY_SIZE(ctx->viewport)) : 1;
+      record->viewport_count = viewports;
+      struct agx_scissor_packed scissors[AGX_APPLE9_MAX_VIEWPORTS];
+      unsigned bbox[4] = {UINT_MAX, UINT_MAX, 0, 0};
+      for (unsigned v = 0; v < viewports; ++v) {
+         const struct pipe_viewport_state *vp = &ctx->viewport[v];
+         float translate[3], scale[3];
+         memcpy(translate, vp->translate, sizeof(translate));
+         memcpy(scale, vp->scale, sizeof(scale));
+         /* The Apple9 vertex path already lowers clip Z to [0, W]. */
+         if (!agx_clip_halfz(ctx)) {
+            translate[2] -= scale[2];
+            scale[2] *= 2.0f;
+         }
+         if (v == 0) {
+            memcpy(record->viewport_translate, translate, sizeof(translate));
+            memcpy(record->viewport_scale, scale, sizeof(scale));
+         } else {
+            float *t = record->viewports[v - 1];
+            for (unsigned axis = 0; axis < 3; ++axis) {
+               t[axis * 2] = translate[axis];
+               t[axis * 2 + 1] = scale[axis];
+            }
+         }
+         unsigned minx, miny, maxx, maxy;
+         agx_get_scissor_extents(vp,
+                                 ctx->rast->base.scissor ? &ctx->scissor[v] : NULL,
+                                 &batch->key, &minx, &miny, &maxx, &maxy);
+         /* Canonicalize empty intersections before unsigned region packing. */
+         if (minx >= maxx || miny >= maxy) {
+            minx = miny = maxx = maxy = 0;
+         } else {
+            bbox[0] = MIN2(bbox[0], minx);
+            bbox[1] = MIN2(bbox[1], miny);
+            bbox[2] = MAX2(bbox[2], maxx);
+            bbox[3] = MAX2(bbox[3], maxy);
+         }
+         float minz, maxz;
+         util_viewport_zmin_zmax(vp, agx_clip_halfz(ctx), &minz, &maxz);
+         agx_pack(&scissors[v], SCISSOR, cfg) {
+            cfg.min_x = minx;
+            cfg.min_y = miny;
+            cfg.max_x = maxx;
+            cfg.max_y = maxy;
+            cfg.min_z = minz;
+            cfg.max_z = maxz;
+         }
       }
-      unsigned minx, miny, maxx, maxy;
-      agx_get_scissor_extents(&ctx->viewport[0],
-                              ctx->rast->base.scissor ? &ctx->scissor[0] : NULL,
-                              &batch->key, &minx, &miny, &maxx, &maxy);
-      /* Canonicalize empty intersections before unsigned region packing. */
-      if (minx >= maxx || miny >= maxy)
-         minx = miny = maxx = maxy = 0;
-      record->scissor_min[0] = minx;
-      record->scissor_min[1] = miny;
-      record->scissor_max[0] = maxx;
-      record->scissor_max[1] = maxy;
-      struct agx_scissor_packed scissor;
-      float minz, maxz;
-      util_viewport_zmin_zmax(&ctx->viewport[0], agx_clip_halfz(ctx),
-                             &minz, &maxz);
-      agx_pack(&scissor, SCISSOR, cfg) {
-         cfg.min_x = minx;
-         cfg.min_y = miny;
-         cfg.max_x = maxx;
-         cfg.max_y = maxy;
-         cfg.min_z = minz;
-         cfg.max_z = maxz;
-      }
+      if (bbox[0] >= bbox[2] || bbox[1] >= bbox[3])
+         bbox[0] = bbox[1] = bbox[2] = bbox[3] = 0;
+      record->scissor_min[0] = bbox[0];
+      record->scissor_min[1] = bbox[1];
+      record->scissor_max[0] = bbox[2];
+      record->scissor_max[1] = bbox[3];
       const uint8_t *old_scissor =
-         previous ? (const uint8_t *)batch->scissor.data +
-                       previous->scissor_index * AGX_SCISSOR_LENGTH
-                  : NULL;
-      if (old_scissor && !memcmp(old_scissor, &scissor, sizeof(scissor))) {
+         previous && previous->viewport_count <= 1 && viewports == 1
+            ? (const uint8_t *)batch->scissor.data +
+                 previous->scissor_index * AGX_SCISSOR_LENGTH
+            : NULL;
+      if (old_scissor && !memcmp(old_scissor, &scissors[0], sizeof(scissors[0]))) {
          record->scissor_index = previous->scissor_index;
       } else {
          record->scissor_index = batch->scissor.size / AGX_SCISSOR_LENGTH;
-         memcpy(util_dynarray_grow_bytes(&batch->scissor, 1, sizeof(scissor)),
-                &scissor, sizeof(scissor));
+         memcpy(util_dynarray_grow_bytes(&batch->scissor, viewports,
+                                         sizeof(scissors[0])),
+                scissors, viewports * sizeof(scissors[0]));
       }
       record->reads_tile = pipeline.fragment->reads_tile;
       record->uses_discard = pipeline.fragment->uses_discard;
