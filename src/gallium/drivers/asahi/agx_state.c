@@ -1414,17 +1414,18 @@ agx_bind_vertex_elements_state(struct pipe_context *pctx, void *cso)
 
 DERIVE_HASH_TABLE(asahi_vs_shader_key);
 DERIVE_HASH_TABLE(asahi_fs_shader_key);
+DERIVE_HASH_TABLE(asahi_cs_shader_key);
 DERIVE_HASH_TABLE(agx_fast_link_key);
 
-/* No compute variants */
+/* Stages without variants */
 static uint32_t
-asahi_cs_shader_key_hash(const void *key)
+asahi_no_key_hash(const void *key)
 {
    return 0;
 }
 
 static bool
-asahi_cs_shader_key_equal(const void *a, const void *b)
+asahi_no_key_equal(const void *a, const void *b)
 {
    return true;
 }
@@ -2339,11 +2340,84 @@ agx_apple9_lower_image_barrier(nir_builder *b, nir_intrinsic_instr *intr,
    return true;
 }
 
+static uint64_t
+agx_apple9_formatless_images(nir_shader *nir)
+{
+   uint64_t mask = 0;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_image_store ||
+                nir_intrinsic_format(intr) != PIPE_FORMAT_NONE)
+               continue;
+            if (nir_src_is_const(intr->src[0]) &&
+                nir_src_as_uint(intr->src[0]) < 64)
+               mask |= BITFIELD64_BIT(nir_src_as_uint(intr->src[0]));
+            else
+               mask |= BITSET_LAST_BIT(nir->info.images_used) >= 64
+                          ? ~0ull
+                          : BITFIELD64_MASK(BITSET_LAST_BIT(nir->info.images_used));
+         }
+      }
+   }
+   return mask;
+}
+
+/* Desktop GL may store to an image declared without a format. The shader
+ * key carries the formats of the views bound to such slots: give each
+ * store its slot's format, branching over the candidate slots when the
+ * index is dynamic. Stores to slots without a known format are dropped
+ * (no view bound, or the variant compiled before any binding). */
 static bool
-agx_apple9_lower_images(nir_shader *nir, unsigned count)
+agx_apple9_resolve_formatless_store(nir_builder *b, nir_intrinsic_instr *intr,
+                                    void *data)
+{
+   const uint16_t *formats = data;
+   if (intr->intrinsic != nir_intrinsic_image_store ||
+       nir_intrinsic_format(intr) != PIPE_FORMAT_NONE)
+      return false;
+
+   if (nir_src_is_const(intr->src[0])) {
+      unsigned slot = nir_src_as_uint(intr->src[0]);
+      enum pipe_format format =
+         slot < PIPE_MAX_SHADER_IMAGES ? formats[slot] : PIPE_FORMAT_NONE;
+      if (format == PIPE_FORMAT_NONE)
+         nir_instr_remove(&intr->instr);
+      else
+         nir_intrinsic_set_format(intr, format);
+      return true;
+   }
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *index = nir_u2u32(b, intr->src[0].ssa);
+   for (unsigned slot = 0; slot < PIPE_MAX_SHADER_IMAGES; ++slot) {
+      if (formats[slot] == PIPE_FORMAT_NONE)
+         continue;
+      nir_push_if(b, nir_ieq_imm(b, index, slot));
+      nir_def *slot_index = nir_imm_intN_t(b, slot, intr->src[0].ssa->bit_size);
+      nir_intrinsic_instr *copy =
+         nir_instr_as_intrinsic(nir_instr_clone(b->shader, &intr->instr));
+      nir_intrinsic_set_format(copy, formats[slot]);
+      nir_builder_instr_insert(b, &copy->instr);
+      nir_src_rewrite(&copy->src[0], slot_index);
+      nir_pop_if(b, NULL);
+   }
+   nir_instr_remove(&intr->instr);
+   return true;
+}
+
+static bool
+agx_apple9_lower_images(nir_shader *nir, unsigned count,
+                        const uint16_t *formats)
 {
    struct agx_apple9_image_lowering lower = {.count = count};
    bool progress = false;
+   NIR_PASS(progress, nir, nir_shader_intrinsics_pass,
+            agx_apple9_resolve_formatless_store, nir_metadata_none,
+            (void *)formats);
    NIR_PASS(progress, nir, nir_shader_intrinsics_pass,
             agx_apple9_lower_compute_image, nir_metadata_none, &lower);
    NIR_PASS(progress, nir, nir_shader_intrinsics_pass,
@@ -2465,7 +2539,8 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       compiled->apple9_image_count =
          MAX2(BITSET_LAST_BIT(early->info.images_used), early->info.num_images);
       if (compiled->apple9_image_count)
-         agx_apple9_lower_images(early, compiled->apple9_image_count);
+         agx_apple9_lower_images(early, compiled->apple9_image_count,
+                                 key_->cs.apple9_image_formats);
 
       bool compiled_ok = agx_compile_apple9_tiny(
          early, &compiled->b, &compiled->apple9_compute_profile, &reason);
@@ -2645,7 +2720,9 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       apple9_image_count = MAX2(BITSET_LAST_BIT(apple9_nir->info.images_used),
                                 apple9_nir->info.num_images);
       if (apple9_image_count)
-         agx_apple9_lower_images(apple9_nir, apple9_image_count);
+         agx_apple9_lower_images(apple9_nir, apple9_image_count,
+                                 fragment ? key_->fs.apple9_image_formats
+                                          : key_->vs.apple9_image_formats);
       if (fragment)
          agx_apple9_fs_side_effects(apple9_nir);
       if (fragment) {
@@ -2908,6 +2985,8 @@ agx_get_shader_variant(struct agx_screen *screen, struct pipe_context *pctx,
               so->type == MESA_SHADER_TESS_EVAL ||
               (so->type == MESA_SHADER_GEOMETRY && apple9_render)) {
       memcpy(cloned_key, key, sizeof(struct asahi_vs_shader_key));
+   } else if (so->type == MESA_SHADER_COMPUTE) {
+      memcpy(cloned_key, key, sizeof(struct asahi_cs_shader_key));
    } else {
       /* No key */
    }
@@ -2999,6 +3078,7 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
 
    blob_init(&so->early_serialized_nir);
    nir_serialize(&so->early_serialized_nir, nir, true);
+   so->apple9_formatless_images = agx_apple9_formatless_images(nir);
 
    /* We need to lower robustness before bindings, since robustness lowering
     * affects the bindings used.
@@ -3160,8 +3240,8 @@ agx_create_shader_state(struct pipe_context *pctx,
    } else if (nir->info.stage == MESA_SHADER_TESS_CTRL ||
               nir->info.stage == MESA_SHADER_GEOMETRY) {
       /* No variants */
-      so->variants = _mesa_hash_table_create(NULL, asahi_cs_shader_key_hash,
-                                             asahi_cs_shader_key_equal);
+      so->variants = _mesa_hash_table_create(NULL, asahi_no_key_hash,
+                                             asahi_no_key_equal);
    } else {
       so->variants = asahi_fs_shader_key_table_create(so);
       so->linked_shaders = agx_fast_link_key_table_create(so);
@@ -3254,8 +3334,7 @@ agx_create_compute_state(struct pipe_context *pctx,
    if (!so)
       return NULL;
 
-   so->variants = _mesa_hash_table_create(so, asahi_cs_shader_key_hash,
-                                          asahi_cs_shader_key_equal);
+   so->variants = asahi_cs_shader_key_table_create(so);
 
    union asahi_shader_key key = {0};
 
@@ -3449,6 +3528,19 @@ apple9_border_preset(const struct pipe_sampler_state *state)
 }
 
 static void
+agx_apple9_image_format_key(const struct agx_stage *stage,
+                            uint16_t formats[PIPE_MAX_SHADER_IMAGES])
+{
+   memset(formats, 0, PIPE_MAX_SHADER_IMAGES * sizeof(formats[0]));
+   if (!stage->shader)
+      return;
+   u_foreach_bit64(i, stage->shader->apple9_formatless_images) {
+      if ((stage->image_mask & BITFIELD64_BIT(i)) && stage->images[i].resource)
+         formats[i] = stage->images[i].format;
+   }
+}
+
+static void
 agx_apple9_sampler_key(const struct agx_stage *stage,
                        struct agx_apple9_sampler_key key[32])
 {
@@ -3537,6 +3629,8 @@ agx_update_vs(struct agx_batch *batch, unsigned index_size_B)
          AGX_APPLE9_SYSVAL_UBO_BASE + AGX_SYSVAL_TABLE_PARAMS;
       agx_apple9_sampler_key(&ctx->stage[MESA_SHADER_VERTEX],
                              key.apple9_samplers);
+      agx_apple9_image_format_key(&ctx->stage[MESA_SHADER_VERTEX],
+                                  key.apple9_image_formats);
       key.apple9_inputs.capture_xfb =
          ctx->apple9_xfb_capture &&
          ctx->apple9_xfb_capture == ctx->stage[MESA_SHADER_VERTEX].shader;
@@ -3842,6 +3936,8 @@ agx_update_fs(struct agx_batch *batch)
       }
       agx_apple9_sampler_key(&ctx->stage[MESA_SHADER_FRAGMENT],
                              key.apple9_samplers);
+      agx_apple9_image_format_key(&ctx->stage[MESA_SHADER_FRAGMENT],
+                                  key.apple9_image_formats);
       /* Disabled blending is canonicalized to ONE/ZERO in the blend state,
        * so this cannot reinterpret an ordinary MRT output when disabled. */
       key.apple9_blend[0].dual_source_by_location =
@@ -8362,15 +8458,22 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
    struct agx_uncompiled_shader *uncompiled =
       ctx->stage[MESA_SHADER_COMPUTE].shader;
 
-   /* There is exactly one variant. Obtain its launch requirements before
-    * touching batch statistics or checking command-stream capacity. */
+   /* Variants differ only in the formats of format-less storage images.
+    * Obtain the variant's launch requirements before touching batch
+    * statistics or checking command-stream capacity. */
+   union asahi_shader_key cs_key = {0};
+   agx_apple9_image_format_key(&ctx->stage[MESA_SHADER_COMPUTE],
+                               cs_key.cs.apple9_image_formats);
    struct hash_entry *variant =
-      _mesa_hash_table_next_entry(uncompiled->variants, NULL);
-   if (unlikely(!variant)) {
+      _mesa_hash_table_search(uncompiled->variants, &cs_key);
+   struct agx_compiled_shader *cs =
+      variant ? variant->data
+              : agx_get_shader_variant(agx_screen(pipe->screen), pipe,
+                                       uncompiled, &cs_key);
+   if (unlikely(!cs)) {
       fprintf(stderr, "compute shader has no compiled variant\n");
       return;
    }
-   struct agx_compiled_shader *cs = variant->data;
 
    /* An Apple9 compute shader without observable effects compiled to
     * nothing (see agx_compile_variant): the dispatch is a no-op. */

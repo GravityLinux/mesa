@@ -327,6 +327,9 @@ struct agx_uncompiled_shader {
    bool has_xfb_info;
    /* The shader stores to or atomically updates memory. */
    bool writes_memory;
+   /* Image slots stored to without a format qualifier. Apple9 takes the
+    * bound views' formats from the shader key. */
+   uint64_t apple9_formatless_images;
    bool is_xfb_passthrough;
    /* Internal passthrough GS that also forwards line stipple state */
    bool is_line_stipple_passthrough;
@@ -558,6 +561,8 @@ struct agx_blend {
 
 struct asahi_vs_shader_key {
    uint64_t apple9_fragment_inputs;
+   /* Formats of the views bound to apple9_formatless_images slots. */
+   uint16_t apple9_image_formats[PIPE_MAX_SHADER_IMAGES];
    /* If true, this is running as a hardware vertex shader. If false, this is a
     * compute job used to feed a TCS or GS.
     */
@@ -580,7 +585,13 @@ struct agx_vertex_elements {
    uint16_t buffers[PIPE_MAX_ATTRIBS];
 };
 
+struct asahi_cs_shader_key {
+   /* Formats of the views bound to apple9_formatless_images slots. */
+   uint16_t apple9_image_formats[PIPE_MAX_SHADER_IMAGES];
+};
+
 struct asahi_fs_shader_key {
+   uint16_t apple9_image_formats[PIPE_MAX_SHADER_IMAGES];
    enum pipe_format rt_formats[PIPE_MAX_COLOR_BUFS];
    uint8_t nr_samples;
    uint8_t apple9_nr_targets;
@@ -593,11 +604,12 @@ struct asahi_fs_shader_key {
    struct agx_apple9_blend apple9_blend[PIPE_MAX_COLOR_BUFS];
    struct agx_apple9_sampler_key apple9_samplers[32];
 };
-static_assert(sizeof(struct asahi_fs_shader_key) == 1804, "no holes");
+static_assert(sizeof(struct asahi_fs_shader_key) == 1932, "no holes");
 
 union asahi_shader_key {
    struct asahi_vs_shader_key vs;
    struct asahi_fs_shader_key fs;
+   struct asahi_cs_shader_key cs;
 };
 
 enum agx_dirty {
