@@ -106,6 +106,9 @@ bool agx_compile_apple9_fragment(nir_shader *nir,
 /* Gallium compute: one 32-bit bound range size per API SSBO binding, for
  * get_ssbo_size. Uploaded with each dispatch that references it. */
 #define AGX_APPLE9_SSBO_SIZE_BINDING 65
+/* Gallium compute: storage image table. The first 8 bytes hold the address
+ * of an array of (texture, PBE) descriptor pairs, one per API image slot. */
+#define AGX_APPLE9_IMAGE_TABLE_BINDING 66
 #define AGX_APPLE9_SAMPLER_BIAS_OFFSET 16
 #define AGX_APPLE9_SAMPLER_BIAS_COUNT 32
 #define AGX_APPLE9_TEXTURE_INFO_OFFSET (16 + AGX_APPLE9_SAMPLER_BIAS_COUNT * sizeof(float))
