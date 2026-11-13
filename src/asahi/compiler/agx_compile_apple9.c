@@ -10134,9 +10134,35 @@ apple9_lower_xfb_intrinsic(nir_builder *b, nir_intrinsic_instr *intr,
    return true;
 }
 
+/* Multi-slot outputs such as more than four clip or cull distances store
+ * their second slot at a constant offset. Record such a store at its own
+ * location, which is how nir_io_add_intrinsic_xfb_info matches outputs.
+ */
+static bool
+apple9_fold_output_offset(nir_builder *b, nir_intrinsic_instr *intr,
+                          UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_store_output)
+      return false;
+   nir_src *offset = nir_get_io_offset_src(intr);
+   if (!nir_src_is_const(*offset) || nir_src_as_uint(*offset) == 0)
+      return false;
+   unsigned slots = nir_src_as_uint(*offset);
+   nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+   sem.location += slots;
+   sem.num_slots = 1;
+   nir_intrinsic_set_io_semantics(intr, sem);
+   nir_intrinsic_set_base(intr, nir_intrinsic_base(intr) + slots);
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_src_rewrite(offset, nir_imm_int(b, 0));
+   return true;
+}
+
 static void
 apple9_lower_xfb(nir_shader *nir, const struct agx_apple9_vertex_layout *layout)
 {
+   nir_shader_intrinsics_pass(nir, apple9_fold_output_offset,
+                              nir_metadata_control_flow, NULL);
    nir_io_add_intrinsic_xfb_info(nir);
    nir_builder b =
       nir_builder_at(nir_before_impl(nir_shader_get_entrypoint(nir)));
