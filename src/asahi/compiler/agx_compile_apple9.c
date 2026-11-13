@@ -11101,6 +11101,20 @@ apple9_lower_cull_distance_fs(nir_shader *nir,
 static nir_def *apple9_pack_color(nir_builder *b, enum pipe_format format,
                                   nir_def *color);
 
+/* Cull distance lowering needs scalar clip/cull distance stores. Leave other
+ * outputs whole: the GL clip-space depth conversion (clip_halfz) rewrites
+ * the position store as one vector. */
+static bool
+apple9_is_clip_dist_store(const nir_intrinsic_instr *intr,
+                          UNUSED const void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_store_output)
+      return false;
+   unsigned location = nir_intrinsic_io_semantics(intr).location;
+   return location == VARYING_SLOT_CLIP_DIST0 ||
+          location == VARYING_SLOT_CLIP_DIST1;
+}
+
 static bool
 apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
                         const struct agx_apple9_vertex_layout *layout,
@@ -11132,7 +11146,8 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
                 nir_lower_io_use_interpolated_input_intrinsics);
    if (nir->info.stage == MESA_SHADER_VERTEX &&
        nir->info.cull_distance_array_size) {
-      nir_lower_io_to_scalar(nir, nir_var_shader_out, NULL, NULL);
+      nir_lower_io_to_scalar(nir, nir_var_shader_out,
+                             apple9_is_clip_dist_store, NULL);
       if (layout && layout->cull_distance_mask)
          apple9_pack_cull_distance(nir);
       else
