@@ -1564,6 +1564,33 @@ agx_apple9_widen_tex_dest(nir_builder *b, nir_tex_instr *tex,
    return true;
 }
 
+/* GLSL leaves gl_Position undefined when a vertex shader does not write it,
+ * as in shaders used only for their storage writes. The Apple9 vertex
+ * interface needs a position, so write one outside the clip volume: the
+ * shader still runs for every vertex but nothing is rasterized. */
+static void
+agx_apple9_default_position(nir_shader *nir)
+{
+   if (nir->info.stage != MESA_SHADER_VERTEX ||
+       (nir->info.outputs_written & VARYING_BIT_POS))
+      return;
+
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   nir_builder b = nir_builder_at(nir_after_impl(impl));
+   nir_def *pos = nir_imm_vec4(&b, 2.0, 2.0, 2.0, 1.0);
+   if (nir->info.io_lowered) {
+      nir_store_output(&b, pos, nir_imm_int(&b, 0),
+                       .io_semantics.location = VARYING_SLOT_POS,
+                       .io_semantics.num_slots = 1,
+                       .src_type = nir_type_float32, .write_mask = 0xf);
+   } else {
+      nir_variable *var = nir_create_variable_with_location(
+         nir, nir_var_shader_out, VARYING_SLOT_POS, glsl_vec4_type());
+      nir_store_var(&b, var, pos, 0xf);
+   }
+   nir_shader_gather_info(nir, impl);
+}
+
 /* The Apple9 rasterizer delivers the layer to the fragment layer system value
  * (as in Honeykrisp's hk_apple9_lower_layer_viewport_fs); it is not a varying.
  * The fragment NIR here still uses variables, so handle derefs too. */
@@ -1623,10 +1650,7 @@ agx_apple9_bounded_render_signature(const nir_shader *nir, const char **reason)
          *reason = "unsupported vertex input location";
          return false;
       }
-      if (!(nir->info.outputs_written & position)) {
-         *reason = "missing gl_Position output";
-         return false;
-      }
+      /* A missing gl_Position is added by agx_apple9_default_position. */
       if (unsupported_outputs) {
          *reason = gl_varying_slot_name_for_stage(
             (gl_varying_slot)(ffsll(unsupported_outputs) - 1), MESA_SHADER_VERTEX);
@@ -2489,6 +2513,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       nir_shader *apple9_nir =
          nir_deserialize(NULL, &agx_nir_options, &apple9_reader);
       bool fragment = so->type == MESA_SHADER_FRAGMENT;
+      agx_apple9_default_position(apple9_nir);
       NIR_PASS(_, apple9_nir, nir_shader_intrinsics_pass,
                agx_apple9_lower_ssbo_size, nir_metadata_control_flow, NULL);
       if (fragment) {
