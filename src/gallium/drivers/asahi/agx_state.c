@@ -1543,6 +1543,27 @@ agx_build_meta_shader_internal(struct agx_context *ctx,
                                size_t data_size, bool prolog, bool epilog,
                                unsigned cf_base, bool internal_kernel);
 
+/* The Apple9 compute compiler only returns 32-bit texture results. Mediump
+ * sampling in compute shaders (where 16-bit lowering stays enabled) produces
+ * 16-bit results, so sample at 32 bits and convert. */
+static bool
+agx_apple9_widen_tex_dest(nir_builder *b, nir_tex_instr *tex,
+                          UNUSED void *data)
+{
+   if (tex->def.bit_size != 16)
+      return false;
+
+   nir_alu_type base = nir_alu_type_get_base_type(tex->dest_type);
+   tex->dest_type = base | 32;
+   tex->def.bit_size = 32;
+
+   b->cursor = nir_after_instr(&tex->instr);
+   nir_def *narrow = base == nir_type_float ? nir_f2f16(b, &tex->def)
+                                            : nir_u2u16(b, &tex->def);
+   nir_def_rewrite_uses_after(&tex->def, narrow);
+   return true;
+}
+
 /* The Apple9 rasterizer delivers the layer to the fragment layer system value
  * (as in Honeykrisp's hk_apple9_lower_layer_viewport_fs); it is not a varying.
  * The fragment NIR here still uses variables, so handle derefs too. */
@@ -2284,6 +2305,8 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       compiled->apple9_compute_textures.runtime_samplers =
          agx_nir_apple9_offset_samplers(early);
       NIR_PASS(_, early, nir_shader_intrinsics_pass, agx_apple9_lower_ssbo_size,
+               nir_metadata_control_flow, NULL);
+      NIR_PASS(_, early, nir_shader_tex_pass, agx_apple9_widen_tex_dest,
                nir_metadata_control_flow, NULL);
       compiled->apple9_image_count =
          MAX2(BITSET_LAST_BIT(early->info.images_used), early->info.num_images);
