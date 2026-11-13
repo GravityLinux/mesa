@@ -12,6 +12,7 @@
 #include <stdatomic.h>
 
 static _Atomic uint64_t apple9_program_serial;
+#include "asahi/debug.h"
 #include "asahi/compiler/agx_compile.h"
 #include "asahi/compiler/agx_compile_apple9.h"
 #include "asahi/compiler/agx_nir.h"
@@ -1778,14 +1779,17 @@ agx_apple9_bounded_render_signature(const nir_shader *nir, const char **reason)
       if (agx_apple9_varying_supported(i))
          user |= BITFIELD64_BIT(i);
    }
-   if (nir->info.stage == MESA_SHADER_VERTEX) {
+   /* Evaluation shaders read their inputs from the patch buffer. */
+   if (nir->info.stage == MESA_SHADER_VERTEX ||
+       nir->info.stage == MESA_SHADER_TESS_EVAL) {
       uint64_t position = BITFIELD64_BIT(VARYING_SLOT_POS);
       /* Compatibility attributes and generic attributes both use compacted
        * driver locations. Their semantic numbers are not hardware bindings. */
       uint64_t supported_inputs = BITFIELD64_MASK(VERT_ATTRIB_MAX);
       uint64_t unsupported_outputs = nir->info.outputs_written &
          ~(position | user | BITFIELD64_BIT(VARYING_SLOT_PSIZ) | VARYING_BIT_LAYER);
-      if (nir->info.inputs_read & ~supported_inputs) {
+      if (nir->info.stage == MESA_SHADER_VERTEX &&
+          (nir->info.inputs_read & ~supported_inputs)) {
          *reason = "unsupported vertex input location";
          return false;
       }
@@ -1897,6 +1901,11 @@ agx_apple9_compile_prerast(struct agx_device *dev, nir_shader *nir,
       return compiled;
    }
 
+   if (agx_apple9_debug_enabled(AGX_A9_DBG_NIR)) {
+      fprintf(stderr, "APPLE9_PRERAST_NIR stage=%s\n",
+              _mesa_shader_stage_to_abbrev(descriptor_stage));
+      nir_print_shader(nir, stderr);
+   }
    const char *reason = NULL;
    if (!agx_compile_apple9_tiny(nir, &compiled->b,
                                &compiled->apple9_compute_profile, &reason)) {
@@ -1929,6 +1938,38 @@ agx_apple9_lower_sw_vertex_zero_base(nir_builder *b, nir_intrinsic_instr *intr,
    return true;
 }
 
+/* Tessellation levels and clip/cull distances are compact arrays: after IO
+ * lowering an element index is a component, which the patch buffer addressing
+ * (poly) and the vertex compiler expect to be constant. Dynamically indexed
+ * elements, such as gl_TessLevelOuter[gl_InvocationID], become selects.
+ */
+static void
+agx_apple9_lower_compact_indirects(nir_shader *nir)
+{
+   struct set *vars = _mesa_pointer_set_create(NULL);
+   nir_foreach_variable_with_modes(var, nir,
+                                   nir_var_shader_in | nir_var_shader_out) {
+      if (var->data.compact)
+         _mesa_set_add(vars, var);
+   }
+   if (vars->entries) {
+      /* The pass leaves compact IO alone where the options allow indirect
+       * IO, which agx_nir_options does for every stage. */
+      const nir_shader_compiler_options *options = nir->options;
+      nir_shader_compiler_options direct = *options;
+      direct.support_indirect_inputs = direct.support_indirect_outputs = 0;
+      nir->options = &direct;
+      NIR_PASS(_, nir, nir_lower_indirect_var_derefs_to_if_else_trees, vars);
+      nir->options = options;
+   }
+   _mesa_set_destroy(vars, NULL);
+}
+
+static bool agx_apple9_lower_ssbo_size(nir_builder *b, nir_intrinsic_instr *intr,
+                                       UNUSED void *data);
+static bool agx_apple9_lower_images(nir_shader *nir, unsigned count,
+                                    const uint16_t *formats);
+
 static struct agx_compiled_shader *
 agx_apple9_compile_geometry(struct agx_device *dev,
                             struct agx_uncompiled_shader *so,
@@ -1938,8 +1979,11 @@ agx_apple9_compile_geometry(struct agx_device *dev,
    blob_reader_init(&reader, so->early_serialized_nir.data,
                     so->early_serialized_nir.size);
    nir_shader *nir = nir_deserialize(NULL, &agx_nir_options, &reader);
-   nir_lower_io_vars_to_temporaries(nir, nir_shader_get_entrypoint(nir),
-                                   nir_var_shader_out);
+   agx_apple9_lower_compact_indirects(nir);
+   /* Control shader outputs are shared by the patch's invocations. */
+   if (so->type != MESA_SHADER_TESS_CTRL)
+      nir_lower_io_vars_to_temporaries(nir, nir_shader_get_entrypoint(nir),
+                                      nir_var_shader_out);
    nir_lower_global_vars_to_local(nir);
    nir_split_var_copies(nir);
    nir_lower_var_copies(nir);
@@ -1957,7 +2001,36 @@ agx_apple9_compile_geometry(struct agx_device *dev,
 
    struct agx_compiled_shader *compiled = NULL;
    nir_shader *count = NULL, *copy = NULL, *pre = NULL;
-   if (so->type == MESA_SHADER_VERTEX) {
+   /* Tessellation stages run as compute, which accesses SSBOs natively and
+    * images through global memory, once per API invocation. */
+   unsigned image_count = 0;
+   if (so->type == MESA_SHADER_TESS_CTRL ||
+       so->type == MESA_SHADER_TESS_EVAL) {
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass, agx_apple9_lower_ssbo_size,
+               nir_metadata_control_flow, NULL);
+      image_count = MAX2(BITSET_LAST_BIT(nir->info.images_used),
+                         nir->info.num_images);
+      if (image_count)
+         agx_apple9_lower_images(nir, image_count, key->apple9_image_formats);
+   }
+   if (so->type == MESA_SHADER_TESS_CTRL) {
+      /* One workgroup per patch, one invocation per output vertex, writing
+       * the patch buffer read by the tessellator (as hk_apple9_compile_tcs).
+       */
+      poly_nir_lower_tcs(nir, true);
+      compiled =
+         agx_apple9_compile_prerast(dev, nir, MESA_SHADER_TESS_CTRL, &mapping);
+   } else if (so->type == MESA_SHADER_TESS_EVAL) {
+      /* Software evaluation over the tessellated domain, feeding a geometry
+       * shader. */
+      poly_nir_lower_tes(nir, false);
+      uint64_t outputs = nir->info.outputs_written;
+      poly_nir_lower_vs_before_gs(nir);
+      compiled =
+         agx_apple9_compile_prerast(dev, nir, MESA_SHADER_TESS_EVAL, &mapping);
+      if (compiled)
+         compiled->b.info.outputs = outputs;
+   } else if (so->type == MESA_SHADER_VERTEX) {
       if (!agx_nir_lower_apple9_vertex_inputs(nir, &key->apple9_inputs, true))
          goto fail;
       uint64_t outputs = nir->info.outputs_written;
@@ -2009,8 +2082,10 @@ agx_apple9_compile_geometry(struct agx_device *dev,
       compiled->gs_copy->stage = MESA_SHADER_GEOMETRY;
       agx_apple9_install_vertex_stage(dev, compiled->gs_copy, &part, &mapping);
    }
-   if (compiled)
+   if (compiled) {
       compiled->so = so;
+      compiled->apple9_image_count = image_count;
+   }
    goto cleanup;
 
 fail_compiled:
@@ -2514,13 +2589,15 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
                     union asahi_shader_key *key_)
 {
    if (agx_apple9_direct_render_enabled(dev) &&
-       (so->type == MESA_SHADER_GEOMETRY ||
-        (so->type == MESA_SHADER_VERTEX && !key_->vs.hw)))
+       (so->type == MESA_SHADER_GEOMETRY || so->type == MESA_SHADER_TESS_CTRL ||
+        ((so->type == MESA_SHADER_VERTEX || so->type == MESA_SHADER_TESS_EVAL) &&
+         !key_->vs.hw)))
       return agx_apple9_compile_geometry(dev, so, &key_->vs);
 
    bool apple9_render =
       agx_apple9_direct_render_enabled(dev) &&
-      (so->type == MESA_SHADER_VERTEX || so->type == MESA_SHADER_FRAGMENT);
+      (so->type == MESA_SHADER_VERTEX || so->type == MESA_SHADER_FRAGMENT ||
+       so->type == MESA_SHADER_TESS_EVAL);
    if (apple9_render) {
       struct blob_reader bootstrap_reader;
       blob_reader_init(&bootstrap_reader, so->early_serialized_nir.data,
@@ -2731,6 +2808,16 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       nir_shader *apple9_nir =
          nir_deserialize(NULL, &agx_nir_options, &apple9_reader);
       bool fragment = so->type == MESA_SHADER_FRAGMENT;
+      if (so->type == MESA_SHADER_TESS_EVAL) {
+         /* The evaluation shader runs as the hardware vertex program over the
+          * tessellated domain, indexed by the tessellator's index buffer. */
+         agx_apple9_lower_compact_indirects(apple9_nir);
+         NIR_PASS(_, apple9_nir, nir_lower_io, nir_var_shader_in,
+                  glsl_type_size, nir_lower_io_lower_64bit_to_32);
+         NIR_PASS(_, apple9_nir, poly_nir_lower_tes, true);
+         nir_shader_gather_info(apple9_nir,
+                                nir_shader_get_entrypoint(apple9_nir));
+      }
       agx_apple9_default_position(apple9_nir);
       if (!fragment && key_->vs.apple9_no_effects) {
          NIR_PASS(_, apple9_nir, nir_shader_intrinsics_pass,
@@ -2981,7 +3068,8 @@ agx_get_shader_variant(struct agx_screen *screen, struct pipe_context *pctx,
    bool apple9_render =
       agx_apple9_direct_render_enabled(&screen->dev) &&
       (so->type == MESA_SHADER_VERTEX || so->type == MESA_SHADER_FRAGMENT ||
-       so->type == MESA_SHADER_GEOMETRY);
+       so->type == MESA_SHADER_GEOMETRY || so->type == MESA_SHADER_TESS_CTRL ||
+       so->type == MESA_SHADER_TESS_EVAL);
    bool apple9_bounded = apple9_compute || apple9_render;
    struct agx_compiled_shader *compiled =
       apple9_bounded ? NULL : agx_disk_cache_retrieve(screen, so, key);
@@ -3005,7 +3093,8 @@ agx_get_shader_variant(struct agx_screen *screen, struct pipe_context *pctx,
       memcpy(cloned_key, key, sizeof(struct asahi_fs_shader_key));
    } else if (so->type == MESA_SHADER_VERTEX ||
               so->type == MESA_SHADER_TESS_EVAL ||
-              (so->type == MESA_SHADER_GEOMETRY && apple9_render)) {
+              ((so->type == MESA_SHADER_GEOMETRY ||
+                so->type == MESA_SHADER_TESS_CTRL) && apple9_render)) {
       memcpy(cloned_key, key, sizeof(struct asahi_vs_shader_key));
    } else if (so->type == MESA_SHADER_COMPUTE) {
       memcpy(cloned_key, key, sizeof(struct asahi_cs_shader_key));
@@ -3255,7 +3344,8 @@ agx_create_shader_state(struct pipe_context *pctx,
 
    if (nir->info.stage == MESA_SHADER_VERTEX ||
        nir->info.stage == MESA_SHADER_TESS_EVAL ||
-       (nir->info.stage == MESA_SHADER_GEOMETRY &&
+       ((nir->info.stage == MESA_SHADER_GEOMETRY ||
+         nir->info.stage == MESA_SHADER_TESS_CTRL) &&
         agx_apple9_direct_render_enabled(dev))) {
       so->variants = asahi_vs_shader_key_table_create(so);
       so->linked_shaders = agx_fast_link_key_table_create(so);
@@ -3297,7 +3387,8 @@ agx_create_shader_state(struct pipe_context *pctx,
     * shader with a default key. This could be improved but hopefully this is
     * acceptable for now.
     */
-   if ((so->type == MESA_SHADER_TESS_CTRL) ||
+   if ((so->type == MESA_SHADER_TESS_CTRL &&
+        !agx_apple9_direct_render_enabled(dev)) ||
        (so->type == MESA_SHADER_GEOMETRY &&
         !agx_apple9_direct_render_enabled(dev)) ||
        (so->type == MESA_SHADER_FRAGMENT && !so->info.uses_fbfetch &&
@@ -3620,6 +3711,18 @@ agx_apple9_varying_key(struct agx_context *ctx,
       layout->outputs_flat |= fs->info.inputs_shade_model_colors;
 }
 
+/* The API stage whose resources the rasterized vertex program uses: the
+ * geometry shader's copy program, the evaluation shader running as the
+ * hardware vertex program during a tessellated draw, or the vertex shader.
+ */
+static mesa_shader_stage
+agx_apple9_raster_stage(const struct agx_context *ctx)
+{
+   return ctx->gs ? MESA_SHADER_GEOMETRY
+          : ctx->in_tess ? MESA_SHADER_TESS_EVAL
+                         : MESA_SHADER_VERTEX;
+}
+
 static bool
 agx_update_vs(struct agx_batch *batch, unsigned index_size_B)
 {
@@ -3645,14 +3748,15 @@ agx_update_vs(struct agx_batch *batch, unsigned index_size_B)
    };
 
    if (agx_apple9_direct_render_enabled(agx_device(ctx->base.screen))) {
+      /* During a tessellated draw the evaluation shader is bound here. */
+      struct agx_stage *api =
+         &ctx->stage[ctx->in_tess ? MESA_SHADER_TESS_EVAL : MESA_SHADER_VERTEX];
       key.apple9_index_size = key.hw ? 0 : index_size_B;
       agx_apple9_varying_key(ctx, &key.apple9_inputs);
       key.apple9_inputs.draw_params_ubo =
          AGX_APPLE9_SYSVAL_UBO_BASE + AGX_SYSVAL_TABLE_PARAMS;
-      agx_apple9_sampler_key(&ctx->stage[MESA_SHADER_VERTEX],
-                             key.apple9_samplers);
-      agx_apple9_image_format_key(&ctx->stage[MESA_SHADER_VERTEX],
-                                  key.apple9_image_formats);
+      agx_apple9_sampler_key(api, key.apple9_samplers);
+      agx_apple9_image_format_key(api, key.apple9_image_formats);
       key.apple9_inputs.capture_xfb =
          ctx->apple9_xfb_capture &&
          ctx->apple9_xfb_capture == ctx->stage[MESA_SHADER_VERTEX].shader;
@@ -3728,7 +3832,7 @@ retry_apple9_inputs:
          if (key.apple9_inputs.format[i] != PIPE_FORMAT_NONE)
             input_bindings |= 1u << key.apple9_inputs.buffer[i];
       if (!compact_resources && util_bitcount(input_bindings) +
-          util_bitcount(ctx->stage[MESA_SHADER_VERTEX].cb_mask) > 4) {
+          util_bitcount(api->cb_mask) > 4) {
          compact_resources = true;
          goto retry_apple9_inputs;
       }
@@ -3804,6 +3908,16 @@ static bool
 agx_update_tcs(struct agx_context *ctx, const struct pipe_draw_info *info)
 {
    assert(info->mode == MESA_PRIM_PATCHES);
+
+   if (agx_apple9_direct_render_enabled(agx_device(ctx->base.screen))) {
+      union asahi_shader_key key = {0};
+      agx_apple9_sampler_key(&ctx->stage[MESA_SHADER_TESS_CTRL],
+                             key.vs.apple9_samplers);
+      agx_apple9_image_format_key(&ctx->stage[MESA_SHADER_TESS_CTRL],
+                                  key.vs.apple9_image_formats);
+      agx_update_shader(ctx, &ctx->tcs, MESA_SHADER_TESS_CTRL, &key);
+      return ctx->tcs != NULL;
+   }
 
    ctx->tcs = _mesa_hash_table_next_entry(
                  ctx->stage[MESA_SHADER_TESS_CTRL].shader->variants, NULL)
@@ -6240,6 +6354,16 @@ agx_needs_passthrough_gs(struct agx_context *ctx,
       return true;
    }
 
+   /* With tessellation, the fragment primitive ID is the patch ID, which the
+    * rasterizer cannot count. The geometry stage recovers it from the
+    * tessellator's output (poly_tess_params).
+    */
+   if (ctx->stage[MESA_SHADER_TESS_EVAL].shader &&
+       agx_apple9_reads_generated_primitive_id(ctx)) {
+      perf_debug_ctx(ctx, "Using passthrough GS due to tessellated primitive ID");
+      return true;
+   }
+
    /* Transform feedback is layered on geometry shaders, so if transform
     * feedback is used, we need a GS.
     */
@@ -6520,7 +6644,12 @@ agx_draw_patches(struct agx_context *ctx, const struct pipe_draw_info *info,
    agx_upload_draw_params(batch, indirect, draws, info);
    agx_upload_vbos(batch);
    agx_update_vs(batch, info->index_size);
-   agx_update_tcs(ctx, info);
+   if (!agx_update_tcs(ctx, info) || !ctx->vs) {
+      /* A shader outside the compiler was reported at compile time. */
+      if (unbind_tcs_when_done)
+         ctx->base.bind_tcs_state(&ctx->base, NULL);
+      return;
+   }
    /* XXX */
    ctx->stage[MESA_SHADER_TESS_CTRL].dirty = ~0;
    ctx->stage[MESA_SHADER_TESS_EVAL].dirty = ~0;
@@ -6937,7 +7066,7 @@ agx_apple9_validate_resources(struct agx_context *ctx)
       const struct agx_apple9_render_stage *rs = stages[i];
       struct agx_stage *stage =
          &ctx->stage[i ? MESA_SHADER_FRAGMENT :
-                     ctx->gs ? MESA_SHADER_GEOMETRY : MESA_SHADER_VERTEX];
+                     agx_apple9_raster_stage(ctx)];
       for (unsigned slot = 0; slot < rs->resource_count; ++slot) {
          unsigned binding = rs->resource_binding[slot];
          if (!(rs->resource_ssbo_mask & BITFIELD_BIT(slot)) &&
@@ -6972,7 +7101,7 @@ agx_apple9_validate_resources(struct agx_context *ctx)
       const struct agx_apple9_render_stage *rs = stages[i];
       struct agx_stage *stage =
          &ctx->stage[i ? MESA_SHADER_FRAGMENT :
-                     ctx->gs ? MESA_SHADER_GEOMETRY : MESA_SHADER_VERTEX];
+                     agx_apple9_raster_stage(ctx)];
       u_foreach_bit(binding, rs->texture_mask) {
          struct agx_sampler_view *view = stage->textures[binding];
          if (!agx_apple9_texture_view_supported(view)) {
@@ -7620,8 +7749,16 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
 #endif
 
    agx_batch_init_state(batch);
-   if (agx_apple9_direct_render_enabled(dev) && !agx_apple9_reload_color(batch))
-      return;
+   if (agx_apple9_direct_render_enabled(dev)) {
+      /* The reload is an ordinary draw of its own, even when it starts the
+       * render of a tessellated draw. */
+      bool in_tess = ctx->in_tess;
+      ctx->in_tess = false;
+      bool reloaded = agx_apple9_reload_color(batch);
+      ctx->in_tess = in_tess;
+      if (!reloaded)
+         return;
+   }
 
    /* Dirty track the reduced prim: lines vs points vs triangles. Happens before
     * agx_update_vs/agx_update_fs, which specialize based on primitive.
@@ -7886,8 +8023,8 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
 
    if (agx_apple9_direct_render_enabled(dev)) {
       /* Apple9 encodes all GLES primitive modes and index widths directly,
-       * including restart and GPU-provided draw arguments. */
-      assert(!ctx->in_tess);
+       * including restart and GPU-provided draw arguments. Tessellated draws
+       * arrive here from agx_draw_patches with the evaluation shader bound. */
       assert(!info->index_size || info->index_size == 1 ||
              info->index_size == 2 || info->index_size == 4);
       assert(apple9_native_prims & BITFIELD_BIT(info->mode));
@@ -8003,7 +8140,12 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
       /* The cull packet also owns near/far clipping and depth clamping. */
       memcpy(&record->raster_control, ctx->rast->cull,
              sizeof(record->raster_control));
-      record->raster_control |= ctx->rast->base.front_ccw ? 1u << 16 : 0;
+      bool front_ccw = ctx->rast->base.front_ccw;
+      /* The tessellator emits clockwise triangles for a ccw domain, as for
+       * the legacy cull packet. */
+      if (ctx->in_tess && !ctx->gs)
+         front_ccw ^= !ctx->stage[MESA_SHADER_TESS_EVAL].shader->tess.ccw;
+      record->raster_control |= front_ccw ? 1u << 16 : 0;
       record->object_type = reduced_prim == MESA_PRIM_POINTS ? agx_point_object_type(ctx->rast)
                            : reduced_prim == MESA_PRIM_LINES ? AGX_OBJECT_TYPE_LINE
                                                             : AGX_OBJECT_TYPE_TRIANGLE;
@@ -8023,7 +8165,7 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
             stage ? pipeline.fragment : pipeline.vertex;
          mesa_shader_stage shader =
             stage ? MESA_SHADER_FRAGMENT :
-            ctx->gs ? MESA_SHADER_GEOMETRY : MESA_SHADER_VERTEX;
+            agx_apple9_raster_stage(ctx);
          record->buffer_count[stage] = rs->resource_count;
          for (unsigned slot = 0; slot < rs->resource_count; ++slot) {
             unsigned binding = rs->resource_binding[slot];
@@ -8111,7 +8253,7 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
             stage ? pipeline.fragment : pipeline.vertex;
          struct agx_stage *shader = &ctx->stage[
             stage ? MESA_SHADER_FRAGMENT :
-            ctx->gs ? MESA_SHADER_GEOMETRY : MESA_SHADER_VERTEX];
+            agx_apple9_raster_stage(ctx)];
          agx_apple9_upload_textures(batch, shader, rs, stage != 0,
                                     &record->texture_table[stage],
                                     &record->sampler_table[stage]);
@@ -8296,13 +8438,26 @@ agx_apple9_launch_prerast(struct agx_batch *batch, struct agx_grid grid,
          continue;
       }
       if (profile->resource_kind[i] == AGX_APPLE9_COMPUTE_RESOURCE_SSBO) {
-         assert(binding < PIPE_MAX_SHADER_BUFFERS && stage->ssbo[binding].buffer);
+         if (!agx_apple9_ssbo_bound(stage, binding)) {
+            addresses[i] = AGX_SCRATCH_PAGE_ADDRESS;
+            continue;
+         }
          resource = agx_resource(stage->ssbo[binding].buffer);
          offset = stage->ssbo[binding].buffer_offset;
          size = stage->ssbo[binding].buffer_size;
+         /* glMemoryBarrier flushes batches with such writes. */
+         if (profile->resource_write_mask & BITFIELD_BIT(i))
+            batch->incoherent_writes = true;
       } else if (binding == AGX_APPLE9_GRAPHICS_SYSVAL_BINDING) {
          addresses[i] = agx_apple9_upload_graphics_sysvals(
             batch, stage, &cs->apple9_compute_textures, false);
+         continue;
+      } else if (binding == AGX_APPLE9_SSBO_SIZE_BINDING) {
+         addresses[i] = agx_apple9_upload_ssbo_sizes(batch, stage);
+         continue;
+      } else if (binding == AGX_APPLE9_IMAGE_TABLE_BINDING) {
+         addresses[i] = agx_apple9_upload_images(batch, cs->stage, cs);
+         batch->incoherent_writes = true;
          continue;
       } else if (binding >= AGX_APPLE9_SYSVAL_UBO_BASE &&
                  binding < AGX_APPLE9_SYSVAL_UBO_BASE + AGX_NUM_SYSVAL_TABLES) {

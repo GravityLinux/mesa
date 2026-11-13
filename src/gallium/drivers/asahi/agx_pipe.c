@@ -2315,9 +2315,11 @@ agx_init_shader_caps(struct pipe_screen *pscreen)
 
       /* The Apple9 graphics compiler currently consumes FP32 shader I/O
        * and texture results. Keep lowp/mediump GLSL at FP32 instead of
-       * advertising a half-precision lowering path it cannot compile. */
+       * advertising a half-precision lowering path it cannot compile.
+       * Evaluation shaders run as the hardware vertex program. */
       bool apple9_graphics = agx_apple9_direct_render_enabled(agx_device(pscreen)) &&
-                             (i == MESA_SHADER_VERTEX || i == MESA_SHADER_FRAGMENT);
+                             (i == MESA_SHADER_VERTEX || i == MESA_SHADER_FRAGMENT ||
+                              i == MESA_SHADER_TESS_EVAL);
       caps->fp16 = caps->glsl_16bit_consts = caps->fp16_derivatives =
          !is_no16 && !apple9_graphics;
       /* GLSL compiler is broken. Flip this on when Panfrost does. */
@@ -2348,32 +2350,29 @@ agx_init_shader_caps(struct pipe_screen *pscreen)
          caps->max_outputs = i == MESA_SHADER_FRAGMENT
                                 ? 1 : AGX_APPLE9_MAX_VARYING_COMPONENTS / 4;
          caps->max_inputs = i == MESA_SHADER_FRAGMENT
-                               ? AGX_APPLE9_MAX_VARYING_COMPONENTS / 4 : 16;
+                               ? AGX_APPLE9_MAX_VARYING_COMPONENTS / 4
+                            : i == MESA_SHADER_VERTEX ? 16 : caps->max_inputs;
          caps->max_texture_samplers = caps->max_sampler_views = 16;
          /* Transform feedback capture binds its own buffers from
           * AGX_APPLE9_XFB_PARAMS on; keep API buffers below them. */
-         if (i == MESA_SHADER_VERTEX)
+         if (i == MESA_SHADER_VERTEX || i == MESA_SHADER_TESS_EVAL)
             caps->max_shader_buffers = AGX_APPLE9_XFB_PARAMS;
       }
 
-      /* Geometry shaders run through the emulated compute path, but storage
-       * resources there are not wired up on Apple9 (atomic counters return
-       * wrong values). Report none, as for vertex and fragment shaders. */
+      /* The emulated geometry path runs the shader's side effects once per
+       * output vertex (poly's rasterization program), so report no storage
+       * resources for geometry shaders. Tessellation stages run once per
+       * API invocation. */
       if (agx_apple9_direct_render_enabled(agx_device(pscreen)) &&
           i == MESA_SHADER_GEOMETRY)
          caps->max_shader_buffers = caps->max_shader_images = 0;
    }
 
-   /* Apple9 has no native launch path for the tessellation control stage or
-    * the libagx tessellator yet. Report no tessellation stages so
-    * ARB_tessellation_shader stays hidden instead of aborting at draw time.
+   /* Apple9 tessellation is emulated as on Honeykrisp: the vertex and
+    * control shaders run as compute, the libagx tessellator generates the
+    * domain, and the evaluation shader is the hardware vertex program
+    * (agx_draw_patches).
     */
-   if (agx_apple9_direct_render_enabled(agx_device(pscreen))) {
-      memset((void *)&pscreen->shader_caps[MESA_SHADER_TESS_CTRL], 0,
-             sizeof(pscreen->shader_caps[MESA_SHADER_TESS_CTRL]));
-      memset((void *)&pscreen->shader_caps[MESA_SHADER_TESS_EVAL], 0,
-             sizeof(pscreen->shader_caps[MESA_SHADER_TESS_EVAL]));
-   }
 }
 
 static void
