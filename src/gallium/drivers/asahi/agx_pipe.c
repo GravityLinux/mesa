@@ -2690,8 +2690,11 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
       /* Seamless filtering is per sampler in the native descriptor and the
        * compiler key, so it can come from texture state too. */
       caps->seamless_cube_map_per_texture = true;
+      /* Format-less stores take the bound view's format from the shader
+       * key (agx_apple9_resolve_formatless_store); format-less loads are
+       * not implemented. */
       caps->image_load_formatted = false;
-      caps->image_store_formatted = false;
+      caps->image_store_formatted = true;
       /* Gathers use the native gather sample, including constant offsets. */
       caps->max_texture_gather_components = 4;
       caps->max_varyings = AGX_APPLE9_MAX_VARYING_COMPONENTS / 4;
