@@ -2221,7 +2221,7 @@ agx_apple9_lower_image_barrier(nir_builder *b, nir_intrinsic_instr *intr,
 }
 
 static bool
-agx_apple9_lower_compute_images(nir_shader *nir, unsigned count)
+agx_apple9_lower_images(nir_shader *nir, unsigned count)
 {
    struct agx_apple9_image_lowering lower = {.count = count};
    bool progress = false;
@@ -2233,10 +2233,10 @@ agx_apple9_lower_compute_images(nir_shader *nir, unsigned count)
 }
 
 static uint64_t
-agx_apple9_upload_compute_images(struct agx_batch *batch,
-                                 const struct agx_compiled_shader *cs)
+agx_apple9_upload_images(struct agx_batch *batch, mesa_shader_stage shader,
+                         const struct agx_compiled_shader *cs)
 {
-   struct agx_stage *stage = &batch->ctx->stage[MESA_SHADER_COMPUTE];
+   struct agx_stage *stage = &batch->ctx->stage[shader];
    unsigned count = MAX2(cs->apple9_image_count, 1);
    struct agx_ptr table = agx_pool_alloc_aligned(
       &batch->pool,
@@ -2265,8 +2265,9 @@ agx_apple9_upload_compute_images(struct agx_batch *batch,
 
       struct pipe_image_view *view = &stage->images[i];
       struct agx_resource *rsrc = agx_resource(view->resource);
-      agx_batch_track_image(batch, view, MESA_SHADER_COMPUTE);
-      if (view->shader_access & PIPE_IMAGE_ACCESS_WRITE)
+      agx_batch_track_image(batch, view, shader);
+      if (shader == MESA_SHADER_COMPUTE &&
+          (view->shader_access & PIPE_IMAGE_ACCESS_WRITE))
          agx_apple9_add_compute_attachment(batch, rsrc);
 
       if (rsrc->base.target == PIPE_BUFFER) {
@@ -2345,7 +2346,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       compiled->apple9_image_count =
          MAX2(BITSET_LAST_BIT(early->info.images_used), early->info.num_images);
       if (compiled->apple9_image_count)
-         agx_apple9_lower_compute_images(early, compiled->apple9_image_count);
+         agx_apple9_lower_images(early, compiled->apple9_image_count);
 
       bool compiled_ok = agx_compile_apple9_tiny(
          early, &compiled->b, &compiled->apple9_compute_profile, &reason);
@@ -2503,6 +2504,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
 
    struct agx_shader_part apple9_stage = {0};
    struct agx_apple9_texture_mapping apple9_texture_mapping = {0};
+   unsigned apple9_image_count = 0;
    if (apple9_render) {
       const char *reason = NULL;
       /* Compile the API body and its metadata through Apple9's semantic
@@ -2516,6 +2518,10 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       agx_apple9_default_position(apple9_nir);
       NIR_PASS(_, apple9_nir, nir_shader_intrinsics_pass,
                agx_apple9_lower_ssbo_size, nir_metadata_control_flow, NULL);
+      apple9_image_count = MAX2(BITSET_LAST_BIT(apple9_nir->info.images_used),
+                                apple9_nir->info.num_images);
+      if (apple9_image_count)
+         agx_apple9_lower_images(apple9_nir, apple9_image_count);
       if (fragment) {
          agx_apple9_lower_fs_layer_input(apple9_nir);
          if (key_->fs.apple9_flatshade) {
@@ -2585,6 +2591,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       compiled = CALLOC_STRUCT(agx_compiled_shader);
       compiled->stage = so->type;
       compiled->b.info = apple9_stage.info;
+      compiled->apple9_image_count = apple9_image_count;
       BITSET_COPY(compiled->attrib_components_read, attrib_components_read);
    } else {
       compiled = agx_compile_nir(
@@ -4200,7 +4207,12 @@ agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
 
       struct agx_pbe_packed *pbe = (struct agx_pbe_packed *)(texture + 1);
 
-      if (!(ctx->stage[stage].image_mask & BITFIELD_BIT(i))) {
+      /* Apple9 render stages access images through their own table
+       * (agx_apple9_upload_images); legacy descriptors cannot hold Apple9
+       * buffer addresses. */
+      if (!(ctx->stage[stage].image_mask & BITFIELD_BIT(i)) ||
+          (stage != MESA_SHADER_COMPUTE &&
+           agx_apple9_direct_render_enabled(agx_device(ctx->base.screen)))) {
          agx_set_null_texture(texture);
          agx_set_null_pbe(pbe);
          continue;
@@ -6680,6 +6692,7 @@ agx_apple9_validate_resources(struct agx_context *ctx)
          if (!(rs->resource_ssbo_mask & BITFIELD_BIT(slot)) &&
              (binding == AGX_APPLE9_GRAPHICS_SYSVAL_BINDING ||
               binding == AGX_APPLE9_SSBO_SIZE_BINDING ||
+              binding == AGX_APPLE9_IMAGE_TABLE_BINDING ||
               (binding >= AGX_APPLE9_SYSVAL_UBO_BASE &&
                binding < AGX_APPLE9_SYSVAL_UBO_BASE + AGX_NUM_SYSVAL_TABLES)))
             continue;
@@ -7795,6 +7808,12 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
             } else if (binding == AGX_APPLE9_SSBO_SIZE_BINDING) {
                address =
                   agx_apple9_upload_ssbo_sizes(batch, &ctx->stage[shader]);
+            } else if (binding == AGX_APPLE9_IMAGE_TABLE_BINDING) {
+               /* Render stages belong to their compiled shaders. */
+               address = agx_apple9_upload_images(
+                  batch, shader,
+                  container_of(rs, struct agx_compiled_shader,
+                               apple9_render_stage));
             } else if (binding >= AGX_APPLE9_SYSVAL_UBO_BASE &&
                        binding < AGX_APPLE9_SYSVAL_UBO_BASE + AGX_NUM_SYSVAL_TABLES) {
                address = batch->uniforms.tables[binding - AGX_APPLE9_SYSVAL_UBO_BASE];
@@ -8394,7 +8413,8 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
                continue;
             }
             if (binding == AGX_APPLE9_IMAGE_TABLE_BINDING) {
-               resource_addresses[i] = agx_apple9_upload_compute_images(batch, cs);
+               resource_addresses[i] =
+                  agx_apple9_upload_images(batch, MESA_SHADER_COMPUTE, cs);
                continue;
             }
             if (binding >= PIPE_MAX_CONSTANT_BUFFERS ||
