@@ -2662,8 +2662,6 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
       caps->device_reset_status_query = true;
       /* External textures are sampled as 2D views. */
       caps->texture_external = true;
-      /* Cull distances still need primitive rejection lowering. */
-      caps->cull_distance = false;
       /* One RGBA8 tile-output slot per active color attachment. */
       caps->max_render_targets = 8;
       /* Advanced equations are lowered with the attachment blend state.
