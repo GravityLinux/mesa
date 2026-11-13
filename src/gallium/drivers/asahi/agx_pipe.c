@@ -2646,8 +2646,10 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
       /* Public contexts expose the current graphics frontend contract.
        * Internal NIR compute remains available for resource copies. */
       caps->glsl_feature_level = caps->glsl_feature_level_compatibility = 330;
-      /* ES 3.0 shader support is independent of the desktop GLSL level. */
-      caps->essl_feature_level = 300;
+      /* ES shader support is independent of the desktop GLSL level. ES 3.1
+       * needs storage resources only in compute shaders, which the Apple9
+       * compute backend provides; graphics stages report none. */
+      caps->essl_feature_level = 310;
       /* Point size is carried by the vertex output interface. */
       caps->point_size_fixed = PIPE_POINT_SIZE_LOWER_ALWAYS;
       caps->robust_buffer_access_behavior = false;
