@@ -1543,8 +1543,9 @@ check_extra(struct gl_context *ctx, const char *func, const struct value_desc *d
          break;
       case EXTRA_EXT_ATOMICS_GS:
          api_check = GL_TRUE;
-         if (ctx->Extensions.ARB_shader_atomic_counters &&
-            _mesa_has_geometry_shaders(ctx))
+         if ((ctx->Extensions.ARB_shader_atomic_counters ||
+              _mesa_is_gles31(ctx)) &&
+             _mesa_has_geometry_shaders(ctx))
             api_found = GL_TRUE;
          break;
       case EXTRA_EXT_SHADER_IMAGE_GS:
@@ -1566,8 +1567,9 @@ check_extra(struct gl_context *ctx, const char *func, const struct value_desc *d
          break;
       case EXTRA_EXT_SSBO_GS:
          api_check = GL_TRUE;
-         if (ctx->Extensions.ARB_shader_storage_buffer_object &&
-            _mesa_has_geometry_shaders(ctx))
+         if ((ctx->Extensions.ARB_shader_storage_buffer_object ||
+              _mesa_is_gles31(ctx)) &&
+             _mesa_has_geometry_shaders(ctx))
             api_found = GL_TRUE;
          break;
       case EXTRA_EXT_FB_NO_ATTACH_GS:

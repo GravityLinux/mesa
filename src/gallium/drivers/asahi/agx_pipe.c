@@ -2352,6 +2352,13 @@ agx_init_shader_caps(struct pipe_screen *pscreen)
          caps->max_shader_buffers = caps->max_shader_images = 0;
          caps->max_texture_samplers = caps->max_sampler_views = 16;
       }
+
+      /* Geometry shaders run through the emulated compute path, but storage
+       * resources there are not wired up on Apple9 (atomic counters return
+       * wrong values). Report none, as for vertex and fragment shaders. */
+      if (agx_apple9_direct_render_enabled(agx_device(pscreen)) &&
+          i == MESA_SHADER_GEOMETRY)
+         caps->max_shader_buffers = caps->max_shader_images = 0;
    }
 
    /* Apple9 has no native launch path for the tessellation control stage or
@@ -2639,8 +2646,10 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
       /* Public contexts expose the current graphics frontend contract.
        * Internal NIR compute remains available for resource copies. */
       caps->glsl_feature_level = caps->glsl_feature_level_compatibility = 330;
-      /* ES 3.0 shader support is independent of the desktop GLSL level. */
-      caps->essl_feature_level = 300;
+      /* ES shader support is independent of the desktop GLSL level. ES 3.1
+       * needs storage resources only in compute shaders, which the Apple9
+       * compute backend provides; graphics stages report none. */
+      caps->essl_feature_level = 310;
       /* Point size is carried by the vertex output interface. */
       caps->point_size_fixed = PIPE_POINT_SIZE_LOWER_ALWAYS;
       caps->robust_buffer_access_behavior = false;
@@ -2662,7 +2671,8 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
       /* The fragment compiler exports stencil with the depth publication,
        * as Honeykrisp's shaderStencilExport does. */
       caps->shader_stencil_export = true;
-      caps->framebuffer_no_attachment = false;
+      /* Zero-attachment renders take the empty-tile path (README.apple9-es3.md). */
+      caps->framebuffer_no_attachment = true;
       /* Native sampler address mode 5 (agx_apple9_pack_sampler). */
       caps->texture_mirror_clamp_to_edge = true;
       caps->texture_buffer_objects = true;
@@ -2746,13 +2756,19 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
       if ((usage & PIPE_BIND_RENDER_TARGET) &&
           agx_apple9_block_export_format(agx_apple9_color_tile_format(format)) > 15)
          return false;
+      /* Stencil-only views sample the separate S8 resource
+       * (agx_create_sampler_view), so check the format actually sampled. */
+      enum pipe_format view_format =
+         (format == PIPE_FORMAT_X24S8_UINT || format == PIPE_FORMAT_X32_S8X24_UINT)
+            ? PIPE_FORMAT_S8_UINT
+            : format;
       if ((usage & PIPE_BIND_SAMPLER_VIEW) &&
           ((target != PIPE_BUFFER && target != PIPE_TEXTURE_2D && target != PIPE_TEXTURE_1D &&
             target != PIPE_TEXTURE_1D_ARRAY && target != PIPE_TEXTURE_RECT &&
             target != PIPE_TEXTURE_3D && target != PIPE_TEXTURE_CUBE &&
             target != PIPE_TEXTURE_CUBE_ARRAY &&
             target != PIPE_TEXTURE_2D_ARRAY) ||
-           !(agx_apple9_texture_format_supported(format) ||
+           !(agx_apple9_texture_format_supported(view_format) ||
              (target == PIPE_BUFFER && agx_apple9_texture_is_rgb32(format)))))
          return false;
    }
