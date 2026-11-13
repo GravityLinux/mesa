@@ -1684,9 +1684,31 @@ agx_apple9_fs_early_tests(nir_shader *nir)
  * TODO: A NEVER depth test still skips the shader (Honeykrisp tests LESS
  * against an out-of-range export instead).
  */
+static bool
+agx_apple9_helper_to_load(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_is_helper_invocation)
+      return false;
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def_replace(&intr->def, nir_load_helper_invocation(b, 1));
+   return true;
+}
+
 static void
 agx_apple9_fs_side_effects(nir_shader *nir)
 {
+   /* Per-sample shading runs every sample of the pixel in a loop, covered or
+    * not, so predicate memory writes on the iteration's coverage as
+    * agx_nir_lower_frag_sidefx does. Under sample shading the compiler lowers
+    * load_helper_invocation to exactly that test; Apple9 has no
+    * is_helper_invocation.
+    */
+   if (nir->info.writes_memory && nir->info.fs.uses_sample_shading) {
+      NIR_PASS(_, nir, nir_lower_helper_writes, true);
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass, agx_apple9_helper_to_load,
+               nir_metadata_control_flow, NULL);
+   }
+
    if (!nir->info.writes_memory || nir->info.fs.early_fragment_tests ||
        (nir->info.outputs_written & (BITFIELD64_BIT(FRAG_RESULT_DEPTH) |
                                      BITFIELD64_BIT(FRAG_RESULT_STENCIL))))
