@@ -1542,6 +1542,46 @@ agx_build_meta_shader_internal(struct agx_context *ctx,
                                size_t data_size, bool prolog, bool epilog,
                                unsigned cf_base, bool internal_kernel);
 
+/* The Apple9 rasterizer delivers the layer to the fragment layer system value
+ * (as in Honeykrisp's hk_apple9_lower_layer_viewport_fs); it is not a varying.
+ * The fragment NIR here still uses variables, so handle derefs too. */
+static bool
+agx_apple9_lower_fs_layer(nir_builder *b, nir_intrinsic_instr *intr,
+                          UNUSED void *data)
+{
+   if (intr->intrinsic == nir_intrinsic_load_deref) {
+      nir_variable *var = nir_intrinsic_get_var(intr, 0);
+      if (!var || var->data.mode != nir_var_shader_in ||
+          var->data.location != VARYING_SLOT_LAYER)
+         return false;
+   } else if (intr->intrinsic == nir_intrinsic_load_input) {
+      if (nir_intrinsic_io_semantics(intr).location != VARYING_SLOT_LAYER)
+         return false;
+   } else {
+      return false;
+   }
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *layer = nir_iand_imm(b, nir_load_layer_id(b), 0xffff);
+   nir_def_replace(&intr->def, nir_u2uN(b, layer, intr->def.bit_size));
+   return true;
+}
+
+static void
+agx_apple9_lower_fs_layer_input(nir_shader *nir)
+{
+   if (!(nir->info.inputs_read & VARYING_BIT_LAYER))
+      return;
+
+   NIR_PASS(_, nir, nir_shader_intrinsics_pass, agx_apple9_lower_fs_layer,
+            nir_metadata_control_flow, NULL);
+   NIR_PASS(_, nir, nir_opt_dce);
+   NIR_PASS(_, nir, nir_remove_dead_derefs);
+   nir_remove_dead_variables_options opts = {0};
+   NIR_PASS(_, nir, nir_remove_dead_variables, nir_var_shader_in, &opts);
+   nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+}
+
 static bool
 agx_apple9_bounded_render_signature(const nir_shader *nir, const char **reason)
 {
@@ -1575,7 +1615,8 @@ agx_apple9_bounded_render_signature(const nir_shader *nir, const char **reason)
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       uint64_t colors = nir->info.outputs_written;
       return !(nir->info.inputs_read & ~(user | BITFIELD64_BIT(VARYING_SLOT_POS) |
-                                        BITFIELD64_BIT(VARYING_SLOT_PNTC))) &&
+                                        BITFIELD64_BIT(VARYING_SLOT_PNTC) |
+                                        VARYING_BIT_LAYER)) &&
              !(colors & ~((BITFIELD64_MASK(8) << FRAG_RESULT_DATA0) |
                           BITFIELD64_BIT(FRAG_RESULT_COLOR) |
                           BITFIELD64_BIT(FRAG_RESULT_DEPTH) |
@@ -2415,6 +2456,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
          nir_deserialize(NULL, &agx_nir_options, &apple9_reader);
       bool fragment = so->type == MESA_SHADER_FRAGMENT;
       if (fragment) {
+         agx_apple9_lower_fs_layer_input(apple9_nir);
          if (key_->fs.apple9_flatshade) {
             if (apple9_nir->info.io_lowered) {
                NIR_PASS(_, apple9_nir, nir_lower_flatshade);
