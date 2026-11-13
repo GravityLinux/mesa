@@ -2349,8 +2349,11 @@ agx_init_shader_caps(struct pipe_screen *pscreen)
                                 ? 1 : AGX_APPLE9_MAX_VARYING_COMPONENTS / 4;
          caps->max_inputs = i == MESA_SHADER_FRAGMENT
                                ? AGX_APPLE9_MAX_VARYING_COMPONENTS / 4 : 16;
-         caps->max_shader_buffers = caps->max_shader_images = 0;
          caps->max_texture_samplers = caps->max_sampler_views = 16;
+         /* Transform feedback capture binds its own buffers from
+          * AGX_APPLE9_XFB_PARAMS on; keep API buffers below them. */
+         if (i == MESA_SHADER_VERTEX)
+            caps->max_shader_buffers = AGX_APPLE9_XFB_PARAMS;
       }
 
       /* Geometry shaders run through the emulated compute path, but storage
