@@ -1938,6 +1938,136 @@ agx_apple9_lower_sw_vertex_zero_base(nir_builder *b, nir_intrinsic_instr *intr,
    return true;
 }
 
+/* Apple9 binds every buffer and texture through a constant resource slot.
+ * GLSL 4.00 allows dynamically uniform indices into UBO and sampler arrays
+ * (and GLSL 4.30 into SSBO arrays); select the binding with a binary tree of
+ * branches over the bindings the shader can address, each leaf using a
+ * constant binding.
+ */
+struct agx_apple9_binding_ladder {
+   nir_instr *instr;
+   /* Intrinsic source holding the binding, or -1 for texture offsets. */
+   int src;
+   nir_def *index;
+   /* Texture/sampler base for texture offsets. */
+   unsigned texture_base, sampler_base;
+   bool sampler_offset;
+};
+
+static nir_def *
+agx_apple9_binding_leaf(nir_builder *b,
+                        const struct agx_apple9_binding_ladder *l, unsigned i)
+{
+   nir_def *binding = l->src >= 0
+      ? nir_imm_intN_t(b, i,
+                       nir_instr_as_intrinsic(l->instr)->src[l->src].ssa->bit_size)
+      : NULL;
+   nir_instr *clone = nir_instr_clone(b->shader, l->instr);
+   nir_builder_instr_insert(b, clone);
+   if (clone->type == nir_instr_type_tex) {
+      nir_tex_instr *tex = nir_instr_as_tex(clone);
+      int idx = nir_tex_instr_src_index(tex, nir_tex_src_texture_offset);
+      nir_tex_instr_remove_src(tex, idx);
+      idx = nir_tex_instr_src_index(tex, nir_tex_src_sampler_offset);
+      if (idx >= 0)
+         nir_tex_instr_remove_src(tex, idx);
+      tex->texture_index = l->texture_base + i;
+      if (l->sampler_offset)
+         tex->sampler_index = l->sampler_base + i;
+      return &tex->def;
+   }
+   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(clone);
+   nir_src_rewrite(&intr->src[l->src], binding);
+   return nir_intrinsic_infos[intr->intrinsic].has_dest ? &intr->def : NULL;
+}
+
+static nir_def *
+agx_apple9_binding_tree(nir_builder *b,
+                        const struct agx_apple9_binding_ladder *l,
+                        unsigned lo, unsigned hi)
+{
+   if (hi - lo == 1)
+      return agx_apple9_binding_leaf(b, l, lo);
+   unsigned mid = lo + (hi - lo) / 2;
+   nir_push_if(b, nir_ult_imm(b, l->index, mid));
+   nir_def *low = agx_apple9_binding_tree(b, l, lo, mid);
+   nir_push_else(b, NULL);
+   nir_def *high = agx_apple9_binding_tree(b, l, mid, hi);
+   nir_pop_if(b, NULL);
+   return low ? nir_if_phi(b, low, high) : NULL;
+}
+
+static bool
+agx_apple9_lower_dynamic_binding(nir_builder *b, nir_instr *instr,
+                                 UNUSED void *data)
+{
+   struct agx_apple9_binding_ladder l = {.instr = instr, .src = -1};
+   unsigned count = 0;
+   nir_def *old = NULL;
+   if (instr->type == nir_instr_type_tex) {
+      nir_tex_instr *tex = nir_instr_as_tex(instr);
+      int t = nir_tex_instr_src_index(tex, nir_tex_src_texture_offset);
+      int s = nir_tex_instr_src_index(tex, nir_tex_src_sampler_offset);
+      if (t < 0)
+         return false;
+      /* Combined GL samplers index both with the same value. */
+      if (s >= 0 && tex->src[s].src.ssa != tex->src[t].src.ssa)
+         return false;
+      unsigned last = BITSET_LAST_BIT(b->shader->info.textures_used);
+      if (last <= tex->texture_index)
+         return false;
+      l.index = tex->src[t].src.ssa;
+      l.texture_base = tex->texture_index;
+      l.sampler_base = tex->sampler_index;
+      l.sampler_offset = s >= 0;
+      count = last - tex->texture_index;
+      old = &tex->def;
+   } else if (instr->type == nir_instr_type_intrinsic) {
+      nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+      switch (intr->intrinsic) {
+      case nir_intrinsic_load_ubo:
+         count = b->shader->info.num_ubos;
+         l.src = 0;
+         break;
+      case nir_intrinsic_load_ssbo:
+      case nir_intrinsic_ssbo_atomic:
+      case nir_intrinsic_ssbo_atomic_swap:
+      case nir_intrinsic_get_ssbo_size:
+         count = b->shader->info.num_ssbos;
+         l.src = 0;
+         break;
+      case nir_intrinsic_store_ssbo:
+         count = b->shader->info.num_ssbos;
+         l.src = 1;
+         break;
+      default:
+         return false;
+      }
+      if (nir_src_is_const(intr->src[l.src]) || !count)
+         return false;
+      l.index = intr->src[l.src].ssa;
+      old = nir_intrinsic_infos[intr->intrinsic].has_dest ? &intr->def : NULL;
+   } else {
+      return false;
+   }
+   b->cursor = nir_before_instr(instr);
+   nir_def *index = l.index;
+   if (index->bit_size != 32)
+      l.index = nir_u2u32(b, index);
+   nir_def *value = agx_apple9_binding_tree(b, &l, 0, count);
+   if (old)
+      nir_def_rewrite_uses(old, value);
+   nir_instr_remove(instr);
+   return true;
+}
+
+static void
+agx_apple9_lower_dynamic_bindings(nir_shader *nir)
+{
+   NIR_PASS(_, nir, nir_shader_instructions_pass,
+            agx_apple9_lower_dynamic_binding, nir_metadata_none, NULL);
+}
+
 /* Tessellation levels and clip/cull distances are compact arrays: after IO
  * lowering an element index is a component, which the patch buffer addressing
  * (poly) and the vertex compiler expect to be constant. Dynamically indexed
@@ -1979,6 +2109,7 @@ agx_apple9_compile_geometry(struct agx_device *dev,
    blob_reader_init(&reader, so->early_serialized_nir.data,
                     so->early_serialized_nir.size);
    nir_shader *nir = nir_deserialize(NULL, &agx_nir_options, &reader);
+   agx_apple9_lower_dynamic_bindings(nir);
    agx_apple9_lower_compact_indirects(nir);
    /* Control shader outputs are shared by the patch's invocations. */
    if (so->type != MESA_SHADER_TESS_CTRL)
@@ -2627,6 +2758,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
                        so->early_serialized_nir.size);
       nir_shader *early =
          nir_deserialize(NULL, &agx_nir_options, &early_reader);
+      agx_apple9_lower_dynamic_bindings(early);
       struct agx_compiled_shader *compiled = CALLOC_STRUCT(agx_compiled_shader);
       const char *reason = NULL;
       compiled->apple9_compute_textures.runtime_samplers =
@@ -2807,6 +2939,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
                        so->early_serialized_nir.size);
       nir_shader *apple9_nir =
          nir_deserialize(NULL, &agx_nir_options, &apple9_reader);
+      agx_apple9_lower_dynamic_bindings(apple9_nir);
       bool fragment = so->type == MESA_SHADER_FRAGMENT;
       if (so->type == MESA_SHADER_TESS_EVAL) {
          /* The evaluation shader runs as the hardware vertex program over the
