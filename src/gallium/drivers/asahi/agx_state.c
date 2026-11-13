@@ -2248,8 +2248,21 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       if (compiled->apple9_image_count)
          agx_apple9_lower_compute_images(early, compiled->apple9_image_count);
 
-      if (!agx_compile_apple9_tiny(
-             early, &compiled->b, &compiled->apple9_compute_profile, &reason)) {
+      bool compiled_ok = agx_compile_apple9_tiny(
+         early, &compiled->b, &compiled->apple9_compute_profile, &reason);
+      if (!compiled_ok && reason == agx_apple9_compute_without_effects) {
+         /* Nothing observable to run, as in Honeykrisp: an empty shader that
+          * agx_launch_grid skips. */
+         memset(&compiled->b, 0, sizeof(compiled->b));
+         memset(&compiled->apple9_compute_profile, 0,
+                sizeof(compiled->apple9_compute_profile));
+         compiled->b.info.stats.instrs = 1;
+         compiled->apple9_tiny = true;
+         compiled->stage = MESA_SHADER_COMPUTE;
+         compiled->so = so;
+         ralloc_free(early);
+         return compiled;
+      } else if (!compiled_ok) {
          fprintf(stderr,
                  "Apple9 compute shader is outside the bounded NIR "
                  "compiler: %s\n",
@@ -8085,6 +8098,11 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
       return;
    }
    struct agx_compiled_shader *cs = variant->data;
+
+   /* An Apple9 compute shader without observable effects compiled to
+    * nothing (see agx_compile_variant): the dispatch is a no-op. */
+   if (cs->apple9_tiny && agx_is_shader_empty(&cs->b))
+      return;
 
    if (cs->apple9_tiny && is_indirect &&
        !agx_apple9_compute_indirect_dispatch_supported(
