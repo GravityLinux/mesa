@@ -117,8 +117,9 @@ agx_set_shader_images(struct pipe_context *pctx, mesa_shader_stage shader,
     * call set_shader_images internall.
     */
    /* Apple9 accesses storage images through global memory with software
-    * texel addressing, which does not decode compression, so reads need an
-    * uncompressed layout too.
+    * texel addressing. That needs the writeable-image layout even for reads:
+    * it does not decode compression, and only writeable layouts carry the
+    * tile geometry sideband in the PBE descriptor (agx_batch_upload_pbe).
     */
    bool apple9 = agx_apple9_compute_enabled(agx_device(pctx->screen));
 
@@ -129,7 +130,7 @@ agx_set_shader_images(struct pipe_context *pctx, mesa_shader_stage shader,
       if (rsrc && !(image->access & PIPE_IMAGE_ACCESS_DRIVER_INTERNAL)) {
          if (!rsrc->layout.writeable_image &&
              ((image->shader_access & PIPE_IMAGE_ACCESS_WRITE) ||
-              (apple9 && rsrc->layout.compressed))) {
+              (apple9 && rsrc->base.target != PIPE_BUFFER))) {
 
             agx_decompress(ctx, rsrc, "Shader image");
          }
