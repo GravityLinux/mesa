@@ -1633,6 +1633,39 @@ agx_apple9_default_position(nir_shader *nir)
    nir_shader_gather_info(nir, impl);
 }
 
+/* Fragment shaders with memory side effects, as in agx_nir_lower_frag_sidefx:
+ * without early_fragment_tests the depth/stencil test follows the shader, so
+ * it runs (and writes) even for fragments that then fail. The hardware tests
+ * early unless the shader exports depth, so export the interpolated depth.
+ * As in Honeykrisp, the hardware predicates helper invocations' writes.
+ *
+ * TODO: A NEVER depth test still skips the shader (Honeykrisp tests LESS
+ * against an out-of-range export instead).
+ */
+static void
+agx_apple9_fs_side_effects(nir_shader *nir)
+{
+   if (!nir->info.writes_memory || nir->info.fs.early_fragment_tests ||
+       (nir->info.outputs_written & (BITFIELD64_BIT(FRAG_RESULT_DEPTH) |
+                                     BITFIELD64_BIT(FRAG_RESULT_STENCIL))))
+      return;
+
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   nir_builder b = nir_builder_at(nir_after_impl(impl));
+   nir_def *z = nir_load_frag_coord_z(&b);
+   if (nir->info.io_lowered) {
+      nir_store_output(&b, z, nir_imm_int(&b, 0),
+                       .io_semantics.location = FRAG_RESULT_DEPTH,
+                       .io_semantics.num_slots = 1,
+                       .src_type = nir_type_float32, .write_mask = 0x1);
+   } else {
+      nir_variable *var = nir_create_variable_with_location(
+         nir, nir_var_shader_out, FRAG_RESULT_DEPTH, glsl_float_type());
+      nir_store_var(&b, var, z, 0x1);
+   }
+   nir_shader_gather_info(nir, impl);
+}
+
 /* The Apple9 rasterizer delivers the layer to the fragment layer system value
  * (as in Honeykrisp's hk_apple9_lower_layer_viewport_fs); it is not a varying.
  * The fragment NIR here still uses variables, so handle derefs too. */
@@ -2569,6 +2602,8 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
                                 apple9_nir->info.num_images);
       if (apple9_image_count)
          agx_apple9_lower_images(apple9_nir, apple9_image_count);
+      if (fragment)
+         agx_apple9_fs_side_effects(apple9_nir);
       if (fragment) {
          agx_apple9_lower_fs_layer_input(apple9_nir);
          if (key_->fs.apple9_flatshade) {
