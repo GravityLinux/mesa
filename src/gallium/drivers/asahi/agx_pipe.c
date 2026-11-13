@@ -2662,7 +2662,8 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
       /* The fragment compiler exports stencil with the depth publication,
        * as Honeykrisp's shaderStencilExport does. */
       caps->shader_stencil_export = true;
-      caps->framebuffer_no_attachment = false;
+      /* Zero-attachment renders take the empty-tile path (README.apple9-es3.md). */
+      caps->framebuffer_no_attachment = true;
       /* Native sampler address mode 5 (agx_apple9_pack_sampler). */
       caps->texture_mirror_clamp_to_edge = true;
       caps->texture_buffer_objects = true;
@@ -2746,13 +2747,19 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
       if ((usage & PIPE_BIND_RENDER_TARGET) &&
           agx_apple9_block_export_format(agx_apple9_color_tile_format(format)) > 15)
          return false;
+      /* Stencil-only views sample the separate S8 resource
+       * (agx_create_sampler_view), so check the format actually sampled. */
+      enum pipe_format view_format =
+         (format == PIPE_FORMAT_X24S8_UINT || format == PIPE_FORMAT_X32_S8X24_UINT)
+            ? PIPE_FORMAT_S8_UINT
+            : format;
       if ((usage & PIPE_BIND_SAMPLER_VIEW) &&
           ((target != PIPE_BUFFER && target != PIPE_TEXTURE_2D && target != PIPE_TEXTURE_1D &&
             target != PIPE_TEXTURE_1D_ARRAY && target != PIPE_TEXTURE_RECT &&
             target != PIPE_TEXTURE_3D && target != PIPE_TEXTURE_CUBE &&
             target != PIPE_TEXTURE_CUBE_ARRAY &&
             target != PIPE_TEXTURE_2D_ARRAY) ||
-           !(agx_apple9_texture_format_supported(format) ||
+           !(agx_apple9_texture_format_supported(view_format) ||
              (target == PIPE_BUFFER && agx_apple9_texture_is_rgb32(format)))))
          return false;
    }
