@@ -1564,6 +1564,48 @@ agx_apple9_widen_tex_dest(nir_builder *b, nir_tex_instr *tex,
    return true;
 }
 
+/* Drop the memory side effects of a shader variant whose effects another
+ * pass performs (asahi_vs_shader_key::apple9_no_effects). Stores are removed
+ * and atomics become loads, so the shader's outputs still see the memory. */
+static bool
+agx_apple9_drop_effect(nir_builder *b, nir_intrinsic_instr *intr,
+                       UNUSED void *data)
+{
+   b->cursor = nir_before_instr(&intr->instr);
+   switch (intr->intrinsic) {
+   case nir_intrinsic_store_ssbo:
+   case nir_intrinsic_store_global:
+      nir_instr_remove(&intr->instr);
+      return true;
+   case nir_intrinsic_store_deref: {
+      nir_deref_instr *deref = nir_src_as_deref(intr->src[0]);
+      if (!nir_deref_mode_may_be(deref, nir_var_mem_ssbo | nir_var_mem_global))
+         return false;
+      nir_instr_remove(&intr->instr);
+      return true;
+   }
+   case nir_intrinsic_ssbo_atomic:
+   case nir_intrinsic_ssbo_atomic_swap: {
+      nir_def *value = nir_load_ssbo(
+         b, 1, intr->def.bit_size, intr->src[0].ssa, intr->src[1].ssa,
+         .access = ACCESS_COHERENT, .align_mul = intr->def.bit_size / 8);
+      nir_def_replace(&intr->def, value);
+      return true;
+   }
+   case nir_intrinsic_deref_atomic:
+   case nir_intrinsic_deref_atomic_swap: {
+      nir_deref_instr *deref = nir_src_as_deref(intr->src[0]);
+      if (!nir_deref_mode_may_be(deref, nir_var_mem_ssbo | nir_var_mem_global))
+         return false;
+      nir_def *value = nir_load_deref_with_access(b, deref, ACCESS_COHERENT);
+      nir_def_replace(&intr->def, value);
+      return true;
+   }
+   default:
+      return false;
+   }
+}
+
 /* GLSL leaves gl_Position undefined when a vertex shader does not write it,
  * as in shaders used only for their storage writes. The Apple9 vertex
  * interface needs a position, so write one outside the clip volume: the
@@ -2516,6 +2558,11 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
          nir_deserialize(NULL, &agx_nir_options, &apple9_reader);
       bool fragment = so->type == MESA_SHADER_FRAGMENT;
       agx_apple9_default_position(apple9_nir);
+      if (!fragment && key_->vs.apple9_no_effects) {
+         NIR_PASS(_, apple9_nir, nir_shader_intrinsics_pass,
+                  agx_apple9_drop_effect, nir_metadata_control_flow, NULL);
+         nir_shader_gather_info(apple9_nir, nir_shader_get_entrypoint(apple9_nir));
+      }
       NIR_PASS(_, apple9_nir, nir_shader_intrinsics_pass,
                agx_apple9_lower_ssbo_size, nir_metadata_control_flow, NULL);
       apple9_image_count = MAX2(BITSET_LAST_BIT(apple9_nir->info.images_used),
@@ -2984,6 +3031,7 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
                         so->nir_blake3);
 
    so->has_xfb_info = (nir->xfb_info != NULL);
+   so->writes_memory = nir->info.writes_memory;
 
    static_assert(
       ARRAY_SIZE(so->xfb_strides) == ARRAY_SIZE(nir->info.xfb_stride),
@@ -3418,6 +3466,11 @@ agx_update_vs(struct agx_batch *batch, unsigned index_size_B)
          key.apple9_inputs.xfb_flatshade_first =
             ctx->apple9_xfb_flatshade_first;
       }
+      key.apple9_no_effects =
+         key.hw && !key.apple9_inputs.capture_xfb &&
+         ctx->streamout.num_targets &&
+         ctx->stage[MESA_SHADER_VERTEX].shader->has_xfb_info &&
+         ctx->stage[MESA_SHADER_VERTEX].shader->writes_memory;
       key.apple9_inputs.clip_halfz =
          key.hw && !key.apple9_inputs.capture_xfb && !agx_clip_halfz(ctx);
       key.apple9_inputs.clip_distance_enable = ctx->rast->base.clip_plane_enable;

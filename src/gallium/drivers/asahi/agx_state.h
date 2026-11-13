@@ -325,6 +325,8 @@ struct agx_uncompiled_shader {
    uint32_t xfb_output_end[4];
    uint8_t xfb_buffers_written;
    bool has_xfb_info;
+   /* The shader stores to or atomically updates memory. */
+   bool writes_memory;
    bool is_xfb_passthrough;
    /* Internal passthrough GS that also forwards line stipple state */
    bool is_line_stipple_passthrough;
@@ -560,6 +562,10 @@ struct asahi_vs_shader_key {
     * compute job used to feed a TCS or GS.
     */
    bool hw;
+   /* Apple9 transform feedback runs the vertex shader in a capture pass
+    * before the rasterizing draw. The capture pass performs the shader's
+    * memory side effects; the rasterizing variant drops them. */
+   bool apple9_no_effects;
    uint8_t apple9_index_size;
    struct agx_apple9_vertex_layout apple9_inputs;
    struct agx_apple9_sampler_key apple9_samplers[32];
