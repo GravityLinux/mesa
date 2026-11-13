@@ -2568,7 +2568,7 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
    caps->min_texture_gather_offset = -8;
    caps->max_texture_gather_offset = 7;
    caps->draw_indirect = true;
-   caps->texture_query_samples = !apple9_render;
+   caps->texture_query_samples = true;
    caps->texture_query_lod = true;
    caps->texture_shadow_lod = true;
 
@@ -2647,11 +2647,9 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
        * harnesses, not in capabilities presented to applications. */
       /* Public contexts expose the current graphics frontend contract.
        * Internal NIR compute remains available for resource copies. */
-      caps->glsl_feature_level = caps->glsl_feature_level_compatibility = 400;
-      /* ES shader support is independent of the desktop GLSL level. ES 3.1
-       * needs storage resources only in compute shaders, which the Apple9
-       * compute backend provides; graphics stages report none. */
-      caps->essl_feature_level = 310;
+      caps->glsl_feature_level = caps->glsl_feature_level_compatibility = 460;
+      /* GLSL ES 3.20 (ES 3.2), including EXT_gpu_shader5. */
+      caps->essl_feature_level = 320;
       /* Point size is carried by the vertex output interface. */
       caps->point_size_fixed = PIPE_POINT_SIZE_LOWER_ALWAYS;
       /* Robust contexts bound UBO, SSBO and vertex buffer accesses
