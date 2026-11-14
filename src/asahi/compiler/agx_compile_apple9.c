@@ -9046,6 +9046,16 @@ agx_nir_lower_apple9_sampler_state(
    nir_shader_instructions_pass(nir, apple9_lower_texture_lod_query,
                                 nir_metadata_control_flow, (void *)key);
    mapping->runtime_samplers = agx_nir_apple9_offset_samplers(nir);
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_tex &&
+                agx_apple9_gather_needs_border(nir_instr_as_tex(instr), key))
+               mapping->runtime_samplers |=
+                  BITFIELD_BIT(nir_instr_as_tex(instr)->sampler_index);
+         }
+      }
+   }
    if (!agx_nir_lower_apple9_texture_offsets(nir, key, reason))
       return false;
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);

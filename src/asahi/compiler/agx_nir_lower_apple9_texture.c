@@ -583,6 +583,21 @@ agx_apple9_texture_native_offset(const nir_tex_instr *tex, uint16_t *bits)
 }
 
 bool
+agx_apple9_gather_needs_border(const nir_tex_instr *tex,
+                               const struct agx_apple9_sampler_key key[32])
+{
+   if (!key || tex->op != nir_texop_tg4 ||
+       tex->sampler_dim != GLSL_SAMPLER_DIM_2D || tex->sampler_index >= 32)
+      return false;
+   for (unsigned c = 0; c < 2; ++c) {
+      unsigned wrap = key[tex->sampler_index].wrap[c];
+      if (wrap == PIPE_TEX_WRAP_CLAMP_TO_BORDER || wrap == PIPE_TEX_WRAP_CLAMP)
+         return true;
+   }
+   return false;
+}
+
+bool
 agx_nir_lower_apple9_texture_offsets(nir_shader *nir,
                                      const struct agx_apple9_sampler_key key[32],
                                      const char **reason)
@@ -597,9 +612,11 @@ agx_nir_lower_apple9_texture_offsets(nir_shader *nir,
             continue;
          nir_tex_instr *tex = nir_instr_as_tex(instr);
          int offset = nir_tex_instr_src_index(tex, nir_tex_src_offset);
-         /* Gathers without offsets are native. */
+         /* Gathers without offsets are native, except across a border:
+          * the hardware gather does not return border texels. */
          bool is_gather = tex->op == nir_texop_tg4;
-         if (offset < 0 || tex->op == nir_texop_txf)
+         if ((offset < 0 && !agx_apple9_gather_needs_border(tex, key)) ||
+             tex->op == nir_texop_txf)
             continue;
          /* The sample instruction encodes these offsets itself unless the
           * backend finds no offset form for the sample's final form. It then
@@ -697,6 +714,15 @@ agx_nir_lower_apple9_texture_offsets(nir_shader *nir,
                nir_def *custom = sample_border(&b, tex, s.coord, s.dims);
                nir_pop_if(&b, NULL);
                s.border = nir_if_phi(&b, custom, s.border);
+            } else if (key && (key[tex->sampler_index].flags &
+                               AGX_APPLE9_CUSTOM_BORDER)) {
+               /* A shadow sample returns the comparison, not the border
+                * depth; the draw's sampler key carries it instead. */
+               float depth = key[tex->sampler_index].border[0];
+               if (key[tex->sampler_index].flags &
+                   AGX_APPLE9_CLAMP_SHADOW_REFERENCE)
+                  depth = CLAMP(depth, 0.0f, 1.0f);
+               s.border = nir_imm_vec4(&b, depth, depth, depth, depth);
             }
          }
          for (unsigned c = 0; c < s.dims; ++c)

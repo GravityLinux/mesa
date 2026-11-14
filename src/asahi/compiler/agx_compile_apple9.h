@@ -434,6 +434,10 @@ struct nir_def *agx_apple9_sampler_field(struct nir_builder *b,
                                          const struct nir_tex_instr *tex,
                                          unsigned field);
 bool agx_nir_lower_apple9_runtime_sampler_state(nir_shader *nir, const char **reason);
+/* Whether a gather without an offset needs the software path for border
+ * texels under this sampler key. */
+bool agx_apple9_gather_needs_border(const struct nir_tex_instr *tex,
+                                    const struct agx_apple9_sampler_key key[32]);
 /* A NULL key reads the runtime sampler metadata; otherwise specialize to key. */
 
 bool agx_nir_lower_apple9_texture_offsets(
