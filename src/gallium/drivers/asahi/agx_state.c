@@ -3013,6 +3013,17 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
                   &translucent);
       }
 
+      /* GL_MULTISAMPLE off: one invocation per pixel with every sample at the
+       * pixel center (agx_apple9_commit_sample_positions), so drop sample
+       * shading before it becomes a per-sample loop. Zeroed on Apple8. */
+      if (key->nr_samples > 1 && key->apple9_blend[0].multisample_disabled) {
+         const nir_lower_single_sampled_options single = {
+            .lower_sample_mask_in = true,
+         };
+         NIR_PASS(_, nir, nir_lower_single_sampled, &single);
+         nir->info.fs.uses_sample_shading = false;
+      }
+
       if (nir->info.fs.uses_sample_shading) {
          /* Ensure the sample ID is preserved in register */
          nir_builder b =
@@ -5628,9 +5639,11 @@ agx_batch_init_state(struct agx_batch *batch)
       }
    }
 
-   /* Set up standard sample positions */
-   batch->uniforms.ppp_multisamplectl =
-      agx_default_sample_positions(batch->tilebuffer_layout.nr_samples);
+   /* Set up standard sample positions, unless the first draw already chose
+    * its own (agx_apple9_commit_sample_positions). */
+   if (!batch->apple9_sample_positions_committed)
+      batch->uniforms.ppp_multisamplectl =
+         agx_default_sample_positions(batch->tilebuffer_layout.nr_samples);
 }
 
 static enum agx_object_type
@@ -7764,6 +7777,41 @@ agx_apple9_upload_compute_textures(struct agx_batch *batch,
       fprintf(stderr, "APPLE9_COMPUTE_TEXTURES stage=%u masks=%x,%x tables=%llx,%llx abi=%u pubs=%u\n", cs->stage, bindings.texture_mask, bindings.sampler_mask, (unsigned long long)*textures, (unsigned long long)*samplers, cs->apple9_compute_profile.abi, cs->apple9_compute_profile.publication_count);
 }
 
+/* GL_MULTISAMPLE off on a multisampled framebuffer rasterizes as if single
+ * sampled, but Apple9 hardware still computes coverage per sample. Placing
+ * every sample at the pixel center makes the coverage of all samples that of
+ * the center, and the shader variant (multisample_disabled) reports one
+ * sample. Sample positions are per-render state, so a draw that needs other
+ * positions than earlier draws of the batch starts a new render.
+ */
+static uint32_t
+agx_apple9_draw_sample_positions(const struct agx_context *ctx, unsigned samples)
+{
+   if (samples > 1 && !ctx->rast->base.multisample)
+      return BITFIELD_MASK(samples * 8) & 0x88888888;
+   return agx_default_sample_positions(samples);
+}
+
+static struct agx_batch *
+agx_apple9_commit_sample_positions(struct agx_context *ctx,
+                                   struct agx_batch *batch)
+{
+   unsigned samples = util_framebuffer_get_num_samples(&batch->key);
+   if (samples <= 1 || batch->apple9_preparing_tile_helper)
+      return batch;
+
+   uint32_t positions = agx_apple9_draw_sample_positions(ctx, samples);
+   if (batch->apple9_sample_positions_committed &&
+       batch->uniforms.ppp_multisamplectl != positions) {
+      agx_flush_batch_for_reason(ctx, batch,
+                                 "Apple9 sample positions changed");
+      batch = agx_get_batch(ctx);
+   }
+   batch->apple9_sample_positions_committed = true;
+   batch->uniforms.ppp_multisamplectl = positions;
+   return batch;
+}
+
 static void
 agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
              unsigned drawid_offset,
@@ -7946,6 +7994,8 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
    agx_legalize_xfb(ctx);
 
    struct agx_batch *batch = agx_get_batch(ctx);
+   if (agx_apple9_direct_render_enabled(dev))
+      batch = agx_apple9_commit_sample_positions(ctx, batch);
    uint64_t ib = 0;
    size_t ib_extent = 0;
 

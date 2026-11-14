@@ -446,6 +446,8 @@ struct agx_batch {
    uint32_t apple9_color_store_launch;
    /* Prepare background/EOT state without emitting a rasterized draw. */
    bool apple9_preparing_tile_helper;
+   /* An application draw has fixed ppp_multisamplectl for this render. */
+   bool apple9_sample_positions_committed;
    /* Draws emitted into the VDM stream; tile helpers are not among them. */
    unsigned apple9_vdm_draws;
 

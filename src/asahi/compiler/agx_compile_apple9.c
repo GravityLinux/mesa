@@ -11361,7 +11361,12 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
       bool single_sampled =
          samples == 1 || (blend && blend[0].multisample_disabled);
       if (single_sampled) {
-         const nir_lower_single_sampled_options options = {0};
+         /* With multisampling disabled the driver places every sample at the
+          * pixel center (agx_apple9_commit_sample_positions), so a covered
+          * pixel covers all samples while the shader sees one sample. */
+         const nir_lower_single_sampled_options options = {
+            .lower_sample_mask_in = samples > 1,
+         };
          nir_lower_single_sampled(nir, &options);
          nir->info.fs.uses_sample_shading = false;
       }

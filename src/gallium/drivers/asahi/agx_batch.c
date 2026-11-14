@@ -156,6 +156,7 @@ agx_batch_init(struct agx_context *ctx,
    batch->clear = 0;
    batch->apple9_color_reloaded = false;
    batch->apple9_color_reload_launch = 0;
+   batch->apple9_sample_positions_committed = false;
    batch->apple9_color_store_launch = 0;
    batch->draw = 0;
    batch->load = 0;
