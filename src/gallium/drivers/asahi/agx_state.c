@@ -7793,6 +7793,12 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
       return;
    }
 
+   /* Empty direct draws (for example a glBegin/glEnd pair with too few
+    * vertices) draw nothing; the Apple9 encoder requires work. */
+   if (agx_apple9_direct_render_enabled(dev) && !indirect &&
+       (!draws->count || !info->instance_count))
+      return;
+
    if (agx_apple9_direct_render_enabled(dev) && indirect &&
        indirect->indirect_draw_count) {
       if (!indirect->draw_count)
