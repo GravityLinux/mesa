@@ -1909,6 +1909,14 @@ agx_apple9_compile_prerast(struct agx_device *dev, nir_shader *nir,
    const char *reason = NULL;
    if (!agx_compile_apple9_tiny(nir, &compiled->b,
                                &compiled->apple9_compute_profile, &reason)) {
+      /* The compiler's own optimization can still empty the body. */
+      if (reason == agx_apple9_compute_without_effects) {
+         memset(&compiled->b, 0, sizeof(compiled->b));
+         memset(&compiled->apple9_compute_profile, 0,
+                sizeof(compiled->apple9_compute_profile));
+         compiled->b.info.stats.instrs = 1;
+         return compiled;
+      }
       fprintf(stderr, "Apple9 %s pre-rasterization compile failed: %s\n",
               _mesa_shader_stage_to_abbrev(descriptor_stage), reason ?: "unknown");
       nir_print_shader(nir, stderr);
@@ -2170,13 +2178,12 @@ agx_apple9_compile_geometry(struct agx_device *dev,
 
    struct agx_compiled_shader *compiled = NULL;
    nir_shader *count = NULL, *copy = NULL, *pre = NULL;
-   /* Tessellation stages run as compute, which accesses SSBOs natively and
-    * images through global memory, once per API invocation. */
+   /* Vertex and tessellation stages run as compute, which accesses SSBOs
+    * natively and images through global memory, once per API invocation. */
    unsigned image_count = 0;
    NIR_PASS(_, nir, nir_shader_intrinsics_pass, agx_apple9_lower_ssbo_size,
             nir_metadata_control_flow, NULL);
-   if (so->type == MESA_SHADER_TESS_CTRL ||
-       so->type == MESA_SHADER_TESS_EVAL) {
+   if (so->type != MESA_SHADER_GEOMETRY) {
       image_count = MAX2(BITSET_LAST_BIT(nir->info.images_used),
                          nir->info.num_images);
       if (image_count)
