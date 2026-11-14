@@ -89,6 +89,8 @@ agx_set_stream_output_targets(struct pipe_context *pctx, unsigned num_targets,
       pipe_so_target_reference(&so->targets[i], NULL);
 
    so->num_targets = num_targets;
+   /* Apple9 vertex shader keys depend on whether streamout is active. */
+   ctx->dirty |= AGX_DIRTY_XFB;
 }
 
 static struct pipe_stream_output_target *

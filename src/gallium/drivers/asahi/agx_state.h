@@ -236,6 +236,9 @@ struct agx_compiled_shader {
     * allocation.  Apple9 package validation still constrains the resulting
     * static-plus-dynamic total to the exact capture-backed ABI size. */
    bool apple9_has_variable_shared_mem;
+   /* API image slots addressed by an Apple9 compute shader; the dispatch
+    * uploads this many descriptor pairs (agx_apple9_upload_compute_images). */
+   unsigned apple9_image_count;
    struct agx_apple9_compute_profile apple9_compute_profile;
    struct agx_apple9_texture_mapping apple9_compute_textures;
 
@@ -322,6 +325,14 @@ struct agx_uncompiled_shader {
    uint32_t xfb_output_end[4];
    uint8_t xfb_buffers_written;
    bool has_xfb_info;
+   /* The shader stores to or atomically updates memory. */
+   bool writes_memory;
+   /* Image slots stored to without a format qualifier. Apple9 takes the
+    * bound views' formats from the shader key. */
+   uint64_t apple9_formatless_images;
+   /* Created in a robust-access context: Apple9 bounds-checks buffer
+    * accesses (agx_apple9_lower_robustness). */
+   bool apple9_robust;
    bool is_xfb_passthrough;
    /* Internal passthrough GS that also forwards line stipple state */
    bool is_line_stipple_passthrough;
@@ -435,6 +446,8 @@ struct agx_batch {
    uint32_t apple9_color_store_launch;
    /* Prepare background/EOT state without emitting a rasterized draw. */
    bool apple9_preparing_tile_helper;
+   /* An application draw has fixed ppp_multisamplectl for this render. */
+   bool apple9_sample_positions_committed;
    /* Draws emitted into the VDM stream; tile helpers are not among them. */
    unsigned apple9_vdm_draws;
 
@@ -553,10 +566,16 @@ struct agx_blend {
 
 struct asahi_vs_shader_key {
    uint64_t apple9_fragment_inputs;
+   /* Formats of the views bound to apple9_formatless_images slots. */
+   uint16_t apple9_image_formats[PIPE_MAX_SHADER_IMAGES];
    /* If true, this is running as a hardware vertex shader. If false, this is a
     * compute job used to feed a TCS or GS.
     */
    bool hw;
+   /* Apple9 transform feedback runs the vertex shader in a capture pass
+    * before the rasterizing draw. The capture pass performs the shader's
+    * memory side effects; the rasterizing variant drops them. */
+   bool apple9_no_effects;
    uint8_t apple9_index_size;
    struct agx_apple9_vertex_layout apple9_inputs;
    struct agx_apple9_sampler_key apple9_samplers[32];
@@ -571,7 +590,13 @@ struct agx_vertex_elements {
    uint16_t buffers[PIPE_MAX_ATTRIBS];
 };
 
+struct asahi_cs_shader_key {
+   /* Formats of the views bound to apple9_formatless_images slots. */
+   uint16_t apple9_image_formats[PIPE_MAX_SHADER_IMAGES];
+};
+
 struct asahi_fs_shader_key {
+   uint16_t apple9_image_formats[PIPE_MAX_SHADER_IMAGES];
    enum pipe_format rt_formats[PIPE_MAX_COLOR_BUFS];
    uint8_t nr_samples;
    uint8_t apple9_nr_targets;
@@ -584,11 +609,12 @@ struct asahi_fs_shader_key {
    struct agx_apple9_blend apple9_blend[PIPE_MAX_COLOR_BUFS];
    struct agx_apple9_sampler_key apple9_samplers[32];
 };
-static_assert(sizeof(struct asahi_fs_shader_key) == 1804, "no holes");
+static_assert(sizeof(struct asahi_fs_shader_key) == 1932, "no holes");
 
 union asahi_shader_key {
    struct asahi_vs_shader_key vs;
    struct asahi_fs_shader_key fs;
+   struct asahi_cs_shader_key cs;
 };
 
 enum agx_dirty {
@@ -1172,6 +1198,9 @@ bool agx_nir_lower_sysvals(nir_shader *shader, mesa_shader_stage desc_stage,
 
 /* Private bindings for the same sysval tables used by the Gallium ABI. */
 #define AGX_APPLE9_SYSVAL_UBO_BASE 240
+/* Robust contexts: {uint64_t address, uint64_t size} per vertex buffer, for
+ * the bounded vertex fetch of agx_apple9_vertex_layout::buffer_descriptor_ubo. */
+#define AGX_APPLE9_VERTEX_BUFFER_TABLE_BINDING 68
 bool agx_nir_lower_apple9_sysvals(nir_shader *shader,
                                 mesa_shader_stage desc_stage);
 

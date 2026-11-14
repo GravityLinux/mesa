@@ -103,6 +103,12 @@ bool agx_compile_apple9_fragment(nir_shader *nir,
 /* Internal per-draw system values share the ordinary buffer-address table.
  * API UBOs use 0..31; vertex bindings use 32..63. */
 #define AGX_APPLE9_GRAPHICS_SYSVAL_BINDING 64
+/* Gallium compute: one 32-bit bound range size per API SSBO binding, for
+ * get_ssbo_size. Uploaded with each dispatch that references it. */
+#define AGX_APPLE9_SSBO_SIZE_BINDING 65
+/* Gallium compute: storage image table. The first 8 bytes hold the address
+ * of an array of (texture, PBE) descriptor pairs, one per API image slot. */
+#define AGX_APPLE9_IMAGE_TABLE_BINDING 66
 #define AGX_APPLE9_SAMPLER_BIAS_OFFSET 16
 #define AGX_APPLE9_SAMPLER_BIAS_COUNT 32
 #define AGX_APPLE9_TEXTURE_INFO_OFFSET (16 + AGX_APPLE9_SAMPLER_BIAS_COUNT * sizeof(float))
@@ -428,6 +434,10 @@ struct nir_def *agx_apple9_sampler_field(struct nir_builder *b,
                                          const struct nir_tex_instr *tex,
                                          unsigned field);
 bool agx_nir_lower_apple9_runtime_sampler_state(nir_shader *nir, const char **reason);
+/* Whether a gather without an offset needs the software path for border
+ * texels under this sampler key. */
+bool agx_apple9_gather_needs_border(const struct nir_tex_instr *tex,
+                                    const struct agx_apple9_sampler_key key[32]);
 /* A NULL key reads the runtime sampler metadata; otherwise specialize to key. */
 
 bool agx_nir_lower_apple9_texture_offsets(

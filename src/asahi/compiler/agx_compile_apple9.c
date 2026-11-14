@@ -9046,6 +9046,16 @@ agx_nir_lower_apple9_sampler_state(
    nir_shader_instructions_pass(nir, apple9_lower_texture_lod_query,
                                 nir_metadata_control_flow, (void *)key);
    mapping->runtime_samplers = agx_nir_apple9_offset_samplers(nir);
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_tex &&
+                agx_apple9_gather_needs_border(nir_instr_as_tex(instr), key))
+               mapping->runtime_samplers |=
+                  BITFIELD_BIT(nir_instr_as_tex(instr)->sampler_index);
+         }
+      }
+   }
    if (!agx_nir_lower_apple9_texture_offsets(nir, key, reason))
       return false;
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
@@ -10134,9 +10144,35 @@ apple9_lower_xfb_intrinsic(nir_builder *b, nir_intrinsic_instr *intr,
    return true;
 }
 
+/* Multi-slot outputs such as more than four clip or cull distances store
+ * their second slot at a constant offset. Record such a store at its own
+ * location, which is how nir_io_add_intrinsic_xfb_info matches outputs.
+ */
+static bool
+apple9_fold_output_offset(nir_builder *b, nir_intrinsic_instr *intr,
+                          UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_store_output)
+      return false;
+   nir_src *offset = nir_get_io_offset_src(intr);
+   if (!nir_src_is_const(*offset) || nir_src_as_uint(*offset) == 0)
+      return false;
+   unsigned slots = nir_src_as_uint(*offset);
+   nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+   sem.location += slots;
+   sem.num_slots = 1;
+   nir_intrinsic_set_io_semantics(intr, sem);
+   nir_intrinsic_set_base(intr, nir_intrinsic_base(intr) + slots);
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_src_rewrite(offset, nir_imm_int(b, 0));
+   return true;
+}
+
 static void
 apple9_lower_xfb(nir_shader *nir, const struct agx_apple9_vertex_layout *layout)
 {
+   nir_shader_intrinsics_pass(nir, apple9_fold_output_offset,
+                              nir_metadata_control_flow, NULL);
    nir_io_add_intrinsic_xfb_info(nir);
    nir_builder b =
       nir_builder_at(nir_before_impl(nir_shader_get_entrypoint(nir)));
@@ -11101,6 +11137,41 @@ apple9_lower_cull_distance_fs(nir_shader *nir,
 static nir_def *apple9_pack_color(nir_builder *b, enum pipe_format format,
                                   nir_def *color);
 
+/* Cull distance lowering needs scalar clip/cull distance stores. Leave other
+ * outputs whole: the GL clip-space depth conversion (clip_halfz) rewrites
+ * the position store as one vector. */
+static bool
+apple9_is_clip_dist_store(const nir_intrinsic_instr *intr,
+                          UNUSED const void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_store_output)
+      return false;
+   unsigned location = nir_intrinsic_io_semantics(intr).location;
+   return location == VARYING_SLOT_CLIP_DIST0 ||
+          location == VARYING_SLOT_CLIP_DIST1;
+}
+
+/* Vertex inputs are numbered by vertex element, and the second half of a
+ * 64-bit dvec3/dvec4 attribute is the next element (Gallium splits dual-slot
+ * elements). IO lowering addresses that half, and matrix columns, at a
+ * constant slot offset from the attribute; make it the input's base.
+ */
+static bool
+apple9_fold_input_offset(nir_builder *b, nir_intrinsic_instr *intr,
+                         UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_input)
+      return false;
+   nir_src *offset = nir_get_io_offset_src(intr);
+   if (!nir_src_is_const(*offset) || nir_src_as_uint(*offset) == 0)
+      return false;
+   nir_intrinsic_set_base(intr, nir_intrinsic_base(intr) +
+                                   nir_src_as_uint(*offset));
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_src_rewrite(offset, nir_imm_int(b, 0));
+   return true;
+}
+
 static bool
 apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
                         const struct agx_apple9_vertex_layout *layout,
@@ -11128,11 +11199,19 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
    nir_lower_global_vars_to_local(nir);
    nir_split_var_copies(nir);
    nir_lower_var_copies(nir);
+   /* 64-bit IO is carried as pairs of 32-bit slots. */
    nir_lower_io(nir, nir_var_shader_in | nir_var_shader_out, apple9_io_size,
-                nir_lower_io_use_interpolated_input_intrinsics);
+                nir_lower_io_use_interpolated_input_intrinsics |
+                   nir_lower_io_lower_64bit_to_32);
+   if (nir->info.stage == MESA_SHADER_VERTEX) {
+      nir_opt_constant_folding(nir);
+      nir_shader_intrinsics_pass(nir, apple9_fold_input_offset,
+                                 nir_metadata_control_flow, NULL);
+   }
    if (nir->info.stage == MESA_SHADER_VERTEX &&
        nir->info.cull_distance_array_size) {
-      nir_lower_io_to_scalar(nir, nir_var_shader_out, NULL, NULL);
+      nir_lower_io_to_scalar(nir, nir_var_shader_out,
+                             apple9_is_clip_dist_store, NULL);
       if (layout && layout->cull_distance_mask)
          apple9_pack_cull_distance(nir);
       else
@@ -11282,7 +11361,12 @@ apple9_compile_graphics(nir_shader *nir, struct agx_shader_part *out,
       bool single_sampled =
          samples == 1 || (blend && blend[0].multisample_disabled);
       if (single_sampled) {
-         const nir_lower_single_sampled_options options = {0};
+         /* With multisampling disabled the driver places every sample at the
+          * pixel center (agx_apple9_commit_sample_positions), so a covered
+          * pixel covers all samples while the shader sees one sample. */
+         const nir_lower_single_sampled_options options = {
+            .lower_sample_mask_in = samples > 1,
+         };
          nir_lower_single_sampled(nir, &options);
          nir->info.fs.uses_sample_shading = false;
       }

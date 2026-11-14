@@ -2315,9 +2315,11 @@ agx_init_shader_caps(struct pipe_screen *pscreen)
 
       /* The Apple9 graphics compiler currently consumes FP32 shader I/O
        * and texture results. Keep lowp/mediump GLSL at FP32 instead of
-       * advertising a half-precision lowering path it cannot compile. */
+       * advertising a half-precision lowering path it cannot compile.
+       * Evaluation shaders run as the hardware vertex program. */
       bool apple9_graphics = agx_apple9_direct_render_enabled(agx_device(pscreen)) &&
-                             (i == MESA_SHADER_VERTEX || i == MESA_SHADER_FRAGMENT);
+                             (i == MESA_SHADER_VERTEX || i == MESA_SHADER_FRAGMENT ||
+                              i == MESA_SHADER_TESS_EVAL);
       caps->fp16 = caps->glsl_16bit_consts = caps->fp16_derivatives =
          !is_no16 && !apple9_graphics;
       /* GLSL compiler is broken. Flip this on when Panfrost does. */
@@ -2348,22 +2350,34 @@ agx_init_shader_caps(struct pipe_screen *pscreen)
          caps->max_outputs = i == MESA_SHADER_FRAGMENT
                                 ? 1 : AGX_APPLE9_MAX_VARYING_COMPONENTS / 4;
          caps->max_inputs = i == MESA_SHADER_FRAGMENT
-                               ? AGX_APPLE9_MAX_VARYING_COMPONENTS / 4 : 16;
-         caps->max_shader_buffers = caps->max_shader_images = 0;
+                               ? AGX_APPLE9_MAX_VARYING_COMPONENTS / 4
+                            : i == MESA_SHADER_VERTEX ? 16 : caps->max_inputs;
          caps->max_texture_samplers = caps->max_sampler_views = 16;
+         /* Transform feedback capture binds its own buffers from
+          * AGX_APPLE9_XFB_PARAMS on; keep API buffers below them. */
+         if (i == MESA_SHADER_VERTEX || i == MESA_SHADER_TESS_EVAL)
+            caps->max_shader_buffers = AGX_APPLE9_XFB_PARAMS;
+      }
+
+      /* The emulated geometry path runs the shader's side effects once per
+       * output vertex (poly's rasterization program), so report no storage
+       * resources for geometry shaders. Tessellation stages run once per
+       * API invocation. */
+      if (agx_apple9_direct_render_enabled(agx_device(pscreen)) &&
+          i == MESA_SHADER_GEOMETRY) {
+         caps->max_shader_buffers = caps->max_shader_images = 0;
+         /* Geometry outputs are published by the hardware vertex program
+          * (the rasterization copy), within the same budget as vertex and
+          * evaluation outputs. */
+         caps->max_outputs = AGX_APPLE9_MAX_VARYING_COMPONENTS / 4;
       }
    }
 
-   /* Apple9 has no native launch path for the tessellation control stage or
-    * the libagx tessellator yet. Report no tessellation stages so
-    * ARB_tessellation_shader stays hidden instead of aborting at draw time.
+   /* Apple9 tessellation is emulated as on Honeykrisp: the vertex and
+    * control shaders run as compute, the libagx tessellator generates the
+    * domain, and the evaluation shader is the hardware vertex program
+    * (agx_draw_patches).
     */
-   if (agx_apple9_direct_render_enabled(agx_device(pscreen))) {
-      memset((void *)&pscreen->shader_caps[MESA_SHADER_TESS_CTRL], 0,
-             sizeof(pscreen->shader_caps[MESA_SHADER_TESS_CTRL]));
-      memset((void *)&pscreen->shader_caps[MESA_SHADER_TESS_EVAL], 0,
-             sizeof(pscreen->shader_caps[MESA_SHADER_TESS_EVAL]));
-   }
 }
 
 static void
@@ -2559,7 +2573,7 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
    caps->min_texture_gather_offset = -8;
    caps->max_texture_gather_offset = 7;
    caps->draw_indirect = true;
-   caps->texture_query_samples = !apple9_render;
+   caps->texture_query_samples = true;
    caps->texture_query_lod = true;
    caps->texture_shadow_lod = true;
 
@@ -2638,20 +2652,20 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
        * harnesses, not in capabilities presented to applications. */
       /* Public contexts expose the current graphics frontend contract.
        * Internal NIR compute remains available for resource copies. */
-      caps->glsl_feature_level = caps->glsl_feature_level_compatibility = 330;
-      /* ES 3.0 shader support is independent of the desktop GLSL level. */
-      caps->essl_feature_level = 300;
+      caps->glsl_feature_level = caps->glsl_feature_level_compatibility = 460;
+      /* GLSL ES 3.20 (ES 3.2), including EXT_gpu_shader5. */
+      caps->essl_feature_level = 320;
       /* Point size is carried by the vertex output interface. */
       caps->point_size_fixed = PIPE_POINT_SIZE_LOWER_ALWAYS;
-      caps->robust_buffer_access_behavior = false;
+      /* Robust contexts bound UBO, SSBO and vertex buffer accesses
+       * (agx_apple9_lower_robustness). */
+      caps->robust_buffer_access_behavior = true;
       /* Lost-context reporting (EGL_EXT_create_context_robustness, reset
        * status queries) works: failed work and rejected submissions mark the
        * context lost instead of aborting. Robust buffer access stays off. */
       caps->device_reset_status_query = true;
       /* External textures are sampled as 2D views. */
       caps->texture_external = true;
-      /* Cull distances still need primitive rejection lowering. */
-      caps->cull_distance = false;
       /* One RGBA8 tile-output slot per active color attachment. */
       caps->max_render_targets = 8;
       /* Advanced equations are lowered with the attachment blend state.
@@ -2662,12 +2676,12 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
       /* The fragment compiler exports stencil with the depth publication,
        * as Honeykrisp's shaderStencilExport does. */
       caps->shader_stencil_export = true;
-      caps->framebuffer_no_attachment = false;
+      /* Zero-attachment renders take the empty-tile path (README.apple9-es3.md). */
+      caps->framebuffer_no_attachment = true;
       /* Native sampler address mode 5 (agx_apple9_pack_sampler). */
       caps->texture_mirror_clamp_to_edge = true;
       caps->texture_buffer_objects = true;
-      /* RGB32 views consume three physical scalar texels per logical texel. */
-      caps->max_texel_buffer_elements = AGX_TEXTURE_BUFFER_MAX_SIZE / 4;
+      caps->max_texel_buffer_elements = AGX_APPLE9_TEXTURE_BUFFER_MAX_SIZE;
       caps->max_texture_array_layers = 2048;
       caps->max_texture_cube_levels = 15;
       caps->max_texture_3d_levels = 12;
@@ -2677,12 +2691,17 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
       /* Seamless filtering is per sampler in the native descriptor and the
        * compiler key, so it can come from texture state too. */
       caps->seamless_cube_map_per_texture = true;
+      /* Format-less stores take the bound view's format from the shader
+       * key (agx_apple9_resolve_formatless_store); format-less loads are
+       * not implemented. */
       caps->image_load_formatted = false;
-      caps->image_store_formatted = false;
+      caps->image_store_formatted = true;
       /* Gathers use the native gather sample, including constant offsets. */
       caps->max_texture_gather_components = 4;
       caps->max_varyings = AGX_APPLE9_MAX_VARYING_COMPONENTS / 4;
-      caps->doubles = false;
+      /* fp64 uses Mesa's software implementation (lower_doubles_options in
+       * agx_nir_options), which the state tracker links at GLSL 4.00. */
+      caps->doubles = true;
    }
 }
 
@@ -2746,14 +2765,20 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
       if ((usage & PIPE_BIND_RENDER_TARGET) &&
           agx_apple9_block_export_format(agx_apple9_color_tile_format(format)) > 15)
          return false;
+      /* Stencil-only views sample the separate S8 resource
+       * (agx_create_sampler_view), so check the format actually sampled. */
+      enum pipe_format view_format =
+         (format == PIPE_FORMAT_X24S8_UINT || format == PIPE_FORMAT_X32_S8X24_UINT)
+            ? PIPE_FORMAT_S8_UINT
+            : format;
       if ((usage & PIPE_BIND_SAMPLER_VIEW) &&
           ((target != PIPE_BUFFER && target != PIPE_TEXTURE_2D && target != PIPE_TEXTURE_1D &&
             target != PIPE_TEXTURE_1D_ARRAY && target != PIPE_TEXTURE_RECT &&
             target != PIPE_TEXTURE_3D && target != PIPE_TEXTURE_CUBE &&
             target != PIPE_TEXTURE_CUBE_ARRAY &&
             target != PIPE_TEXTURE_2D_ARRAY) ||
-           !(agx_apple9_texture_format_supported(format) ||
-             (target == PIPE_BUFFER && agx_apple9_texture_is_rgb32(format)))))
+           !(target == PIPE_BUFFER ? agx_apple9_buffer_format_supported(format)
+                                   : agx_apple9_texture_format_supported(view_format))))
          return false;
    }
 
