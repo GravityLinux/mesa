@@ -35,6 +35,7 @@ extern "C" {
 #define AGX_APPLE9_MAX_LINEAR_STRIDE (1u << 20)
 
 bool agx_apple9_texture_format_supported(enum pipe_format format);
+bool agx_apple9_buffer_format_supported(enum pipe_format format);
 
 struct agx_device;
 struct agx_bo;

@@ -2681,8 +2681,7 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
       /* Native sampler address mode 5 (agx_apple9_pack_sampler). */
       caps->texture_mirror_clamp_to_edge = true;
       caps->texture_buffer_objects = true;
-      /* RGB32 views consume three physical scalar texels per logical texel. */
-      caps->max_texel_buffer_elements = AGX_TEXTURE_BUFFER_MAX_SIZE / 4;
+      caps->max_texel_buffer_elements = AGX_APPLE9_TEXTURE_BUFFER_MAX_SIZE;
       caps->max_texture_array_layers = 2048;
       caps->max_texture_cube_levels = 15;
       caps->max_texture_3d_levels = 12;
@@ -2778,8 +2777,8 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
             target != PIPE_TEXTURE_3D && target != PIPE_TEXTURE_CUBE &&
             target != PIPE_TEXTURE_CUBE_ARRAY &&
             target != PIPE_TEXTURE_2D_ARRAY) ||
-           !(agx_apple9_texture_format_supported(view_format) ||
-             (target == PIPE_BUFFER && agx_apple9_texture_is_rgb32(format)))))
+           !(target == PIPE_BUFFER ? agx_apple9_buffer_format_supported(format)
+                                   : agx_apple9_texture_format_supported(view_format))))
          return false;
    }
 

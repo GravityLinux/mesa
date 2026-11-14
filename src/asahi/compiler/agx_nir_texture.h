@@ -25,3 +25,8 @@
 #define AGX_TEXTURE_BUFFER_MAX_HEIGHT 16384
 #define AGX_TEXTURE_BUFFER_MAX_SIZE                                            \
    (AGX_TEXTURE_BUFFER_WIDTH * AGX_TEXTURE_BUFFER_MAX_HEIGHT)
+
+/* Apple9 advertises a quarter of that, since RGB32 views consume three
+ * physical scalar texels per logical texel. textureSize/imageSize must clamp
+ * to the advertised limit. */
+#define AGX_APPLE9_TEXTURE_BUFFER_MAX_SIZE (AGX_TEXTURE_BUFFER_MAX_SIZE / 4)

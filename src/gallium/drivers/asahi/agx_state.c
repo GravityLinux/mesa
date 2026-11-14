@@ -2804,7 +2804,8 @@ agx_apple9_upload_images(struct agx_batch *batch, mesa_shader_stage shader,
          agx_set_null_pbe(pbe);
          record->address = agx_map_gpu(rsrc) + view->u.buf.offset;
          record->size_el =
-            view->u.buf.size / util_format_get_blocksize(view->format);
+            MIN2(view->u.buf.size / util_format_get_blocksize(view->format),
+                 AGX_APPLE9_TEXTURE_BUFFER_MAX_SIZE);
          continue;
       }
 
@@ -7278,8 +7279,7 @@ agx_apple9_texture_view_supported(const struct agx_sampler_view *view)
 
    if (state->target == PIPE_BUFFER) {
       return resource->base.target == PIPE_BUFFER &&
-             (agx_apple9_texture_format_supported(view->format) ||
-              agx_apple9_texture_is_rgb32(view->format)) &&
+             agx_apple9_buffer_format_supported(view->format) &&
              !((agx_map_gpu(resource) + state->u.buf.offset) & 15);
    }
 
@@ -7496,7 +7496,8 @@ agx_apple9_upload_graphics_sysvals(
          continue;
       struct pipe_resource *texture = &view->rsrc->base;
       if (view->base.target == PIPE_BUFFER) {
-         info[0] = agx_texture_buffer_size_el(view->format, view->base.u.buf.size);
+         info[0] = MIN2(agx_texture_buffer_size_el(view->format, view->base.u.buf.size),
+                        AGX_APPLE9_TEXTURE_BUFFER_MAX_SIZE);
          info[5] = agx_apple9_texture_is_rgb32(view->format);
          info[6] = view->base.swizzle_r | (view->base.swizzle_g << 3) |
                    (view->base.swizzle_b << 6) | (view->base.swizzle_a << 9);

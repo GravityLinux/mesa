@@ -815,6 +815,26 @@ agx_apple9_pack_r32f_texture(void *out, uint64_t address, uint32_t width,
    memcpy(out, words, sizeof(words));
 }
 
+/* Buffer views take every sampled format, the scalar-texel RGB32 views, and
+ * the legacy 16-bit float alpha/luminance/intensity formats. GL fixes the
+ * buffer format with no fallback, and those share the R16/R16G16 float
+ * hardware formats, with the view swizzle doing the rest. Images keep the
+ * stricter list so they still fall back to RGBA16F. */
+bool
+agx_apple9_buffer_format_supported(enum pipe_format format)
+{
+   switch (format) {
+   case PIPE_FORMAT_A16_FLOAT:
+   case PIPE_FORMAT_L16_FLOAT:
+   case PIPE_FORMAT_I16_FLOAT:
+   case PIPE_FORMAT_L16A16_FLOAT:
+      return true;
+   default:
+      return agx_apple9_texture_format_supported(format) ||
+             agx_apple9_texture_is_rgb32(format);
+   }
+}
+
 bool
 agx_apple9_texture_format_supported(enum pipe_format format)
 {
