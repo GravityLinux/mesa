@@ -2364,8 +2364,13 @@ agx_init_shader_caps(struct pipe_screen *pscreen)
        * resources for geometry shaders. Tessellation stages run once per
        * API invocation. */
       if (agx_apple9_direct_render_enabled(agx_device(pscreen)) &&
-          i == MESA_SHADER_GEOMETRY)
+          i == MESA_SHADER_GEOMETRY) {
          caps->max_shader_buffers = caps->max_shader_images = 0;
+         /* Geometry outputs are published by the hardware vertex program
+          * (the rasterization copy), within the same budget as vertex and
+          * evaluation outputs. */
+         caps->max_outputs = AGX_APPLE9_MAX_VARYING_COMPONENTS / 4;
+      }
    }
 
    /* Apple9 tessellation is emulated as on Honeykrisp: the vertex and
