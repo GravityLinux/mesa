@@ -7912,8 +7912,12 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
       return;
    }
 
+   /* Capture the bound VS only when it is the last vertex stage: a separable
+    * VS program keeps its own XFB info even when a TES follows it, and the
+    * TES is captured when agx_draw_patches draws it as the VS (in_tess). */
    if (agx_apple9_direct_render_enabled(dev) && !ctx->apple9_xfb_capture &&
        !ctx->stage[MESA_SHADER_GEOMETRY].shader &&
+       (!ctx->stage[MESA_SHADER_TESS_EVAL].shader || ctx->in_tess) &&
        ctx->streamout.num_targets &&
        ctx->stage[MESA_SHADER_VERTEX].shader->has_xfb_info) {
       if (indirect) {
