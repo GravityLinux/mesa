@@ -733,10 +733,17 @@ agx_pack_texture(void *out, struct agx_resource *rsrc,
       cfg.compressed = rsrc->layout.compressed;
       cfg.extended = cfg.compressed;
 
-      cfg.address = agx_map_texture_gpu(rsrc, first_layer);
+      uint64_t address = agx_map_texture_gpu(rsrc, first_layer);
 
       if (state->target == PIPE_BUFFER)
-         cfg.address += state->u.buf.offset;
+         address += state->u.buf.offset;
+
+      /* Apple9 buffers live in the USC aperture at 2^40, past this field.
+       * The Apple9 descriptor carries their address in its own wider word
+       * and keeps only the first half of this one
+       * (agx_apple9_upload_textures).
+       */
+      cfg.address = address < (1ull << 40) ? address : 0;
 
       if (rsrc->layout.compressed) {
          cfg.acceleration_buffer =
