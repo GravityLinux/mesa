@@ -2064,6 +2064,14 @@ agx_apple9_lower_dynamic_binding(nir_builder *b, nir_instr *instr,
 static void
 agx_apple9_lower_dynamic_bindings(nir_shader *nir)
 {
+   /* Early NIR is unoptimized: combined samplers compute their texture and
+    * sampler offsets separately, and resource indices may still fold to
+    * constants.
+    */
+   NIR_PASS(_, nir, nir_opt_copy_prop);
+   NIR_PASS(_, nir, nir_opt_constant_folding);
+   NIR_PASS(_, nir, nir_opt_algebraic);
+   NIR_PASS(_, nir, nir_opt_cse);
    NIR_PASS(_, nir, nir_shader_instructions_pass,
             agx_apple9_lower_dynamic_binding, nir_metadata_none, NULL);
 }
@@ -2305,6 +2313,18 @@ agx_apple9_ssbo_bound(const struct agx_stage *stage, unsigned binding)
    return binding < PIPE_MAX_SHADER_BUFFERS &&
           (stage->ssbo_mask & BITFIELD_BIT(binding)) &&
           stage->ssbo[binding].buffer && stage->ssbo[binding].buffer_size;
+}
+
+/* Likewise UBOs: dynamically indexed block arrays
+ * (agx_apple9_lower_dynamic_bindings) name every UBO slot, including an
+ * unused default uniform block.
+ */
+static bool
+agx_apple9_ubo_bound(const struct agx_stage *stage, unsigned binding)
+{
+   return binding < PIPE_MAX_CONSTANT_BUFFERS &&
+          (stage->cb_mask & BITFIELD_BIT(binding)) &&
+          stage->cb[binding].buffer && stage->cb[binding].buffer_size;
 }
 
 static uint64_t
@@ -7302,8 +7322,8 @@ agx_apple9_validate_resources(struct agx_context *ctx)
             valid = !i && vb < ARRAY_SIZE(ctx->vertex_buffers) &&
                     ctx->vertex_buffers[vb].buffer.resource;
          } else {
-            valid = binding < ARRAY_SIZE(stage->cb) &&
-                    stage->cb[binding].buffer && stage->cb[binding].buffer_size;
+            /* Unbound UBOs use the scratch page too. */
+            valid = binding < ARRAY_SIZE(stage->cb);
          }
          if (!valid) {
             fprintf(stderr,
@@ -8466,16 +8486,16 @@ agx_draw_vbo_inner(struct pipe_context *pctx, const struct pipe_draw_info *info,
                address = agx_map_gpu(vbo) + (vb->buffer_offset & ~3u);
             } else {
                struct pipe_constant_buffer *cb = &ctx->stage[shader].cb[binding];
-               if (!cb->buffer || !cb->buffer_size) {
-                  fprintf(stderr, "Apple9 graphics UBO is unbound\n");
-                  abort();
+               if (!agx_apple9_ubo_bound(&ctx->stage[shader], binding)) {
+                  address = AGX_SCRATCH_PAGE_ADDRESS;
+               } else {
+                  struct agx_resource *ubo = agx_resource(cb->buffer);
+                  if (stage)
+                     agx_batch_reads_fragment(batch, ubo);
+                  else
+                     agx_batch_reads(batch, ubo);
+                  address = agx_map_gpu(ubo) + cb->buffer_offset;
                }
-               struct agx_resource *ubo = agx_resource(cb->buffer);
-               if (stage)
-                  agx_batch_reads_fragment(batch, ubo);
-               else
-                  agx_batch_reads(batch, ubo);
-               address = agx_map_gpu(ubo) + cb->buffer_offset;
             }
             record->buffers[stage][slot] = address;
          }
@@ -8720,7 +8740,10 @@ agx_apple9_launch_prerast(struct agx_batch *batch, struct agx_grid grid,
          resource = agx_resource(vb->buffer.resource);
          offset = vb->buffer_offset & ~3u;
       } else {
-         assert(binding < PIPE_MAX_CONSTANT_BUFFERS && stage->cb[binding].buffer);
+         if (!agx_apple9_ubo_bound(stage, binding)) {
+            addresses[i] = AGX_SCRATCH_PAGE_ADDRESS;
+            continue;
+         }
          resource = agx_resource(stage->cb[binding].buffer);
          offset = stage->cb[binding].buffer_offset;
       }
@@ -9080,13 +9103,10 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
                   agx_apple9_upload_images(batch, MESA_SHADER_COMPUTE, cs);
                continue;
             }
-            if (binding >= PIPE_MAX_CONSTANT_BUFFERS ||
-                !(stage->cb_mask & BITFIELD_BIT(binding)) ||
-                !stage->cb[binding].buffer) {
-               fprintf(stderr,
-                       "Apple9 compute ABI requires UBO binding %u\n",
-                       binding);
-               return;
+            if (!agx_apple9_ubo_bound(stage, binding)) {
+               resources[i] = NULL;
+               resource_addresses[i] = AGX_SCRATCH_PAGE_ADDRESS;
+               continue;
             }
             resources[i] = agx_resource(stage->cb[binding].buffer);
             resource_offsets[i] = stage->cb[binding].buffer_offset;
